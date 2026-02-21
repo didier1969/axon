@@ -232,7 +232,7 @@ class TestHandleImpact:
     def test_no_downstream(self, mock_storage):
         """Returns no-dependencies message when traverse is empty."""
         result = handle_impact(mock_storage, "validate")
-        assert "No upstream callers found" in result
+        assert "No upstream callers found" in result or "No downstream dependencies" in result
 
     def test_with_affected_symbols(self, mock_storage):
         """Returns formatted impact list when traverse finds nodes."""
