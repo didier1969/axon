@@ -38,6 +38,7 @@ class CallInfo:
     name: str  # the called function/method name
     line: int
     receiver: str = ""  # for method calls: the object (e.g., "self", "user")
+    arguments: list[str] = field(default_factory=list)  # bare identifier arguments (callbacks)
 
 @dataclass
 class TypeRef:
@@ -59,6 +60,7 @@ class ParseResult:
     heritage: list[tuple[str, str, str]] = field(
         default_factory=list
     )  # (class_name, kind, parent_name) where kind is "extends" or "implements"
+    exports: list[str] = field(default_factory=list)  # names from __all__ or export statements
 
 class LanguageParser(ABC):
     """Base interface for language-specific parsers."""

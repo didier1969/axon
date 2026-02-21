@@ -90,7 +90,9 @@ class TypeScriptParser(LanguageParser):
 
         ntype = node.type
 
-        if ntype == "function_declaration":
+        if ntype == "export_statement":
+            self._extract_export(node, source, result)
+        elif ntype == "function_declaration":
             self._extract_function_declaration(node, source, result)
         elif ntype in ("lexical_declaration", "variable_declaration"):
             self._extract_variable_declaration(node, source, result)
@@ -104,11 +106,75 @@ class TypeScriptParser(LanguageParser):
             self._extract_import(node, source, result)
         elif ntype == "call_expression":
             self._extract_call(node, source, result)
+        elif ntype == "new_expression":
+            self._extract_new_expression(node, source, result)
+        elif ntype == "expression_statement":
+            self._maybe_extract_module_exports(node, source, result)
         elif ntype == "method_definition":
             self._extract_method(node, source, result)
 
         for child in node.children:
             self._walk(child, source, result, visited)
+
+    def _extract_export(
+        self, node: Node, source: str, result: ParseResult
+    ) -> None:
+        """Handle ``export`` statements — mark exported symbol names.
+
+        Handles ``export function foo()``, ``export class Bar``,
+        ``export const baz = ...``, and ``export { name1, name2 }``.
+        """
+        for child in node.children:
+            if child.type in (
+                "function_declaration",
+                "class_declaration",
+                "interface_declaration",
+                "type_alias_declaration",
+            ):
+                name_node = child.child_by_field_name("name")
+                if name_node is not None:
+                    result.exports.append(name_node.text.decode())
+            elif child.type in ("lexical_declaration", "variable_declaration"):
+                for sub in child.children:
+                    if sub.type == "variable_declarator":
+                        name_node = sub.child_by_field_name("name")
+                        if name_node is not None:
+                            result.exports.append(name_node.text.decode())
+            elif child.type == "export_clause":
+                # export { name1, name2 }
+                for spec in child.children:
+                    if spec.type == "export_specifier":
+                        name_node = spec.child_by_field_name("name")
+                        if name_node is not None:
+                            result.exports.append(name_node.text.decode())
+
+    def _maybe_extract_module_exports(
+        self, node: Node, source: str, result: ParseResult
+    ) -> None:
+        """Handle ``module.exports = X`` and ``module.exports = { A, B }``."""
+        for child in node.children:
+            if child.type != "assignment_expression":
+                continue
+            left = child.child_by_field_name("left")
+            right = child.child_by_field_name("right")
+            if left is None or right is None:
+                continue
+
+            left_text = left.text.decode()
+            if left_text not in ("module.exports", "exports"):
+                continue
+
+            if right.type == "identifier":
+                result.exports.append(right.text.decode())
+            elif right.type == "object":
+                # module.exports = { Foo, Bar, baz: something }
+                for prop in right.children:
+                    if prop.type == "shorthand_property_identifier":
+                        result.exports.append(prop.text.decode())
+                    elif prop.type == "pair":
+                        key_node = prop.child_by_field_name("key")
+                        if key_node is not None:
+                            result.exports.append(key_node.text.decode())
 
     def _extract_function_declaration(
         self, node: Node, source: str, result: ParseResult
@@ -393,6 +459,7 @@ class TypeScriptParser(LanguageParser):
             return
 
         line = node.start_point[0] + 1
+        arguments = self._extract_identifier_arguments(node)
 
         if func_node.type == "member_expression":
             obj_node = func_node.child_by_field_name("object")
@@ -404,13 +471,60 @@ class TypeScriptParser(LanguageParser):
                         name=prop_node.text.decode(),
                         line=line,
                         receiver=receiver,
+                        arguments=arguments,
                     )
                 )
         elif func_node.type == "identifier":
             name = func_node.text.decode()
             # Skip require() since it's handled as an import.
             if name != "require":
-                result.calls.append(CallInfo(name=name, line=line))
+                result.calls.append(CallInfo(name=name, line=line, arguments=arguments))
+
+    def _extract_new_expression(
+        self, node: Node, source: str, result: ParseResult
+    ) -> None:
+        """Handle ``new ClassName(args)`` — emit a CallInfo targeting the class."""
+        constructor_node = node.child_by_field_name("constructor")
+        if constructor_node is None:
+            return
+
+        line = node.start_point[0] + 1
+        arguments = self._extract_identifier_arguments(node)
+
+        if constructor_node.type == "identifier":
+            result.calls.append(
+                CallInfo(
+                    name=constructor_node.text.decode(),
+                    line=line,
+                    arguments=arguments,
+                )
+            )
+        elif constructor_node.type == "member_expression":
+            obj_node = constructor_node.child_by_field_name("object")
+            prop_node = constructor_node.child_by_field_name("property")
+            if prop_node is not None:
+                receiver = obj_node.text.decode() if obj_node else ""
+                result.calls.append(
+                    CallInfo(
+                        name=prop_node.text.decode(),
+                        line=line,
+                        receiver=receiver,
+                        arguments=arguments,
+                    )
+                )
+
+    @staticmethod
+    def _extract_identifier_arguments(call_node: Node) -> list[str]:
+        """Extract bare identifier arguments from a call_expression node."""
+        args_node = call_node.child_by_field_name("arguments")
+        if args_node is None:
+            return []
+
+        identifiers: list[str] = []
+        for child in args_node.children:
+            if child.type == "identifier":
+                identifiers.append(child.text.decode())
+        return identifiers
 
     def _extract_function_types(
         self, func_node: Node, func_name: str, result: ParseResult

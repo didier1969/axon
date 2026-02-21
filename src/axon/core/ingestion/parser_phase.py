@@ -149,6 +149,13 @@ def process_parsing(
     # Phase 2: Graph mutation (sequential — not thread-safe).
     for file_entry, parse_data in zip(files, all_parse_data):
         file_id = generate_id(NodeLabel.FILE, file_entry.path)
+        exported_names: set[str] = set(parse_data.parse_result.exports)
+
+        # Build class -> base class names for storing on class nodes.
+        class_bases: dict[str, list[str]] = {}
+        for cls_name, kind, parent_name in parse_data.parse_result.heritage:
+            if kind == "extends":
+                class_bases.setdefault(cls_name, []).append(parent_name)
 
         for symbol in parse_data.parse_result.symbols:
             label = _KIND_TO_LABEL.get(symbol.kind)
@@ -174,6 +181,10 @@ def process_parsing(
             props: dict[str, Any] = {}
             if symbol.decorators:
                 props["decorators"] = symbol.decorators
+            if symbol.kind == "class" and symbol.name in class_bases:
+                props["bases"] = class_bases[symbol.name]
+
+            is_exported = symbol.name in exported_names
 
             graph.add_node(
                 GraphNode(
@@ -187,6 +198,7 @@ def process_parsing(
                     signature=symbol.signature,
                     class_name=symbol.class_name,
                     language=file_entry.language,
+                    is_exported=is_exported,
                     properties=props,
                 )
             )

@@ -376,8 +376,8 @@ class TestSkipsFrameworkDecoratedFunctions:
 
         assert node.is_dead is True
 
-    def test_non_framework_dotted_decorator_still_dead(self) -> None:
-        """Known non-framework dotted decorators don't exempt."""
+    def test_typing_overload_decorator_exempts(self) -> None:
+        """@typing.overload stubs are not dead — they define type signatures."""
         g = KnowledgeGraph()
         _add_file_node(g, "src/utils.py")
         node_id = _add_symbol_node(
@@ -386,6 +386,21 @@ class TestSkipsFrameworkDecoratedFunctions:
         node = g.get_node(node_id)
         assert node is not None
         node.properties["decorators"] = ["typing.overload"]
+
+        process_dead_code(g)
+
+        assert node.is_dead is False
+
+    def test_functools_wraps_still_dead(self) -> None:
+        """Known non-framework dotted decorators (functools.wraps) don't exempt."""
+        g = KnowledgeGraph()
+        _add_file_node(g, "src/utils.py")
+        node_id = _add_symbol_node(
+            g, NodeLabel.FUNCTION, "src/utils.py", "wrapper"
+        )
+        node = g.get_node(node_id)
+        assert node is not None
+        node.properties["decorators"] = ["functools.wraps"]
 
         process_dead_code(g)
 

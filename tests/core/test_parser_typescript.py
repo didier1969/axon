@@ -273,3 +273,105 @@ function getUser(): UserModel {
     return_types = [t for t in result.type_refs if t.kind == "return"]
     assert len(return_types) == 1
     assert return_types[0].name == "UserModel"
+
+
+# ---------------------------------------------------------------------------
+# new expression handling
+# ---------------------------------------------------------------------------
+
+
+def test_new_expression_simple(js_parser: TypeScriptParser) -> None:
+    """``new ClassName(args)`` creates a CallInfo targeting the class."""
+    code = """\
+function init() {
+    const mgr = new AchievementManager(this);
+}
+"""
+    result = js_parser.parse(code, "game.js")
+
+    new_calls = [c for c in result.calls if c.name == "AchievementManager"]
+    assert len(new_calls) == 1
+    assert new_calls[0].line == 2
+    assert new_calls[0].receiver == ""
+
+
+def test_new_expression_with_member(ts_parser: TypeScriptParser) -> None:
+    """``new module.ClassName()`` captures receiver and class name."""
+    code = """\
+const db = new pg.Client();
+"""
+    result = ts_parser.parse(code, "db.ts")
+
+    new_calls = [c for c in result.calls if c.name == "Client"]
+    assert len(new_calls) == 1
+    assert new_calls[0].receiver == "pg"
+
+
+def test_new_expression_callback_args(js_parser: TypeScriptParser) -> None:
+    """``new Cls(callbackFn)`` captures bare identifier arguments."""
+    code = """\
+const watcher = new FileWatcher(onChange);
+"""
+    result = js_parser.parse(code, "watcher.js")
+
+    new_calls = [c for c in result.calls if c.name == "FileWatcher"]
+    assert len(new_calls) == 1
+    assert "onChange" in new_calls[0].arguments
+
+
+def test_new_expression_cookie_clicker_pattern(js_parser: TypeScriptParser) -> None:
+    """Real-world pattern: exported class instantiated with ``new``."""
+    code = """\
+import { AchievementManager } from "./achievements.js";
+
+export class Game {
+    constructor() {
+        this.achievementManager = new AchievementManager(this);
+        this.prestige = new PrestigeManager(this);
+    }
+
+    start() {
+        this.achievementManager.check();
+    }
+}
+"""
+    result = js_parser.parse(code, "game.js")
+
+    # Both new expressions should create calls.
+    call_names = [c.name for c in result.calls]
+    assert "AchievementManager" in call_names
+    assert "PrestigeManager" in call_names
+
+    # Method call on instance should also be captured.
+    check_calls = [c for c in result.calls if c.name == "check"]
+    assert len(check_calls) == 1
+    assert "achievementManager" in check_calls[0].receiver
+
+
+# ---------------------------------------------------------------------------
+# module.exports handling
+# ---------------------------------------------------------------------------
+
+
+def test_module_exports_identifier(js_parser: TypeScriptParser) -> None:
+    """``module.exports = ClassName`` marks ClassName as exported."""
+    code = """\
+class AchievementManager {}
+module.exports = AchievementManager;
+"""
+    result = js_parser.parse(code, "achievements.js")
+
+    assert "AchievementManager" in result.exports
+
+
+def test_module_exports_object(js_parser: TypeScriptParser) -> None:
+    """``module.exports = { A, B }`` marks both A and B as exported."""
+    code = """\
+class Foo {}
+class Bar {}
+module.exports = { Foo, Bar };
+"""
+    result = js_parser.parse(code, "lib.js")
+
+    assert "Foo" in result.exports
+    assert "Bar" in result.exports

@@ -7,6 +7,7 @@ Resolution priority:
 1. Same-file exact match (confidence 1.0)
 2. Import-resolved match (confidence 1.0)
 3. Global fuzzy match (confidence 0.5)
+4. Receiver method resolution (confidence 0.8)
 """
 
 from __future__ import annotations
@@ -176,6 +177,63 @@ def _pick_closest(candidate_ids: list[str], graph: KnowledgeGraph) -> str | None
 
     return best_id
 
+def _add_calls_edge(
+    source_id: str,
+    target_id: str,
+    confidence: float,
+    graph: KnowledgeGraph,
+    seen: set[str],
+) -> None:
+    """Create a deduplicated CALLS relationship."""
+    rel_id = f"calls:{source_id}->{target_id}"
+    if rel_id not in seen:
+        seen.add(rel_id)
+        graph.add_relationship(
+            GraphRelationship(
+                id=rel_id,
+                type=RelType.CALLS,
+                source=source_id,
+                target=target_id,
+                properties={"confidence": confidence},
+            )
+        )
+
+def _resolve_receiver_method(
+    receiver: str,
+    method_name: str,
+    source_id: str,
+    file_path: str,
+    call_index: dict[str, list[str]],
+    graph: KnowledgeGraph,
+    seen: set[str],
+) -> None:
+    """Resolve ``Receiver.method()`` to the METHOD node and create a CALLS edge.
+
+    Looks for a METHOD node whose ``name`` matches *method_name* and whose
+    ``class_name`` matches *receiver*.  Searches same-file first, then
+    globally.
+    """
+    same_file_match: str | None = None
+    global_match: str | None = None
+
+    for nid in call_index.get(method_name, []):
+        node = graph.get_node(nid)
+        if (
+            node is not None
+            and node.label == NodeLabel.METHOD
+            and node.class_name == receiver
+        ):
+            if node.file_path == file_path:
+                same_file_match = nid
+                break
+            elif global_match is None:
+                global_match = nid
+
+    target = same_file_match or global_match
+    if target is not None:
+        _add_calls_edge(source_id, target, 0.8, graph, seen)
+
+
 def process_calls(
     parse_data: list[FileParseData],
     graph: KnowledgeGraph,
@@ -220,23 +278,33 @@ def process_calls(
             target_id, confidence = resolve_call(
                 call, fpd.file_path, call_index, graph
             )
-            if target_id is None:
-                continue
+            if target_id is not None:
+                _add_calls_edge(source_id, target_id, confidence, graph, seen)
 
-            rel_id = f"calls:{source_id}->{target_id}"
-            if rel_id in seen:
-                continue
-            seen.add(rel_id)
-
-            graph.add_relationship(
-                GraphRelationship(
-                    id=rel_id,
-                    type=RelType.CALLS,
-                    source=source_id,
-                    target=target_id,
-                    properties={"confidence": confidence},
+            # Callback arguments: bare identifiers passed as arguments
+            # (e.g. map(transform, items), Depends(get_db)).
+            for arg_name in call.arguments:
+                arg_call = CallInfo(name=arg_name, line=call.line)
+                arg_id, arg_conf = resolve_call(
+                    arg_call, fpd.file_path, call_index, graph
                 )
-            )
+                if arg_id is not None:
+                    _add_calls_edge(source_id, arg_id, arg_conf * 0.8, graph, seen)
+
+            # Receiver: link to the class and resolve the method on it.
+            receiver = call.receiver
+            if receiver and receiver not in ("self", "this"):
+                receiver_call = CallInfo(name=receiver, line=call.line)
+                recv_id, recv_conf = resolve_call(
+                    receiver_call, fpd.file_path, call_index, graph
+                )
+                if recv_id is not None:
+                    _add_calls_edge(source_id, recv_id, recv_conf, graph, seen)
+
+                _resolve_receiver_method(
+                    receiver, call.name, source_id, fpd.file_path,
+                    call_index, graph, seen,
+                )
 
         # Decorators are implicit calls — @cost_decorator on a function is
         # equivalent to calling cost_decorator(func).  Create CALLS edges

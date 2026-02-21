@@ -349,10 +349,11 @@ class PythonParser(LanguageParser):
         node: Node,
         result: ParseResult,
     ) -> None:
-        """Extract variable annotations from an expression_statement."""
+        """Extract variable annotations and __all__ from an expression_statement."""
         for child in node.children:
             if child.type == "assignment":
                 self._try_extract_variable_annotation(child, result)
+                self._try_extract_all_exports(child, result)
 
     def _try_extract_variable_annotation(self, assignment_node: Node, result: ParseResult) -> None:
         """Extract a type reference from a variable annotation if present."""
@@ -370,17 +371,89 @@ class PythonParser(LanguageParser):
                 )
             )
 
+    @staticmethod
+    def _try_extract_all_exports(assignment_node: Node, result: ParseResult) -> None:
+        """Extract names from ``__all__ = [...]`` or ``__all__ = (...)`` assignments."""
+        left = assignment_node.child_by_field_name("left")
+        right = assignment_node.child_by_field_name("right")
+        if left is None or right is None:
+            return
+        if left.type != "identifier" or left.text.decode("utf8") != "__all__":
+            return
+        if right.type not in ("list", "tuple"):
+            return
+
+        for child in right.children:
+            if child.type == "string":
+                text = child.text.decode("utf8")
+                # Strip surrounding quotes (single, double, or triple).
+                for quote in ('"""', "'''", '"', "'"):
+                    if text.startswith(quote) and text.endswith(quote):
+                        text = text[len(quote):-len(quote)]
+                        break
+                if text:
+                    result.exports.append(text)
+
     def _extract_calls_recursive(self, node: Node, result: ParseResult) -> None:
-        """Recursively find and extract all call nodes."""
+        """Recursively find and extract all call nodes and exception references."""
         if node.type == "call":
             self._extract_call(node, result)
-            # Recurse into ALL children so we catch:
-            # - nested calls in arguments: foo(bar())
-            # - chained calls: obj.method1().method2() — the function part
-            #   of the outer call contains the inner call node.
             for child in node.children:
                 self._extract_calls_recursive(child, result)
             return
+
+        # except SomeError: — reference to the exception class.
+        if node.type == "except_clause":
+            for child in node.children:
+                if child.type == "identifier":
+                    result.calls.append(
+                        CallInfo(
+                            name=child.text.decode("utf8"),
+                            line=child.start_point[0] + 1,
+                        )
+                    )
+                elif child.type == "tuple":
+                    # except (ErrorA, ErrorB): — extract each exception type.
+                    for elem in child.children:
+                        if elem.type == "identifier":
+                            result.calls.append(
+                                CallInfo(
+                                    name=elem.text.decode("utf8"),
+                                    line=elem.start_point[0] + 1,
+                                )
+                            )
+                elif child.type == "as_pattern":
+                    # except ErrorA as e  OR  except (ErrorA, ErrorB) as e
+                    for sub in child.children:
+                        if sub.type == "identifier":
+                            result.calls.append(
+                                CallInfo(
+                                    name=sub.text.decode("utf8"),
+                                    line=sub.start_point[0] + 1,
+                                )
+                            )
+                            break
+                        if sub.type == "tuple":
+                            for elem in sub.children:
+                                if elem.type == "identifier":
+                                    result.calls.append(
+                                        CallInfo(
+                                            name=elem.text.decode("utf8"),
+                                            line=elem.start_point[0] + 1,
+                                        )
+                                    )
+                            break
+
+        # raise SomeError (without parens) — reference to the exception class.
+        if node.type == "raise_statement":
+            for child in node.children:
+                if child.type == "identifier":
+                    result.calls.append(
+                        CallInfo(
+                            name=child.text.decode("utf8"),
+                            line=child.start_point[0] + 1,
+                        )
+                    )
 
         for child in node.children:
             self._extract_calls_recursive(child, result)
@@ -398,12 +471,14 @@ class PythonParser(LanguageParser):
             return
 
         line = call_node.start_point[0] + 1
+        arguments = self._extract_identifier_arguments(call_node)
 
         if func_node.type == "identifier":
             result.calls.append(
                 CallInfo(
                     name=func_node.text.decode("utf8"),
                     line=line,
+                    arguments=arguments,
                 )
             )
         elif func_node.type == "attribute":
@@ -413,6 +488,7 @@ class PythonParser(LanguageParser):
                     name=name,
                     line=line,
                     receiver=receiver,
+                    arguments=arguments,
                 )
             )
 
@@ -443,6 +519,28 @@ class PythonParser(LanguageParser):
                 receiver = self._root_identifier(obj_node)
 
         return method_name, receiver
+
+    @staticmethod
+    def _extract_identifier_arguments(call_node: Node) -> list[str]:
+        """Extract bare identifier arguments from a call node.
+
+        Returns names of arguments that are plain identifiers (not literals,
+        calls, or attribute accesses) — these are likely callback references
+        like ``map(transform, items)`` or ``Depends(get_db)``.
+        """
+        args_node = call_node.child_by_field_name("arguments")
+        if args_node is None:
+            return []
+
+        identifiers: list[str] = []
+        for child in args_node.children:
+            if child.type == "identifier":
+                identifiers.append(child.text.decode("utf8"))
+            elif child.type == "keyword_argument":
+                value_node = child.child_by_field_name("value")
+                if value_node is not None and value_node.type == "identifier":
+                    identifiers.append(value_node.text.decode("utf8"))
+        return identifiers
 
     def _root_identifier(self, node: Node) -> str:
         """Walk down into the leftmost identifier of an expression."""
