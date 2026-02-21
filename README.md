@@ -248,6 +248,8 @@ axon setup                   Print MCP configuration JSON
     --cursor                 For Cursor
 
 axon mcp                     Start the MCP server (stdio transport)
+axon serve                   Start the MCP server (same as axon mcp)
+    --watch, -w              Enable live file watching with auto-reindex
 axon --version               Print version
 ```
 
@@ -266,11 +268,13 @@ Add to your `.claude/settings.json` or project `.mcp.json`:
   "mcpServers": {
     "axon": {
       "command": "axon",
-      "args": ["mcp"]
+      "args": ["serve", "--watch"]
     }
   }
 }
 ```
+
+This starts the MCP server **with live file watching** — the knowledge graph updates automatically as you edit code. To run without watching, use `"args": ["mcp"]` instead.
 
 Or run the setup helper:
 
@@ -286,7 +290,7 @@ Add to your Cursor MCP settings:
 {
   "axon": {
     "command": "axon",
-    "args": ["mcp"]
+    "args": ["serve", "--watch"]
   }
 }
 ```

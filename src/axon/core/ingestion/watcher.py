@@ -89,6 +89,7 @@ async def watch_repo(
     storage: StorageBackend,
     *,
     stop_event: asyncio.Event | None = None,
+    lock: asyncio.Lock | None = None,
 ) -> None:
     """Main watch loop — monitor files and re-index on changes.
 
@@ -101,8 +102,18 @@ async def watch_repo(
     stop_event:
         Optional event to signal shutdown (useful for testing).
         When set, the watch loop exits gracefully.
+    lock:
+        Optional async lock for coordinating storage access with
+        concurrent readers (e.g. the MCP server in combined mode).
     """
     import watchfiles
+
+    async def _run_sync(fn, *args):
+        """Run a sync function in a thread, optionally under the lock."""
+        if lock is not None:
+            async with lock:
+                return await asyncio.to_thread(fn, *args)
+        return await asyncio.to_thread(fn, *args)
 
     gitignore = load_gitignore(repo_path)
     dirty = False
@@ -126,7 +137,7 @@ async def watch_repo(
         if not changed_paths:
             continue
 
-        count = _reindex_files(changed_paths, repo_path, storage, gitignore)
+        count = await _run_sync(_reindex_files, changed_paths, repo_path, storage, gitignore)
         if count > 0:
             files_changed += count
             dirty = True
@@ -135,7 +146,7 @@ async def watch_repo(
         now = time.monotonic()
         if dirty and (now - last_global) >= GLOBAL_PHASE_INTERVAL:
             logger.info("Running global analysis phases...")
-            _run_global_phases(storage, repo_path)
+            await _run_sync(_run_global_phases, storage, repo_path)
             dirty = False
             last_global = now
 

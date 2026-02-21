@@ -346,6 +346,24 @@ class TestMcp:
                     mock_run.assert_called_once()
 
 
+class TestServe:
+    """Tests for the serve command."""
+
+    def test_serve_command_exists(self) -> None:
+        """The serve command should be registered."""
+        result = runner.invoke(app, ["serve", "--help"])
+        assert result.exit_code == 0
+        assert "watch" in result.output.lower()
+
+    def test_serve_without_watch_delegates_to_mcp(self) -> None:
+        """serve without --watch should behave like axon mcp."""
+        import asyncio as real_asyncio
+
+        with patch.object(real_asyncio, "run") as mock_run:
+            result = runner.invoke(app, ["serve"])
+            mock_run.assert_called_once()
+
+
 class TestStillStubbed:
     """Tests that watch and diff are still stubs."""
 

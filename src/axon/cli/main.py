@@ -264,7 +264,7 @@ def setup(
     """Configure MCP for Claude Code / Cursor."""
     mcp_config = {
         "command": "axon",
-        "args": ["mcp"],
+        "args": ["serve", "--watch"],
     }
 
     if claude or (not claude and not cursor):
@@ -329,3 +329,60 @@ def mcp() -> None:
     from axon.mcp.server import main as mcp_main
 
     asyncio.run(mcp_main())
+
+@app.command()
+def serve(
+    watch: bool = typer.Option(False, "--watch", "-w", help="Enable file watching with auto-reindex."),
+) -> None:
+    """Start MCP server, optionally with live file watching."""
+    import asyncio
+    import sys
+
+    from axon.mcp.server import main as mcp_main, set_lock, set_storage
+
+    if not watch:
+        asyncio.run(mcp_main())
+        return
+
+    from axon.core.ingestion.pipeline import run_pipeline
+    from axon.core.ingestion.watcher import watch_repo
+    from axon.core.storage.kuzu_backend import KuzuBackend
+
+    repo_path = Path.cwd().resolve()
+    axon_dir = repo_path / ".axon"
+    axon_dir.mkdir(parents=True, exist_ok=True)
+    db_path = axon_dir / "kuzu"
+
+    storage = KuzuBackend()
+    storage.initialize(db_path)
+
+    if not (axon_dir / "meta.json").exists():
+        print("Running initial index...", file=sys.stderr)
+        run_pipeline(repo_path, storage, full=True)
+
+    lock = asyncio.Lock()
+    set_storage(storage)
+    set_lock(lock)
+
+    async def _run() -> None:
+        from mcp.server.stdio import stdio_server
+        from axon.mcp.server import server as mcp_server
+
+        stop = asyncio.Event()
+
+        async with stdio_server() as (read, write):
+            async def _mcp_then_stop():
+                await mcp_server.run(read, write, mcp_server.create_initialization_options())
+                stop.set()
+
+            await asyncio.gather(
+                _mcp_then_stop(),
+                watch_repo(repo_path, storage, stop_event=stop, lock=lock),
+            )
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        storage.close()

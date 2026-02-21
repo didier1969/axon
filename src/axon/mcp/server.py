@@ -7,11 +7,11 @@ working directory.
 
 Usage::
 
-    # Run directly
-    python -m axon.mcp.server
+    # MCP server only
+    axon mcp
 
-    # Or via the MCP protocol (stdio transport)
-    axon serve  # (once CLI is wired)
+    # MCP server with live file watching (recommended)
+    axon serve --watch
 """
 
 from __future__ import annotations
@@ -41,6 +41,20 @@ logger = logging.getLogger(__name__)
 server = Server("axon")
 
 _storage: KuzuBackend | None = None
+_lock: asyncio.Lock | None = None
+
+
+def set_storage(storage: KuzuBackend) -> None:
+    """Inject a pre-initialised storage backend (e.g. from ``axon serve --watch``)."""
+    global _storage  # noqa: PLW0603
+    _storage = storage
+
+
+def set_lock(lock: asyncio.Lock) -> None:
+    """Inject a shared lock for coordinating storage access with the file watcher."""
+    global _lock  # noqa: PLW0603
+    _lock = lock
+
 
 def _get_storage() -> KuzuBackend:
     """Lazily initialise and return the KuzuDB storage backend.
@@ -176,41 +190,36 @@ async def list_tools() -> list[Tool]:
     """Return the list of available Axon tools."""
     return TOOLS
 
+def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
+    """Synchronous tool dispatch — called directly or via ``asyncio.to_thread``."""
+    if name == "axon_list_repos":
+        return handle_list_repos()
+    elif name == "axon_query":
+        return handle_query(storage, arguments.get("query", ""), limit=arguments.get("limit", 20))
+    elif name == "axon_context":
+        return handle_context(storage, arguments.get("symbol", ""))
+    elif name == "axon_impact":
+        return handle_impact(storage, arguments.get("symbol", ""), depth=arguments.get("depth", 3))
+    elif name == "axon_dead_code":
+        return handle_dead_code(storage)
+    elif name == "axon_detect_changes":
+        return handle_detect_changes(storage, arguments.get("diff", ""))
+    elif name == "axon_cypher":
+        return handle_cypher(storage, arguments.get("query", ""))
+    else:
+        return f"Unknown tool: {name}"
+
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Dispatch a tool call to the appropriate handler."""
     storage = _get_storage()
 
-    if name == "axon_list_repos":
-        result = handle_list_repos()
-
-    elif name == "axon_query":
-        query = arguments.get("query", "")
-        limit = arguments.get("limit", 20)
-        result = handle_query(storage, query, limit=limit)
-
-    elif name == "axon_context":
-        symbol = arguments.get("symbol", "")
-        result = handle_context(storage, symbol)
-
-    elif name == "axon_impact":
-        symbol = arguments.get("symbol", "")
-        depth = arguments.get("depth", 3)
-        result = handle_impact(storage, symbol, depth=depth)
-
-    elif name == "axon_dead_code":
-        result = handle_dead_code(storage)
-
-    elif name == "axon_detect_changes":
-        diff = arguments.get("diff", "")
-        result = handle_detect_changes(storage, diff)
-
-    elif name == "axon_cypher":
-        query = arguments.get("query", "")
-        result = handle_cypher(storage, query)
-
+    if _lock is not None:
+        async with _lock:
+            result = await asyncio.to_thread(_dispatch_tool, name, arguments, storage)
     else:
-        result = f"Unknown tool: {name}"
+        result = _dispatch_tool(name, arguments, storage)
 
     return [TextContent(type="text", text=result)]
 
@@ -238,23 +247,27 @@ async def list_resources() -> list[Resource]:
         ),
     ]
 
+def _dispatch_resource(uri_str: str, storage: KuzuBackend) -> str:
+    """Synchronous resource dispatch."""
+    if uri_str == "axon://overview":
+        return get_overview(storage)
+    if uri_str == "axon://dead-code":
+        return get_dead_code_list(storage)
+    if uri_str == "axon://schema":
+        return get_schema()
+    return f"Unknown resource: {uri_str}"
+
+
 @server.read_resource()
 async def read_resource(uri) -> str:
     """Read the contents of an Axon resource."""
+    storage = _get_storage()
     uri_str = str(uri)
 
-    if uri_str == "axon://overview":
-        storage = _get_storage()
-        return get_overview(storage)
-
-    if uri_str == "axon://dead-code":
-        storage = _get_storage()
-        return get_dead_code_list(storage)
-
-    if uri_str == "axon://schema":
-        return get_schema()
-
-    return f"Unknown resource: {uri_str}"
+    if _lock is not None:
+        async with _lock:
+            return await asyncio.to_thread(_dispatch_resource, uri_str, storage)
+    return _dispatch_resource(uri_str, storage)
 
 async def main() -> None:
     """Run the Axon MCP server over stdio transport."""
