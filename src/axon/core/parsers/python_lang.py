@@ -426,7 +426,6 @@ class PythonParser(LanguageParser):
                     # except ErrorA as e  OR  except (ErrorA, ErrorB) as e
                     for sub in child.children:
                         if sub.type == "identifier":
-                            # Simple case: first identifier is the exception type.
                             result.calls.append(
                                 CallInfo(
                                     name=sub.text.decode("utf8"),
@@ -435,7 +434,6 @@ class PythonParser(LanguageParser):
                             )
                             break
                         if sub.type == "tuple":
-                            # Tuple case: extract each exception type from tuple.
                             for elem in sub.children:
                                 if elem.type == "identifier":
                                     result.calls.append(
@@ -473,8 +471,6 @@ class PythonParser(LanguageParser):
             return
 
         line = call_node.start_point[0] + 1
-
-        # Extract bare identifier arguments (callbacks like map(transform, items)).
         arguments = self._extract_identifier_arguments(call_node)
 
         if func_node.type == "identifier":
@@ -541,7 +537,6 @@ class PythonParser(LanguageParser):
             if child.type == "identifier":
                 identifiers.append(child.text.decode("utf8"))
             elif child.type == "keyword_argument":
-                # Check the value of keyword arguments: Depends(dependency=get_db)
                 value_node = child.child_by_field_name("value")
                 if value_node is not None and value_node.type == "identifier":
                     identifiers.append(value_node.text.decode("utf8"))

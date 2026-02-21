@@ -184,7 +184,6 @@ def process_parsing(
             if symbol.kind == "class" and symbol.name in class_bases:
                 props["bases"] = class_bases[symbol.name]
 
-            # Mark as exported if listed in __all__ or parser-detected exports.
             is_exported = symbol.name in exported_names
 
             graph.add_node(

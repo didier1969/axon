@@ -78,14 +78,10 @@ _FRAMEWORK_DECORATOR_NAMES: frozenset[str] = frozenset({
 def _has_framework_decorator(node: GraphNode) -> bool:
     """Return ``True`` if *node* has a framework decorator (dotted or undotted)."""
     decorators: list[str] = node.properties.get("decorators", [])
-    for dec in decorators:
-        # Known undotted framework decorator names.
-        if dec in _FRAMEWORK_DECORATOR_NAMES:
-            return True
-        # Dotted decorators (e.g. app.route) that aren't known non-framework.
-        if "." in dec and dec not in _NON_FRAMEWORK_DECORATORS:
-            return True
-    return False
+    return any(
+        dec in _FRAMEWORK_DECORATOR_NAMES or ("." in dec and dec not in _NON_FRAMEWORK_DECORATORS)
+        for dec in decorators
+    )
 
 def _has_property_decorator(node: GraphNode) -> bool:
     """Return ``True`` if *node* is a ``@property`` (accessed as attribute, not called)."""

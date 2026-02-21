@@ -459,8 +459,6 @@ class TypeScriptParser(LanguageParser):
             return
 
         line = node.start_point[0] + 1
-
-        # Extract bare identifier arguments (callbacks).
         arguments = self._extract_identifier_arguments(node)
 
         if func_node.type == "member_expression":
@@ -502,7 +500,6 @@ class TypeScriptParser(LanguageParser):
                 )
             )
         elif constructor_node.type == "member_expression":
-            # new Module.ClassName(args)
             obj_node = constructor_node.child_by_field_name("object")
             prop_node = constructor_node.child_by_field_name("property")
             if prop_node is not None:

@@ -177,6 +177,27 @@ def _pick_closest(candidate_ids: list[str], graph: KnowledgeGraph) -> str | None
 
     return best_id
 
+def _add_calls_edge(
+    source_id: str,
+    target_id: str,
+    confidence: float,
+    graph: KnowledgeGraph,
+    seen: set[str],
+) -> None:
+    """Create a deduplicated CALLS relationship."""
+    rel_id = f"calls:{source_id}->{target_id}"
+    if rel_id not in seen:
+        seen.add(rel_id)
+        graph.add_relationship(
+            GraphRelationship(
+                id=rel_id,
+                type=RelType.CALLS,
+                source=source_id,
+                target=target_id,
+                properties={"confidence": confidence},
+            )
+        )
+
 def _resolve_receiver_method(
     receiver: str,
     method_name: str,
@@ -204,26 +225,13 @@ def _resolve_receiver_method(
         ):
             if node.file_path == file_path:
                 same_file_match = nid
-                break  # Best possible match
+                break
             elif global_match is None:
                 global_match = nid
 
     target = same_file_match or global_match
-    if target is None:
-        return
-
-    rel_id = f"calls:{source_id}->{target}"
-    if rel_id not in seen:
-        seen.add(rel_id)
-        graph.add_relationship(
-            GraphRelationship(
-                id=rel_id,
-                type=RelType.CALLS,
-                source=source_id,
-                target=target,
-                properties={"confidence": 0.8},
-            )
-        )
+    if target is not None:
+        _add_calls_edge(source_id, target, 0.8, graph, seen)
 
 
 def process_calls(
@@ -271,18 +279,7 @@ def process_calls(
                 call, fpd.file_path, call_index, graph
             )
             if target_id is not None:
-                rel_id = f"calls:{source_id}->{target_id}"
-                if rel_id not in seen:
-                    seen.add(rel_id)
-                    graph.add_relationship(
-                        GraphRelationship(
-                            id=rel_id,
-                            type=RelType.CALLS,
-                            source=source_id,
-                            target=target_id,
-                            properties={"confidence": confidence},
-                        )
-                    )
+                _add_calls_edge(source_id, target_id, confidence, graph, seen)
 
             # Callback arguments: bare identifiers passed as arguments
             # (e.g. map(transform, items), Depends(get_db)).
@@ -292,21 +289,9 @@ def process_calls(
                     arg_call, fpd.file_path, call_index, graph
                 )
                 if arg_id is not None:
-                    arg_rel_id = f"calls:{source_id}->{arg_id}"
-                    if arg_rel_id not in seen:
-                        seen.add(arg_rel_id)
-                        graph.add_relationship(
-                            GraphRelationship(
-                                id=arg_rel_id,
-                                type=RelType.CALLS,
-                                source=source_id,
-                                target=arg_id,
-                                properties={"confidence": arg_conf * 0.8},
-                            )
-                        )
+                    _add_calls_edge(source_id, arg_id, arg_conf * 0.8, graph, seen)
 
-            # Receiver handling: link to the receiver class and resolve
-            # the method on it (e.g. ClassName.method()).
+            # Receiver: link to the class and resolve the method on it.
             receiver = call.receiver
             if receiver and receiver not in ("self", "this"):
                 receiver_call = CallInfo(name=receiver, line=call.line)
@@ -314,22 +299,8 @@ def process_calls(
                     receiver_call, fpd.file_path, call_index, graph
                 )
                 if recv_id is not None:
-                    recv_rel_id = f"calls:{source_id}->{recv_id}"
-                    if recv_rel_id not in seen:
-                        seen.add(recv_rel_id)
-                        graph.add_relationship(
-                            GraphRelationship(
-                                id=recv_rel_id,
-                                type=RelType.CALLS,
-                                source=source_id,
-                                target=recv_id,
-                                properties={"confidence": recv_conf},
-                            )
-                        )
+                    _add_calls_edge(source_id, recv_id, recv_conf, graph, seen)
 
-                # Also resolve the method on the receiver class.
-                # e.g. MathUtils.compute() → find METHOD node with
-                # name="compute" and class_name="MathUtils".
                 _resolve_receiver_method(
                     receiver, call.name, source_id, fpd.file_path,
                     call_index, graph, seen,
