@@ -210,6 +210,8 @@ class KuzuBackend:
         )
         return self._query_nodes(query, parameters={"nid": node_id})
 
+    _MAX_BFS_DEPTH = 10
+
     def traverse(self, start_id: str, depth: int, direction: str = "callers") -> list[GraphNode]:
         """BFS traversal through CALLS edges up to *depth* hops.
 
@@ -218,6 +220,7 @@ class KuzuBackend:
                        ``"callees"`` follows outgoing CALLS (dependencies).
         """
         assert self._conn is not None
+        depth = min(depth, self._MAX_BFS_DEPTH)
         if _table_for_id(start_id) is None:
             return []
 
