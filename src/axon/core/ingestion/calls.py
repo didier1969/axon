@@ -39,6 +39,43 @@ _KIND_TO_LABEL: dict[str, NodeLabel] = {
     "class": NodeLabel.CLASS,
 }
 
+# Names that should never produce CALLS edges.  These are language builtins,
+# stdlib utilities, framework hooks, and common JS/TS globals whose definitions
+# do not exist in the user's codebase.  Filtering them before resolution
+# prevents low-confidence global-fuzzy matches against short, common names.
+_CALL_BLOCKLIST: frozenset[str] = frozenset({
+    # Python builtins
+    "print", "len", "range", "map", "filter", "sorted", "list", "dict",
+    "set", "str", "int", "float", "bool", "type", "super", "isinstance",
+    "issubclass", "hasattr", "getattr", "setattr", "open", "iter", "next",
+    "zip", "enumerate", "any", "all", "min", "max", "sum", "abs", "round",
+    "repr", "id", "hash", "dir", "vars", "input", "format", "tuple",
+    "frozenset", "bytes", "bytearray", "memoryview", "object", "property",
+    "classmethod", "staticmethod", "delattr", "callable", "compile", "eval",
+    "exec", "globals", "locals", "breakpoint", "exit", "quit",
+    # Python stdlib — common method names that collide with user-defined symbols
+    "append", "extend", "update", "pop", "get", "items", "keys", "values",
+    "split", "join", "strip", "replace", "startswith", "endswith", "lower",
+    "upper", "encode", "decode", "read", "write", "close",
+    # JS/TS built-in globals
+    "console", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "JSON", "Array", "Object", "Promise", "Math", "Date", "Error", "Symbol",
+    "parseInt", "parseFloat", "isNaN", "isFinite", "encodeURIComponent",
+    "decodeURIComponent", "fetch", "require", "exports", "module",
+    "document", "window", "process", "Buffer", "URL",
+    # JS/TS dotted method names extracted as bare call names
+    "log", "error", "warn", "info", "debug",
+    "parse", "stringify",
+    "assign", "freeze",
+    "isArray", "from", "of",
+    "resolve", "reject", "race",
+    "floor", "ceil", "random",
+    # React hooks
+    "useState", "useEffect", "useRef", "useCallback", "useMemo",
+    "useContext", "useReducer", "useLayoutEffect", "useImperativeHandle",
+    "useDebugValue", "useId", "useTransition", "useDeferredValue",
+})
+
 def resolve_call(
     call: CallInfo,
     file_path: str,
@@ -263,6 +300,9 @@ def process_calls(
 
     for fpd in parse_data:
         for call in fpd.parse_result.calls:
+            if call.name in _CALL_BLOCKLIST and call.receiver not in ("self", "this"):
+                continue
+
             source_id = find_containing_symbol(
                 call.line, fpd.file_path, file_sym_index
             )
@@ -284,6 +324,8 @@ def process_calls(
             # Callback arguments: bare identifiers passed as arguments
             # (e.g. map(transform, items), Depends(get_db)).
             for arg_name in call.arguments:
+                if arg_name in _CALL_BLOCKLIST:
+                    continue
                 arg_call = CallInfo(name=arg_name, line=call.line)
                 arg_id, arg_conf = resolve_call(
                     arg_call, fpd.file_path, call_index, graph

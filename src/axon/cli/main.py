@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +17,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from axon import __version__
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 def _load_storage(repo_path: Path | None = None) -> "KuzuBackend":  # noqa: F821
     """Load the KuzuDB backend for the given or current repo."""
@@ -31,6 +34,51 @@ def _load_storage(repo_path: Path | None = None) -> "KuzuBackend":  # noqa: F821
     storage = KuzuBackend()
     storage.initialize(db_path, read_only=True)
     return storage
+
+
+def _register_in_global_registry(meta: dict, repo_path: Path) -> None:
+    """Write meta.json into ``~/.axon/repos/{slug}/`` for multi-repo discovery.
+
+    Slug is ``{repo_name}`` if that slot is unclaimed or already belongs to
+    this repo.  Falls back to ``{repo_name}-{sha256(path)[:8]}`` on collision.
+    """
+    registry_root = Path.home() / ".axon" / "repos"
+    repo_name = repo_path.name
+
+    candidate = registry_root / repo_name
+    slug = repo_name
+    if candidate.exists():
+        existing_meta_path = candidate / "meta.json"
+        try:
+            existing = json.loads(existing_meta_path.read_text())
+            if existing.get("path") != str(repo_path):
+                short_hash = hashlib.sha256(str(repo_path).encode()).hexdigest()[:8]
+                slug = f"{repo_name}-{short_hash}"
+        except (json.JSONDecodeError, OSError):
+            shutil.rmtree(candidate, ignore_errors=True)  # Clean broken slot before claiming
+
+    # Remove any stale entry for the same repo_path under a different slug.
+    if registry_root.exists():
+        for old_dir in registry_root.iterdir():
+            if not old_dir.is_dir() or old_dir.name == slug:
+                continue
+            old_meta = old_dir / "meta.json"
+            try:
+                old_data = json.loads(old_meta.read_text())
+                if old_data.get("path") == str(repo_path):
+                    shutil.rmtree(old_dir, ignore_errors=True)
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    slot = registry_root / slug
+    slot.mkdir(parents=True, exist_ok=True)
+
+    registry_meta = dict(meta)
+    registry_meta["slug"] = slug
+    (slot / "meta.json").write_text(
+        json.dumps(registry_meta, indent=2) + "\n", encoding="utf-8"
+    )
+
 
 app = typer.Typer(
     name="axon",
@@ -61,6 +109,7 @@ def main(
 def analyze(
     path: Path = typer.Argument(Path("."), help="Path to the repository to index."),
     full: bool = typer.Option(False, "--full", help="Perform a full re-index."),
+    no_embeddings: bool = typer.Option(False, "--no-embeddings", help="Skip vector embedding generation."),
 ) -> None:
     """Index a repository into a knowledge graph."""
     from axon.core.ingestion.pipeline import PipelineResult, run_pipeline
@@ -97,6 +146,7 @@ def analyze(
             storage=storage,
             full=full,
             progress_callback=on_progress,
+            embeddings=not no_embeddings,
         )
 
     meta = {
@@ -111,11 +161,17 @@ def analyze(
             "flows": result.processes,
             "dead_code": result.dead_code,
             "coupled_pairs": result.coupled_pairs,
+            "embeddings": result.embeddings,
         },
         "last_indexed_at": datetime.now(tz=timezone.utc).isoformat(),
     }
     meta_path = axon_dir / "meta.json"
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+    try:
+        _register_in_global_registry(meta, repo_path)
+    except Exception:
+        logger.debug("Failed to register repo in global registry", exc_info=True)
 
     console.print()
     console.print("[bold green]Indexing complete.[/bold green]")
@@ -130,6 +186,8 @@ def analyze(
         console.print(f"  Dead code:      {result.dead_code}")
     if result.coupled_pairs > 0:
         console.print(f"  Coupled pairs:  {result.coupled_pairs}")
+    if result.embeddings > 0:
+        console.print(f"  Embeddings:     {result.embeddings}")
     console.print(f"  Duration:       {result.duration_seconds:.2f}s")
 
     storage.close()

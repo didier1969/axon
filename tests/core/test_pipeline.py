@@ -334,3 +334,56 @@ class TestRunPipelineProgressIncludesNewPhases:
             phase_pcts = {pct for name, pct in calls if name == phase_name}
             assert 0.0 in phase_pcts, f"{phase_name} missing 0.0 progress"
             assert 1.0 in phase_pcts, f"{phase_name} missing 1.0 progress"
+
+
+# ---------------------------------------------------------------------------
+# Embedding phase integration
+# ---------------------------------------------------------------------------
+
+
+class TestRunPipelineEmbeddings:
+    """The pipeline's embedding phase fires correctly."""
+
+    def test_embedding_phase_in_progress(
+        self, rich_repo: Path, rich_storage: KuzuBackend
+    ) -> None:
+        """Progress callback includes 'Generating embeddings' phase."""
+        calls: list[tuple[str, float]] = []
+
+        def callback(phase: str, pct: float) -> None:
+            calls.append((phase, pct))
+
+        run_pipeline(rich_repo, rich_storage, progress_callback=callback)
+
+        phase_names = {name for name, _ in calls}
+        assert "Generating embeddings" in phase_names
+
+    def test_result_symbols_set_even_if_embed_fails(
+        self, rich_repo: Path, rich_storage: KuzuBackend
+    ) -> None:
+        """result.symbols is correct even when embedding phase raises."""
+        from unittest.mock import patch
+
+        with patch(
+            "axon.core.ingestion.pipeline.embed_graph",
+            side_effect=RuntimeError("model not found"),
+        ):
+            _, result = run_pipeline(rich_repo, rich_storage)
+
+        # symbols and relationships are computed before the embedding step
+        assert result.symbols >= 5
+        assert result.relationships > 0
+        assert result.embeddings == 0
+
+    def test_no_storage_skips_embedding(self, rich_repo: Path) -> None:
+        """When storage=None, embedding phase is skipped entirely."""
+        calls: list[tuple[str, float]] = []
+
+        def callback(phase: str, pct: float) -> None:
+            calls.append((phase, pct))
+
+        _, result = run_pipeline(rich_repo, storage=None, progress_callback=callback)
+
+        phase_names = {name for name, _ in calls}
+        assert "Generating embeddings" not in phase_names
+        assert result.embeddings == 0

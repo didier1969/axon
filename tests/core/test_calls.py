@@ -13,6 +13,7 @@ from axon.core.graph.model import (
     generate_id,
 )
 from axon.core.ingestion.calls import (
+    _CALL_BLOCKLIST,
     process_calls,
     resolve_call,
 )
@@ -491,3 +492,95 @@ class TestResolveCallImportResolved:
         )
         assert target_id == expected_id
         assert confidence == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Noise filtering — _CALL_BLOCKLIST
+# ---------------------------------------------------------------------------
+
+
+class TestCallBlocklist:
+    """Calls to blocklisted names produce no CALLS edges."""
+
+    def test_blocklist_is_frozenset(self) -> None:
+        """_CALL_BLOCKLIST is a frozenset (immutable, O(1) membership)."""
+        assert isinstance(_CALL_BLOCKLIST, frozenset)
+
+    def test_python_builtins_in_blocklist(self) -> None:
+        """Common Python builtins are blocked."""
+        for name in ("print", "len", "range", "isinstance", "super"):
+            assert name in _CALL_BLOCKLIST
+
+    def test_js_globals_in_blocklist(self) -> None:
+        """JS/TS built-ins are blocked."""
+        for name in ("console", "setTimeout", "fetch", "JSON", "Promise"):
+            assert name in _CALL_BLOCKLIST
+
+    def test_react_hooks_in_blocklist(self) -> None:
+        """React hooks are blocked."""
+        for name in ("useState", "useEffect", "useCallback", "useMemo"):
+            assert name in _CALL_BLOCKLIST
+
+    def test_blocklisted_call_creates_no_edge(self) -> None:
+        """A call to 'print' inside a function produces no CALLS edge."""
+        g = KnowledgeGraph()
+        _add_file_node(g, "src/main.py")
+        _add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "do_work", 1, 10)
+
+        parse_data = [
+            FileParseData(
+                file_path="src/main.py",
+                language="python",
+                parse_result=ParseResult(
+                    calls=[CallInfo(name="print", line=5)],
+                ),
+            ),
+        ]
+
+        process_calls(parse_data, g)
+        calls_rels = g.get_relationships_by_type(RelType.CALLS)
+        assert len(calls_rels) == 0
+
+    def test_blocklisted_argument_creates_no_edge(self) -> None:
+        """A blocklisted name passed as argument produces no CALLS edge."""
+        g = KnowledgeGraph()
+        _add_file_node(g, "src/main.py")
+        _add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "do_work", 1, 10)
+
+        parse_data = [
+            FileParseData(
+                file_path="src/main.py",
+                language="python",
+                parse_result=ParseResult(
+                    calls=[
+                        CallInfo(name="apply_func", line=5, arguments=["str"]),
+                    ],
+                ),
+            ),
+        ]
+
+        process_calls(parse_data, g)
+        calls_rels = g.get_relationships_by_type(RelType.CALLS)
+        # apply_func is not in the graph so no edge for it; 'str' is blocklisted.
+        assert len(calls_rels) == 0
+
+    def test_non_blocklisted_call_still_resolves(self) -> None:
+        """User-defined function names pass through the blocklist filter."""
+        g = KnowledgeGraph()
+        _add_file_node(g, "src/main.py")
+        _add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "caller", 1, 10)
+        _add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "my_helper", 12, 20)
+
+        parse_data = [
+            FileParseData(
+                file_path="src/main.py",
+                language="python",
+                parse_result=ParseResult(
+                    calls=[CallInfo(name="my_helper", line=5)],
+                ),
+            ),
+        ]
+
+        process_calls(parse_data, g)
+        calls_rels = g.get_relationships_by_type(RelType.CALLS)
+        assert len(calls_rels) == 1

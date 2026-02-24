@@ -28,6 +28,7 @@ from pathlib import Path
 from axon.config.ignore import load_gitignore
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import NodeLabel
+from axon.core.embeddings.embedder import embed_graph
 from axon.core.ingestion.calls import process_calls
 from axon.core.ingestion.community import process_communities
 from axon.core.ingestion.coupling import process_coupling
@@ -52,6 +53,7 @@ class PipelineResult:
     processes: int = 0
     dead_code: int = 0
     coupled_pairs: int = 0
+    embeddings: int = 0
     duration_seconds: float = 0.0
     incremental: bool = False
     changed_files: int = 0
@@ -68,6 +70,7 @@ def run_pipeline(
     storage: StorageBackend | None = None,
     full: bool = False,
     progress_callback: Callable[[str, float], None] | None = None,
+    embeddings: bool = True,
 ) -> tuple[KnowledgeGraph, PipelineResult]:
     """Run phases 1-11 of the ingestion pipeline.
 
@@ -88,6 +91,9 @@ def run_pipeline(
     progress_callback:
         Optional ``(phase_name, progress)`` callback where *progress* is a
         float in ``[0.0, 1.0]``.
+    embeddings:
+        When ``True`` (default), generate and store vector embeddings after
+        bulk-loading.  Set to ``False`` to skip embedding generation.
 
     Returns
     -------
@@ -149,13 +155,31 @@ def run_pipeline(
     result.coupled_pairs = process_coupling(graph, repo_path)
     report("Analyzing git history", 1.0)
 
+    # Compute result counts before the optional embedding step so a
+    # fastembed failure never leaves symbols/relationships at zero.
+    result.symbols = sum(1 for n in graph.iter_nodes() if n.label in _SYMBOL_LABELS)
+    result.relationships = graph.relationship_count
+
     if storage is not None:
         report("Loading to storage", 0.0)
         storage.bulk_load(graph)
         report("Loading to storage", 1.0)
 
-    result.symbols = sum(1 for n in graph.iter_nodes() if n.label in _SYMBOL_LABELS)
-    result.relationships = graph.relationship_count
+        if embeddings:
+            try:
+                report("Generating embeddings", 0.0)
+                node_embeddings = embed_graph(graph)
+                storage.store_embeddings(node_embeddings)
+                result.embeddings = len(node_embeddings)
+                report("Generating embeddings", 1.0)
+            except Exception:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "Embedding phase failed — search will use FTS only",
+                    exc_info=True,
+                )
+                report("Generating embeddings", 1.0)
+
     result.duration_seconds = time.monotonic() - start
 
     return graph, result

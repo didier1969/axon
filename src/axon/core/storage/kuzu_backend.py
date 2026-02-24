@@ -210,10 +210,44 @@ class KuzuBackend:
         )
         return self._query_nodes(query, parameters={"nid": node_id})
 
+    def get_callers_with_confidence(self, node_id: str) -> list[tuple[GraphNode, float]]:
+        """Return ``(node, confidence)`` for all callers of *node_id*."""
+        assert self._conn is not None
+        table = _table_for_id(node_id)
+        if table is None:
+            return []
+        query = (
+            f"MATCH (caller)-[r:CodeRelation]->(callee:{table}) "
+            f"WHERE callee.id = $nid AND r.rel_type = 'calls' "
+            f"RETURN caller.*, r.confidence"
+        )
+        return self._query_nodes_with_confidence(query, parameters={"nid": node_id})
+
+    def get_callees_with_confidence(self, node_id: str) -> list[tuple[GraphNode, float]]:
+        """Return ``(node, confidence)`` for all callees of *node_id*."""
+        assert self._conn is not None
+        table = _table_for_id(node_id)
+        if table is None:
+            return []
+        query = (
+            f"MATCH (caller:{table})-[r:CodeRelation]->(callee) "
+            f"WHERE caller.id = $nid AND r.rel_type = 'calls' "
+            f"RETURN callee.*, r.confidence"
+        )
+        return self._query_nodes_with_confidence(query, parameters={"nid": node_id})
+
     _MAX_BFS_DEPTH = 10
 
     def traverse(self, start_id: str, depth: int, direction: str = "callers") -> list[GraphNode]:
-        """BFS traversal through CALLS edges up to *depth* hops.
+        """BFS traversal through CALLS edges — flat result list (no depth info)."""
+        return [node for node, _ in self.traverse_with_depth(start_id, depth, direction)]
+
+    def traverse_with_depth(
+        self, start_id: str, depth: int, direction: str = "callers"
+    ) -> list[tuple[GraphNode, int]]:
+        """BFS traversal returning ``(node, hop_depth)`` pairs.
+
+        ``hop_depth`` is 1-based: direct callers/callees are depth 1.
 
         Args:
             direction: ``"callers"`` follows incoming CALLS (blast radius),
@@ -225,7 +259,7 @@ class KuzuBackend:
             return []
 
         visited: set[str] = set()
-        result_list: list[GraphNode] = []
+        result_list: list[tuple[GraphNode, int]] = []
         queue: deque[tuple[str, int]] = deque([(start_id, 0)])
 
         while queue:
@@ -237,7 +271,7 @@ class KuzuBackend:
             if current_id != start_id:
                 node = self.get_node(current_id)
                 if node is not None:
-                    result_list.append(node)
+                    result_list.append((node, current_depth))
 
             if current_depth < depth:
                 neighbors = (
@@ -250,6 +284,33 @@ class KuzuBackend:
                         queue.append((neighbor.id, current_depth + 1))
 
         return result_list
+
+    def get_process_memberships(self, node_ids: list[str]) -> dict[str, str]:
+        """Return ``{node_id: process_name}`` for nodes in any Process.
+
+        Uses parameterized IN clause to safely query all node IDs at once.
+        """
+        assert self._conn is not None
+        if not node_ids:
+            return {}
+
+        mapping: dict[str, str] = {}
+        try:
+            result = self._conn.execute(
+                "MATCH (n)-[r:CodeRelation]->(p:Process) "
+                "WHERE n.id IN $ids AND r.rel_type = 'step_in_process' "
+                "RETURN n.id, p.name",
+                parameters={"ids": node_ids},
+            )
+            while result.has_next():
+                row = result.get_next()
+                nid = row[0] if row else ""
+                pname = row[1] if len(row) > 1 else ""
+                if nid and pname and nid not in mapping:
+                    mapping[nid] = pname
+        except Exception:
+            logger.debug("get_process_memberships failed", exc_info=True)
+        return mapping
 
     def execute_raw(self, query: str) -> list[list[Any]]:
         """Execute a raw Cypher query and return all result rows."""
@@ -648,7 +709,7 @@ class KuzuBackend:
         assert self._conn is not None
         try:
             try:
-                self._conn.execute("MATCH (e:Embedding) DELETE e")
+                self._conn.execute("MATCH (e:Embedding) DETACH DELETE e")
             except Exception:
                 pass
 
@@ -811,6 +872,24 @@ class KuzuBackend:
         except Exception:
             logger.debug("_query_nodes failed: %s", query, exc_info=True)
         return nodes
+
+    def _query_nodes_with_confidence(
+        self, query: str, parameters: dict[str, Any] | None = None
+    ) -> list[tuple[GraphNode, float]]:
+        """Execute a query returning ``n.*`` columns plus a trailing confidence column."""
+        assert self._conn is not None
+        pairs: list[tuple[GraphNode, float]] = []
+        try:
+            result = self._conn.execute(query, parameters=parameters or {})
+            while result.has_next():
+                row = result.get_next()
+                node = self._row_to_node(row[:-1])
+                confidence = float(row[-1]) if row[-1] is not None else 1.0
+                if node is not None:
+                    pairs.append((node, confidence))
+        except Exception:
+            logger.debug("_query_nodes_with_confidence failed: %s", query, exc_info=True)
+        return pairs
 
     @staticmethod
     def _row_to_node(row: list[Any], node_id: str | None = None) -> GraphNode | None:

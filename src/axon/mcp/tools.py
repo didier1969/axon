@@ -21,6 +21,21 @@ logger = logging.getLogger(__name__)
 MAX_TRAVERSE_DEPTH = 10
 
 
+def _escape_cypher(value: str) -> str:
+    """Escape a string for safe inclusion in a Cypher string literal."""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+_EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+
+
+def _confidence_tag(confidence: float) -> str:
+    """Return a visual confidence indicator for edge display."""
+    if confidence >= 0.9:
+        return ""
+    if confidence >= 0.5:
+        return " (~)"
+    return " (?)"
+
+
 def _resolve_symbol(storage: StorageBackend, symbol: str) -> list:
     """Resolve a symbol name to search results, preferring exact name matches."""
     if hasattr(storage, "exact_name_search"):
@@ -86,8 +101,76 @@ def handle_list_repos(registry_dir: Path | None = None) -> str:
 
     return "\n".join(lines)
 
+def _group_by_process(
+    results: list,
+    storage: StorageBackend,
+) -> dict[str, list]:
+    """Map search results to their parent execution processes.
+
+    Delegates to ``storage.get_process_memberships()`` for a safe
+    parameterized query, falling back to an empty dict if the backend
+    does not support the method.
+    """
+    if not results:
+        return {}
+
+    node_ids = [r.node_id for r in results]
+
+    try:
+        node_to_process = storage.get_process_memberships(node_ids)
+    except (AttributeError, TypeError):
+        return {}
+
+    groups: dict[str, list] = {}
+    for r in results:
+        pname = node_to_process.get(r.node_id)
+        if pname:
+            groups.setdefault(pname, []).append(r)
+
+    return groups
+
+
+def _format_query_results(results: list, groups: dict[str, list]) -> str:
+    """Format search results with process grouping.
+
+    Results belonging to a process appear under a labelled section.
+    Remaining results appear in an "Other results" section.
+    """
+    grouped_ids: set[str] = {r.node_id for group in groups.values() for r in group}
+    ungrouped = [r for r in results if r.node_id not in grouped_ids]
+
+    lines: list[str] = []
+    counter = 1
+
+    for process_name, proc_results in groups.items():
+        lines.append(f"=== {process_name} ===")
+        for r in proc_results:
+            label = r.label.title() if r.label else "Unknown"
+            lines.append(f"{counter}. {r.node_name} ({label}) -- {r.file_path}")
+            if r.snippet:
+                snippet = r.snippet[:200].replace("\n", " ").strip()
+                lines.append(f"   {snippet}")
+            counter += 1
+        lines.append("")
+
+    if ungrouped:
+        if groups:
+            lines.append("=== Other results ===")
+        for r in ungrouped:
+            label = r.label.title() if r.label else "Unknown"
+            lines.append(f"{counter}. {r.node_name} ({label}) -- {r.file_path}")
+            if r.snippet:
+                snippet = r.snippet[:200].replace("\n", " ").strip()
+                lines.append(f"   {snippet}")
+            counter += 1
+        lines.append("")
+
+    lines.append("Next: Use context() on a specific symbol for the full picture.")
+    return "\n".join(lines)
+
+
 def handle_query(storage: StorageBackend, query: str, limit: int = 20) -> str:
-    """Execute hybrid search and format results.
+    """Execute hybrid search and format results, grouped by execution process.
 
     Args:
         storage: The storage backend to search against.
@@ -95,22 +178,24 @@ def handle_query(storage: StorageBackend, query: str, limit: int = 20) -> str:
         limit: Maximum number of results (default 20).
 
     Returns:
-        Formatted search results with file, name, label, and snippet.
+        Formatted search results grouped by process, with file, name, label,
+        and snippet for each result.
     """
-    results = hybrid_search(query, storage, limit=limit)
+    query_embedding: list[float] | None = None
+    try:
+        from axon.core.embeddings.embedder import _get_model
+
+        model = _get_model(_EMBED_MODEL_NAME)
+        query_embedding = list(next(iter(model.embed([query]))))
+    except Exception:
+        logger.debug("Query embedding failed, falling back to FTS only", exc_info=True)
+
+    results = hybrid_search(query, storage, query_embedding=query_embedding, limit=limit)
     if not results:
         return f"No results found for '{query}'."
 
-    lines = []
-    for i, r in enumerate(results, 1):
-        label = r.label.title() if r.label else "Unknown"
-        lines.append(f"{i}. {r.node_name} ({label}) -- {r.file_path}")
-        if r.snippet:
-            snippet = r.snippet[:200].replace("\n", " ").strip()
-            lines.append(f"   {snippet}")
-    lines.append("")
-    lines.append("Next: Use context() on a specific symbol for the full picture.")
-    return "\n".join(lines)
+    groups = _group_by_process(results, storage)
+    return _format_query_results(results, groups)
 
 def handle_context(storage: StorageBackend, symbol: str) -> str:
     """Provide a 360-degree view of a symbol.
@@ -143,17 +228,27 @@ def handle_context(storage: StorageBackend, symbol: str) -> str:
     if node.is_dead:
         lines.append("Status: DEAD CODE (unreachable)")
 
-    callers = storage.get_callers(node.id)
-    if callers:
-        lines.append(f"\nCallers ({len(callers)}):")
-        for c in callers:
-            lines.append(f"  -> {c.name}  {c.file_path}:{c.start_line}")
+    try:
+        callers_raw = storage.get_callers_with_confidence(node.id)
+    except (AttributeError, TypeError):
+        callers_raw = [(c, 1.0) for c in storage.get_callers(node.id)]
 
-    callees = storage.get_callees(node.id)
-    if callees:
-        lines.append(f"\nCallees ({len(callees)}):")
-        for c in callees:
-            lines.append(f"  -> {c.name}  {c.file_path}:{c.start_line}")
+    if callers_raw:
+        lines.append(f"\nCallers ({len(callers_raw)}):")
+        for c, conf in callers_raw:
+            tag = _confidence_tag(conf)
+            lines.append(f"  -> {c.name}  {c.file_path}:{c.start_line}{tag}")
+
+    try:
+        callees_raw = storage.get_callees_with_confidence(node.id)
+    except (AttributeError, TypeError):
+        callees_raw = [(c, 1.0) for c in storage.get_callees(node.id)]
+
+    if callees_raw:
+        lines.append(f"\nCallees ({len(callees_raw)}):")
+        for c, conf in callees_raw:
+            tag = _confidence_tag(conf)
+            lines.append(f"  -> {c.name}  {c.file_path}:{c.start_line}{tag}")
 
     type_refs = storage.get_type_refs(node.id)
     if type_refs:
@@ -165,11 +260,17 @@ def handle_context(storage: StorageBackend, symbol: str) -> str:
     lines.append("Next: Use impact() if planning changes to this symbol.")
     return "\n".join(lines)
 
+_DEPTH_LABELS: dict[int, str] = {
+    1: "Direct callers (will break)",
+    2: "Indirect (may break)",
+}
+
+
 def handle_impact(storage: StorageBackend, symbol: str, depth: int = 3) -> str:
-    """Analyse the blast radius of changing a symbol.
+    """Analyse the blast radius of changing a symbol, grouped by hop depth.
 
     Uses BFS traversal through CALLS edges to find all affected symbols
-    up to the specified depth.
+    up to the specified depth, then groups results by distance.
 
     Args:
         storage: The storage backend.
@@ -177,7 +278,7 @@ def handle_impact(storage: StorageBackend, symbol: str, depth: int = 3) -> str:
         depth: Maximum traversal depth (default 3).
 
     Returns:
-        Formatted impact analysis showing affected symbols at each depth level.
+        Formatted impact analysis with depth-grouped sections.
     """
     depth = max(1, min(depth, MAX_TRAVERSE_DEPTH))
 
@@ -189,18 +290,43 @@ def handle_impact(storage: StorageBackend, symbol: str, depth: int = 3) -> str:
     if not start_node:
         return f"Symbol '{symbol}' not found."
 
-    affected = storage.traverse(start_node.id, depth, direction="callers")
-    if not affected:
+    affected_with_depth = storage.traverse_with_depth(
+        start_node.id, depth, direction="callers"
+    )
+    if not affected_with_depth:
         return f"No upstream callers found for '{symbol}'."
 
-    lines = [f"Impact analysis for: {start_node.name} ({start_node.label.value.title()})"]
-    lines.append(f"Depth: {depth}")
-    lines.append(f"Total affected symbols: {len(affected)}")
-    lines.append("")
+    # Group by depth
+    by_depth: dict[int, list] = {}
+    for node, d in affected_with_depth:
+        by_depth.setdefault(d, []).append(node)
 
-    for i, node in enumerate(affected, 1):
-        label = node.label.value.title() if node.label else "Unknown"
-        lines.append(f"  {i}. {node.name} ({label}) -- {node.file_path}:{node.start_line}")
+    total = len(affected_with_depth)
+    label_display = start_node.label.value.title()
+    lines = [f"Impact analysis for: {start_node.name} ({label_display})"]
+    lines.append(f"Depth: {depth} | Total: {total} symbols")
+
+    # Build confidence lookup for depth-1 (direct callers) display
+    conf_lookup: dict[str, float] = {}
+    try:
+        for node, conf in storage.get_callers_with_confidence(start_node.id):
+            conf_lookup[node.id] = conf
+    except (AttributeError, TypeError):
+        pass
+
+    counter = 1
+    for d in sorted(by_depth.keys()):
+        depth_label = _DEPTH_LABELS.get(d, "Transitive (review)")
+        lines.append(f"\nDepth {d} — {depth_label}:")
+        for node in by_depth[d]:
+            label = node.label.value.title() if node.label else "Unknown"
+            conf = conf_lookup.get(node.id)
+            tag = f"  (confidence: {conf:.2f})" if conf is not None else ""
+            lines.append(
+                f"  {counter}. {node.name} ({label}) -- "
+                f"{node.file_path}:{node.start_line}{tag}"
+            )
+            counter += 1
 
     lines.append("")
     lines.append("Tip: Review each affected symbol before making changes.")
@@ -269,7 +395,7 @@ def handle_detect_changes(storage: StorageBackend, diff: str) -> str:
         affected_symbols = []
         try:
             rows = storage.execute_raw(
-                f"MATCH (n) WHERE n.file_path = '{file_path.replace(chr(39), '')}' "
+                f"MATCH (n) WHERE n.file_path = '{_escape_cypher(file_path)}' "
                 f"AND n.start_line > 0 "
                 f"RETURN n.id, n.name, n.file_path, n.start_line, n.end_line"
             )

@@ -81,6 +81,14 @@ class StorageBackend(Protocol):
         """Return nodes that reference the type identified by *node_id*."""
         ...
 
+    def get_callers_with_confidence(self, node_id: str) -> list[tuple[GraphNode, float]]:
+        """Return ``(node, confidence)`` pairs for all nodes that CALL *node_id*."""
+        ...
+
+    def get_callees_with_confidence(self, node_id: str) -> list[tuple[GraphNode, float]]:
+        """Return ``(node, confidence)`` pairs for all nodes called by *node_id*."""
+        ...
+
     def traverse(self, start_id: str, depth: int, direction: str = "callers") -> list[GraphNode]:
         """Breadth-first traversal up to *depth* hops from *start_id*.
 
@@ -90,8 +98,26 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def traverse_with_depth(
+        self, start_id: str, depth: int, direction: str = "callers"
+    ) -> list[tuple[GraphNode, int]]:
+        """BFS traversal returning ``(node, hop_depth)`` pairs.
+
+        Same semantics as :meth:`traverse` but preserves the hop distance
+        (1-based) so callers can group results by proximity.
+        """
+        ...
+
+    def get_process_memberships(self, node_ids: list[str]) -> dict[str, str]:
+        """Return ``{node_id: process_name}`` for nodes belonging to a Process."""
+        ...
+
     def execute_raw(self, query: str) -> Any:
         """Execute a raw backend-specific query string."""
+        ...
+
+    def exact_name_search(self, name: str, limit: int = 5) -> list[SearchResult]:
+        """Search for nodes with an exact name match."""
         ...
 
     def fts_search(self, query: str, limit: int) -> list[SearchResult]:

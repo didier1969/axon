@@ -10,7 +10,7 @@ import typer
 from typer.testing import CliRunner
 
 from axon import __version__
-from axon.cli.main import app
+from axon.cli.main import _register_in_global_registry, app
 
 runner = CliRunner()
 
@@ -378,3 +378,120 @@ class TestWatch:
         result = runner.invoke(app, ["diff", "--help"])
         assert result.exit_code == 0
         assert "branch" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Multi-repo registry
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterInGlobalRegistry:
+    """Tests for _register_in_global_registry()."""
+
+    def test_first_registration(self, tmp_path: Path) -> None:
+        """Creates {registry}/repo_name/meta.json with correct content."""
+        registry = tmp_path / "registry"
+        repo_path = tmp_path / "my-project"
+        repo_path.mkdir()
+
+        meta = {"name": "my-project", "path": str(repo_path), "stats": {}}
+
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            # _register_in_global_registry uses Path.home() / ".axon" / "repos"
+            _register_in_global_registry(meta, repo_path)
+
+        slot = tmp_path / ".axon" / "repos" / "my-project"
+        assert slot.exists()
+        written = json.loads((slot / "meta.json").read_text())
+        assert written["name"] == "my-project"
+        assert written["slug"] == "my-project"
+        assert written["path"] == str(repo_path)
+
+    def test_same_repo_re_registered(self, tmp_path: Path) -> None:
+        """Re-registering the same repo reuses the same slug."""
+        repo_path = tmp_path / "my-project"
+        repo_path.mkdir()
+        meta = {"name": "my-project", "path": str(repo_path), "stats": {}}
+
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            _register_in_global_registry(meta, repo_path)
+            _register_in_global_registry(meta, repo_path)
+
+        # Only one directory should exist
+        registry = tmp_path / ".axon" / "repos"
+        entries = list(registry.iterdir())
+        assert len(entries) == 1
+        assert entries[0].name == "my-project"
+
+    def test_name_collision_different_repos(self, tmp_path: Path) -> None:
+        """Different repos with same directory name get different slugs."""
+        repo_a = tmp_path / "workspace-a" / "myapp"
+        repo_b = tmp_path / "workspace-b" / "myapp"
+        repo_a.mkdir(parents=True)
+        repo_b.mkdir(parents=True)
+
+        meta_a = {"name": "myapp", "path": str(repo_a), "stats": {}}
+        meta_b = {"name": "myapp", "path": str(repo_b), "stats": {}}
+
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            _register_in_global_registry(meta_a, repo_a)
+            _register_in_global_registry(meta_b, repo_b)
+
+        registry = tmp_path / ".axon" / "repos"
+        entries = sorted([e.name for e in registry.iterdir()])
+        assert len(entries) == 2
+        # One should be "myapp", the other "myapp-<hash>"
+        assert entries[0] == "myapp"
+        assert entries[1].startswith("myapp-")
+
+    def test_stale_entry_cleanup(self, tmp_path: Path) -> None:
+        """Old registry entry is removed when repo re-registers under new slug."""
+        repo_path = tmp_path / "myapp"
+        repo_path.mkdir()
+
+        # Manually create a stale entry under a hash slug
+        registry = tmp_path / ".axon" / "repos"
+        stale = registry / "myapp-abcd1234"
+        stale.mkdir(parents=True)
+        stale_meta = {"name": "myapp", "path": str(repo_path)}
+        (stale / "meta.json").write_text(json.dumps(stale_meta))
+
+        meta = {"name": "myapp", "path": str(repo_path), "stats": {}}
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            _register_in_global_registry(meta, repo_path)
+
+        # Stale entry should be cleaned up
+        assert not stale.exists()
+        # New entry under bare name should exist
+        assert (registry / "myapp" / "meta.json").exists()
+
+    def test_corrupt_existing_meta_json(self, tmp_path: Path) -> None:
+        """Corrupt meta.json in existing slot is handled gracefully."""
+        registry = tmp_path / ".axon" / "repos" / "myapp"
+        registry.mkdir(parents=True)
+        (registry / "meta.json").write_text("not valid json!")
+
+        repo_path = tmp_path / "myapp"
+        repo_path.mkdir()
+        meta = {"name": "myapp", "path": str(repo_path), "stats": {}}
+
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            _register_in_global_registry(meta, repo_path)
+
+        # Should claim the slot (no crash)
+        written = json.loads((registry / "meta.json").read_text())
+        assert written["path"] == str(repo_path)
+
+    def test_registry_dir_created_if_missing(self, tmp_path: Path) -> None:
+        """Registry directory is created automatically."""
+        repo_path = tmp_path / "myapp"
+        repo_path.mkdir()
+        meta = {"name": "myapp", "path": str(repo_path), "stats": {}}
+
+        # Ensure no .axon dir exists
+        assert not (tmp_path / ".axon").exists()
+
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            _register_in_global_registry(meta, repo_path)
+
+        assert (tmp_path / ".axon" / "repos" / "myapp" / "meta.json").exists()
