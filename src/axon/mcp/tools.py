@@ -8,12 +8,17 @@ for inclusion in an MCP ``TextContent`` response.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
 from axon.core.search.hybrid import hybrid_search
 from axon.core.storage.base import StorageBackend
+
+logger = logging.getLogger(__name__)
+
+MAX_TRAVERSE_DEPTH = 10
 
 
 def _resolve_symbol(storage: StorageBackend, symbol: str) -> list:
@@ -174,6 +179,8 @@ def handle_impact(storage: StorageBackend, symbol: str, depth: int = 3) -> str:
     Returns:
         Formatted impact analysis showing affected symbols at each depth level.
     """
+    depth = max(1, min(depth, MAX_TRAVERSE_DEPTH))
+
     results = _resolve_symbol(storage, symbol)
     if not results:
         return f"Symbol '{symbol}' not found."
@@ -278,8 +285,12 @@ def handle_detect_changes(storage: StorageBackend, diff: str) -> str:
                             (name, label_prefix.title(), start_line, end_line)
                         )
                         break
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to query symbols for %s: %s", file_path, exc, exc_info=True)
+            lines.append(f"  {file_path}:")
+            lines.append(f"    (error querying symbols: {exc})")
+            lines.append("")
+            continue
 
         lines.append(f"  {file_path}:")
         if affected_symbols:

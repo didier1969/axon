@@ -27,6 +27,7 @@ from mcp.types import Resource, TextContent, Tool
 from axon.core.storage.kuzu_backend import KuzuBackend
 from axon.mcp.resources import get_dead_code_list, get_overview, get_schema
 from axon.mcp.tools import (
+    MAX_TRAVERSE_DEPTH,
     handle_context,
     handle_cypher,
     handle_dead_code,
@@ -137,8 +138,10 @@ TOOLS: list[Tool] = [
                 },
                 "depth": {
                     "type": "integer",
-                    "description": "Maximum traversal depth (default 3).",
+                    "description": f"Maximum traversal depth (default 3, max {MAX_TRAVERSE_DEPTH}).",
                     "default": 3,
+                    "minimum": 1,
+                    "maximum": MAX_TRAVERSE_DEPTH,
                 },
             },
             "required": ["symbol"],

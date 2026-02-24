@@ -224,7 +224,7 @@ def context(
 @app.command()
 def impact(
     target: str = typer.Argument(..., help="Symbol to analyze blast radius for."),
-    depth: int = typer.Option(3, "--depth", "-d", help="Traversal depth."),
+    depth: int = typer.Option(3, "--depth", "-d", min=1, max=10, help="Traversal depth (1-10)."),
 ) -> None:
     """Show blast radius of changing a symbol."""
     from axon.mcp.tools import handle_impact
