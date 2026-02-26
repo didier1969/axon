@@ -24,6 +24,7 @@ class SearchResult:
     file_path: str = ""
     label: str = ""
     snippet: str = ""
+    language: str = ""
 
 @dataclass
 class NodeEmbedding:

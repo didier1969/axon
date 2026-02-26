@@ -36,13 +36,13 @@ def _confidence_tag(confidence: float) -> str:
     return " (?)"
 
 
-def _resolve_symbol(storage: StorageBackend, symbol: str) -> list:
+def _resolve_symbol(storage: StorageBackend, symbol: str, limit: int = 1) -> list:
     """Resolve a symbol name to search results, preferring exact name matches."""
     if hasattr(storage, "exact_name_search"):
-        results = storage.exact_name_search(symbol, limit=1)
+        results = storage.exact_name_search(symbol, limit=limit)
         if results:
             return results
-    return storage.fts_search(symbol, limit=1)
+    return storage.fts_search(symbol, limit=limit)
 
 def handle_list_repos(registry_dir: Path | None = None) -> str:
     """List indexed repositories by scanning for .axon directories.
@@ -169,13 +169,19 @@ def _format_query_results(results: list, groups: dict[str, list]) -> str:
     return "\n".join(lines)
 
 
-def handle_query(storage: StorageBackend, query: str, limit: int = 20) -> str:
+def handle_query(
+    storage: StorageBackend,
+    query: str,
+    limit: int = 20,
+    language: str | None = None,
+) -> str:
     """Execute hybrid search and format results, grouped by execution process.
 
     Args:
         storage: The storage backend to search against.
         query: Text search query.
         limit: Maximum number of results (default 20).
+        language: Optional language filter (e.g. "python", "elixir"). Case-insensitive.
 
     Returns:
         Formatted search results grouped by process, with file, name, label,
@@ -191,11 +197,32 @@ def handle_query(storage: StorageBackend, query: str, limit: int = 20) -> str:
         logger.debug("Query embedding failed, falling back to FTS only", exc_info=True)
 
     results = hybrid_search(query, storage, query_embedding=query_embedding, limit=limit)
+
+    if language:
+        lang_lower = language.lower()
+        results = [r for r in results if r.language and r.language.lower() == lang_lower]
+        if not results:
+            return f"No results found for '{query}' in language '{language}'."
+
     if not results:
         return f"No results found for '{query}'."
 
     groups = _group_by_process(results, storage)
     return _format_query_results(results, groups)
+
+def _parse_file_symbol(symbol: str) -> tuple[str | None, str]:
+    """Parse a 'file/path.py:symbol_name' string into (file_hint, symbol_name).
+
+    Returns (None, symbol) if no colon is found or input looks like a Windows drive path.
+    """
+    if ":" not in symbol:
+        return None, symbol
+    # Ignore Windows-style drive letters like "C:\..."
+    if len(symbol) >= 2 and symbol[1] == ":" and symbol[0].isalpha():
+        return None, symbol
+    file_hint, _, sym_name = symbol.rpartition(":")
+    return file_hint, sym_name
+
 
 def handle_context(storage: StorageBackend, symbol: str) -> str:
     """Provide a 360-degree view of a symbol.
@@ -203,20 +230,56 @@ def handle_context(storage: StorageBackend, symbol: str) -> str:
     Looks up the symbol by name via full-text search, then retrieves its
     callers, callees, and type references.
 
+    Supports 'file/path.py:symbol_name' format to disambiguate symbols that
+    share the same name across different files.  When a bare name matches
+    multiple symbols in different files, a disambiguation list is returned.
+
     Args:
         storage: The storage backend.
-        symbol: The symbol name to look up.
+        symbol: The symbol name to look up, optionally prefixed with a file
+            path (e.g. ``"src/parsers/python.py:parse"``).
 
     Returns:
         Formatted view including callers, callees, type refs, and guidance.
     """
-    results = _resolve_symbol(storage, symbol)
-    if not results:
-        return f"Symbol '{symbol}' not found."
+    file_hint, sym_name = _parse_file_symbol(symbol)
+
+    if file_hint:
+        # File-qualified lookup: find candidates by name, then filter by file path.
+        candidates = storage.fts_search(sym_name, limit=20)
+        matches = [r for r in candidates if r.file_path and r.file_path.endswith(file_hint)]
+        if not matches:
+            return f"Symbol '{sym_name}' not found in '{file_hint}'."
+        results = matches[:1]
+    else:
+        # Unqualified lookup: detect ambiguity across files.
+        candidates = _resolve_symbol(storage, sym_name, limit=5)
+        if not candidates:
+            return f"Symbol '{sym_name}' not found."
+        # Check for distinct file paths among candidates.
+        seen_files: list[str] = []
+        for r in candidates:
+            if r.file_path and r.file_path not in seen_files:
+                seen_files.append(r.file_path)
+        if len(seen_files) > 1:
+            lines = [
+                f"Multiple symbols named '{sym_name}' found. "
+                "Specify a file path to disambiguate:",
+                "",
+            ]
+            for i, r in enumerate(candidates, 1):
+                label = r.label.title() if r.label else "Unknown"
+                lines.append(f"  {i}. {r.node_name}  ({label}) — {r.file_path}")
+            lines.append("")
+            lines.append(
+                f'Retry with: axon_context(symbol="path/to/file.py:{sym_name}")'
+            )
+            return "\n".join(lines)
+        results = candidates[:1]
 
     node = storage.get_node(results[0].node_id)
     if not node:
-        return f"Symbol '{symbol}' not found."
+        return f"Symbol '{sym_name}' not found."
 
     label_display = node.label.value.title() if node.label else "Unknown"
     lines = [f"Symbol: {node.name} ({label_display})"]

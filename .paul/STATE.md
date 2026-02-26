@@ -11,13 +11,13 @@ See: .paul/PROJECT.md (updated 2026-02-26 after Phase 2)
 
 Milestone: v0.3 Workflow Integration
 Phase: 3 of 3 (Workflow Integration) — In Progress
-Plan: 03-02 complete; 03-03 next (MCP query API refinement)
+Plan: 03-03 complete; 03-04 next (Developer documentation)
 Status: Ready for next PLAN
-Last activity: 2026-02-26 — Unified 03-02 (dead-code --exit-code + CI templates); committed 7c81a55
+Last activity: 2026-02-26 — Unified 03-03 (MCP query API refinement); 678/678 passing
 
 Progress:
-- Milestone: [█████████░] 83%
-- Phase 3: [█████░░░░░] 50%
+- Milestone: [█████████░] 91%
+- Phase 3: [███████░░░] 75%
 
 ## Loop Position
 
@@ -52,13 +52,13 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-26
-Stopped at: Session paused after 03-02 unified — all work committed
-Next action: /paul:plan (Plan 03-03 — MCP query API refinement)
-Resume file: .paul/HANDOFF-2026-02-26c.md
+Stopped at: Session paused after 03-03 unified — all work committed
+Next action: /paul:plan (Plan 03-04 — Developer documentation)
+Resume file: .paul/phases/03-workflow-integration/03-03-SUMMARY.md
 Resume context:
-- 03-01 (shell-hook + init) and 03-02 (dead-code --exit-code + CI templates) complete
-- 671/671 tests passing; no uncommitted changes
-- 03-03 scope: MCP query API refinement (explore src/axon/mcp/ before planning)
+- 03-01 (shell-hook + init), 03-02 (CI templates), 03-03 (MCP query API refinement) complete
+- 678/678 tests passing; no uncommitted changes
+- 03-04 scope: developer documentation (README, usage guide, MCP tool reference)
 
 ---
 *STATE.md — Updated after every significant action*

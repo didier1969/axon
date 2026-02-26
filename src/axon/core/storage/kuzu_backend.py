@@ -382,7 +382,7 @@ class KuzuBackend:
             cypher = (
                 f"CALL QUERY_FTS_INDEX('{table}', '{idx_name}', '{escaped_q}') "
                 f"RETURN node.id, node.name, node.file_path, node.content, "
-                f"node.signature, score "
+                f"node.signature, node.language, score "
                 f"ORDER BY score DESC LIMIT {limit}"
             )
             try:
@@ -394,7 +394,8 @@ class KuzuBackend:
                     file_path = row[2] or ""
                     content = row[3] or ""
                     signature = row[4] or ""
-                    bm25_score = float(row[5]) if row[5] is not None else 0.0
+                    language = row[5] or ""
+                    bm25_score = float(row[6]) if row[6] is not None else 0.0
 
                     # Demote test file results — mirrors exact_name_search penalty.
                     if "/tests/" in file_path or "/test_" in file_path:
@@ -416,6 +417,7 @@ class KuzuBackend:
                             file_path=file_path,
                             label=label_prefix,
                             snippet=snippet,
+                            language=language,
                         )
                     )
             except Exception:
@@ -560,6 +562,7 @@ class KuzuBackend:
                     file_path=node.file_path if node else "",
                     label=label_prefix,
                     snippet=(node.content[:200] if node and node.content else ""),
+                    language=node.language if node else "",
                 )
             )
         return results

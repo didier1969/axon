@@ -79,7 +79,11 @@ def _get_storage() -> KuzuBackend:
 TOOLS: list[Tool] = [
     Tool(
         name="axon_list_repos",
-        description="List all indexed repositories with their stats.",
+        description=(
+            "List all indexed repositories with their stats. "
+            "Use first to discover which repos are available before querying. "
+            "Returns name, path, file count, symbol count, and relationship count per repo."
+        ),
         inputSchema={
             "type": "object",
             "properties": {},
@@ -88,20 +92,31 @@ TOOLS: list[Tool] = [
     Tool(
         name="axon_query",
         description=(
-            "Search the knowledge graph using hybrid (keyword + vector) search. "
-            "Returns ranked symbols matching the query."
+            "Search the knowledge graph by natural language or symbol name using hybrid "
+            "(keyword + vector) search. "
+            "Use when you need to find relevant functions, classes, or files by concept or name. "
+            "Returns ranked symbols with file path, label, and a code snippet per result. "
+            "Optionally filter by language. "
+            "Follow with axon_context on a specific result for its full dependency graph."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query text.",
+                    "description": "Search query — natural language or symbol name.",
                 },
                 "limit": {
                     "type": "integer",
                     "description": "Maximum number of results (default 20).",
                     "default": 20,
+                },
+                "language": {
+                    "type": "string",
+                    "description": (
+                        "Filter results to a specific language "
+                        "(e.g. 'python', 'elixir', 'typescript'). Optional."
+                    ),
                 },
             },
             "required": ["query"],
@@ -110,15 +125,21 @@ TOOLS: list[Tool] = [
     Tool(
         name="axon_context",
         description=(
-            "Get a 360-degree view of a symbol: callers, callees, type references, "
-            "and community membership."
+            "Get a 360-degree view of a symbol: callers, callees, and type references. "
+            "Use before modifying a symbol to understand its full dependency graph. "
+            "Returns callers, callees, type refs, signature, file location, and dead-code status. "
+            "To disambiguate symbols with the same name across files, use 'path/to/file.py:symbol_name' format. "
+            "Follow with axon_impact to assess blast radius before making changes."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "symbol": {
                     "type": "string",
-                    "description": "Name of the symbol to look up.",
+                    "description": (
+                        "Name of the symbol to look up. "
+                        "Use 'file/path.py:symbol_name' to target a specific file."
+                    ),
                 },
             },
             "required": ["symbol"],
@@ -127,7 +148,10 @@ TOOLS: list[Tool] = [
     Tool(
         name="axon_impact",
         description=(
-            "Blast radius analysis: find all symbols affected by changing a given symbol."
+            "Blast radius analysis — find all symbols affected by changing a given symbol, "
+            "grouped by hop depth. "
+            "Use before refactoring to understand risk and scope of changes. "
+            "Returns affected symbols per depth level with confidence scores for direct callers."
         ),
         inputSchema={
             "type": "object",
@@ -149,7 +173,11 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="axon_dead_code",
-        description="List all symbols detected as dead (unreachable) code.",
+        description=(
+            "List all symbols detected as dead (unreachable) code. "
+            "Use during code review or cleanup to identify safe deletions. "
+            "Returns symbols grouped by file with line numbers."
+        ),
         inputSchema={
             "type": "object",
             "properties": {},
@@ -158,8 +186,11 @@ TOOLS: list[Tool] = [
     Tool(
         name="axon_detect_changes",
         description=(
-            "Parse a git diff and map changed files/lines to affected symbols "
-            "in the knowledge graph."
+            "Map a git diff to the symbols it touches. "
+            "Pass raw `git diff HEAD` output to identify which indexed symbols are affected by a changeset. "
+            "Use to understand scope before reviewing or testing a PR. "
+            "Returns affected symbols per file. "
+            "Follow with axon_impact on each affected symbol to see downstream effects."
         ),
         inputSchema={
             "type": "object",
@@ -174,13 +205,18 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="axon_cypher",
-        description="Execute a raw Cypher query against the knowledge graph.",
+        description=(
+            "Execute a raw read-only Cypher query directly against the knowledge graph. "
+            "Use for custom queries not covered by other tools (e.g. counting nodes by label, "
+            "finding symbols matching complex patterns). "
+            "Only MATCH/RETURN queries are allowed; write operations are rejected."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Cypher query string.",
+                    "description": "Cypher query string (read-only; MATCH/RETURN only).",
                 },
             },
             "required": ["query"],
@@ -198,7 +234,12 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
     if name == "axon_list_repos":
         return handle_list_repos()
     elif name == "axon_query":
-        return handle_query(storage, arguments.get("query", ""), limit=arguments.get("limit", 20))
+        return handle_query(
+            storage,
+            arguments.get("query", ""),
+            limit=arguments.get("limit", 20),
+            language=arguments.get("language"),
+        )
     elif name == "axon_context":
         return handle_context(storage, arguments.get("symbol", ""))
     elif name == "axon_impact":

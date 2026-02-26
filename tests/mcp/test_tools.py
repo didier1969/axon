@@ -635,3 +635,133 @@ class TestImpactDepthGrouping:
         mock_storage.traverse_with_depth.return_value = []
         result = handle_impact(mock_storage, "validate", depth=100)
         assert "No upstream callers found" in result
+
+
+# ---------------------------------------------------------------------------
+# Language filter (axon_query)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleQueryLanguageFilter:
+    """handle_query() filters results by language when requested."""
+
+    def _make_result(self, node_id, name, file_path, language):
+        return SearchResult(
+            node_id=node_id,
+            score=1.0,
+            node_name=name,
+            file_path=file_path,
+            label="function",
+            snippet="",
+            language=language,
+        )
+
+    def test_language_filter_returns_only_matching(self, mock_storage):
+        """Results are filtered to the requested language."""
+        py_result = self._make_result("func:a", "parse_py", "src/a.py", "python")
+        ex_result = self._make_result("func:b", "parse_ex", "src/b.ex", "elixir")
+        mock_storage.fts_search.return_value = [py_result, ex_result]
+        mock_storage.vector_search.return_value = []
+        mock_storage.get_process_memberships.return_value = {}
+
+        result = handle_query(mock_storage, "parse", language="python")
+
+        assert "parse_py" in result
+        assert "parse_ex" not in result
+
+    def test_language_filter_no_match_returns_message(self, mock_storage):
+        """Empty filtered list returns a message naming the language."""
+        ex_result = self._make_result("func:b", "parse_ex", "src/b.ex", "elixir")
+        mock_storage.fts_search.return_value = [ex_result]
+        mock_storage.vector_search.return_value = []
+
+        result = handle_query(mock_storage, "parse", language="rust")
+
+        assert "rust" in result
+        assert "No results found" in result
+
+    def test_language_filter_none_returns_all(self, mock_storage):
+        """When language=None all results are returned unchanged."""
+        py_result = self._make_result("func:a", "parse_py", "src/a.py", "python")
+        ex_result = self._make_result("func:b", "parse_ex", "src/b.ex", "elixir")
+        mock_storage.fts_search.return_value = [py_result, ex_result]
+        mock_storage.vector_search.return_value = []
+        mock_storage.get_process_memberships.return_value = {}
+
+        result = handle_query(mock_storage, "parse", language=None)
+
+        assert "parse_py" in result
+        assert "parse_ex" in result
+
+
+# ---------------------------------------------------------------------------
+# File-path disambiguation (axon_context)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleContextDisambiguation:
+    """handle_context() disambiguation and file:symbol lookup."""
+
+    def _make_search_result(self, node_id, name, file_path):
+        return SearchResult(
+            node_id=node_id,
+            score=1.0,
+            node_name=name,
+            file_path=file_path,
+            label="function",
+            snippet="",
+        )
+
+    def test_single_result_no_disambiguation(self, mock_storage):
+        """Single match proceeds normally without disambiguation message."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = [
+            self._make_search_result("func:a", "parse", "src/parser.py"),
+        ]
+        result = handle_context(mock_storage, "parse")
+        assert "Multiple symbols" not in result
+        assert "Retry with" not in result
+
+    def test_multiple_files_returns_disambiguation(self, mock_storage):
+        """Multiple distinct file paths trigger disambiguation list."""
+        # exact_name_search must return [] so _resolve_symbol falls through to fts_search
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = [
+            self._make_search_result("func:a", "parse", "src/parser.py"),
+            self._make_search_result("func:b", "parse", "src/legacy/parser.py"),
+            self._make_search_result("func:c", "parse", "tests/test_parser.py"),
+        ]
+        result = handle_context(mock_storage, "parse")
+        assert "Multiple symbols" in result
+        assert "src/parser.py" in result
+        assert "src/legacy/parser.py" in result
+        assert "Retry with" in result
+
+    def test_file_colon_symbol_exact_match(self, mock_storage):
+        """'file.py:symbol' format resolves to the matching file."""
+        mock_storage.fts_search.return_value = [
+            self._make_search_result("func:a", "parse", "src/parser.py"),
+            self._make_search_result("func:b", "parse", "src/legacy/parser.py"),
+        ]
+        mock_storage.get_node.return_value = GraphNode(
+            id="func:a",
+            label=NodeLabel.FUNCTION,
+            name="parse",
+            file_path="src/parser.py",
+            start_line=1,
+            end_line=10,
+        )
+        result = handle_context(mock_storage, "src/parser.py:parse")
+        assert "Multiple symbols" not in result
+        # Should return the node context, not an error
+        assert "parse" in result
+        assert "src/parser.py" in result
+
+    def test_file_colon_symbol_not_found(self, mock_storage):
+        """Returns not-found message when file hint matches no results."""
+        mock_storage.fts_search.return_value = [
+            self._make_search_result("func:a", "parse", "src/parser.py"),
+        ]
+        result = handle_context(mock_storage, "src/nonexistent.py:parse")
+        assert "not found" in result
+        assert "nonexistent.py" in result
