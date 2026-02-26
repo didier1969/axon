@@ -15,7 +15,7 @@ Phases: 1 of 3 complete
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
 | 1 | Language Coverage | 1 | ✅ Complete | 2026-02-26 |
-| 2 | Large Project Performance | TBD | Not started | - |
+| 2 | Large Project Performance | TBD | Planning | - |
 | 3 | Workflow Integration | TBD | Not started | - |
 
 ## Phase Details

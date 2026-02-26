@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from axon.config.ignore import load_gitignore
@@ -43,6 +43,25 @@ from axon.core.ingestion.walker import FileEntry, walk_repo
 from axon.core.storage.base import StorageBackend
 
 @dataclass
+class PhaseTimings:
+    """Wall-clock duration (seconds) for each pipeline phase."""
+
+    walk: float = 0.0
+    structure: float = 0.0
+    parsing: float = 0.0
+    imports: float = 0.0
+    calls: float = 0.0
+    heritage: float = 0.0
+    types: float = 0.0
+    communities: float = 0.0
+    processes: float = 0.0
+    dead_code: float = 0.0
+    coupling: float = 0.0
+    storage_load: float = 0.0
+    embeddings: float = 0.0
+
+
+@dataclass
 class PipelineResult:
     """Summary of a pipeline run."""
 
@@ -57,6 +76,7 @@ class PipelineResult:
     duration_seconds: float = 0.0
     incremental: bool = False
     changed_files: int = 0
+    phase_timings: PhaseTimings = field(default_factory=PhaseTimings)
 
 _SYMBOL_LABELS: frozenset[NodeLabel] = frozenset(NodeLabel) - {
     NodeLabel.FILE,
@@ -109,50 +129,72 @@ def run_pipeline(
 
     report("Walking files", 0.0)
     gitignore = load_gitignore(repo_path)
+    _t = time.monotonic()
     files = walk_repo(repo_path, gitignore)
+    result.phase_timings.walk = time.monotonic() - _t
     result.files = len(files)
     report("Walking files", 1.0)
 
     graph = KnowledgeGraph()
 
     report("Processing structure", 0.0)
+    _t = time.monotonic()
     process_structure(files, graph)
+    result.phase_timings.structure = time.monotonic() - _t
     report("Processing structure", 1.0)
 
     report("Parsing code", 0.0)
+    _t = time.monotonic()
     parse_data = process_parsing(files, graph)
+    result.phase_timings.parsing = time.monotonic() - _t
     report("Parsing code", 1.0)
 
     report("Resolving imports", 0.0)
+    _t = time.monotonic()
     process_imports(parse_data, graph)
+    result.phase_timings.imports = time.monotonic() - _t
     report("Resolving imports", 1.0)
 
     report("Tracing calls", 0.0)
+    _t = time.monotonic()
     process_calls(parse_data, graph)
+    result.phase_timings.calls = time.monotonic() - _t
     report("Tracing calls", 1.0)
 
     report("Extracting heritage", 0.0)
+    _t = time.monotonic()
     process_heritage(parse_data, graph)
+    result.phase_timings.heritage = time.monotonic() - _t
     report("Extracting heritage", 1.0)
 
     report("Analyzing types", 0.0)
+    _t = time.monotonic()
     process_types(parse_data, graph)
+    result.phase_timings.types = time.monotonic() - _t
     report("Analyzing types", 1.0)
 
     report("Detecting communities", 0.0)
+    _t = time.monotonic()
     result.clusters = process_communities(graph)
+    result.phase_timings.communities = time.monotonic() - _t
     report("Detecting communities", 1.0)
 
     report("Detecting execution flows", 0.0)
+    _t = time.monotonic()
     result.processes = process_processes(graph)
+    result.phase_timings.processes = time.monotonic() - _t
     report("Detecting execution flows", 1.0)
 
     report("Finding dead code", 0.0)
+    _t = time.monotonic()
     result.dead_code = process_dead_code(graph)
+    result.phase_timings.dead_code = time.monotonic() - _t
     report("Finding dead code", 1.0)
 
     report("Analyzing git history", 0.0)
+    _t = time.monotonic()
     result.coupled_pairs = process_coupling(graph, repo_path)
+    result.phase_timings.coupling = time.monotonic() - _t
     report("Analyzing git history", 1.0)
 
     # Compute result counts before the optional embedding step so a
@@ -162,14 +204,18 @@ def run_pipeline(
 
     if storage is not None:
         report("Loading to storage", 0.0)
+        _t = time.monotonic()
         storage.bulk_load(graph)
+        result.phase_timings.storage_load = time.monotonic() - _t
         report("Loading to storage", 1.0)
 
         if embeddings:
             try:
                 report("Generating embeddings", 0.0)
+                _t = time.monotonic()
                 node_embeddings = embed_graph(graph)
                 storage.store_embeddings(node_embeddings)
+                result.phase_timings.embeddings = time.monotonic() - _t
                 result.embeddings = len(node_embeddings)
                 report("Generating embeddings", 1.0)
             except Exception:
