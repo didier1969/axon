@@ -387,3 +387,82 @@ class TestRunPipelineEmbeddings:
         phase_names = {name for name, _ in calls}
         assert "Generating embeddings" not in phase_names
         assert result.embeddings == 0
+
+
+# ---------------------------------------------------------------------------
+# TestIncrementalPipeline
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalPipeline:
+    """run_pipeline() incremental path: unchanged files are skipped."""
+
+    def test_incremental_no_changes(
+        self, tmp_repo: Path, storage: KuzuBackend
+    ) -> None:
+        """Second run with no changes → incremental=True, changed_files=0."""
+        run_pipeline(tmp_repo, storage, embeddings=False)
+        _, result = run_pipeline(tmp_repo, storage, embeddings=False)
+
+        assert result.incremental is True
+        assert result.changed_files == 0
+        assert result.files == 3  # tmp_repo has 3 .py files
+
+    def test_incremental_changed_file(
+        self, tmp_repo: Path, storage: KuzuBackend
+    ) -> None:
+        """Modified file is re-indexed; changed_files == 1."""
+        run_pipeline(tmp_repo, storage, embeddings=False)
+
+        (tmp_repo / "src" / "utils.py").write_text(
+            "def helper():\n    return 42\n",
+            encoding="utf-8",
+        )
+
+        _, result = run_pipeline(tmp_repo, storage, embeddings=False)
+
+        assert result.incremental is True
+        assert result.changed_files == 1
+
+    def test_incremental_new_file(
+        self, tmp_repo: Path, storage: KuzuBackend
+    ) -> None:
+        """New file is indexed; changed_files == 1."""
+        run_pipeline(tmp_repo, storage, embeddings=False)
+
+        (tmp_repo / "src" / "extra.py").write_text(
+            "def extra_func():\n    pass\n",
+            encoding="utf-8",
+        )
+
+        _, result = run_pipeline(tmp_repo, storage, embeddings=False)
+
+        assert result.incremental is True
+        assert result.changed_files == 1
+
+    def test_incremental_deleted_file(
+        self, tmp_repo: Path, storage: KuzuBackend
+    ) -> None:
+        """Deleted file nodes are removed from storage; changed_files == 1."""
+        run_pipeline(tmp_repo, storage, embeddings=False)
+
+        deleted = tmp_repo / "src" / "utils.py"
+        deleted.unlink()
+
+        _, result = run_pipeline(tmp_repo, storage, embeddings=False)
+
+        assert result.incremental is True
+        assert result.changed_files == 1
+
+        # Nodes for the deleted file should no longer be in storage
+        remaining = storage.get_indexed_files()
+        assert not any("utils.py" in p for p in remaining)
+
+    def test_full_flag_bypasses_incremental(
+        self, tmp_repo: Path, storage: KuzuBackend
+    ) -> None:
+        """full=True forces a complete re-index regardless of existing data."""
+        run_pipeline(tmp_repo, storage, embeddings=False)
+        _, result = run_pipeline(tmp_repo, storage, full=True, embeddings=False)
+
+        assert result.incremental is False

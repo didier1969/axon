@@ -331,7 +331,7 @@ class TestMCPDeadCode:
 
 
 class TestIdempotency:
-    """Running the pipeline twice produces the same stats."""
+    """Running the pipeline twice is idempotent: no changes detected on second run."""
 
     def test_idempotent(
         self, sample_repo: Path, storage: KuzuBackend
@@ -339,7 +339,11 @@ class TestIdempotency:
         _, result1 = run_pipeline(sample_repo, storage)
         _, result2 = run_pipeline(sample_repo, storage)
 
+        # File count is always populated (walk happens regardless)
         assert result1.files == result2.files
-        assert result1.symbols == result2.symbols
-        assert result1.relationships == result2.relationships
-        assert result1.dead_code == result2.dead_code
+
+        # Second run activates the incremental path with zero changes — no files
+        # were re-parsed so symbol/relationship counts in the result are 0 (by
+        # design).  Verify the incremental path fired and found nothing to do.
+        assert result2.incremental is True
+        assert result2.changed_files == 0

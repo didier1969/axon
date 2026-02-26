@@ -11,13 +11,13 @@ See: .paul/PROJECT.md (updated 2026-02-26 after Phase 1)
 
 Milestone: v0.3 Workflow Integration
 Phase: 2 of 3 (Large Project Performance) — In Progress
-Plan: 02-01 complete (1 of 3 plans)
-Status: Ready for next PLAN (02-02)
-Last activity: 2026-02-26 — Plan 02-01 unified (benchmark baseline)
+Plan: 02-02 complete (2 of 3 plans)
+Status: Ready for next PLAN (02-03)
+Last activity: 2026-02-26 — Plan 02-02 unified (incremental indexing)
 
 Progress:
-- Milestone: [███░░░░░░░] 33%
-- Phase 2: [███░░░░░░░] 33%
+- Milestone: [████░░░░░░] 44%
+- Phase 2: [██████░░░░] 66%
 
 ## Loop Position
 
@@ -35,6 +35,8 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | Markdown headings → NodeLabel.FUNCTION | Phase 1 | Markdown searchable via existing graph queries |
 | Elixir module → NodeLabel.CLASS | Phase 1 | Consistent with OOP-centric graph model |
 | Rust struct/enum/trait → NodeLabel.CLASS | Phase 1 | Uniform type queries across languages |
+| Content hash (sha256) over mtime for incremental | Phase 2 | Reliable across copies/moves; no mtime storage needed |
+| result.symbols=0 on incremental path | Phase 2 | Counts meaningless for partial run; callers check result.incremental |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
@@ -47,13 +49,13 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-26
-Stopped at: Plan 02-01 complete, paused before planning 02-02
-Next action: /paul:plan for Phase 2, Plan 02-02 (Incremental Indexing)
-Resume file: .paul/HANDOFF-2026-02-26.md
+Stopped at: Plan 02-02 complete, paused before planning 02-03
+Next action: /paul:plan for Phase 2, Plan 02-03 (Parallel Parsing)
+Resume file: .paul/phases/02-large-project-performance/02-02-SUMMARY.md
 Resume context:
-- Baseline: file walking 36%, parsing 35%, community detection 19% of total
-- reindex_files() already exists in pipeline.py — foundation for 02-02
-- Plan 02-02 scope: mtime/hash manifest to skip unchanged files on cold-start index
+- walk_repo() already uses ThreadPoolExecutor(max_workers=8) for parallel file reads
+- Parsing (35% of total) is now the dominant cold-start bottleneck
+- Plan 02-03 scope: worker pool for process_parsing() across files
 
 ---
 *STATE.md — Updated after every significant action*

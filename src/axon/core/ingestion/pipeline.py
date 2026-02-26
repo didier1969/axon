@@ -4,7 +4,7 @@ Runs all ingestion phases in sequence, populates an in-memory knowledge graph,
 bulk-loads it into a storage backend, and returns a summary of the results.
 
 Phases executed:
-    0. Incremental diff (reserved -- not yet implemented)
+    0. Incremental diff (content-hash delta; skips full index when prior data exists)
     1. File walking
     2. Structure processing (File/Folder nodes + CONTAINS edges)
     3. Code parsing (symbol nodes + DEFINES edges)
@@ -20,6 +20,7 @@ Phases executed:
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -134,6 +135,45 @@ def run_pipeline(
     result.phase_timings.walk = time.monotonic() - _t
     result.files = len(files)
     report("Walking files", 1.0)
+
+    # Incremental path: skip re-parsing unchanged files when an existing index is present.
+    # Activates when storage has data and full=False.  Falls through to the full-index
+    # path below on first run (empty manifest) or when full=True.
+    if storage is not None and not full:
+        manifest = storage.get_indexed_files()
+        if manifest:
+            current = {e.path: hashlib.sha256(e.content.encode()).hexdigest() for e in files}
+            changed_or_new = [e for e in files if current[e.path] != manifest.get(e.path)]
+            deleted_paths = [p for p in manifest if p not in current]
+
+            for path in deleted_paths:
+                storage.remove_nodes_by_file(path)
+
+            partial_graph = KnowledgeGraph()
+            if changed_or_new:
+                partial_graph = reindex_files(changed_or_new, repo_path, storage)
+
+            if embeddings and changed_or_new:
+                try:
+                    report("Generating embeddings", 0.0)
+                    _t = time.monotonic()
+                    node_embeddings = embed_graph(partial_graph)
+                    storage.store_embeddings(node_embeddings)
+                    result.phase_timings.embeddings = time.monotonic() - _t
+                    result.embeddings = len(node_embeddings)
+                    report("Generating embeddings", 1.0)
+                except Exception:
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "Embedding phase failed — search will use FTS only",
+                        exc_info=True,
+                    )
+                    report("Generating embeddings", 1.0)
+
+            result.incremental = True
+            result.changed_files = len(changed_or_new) + len(deleted_paths)
+            result.duration_seconds = time.monotonic() - start
+            return partial_graph, result
 
     graph = KnowledgeGraph()
 
