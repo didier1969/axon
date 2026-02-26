@@ -247,8 +247,8 @@ The `--watch` flag enables live re-indexing — the graph updates as you edit co
 
 | Tool | What the agent gets |
 |------|-------------|
-| `axon_query` | Hybrid search (BM25 + vector + fuzzy) with results grouped by execution flow |
-| `axon_context` | 360-degree view — callers, callees, type refs, confidence tags, dead code status |
+| `axon_query` | Hybrid search (BM25 + vector + fuzzy) with results grouped by execution flow. Optional `language` filter |
+| `axon_context` | 360-degree view — callers, callees, type refs, confidence tags, dead code status. Accepts `file.py:symbol` format for disambiguation |
 | `axon_impact` | Blast radius grouped by depth — direct (will break), indirect (may break), transitive |
 | `axon_dead_code` | All unreachable symbols grouped by file |
 | `axon_detect_changes` | Map a `git diff` to affected symbols and execution flows |
@@ -270,6 +270,60 @@ impact  -> "Tip: Review each affected symbol before making changes."
 | `axon://overview` | Node and relationship counts by type |
 | `axon://dead-code` | Full dead code report |
 | `axon://schema` | Graph schema reference for Cypher queries |
+
+---
+
+## Shell Integration
+
+Auto-start `axon serve --watch` when you `cd` into an indexed project.
+
+**Option A — Shell hook** (bash/zsh, one-time setup):
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+eval "$(axon shell-hook)"
+# or explicitly for zsh:
+eval "$(axon shell-hook --shell zsh)"
+```
+
+**Option B — direnv** (per-project, requires [direnv](https://direnv.net)):
+
+```bash
+axon init --direnv   # creates/updates .envrc with auto-start block
+```
+
+Run `axon init` (without `--direnv`) to print setup instructions instead.
+
+A PID file (`.axon/watch.pid`) prevents duplicate watcher processes on re-entry.
+
+---
+
+## CI Integration
+
+Use `axon dead-code --exit-code` as a quality gate — exits 1 if dead code is found, 0 if clean.
+
+**GitHub Actions** — copy the included template:
+
+```bash
+cp templates/github-actions.yml .github/workflows/axon.yml
+```
+
+The template runs `axon analyze .` then `axon dead-code --exit-code` on each push.
+
+**pre-commit** — copy the hook config:
+
+```bash
+cp templates/pre-commit-config.yaml .pre-commit-config.yaml
+```
+
+Runs `axon analyze` + dead-code check as a local pre-commit hook.
+
+**Manual CI snippet** (any CI system):
+
+```yaml
+- run: axon analyze .
+- run: axon dead-code --exit-code
+```
 
 ---
 
@@ -299,6 +353,9 @@ impact  -> "Tip: Review each affected symbol before making changes."
 | Python | `.py` | tree-sitter-python |
 | TypeScript | `.ts`, `.tsx` | tree-sitter-typescript |
 | JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | tree-sitter-javascript |
+| Elixir | `.ex`, `.exs` | tree-sitter-elixir |
+| Rust | `.rs` | tree-sitter-rust |
+| Markdown | `.md` | tree-sitter-markdown |
 
 ---
 
@@ -348,10 +405,17 @@ axon impact SYMBOL           Blast radius analysis
     --depth / -d N           BFS traversal depth (default: 3)
 
 axon dead-code               List all detected dead code
+    --exit-code              Exit 1 if dead code found (for CI)
 axon cypher QUERY            Execute a raw Cypher query (read-only)
 
 axon watch                   Watch mode — live re-indexing on file changes
 axon diff BASE..HEAD         Structural branch comparison
+
+axon shell-hook              Print shell integration function for bash or zsh
+    --shell bash|zsh         Shell type (default: bash-compatible)
+
+axon init                    Print shell integration instructions
+    --direnv                 Create/append axon auto-start block to .envrc
 
 axon setup                   Print MCP configuration JSON
     --claude                 For Claude Code

@@ -12,9 +12,9 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 | Attribute | Value |
 |-----------|-------|
-| Version | 0.2.3 |
+| Version | 0.3.0 |
 | Status | Active Development |
-| Last Updated | 2026-02-26 |
+| Last Updated | 2026-02-27 |
 
 ## Requirements
 
@@ -26,12 +26,16 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] Extended language support (Elixir, Rust, Markdown) — Phase 1
 - [x] Incremental indexing (content-hash delta, warm starts ~8ms) — Phase 2
 - [x] CPU-adaptive parallel parsing (walk + parse scale with hardware) — Phase 2
+- [x] Shell integration (shell-hook + direnv auto-start on cd) — Phase 3
+- [x] CI integration (dead-code --exit-code gate, GitHub Actions + pre-commit templates) — Phase 3
+- [x] MCP query ergonomics (language filter, file:symbol disambiguation, deprecation warnings) — Phase 3
+- [x] Developer documentation (README updated, getting-started guide) — Phase 3
 
 ### Active (In Progress)
-- [ ] CI integration and workflow polish
+(None — milestone v0.3 complete)
 
 ### Planned (Next)
-- [ ] Seamless integration into large/massive project workflows (Phase 3)
+(To be defined in next milestone)
 
 ### Out of Scope
 - GUI / web interface — CLI and MCP-first
@@ -73,7 +77,7 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 |--------|--------|---------|--------|
 | Languages supported | 10+ | 6 (Python, TS, JS, Elixir, Rust, Markdown) | In progress |
 | Large project indexing | <60s for 100k LOC | Warm: ~8ms; Cold: ~0.89s (85 files) | In progress |
-| Workflow integration | Zero-friction on session start | Partial | In progress |
+| Workflow integration | Zero-friction on session start | shell-hook + direnv + CI templates + docs | Shipped |
 
 ## Tech Stack
 
@@ -87,4 +91,4 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-02-26 after Phase 2 (Large Project Performance)*
+*Last updated: 2026-02-27 after Phase 3 (Workflow Integration) — Milestone v0.3 complete*

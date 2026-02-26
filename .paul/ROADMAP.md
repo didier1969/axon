@@ -7,8 +7,8 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 ## Current Milestone
 
 **v0.3 Workflow Integration** (v0.3.0)
-Status: In progress
-Phases: 2 of 3 complete
+Status: Complete
+Phases: 3 of 3 complete
 
 ## Phases
 
@@ -16,7 +16,7 @@ Phases: 2 of 3 complete
 |-------|------|-------|--------|-----------|
 | 1 | Language Coverage | 1 | ✅ Complete | 2026-02-26 |
 | 2 | Large Project Performance | 3 | ✅ Complete | 2026-02-26 |
-| 3 | Workflow Integration | TBD | Planning | - |
+| 3 | Workflow Integration | 4 | ✅ Complete | 2026-02-27 |
 
 ## Phase Details
 
@@ -69,9 +69,9 @@ Phases: 2 of 3 complete
 **Plans:**
 - [x] 03-01: Shell integration (direnv / hook) — 2026-02-26
 - [x] 03-02: CI integration guide + config templates — 2026-02-26
-- [ ] 03-03: MCP query API refinement
-- [ ] 03-04: Developer documentation
+- [x] 03-03: MCP query API refinement — 2026-02-26
+- [x] 03-04: Developer documentation — 2026-02-27
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-02-26*
+*Last updated: 2026-02-27 — Milestone v0.3 complete*
