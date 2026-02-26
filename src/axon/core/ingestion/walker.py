@@ -88,7 +88,7 @@ def read_file(repo_path: Path, file_path: Path) -> FileEntry | None:
 def walk_repo(
     repo_path: Path,
     gitignore_patterns: list[str] | None = None,
-    max_workers: int = 8,
+    max_workers: int | None = None,
 ) -> list[FileEntry]:
     """Walk a repository and return all supported source files with their content.
 
@@ -103,7 +103,9 @@ def walk_repo(
         Optional list of gitignore-style patterns (e.g. from
         :func:`axon.config.ignore.load_gitignore`).
     max_workers:
-        Maximum number of threads for parallel file reading.  Defaults to 8.
+        Maximum number of threads for parallel file reading.  Defaults to
+        ``None``, which lets :class:`~concurrent.futures.ThreadPoolExecutor`
+        pick ``min(32, cpu_count + 4)``.
 
     Returns
     -------

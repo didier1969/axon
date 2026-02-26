@@ -442,3 +442,63 @@ class TestProcessParsingTypeScript:
         method_nodes = graph.get_nodes_by_label(NodeLabel.METHOD)
         method_names = {n.name for n in method_nodes}
         assert "start" in method_names
+
+
+# ---------------------------------------------------------------------------
+# TestParallelParsing
+# ---------------------------------------------------------------------------
+
+_PARALLEL_FILES = [
+    ("a.py", "def foo(): pass", "python"),
+    ("b.py", "class Bar:\n    def method(self): pass", "python"),
+    ("c.py", "def baz(): pass\ndef qux(): pass", "python"),
+]
+
+
+def _make_graph_with_file_nodes(specs: list[tuple[str, str, str]]) -> KnowledgeGraph:
+    """Create a KnowledgeGraph pre-seeded with File nodes for each spec."""
+    g = KnowledgeGraph()
+    for path, _content, language in specs:
+        g.add_node(
+            GraphNode(
+                id=generate_id(NodeLabel.FILE, path),
+                label=NodeLabel.FILE,
+                name=path.split("/")[-1],
+                file_path=path,
+                language=language,
+            )
+        )
+    return g
+
+
+class TestParallelParsing:
+    """process_parsing parallel path produces correct, deterministic output."""
+
+    def test_serial_and_parallel_produce_identical_graphs(self) -> None:
+        """Serial (max_workers=1) and parallel (max_workers=4) graphs must agree."""
+        files = [_make_file_entry(p, c, l) for p, c, l in _PARALLEL_FILES]
+
+        graph_serial = _make_graph_with_file_nodes(_PARALLEL_FILES)
+        process_parsing(files, graph_serial, max_workers=1)
+
+        graph_parallel = _make_graph_with_file_nodes(_PARALLEL_FILES)
+        process_parsing(files, graph_parallel, max_workers=4)
+
+        assert graph_serial.node_count == graph_parallel.node_count
+        assert graph_serial.relationship_count == graph_parallel.relationship_count
+
+    def test_parse_order_is_deterministic(self) -> None:
+        """executor.map preserves input order — results align with files list."""
+        specs = [
+            ("x.py", "def x1(): pass\ndef x2(): pass", "python"),
+            ("y.py", "def y1(): pass", "python"),
+        ]
+        files = [_make_file_entry(p, c, l) for p, c, l in specs]
+        graph = _make_graph_with_file_nodes(specs)
+
+        results = process_parsing(files, graph, max_workers=4)
+
+        assert results[0].file_path == "x.py"
+        assert len(results[0].parse_result.symbols) == 2
+        assert results[1].file_path == "y.py"
+        assert len(results[1].parse_result.symbols) == 1

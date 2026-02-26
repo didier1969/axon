@@ -8,14 +8,14 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 **v0.3 Workflow Integration** (v0.3.0)
 Status: In progress
-Phases: 1 of 3 complete
+Phases: 2 of 3 complete
 
 ## Phases
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
 | 1 | Language Coverage | 1 | ✅ Complete | 2026-02-26 |
-| 2 | Large Project Performance | TBD | Planning | - |
+| 2 | Large Project Performance | 3 | ✅ Complete | 2026-02-26 |
 | 3 | Workflow Integration | TBD | Not started | - |
 
 ## Phase Details

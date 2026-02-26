@@ -136,7 +136,7 @@ def parse_file(file_path: str, content: str, language: str) -> FileParseData:
 def process_parsing(
     files: list[FileEntry],
     graph: KnowledgeGraph,
-    max_workers: int = 8,
+    max_workers: int | None = None,
 ) -> list[FileParseData]:
     """Parse every file and populate the knowledge graph with symbol nodes.
 
@@ -152,7 +152,9 @@ def process_parsing(
         files: File entries produced by the walker phase.
         graph: The knowledge graph to populate.  File nodes are expected to
             already exist (created by the structure phase).
-        max_workers: Maximum number of threads for parallel parsing.
+        max_workers: Maximum number of threads for parallel parsing.  Defaults
+            to ``None``, which lets :class:`~concurrent.futures.ThreadPoolExecutor`
+            pick ``min(32, cpu_count + 4)``.
 
     Returns:
         A list of :class:`FileParseData` objects that carry the full parse

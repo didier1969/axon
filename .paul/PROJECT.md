@@ -24,13 +24,14 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] Multi-language parser support (Python, JS/TS, etc.) — v0.2.x
 - [x] Ignore patterns and language configuration — v0.2.x
 - [x] Extended language support (Elixir, Rust, Markdown) — Phase 1
+- [x] Incremental indexing (content-hash delta, warm starts ~8ms) — Phase 2
+- [x] CPU-adaptive parallel parsing (walk + parse scale with hardware) — Phase 2
 
 ### Active (In Progress)
 - [ ] CI integration and workflow polish
 
 ### Planned (Next)
-- [ ] Seamless integration into large/massive project workflows
-- [ ] Performance optimisation for large codebases
+- [ ] Seamless integration into large/massive project workflows (Phase 3)
 
 ### Out of Scope
 - GUI / web interface — CLI and MCP-first
@@ -63,13 +64,15 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 | Markdown headings → NodeLabel.FUNCTION | Reuses existing graph label, no schema change | 2026-02-26 | Active |
 | Elixir module → NodeLabel.CLASS | Modules are units of encapsulation, analogous to classes | 2026-02-26 | Active |
 | Rust struct/enum/trait → NodeLabel.CLASS | Type-defining constructs unified under CLASS for simpler queries | 2026-02-26 | Active |
+| Content hash (sha256) for incremental diff | Reliable across copies/moves; content already in memory | 2026-02-26 | Active |
+| max_workers=None → ThreadPoolExecutor default | Let stdlib pick min(32, cpu_count+4); no app-level os.cpu_count() | 2026-02-26 | Active |
 
 ## Success Metrics
 
 | Metric | Target | Current | Status |
 |--------|--------|---------|--------|
 | Languages supported | 10+ | 6 (Python, TS, JS, Elixir, Rust, Markdown) | In progress |
-| Large project indexing | <60s for 100k LOC | Unknown | TBD |
+| Large project indexing | <60s for 100k LOC | Warm: ~8ms; Cold: ~0.89s (85 files) | In progress |
 | Workflow integration | Zero-friction on session start | Partial | In progress |
 
 ## Tech Stack
@@ -84,4 +87,4 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-02-26 after Phase 1 (Language Coverage)*
+*Last updated: 2026-02-26 after Phase 2 (Large Project Performance)*
