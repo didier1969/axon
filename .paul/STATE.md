@@ -54,7 +54,7 @@ None.
 Last session: 2026-02-26
 Stopped at: Session paused after 03-03 unified — all work committed
 Next action: /paul:plan (Plan 03-04 — Developer documentation)
-Resume file: .paul/phases/03-workflow-integration/03-03-SUMMARY.md
+Resume file: .paul/HANDOFF-2026-02-26d.md
 Resume context:
 - 03-01 (shell-hook + init), 03-02 (CI templates), 03-03 (MCP query API refinement) complete
 - 678/678 tests passing; no uncommitted changes
