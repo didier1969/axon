@@ -11,13 +11,13 @@ See: .paul/PROJECT.md (updated 2026-02-26 after Phase 2)
 
 Milestone: v0.3 Workflow Integration
 Phase: 3 of 3 (Workflow Integration) — In Progress
-Plan: 03-01 complete; 03-02 next (CI Integration)
+Plan: 03-02 complete; 03-03 next (MCP query API refinement)
 Status: Ready for next PLAN
-Last activity: 2026-02-26 — Unified 03-01 (shell-hook + init); committed 988c22b
+Last activity: 2026-02-26 — Unified 03-02 (dead-code --exit-code + CI templates); committed 7c81a55
 
 Progress:
-- Milestone: [████████░░] 75%
-- Phase 3: [███░░░░░░░] 25%
+- Milestone: [█████████░] 83%
+- Phase 3: [█████░░░░░] 50%
 
 ## Loop Position
 
@@ -52,13 +52,13 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-26
-Stopped at: Plan 03-01 unified — commit 988c22b; shell-hook + init shipped
-Next action: /paul:plan (Plan 03-02 — CI Integration)
-Resume file: .paul/phases/03-workflow-integration/03-01-SUMMARY.md
+Stopped at: Plan 03-02 unified — commit 7c81a55; CI integration shipped
+Next action: /paul:plan (Plan 03-03 — MCP query API refinement)
+Resume file: .paul/phases/03-workflow-integration/03-02-SUMMARY.md
 Resume context:
-- 03-01 complete: axon shell-hook + axon init commands, 668/668 tests passing
-- Phase 3 has 4 plans total; 1 of 4 done
-- Next: 03-02 CI integration guide + config templates
+- 03-02 complete: dead-code --exit-code + CI templates; 671 tests passing
+- Phase 3 has 4 plans total; 2 of 4 done
+- Next: 03-03 MCP query API refinement
 
 ---
 *STATE.md — Updated after every significant action*

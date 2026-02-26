@@ -68,7 +68,7 @@ Phases: 2 of 3 complete
 
 **Plans:**
 - [x] 03-01: Shell integration (direnv / hook) — 2026-02-26
-- [ ] 03-02: CI integration guide + config templates
+- [x] 03-02: CI integration guide + config templates — 2026-02-26
 - [ ] 03-03: MCP query API refinement
 - [ ] 03-04: Developer documentation
 
