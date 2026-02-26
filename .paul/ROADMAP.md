@@ -16,7 +16,7 @@ Phases: 2 of 3 complete
 |-------|------|-------|--------|-----------|
 | 1 | Language Coverage | 1 | ✅ Complete | 2026-02-26 |
 | 2 | Large Project Performance | 3 | ✅ Complete | 2026-02-26 |
-| 3 | Workflow Integration | TBD | Not started | - |
+| 3 | Workflow Integration | TBD | Planning | - |
 
 ## Phase Details
 
@@ -67,7 +67,7 @@ Phases: 2 of 3 complete
 - Documentation and onboarding
 
 **Plans:**
-- [ ] 03-01: Shell integration (direnv / hook)
+- [x] 03-01: Shell integration (direnv / hook) — 2026-02-26
 - [ ] 03-02: CI integration guide + config templates
 - [ ] 03-03: MCP query API refinement
 - [ ] 03-04: Developer documentation

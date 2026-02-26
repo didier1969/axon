@@ -10,21 +10,21 @@ See: .paul/PROJECT.md (updated 2026-02-26 after Phase 2)
 ## Current Position
 
 Milestone: v0.3 Workflow Integration
-Phase: 3 of 3 (Workflow Integration) — Not started
-Plan: Not started
-Status: Ready to plan Phase 3
-Last activity: 2026-02-26 — Phase 2 complete (3/3 plans), transitioned to Phase 3
+Phase: 3 of 3 (Workflow Integration) — In Progress
+Plan: 03-01 complete; 03-02 next (CI Integration)
+Status: Ready for next PLAN
+Last activity: 2026-02-26 — Unified 03-01 (shell-hook + init); committed 988c22b
 
 Progress:
-- Milestone: [██████░░░░] 66%
-- Phase 3: [░░░░░░░░░░] 0%
+- Milestone: [████████░░] 75%
+- Phase 3: [███░░░░░░░] 25%
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ○        ○        ○     [Ready for next PLAN]
+  ✓        ✓        ✓     [Loop complete — ready for next PLAN]
 ```
 
 ## Accumulated Context
@@ -52,13 +52,13 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-26
-Stopped at: Phase 2 complete (3/3 plans unified), transitioned to Phase 3
-Next action: /paul:plan for Phase 3 (Workflow Integration)
-Resume file: .paul/ROADMAP.md
+Stopped at: Plan 03-01 unified — commit 988c22b; shell-hook + init shipped
+Next action: /paul:plan (Plan 03-02 — CI Integration)
+Resume file: .paul/phases/03-workflow-integration/03-01-SUMMARY.md
 Resume context:
-- Phase 2 delivers: benchmark baseline, incremental indexing (~8ms warm), CPU-adaptive parallel workers
-- Phase 3 scope: shell/direnv integration, CI config templates, MCP query API refinement, docs
-- 652 tests passing; no blockers
+- 03-01 complete: axon shell-hook + axon init commands, 668/668 tests passing
+- Phase 3 has 4 plans total; 1 of 4 done
+- Next: 03-02 CI integration guide + config templates
 
 ---
 *STATE.md — Updated after every significant action*
