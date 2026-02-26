@@ -65,10 +65,10 @@ class TestReadFileEntry:
         assert "hello" in entry.content
 
     def test_returns_none_for_unsupported(self, tmp_repo: Path) -> None:
-        readme = tmp_repo / "README.md"
-        readme.write_text("# readme", encoding="utf-8")
+        data_file = tmp_repo / "data.csv"
+        data_file.write_text("a,b,c", encoding="utf-8")
 
-        entry = read_file(tmp_repo, readme)
+        entry = read_file(tmp_repo, data_file)
 
         assert entry is None
 
@@ -223,10 +223,10 @@ class TestWatcherReindexFiles:
     ) -> None:
         run_pipeline(tmp_repo, storage)
 
-        readme = tmp_repo / "README.md"
-        readme.write_text("# hello", encoding="utf-8")
+        data_file = tmp_repo / "data.csv"
+        data_file.write_text("a,b,c", encoding="utf-8")
 
-        count = _reindex_files([readme], tmp_repo, storage)
+        count = _reindex_files([data_file], tmp_repo, storage)
 
         assert count == 0
 

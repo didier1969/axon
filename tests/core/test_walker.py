@@ -106,7 +106,7 @@ class TestWalkRepoSkipsUnsupported:
     def test_walk_repo_skips_unsupported(self, tmp_repo: Path) -> None:
         entries = walk_repo(tmp_repo)
         paths = {e.path for e in entries}
-        assert "README.md" not in paths
+        assert "README.md" in paths  # .md is now supported
 
 
 class TestWalkRepoRelativePaths:
@@ -173,7 +173,7 @@ class TestDiscoverFiles:
             rel = str(p.relative_to(tmp_repo.resolve()))
             assert "node_modules" not in rel
             assert "__pycache__" not in rel
-            assert not rel.endswith(".md")
+            assert not rel.endswith(".json")  # .md is now supported, .json is not
 
 
 class TestWalkRepoGitignore:

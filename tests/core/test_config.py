@@ -153,8 +153,8 @@ class TestGetLanguage:
     def test_javascript_cjs(self) -> None:
         assert get_language("config.cjs") == "javascript"
 
-    def test_unsupported_md(self) -> None:
-        assert get_language("README.md") is None
+    def test_supported_md_language(self) -> None:
+        assert get_language("README.md") == "markdown"
 
     def test_unsupported_json(self) -> None:
         assert get_language("package.json") is None
@@ -178,8 +178,8 @@ class TestIsSupported:
     def test_supported_ts(self) -> None:
         assert is_supported("app.ts") is True
 
-    def test_not_supported_md(self) -> None:
-        assert is_supported("README.md") is False
+    def test_supported_md(self) -> None:
+        assert is_supported("README.md") is True
 
     def test_not_supported_json(self) -> None:
         assert is_supported("data.json") is False

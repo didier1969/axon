@@ -33,6 +33,12 @@ _KIND_TO_LABEL: dict[str, NodeLabel] = {
     "interface": NodeLabel.INTERFACE,
     "type_alias": NodeLabel.TYPE_ALIAS,
     "enum": NodeLabel.ENUM,
+    # Elixir
+    "module": NodeLabel.CLASS,
+    "macro": NodeLabel.FUNCTION,
+    "struct": NodeLabel.CLASS,
+    # Markdown
+    "section": NodeLabel.FUNCTION,
 }
 
 @dataclass
@@ -79,10 +85,25 @@ def get_parser(language: str) -> LanguageParser:
 
         parser = TypeScriptParser(dialect="javascript")
 
+    elif language == "elixir":
+        from axon.core.parsers.elixir_lang import ElixirParser
+
+        parser = ElixirParser()
+
+    elif language == "rust":
+        from axon.core.parsers.rust_lang import RustParser
+
+        parser = RustParser()
+
+    elif language == "markdown":
+        from axon.core.parsers.markdown import MarkdownParser
+
+        parser = MarkdownParser()
+
     else:
         raise ValueError(
             f"Unsupported language {language!r}. "
-            f"Expected one of: python, typescript, javascript"
+            f"Expected one of: python, typescript, javascript, elixir, rust, markdown"
         )
 
     _PARSER_CACHE[language] = parser

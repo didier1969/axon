@@ -27,6 +27,16 @@ DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset(
         ".eggs",
         "coverage",
         "htmlcov",
+        # Elixir/Mix
+        "deps",
+        "_build",
+        ".elixir_ls",
+        ".fetch",
+        # Rust/Cargo
+        "target",
+        # Ruby
+        "vendor",
+        "bundle",
         # Files (exact names)
         ".DS_Store",
         ".coverage",

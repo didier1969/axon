@@ -129,7 +129,7 @@ class TestGetParserUnsupported:
 
     def test_get_parser_unsupported(self) -> None:
         with pytest.raises(ValueError, match="Unsupported language"):
-            get_parser("rust")
+            get_parser("cobol")
 
 
 # ---------------------------------------------------------------------------
@@ -378,14 +378,14 @@ class TestProcessParsingHandlesError:
         # Provide an unsupported language to trigger the error path.
         graph.add_node(
             GraphNode(
-                id=generate_id(NodeLabel.FILE, "src/bad.rs"),
+                id=generate_id(NodeLabel.FILE, "src/bad.cobol"),
                 label=NodeLabel.FILE,
-                name="bad.rs",
-                file_path="src/bad.rs",
-                language="rust",
+                name="bad.cobol",
+                file_path="src/bad.cobol",
+                language="cobol",
             )
         )
-        files = [_make_file_entry("src/bad.rs", "fn main() {}", "rust")]
+        files = [_make_file_entry("src/bad.cobol", "IDENTIFICATION DIVISION.", "cobol")]
         result = process_parsing(files, graph)
 
         # Should still return a FileParseData with empty result.
@@ -398,21 +398,21 @@ class TestProcessParsingHandlesError:
     ) -> None:
         graph.add_node(
             GraphNode(
-                id=generate_id(NodeLabel.FILE, "src/bad.rs"),
+                id=generate_id(NodeLabel.FILE, "src/bad.cobol"),
                 label=NodeLabel.FILE,
-                name="bad.rs",
-                file_path="src/bad.rs",
-                language="rust",
+                name="bad.cobol",
+                file_path="src/bad.cobol",
+                language="cobol",
             )
         )
         files = [
-            _make_file_entry("src/bad.rs", "fn main() {}", "rust"),
+            _make_file_entry("src/bad.cobol", "IDENTIFICATION DIVISION.", "cobol"),
             _make_file_entry("src/utils.py", PYTHON_CODE, "python"),
         ]
         result = process_parsing(files, graph)
 
         assert len(result) == 2
-        # The Rust file should have empty symbols.
+        # The cobol file should have empty symbols (unsupported).
         assert result[0].parse_result.symbols == []
         # The Python file should parse successfully.
         assert len(result[1].parse_result.symbols) > 0
