@@ -388,6 +388,112 @@ def mcp() -> None:
 
     asyncio.run(mcp_main())
 
+_SHELL_HOOK_BASH = """\
+# Axon shell integration
+# Add to ~/.bashrc:  eval "$(axon shell-hook)"
+_axon_chpwd() {
+  if [[ -d ".axon" ]] && command -v axon >/dev/null 2>&1; then
+    local pid_file=".axon/watch.pid"
+    if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+      return
+    fi
+    axon watch >/dev/null 2>&1 &
+    echo $! > "$pid_file"
+  fi
+}
+PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }_axon_chpwd"
+"""
+
+_SHELL_HOOK_ZSH = """\
+# Axon shell integration
+# Add to ~/.zshrc:  eval "$(axon shell-hook --shell zsh)"
+_axon_chpwd() {
+  if [[ -d ".axon" ]] && command -v axon >/dev/null 2>&1; then
+    local pid_file=".axon/watch.pid"
+    if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+      return
+    fi
+    axon watch >/dev/null 2>&1 &
+    echo $! > "$pid_file"
+  fi
+}
+autoload -U add-zsh-hook
+add-zsh-hook chpwd _axon_chpwd
+"""
+
+_ENVRC_SENTINEL = "# >>> axon auto-start <<<"
+
+_ENVRC_BLOCK = """\
+# >>> axon auto-start <<<
+if command -v axon >/dev/null 2>&1 && [[ -d ".axon" ]]; then
+  _axon_pid_file=".axon/watch.pid"
+  if ! { [[ -f "$_axon_pid_file" ]] && kill -0 "$(cat "$_axon_pid_file")" 2>/dev/null; }; then
+    axon watch >/dev/null 2>&1 &
+    echo $! > "$_axon_pid_file"
+  fi
+fi
+# <<< axon auto-start <<<
+"""
+
+
+@app.command(name="shell-hook")
+def shell_hook(
+    shell: str = typer.Option("bash", "--shell", "-s", help="Shell type: bash or zsh."),
+) -> None:
+    """Print shell integration code to auto-start axon watcher on cd."""
+    if shell == "bash":
+        print(_SHELL_HOOK_BASH, end="")
+    elif shell == "zsh":
+        print(_SHELL_HOOK_ZSH, end="")
+    else:
+        console.print(f"[red]Error:[/red] Unsupported shell '{shell}'. Use 'bash' or 'zsh'.")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def init(
+    direnv: bool = typer.Option(False, "--direnv", help="Create/update .envrc with axon auto-start."),  # noqa: E501
+) -> None:
+    """Initialize axon shell integration for the current project."""
+    if not direnv:
+        console.print("[bold]Axon Shell Integration[/bold]")
+        console.print()
+        console.print("[bold]Option 1 — Shell hook (bash/zsh)[/bold]")
+        console.print("Add to ~/.bashrc or ~/.zshrc:")
+        console.print()
+        console.print('    eval "$(axon shell-hook)"              # bash (default)')
+        console.print('    eval "$(axon shell-hook --shell zsh)"  # zsh')
+        console.print()
+        console.print("[bold]Option 2 — direnv[/bold]")
+        console.print("Run in your project directory:")
+        console.print()
+        console.print("    axon init --direnv")
+        if shutil.which("direnv"):
+            console.print("    direnv allow")
+        console.print()
+        console.print(
+            "Both methods auto-start [bold]axon watch[/bold] when you cd into a project with .axon/."  # noqa: E501
+        )
+        return
+
+    envrc_path = Path.cwd() / ".envrc"
+
+    if envrc_path.exists():
+        existing = envrc_path.read_text(encoding="utf-8")
+        if _ENVRC_SENTINEL in existing:
+            console.print("Axon block already in .envrc — skipping.")
+            return
+        updated = existing.rstrip("\n") + "\n\n" + _ENVRC_BLOCK
+        envrc_path.write_text(updated, encoding="utf-8")
+        console.print("[green]Appended[/green] axon auto-start block to .envrc")
+    else:
+        envrc_path.write_text(_ENVRC_BLOCK, encoding="utf-8")
+        console.print("[green]Created[/green] .envrc with axon auto-start block")
+
+    if shutil.which("direnv"):
+        console.print("Run [bold]direnv allow[/bold] to activate.")
+
+
 @app.command()
 def serve(
     watch: bool = typer.Option(False, "--watch", "-w", help="Enable file watching with auto-reindex."),

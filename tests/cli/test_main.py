@@ -385,6 +385,104 @@ class TestWatch:
 # ---------------------------------------------------------------------------
 
 
+class TestShellHook:
+    """Tests for the shell-hook command."""
+
+    def test_shell_hook_bash_exit_code(self) -> None:
+        result = runner.invoke(app, ["shell-hook", "--shell", "bash"])
+        assert result.exit_code == 0
+
+    def test_shell_hook_bash_contains_function(self) -> None:
+        result = runner.invoke(app, ["shell-hook", "--shell", "bash"])
+        assert "_axon_chpwd" in result.output
+
+    def test_shell_hook_bash_contains_prompt_command(self) -> None:
+        result = runner.invoke(app, ["shell-hook", "--shell", "bash"])
+        assert "PROMPT_COMMAND" in result.output
+
+    def test_shell_hook_bash_contains_axon_watch(self) -> None:
+        result = runner.invoke(app, ["shell-hook", "--shell", "bash"])
+        assert "axon watch" in result.output
+
+    def test_shell_hook_bash_contains_pid_file(self) -> None:
+        result = runner.invoke(app, ["shell-hook", "--shell", "bash"])
+        assert "watch.pid" in result.output
+
+    def test_shell_hook_zsh_exit_code(self) -> None:
+        result = runner.invoke(app, ["shell-hook", "--shell", "zsh"])
+        assert result.exit_code == 0
+
+    def test_shell_hook_zsh_contains_add_zsh_hook(self) -> None:
+        result = runner.invoke(app, ["shell-hook", "--shell", "zsh"])
+        assert "add-zsh-hook" in result.output
+
+    def test_shell_hook_zsh_contains_axon_watch(self) -> None:
+        result = runner.invoke(app, ["shell-hook", "--shell", "zsh"])
+        assert "axon watch" in result.output
+
+    def test_shell_hook_default_exit_code(self) -> None:
+        result = runner.invoke(app, ["shell-hook"])
+        assert result.exit_code == 0
+
+    def test_shell_hook_default_contains_axon_watch(self) -> None:
+        result = runner.invoke(app, ["shell-hook"])
+        assert "axon watch" in result.output
+
+    def test_shell_hook_invalid_shell(self) -> None:
+        result = runner.invoke(app, ["shell-hook", "--shell", "fish"])
+        assert result.exit_code != 0
+
+
+class TestInit:
+    """Tests for the init command."""
+
+    def test_init_no_args_exit_code(self) -> None:
+        result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0
+
+    def test_init_no_args_shows_instructions(self) -> None:
+        result = runner.invoke(app, ["init"])
+        assert "shell-hook" in result.output
+        assert "direnv" in result.output
+
+    def test_init_direnv_creates_envrc(  # noqa: E501
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["init", "--direnv"])
+        assert result.exit_code == 0
+        envrc = tmp_path / ".envrc"
+        assert envrc.exists()
+        content = envrc.read_text(encoding="utf-8")
+        assert "axon auto-start" in content
+        assert "axon watch" in content
+
+    def test_init_direnv_appends_to_existing_envrc(  # noqa: E501
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        envrc = tmp_path / ".envrc"
+        envrc.write_text("export FOO=bar\n", encoding="utf-8")
+        result = runner.invoke(app, ["init", "--direnv"])
+        assert result.exit_code == 0
+        content = envrc.read_text(encoding="utf-8")
+        assert "export FOO=bar" in content
+        assert "axon watch" in content
+
+    def test_init_direnv_idempotent(  # noqa: E501
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        runner.invoke(app, ["init", "--direnv"])
+        result2 = runner.invoke(app, ["init", "--direnv"])
+        assert result2.exit_code == 0
+        assert "skipping" in result2.output
+        envrc = tmp_path / ".envrc"
+        content = envrc.read_text(encoding="utf-8")
+        # The sentinel marker should appear exactly once (block not duplicated)
+        assert content.count(">>> axon auto-start") == 1
+
+
 class TestRegisterInGlobalRegistry:
     """Tests for _register_in_global_registry()."""
 
