@@ -1,0 +1,20 @@
+# Merge this snippet into your project's .pre-commit-config.yaml
+# Requires: pip install pre-commit axoniq
+repos:
+  - repo: local
+    hooks:
+      - id: axon-analyze
+        name: "Axon: Re-index codebase"
+        entry: axon analyze
+        language: python
+        additional_dependencies: ["axoniq"]
+        pass_filenames: false
+        always_run: true
+
+      - id: axon-dead-code
+        name: "Axon: Check for dead code"
+        entry: axon dead-code --exit-code
+        language: python
+        additional_dependencies: ["axoniq"]
+        pass_filenames: false
+        always_run: true

@@ -1,0 +1,24 @@
+# Copy to .github/workflows/axon.yml in your project
+# Runs axon code analysis on every push and PR
+name: Axon Code Analysis
+
+on: [push, pull_request]
+
+jobs:
+  axon-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install axon
+        run: uv pip install axoniq
+
+      - name: Index codebase
+        run: axon analyze .
+
+      - name: Check for dead code
+        run: axon dead-code --exit-code

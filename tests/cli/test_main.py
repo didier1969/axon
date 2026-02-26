@@ -267,6 +267,45 @@ class TestDeadCode:
         assert result.exit_code == 0
         assert "No dead code detected" in result.output
 
+    def test_dead_code_exit_code_when_found(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> None:
+        """--exit-code should exit 1 when dead code is found."""
+        monkeypatch.chdir(tmp_path)
+        mock_storage = MagicMock()
+        with patch("axon.cli.main._load_storage", return_value=mock_storage):
+            with patch(
+                "axon.mcp.tools.handle_dead_code",
+                return_value="Dead Code Report (3 symbols)\n----------------------------------------\n  src/foo.py:\n    - bar (line 10)",
+            ):
+                result = runner.invoke(app, ["dead-code", "--exit-code"], catch_exceptions=False)
+        assert result.exit_code == 1
+        assert "Dead Code Report" in result.output
+
+    def test_dead_code_exit_code_when_clean(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> None:
+        """--exit-code should exit 0 when no dead code is found."""
+        monkeypatch.chdir(tmp_path)
+        mock_storage = MagicMock()
+        with patch("axon.cli.main._load_storage", return_value=mock_storage):
+            with patch(
+                "axon.mcp.tools.handle_dead_code",
+                return_value="No dead code detected. Codebase looks clean.",
+            ):
+                result = runner.invoke(app, ["dead-code", "--exit-code"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "No dead code" in result.output
+
+    def test_dead_code_no_flag_exits_zero_even_with_dead_code(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> None:
+        """Without --exit-code, dead code report should still exit 0 (backward compat)."""
+        monkeypatch.chdir(tmp_path)
+        mock_storage = MagicMock()
+        with patch("axon.cli.main._load_storage", return_value=mock_storage):
+            with patch(
+                "axon.mcp.tools.handle_dead_code",
+                return_value="Dead Code Report (3 symbols)\n----------------------------------------\n  src/foo.py:\n    - bar (line 10)",
+            ):
+                result = runner.invoke(app, ["dead-code"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "Dead Code Report" in result.output
+
 
 class TestCypher:
     """Tests for the cypher command."""

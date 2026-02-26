@@ -293,7 +293,9 @@ def impact(
     storage.close()
 
 @app.command(name="dead-code")
-def dead_code() -> None:
+def dead_code(
+    exit_code: bool = typer.Option(False, "--exit-code", help="Exit 1 if dead code found (for CI)."),
+) -> None:
     """List all detected dead code."""
     from axon.mcp.tools import handle_dead_code
 
@@ -301,6 +303,8 @@ def dead_code() -> None:
     result = handle_dead_code(storage)
     console.print(result)
     storage.close()
+    if exit_code and not result.startswith("No dead code"):
+        raise typer.Exit(code=1)
 
 @app.command()
 def cypher(
