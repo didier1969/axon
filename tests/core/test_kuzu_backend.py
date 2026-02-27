@@ -327,3 +327,106 @@ class TestMultipleLabels:
         assert backend.get_node(cls.id) is not None
         assert backend.get_node(fn.id).label == NodeLabel.FUNCTION
         assert backend.get_node(cls.id).label == NodeLabel.CLASS
+
+
+class TestBatchAddNodes:
+    """Tests for batch CSV COPY FROM in add_nodes."""
+
+    def test_batch_add_multiple_nodes(self, backend: KuzuBackend) -> None:
+        nodes = [
+            _make_node(name=f"func_{i}", file_path="src/batch.py")
+            for i in range(5)
+        ]
+        backend.add_nodes(nodes)
+
+        for node in nodes:
+            result = backend.get_node(node.id)
+            assert result is not None
+            assert result.name == node.name
+
+    def test_batch_add_empty_list(self, backend: KuzuBackend) -> None:
+        backend.add_nodes([])
+
+    def test_batch_add_mixed_labels(self, backend: KuzuBackend) -> None:
+        fn = _make_node(label=NodeLabel.FUNCTION, name="batch_fn", file_path="src/m.py")
+        cls = _make_node(label=NodeLabel.CLASS, name="BatchClass", file_path="src/m.py")
+        method = _make_node(label=NodeLabel.METHOD, name="batch_method", file_path="src/m.py")
+        backend.add_nodes([fn, cls, method])
+
+        assert backend.get_node(fn.id) is not None
+        assert backend.get_node(cls.id) is not None
+        assert backend.get_node(method.id) is not None
+
+    def test_batch_fallback_on_csv_failure(self, backend: KuzuBackend, monkeypatch) -> None:
+        """When _csv_copy raises, add_nodes falls back to individual inserts."""
+        original_csv_copy = backend._csv_copy
+        call_count = {"csv": 0, "insert": 0}
+
+        def failing_csv_copy(*args, **kwargs):
+            call_count["csv"] += 1
+            raise RuntimeError("CSV copy simulated failure")
+
+        original_insert = backend._insert_node
+        def tracking_insert(node):
+            call_count["insert"] += 1
+            return original_insert(node)
+
+        monkeypatch.setattr(backend, "_csv_copy", failing_csv_copy)
+        monkeypatch.setattr(backend, "_insert_node", tracking_insert)
+
+        nodes = [_make_node(name=f"fb_{i}", file_path="src/fb.py") for i in range(3)]
+        backend.add_nodes(nodes)
+
+        assert call_count["csv"] >= 1
+        assert call_count["insert"] == 3
+        for node in nodes:
+            assert backend.get_node(node.id) is not None
+
+
+class TestBatchAddRelationships:
+    """Tests for batch CSV COPY FROM in add_relationships."""
+
+    def test_batch_add_multiple_rels(self, backend: KuzuBackend) -> None:
+        nodes = [_make_node(name=f"r_{i}", file_path="src/r.py") for i in range(3)]
+        backend.add_nodes(nodes)
+
+        rels = [
+            _make_rel(nodes[0].id, nodes[1].id),
+            _make_rel(nodes[1].id, nodes[2].id),
+        ]
+        backend.add_relationships(rels)
+
+        callers = backend.get_callers(nodes[1].id)
+        assert any(c.id == nodes[0].id for c in callers)
+        callees = backend.get_callees(nodes[1].id)
+        assert any(c.id == nodes[2].id for c in callees)
+
+    def test_batch_add_empty_rels(self, backend: KuzuBackend) -> None:
+        backend.add_relationships([])
+
+    def test_batch_rels_fallback_on_csv_failure(self, backend: KuzuBackend, monkeypatch) -> None:
+        """When _csv_copy raises, add_relationships falls back to individual inserts."""
+        nodes = [_make_node(name=f"rf_{i}", file_path="src/rf.py") for i in range(2)]
+        backend.add_nodes(nodes)
+
+        call_count = {"csv": 0, "insert": 0}
+
+        def failing_csv_copy(*args, **kwargs):
+            call_count["csv"] += 1
+            raise RuntimeError("CSV copy simulated failure")
+
+        original_insert = backend._insert_relationship
+        def tracking_insert(rel):
+            call_count["insert"] += 1
+            return original_insert(rel)
+
+        monkeypatch.setattr(backend, "_csv_copy", failing_csv_copy)
+        monkeypatch.setattr(backend, "_insert_relationship", tracking_insert)
+
+        rels = [_make_rel(nodes[0].id, nodes[1].id)]
+        backend.add_relationships(rels)
+
+        assert call_count["csv"] >= 1
+        assert call_count["insert"] == 1
+        callers = backend.get_callers(nodes[1].id)
+        assert any(c.id == nodes[0].id for c in callers)

@@ -147,6 +147,7 @@ def analyze(
             full=full,
             progress_callback=on_progress,
             embeddings=not no_embeddings,
+            wait_embeddings=True,
         )
 
     meta = {

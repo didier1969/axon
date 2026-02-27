@@ -10,21 +10,21 @@ See: .paul/PROJECT.md (updated 2026-02-27 after v0.3 complete)
 ## Current Position
 
 Milestone: v0.4 Consolidation & Scale
-Phase: 1 of 1 (Consolidation & Scale) — Planning
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-02-27 — Milestone v0.4 created
+Phase: 1 of 1 (Consolidation & Scale) — Executing
+Plan: 01-01 executed, ready for UNIFY
+Status: APPLY complete, all 3 tasks passed
+Last activity: 2026-02-27 — Plan 01-01 APPLY complete
 
 Progress:
-- Milestone: [░░░░░░░░░░] 0%
-- Phase 1: [░░░░░░░░░░] 0%
+- Milestone: [██░░░░░░░░] 20%
+- Phase 1: [██░░░░░░░░] 20%
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ○        ○        ○     [Ready to plan 01-01]
+  ✓        ✓        ○     [APPLY complete, ready for UNIFY]
 ```
 
 ## Accumulated Context
@@ -36,6 +36,8 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | Elixir module → NodeLabel.CLASS | v0.3 Phase 1 | Consistent with OOP-centric graph model |
 | Content hash (sha256) over mtime for incremental | v0.3 Phase 2 | Reliable across copies/moves |
 | max_workers=None → ThreadPoolExecutor default | v0.3 Phase 2 | CPU-adaptive |
+| storage_load is 98%+ of indexing time (not pipeline phases) | v0.4 Plan 01-01 | Future perf work must target KuzuDB bulk_load |
+| Async embeddings via ThreadPoolExecutor (default: non-blocking) | v0.4 Plan 01-01 | Pipeline returns immediately, embeddings in background |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
@@ -49,15 +51,14 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-27
-Stopped at: Milestone v0.4 created, ready to plan
-Next action: /paul:plan for plan 01-01 (Performance optimization)
+Stopped at: Plan 01-01 APPLY complete, paused before UNIFY
+Next action: /paul:unify for plan 01-01
 Resume file: .paul/HANDOFF-2026-02-27.md
 Resume context:
-- v0.3 complete (3 phases, 8 plans, 678 tests)
-- v0.4 milestone created with 1 phase, 5 planned plans
-- Axon installed globally, 25 projects indexed, MCP configured for Claude Code
-- Phase dir: .paul/phases/01-consolidation-and-scale/
-- MILESTONE-CONTEXT.md available with full feature breakdown
+- Plan 01-01 fully executed (3/3 tasks), needs UNIFY to close loop
+- 687 tests pass (678 + 9 new), no regressions
+- Key finding: storage_load is 98%+ of indexing time
+- Uncommitted changes in kuzu_backend.py, pipeline.py, cli/main.py + tests
 
 ---
 *STATE.md — Updated after every significant action*

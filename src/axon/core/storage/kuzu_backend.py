@@ -125,14 +125,66 @@ class KuzuBackend:
             self._db = None
 
     def add_nodes(self, nodes: list[GraphNode]) -> None:
-        """Insert nodes into their respective label tables."""
+        """Insert nodes into their respective label tables.
+
+        Uses CSV COPY FROM for batch efficiency when multiple nodes are
+        provided, falling back to individual inserts on failure.
+        """
+        if not nodes:
+            return
+
+        by_table: dict[str, list[GraphNode]] = {}
         for node in nodes:
-            self._insert_node(node)
+            table = _LABEL_TO_TABLE.get(node.label.value)
+            if table:
+                by_table.setdefault(table, []).append(node)
+
+        try:
+            for table, table_nodes in by_table.items():
+                self._csv_copy(table, [
+                    [n.id, n.name, n.file_path, n.start_line,
+                     n.end_line, n.content, n.signature, n.language,
+                     n.class_name, n.is_dead, n.is_entry_point,
+                     n.is_exported]
+                    for n in table_nodes
+                ])
+        except Exception:
+            logger.debug("Batch add_nodes via CSV failed, falling back to individual inserts", exc_info=True)
+            for node in nodes:
+                self._insert_node(node)
 
     def add_relationships(self, rels: list[GraphRelationship]) -> None:
-        """Insert relationships by matching source and target nodes."""
+        """Insert relationships by matching source and target nodes.
+
+        Uses CSV COPY FROM for batch efficiency when multiple relationships
+        are provided, falling back to individual inserts on failure.
+        """
+        if not rels:
+            return
+
+        by_pair: dict[tuple[str, str], list[GraphRelationship]] = {}
         for rel in rels:
-            self._insert_relationship(rel)
+            src_table = _table_for_id(rel.source)
+            dst_table = _table_for_id(rel.target)
+            if src_table and dst_table:
+                by_pair.setdefault((src_table, dst_table), []).append(rel)
+
+        try:
+            for (src_table, dst_table), pair_rels in by_pair.items():
+                self._csv_copy(f"CodeRelation_{src_table}_{dst_table}", [
+                    [r.source, r.target, r.type.value,
+                     float((r.properties or {}).get("confidence", 1.0)),
+                     str((r.properties or {}).get("role", "")),
+                     int((r.properties or {}).get("step_number", 0)),
+                     float((r.properties or {}).get("strength", 0.0)),
+                     int((r.properties or {}).get("co_changes", 0)),
+                     str((r.properties or {}).get("symbols", ""))]
+                    for r in pair_rels
+                ])
+        except Exception:
+            logger.debug("Batch add_relationships via CSV failed, falling back to individual inserts", exc_info=True)
+            for rel in rels:
+                self._insert_relationship(rel)
 
     def remove_nodes_by_file(self, file_path: str) -> int:
         """Delete all nodes whose ``file_path`` matches across every table.

@@ -21,8 +21,10 @@ Phases executed:
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -78,6 +80,7 @@ class PipelineResult:
     incremental: bool = False
     changed_files: int = 0
     phase_timings: PhaseTimings = field(default_factory=PhaseTimings)
+    embedding_future: Future | None = field(default=None, repr=False)
 
 _SYMBOL_LABELS: frozenset[NodeLabel] = frozenset(NodeLabel) - {
     NodeLabel.FILE,
@@ -86,12 +89,44 @@ _SYMBOL_LABELS: frozenset[NodeLabel] = frozenset(NodeLabel) - {
     NodeLabel.PROCESS,
 }
 
+_logger = logging.getLogger(__name__)
+
+# Shared executor for background embedding work.  A single thread is
+# sufficient because fastembed is CPU-bound and releases the GIL during
+# the ONNX inference calls.
+_EMBEDDING_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="axon-embed")
+
+
+def _run_embeddings(
+    graph: KnowledgeGraph,
+    storage: StorageBackend,
+    result: PipelineResult,
+    report: Callable[[str, float], None],
+) -> None:
+    """Generate and store embeddings (runs in background thread or inline)."""
+    try:
+        report("Generating embeddings", 0.0)
+        _t = time.monotonic()
+        node_embeddings = embed_graph(graph)
+        storage.store_embeddings(node_embeddings)
+        result.phase_timings.embeddings = time.monotonic() - _t
+        result.embeddings = len(node_embeddings)
+        report("Generating embeddings", 1.0)
+    except Exception:
+        _logger.warning(
+            "Embedding phase failed — search will use FTS only",
+            exc_info=True,
+        )
+        report("Generating embeddings", 1.0)
+
+
 def run_pipeline(
     repo_path: Path,
     storage: StorageBackend | None = None,
     full: bool = False,
     progress_callback: Callable[[str, float], None] | None = None,
     embeddings: bool = True,
+    wait_embeddings: bool = False,
 ) -> tuple[KnowledgeGraph, PipelineResult]:
     """Run phases 1-11 of the ingestion pipeline.
 
@@ -115,6 +150,11 @@ def run_pipeline(
     embeddings:
         When ``True`` (default), generate and store vector embeddings after
         bulk-loading.  Set to ``False`` to skip embedding generation.
+    wait_embeddings:
+        When ``True``, block until embedding generation completes before
+        returning.  When ``False`` (default), embeddings run in a background
+        thread and the pipeline returns immediately.  The future is available
+        on ``result.embedding_future``.
 
     Returns
     -------
@@ -154,21 +194,12 @@ def run_pipeline(
                 partial_graph = reindex_files(changed_or_new, repo_path, storage)
 
             if embeddings and changed_or_new:
-                try:
-                    report("Generating embeddings", 0.0)
-                    _t = time.monotonic()
-                    node_embeddings = embed_graph(partial_graph)
-                    storage.store_embeddings(node_embeddings)
-                    result.phase_timings.embeddings = time.monotonic() - _t
-                    result.embeddings = len(node_embeddings)
-                    report("Generating embeddings", 1.0)
-                except Exception:
-                    import logging as _logging
-                    _logging.getLogger(__name__).warning(
-                        "Embedding phase failed — search will use FTS only",
-                        exc_info=True,
+                if wait_embeddings:
+                    _run_embeddings(partial_graph, storage, result, report)
+                else:
+                    result.embedding_future = _EMBEDDING_POOL.submit(
+                        _run_embeddings, partial_graph, storage, result, report,
                     )
-                    report("Generating embeddings", 1.0)
 
             result.incremental = True
             result.changed_files = len(changed_or_new) + len(deleted_paths)
@@ -250,21 +281,12 @@ def run_pipeline(
         report("Loading to storage", 1.0)
 
         if embeddings:
-            try:
-                report("Generating embeddings", 0.0)
-                _t = time.monotonic()
-                node_embeddings = embed_graph(graph)
-                storage.store_embeddings(node_embeddings)
-                result.phase_timings.embeddings = time.monotonic() - _t
-                result.embeddings = len(node_embeddings)
-                report("Generating embeddings", 1.0)
-            except Exception:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
-                    "Embedding phase failed — search will use FTS only",
-                    exc_info=True,
+            if wait_embeddings:
+                _run_embeddings(graph, storage, result, report)
+            else:
+                result.embedding_future = _EMBEDDING_POOL.submit(
+                    _run_embeddings, graph, storage, result, report,
                 )
-                report("Generating embeddings", 1.0)
 
     result.duration_seconds = time.monotonic() - start
 

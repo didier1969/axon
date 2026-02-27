@@ -353,7 +353,7 @@ class TestRunPipelineEmbeddings:
         def callback(phase: str, pct: float) -> None:
             calls.append((phase, pct))
 
-        run_pipeline(rich_repo, rich_storage, progress_callback=callback)
+        run_pipeline(rich_repo, rich_storage, progress_callback=callback, wait_embeddings=True)
 
         phase_names = {name for name, _ in calls}
         assert "Generating embeddings" in phase_names
@@ -368,7 +368,7 @@ class TestRunPipelineEmbeddings:
             "axon.core.ingestion.pipeline.embed_graph",
             side_effect=RuntimeError("model not found"),
         ):
-            _, result = run_pipeline(rich_repo, rich_storage)
+            _, result = run_pipeline(rich_repo, rich_storage, wait_embeddings=True)
 
         # symbols and relationships are computed before the embedding step
         assert result.symbols >= 5
@@ -387,6 +387,30 @@ class TestRunPipelineEmbeddings:
         phase_names = {name for name, _ in calls}
         assert "Generating embeddings" not in phase_names
         assert result.embeddings == 0
+
+    def test_async_embeddings_returns_future(
+        self, rich_repo: Path, rich_storage: KuzuBackend
+    ) -> None:
+        """Default wait_embeddings=False returns a future on result."""
+        from unittest.mock import patch
+
+        with patch("axon.core.ingestion.pipeline.embed_graph", return_value=[]):
+            _, result = run_pipeline(rich_repo, rich_storage, wait_embeddings=False)
+
+        assert result.embedding_future is not None
+        # Wait for the background thread to complete.
+        result.embedding_future.result(timeout=10)
+
+    def test_wait_embeddings_blocks(
+        self, rich_repo: Path, rich_storage: KuzuBackend
+    ) -> None:
+        """wait_embeddings=True blocks and no future is set."""
+        from unittest.mock import patch
+
+        with patch("axon.core.ingestion.pipeline.embed_graph", return_value=[]):
+            _, result = run_pipeline(rich_repo, rich_storage, wait_embeddings=True)
+
+        assert result.embedding_future is None
 
 
 # ---------------------------------------------------------------------------

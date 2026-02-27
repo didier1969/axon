@@ -24,7 +24,7 @@ Phases: 0 of 1 complete
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
-| 1 | Consolidation & Scale | TBD | Planning | - |
+| 1 | Consolidation & Scale | 5 | Planning | - |
 
 ## Phase Details (v0.4)
 
