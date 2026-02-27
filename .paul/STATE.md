@@ -5,41 +5,36 @@
 See: .paul/PROJECT.md (updated 2026-02-27 after v0.4 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.4 Consolidation & Scale — Phase 1 complete, milestone complete
+**Current focus:** Awaiting v0.5 milestone definition
 
 ## Current Position
 
-Milestone: v0.4 Consolidation & Scale — ✅ Complete
-Phase: 1 of 1 (Consolidation & Scale) — Complete
-Plan: 01-04 unified — all 4 plans complete
-Status: UNIFY complete — v0.4 milestone fully shipped
-Last activity: 2026-02-27 — UNIFY 01-04 complete, phase transition done
+Milestone: Awaiting next milestone
+Phase: None active
+Plan: None
+Status: v0.4 Consolidation & Scale complete — ready for next milestone
+Last activity: 2026-02-27 — Milestone v0.4 archived, git tag v0.4.0 created
 
 Progress:
-- Milestone: [██████████] 100%
-- Phase 1: [██████████] 100% (4/4 plans complete)
+- v0.4 Consolidation & Scale: [██████████] 100% ✓
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Loop complete — ready for /paul:complete-milestone]
+  ○        ○        ○     [Milestone complete — ready for next]
 ```
 
 ## Accumulated Context
 
-### Decisions
+### Decisions (Key from v0.4)
 | Decision | Phase | Impact |
 |----------|-------|--------|
-| Markdown headings → NodeLabel.FUNCTION | v0.3 Phase 1 | Markdown searchable via existing graph queries |
-| Elixir module → NodeLabel.CLASS | v0.3 Phase 1 | Consistent with OOP-centric graph model |
-| Content hash (sha256) over mtime for incremental | v0.3 Phase 2 | Reliable across copies/moves |
-| max_workers=None → ThreadPoolExecutor default | v0.3 Phase 2 | CPU-adaptive |
-| storage_load is 98%+ of indexing time (not pipeline phases) | v0.4 Plan 01-01 | Future perf work must target KuzuDB bulk_load |
-| Async embeddings via ThreadPoolExecutor (default: non-blocking) | v0.4 Plan 01-01 | Pipeline returns immediately, embeddings in background |
-| KuzuDB has no specific exception types — raises plain RuntimeError | v0.4 Plan 01-02 | All except blocks use RuntimeError (not kuzu.RuntimeError) |
-| kuzu_backend split: schema/search/bulk as internal modules, class stays public API | v0.4 Plan 01-02 | Shared constants stay in kuzu_backend.py, imported by submodules |
+| storage_load is 98%+ of indexing time | v0.4 Plan 01-01 | Future perf work must target KuzuDB bulk_load |
+| Async embeddings via ThreadPoolExecutor | v0.4 Plan 01-01 | Pipeline returns immediately, embeddings in background |
+| KuzuDB has no specific exception types | v0.4 Plan 01-02 | All except blocks use RuntimeError |
+| kuzu_backend split into submodules | v0.4 Plan 01-02 | Shared constants in kuzu_backend.py, imported by submodules |
 | events.jsonl global at ~/.axon/events.jsonl | v0.4 Plan 01-04 | One log for all repos on the machine |
 | log_event() never raises (BLE001 catch-all) | v0.4 Plan 01-04 | Analytics failure never blocks main flow |
 | repo= opens/closes KuzuBackend per request | v0.4 Plan 01-04 | Safe for read-only, avoids connection leaks |
@@ -55,20 +50,20 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: e7a7c29 (feat(01-04): multi-repo MCP routing, analytics, axon stats)
+Last commit: 6364c9f (docs: unify 01-04, phase transition, v0.4 complete)
+Tag: v0.4.0
 Branch: main
-Feature branches: none
 
 ## Session Continuity
 
 Last session: 2026-02-27
-Stopped at: UNIFY 01-04 complete — phase transition done, milestone ready to archive
-Next action: /paul:complete-milestone
-Resume file: .paul/ROADMAP.md
+Stopped at: Milestone v0.4 complete — archived and tagged
+Next action: /paul:discuss-milestone
+Resume file: .paul/MILESTONES.md
 Resume context:
-- v0.4 fully complete: 4 plans shipped, 751+ tests passing, 12 languages
-- Three deferred issues remain (flaky test, slow watcher tests, sequential community detection)
-- Ready to archive v0.4 and start v0.5
+- v0.4 fully archived: 4 plans, 12 languages, multi-repo MCP, analytics, 751+ tests
+- 3 deferred issues for v0.5 consideration
+- Ready to define v0.5 scope
 
 ---
 *STATE.md — Updated after every significant action*
