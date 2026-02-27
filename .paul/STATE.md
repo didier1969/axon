@@ -51,7 +51,7 @@ None.
 Last session: 2026-02-27
 Stopped at: Milestone v0.4 created, ready to plan
 Next action: /paul:plan for plan 01-01 (Performance optimization)
-Resume file: .paul/ROADMAP.md
+Resume file: .paul/HANDOFF-2026-02-27.md
 Resume context:
 - v0.3 complete (3 phases, 8 plans, 678 tests)
 - v0.4 milestone created with 1 phase, 5 planned plans
