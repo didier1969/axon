@@ -19,6 +19,7 @@ from axon.mcp.tools import (
     _confidence_tag,
     _format_query_results,
     _group_by_process,
+    _load_repo_storage,
     handle_context,
     handle_cypher,
     handle_dead_code,
@@ -765,3 +766,90 @@ class TestHandleContextDisambiguation:
         result = handle_context(mock_storage, "src/nonexistent.py:parse")
         assert "not found" in result
         assert "nonexistent.py" in result
+
+
+# ---------------------------------------------------------------------------
+# Multi-repo routing
+# ---------------------------------------------------------------------------
+
+
+class TestMultiRepoRouting:
+    """Tests for _load_repo_storage and repo= parameter on query/context/impact."""
+
+    def test_load_repo_storage_missing_meta(self, tmp_path: Path, monkeypatch):
+        """Returns None when meta.json does not exist for the named repo."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        result = _load_repo_storage("nonexistent-repo")
+        assert result is None
+
+    def test_load_repo_storage_corrupt_json(self, tmp_path: Path, monkeypatch):
+        """Returns None when meta.json contains invalid JSON."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        repo_dir = tmp_path / ".axon" / "repos" / "bad-repo"
+        repo_dir.mkdir(parents=True)
+        (repo_dir / "meta.json").write_text("NOT JSON", encoding="utf-8")
+        result = _load_repo_storage("bad-repo")
+        assert result is None
+
+    def test_load_repo_storage_db_not_found(self, tmp_path: Path, monkeypatch):
+        """Returns None when meta.json is valid but the kuzu db path does not exist."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        repo_dir = tmp_path / ".axon" / "repos" / "valid-meta"
+        repo_dir.mkdir(parents=True)
+        meta = {"name": "valid-meta", "path": str(tmp_path / "some-repo")}
+        (repo_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        # No kuzu db at that path — initialize should fail → returns None
+        result = _load_repo_storage("valid-meta")
+        assert result is None
+
+    def test_handle_query_repo_not_found(self, mock_storage):
+        """handle_query returns registry error when named repo does not exist."""
+        # Use a patched home so the registry is empty
+        from unittest.mock import patch
+        from pathlib import Path as _Path
+
+        with patch.object(_Path, "home", return_value=_Path("/nonexistent_registry_xyz")):
+            result = handle_query(mock_storage, "test query", repo="missing-repo")
+        assert "missing-repo" in result
+        assert "not found" in result.lower()
+
+    def test_handle_context_repo_not_found(self, mock_storage):
+        """handle_context returns registry error when named repo does not exist."""
+        from unittest.mock import patch
+        from pathlib import Path as _Path
+
+        with patch.object(_Path, "home", return_value=_Path("/nonexistent_registry_xyz")):
+            result = handle_context(mock_storage, "some_symbol", repo="missing-repo")
+        assert "missing-repo" in result
+        assert "not found" in result.lower()
+
+    def test_handle_impact_repo_not_found(self, mock_storage):
+        """handle_impact returns registry error when named repo does not exist."""
+        from unittest.mock import patch
+        from pathlib import Path as _Path
+
+        with patch.object(_Path, "home", return_value=_Path("/nonexistent_registry_xyz")):
+            result = handle_impact(mock_storage, "some_symbol", repo="missing-repo")
+        assert "missing-repo" in result
+        assert "not found" in result.lower()
+
+    def test_handle_query_no_repo_uses_default_storage(self, mock_storage):
+        """handle_query without repo= uses the passed storage backend."""
+        mock_storage.fts_search.return_value = []
+        result = handle_query(mock_storage, "test", repo=None)
+        # Default storage was queried (fts_search called via hybrid_search path)
+        assert "No results" in result
+
+    def test_handle_query_repo_none_does_not_open_registry(self, mock_storage, monkeypatch):
+        """When repo=None, _load_repo_storage is never called."""
+        called = []
+        original = _load_repo_storage
+
+        def spy(repo):
+            called.append(repo)
+            return original(repo)
+
+        monkeypatch.setattr("axon.mcp.tools._load_repo_storage", spy)
+        mock_storage.fts_search.return_value = []
+        handle_query(mock_storage, "hello", repo=None)
+        assert called == []

@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from axon.config.ignore import load_gitignore
+from axon.core.analytics import log_event
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import NodeLabel
 from axon.core.embeddings.embedder import embed_graph
@@ -204,6 +205,17 @@ def run_pipeline(
             result.incremental = True
             result.changed_files = len(changed_or_new) + len(deleted_paths)
             result.duration_seconds = time.monotonic() - start
+            try:
+                log_event(
+                    "index",
+                    repo=repo_path.name,
+                    files=result.files,
+                    changed=result.changed_files,
+                    duration=round(result.duration_seconds, 2),
+                    incremental=True,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return partial_graph, result
 
     graph = KnowledgeGraph()
@@ -289,6 +301,17 @@ def run_pipeline(
                 )
 
     result.duration_seconds = time.monotonic() - start
+
+    try:
+        log_event(
+            "index",
+            repo=repo_path.name,
+            files=result.files,
+            symbols=result.symbols,
+            duration=round(result.duration_seconds, 2),
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     return graph, result
 

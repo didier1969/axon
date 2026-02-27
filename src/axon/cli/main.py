@@ -500,6 +500,61 @@ def init(
 
 
 @app.command()
+def stats() -> None:
+    """Show axon usage statistics from event log."""
+    from collections import Counter
+
+    events_path = Path.home() / ".axon" / "events.jsonl"
+    if not events_path.exists():
+        console.print(
+            "No usage data found. Run 'axon analyze' or 'axon query' to generate stats."
+        )
+        return
+
+    events: list[dict] = []
+    with events_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    if not events:
+        console.print("No usage data found.")
+        return
+
+    query_events = [e for e in events if e.get("type") in {"query", "context", "impact"}]
+    index_events = [e for e in events if e.get("type") == "index"]
+
+    console.print("[bold]Axon Usage Statistics[/bold]")
+    console.print()
+    console.print(f"  Queries:        {len(query_events)}")
+    query_texts = [e["query"] for e in query_events if e.get("query")]
+    console.print(f"  Unique queries: {len(set(query_texts))}")
+    console.print(f"  Index runs:     {len(index_events)}")
+
+    if query_texts:
+        console.print()
+        console.print("[bold]Top 5 queries:[/bold]")
+        for text, count in Counter(query_texts).most_common(5):
+            console.print(f"  {count:>3}x  {text!r}")
+
+    if index_events:
+        console.print()
+        console.print("[bold]Per-repo index activity:[/bold]")
+        repo_events: dict[str, list[dict]] = {}
+        for e in index_events:
+            repo_name = e.get("repo", "unknown")
+            repo_events.setdefault(repo_name, []).append(e)
+        for repo_name, revents in sorted(repo_events.items()):
+            last_ts = max(e.get("ts", "") for e in revents)
+            console.print(f"  {repo_name:<30} {len(revents):>3} run(s), last: {last_ts}")
+
+
+@app.command()
 def serve(
     watch: bool = typer.Option(False, "--watch", "-w", help="Enable file watching with auto-reindex."),
 ) -> None:

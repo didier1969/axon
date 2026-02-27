@@ -632,3 +632,90 @@ class TestRegisterInGlobalRegistry:
             _register_in_global_registry(meta, repo_path)
 
         assert (tmp_path / ".axon" / "repos" / "myapp" / "meta.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# axon stats
+# ---------------------------------------------------------------------------
+
+
+def _write_events(events_path: Path, events: list[dict]) -> None:
+    """Write a list of event dicts as JSONL to events_path."""
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    with events_path.open("w", encoding="utf-8") as fh:
+        for event in events:
+            fh.write(json.dumps(event) + "\n")
+
+
+class TestStats:
+    """Tests for the `axon stats` command."""
+
+    def test_stats_no_file(self, tmp_path: Path) -> None:
+        """Prints 'No usage data' message when events.jsonl does not exist."""
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            result = runner.invoke(app, ["stats"])
+        assert result.exit_code == 0
+        assert "No usage data" in result.output
+
+    def test_stats_with_query_events(self, tmp_path: Path) -> None:
+        """Shows query count and index count from events.jsonl."""
+        events_path = tmp_path / ".axon" / "events.jsonl"
+        _write_events(events_path, [
+            {"ts": "2026-02-27T10:00:00+00:00", "type": "query", "query": "find auth", "results": 5},
+            {"ts": "2026-02-27T10:01:00+00:00", "type": "query", "query": "find auth", "results": 3},
+            {"ts": "2026-02-27T10:02:00+00:00", "type": "query", "query": "find login", "results": 2},
+            {"ts": "2026-02-27T10:05:00+00:00", "type": "index", "repo": "axon", "files": 50},
+        ])
+
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            result = runner.invoke(app, ["stats"])
+
+        assert result.exit_code == 0
+        assert "3" in result.output      # total queries
+        assert "2" in result.output      # unique queries
+        assert "1" in result.output      # index runs
+        assert "find auth" in result.output
+
+    def test_stats_skips_bad_lines(self, tmp_path: Path) -> None:
+        """Corrupt lines in events.jsonl are skipped without error."""
+        events_path = tmp_path / ".axon" / "events.jsonl"
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        with events_path.open("w", encoding="utf-8") as fh:
+            fh.write('{"ts": "2026-02-27T10:00:00+00:00", "type": "query", "query": "ok"}\n')
+            fh.write("NOT VALID JSON\n")
+            fh.write('{"ts": "2026-02-27T10:01:00+00:00", "type": "index", "repo": "proj"}\n')
+
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            result = runner.invoke(app, ["stats"])
+
+        assert result.exit_code == 0
+        # Valid events parsed, no crash
+        assert "No usage data" not in result.output
+
+    def test_stats_empty_file(self, tmp_path: Path) -> None:
+        """Empty events.jsonl prints 'No usage data'."""
+        events_path = tmp_path / ".axon" / "events.jsonl"
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        events_path.write_text("", encoding="utf-8")
+
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            result = runner.invoke(app, ["stats"])
+
+        assert result.exit_code == 0
+        assert "No usage data" in result.output
+
+    def test_stats_per_repo_breakdown(self, tmp_path: Path) -> None:
+        """Per-repo index activity section appears when index events exist."""
+        events_path = tmp_path / ".axon" / "events.jsonl"
+        _write_events(events_path, [
+            {"ts": "2026-02-27T10:00:00+00:00", "type": "index", "repo": "axon", "files": 50},
+            {"ts": "2026-02-27T11:00:00+00:00", "type": "index", "repo": "axon", "files": 51},
+            {"ts": "2026-02-27T12:00:00+00:00", "type": "index", "repo": "other-proj", "files": 10},
+        ])
+
+        with patch("axon.cli.main.Path.home", return_value=tmp_path):
+            result = runner.invoke(app, ["stats"])
+
+        assert result.exit_code == 0
+        assert "axon" in result.output
+        assert "other-proj" in result.output

@@ -96,7 +96,7 @@ TOOLS: list[Tool] = [
             "(keyword + vector) search. "
             "Use when you need to find relevant functions, classes, or files by concept or name. "
             "Returns ranked symbols with file path, label, and a code snippet per result. "
-            "Optionally filter by language. "
+            "Optionally filter by language or specify a repo to search a different indexed project. "
             "Follow with axon_context on a specific result for its full dependency graph."
         ),
         inputSchema={
@@ -118,6 +118,13 @@ TOOLS: list[Tool] = [
                         "(e.g. 'python', 'elixir', 'typescript'). Optional."
                     ),
                 },
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "Name of an indexed repository to query (from axon_list_repos). "
+                        "Defaults to the current directory. Optional."
+                    ),
+                },
             },
             "required": ["query"],
         },
@@ -129,6 +136,7 @@ TOOLS: list[Tool] = [
             "Use before modifying a symbol to understand its full dependency graph. "
             "Returns callers, callees, type refs, signature, file location, and dead-code status. "
             "To disambiguate symbols with the same name across files, use 'path/to/file.py:symbol_name' format. "
+            "Optionally specify a repo to look up a symbol in a different indexed project. "
             "Follow with axon_impact to assess blast radius before making changes."
         ),
         inputSchema={
@@ -141,6 +149,13 @@ TOOLS: list[Tool] = [
                         "Use 'file/path.py:symbol_name' to target a specific file."
                     ),
                 },
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "Name of an indexed repository to query (from axon_list_repos). "
+                        "Defaults to the current directory. Optional."
+                    ),
+                },
             },
             "required": ["symbol"],
         },
@@ -151,7 +166,8 @@ TOOLS: list[Tool] = [
             "Blast radius analysis — find all symbols affected by changing a given symbol, "
             "grouped by hop depth. "
             "Use before refactoring to understand risk and scope of changes. "
-            "Returns affected symbols per depth level with confidence scores for direct callers."
+            "Returns affected symbols per depth level with confidence scores for direct callers. "
+            "Optionally specify a repo to analyse a symbol in a different indexed project."
         ),
         inputSchema={
             "type": "object",
@@ -166,6 +182,13 @@ TOOLS: list[Tool] = [
                     "default": 3,
                     "minimum": 1,
                     "maximum": MAX_TRAVERSE_DEPTH,
+                },
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "Name of an indexed repository to query (from axon_list_repos). "
+                        "Defaults to the current directory. Optional."
+                    ),
                 },
             },
             "required": ["symbol"],
@@ -239,11 +262,17 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
             arguments.get("query", ""),
             limit=arguments.get("limit", 20),
             language=arguments.get("language"),
+            repo=arguments.get("repo"),
         )
     elif name == "axon_context":
-        return handle_context(storage, arguments.get("symbol", ""))
+        return handle_context(storage, arguments.get("symbol", ""), repo=arguments.get("repo"))
     elif name == "axon_impact":
-        return handle_impact(storage, arguments.get("symbol", ""), depth=arguments.get("depth", 3))
+        return handle_impact(
+            storage,
+            arguments.get("symbol", ""),
+            depth=arguments.get("depth", 3),
+            repo=arguments.get("repo"),
+        )
     elif name == "axon_dead_code":
         return handle_dead_code(storage)
     elif name == "axon_detect_changes":

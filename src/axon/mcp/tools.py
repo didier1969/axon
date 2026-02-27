@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from axon.core.analytics import log_event
 from axon.core.search.hybrid import hybrid_search
 from axon.core.storage.base import StorageBackend
 
@@ -43,6 +44,29 @@ def _resolve_symbol(storage: StorageBackend, symbol: str, limit: int = 1) -> lis
         if results:
             return results
     return storage.fts_search(symbol, limit=limit)
+
+def _load_repo_storage(repo: str) -> StorageBackend | None:
+    """Open a read-only KuzuBackend for a named repo from the global registry.
+
+    Reads ``~/.axon/repos/{repo}/meta.json``, resolves the repo path, and
+    initialises a backend from ``{path}/.axon/kuzu``.
+
+    Returns ``None`` (and logs at DEBUG) on any error so callers can return
+    a user-friendly message without crashing.
+    """
+    from axon.core.storage.kuzu_backend import KuzuBackend
+
+    meta_path = Path.home() / ".axon" / "repos" / repo / "meta.json"
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        db_path = Path(data["path"]) / ".axon" / "kuzu"
+        backend = KuzuBackend()
+        backend.initialize(db_path, read_only=True)
+        return backend
+    except (OSError, json.JSONDecodeError, KeyError, RuntimeError) as exc:
+        logger.debug("Failed to load repo storage for '%s': %s", repo, exc)
+        return None
+
 
 def handle_list_repos(registry_dir: Path | None = None) -> str:
     """List indexed repositories by scanning for .axon directories.
@@ -174,41 +198,60 @@ def handle_query(
     query: str,
     limit: int = 20,
     language: str | None = None,
+    repo: str | None = None,
 ) -> str:
     """Execute hybrid search and format results, grouped by execution process.
 
     Args:
-        storage: The storage backend to search against.
+        storage: The storage backend to search against (used when repo is None).
         query: Text search query.
         limit: Maximum number of results (default 20).
         language: Optional language filter (e.g. "python", "elixir"). Case-insensitive.
+        repo: Optional repository slug to query instead of the current directory.
 
     Returns:
         Formatted search results grouped by process, with file, name, label,
         and snippet for each result.
     """
-    query_embedding: list[float] | None = None
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
+        storage = _repo_storage
+
     try:
-        from axon.core.embeddings.embedder import _get_model
+        query_embedding: list[float] | None = None
+        try:
+            from axon.core.embeddings.embedder import _get_model
 
-        model = _get_model(_EMBED_MODEL_NAME)
-        query_embedding = list(next(iter(model.embed([query]))))
-    except (RuntimeError, ValueError, OSError):
-        logger.debug("Query embedding failed, falling back to FTS only", exc_info=True)
+            model = _get_model(_EMBED_MODEL_NAME)
+            query_embedding = list(next(iter(model.embed([query]))))
+        except (RuntimeError, ValueError, OSError):
+            logger.debug("Query embedding failed, falling back to FTS only", exc_info=True)
 
-    results = hybrid_search(query, storage, query_embedding=query_embedding, limit=limit)
+        results = hybrid_search(query, storage, query_embedding=query_embedding, limit=limit)
 
-    if language:
-        lang_lower = language.lower()
-        results = [r for r in results if r.language and r.language.lower() == lang_lower]
+        if language:
+            lang_lower = language.lower()
+            results = [r for r in results if r.language and r.language.lower() == lang_lower]
+            if not results:
+                return f"No results found for '{query}' in language '{language}'."
+
         if not results:
-            return f"No results found for '{query}' in language '{language}'."
+            return f"No results found for '{query}'."
 
-    if not results:
-        return f"No results found for '{query}'."
+        groups = _group_by_process(results, storage)
+        result = _format_query_results(results, groups)
+    finally:
+        if _repo_storage is not None:
+            try:
+                _repo_storage.close()
+            except Exception:  # noqa: BLE001
+                pass
 
-    groups = _group_by_process(results, storage)
-    return _format_query_results(results, groups)
+    log_event("query", query=query[:200], results=len(results), language=language or "", repo=repo or "")
+    return result
 
 def _parse_file_symbol(symbol: str) -> tuple[str | None, str]:
     """Parse a 'file/path.py:symbol_name' string into (file_hint, symbol_name).
@@ -224,7 +267,7 @@ def _parse_file_symbol(symbol: str) -> tuple[str | None, str]:
     return file_hint, sym_name
 
 
-def handle_context(storage: StorageBackend, symbol: str) -> str:
+def handle_context(storage: StorageBackend, symbol: str, repo: str | None = None) -> str:
     """Provide a 360-degree view of a symbol.
 
     Looks up the symbol by name via full-text search, then retrieves its
@@ -242,86 +285,103 @@ def handle_context(storage: StorageBackend, symbol: str) -> str:
     Returns:
         Formatted view including callers, callees, type refs, and guidance.
     """
-    file_hint, sym_name = _parse_file_symbol(symbol)
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
+        storage = _repo_storage
 
-    if file_hint:
-        # File-qualified lookup: find candidates by name, then filter by file path.
-        candidates = storage.fts_search(sym_name, limit=20)
-        matches = [r for r in candidates if r.file_path and r.file_path.endswith(file_hint)]
-        if not matches:
-            return f"Symbol '{sym_name}' not found in '{file_hint}'."
-        results = matches[:1]
-    else:
-        # Unqualified lookup: detect ambiguity across files.
-        candidates = _resolve_symbol(storage, sym_name, limit=5)
-        if not candidates:
+    try:
+        file_hint, sym_name = _parse_file_symbol(symbol)
+
+        if file_hint:
+            # File-qualified lookup: find candidates by name, then filter by file path.
+            candidates = storage.fts_search(sym_name, limit=20)
+            matches = [r for r in candidates if r.file_path and r.file_path.endswith(file_hint)]
+            if not matches:
+                return f"Symbol '{sym_name}' not found in '{file_hint}'."
+            results = matches[:1]
+        else:
+            # Unqualified lookup: detect ambiguity across files.
+            candidates = _resolve_symbol(storage, sym_name, limit=5)
+            if not candidates:
+                return f"Symbol '{sym_name}' not found."
+            # Check for distinct file paths among candidates.
+            seen_files: list[str] = []
+            for r in candidates:
+                if r.file_path and r.file_path not in seen_files:
+                    seen_files.append(r.file_path)
+            if len(seen_files) > 1:
+                lines = [
+                    f"Multiple symbols named '{sym_name}' found. "
+                    "Specify a file path to disambiguate:",
+                    "",
+                ]
+                for i, r in enumerate(candidates, 1):
+                    label = r.label.title() if r.label else "Unknown"
+                    lines.append(f"  {i}. {r.node_name}  ({label}) — {r.file_path}")
+                lines.append("")
+                lines.append(
+                    f'Retry with: axon_context(symbol="path/to/file.py:{sym_name}")'
+                )
+                return "\n".join(lines)
+            results = candidates[:1]
+
+        node = storage.get_node(results[0].node_id)
+        if not node:
             return f"Symbol '{sym_name}' not found."
-        # Check for distinct file paths among candidates.
-        seen_files: list[str] = []
-        for r in candidates:
-            if r.file_path and r.file_path not in seen_files:
-                seen_files.append(r.file_path)
-        if len(seen_files) > 1:
-            lines = [
-                f"Multiple symbols named '{sym_name}' found. "
-                "Specify a file path to disambiguate:",
-                "",
-            ]
-            for i, r in enumerate(candidates, 1):
-                label = r.label.title() if r.label else "Unknown"
-                lines.append(f"  {i}. {r.node_name}  ({label}) — {r.file_path}")
-            lines.append("")
-            lines.append(
-                f'Retry with: axon_context(symbol="path/to/file.py:{sym_name}")'
-            )
-            return "\n".join(lines)
-        results = candidates[:1]
 
-    node = storage.get_node(results[0].node_id)
-    if not node:
-        return f"Symbol '{sym_name}' not found."
+        label_display = node.label.value.title() if node.label else "Unknown"
+        lines = [f"Symbol: {node.name} ({label_display})"]
+        lines.append(f"File: {node.file_path}:{node.start_line}-{node.end_line}")
 
-    label_display = node.label.value.title() if node.label else "Unknown"
-    lines = [f"Symbol: {node.name} ({label_display})"]
-    lines.append(f"File: {node.file_path}:{node.start_line}-{node.end_line}")
+        if node.signature:
+            lines.append(f"Signature: {node.signature}")
 
-    if node.signature:
-        lines.append(f"Signature: {node.signature}")
+        if node.is_dead:
+            lines.append("Status: DEAD CODE (unreachable)")
 
-    if node.is_dead:
-        lines.append("Status: DEAD CODE (unreachable)")
+        try:
+            callers_raw = storage.get_callers_with_confidence(node.id)
+        except (AttributeError, TypeError):
+            callers_raw = [(c, 1.0) for c in storage.get_callers(node.id)]
 
-    try:
-        callers_raw = storage.get_callers_with_confidence(node.id)
-    except (AttributeError, TypeError):
-        callers_raw = [(c, 1.0) for c in storage.get_callers(node.id)]
+        if callers_raw:
+            lines.append(f"\nCallers ({len(callers_raw)}):")
+            for c, conf in callers_raw:
+                tag = _confidence_tag(conf)
+                lines.append(f"  -> {c.name}  {c.file_path}:{c.start_line}{tag}")
 
-    if callers_raw:
-        lines.append(f"\nCallers ({len(callers_raw)}):")
-        for c, conf in callers_raw:
-            tag = _confidence_tag(conf)
-            lines.append(f"  -> {c.name}  {c.file_path}:{c.start_line}{tag}")
+        try:
+            callees_raw = storage.get_callees_with_confidence(node.id)
+        except (AttributeError, TypeError):
+            callees_raw = [(c, 1.0) for c in storage.get_callees(node.id)]
 
-    try:
-        callees_raw = storage.get_callees_with_confidence(node.id)
-    except (AttributeError, TypeError):
-        callees_raw = [(c, 1.0) for c in storage.get_callees(node.id)]
+        if callees_raw:
+            lines.append(f"\nCallees ({len(callees_raw)}):")
+            for c, conf in callees_raw:
+                tag = _confidence_tag(conf)
+                lines.append(f"  -> {c.name}  {c.file_path}:{c.start_line}{tag}")
 
-    if callees_raw:
-        lines.append(f"\nCallees ({len(callees_raw)}):")
-        for c, conf in callees_raw:
-            tag = _confidence_tag(conf)
-            lines.append(f"  -> {c.name}  {c.file_path}:{c.start_line}{tag}")
+        type_refs = storage.get_type_refs(node.id)
+        if type_refs:
+            lines.append(f"\nType references ({len(type_refs)}):")
+            for t in type_refs:
+                lines.append(f"  -> {t.name}  {t.file_path}")
 
-    type_refs = storage.get_type_refs(node.id)
-    if type_refs:
-        lines.append(f"\nType references ({len(type_refs)}):")
-        for t in type_refs:
-            lines.append(f"  -> {t.name}  {t.file_path}")
+        lines.append("")
+        lines.append("Next: Use impact() if planning changes to this symbol.")
+        result = "\n".join(lines)
+    finally:
+        if _repo_storage is not None:
+            try:
+                _repo_storage.close()
+            except Exception:  # noqa: BLE001
+                pass
 
-    lines.append("")
-    lines.append("Next: Use impact() if planning changes to this symbol.")
-    return "\n".join(lines)
+    log_event("context", symbol=symbol[:200], repo=repo or "")
+    return result
 
 _DEPTH_LABELS: dict[int, str] = {
     1: "Direct callers (will break)",
@@ -329,71 +389,89 @@ _DEPTH_LABELS: dict[int, str] = {
 }
 
 
-def handle_impact(storage: StorageBackend, symbol: str, depth: int = 3) -> str:
+def handle_impact(storage: StorageBackend, symbol: str, depth: int = 3, repo: str | None = None) -> str:
     """Analyse the blast radius of changing a symbol, grouped by hop depth.
 
     Uses BFS traversal through CALLS edges to find all affected symbols
     up to the specified depth, then groups results by distance.
 
     Args:
-        storage: The storage backend.
+        storage: The storage backend (used when repo is None).
         symbol: The symbol name to analyse.
         depth: Maximum traversal depth (default 3).
+        repo: Optional repository slug to query instead of the current directory.
 
     Returns:
         Formatted impact analysis with depth-grouped sections.
     """
-    depth = max(1, min(depth, MAX_TRAVERSE_DEPTH))
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
+        storage = _repo_storage
 
-    results = _resolve_symbol(storage, symbol)
-    if not results:
-        return f"Symbol '{symbol}' not found."
-
-    start_node = storage.get_node(results[0].node_id)
-    if not start_node:
-        return f"Symbol '{symbol}' not found."
-
-    affected_with_depth = storage.traverse_with_depth(
-        start_node.id, depth, direction="callers"
-    )
-    if not affected_with_depth:
-        return f"No upstream callers found for '{symbol}'."
-
-    # Group by depth
-    by_depth: dict[int, list] = {}
-    for node, d in affected_with_depth:
-        by_depth.setdefault(d, []).append(node)
-
-    total = len(affected_with_depth)
-    label_display = start_node.label.value.title()
-    lines = [f"Impact analysis for: {start_node.name} ({label_display})"]
-    lines.append(f"Depth: {depth} | Total: {total} symbols")
-
-    # Build confidence lookup for depth-1 (direct callers) display
-    conf_lookup: dict[str, float] = {}
     try:
-        for node, conf in storage.get_callers_with_confidence(start_node.id):
-            conf_lookup[node.id] = conf
-    except (AttributeError, TypeError):
-        pass
+        depth = max(1, min(depth, MAX_TRAVERSE_DEPTH))
 
-    counter = 1
-    for d in sorted(by_depth.keys()):
-        depth_label = _DEPTH_LABELS.get(d, "Transitive (review)")
-        lines.append(f"\nDepth {d} — {depth_label}:")
-        for node in by_depth[d]:
-            label = node.label.value.title() if node.label else "Unknown"
-            conf = conf_lookup.get(node.id)
-            tag = f"  (confidence: {conf:.2f})" if conf is not None else ""
-            lines.append(
-                f"  {counter}. {node.name} ({label}) -- "
-                f"{node.file_path}:{node.start_line}{tag}"
-            )
-            counter += 1
+        results = _resolve_symbol(storage, symbol)
+        if not results:
+            return f"Symbol '{symbol}' not found."
 
-    lines.append("")
-    lines.append("Tip: Review each affected symbol before making changes.")
-    return "\n".join(lines)
+        start_node = storage.get_node(results[0].node_id)
+        if not start_node:
+            return f"Symbol '{symbol}' not found."
+
+        affected_with_depth = storage.traverse_with_depth(
+            start_node.id, depth, direction="callers"
+        )
+        if not affected_with_depth:
+            return f"No upstream callers found for '{symbol}'."
+
+        # Group by depth
+        by_depth: dict[int, list] = {}
+        for node, d in affected_with_depth:
+            by_depth.setdefault(d, []).append(node)
+
+        total = len(affected_with_depth)
+        label_display = start_node.label.value.title()
+        lines = [f"Impact analysis for: {start_node.name} ({label_display})"]
+        lines.append(f"Depth: {depth} | Total: {total} symbols")
+
+        # Build confidence lookup for depth-1 (direct callers) display
+        conf_lookup: dict[str, float] = {}
+        try:
+            for node, conf in storage.get_callers_with_confidence(start_node.id):
+                conf_lookup[node.id] = conf
+        except (AttributeError, TypeError):
+            pass
+
+        counter = 1
+        for d in sorted(by_depth.keys()):
+            depth_label = _DEPTH_LABELS.get(d, "Transitive (review)")
+            lines.append(f"\nDepth {d} — {depth_label}:")
+            for node in by_depth[d]:
+                label = node.label.value.title() if node.label else "Unknown"
+                conf = conf_lookup.get(node.id)
+                tag = f"  (confidence: {conf:.2f})" if conf is not None else ""
+                lines.append(
+                    f"  {counter}. {node.name} ({label}) -- "
+                    f"{node.file_path}:{node.start_line}{tag}"
+                )
+                counter += 1
+
+        lines.append("")
+        lines.append("Tip: Review each affected symbol before making changes.")
+        result = "\n".join(lines)
+    finally:
+        if _repo_storage is not None:
+            try:
+                _repo_storage.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    log_event("impact", symbol=symbol[:200], repo=repo or "")
+    return result
 
 def handle_dead_code(storage: StorageBackend) -> str:
     """List all symbols marked as dead code.
