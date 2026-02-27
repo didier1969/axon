@@ -12,7 +12,7 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 | Attribute | Value |
 |-----------|-------|
-| Version | 0.3.0 |
+| Version | 0.4.0 |
 | Status | Active Development |
 | Last Updated | 2026-02-27 |
 
@@ -30,16 +30,18 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] CI integration (dead-code --exit-code gate, GitHub Actions + pre-commit templates) — Phase 3
 - [x] MCP query ergonomics (language filter, file:symbol disambiguation, deprecation warnings) — Phase 3
 - [x] Developer documentation (README updated, getting-started guide) — Phase 3
+- [x] Performance optimization (batch Cypher inserts, async embeddings, profiling) — v0.4 Phase 1, Plan 01-01
+- [x] Code quality consolidation (exception specificity, kuzu_backend split, version 0.4.0) — v0.4 Phase 1, Plan 01-02
+- [x] Markdown parser upgrade (tree-sitter, frontmatter, pipe tables) — v0.4 Phase 1, Plan 01-03
+- [x] New language parsers (Go, YAML/TOML, SQL, HTML, CSS → 12 total) — v0.4 Phase 1, Plan 01-03
+- [x] Multi-repo intelligence (cross-repo MCP queries via optional repo= param) — v0.4 Phase 1, Plan 01-04
+- [x] Usage analytics (events.jsonl logging + axon stats CLI command) — v0.4 Phase 1, Plan 01-04
 
 ### Active (In Progress)
-- [ ] Performance optimization (batch Cypher, async embeddings, profiling)
-- [ ] Code quality consolidation (error handling, kuzu_backend split, version bump)
-- [ ] Markdown parser upgrade (tree-sitter, frontmatter, tables)
-- [ ] New language parsers (Go, YAML/TOML, SQL, HTML/CSS → 10 total)
-- [ ] Multi-repo intelligence (cross-repo MCP queries)
+(None — v0.4 complete)
 
 ### Planned (Next)
-(To be defined after v0.4)
+(To be defined for v0.5)
 
 ### Out of Scope
 - GUI / web interface — CLI and MCP-first
@@ -74,14 +76,20 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 | Rust struct/enum/trait → NodeLabel.CLASS | Type-defining constructs unified under CLASS for simpler queries | 2026-02-26 | Active |
 | Content hash (sha256) for incremental diff | Reliable across copies/moves; content already in memory | 2026-02-26 | Active |
 | max_workers=None → ThreadPoolExecutor default | Let stdlib pick min(32, cpu_count+4); no app-level os.cpu_count() | 2026-02-26 | Active |
+| storage_load is 98%+ of indexing time | Future perf work must target KuzuDB bulk_load, not pipeline phases | 2026-02-27 | Active |
+| Async embeddings via ThreadPoolExecutor | Pipeline returns immediately, embeddings continue in background | 2026-02-27 | Active |
+| KuzuDB raises plain RuntimeError | No kuzu-specific exception type exists; all except blocks use RuntimeError | 2026-02-27 | Active |
+| events.jsonl global at ~/.axon/events.jsonl | One log for all repos on the machine; consistent with global registry | 2026-02-27 | Active |
+| log_event() never raises | Analytics failure must never block main flow; BLE001 catch-all | 2026-02-27 | Active |
+| repo= opens/closes KuzuBackend per request | No caching needed for read-only queries; avoids connection leaks | 2026-02-27 | Active |
 
 ## Success Metrics
 
 | Metric | Target | Current | Status |
 |--------|--------|---------|--------|
-| Languages supported | 10+ | 6 (Python, TS, JS, Elixir, Rust, Markdown) | In progress |
-| Large project indexing | <60s for 100k LOC | Warm: ~8ms; Cold: ~0.89s (85 files) | In progress |
-| Workflow integration | Zero-friction on session start | shell-hook + direnv + CI templates + docs | Shipped |
+| Languages supported | 10+ | 12 (Python, TS, JS, Elixir, Rust, Markdown, Go, YAML/TOML, SQL, HTML, CSS) | ✅ Shipped |
+| Large project indexing | <60s for 100k LOC | Warm: ~8ms; Cold: ~0.89s (85 files) | ✅ Shipped |
+| Workflow integration | Zero-friction on session start | shell-hook + direnv + CI templates + docs | ✅ Shipped |
 
 ## Tech Stack
 
@@ -95,4 +103,4 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-02-27 — Milestone v0.4 Consolidation & Scale started*
+*Last updated: 2026-02-27 — v0.4 Consolidation & Scale complete (all 4 plans shipped)*
