@@ -32,10 +32,14 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] Developer documentation (README updated, getting-started guide) — Phase 3
 
 ### Active (In Progress)
-(None — milestone v0.3 complete)
+- [ ] Performance optimization (batch Cypher, async embeddings, profiling)
+- [ ] Code quality consolidation (error handling, kuzu_backend split, version bump)
+- [ ] Markdown parser upgrade (tree-sitter, frontmatter, tables)
+- [ ] New language parsers (Go, YAML/TOML, SQL, HTML/CSS → 10 total)
+- [ ] Multi-repo intelligence (cross-repo MCP queries)
 
 ### Planned (Next)
-(To be defined in next milestone)
+(To be defined after v0.4)
 
 ### Out of Scope
 - GUI / web interface — CLI and MCP-first
@@ -91,4 +95,4 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-02-27 after Phase 3 (Workflow Integration) — Milestone v0.3 complete*
+*Last updated: 2026-02-27 — Milestone v0.4 Consolidation & Scale started*

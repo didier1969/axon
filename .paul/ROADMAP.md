@@ -6,11 +6,13 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 ## Current Milestone
 
-**v0.3 Workflow Integration** (v0.3.0)
-Status: Complete
-Phases: 3 of 3 complete
+**v0.4 Consolidation & Scale** (v0.4.0)
+Status: In progress
+Phases: 0 of 1 complete
 
-## Phases
+## Milestones
+
+### v0.3 Workflow Integration — ✅ Complete (2026-02-27)
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
@@ -18,60 +20,34 @@ Phases: 3 of 3 complete
 | 2 | Large Project Performance | 3 | ✅ Complete | 2026-02-26 |
 | 3 | Workflow Integration | 4 | ✅ Complete | 2026-02-27 |
 
-## Phase Details
+### v0.4 Consolidation & Scale — 🔵 In Progress
 
-### Phase 1: Language Coverage
+| Phase | Name | Plans | Status | Completed |
+|-------|------|-------|--------|-----------|
+| 1 | Consolidation & Scale | TBD | Planning | - |
 
-**Goal:** All languages used across developer's projects are parsed correctly
-**Depends on:** Nothing (first phase)
-**Research:** Unlikely (Tree-sitter parsers are established)
+## Phase Details (v0.4)
 
-**Scope:**
-- Elixir parser
-- Rust parser
-- Markdown parser
-- Test coverage for all new parsers
+### Phase 1: Consolidation & Scale
 
-**Plans:**
-- [ ] 01-01: Elixir parser + tests
-- [ ] 01-02: Rust parser + tests
-- [ ] 01-03: Markdown parser + tests
-
-### Phase 2: Large Project Performance
-
-**Goal:** Axon indexes and re-indexes massive projects (100k+ LOC) without blocking the developer
-**Depends on:** Phase 1 (language coverage complete)
-**Research:** Likely (incremental indexing strategies, concurrency models)
-**Research topics:** Chunking strategies, parallel parsing, incremental diff-based re-indexing
+**Goal:** Harden performance, improve code quality, extend language coverage to 10, and enable cross-repo intelligence
+**Depends on:** v0.3 complete
+**Research:** Likely (Go/YAML/SQL parsers, multi-repo query patterns, batch Cypher strategies)
 
 **Scope:**
-- Benchmark suite for large project indexing
-- Incremental/differential re-indexing
-- Concurrency / worker pool for parsing
+- Performance: batch Cypher inserts, async embeddings, profile & optimize slow repos
+- Code quality: fix bare except handlers, split kuzu_backend.py, version bump
+- Markdown parser: upgrade from regex to tree-sitter, add frontmatter/tables
+- New languages: Go, YAML/TOML, SQL, HTML/CSS (reach 10 total)
+- Multi-repo: cross-repo MCP queries
 
 **Plans:**
-- [ ] 02-01: Benchmark baseline on large repos
-- [ ] 02-02: Incremental indexing (file-level delta)
-- [ ] 02-03: Parallel parsing worker pool
-
-### Phase 3: Workflow Integration
-
-**Goal:** Axon is zero-friction on every project session start — auto-detected, auto-started, auto-queried
-**Depends on:** Phase 2 (performance acceptable)
-**Research:** Likely (CI hooks, shell integration, MCP query patterns)
-
-**Scope:**
-- Shell/devtools integration (auto-start on cd)
-- CI pipeline integration
-- Refined MCP query API for agent consumption
-- Documentation and onboarding
-
-**Plans:**
-- [x] 03-01: Shell integration (direnv / hook) — 2026-02-26
-- [x] 03-02: CI integration guide + config templates — 2026-02-26
-- [x] 03-03: MCP query API refinement — 2026-02-26
-- [x] 03-04: Developer documentation — 2026-02-27
+- [ ] 01-01: Performance optimization (batch inserts, async embeddings, profiling)
+- [ ] 01-02: Code quality consolidation (error handling, kuzu_backend split, version bump)
+- [ ] 01-03: Markdown parser upgrade (tree-sitter, frontmatter, tables)
+- [ ] 01-04: New language parsers (Go, YAML/TOML, SQL, HTML/CSS)
+- [ ] 01-05: Multi-repo intelligence (cross-repo MCP queries)
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-02-27 — Milestone v0.3 complete*
+*Last updated: 2026-02-27 — Milestone v0.4 started*
