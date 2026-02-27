@@ -100,10 +100,36 @@ def get_parser(language: str) -> LanguageParser:
 
         parser = MarkdownParser()
 
+    elif language == "go":
+        from axon.core.parsers.go_lang import GoParser
+
+        parser = GoParser()
+
+    elif language in ("yaml", "toml"):
+        from axon.core.parsers.yaml_lang import YamlParser
+
+        parser = YamlParser()
+
+    elif language == "sql":
+        from axon.core.parsers.sql_lang import SqlParser
+
+        parser = SqlParser()
+
+    elif language == "html":
+        from axon.core.parsers.html_lang import HtmlParser
+
+        parser = HtmlParser()
+
+    elif language == "css":
+        from axon.core.parsers.css_lang import CssParser
+
+        parser = CssParser()
+
     else:
         raise ValueError(
             f"Unsupported language {language!r}. "
-            f"Expected one of: python, typescript, javascript, elixir, rust, markdown"
+            f"Expected one of: python, typescript, javascript, elixir, rust, "
+            f"markdown, go, yaml, toml, sql, html, css"
         )
 
     _PARSER_CACHE[language] = parser

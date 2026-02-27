@@ -16,6 +16,15 @@ SUPPORTED_EXTENSIONS: dict[str, str] = {
     ".exs": "elixir",
     ".rs": "rust",
     ".md": "markdown",
+    ".go": "go",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".toml": "toml",
+    ".sql": "sql",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "css",
 }
 
 def get_language(file_path: str | Path) -> str | None:
