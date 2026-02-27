@@ -40,7 +40,7 @@ def get_overview(storage: StorageBackend) -> str:
             lines.append(f"  Total: {total}")
         else:
             lines.append("No nodes indexed yet.")
-    except Exception:
+    except (RuntimeError, ValueError):
         lines.append("Could not retrieve node counts.")
 
     lines.append("")
@@ -60,7 +60,7 @@ def get_overview(storage: StorageBackend) -> str:
             lines.append(f"  Total: {total}")
         else:
             lines.append("No relationships indexed yet.")
-    except Exception:
+    except (RuntimeError, ValueError):
         lines.append("Could not retrieve relationship counts.")
 
     return "\n".join(lines)
@@ -79,7 +79,7 @@ def get_dead_code_list(storage: StorageBackend) -> str:
             "MATCH (n) WHERE n.is_dead = true "
             "RETURN n.name, n.file_path, n.start_line ORDER BY n.file_path"
         )
-    except Exception:
+    except (RuntimeError, ValueError):
         return "Could not retrieve dead code list."
 
     if not rows:

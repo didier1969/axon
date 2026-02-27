@@ -171,7 +171,7 @@ def analyze(
 
     try:
         _register_in_global_registry(meta, repo_path)
-    except Exception:
+    except (OSError, ValueError, KeyError):
         logger.debug("Failed to register repo in global registry", exc_info=True)
 
     console.print()

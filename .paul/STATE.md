@@ -11,20 +11,20 @@ See: .paul/PROJECT.md (updated 2026-02-27 after v0.3 complete)
 
 Milestone: v0.4 Consolidation & Scale
 Phase: 1 of 1 (Consolidation & Scale) — Executing
-Plan: 01-01 executed, ready for UNIFY
-Status: APPLY complete, all 3 tasks passed
-Last activity: 2026-02-27 — Plan 01-01 APPLY complete
+Plan: 01-02 complete, loop closed
+Status: Ready for next PLAN (01-03)
+Last activity: 2026-02-27 — Plan 01-02 UNIFY complete
 
 Progress:
-- Milestone: [██░░░░░░░░] 20%
-- Phase 1: [██░░░░░░░░] 20%
+- Milestone: [███░░░░░░░] 33%
+- Phase 1: [███░░░░░░░] 33% (2/6 plans complete)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ○     [APPLY complete, ready for UNIFY]
+  ✓        ✓        ✓     [Loop closed, ready for next PLAN]
 ```
 
 ## Accumulated Context
@@ -38,6 +38,8 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | max_workers=None → ThreadPoolExecutor default | v0.3 Phase 2 | CPU-adaptive |
 | storage_load is 98%+ of indexing time (not pipeline phases) | v0.4 Plan 01-01 | Future perf work must target KuzuDB bulk_load |
 | Async embeddings via ThreadPoolExecutor (default: non-blocking) | v0.4 Plan 01-01 | Pipeline returns immediately, embeddings in background |
+| KuzuDB has no specific exception types — raises plain RuntimeError | v0.4 Plan 01-02 | All except blocks use RuntimeError (not kuzu.RuntimeError) |
+| kuzu_backend split: schema/search/bulk as internal modules, class stays public API | v0.4 Plan 01-02 | Shared constants stay in kuzu_backend.py, imported by submodules |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
@@ -51,14 +53,14 @@ None.
 ## Session Continuity
 
 Last session: 2026-02-27
-Stopped at: Plan 01-01 APPLY complete, paused before UNIFY
-Next action: /paul:unify for plan 01-01
-Resume file: .paul/HANDOFF-2026-02-27.md
+Stopped at: Plan 01-02 UNIFY complete
+Next action: /paul:plan for 01-03 (Markdown parser upgrade)
+Resume file: .paul/ROADMAP.md
 Resume context:
-- Plan 01-01 fully executed (3/3 tasks), needs UNIFY to close loop
-- 687 tests pass (678 + 9 new), no regressions
-- Key finding: storage_load is 98%+ of indexing time
-- Uncommitted changes in kuzu_backend.py, pipeline.py, cli/main.py + tests
+- Plans 01-01 and 01-02 complete (2/6 in Phase 1)
+- Codebase at v0.4.0, clean exception handling, modular storage
+- 687 tests passing, no regressions
+- Next plan: 01-03 Markdown parser upgrade (tree-sitter, frontmatter, tables)
 
 ---
 *STATE.md — Updated after every significant action*

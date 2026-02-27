@@ -193,7 +193,7 @@ def handle_query(
 
         model = _get_model(_EMBED_MODEL_NAME)
         query_embedding = list(next(iter(model.embed([query]))))
-    except Exception:
+    except (RuntimeError, ValueError, OSError):
         logger.debug("Query embedding failed, falling back to FTS only", exc_info=True)
 
     results = hybrid_search(query, storage, query_embedding=query_embedding, limit=limit)
@@ -474,7 +474,7 @@ def handle_detect_changes(storage: StorageBackend, diff: str) -> str:
                             (name, label_prefix.title(), start_line, end_line)
                         )
                         break
-        except Exception as exc:
+        except (RuntimeError, ValueError) as exc:
             logger.warning("Failed to query symbols for %s: %s", file_path, exc, exc_info=True)
             lines.append(f"  {file_path}:")
             lines.append(f"    (error querying symbols: {exc})")
@@ -521,7 +521,7 @@ def handle_cypher(storage: StorageBackend, query: str) -> str:
 
     try:
         rows = storage.execute_raw(query)
-    except Exception as exc:
+    except (RuntimeError, ValueError) as exc:
         return f"Cypher query failed: {exc}"
 
     if not rows:

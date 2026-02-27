@@ -8,7 +8,7 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 **v0.4 Consolidation & Scale** (v0.4.0)
 Status: In progress
-Phases: 0 of 1 complete
+Phases: 0 of 1 complete (2/6 plans done)
 
 ## Milestones
 
@@ -24,7 +24,7 @@ Phases: 0 of 1 complete
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
-| 1 | Consolidation & Scale | 5 | Planning | - |
+| 1 | Consolidation & Scale | 6 | Planning | - |
 
 ## Phase Details (v0.4)
 
@@ -40,14 +40,16 @@ Phases: 0 of 1 complete
 - Markdown parser: upgrade from regex to tree-sitter, add frontmatter/tables
 - New languages: Go, YAML/TOML, SQL, HTML/CSS (reach 10 total)
 - Multi-repo: cross-repo MCP queries
+- Usage analytics: event logging for MCP queries and pipeline runs, `axon stats` CLI command
 
 **Plans:**
-- [ ] 01-01: Performance optimization (batch inserts, async embeddings, profiling)
-- [ ] 01-02: Code quality consolidation (error handling, kuzu_backend split, version bump)
+- [x] 01-01: Performance optimization (batch inserts, async embeddings, profiling)
+- [x] 01-02: Code quality consolidation (error handling, kuzu_backend split, version bump)
 - [ ] 01-03: Markdown parser upgrade (tree-sitter, frontmatter, tables)
 - [ ] 01-04: New language parsers (Go, YAML/TOML, SQL, HTML/CSS)
 - [ ] 01-05: Multi-repo intelligence (cross-repo MCP queries)
+- [ ] 01-06: Usage analytics (event logging, `axon stats` command, per-project query/indexing counts)
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-02-27 — Milestone v0.4 started*
+*Last updated: 2026-02-27 — Plan 01-02 complete (code quality consolidation)*

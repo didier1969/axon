@@ -358,8 +358,8 @@ class TestBatchAddNodes:
         assert backend.get_node(method.id) is not None
 
     def test_batch_fallback_on_csv_failure(self, backend: KuzuBackend, monkeypatch) -> None:
-        """When _csv_copy raises, add_nodes falls back to individual inserts."""
-        original_csv_copy = backend._csv_copy
+        """When csv_copy raises, add_nodes falls back to individual inserts."""
+        import axon.core.storage.kuzu_bulk as _bulk_mod
         call_count = {"csv": 0, "insert": 0}
 
         def failing_csv_copy(*args, **kwargs):
@@ -371,7 +371,7 @@ class TestBatchAddNodes:
             call_count["insert"] += 1
             return original_insert(node)
 
-        monkeypatch.setattr(backend, "_csv_copy", failing_csv_copy)
+        monkeypatch.setattr(_bulk_mod, "csv_copy", failing_csv_copy)
         monkeypatch.setattr(backend, "_insert_node", tracking_insert)
 
         nodes = [_make_node(name=f"fb_{i}", file_path="src/fb.py") for i in range(3)]
@@ -405,7 +405,8 @@ class TestBatchAddRelationships:
         backend.add_relationships([])
 
     def test_batch_rels_fallback_on_csv_failure(self, backend: KuzuBackend, monkeypatch) -> None:
-        """When _csv_copy raises, add_relationships falls back to individual inserts."""
+        """When csv_copy raises, add_relationships falls back to individual inserts."""
+        import axon.core.storage.kuzu_bulk as _bulk_mod
         nodes = [_make_node(name=f"rf_{i}", file_path="src/rf.py") for i in range(2)]
         backend.add_nodes(nodes)
 
@@ -420,7 +421,7 @@ class TestBatchAddRelationships:
             call_count["insert"] += 1
             return original_insert(rel)
 
-        monkeypatch.setattr(backend, "_csv_copy", failing_csv_copy)
+        monkeypatch.setattr(_bulk_mod, "csv_copy", failing_csv_copy)
         monkeypatch.setattr(backend, "_insert_relationship", tracking_insert)
 
         rels = [_make_rel(nodes[0].id, nodes[1].id)]

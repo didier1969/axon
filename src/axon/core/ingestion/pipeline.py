@@ -112,7 +112,7 @@ def _run_embeddings(
         result.phase_timings.embeddings = time.monotonic() - _t
         result.embeddings = len(node_embeddings)
         report("Generating embeddings", 1.0)
-    except Exception:
+    except (RuntimeError, ValueError, OSError):
         _logger.warning(
             "Embedding phase failed — search will use FTS only",
             exc_info=True,

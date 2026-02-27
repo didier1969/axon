@@ -127,7 +127,7 @@ def parse_file(file_path: str, content: str, language: str) -> FileParseData:
     try:
         parser = get_parser(language)
         result = parser.parse(content, file_path)
-    except Exception:
+    except (RuntimeError, ValueError, OSError):
         logger.warning("Failed to parse %s (%s), skipping", file_path, language, exc_info=True)
         result = ParseResult()
 
