@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -56,11 +57,15 @@ def tmp_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def storage(tmp_path: Path) -> KuzuBackend:
-    """Provide an initialised KuzuBackend for testing."""
+def storage(tmp_path: Path, kuzu_template: Path) -> KuzuBackend:
+    """Provide an initialized KuzuBackend by copying the session schema template.
+
+    Saves 4-5s per test vs. calling initialize() from scratch.
+    """
     db_path = tmp_path / "test_db"
+    shutil.copy2(str(kuzu_template), str(db_path))
     backend = KuzuBackend()
-    backend.initialize(db_path)
+    backend.initialize(db_path)  # all IF NOT EXISTS: no-ops
     yield backend
     backend.close()
 
@@ -76,7 +81,7 @@ class TestRunPipelineBasic:
     def test_run_pipeline_basic(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        _, result = run_pipeline(tmp_repo, storage)
+        _, result = run_pipeline(tmp_repo, storage, embeddings=False)
 
         assert isinstance(result, PipelineResult)
         assert result.duration_seconds > 0.0
@@ -93,7 +98,7 @@ class TestRunPipelineFileCount:
     def test_run_pipeline_file_count(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        _, result = run_pipeline(tmp_repo, storage)
+        _, result = run_pipeline(tmp_repo, storage, embeddings=False)
 
         assert result.files == 3
 
@@ -109,7 +114,7 @@ class TestRunPipelineFindsSymbols:
     def test_run_pipeline_finds_symbols(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        _, result = run_pipeline(tmp_repo, storage)
+        _, result = run_pipeline(tmp_repo, storage, embeddings=False)
 
         assert result.symbols >= 3
 
@@ -125,7 +130,7 @@ class TestRunPipelineFindsRelationships:
     def test_run_pipeline_finds_relationships(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        _, result = run_pipeline(tmp_repo, storage)
+        _, result = run_pipeline(tmp_repo, storage, embeddings=False)
 
         assert result.relationships > 0
 
@@ -146,7 +151,7 @@ class TestRunPipelineProgressCallback:
         def callback(phase: str, pct: float) -> None:
             calls.append((phase, pct))
 
-        run_pipeline(tmp_repo, storage, progress_callback=callback)
+        run_pipeline(tmp_repo, storage, progress_callback=callback, embeddings=False)
 
         # At minimum, every phase should report start (0.0) and end (1.0).
         assert len(calls) >= 2
@@ -172,7 +177,7 @@ class TestRunPipelineLoadsToStorage:
     def test_run_pipeline_loads_to_storage(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        run_pipeline(tmp_repo, storage)
+        run_pipeline(tmp_repo, storage, embeddings=False)
 
         # File nodes should be stored. The walker produces paths relative to
         # repo root, so "src/main.py" should exist as a File node.
@@ -243,9 +248,10 @@ def rich_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def rich_storage(tmp_path: Path) -> KuzuBackend:
-    """Provide an initialised KuzuBackend for the rich repo tests."""
+def rich_storage(tmp_path: Path, kuzu_template: Path) -> KuzuBackend:
+    """Provide an initialized KuzuBackend for the rich repo tests."""
     db_path = tmp_path / "rich_db"
+    shutil.copy2(str(kuzu_template), str(db_path))
     backend = KuzuBackend()
     backend.initialize(db_path)
     yield backend
@@ -263,7 +269,7 @@ class TestRunPipelineFullPhases:
     def test_run_pipeline_full_phases(
         self, rich_repo: Path, rich_storage: KuzuBackend
     ) -> None:
-        _, result = run_pipeline(rich_repo, rich_storage)
+        _, result = run_pipeline(rich_repo, rich_storage, embeddings=False)
 
         # Basic sanity checks.
         assert isinstance(result, PipelineResult)
@@ -307,7 +313,7 @@ class TestRunPipelineProgressIncludesNewPhases:
         def callback(phase: str, pct: float) -> None:
             calls.append((phase, pct))
 
-        run_pipeline(rich_repo, rich_storage, progress_callback=callback)
+        run_pipeline(rich_repo, rich_storage, progress_callback=callback, embeddings=False)
 
         phase_names = {name for name, _ in calls}
 
@@ -396,10 +402,9 @@ class TestRunPipelineEmbeddings:
 
         with patch("axon.core.ingestion.pipeline.embed_graph", return_value=[]):
             _, result = run_pipeline(rich_repo, rich_storage, wait_embeddings=False)
-
-        assert result.embedding_future is not None
-        # Wait for the background thread to complete.
-        result.embedding_future.result(timeout=10)
+            assert result.embedding_future is not None
+            # Wait for the background thread while patch is still active.
+            result.embedding_future.result(timeout=10)
 
     def test_wait_embeddings_blocks(
         self, rich_repo: Path, rich_storage: KuzuBackend

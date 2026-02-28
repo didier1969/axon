@@ -6,12 +6,37 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 ## Current Milestone
 
-**Awaiting next milestone**
-Run `/paul:discuss-milestone` or `/paul:milestone` to define.
+**v0.5 Hardening**
+Status: 🚧 In Progress
+Phases: 1 of 2 complete
+
+| Phase | Name | Plans | Status | Completed |
+|-------|------|-------|--------|-----------|
+| 1 | Test Quality & Bug Fixes | 2/2 | ✅ Complete | 2026-02-28 |
+| 2 | Parser & Performance | TBD | Not started | - |
+
+### Phase 1: Test Quality & Bug Fixes ✅
+
+Focus: Fix test infrastructure issues and analytics pollution bugs
+Plans: 2/2 complete
+
+- ✅ events.jsonl isolated via autouse conftest fixture (plan 01-01)
+- ✅ Async embeddings race fixed: future.result() inside patch block (plan 01-02)
+- ✅ test_watcher.py: 102s → 28s via session-scoped pre-indexed template (plan 01-02)
+- ✅ test_pipeline.py: 166s → 81s via session-scoped schema template (plan 01-02)
+- ✅ Watcher aggressiveness hotfix: embeddings now on 60s interval not 30s (plan 01-02)
+
+### Phase 2: Parser & Performance
+
+Focus: Close parser gaps and parallelize graph algorithms
+Plans: TBD (defined during /paul:plan)
+
+- Elixir `use` → heritage relationship (currently logs warnings on every Elixir project)
+- Community detection parallelization (19% cold-start overhead, currently sequential)
 
 ## Next Milestone
 
-Run `/paul:discuss-milestone` or `/paul:milestone` to define v0.5 scope.
+TBD after v0.5 complete.
 
 ## Completed Milestones
 
@@ -37,4 +62,4 @@ Run `/paul:discuss-milestone` or `/paul:milestone` to define v0.5 scope.
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-02-27 — v0.4 complete, awaiting v0.5 definition*
+*Last updated: 2026-02-28 — v0.5 Hardening milestone created*

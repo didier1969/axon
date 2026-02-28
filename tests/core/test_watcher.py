@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -39,11 +40,16 @@ def tmp_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def storage(tmp_path: Path) -> KuzuBackend:
-    """Provide an initialised KuzuBackend for testing."""
+def storage(tmp_path: Path, watcher_indexed_template: Path) -> KuzuBackend:
+    """Provide a KuzuBackend pre-indexed with src/app.py + src/utils.py.
+
+    Copies the session-level pre-indexed template instead of calling
+    run_pipeline() from scratch, saving 9-12s per test.
+    """
     db_path = tmp_path / "test_db"
+    shutil.copy2(str(watcher_indexed_template), str(db_path))
     backend = KuzuBackend()
-    backend.initialize(db_path)
+    backend.initialize(db_path)  # schema already present: IF NOT EXISTS no-ops
     yield backend
     backend.close()
 
@@ -97,9 +103,6 @@ class TestReindexFiles:
     def test_reindex_updates_content(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        # Initial full index.
-        run_pipeline(tmp_repo, storage)
-
         # Verify initial node exists.
         node = storage.get_node("function:src/app.py:hello")
         assert node is not None
@@ -128,9 +131,6 @@ class TestReindexFiles:
     def test_reindex_handles_new_symbols(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        # Initial full index.
-        run_pipeline(tmp_repo, storage)
-
         # Add a new function to the file.
         (tmp_repo / "src" / "app.py").write_text(
             "def hello():\n"
@@ -155,8 +155,6 @@ class TestReindexFiles:
     def test_reindex_removes_deleted_symbols(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        # Initial full index.
-        run_pipeline(tmp_repo, storage)
         assert storage.get_node("function:src/app.py:hello") is not None
 
         # Remove the function.
@@ -187,8 +185,6 @@ class TestWatcherReindexFiles:
     def test_reindexes_changed_files(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        run_pipeline(tmp_repo, storage)
-
         # Modify a file.
         app_path = tmp_repo / "src" / "app.py"
         app_path.write_text(
@@ -206,8 +202,6 @@ class TestWatcherReindexFiles:
     def test_skips_ignored_files(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        run_pipeline(tmp_repo, storage)
-
         # Create a file in an ignored directory.
         cache_dir = tmp_repo / "__pycache__"
         cache_dir.mkdir()
@@ -221,8 +215,6 @@ class TestWatcherReindexFiles:
     def test_skips_unsupported_files(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        run_pipeline(tmp_repo, storage)
-
         data_file = tmp_repo / "data.csv"
         data_file.write_text("a,b,c", encoding="utf-8")
 
@@ -233,8 +225,6 @@ class TestWatcherReindexFiles:
     def test_handles_deleted_files(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        run_pipeline(tmp_repo, storage)
-
         # File exists in storage but is now deleted from disk.
         deleted_path = tmp_repo / "src" / "app.py"
         assert storage.get_node("file:src/app.py:") is not None
@@ -249,8 +239,6 @@ class TestWatcherReindexFiles:
     def test_handles_multiple_files(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
-        run_pipeline(tmp_repo, storage)
-
         # Modify both files.
         (tmp_repo / "src" / "app.py").write_text(
             "def hello():\n    return 'v2'\n",

@@ -72,17 +72,30 @@ def _reindex_files(
 
     return len(entries)
 
-def _run_global_phases(storage: StorageBackend, repo_path: Path) -> None:
+def _run_global_phases(
+    storage: StorageBackend,
+    repo_path: Path,
+    with_embeddings: bool = False,
+) -> None:
     """Run global analysis phases (communities, processes, dead code).
 
     Rebuilds the full in-memory graph from storage is not practical for
     incremental mode, so we run a full pipeline refresh.  In practice this
     is fast because the storage is already populated.
+
+    Embeddings are intentionally excluded by default — they are expensive
+    and run on a separate, longer interval (EMBEDDING_INTERVAL).
     """
     from axon.core.ingestion.pipeline import run_pipeline
 
-    run_pipeline(repo_path, storage=storage, full=True)
-    logger.info("Global phases completed")
+    run_pipeline(
+        repo_path,
+        storage=storage,
+        full=True,
+        embeddings=with_embeddings,
+        wait_embeddings=False,
+    )
+    logger.info("Global phases completed (embeddings=%s)", with_embeddings)
 
 async def watch_repo(
     repo_path: Path,
@@ -118,6 +131,7 @@ async def watch_repo(
     gitignore = load_gitignore(repo_path)
     dirty = False
     last_global = time.monotonic()
+    last_embed = time.monotonic()
     files_changed = 0
 
     logger.info("Watching %s for changes...", repo_path)
@@ -145,9 +159,14 @@ async def watch_repo(
 
         now = time.monotonic()
         if dirty and (now - last_global) >= GLOBAL_PHASE_INTERVAL:
-            logger.info("Running global analysis phases...")
-            await _run_sync(_run_global_phases, storage, repo_path)
+            with_embeddings = (now - last_embed) >= EMBEDDING_INTERVAL
+            logger.info(
+                "Running global analysis phases (embeddings=%s)...", with_embeddings
+            )
+            await _run_sync(_run_global_phases, storage, repo_path, with_embeddings)
             dirty = False
             last_global = now
+            if with_embeddings:
+                last_embed = now
 
     logger.info("Watch stopped. Total files reindexed: %d", files_changed)
