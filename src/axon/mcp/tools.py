@@ -25,6 +25,21 @@ MAX_TRAVERSE_DEPTH = 10
 def _escape_cypher(value: str) -> str:
     """Escape a string for safe inclusion in a Cypher string literal."""
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+def _repo_name_from_storage(storage: StorageBackend, explicit_repo: str | None) -> str:
+    """Resolve the repo name for analytics logging.
+
+    Uses the explicit repo param when provided; falls back to the storage
+    backend's db_path to derive the name from the registry path structure
+    (``~/.axon/repos/<name>/kuzu``).
+    """
+    if explicit_repo:
+        return explicit_repo
+    db_path = getattr(storage, "db_path", None)
+    if db_path is not None:
+        # ~/.axon/repos/<repo-name>/kuzu  →  parent.name
+        return db_path.parent.name
+    return ""
 _EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 
@@ -250,7 +265,7 @@ def handle_query(
             except Exception:  # noqa: BLE001
                 pass
 
-    log_event("query", query=query[:200], results=len(results), language=language or "", repo=repo or "")
+    log_event("query", query=query[:200], results=len(results), language=language or "", repo=_repo_name_from_storage(storage, repo))
     return result
 
 def _parse_file_symbol(symbol: str) -> tuple[str | None, str]:
@@ -380,7 +395,7 @@ def handle_context(storage: StorageBackend, symbol: str, repo: str | None = None
             except Exception:  # noqa: BLE001
                 pass
 
-    log_event("context", symbol=symbol[:200], repo=repo or "")
+    log_event("context", symbol=symbol[:200], repo=_repo_name_from_storage(storage, repo))
     return result
 
 _DEPTH_LABELS: dict[int, str] = {
@@ -470,7 +485,7 @@ def handle_impact(storage: StorageBackend, symbol: str, depth: int = 3, repo: st
             except Exception:  # noqa: BLE001
                 pass
 
-    log_event("impact", symbol=symbol[:200], repo=repo or "")
+    log_event("impact", symbol=symbol[:200], repo=_repo_name_from_storage(storage, repo))
     return result
 
 def handle_dead_code(storage: StorageBackend) -> str:

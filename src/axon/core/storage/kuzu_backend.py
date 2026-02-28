@@ -73,9 +73,11 @@ class KuzuBackend:
     def __init__(self) -> None:
         self._db: kuzu.Database | None = None
         self._conn: kuzu.Connection | None = None
+        self.db_path: Path | None = None
 
     def initialize(self, path: Path, *, read_only: bool = False) -> None:
         """Open or create the KuzuDB database at *path* and set up the schema."""
+        self.db_path = path
         self._db = kuzu.Database(str(path), read_only=read_only)
         self._conn = kuzu.Connection(self._db)
         if not read_only:
