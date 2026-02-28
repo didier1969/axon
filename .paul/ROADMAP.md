@@ -6,39 +6,23 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 ## Current Milestone
 
-**v0.5 Hardening**
-Status: ✅ Complete
-Phases: 2 of 2 complete
+TBD — run /paul:discuss-milestone or /paul:milestone to define v0.6.
+
+## Next Milestone
+
+Run /paul:discuss-milestone or /paul:milestone to define.
+
+## Completed Milestones
+
+<details>
+<summary>v0.5 Hardening — 2026-02-28 (2 phases, 4 plans)</summary>
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
 | 1 | Test Quality & Bug Fixes | 2/2 | ✅ Complete | 2026-02-28 |
 | 2 | Parser & Performance | 2/2 | ✅ Complete | 2026-02-28 |
 
-### Phase 1: Test Quality & Bug Fixes ✅
-
-Focus: Fix test infrastructure issues and analytics pollution bugs
-Plans: 2/2 complete
-
-- ✅ events.jsonl isolated via autouse conftest fixture (plan 01-01)
-- ✅ Async embeddings race fixed: future.result() inside patch block (plan 01-02)
-- ✅ test_watcher.py: 102s → 28s via session-scoped pre-indexed template (plan 01-02)
-- ✅ test_pipeline.py: 166s → 81s via session-scoped schema template (plan 01-02)
-- ✅ Watcher aggressiveness hotfix: embeddings now on 60s interval not 30s (plan 01-02)
-
-### Phase 2: Parser & Performance ✅
-
-Focus: Close parser gaps and parallelize graph algorithms
-Plans: 2/2 complete
-
-- ✅ Elixir `use` → USES relationship (`RelType.USES`, 4 tests) — plan 02-01
-- ✅ Community detection parallelized (WCC + ThreadPoolExecutor) — plan 02-02
-
-## Next Milestone
-
-TBD after v0.5 complete.
-
-## Completed Milestones
+</details>
 
 <details>
 <summary>v0.4 Consolidation & Scale — 2026-02-27 (1 phase, 4 plans)</summary>
@@ -62,4 +46,4 @@ TBD after v0.5 complete.
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-02-28 — v0.5 Hardening milestone created*
+*Last updated: 2026-02-28 — v0.5 Hardening complete, archived*

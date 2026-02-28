@@ -12,9 +12,9 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 | Attribute | Value |
 |-----------|-------|
-| Version | 0.4.0 |
+| Version | 0.5.0 |
 | Status | Active Development |
-| Last Updated | 2026-02-27 |
+| Last Updated | 2026-02-28 |
 
 ## Requirements
 
@@ -36,12 +36,16 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] New language parsers (Go, YAML/TOML, SQL, HTML, CSS → 12 total) — v0.4 Phase 1, Plan 01-03
 - [x] Multi-repo intelligence (cross-repo MCP queries via optional repo= param) — v0.4 Phase 1, Plan 01-04
 - [x] Usage analytics (events.jsonl logging + axon stats CLI command) — v0.4 Phase 1, Plan 01-04
+- [x] Test infrastructure hardened (isolation fixture, session-scoped KuzuDB templates, async race fix) — v0.5 Phase 1
+- [x] Watcher production-safe (embeddings on 60s interval, not 30s) — v0.5 Phase 1, Plan 01-02
+- [x] Elixir `use Module` → USES relationship in graph — v0.5 Phase 2, Plan 02-01
+- [x] Community detection parallelized (WCC + ThreadPoolExecutor) — v0.5 Phase 2, Plan 02-02
 
 ### Active (In Progress)
-(None — v0.4 complete)
+(None — v0.5 complete)
 
 ### Planned (Next)
-(To be defined for v0.5)
+(To be defined for v0.6)
 
 ### Out of Scope
 - GUI / web interface — CLI and MCP-first
@@ -82,6 +86,10 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 | events.jsonl global at ~/.axon/events.jsonl | One log for all repos on the machine; consistent with global registry | 2026-02-27 | Active |
 | log_event() never raises | Analytics failure must never block main flow; BLE001 catch-all | 2026-02-27 | Active |
 | repo= opens/closes KuzuBackend per request | No caching needed for read-only queries; avoids connection leaks | 2026-02-27 | Active |
+| KuzuDB creates a single FILE (not directory) | shutil.copy2 for template copies in tests | 2026-02-28 | Active |
+| Watcher embeddings on 60s EMBEDDING_INTERVAL | _run_global_phases(embeddings=False); last_embed timer enforces 60s cadence | 2026-02-28 | Active |
+| USES is a distinct RelType (not USES_TYPE) | Elixir `use` is macro injection — semantically different from type usage | 2026-02-28 | Active |
+| Community detection: ThreadPoolExecutor default | Let stdlib pick min(32, cpu_count+4) per WCC component | 2026-02-28 | Active |
 
 ## Success Metrics
 
@@ -103,4 +111,4 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-02-27 — v0.4 Consolidation & Scale complete (all 4 plans shipped)*
+*Last updated: 2026-02-28 — v0.5 Hardening complete (2 phases, 4 plans shipped)*

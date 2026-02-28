@@ -2,29 +2,28 @@
 
 ## Project Reference
 
-See: .paul/PROJECT.md (updated 2026-02-27 after v0.4 complete)
+See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.5 Hardening — Phase 2: Elixir `use` parser + community detection parallelization
+**Current focus:** Awaiting next milestone — v0.5 Hardening complete.
 
 ## Current Position
 
-Milestone: v0.5 Hardening
-Phase: 2 of 2 — Parser & Performance ✅ COMPLETE
-Plan: 02-01 + 02-02 both complete
-Status: Phase 2 done — milestone v0.5 complete
-Last activity: 2026-02-28 — Plans 02-01 + 02-02 applied and unified (776 tests pass)
+Milestone: Awaiting next milestone
+Phase: None active
+Plan: None
+Status: Milestone v0.5 Hardening complete — ready for next
+Last activity: 2026-02-28 — Milestone v0.5 archived, git tag v0.5.0 created
 
 Progress:
-- v0.5 Hardening: [██████████] 100%
-- Phase 2: [██████████] 100%
+- v0.5 Hardening: [██████████] 100% ✓
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Phase 2 complete — v0.5 milestone done]
+  ○        ○        ○     [Milestone complete — ready for next]
 ```
 
 ## Accumulated Context
@@ -42,32 +41,30 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | KuzuDB creates a single FILE (not directory) | v0.5 Plan 01-02 | Template copies use shutil.copy2, not copytree |
 | Watcher embeddings on EMBEDDING_INTERVAL (60s) | v0.5 Plan 01-02 | _run_global_phases(embeddings=False); last_embed timer added |
 | test_watcher.py floor is ~28s | v0.5 Plan 01-02 | KuzuDB open ~1.3s/test; accepted, not worth mocking |
+| USES is a distinct RelType (not USES_TYPE) | v0.5 Plan 02-01 | Elixir `use` is macro injection, different from type usage |
+| Community detection via WCC + ThreadPoolExecutor | v0.5 Plan 02-02 | Per-component Leiden; small (<3 node) components skipped |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
 |-------|--------|--------|---------|
-| Community detection parallelization | v0.5 Plan 02-02 | ✅ Done | ThreadPoolExecutor per WCC |
 | test_watcher.py at 28s (target was 15s) | v0.5 Plan 01-02 | S | accept as-is |
+| cohesion: 0.0 placeholder in communities | v0.5 Plan 02-02 | S | revisit if per-component modularity needed |
 
 ### Blockers/Concerns
 None.
 
 ### Git State
-Last commit: 47758ae (test(01-test-quality-bugs): session fixtures, async race fix, watcher hotfix)
-Tag: v0.4.0 (v0.5.0 to be tagged after commit)
+Last commit: e5495f4 (feat(02-parser-and-performance): Elixir USES + community parallelization)
+Tag: v0.5.0
 Branch: main
-Uncommitted: Phase 2 changes (02-01 + 02-02) — commit pending
+Uncommitted: .paul docs only (milestone completion docs)
 
 ## Session Continuity
 
 Last session: 2026-02-28
-Stopped at: Phase 2 complete — 02-01 + 02-02 unified, 776 tests pass
-Next action: /paul:complete-milestone (v0.5 Hardening is done) or start v0.6
-Resume file: .paul/phases/02-parser-and-performance/02-02-SUMMARY.md
-Resume context:
-- 02-01: RelType.USES added, Elixir `use` creates USES relationships in graph
-- 02-02: Community detection now parallel (WCC + ThreadPoolExecutor)
-- 776 tests pass, git commit pending
+Stopped at: /paul:complete-milestone — v0.5 fully archived, v0.5.0 tagged
+Next action: /paul:discuss-milestone or /paul:milestone (define v0.6)
+Resume file: .paul/MILESTONES.md
 
 ---
 *STATE.md — Updated after every significant action*

@@ -4,7 +4,44 @@ Completed milestone log for this project.
 
 | Milestone | Completed | Duration | Stats |
 |-----------|-----------|----------|-------|
+| v0.5 Hardening | 2026-02-28 | 1 day | 2 phases, 4 plans, 11 files |
 | v0.4 Consolidation & Scale | 2026-02-27 | 1 day | 1 phase, 4 plans, ~35 files |
+
+---
+
+## ✅ v0.5 Hardening
+
+**Completed:** 2026-02-28
+**Duration:** 1 day
+
+### Stats
+
+| Metric | Value |
+|--------|-------|
+| Phases | 2 |
+| Plans | 4 |
+| Files changed | 11 |
+| Tests | 776 passing (+24 new) |
+
+### Key Accomplishments
+
+- **Test isolation hardened:** autouse `isolated_axon_home` fixture redirects `Path.home()` to tmp_path — no more events.jsonl pollution across tests
+- **Test suite 60% faster:** session-scoped KuzuDB templates via `shutil.copy2`; test_pipeline.py 166s → 81s; test_watcher.py 102s → 28s
+- **Async race fixed:** `future.result()` moved inside `with patch()` block — embeddings race condition eliminated
+- **Watcher production-safe:** `_run_global_phases(embeddings=False)` + `EMBEDDING_INTERVAL` (60s) actually enforced — no more fastembed model load every 30s
+- **Elixir `use` → USES relationship:** `RelType.USES` added, `_KIND_TO_REL["uses"]` wired — `use GenServer` now creates graph edges
+- **Community detection parallelized:** WCC split + `ThreadPoolExecutor` per component; small components (< 3 nodes) automatically skipped
+
+### Key Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| KuzuDB creates a single FILE (not directory) | `shutil.copy2` for template copies, not `copytree` |
+| Watcher embeddings on 60s EMBEDDING_INTERVAL | `EMBEDDING_INTERVAL` was defined but never enforced; hotfix applied |
+| test_watcher.py 28s accepted as floor | `kuzu.Database()` on existing file ≈ 1.3s/test — mocking not worth it |
+| `USES` is distinct from `USES_TYPE` | Elixir `use` is macro injection, semantically different from type usage |
+| `ThreadPoolExecutor()` default max_workers | Let stdlib pick `min(32, cpu_count+4)` — no app-level tuning needed |
+| `cohesion: 0.0` placeholder | Per-component modularity deferred; sentinel value acceptable |
 
 ---
 
