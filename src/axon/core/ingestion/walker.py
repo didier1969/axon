@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,19 +44,28 @@ def discover_files(
     repo_path = repo_path.resolve()
     discovered: list[Path] = []
 
-    for file_path in repo_path.rglob("*"):
-        if not file_path.is_file():
-            continue
+    for root, dirs, files in os.walk(repo_path, onerror=lambda _: None):
+        root_path = Path(root)
+        relative_root = root_path.relative_to(repo_path)
 
-        relative = file_path.relative_to(repo_path)
+        # Prune ignored directories in-place so os.walk never descends into them.
+        # This avoids PermissionError on unreadable subtrees (e.g. _build.old).
+        dirs[:] = [
+            d for d in dirs
+            if not should_ignore(str(relative_root / d) if str(relative_root) != "." else d, gitignore_patterns)
+        ]
 
-        if should_ignore(str(relative), gitignore_patterns):
-            continue
+        for file_name in files:
+            file_path = root_path / file_name
+            relative = relative_root / file_name
 
-        if not is_supported(file_path):
-            continue
+            if should_ignore(str(relative), gitignore_patterns):
+                continue
 
-        discovered.append(file_path)
+            if not is_supported(file_path):
+                continue
+
+            discovered.append(file_path)
 
     return discovered
 

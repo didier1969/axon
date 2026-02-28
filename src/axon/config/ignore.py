@@ -30,6 +30,7 @@ DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset(
         # Elixir/Mix
         "deps",
         "_build",
+        "_build.old",   # leftover renamed _build dirs
         ".elixir_ls",
         ".fetch",
         # Rust/Cargo
