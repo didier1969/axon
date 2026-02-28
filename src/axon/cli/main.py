@@ -126,6 +126,21 @@ def analyze(
     axon_dir.mkdir(parents=True, exist_ok=True)
     db_path = axon_dir / "kuzu"
 
+    # Auto-detect stale index: files indexed but 0 symbols → force full re-index.
+    if not full:
+        meta_path = axon_dir / "meta.json"
+        if meta_path.exists():
+            try:
+                prev = json.loads(meta_path.read_text(encoding="utf-8"))
+                prev_stats = prev.get("stats", {})
+                if prev_stats.get("files", 0) > 0 and prev_stats.get("symbols", 0) == 0:
+                    full = True
+                    console.print(
+                        "[yellow]Warning: previous index has no symbols — forcing full re-index.[/yellow]"
+                    )
+            except (json.JSONDecodeError, KeyError):
+                pass
+
     storage = KuzuBackend()
     storage.initialize(db_path)
 
