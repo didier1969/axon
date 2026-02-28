@@ -61,6 +61,7 @@ class TestRelType:
         "IMPORTS",
         "EXTENDS",
         "IMPLEMENTS",
+        "USES",
         "MEMBER_OF",
         "STEP_IN_PROCESS",
         "USES_TYPE",

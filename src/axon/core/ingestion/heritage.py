@@ -27,6 +27,7 @@ _HERITAGE_LABELS: tuple[NodeLabel, ...] = (NodeLabel.CLASS, NodeLabel.INTERFACE)
 _KIND_TO_REL: dict[str, RelType] = {
     "extends": RelType.EXTENDS,
     "implements": RelType.IMPLEMENTS,
+    "uses": RelType.USES,
 }
 
 _PROTOCOL_MARKERS: frozenset[str] = frozenset({"Protocol", "ABC", "ABCMeta"})

@@ -7,13 +7,13 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 ## Current Milestone
 
 **v0.5 Hardening**
-Status: 🚧 In Progress
-Phases: 1 of 2 complete
+Status: ✅ Complete
+Phases: 2 of 2 complete
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
 | 1 | Test Quality & Bug Fixes | 2/2 | ✅ Complete | 2026-02-28 |
-| 2 | Parser & Performance | TBD | Not started | - |
+| 2 | Parser & Performance | 2/2 | ✅ Complete | 2026-02-28 |
 
 ### Phase 1: Test Quality & Bug Fixes ✅
 
@@ -26,13 +26,13 @@ Plans: 2/2 complete
 - ✅ test_pipeline.py: 166s → 81s via session-scoped schema template (plan 01-02)
 - ✅ Watcher aggressiveness hotfix: embeddings now on 60s interval not 30s (plan 01-02)
 
-### Phase 2: Parser & Performance
+### Phase 2: Parser & Performance ✅
 
 Focus: Close parser gaps and parallelize graph algorithms
-Plans: TBD (defined during /paul:plan)
+Plans: 2/2 complete
 
-- Elixir `use` → heritage relationship (currently logs warnings on every Elixir project)
-- Community detection parallelization (19% cold-start overhead, currently sequential)
+- ✅ Elixir `use` → USES relationship (`RelType.USES`, 4 tests) — plan 02-01
+- ✅ Community detection parallelized (WCC + ThreadPoolExecutor) — plan 02-02
 
 ## Next Milestone
 

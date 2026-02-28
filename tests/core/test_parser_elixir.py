@@ -325,3 +325,27 @@ end
         module_names = {s.name for s in result.symbols if s.kind == "module"}
         assert "Outer" in module_names
         assert "Inner" in module_names
+
+
+# ---------------------------------------------------------------------------
+# use directive — heritage tuple
+# ---------------------------------------------------------------------------
+
+
+class TestParseUseDirective:
+    """use MyModule produces a heritage tuple."""
+
+    CODE = """\
+defmodule MyApp.Server do
+  use GenServer
+end
+"""
+
+    def test_use_produces_heritage_tuple(self, parser: ElixirParser) -> None:
+        result = parser.parse(self.CODE, "server.ex")
+        assert ("MyApp.Server", "uses", "GenServer") in result.heritage
+
+    def test_use_also_produces_import(self, parser: ElixirParser) -> None:
+        result = parser.parse(self.CODE, "server.ex")
+        imported_modules = [i.module for i in result.imports]
+        assert "GenServer" in imported_modules

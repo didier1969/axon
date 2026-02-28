@@ -10,21 +10,21 @@ See: .paul/PROJECT.md (updated 2026-02-27 after v0.4 complete)
 ## Current Position
 
 Milestone: v0.5 Hardening
-Phase: 2 of 2 — Parser & Performance
-Plan: none yet — ready for /paul:plan
-Status: Phase 1 complete, Phase 2 not started
-Last activity: 2026-02-28 — Phase 1 complete (2 plans), watcher hotfix applied
+Phase: 2 of 2 — Parser & Performance ✅ COMPLETE
+Plan: 02-01 + 02-02 both complete
+Status: Phase 2 done — milestone v0.5 complete
+Last activity: 2026-02-28 — Plans 02-01 + 02-02 applied and unified (776 tests pass)
 
 Progress:
-- v0.5 Hardening: [█████░░░░░] 50%
-- Phase 2: [░░░░░░░░░░] 0%
+- v0.5 Hardening: [██████████] 100%
+- Phase 2: [██████████] 100%
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Phase 1 complete — ready for Phase 2 PLAN]
+  ✓        ✓        ✓     [Phase 2 complete — v0.5 milestone done]
 ```
 
 ## Accumulated Context
@@ -46,28 +46,28 @@ PLAN ──▶ APPLY ──▶ UNIFY
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
 |-------|--------|--------|---------|
-| Community detection (19% cold-start) still sequential | v0.3 Phase 2 | M | v0.5 Phase 2 ← active |
+| Community detection parallelization | v0.5 Plan 02-02 | ✅ Done | ThreadPoolExecutor per WCC |
 | test_watcher.py at 28s (target was 15s) | v0.5 Plan 01-02 | S | accept as-is |
 
 ### Blockers/Concerns
 None.
 
 ### Git State
-Last commit: 3f731e2 (docs: pause — handoff after v0.4 milestone complete)
-Tag: v0.4.0
+Last commit: 47758ae (test(01-test-quality-bugs): session fixtures, async race fix, watcher hotfix)
+Tag: v0.4.0 (v0.5.0 to be tagged after commit)
 Branch: main
-Uncommitted: Phase 1 changes (test fixtures, watcher hotfix) — commit pending
+Uncommitted: Phase 2 changes (02-01 + 02-02) — commit pending
 
 ## Session Continuity
 
 Last session: 2026-02-28
-Stopped at: Phase 1 UNIFY complete, ready to start Phase 2
-Next action: /paul:plan (Phase 2 — Parser & Performance)
-Resume file: .paul/phases/01-test-quality-bugs/01-02-SUMMARY.md
+Stopped at: Phase 2 complete — 02-01 + 02-02 unified, 776 tests pass
+Next action: /paul:complete-milestone (v0.5 Hardening is done) or start v0.6
+Resume file: .paul/phases/02-parser-and-performance/02-02-SUMMARY.md
 Resume context:
-- Phase 1 done: test isolation ✓, pipeline 81s ✓, watcher 28s ✓, watcher hotfix ✓
-- Uncommitted changes from Phase 1 need git commit before Phase 2
-- Phase 2 targets: Elixir `use` parser + community detection parallelization
+- 02-01: RelType.USES added, Elixir `use` creates USES relationships in graph
+- 02-02: Community detection now parallel (WCC + ThreadPoolExecutor)
+- 776 tests pass, git commit pending
 
 ---
 *STATE.md — Updated after every significant action*

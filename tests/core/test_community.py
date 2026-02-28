@@ -256,3 +256,98 @@ class TestGenerateLabel:
 
         label = generate_label(g, [node_id])
         assert label == "Cluster"
+
+
+# ---------------------------------------------------------------------------
+# test_process_communities_multi_component
+# ---------------------------------------------------------------------------
+
+
+class TestProcessCommunitiesMultiComponent:
+    """Two disconnected clusters are both processed."""
+
+    def test_two_components_both_detected(self) -> None:
+        """Graph with two disconnected 3-node clusters → communities in both."""
+        graph = KnowledgeGraph()
+
+        # Cluster A: 3 nodes, fully connected
+        nodes_a = [
+            GraphNode(
+                id=generate_id(NodeLabel.FUNCTION, "file_a.py", f"a{i}"),
+                label=NodeLabel.FUNCTION,
+                name=f"a{i}",
+                file_path="file_a.py",
+            )
+            for i in range(3)
+        ]
+        for n in nodes_a:
+            graph.add_node(n)
+        for src, tgt in [(0, 1), (1, 2), (2, 0)]:
+            graph.add_relationship(GraphRelationship(
+                id=f"calls:{nodes_a[src].id}->{nodes_a[tgt].id}",
+                type=RelType.CALLS,
+                source=nodes_a[src].id,
+                target=nodes_a[tgt].id,
+            ))
+
+        # Cluster B: 3 nodes, fully connected (disconnected from A)
+        nodes_b = [
+            GraphNode(
+                id=generate_id(NodeLabel.FUNCTION, "file_b.py", f"b{i}"),
+                label=NodeLabel.FUNCTION,
+                name=f"b{i}",
+                file_path="file_b.py",
+            )
+            for i in range(3)
+        ]
+        for n in nodes_b:
+            graph.add_node(n)
+        for src, tgt in [(0, 1), (1, 2), (2, 0)]:
+            graph.add_relationship(GraphRelationship(
+                id=f"calls:{nodes_b[src].id}->{nodes_b[tgt].id}",
+                type=RelType.CALLS,
+                source=nodes_b[src].id,
+                target=nodes_b[tgt].id,
+            ))
+
+        count = process_communities(graph)
+        assert count >= 2
+
+    def test_small_component_not_in_community(self) -> None:
+        """Isolated node is not assigned to any community."""
+        graph = KnowledgeGraph()
+
+        # Isolated node
+        isolated = GraphNode(
+            id=generate_id(NodeLabel.FUNCTION, "isolated.py", "alone"),
+            label=NodeLabel.FUNCTION,
+            name="alone",
+            file_path="isolated.py",
+        )
+        graph.add_node(isolated)
+
+        # 3-node cluster
+        nodes = [
+            GraphNode(
+                id=generate_id(NodeLabel.FUNCTION, "cluster.py", f"c{i}"),
+                label=NodeLabel.FUNCTION,
+                name=f"c{i}",
+                file_path="cluster.py",
+            )
+            for i in range(3)
+        ]
+        for n in nodes:
+            graph.add_node(n)
+        for src, tgt in [(0, 1), (1, 2), (2, 0)]:
+            graph.add_relationship(GraphRelationship(
+                id=f"calls:{nodes[src].id}->{nodes[tgt].id}",
+                type=RelType.CALLS,
+                source=nodes[src].id,
+                target=nodes[tgt].id,
+            ))
+
+        process_communities(graph)
+
+        member_of_rels = graph.get_relationships_by_type(RelType.MEMBER_OF)
+        member_ids = {r.source for r in member_of_rels}
+        assert isolated.id not in member_ids

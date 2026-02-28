@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import PurePosixPath
 
 import igraph as ig
@@ -110,6 +111,35 @@ def generate_label(graph: KnowledgeGraph, member_ids: list[str]) -> str:
     label = f"{most_common[0][0]}+{most_common[1][0]}"
     return label.capitalize()
 
+def _partition_component(
+    ig_graph: ig.Graph,
+    member_vertex_ids: list[int],
+) -> list[list[int]]:
+    """Run Leiden on one connected component. Returns list of member groups.
+
+    Each group is a list of ORIGINAL vertex indices (from the full graph).
+
+    Args:
+        ig_graph: The full directed igraph.
+        member_vertex_ids: Original vertex indices belonging to this component.
+
+    Returns:
+        List of groups (each group = list of original vertex indices).
+        Returns empty list if component is too small for Leiden.
+    """
+    if len(member_vertex_ids) < 3:
+        return []
+
+    sub = ig_graph.subgraph(member_vertex_ids)
+    partition = leidenalg.find_partition(sub, leidenalg.ModularityVertexPartition)
+
+    result: list[list[int]] = []
+    for members in partition:
+        original_ids = [member_vertex_ids[sub_idx] for sub_idx in members]
+        result.append(original_ids)
+    return result
+
+
 def process_communities(
     graph: KnowledgeGraph,
     min_community_size: int = 2,
@@ -117,6 +147,8 @@ def process_communities(
     """Detect communities in the call graph and add them to the knowledge graph.
 
     Uses the Leiden algorithm with modularity-based vertex partitioning.
+    Splits the graph into weakly connected components and processes each
+    component in parallel via ThreadPoolExecutor.
 
     For each detected community that meets the minimum size threshold:
     - A :attr:`NodeLabel.COMMUNITY` node is created with a generated label
@@ -141,17 +173,33 @@ def process_communities(
         )
         return 0
 
-    partition = leidenalg.find_partition(
-        ig_graph, leidenalg.ModularityVertexPartition
+    # Split into weakly connected components for parallel processing
+    undirected = ig_graph.as_undirected()
+    components = undirected.components(mode="WEAK")
+    component_groups: list[list[int]] = [list(comp) for comp in components]
+
+    logger.debug(
+        "Community detection: %d weakly connected components found.",
+        len(component_groups),
     )
-    modularity_score = partition.modularity
+
+    # Run Leiden per component in parallel
+    all_member_groups: list[list[int]] = []
+    with ThreadPoolExecutor() as executor:
+        futures = [
+            executor.submit(_partition_component, ig_graph, comp)
+            for comp in component_groups
+            if len(comp) >= 3
+        ]
+        for future in futures:
+            all_member_groups.extend(future.result())
 
     community_count = 0
-    for i, members in enumerate(partition):
-        if len(members) < min_community_size:
+    for i, original_member_ids in enumerate(all_member_groups):
+        if len(original_member_ids) < min_community_size:
             continue
 
-        member_ids = [index_to_node_id[idx] for idx in members]
+        member_ids = [index_to_node_id[idx] for idx in original_member_ids]
 
         community_id = generate_id(NodeLabel.COMMUNITY, f"community_{i}")
         label = generate_label(graph, member_ids)
@@ -161,7 +209,7 @@ def process_communities(
             label=NodeLabel.COMMUNITY,
             name=label,
             properties={
-                "cohesion": modularity_score,
+                "cohesion": 0.0,
                 "symbol_count": len(member_ids),
             },
         )
@@ -180,11 +228,10 @@ def process_communities(
 
         community_count += 1
         logger.info(
-            "Community %d: %r with %d members (modularity=%.3f)",
+            "Community %d: %r with %d members",
             i,
             label,
             len(member_ids),
-            modularity_score,
         )
 
     logger.info(

@@ -383,3 +383,64 @@ class TestProtocolAnnotation:
 
         extends_rels = graph.get_relationships_by_type(RelType.EXTENDS)
         assert len(extends_rels) == 0
+
+
+# ---------------------------------------------------------------------------
+# process_heritage — uses (Elixir use directive)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessHeritageUses:
+    """Elixir use MyModule creates a USES relationship."""
+
+    def test_process_heritage_uses(self, graph: KnowledgeGraph) -> None:
+        graph.add_node(
+            GraphNode(
+                id=generate_id(NodeLabel.CLASS, "lib/server.ex", "MyServer"),
+                label=NodeLabel.CLASS,
+                name="MyServer",
+                file_path="lib/server.ex",
+            )
+        )
+        graph.add_node(
+            GraphNode(
+                id=generate_id(NodeLabel.CLASS, "lib/gen_server.ex", "GenServer"),
+                label=NodeLabel.CLASS,
+                name="GenServer",
+                file_path="lib/gen_server.ex",
+            )
+        )
+        parse_data = [
+            _make_parse_data(
+                "lib/server.ex",
+                [("MyServer", "uses", "GenServer")],
+            )
+        ]
+        process_heritage(parse_data, graph)
+
+        uses_rels = graph.get_relationships_by_type(RelType.USES)
+        assert len(uses_rels) == 1
+        rel = uses_rels[0]
+        assert rel.source == generate_id(NodeLabel.CLASS, "lib/server.ex", "MyServer")
+        assert rel.target == generate_id(NodeLabel.CLASS, "lib/gen_server.ex", "GenServer")
+
+    def test_uses_unresolved_external_skipped(self, graph: KnowledgeGraph) -> None:
+        """use ExternalLib.Macro (not in graph) is silently skipped."""
+        graph.add_node(
+            GraphNode(
+                id=generate_id(NodeLabel.CLASS, "lib/server.ex", "MyServer"),
+                label=NodeLabel.CLASS,
+                name="MyServer",
+                file_path="lib/server.ex",
+            )
+        )
+        parse_data = [
+            _make_parse_data(
+                "lib/server.ex",
+                [("MyServer", "uses", "Phoenix.Controller")],
+            )
+        ]
+        process_heritage(parse_data, graph)
+
+        uses_rels = graph.get_relationships_by_type(RelType.USES)
+        assert len(uses_rels) == 0

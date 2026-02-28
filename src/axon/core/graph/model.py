@@ -34,6 +34,7 @@ class RelType(Enum):
     IMPORTS = "imports"
     EXTENDS = "extends"
     IMPLEMENTS = "implements"
+    USES = "uses"
     MEMBER_OF = "member_of"
     STEP_IN_PROCESS = "step_in_process"
     USES_TYPE = "uses_type"
