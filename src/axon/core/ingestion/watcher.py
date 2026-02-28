@@ -140,6 +140,7 @@ async def watch_repo(
         repo_path,
         rust_timeout=500,
         stop_event=stop_event,
+        ignore_permission_denied=True,
     ):
         changed_paths: list[Path] = []
         seen: set[str] = set()
