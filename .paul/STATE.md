@@ -56,14 +56,15 @@ Branch: main
 
 ## Session Continuity
 
-Last session: 2026-02-27
-Stopped at: Milestone v0.4 complete — archived and tagged
+Last session: 2026-02-28
+Stopped at: Milestone v0.4 complete — archived, tagged v0.4.0, axon installed, 24 repos re-indexed
 Next action: /paul:discuss-milestone
-Resume file: .paul/MILESTONES.md
+Resume file: .paul/HANDOFF-2026-02-28.md
 Resume context:
-- v0.4 fully archived: 4 plans, 12 languages, multi-repo MCP, analytics, 751+ tests
-- 3 deferred issues for v0.5 consideration
-- Ready to define v0.5 scope
+- v0.4 fully archived: git tag v0.4.0, MILESTONES.md created, axon v0.4.0 installed globally
+- 24 repos re-indexed with new parsers (CSS, HTML, YAML, TOML confirmed working)
+- 2 bugs logged for v0.5: test pollution in events.jsonl, Elixir `use` parser missing
+- Ready to define v0.5 scope with /paul:discuss-milestone
 
 ---
 *STATE.md — Updated after every significant action*
