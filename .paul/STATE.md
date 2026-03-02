@@ -5,26 +5,26 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.6 Phase 3 — Watch & filtrage (sequential watcher queue, configurable debounce, built-in filters).
+**Current focus:** v0.6 Phase 3 complete — ready for milestone completion and v0.7.
 
 ## Current Position
 
 Milestone: v0.6 Daemon & Centralisation
-Phase: 3 of 3 (Watch & filtrage) — Planning
-Plan: 03-01 created, awaiting approval
-Status: PLAN created, ready for APPLY
-Last activity: 2026-03-02 — APPLY 03-01 complete (821 tests, 0 failures, 0 lint errors)
+Phase: 3 of 3 (Watch & filtrage) — COMPLETE
+Plan: 03-03 APPLY complete (3/3 plans done)
+Status: Phase complete — all 3 plans applied
+Last activity: 2026-03-02 — Completed .paul/phases/03-watch-filtrage/03-03-PLAN.md
 
 Progress:
-- v0.6 Daemon & Centralisation: [██████░░░░] 67% (2/3 phases)
-- Phase 3: [░░░░░░░░░░] 0% (0/3 plans complete)
+- v0.6 Daemon & Centralisation: [██████████] 100% (3/3 phases)
+- Phase 3: [██████████] 100% (3/3 plans complete)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ○     [Plan 03-01 executed, awaiting UNIFY]
+  ✓        ✓        ○     [03-03 applied; UNIFY + milestone completion pending]
 ```
 
 ## Accumulated Context
@@ -52,6 +52,9 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | MCP proxy deferred to Plan 02-02 | v0.6 Plan 02-01 | Daemon exists but MCP still uses direct KuzuBackend |
 | MCP proxy routes via daemon, fallback to direct | v0.6 Plan 02-02 | N×~10MB proxy processes share single ~200MB daemon |
 | max_tokens truncation is MCP-side only | v0.6 Plan 02-02 | Applied after daemon result or direct fallback; daemon_args stripped |
+| Byte offsets stored as INT64 in KuzuDB, no migration | v0.6 Plan 03-03 | Users must re-run axon analyze; old 12-col schemas still readable |
+| markdown sections use heading node.start_byte as section start | v0.6 Plan 03-03 | end_byte = next heading start_byte - 1; content assembled from lines |
+| sql_lang.py / yaml_lang.py left at start_byte=0 | v0.6 Plan 03-03 | Regex-based parsers have no tree-sitter node |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
@@ -63,21 +66,20 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: 36a5336 (feat(02-daemon-central): add MCP proxy to daemon with max_tokens support)
-Tag: v0.5.0
+Last commit: b439476 (feat(03-watch-filtrage): 03-03 task 2 — propagate byte offsets in all tree-sitter parsers)
 Branch: main
-Uncommitted: stale handoffs (.paul/HANDOFF-2026-02-28e.md, HANDOFF-2026-03-02.md, HANDOFF-2026-03-02f.md) + uv.lock minor change
+Uncommitted: PAUL files (STATE.md, SUMMARY 03-03) pending docs commit
 
 ## Session Continuity
 
-Last session: 2026-03-02
-Stopped at: /paul:pause — APPLY 03-01 complete, UNIFY not yet run
-Next action: /paul:unify .paul/phases/03-watch-filtrage/03-01-PLAN.md
-Resume file: .paul/HANDOFF-2026-03-02n.md
+Last session: 2026-03-02T19:50Z
+Stopped at: 03-03 APPLY complete — byte-offset caching
+Next action: /paul:unify → then /paul:complete-milestone → v0.7
+Resume file: .paul/phases/03-watch-filtrage/03-03-SUMMARY.md
 Resume context:
-- 03-01 APPLY done: .paul/ filter, watchfiles pre-filter, debounce_ms param, --debounce CLI flag
-- 821 tests, 0 failures; 0 lint errors in all modified files
-- Phase 3 remaining: 03-02 (asyncio.Queue sequential consumer), 03-03 (byte-offset caching)
+- 03-03 adds start_byte/end_byte to SymbolInfo, GraphNode, KuzuDB schema + 8 parsers
+- Full suite: 824 tests, 0 failures, 0 ruff errors
+- UNIFY step pending, then milestone tag v0.6.0
 
 ---
 *STATE.md — Updated after every significant action*
