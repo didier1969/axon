@@ -6,6 +6,8 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 ## Current Milestone
 
+None — v0.6 complete. Define v0.7 via `/paul:discuss-milestone`.
+
 ## Next Milestone
 
 Run /paul:discuss-milestone ou /paul:milestone pour définir.

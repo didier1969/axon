@@ -1,9 +1,9 @@
 [project]
 name = "axoniq"
-version = "0.5.0"
+version = "0.6.0"
 description = "Graph-powered code intelligence engine — indexes codebases into a knowledge graph, exposed via MCP tools for AI agents and a CLI for developers."
 readme = "README.md"
-license = "MIT"
+license = "Proprietary"
 authors = [
     { name = "harshkedia177", email = "harshkedia717@gmail.com" }
 ]
@@ -11,7 +11,7 @@ keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "stati
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",

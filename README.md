@@ -605,7 +605,7 @@ uv run axon --help
 
 ## License
 
-MIT
+Proprietary — All rights reserved.
 
 ---
 

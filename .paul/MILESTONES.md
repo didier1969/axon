@@ -4,8 +4,45 @@ Completed milestone log for this project.
 
 | Milestone | Completed | Duration | Stats |
 |-----------|-----------|----------|-------|
+| v0.6 Daemon & Centralisation | 2026-03-02 | 1 day | 3 phases, 7 plans, 30 files, 824 tests |
 | v0.5 Hardening | 2026-02-28 | 1 day | 2 phases, 4 plans, 11 files |
 | v0.4 Consolidation & Scale | 2026-02-27 | 1 day | 1 phase, 4 plans, ~35 files |
+
+---
+
+## ✅ v0.6 Daemon & Centralisation
+
+**Completed:** 2026-03-02
+**Duration:** 1 day
+
+### Stats
+
+| Metric | Value |
+|--------|-------|
+| Phases | 3 |
+| Plans | 7 |
+| Files changed | 30 |
+| Tests | 824 passing (+48 new) |
+
+### Key Accomplishments
+
+- **Central KuzuDB storage:** All repos migrate to `~/.axon/repos/{slug}/kuzu` — auto-migration on `axon analyze`, no manual step
+- **Daemon & LRU cache:** `axon daemon start/stop/status` via Unix socket; LRU cache holds max 5 open DBs — N MCP processes share single ~200MB daemon instead of N×~10MB each
+- **MCP proxy:** MCP server becomes a lightweight proxy (~10MB); daemon-first with direct fallback; `max_tokens` truncation stays MCP-side
+- **axon_batch:** N MCP tool calls on one socket connection — reduces overhead for multi-symbol lookups
+- **Watch filter + debounce:** `.paul/`, `.git/`, `.axon/` excluded at watchfiles level; `--debounce` CLI flag (default 50ms)
+- **Sequential watcher queue:** `asyncio.Queue` producer/consumer in `watch_repo()` — producer never stalls while MCP holds the lock
+- **Byte-offset caching:** `start_byte`/`end_byte` on `SymbolInfo`, `GraphNode`, and KuzuDB schema — all 8 tree-sitter parsers emit exact source byte offsets; enables O(1) content retrieval
+
+### Key Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Central KuzuDB at ~/.axon/repos/{slug}/kuzu | Single location enables daemon LRU cache over all repos |
+| Double-checked locking in LRU cache | KuzuBackend.initialize() I/O outside lock; insert+evict inside — no lock contention during disk I/O |
+| MCP proxy: daemon-first, fallback to direct | Graceful degradation if daemon not running |
+| asyncio.Queue with None sentinel | Producer signals done by value; consumer exits cleanly without queue.join() |
+| Byte offsets as INT64, no migration | Old 12-col DBs still readable via len(row) guard; users re-run axon analyze |
 
 ---
 

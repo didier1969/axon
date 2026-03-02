@@ -9,22 +9,21 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 ## Current Position
 
-Milestone: v0.6 Daemon & Centralisation — COMPLETE
-Phase: 3 of 3 (Watch & filtrage) — COMPLETE
-Plan: 03-03 UNIFY complete (all 3 phases done)
-Status: Milestone complete — ready for /paul:complete-milestone → v0.7
-Last activity: 2026-03-02 — UNIFY 03-03 complete, phase transition done
+Milestone: Awaiting next milestone
+Phase: None active
+Plan: None
+Status: v0.6 complete — ready to define v0.7
+Last activity: 2026-03-02 — Milestone v0.6 complete, git tag v0.6.0
 
 Progress:
-- v0.6 Daemon & Centralisation: [██████████] 100% (3/3 phases)
-- Phase 3: [██████████] 100% (3/3 plans complete)
+- v0.6 Daemon & Centralisation: [██████████] 100% ✓
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Loop complete — milestone complete]
+  ○        ○        ○     [Milestone complete — ready for next]
 ```
 
 ## Accumulated Context
@@ -73,13 +72,13 @@ Uncommitted: PAUL files (STATE.md, SUMMARY 03-03) pending docs commit
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: UNIFY 03-03 complete — phase transition done, milestone complete
-Next action: /paul:complete-milestone (tag v0.6.0, archive, start v0.7)
-Resume file: .paul/ROADMAP.md
+Stopped at: Milestone v0.6 complete — MILESTONES.md updated, git tag v0.6.0 created
+Next action: /paul:discuss-milestone (define v0.7 scope)
+Resume file: .paul/MILESTONES.md
 Resume context:
-- v0.6 fully shipped: centralisation + daemon + watch & filtrage
-- 824 tests, 0 failures; byte-offset caching in schema
-- Ready to archive v0.6 and define v0.7 milestone
+- v0.6 shipped: central storage + daemon + LRU + MCP proxy + axon_batch + watch filter + queue + byte-offsets
+- 824 tests, 0 failures; pyproject.toml at 0.6.0
+- v0.7 scope not yet defined
 
 ---
 *STATE.md — Updated after every significant action*
