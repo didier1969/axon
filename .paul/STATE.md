@@ -10,10 +10,10 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 ## Current Position
 
 Milestone: v0.6 Daemon & Centralisation
-Phase: 1 of 3 (Centralisation du stockage)
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-03-02 — Milestone v0.6 created
+Phase: 1 of 3 (Centralisation du stockage) — Planning
+Plan: 01-01 created, awaiting approval
+Status: PLAN created, ready for APPLY
+Last activity: 2026-03-02 — Created .paul/phases/01-centralisation-stockage/01-01-PLAN.md
 
 Progress:
 - v0.6 Daemon & Centralisation: [░░░░░░░░░░] 0%
@@ -23,7 +23,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ○        ○        ○     [Ready for first PLAN]
+  ✓        ○        ○     [Plan created, awaiting approval]
 ```
 
 ## Accumulated Context
@@ -62,14 +62,13 @@ Uncommitted: .paul docs only (milestone completion docs)
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: /paul:pause — v0.6 créé, prêt pour Phase 1
-Next action: /paul:plan → Phase 1 Centralisation du stockage
-Resume file: .paul/HANDOFF-2026-03-02.md
+Stopped at: /paul:pause — plan 01-01 créé, attente APPLY
+Next action: /paul:apply .paul/phases/01-centralisation-stockage/01-01-PLAN.md
+Resume file: .paul/HANDOFF-2026-03-02f.md
 Resume context:
-- KuzuDB à migrer de {project}/.axon/kuzu vers ~/.axon/repos/{name}/kuzu
-- axon-mcp wrapper actif dans ~/.local/bin/axon-mcp (MCP only, pas de watchers)
-- nexus à réindexer après migration (DB supprimée car corrompue)
-- Engram/Mem0/code-search MCPs supprimés, 3 restants : playwright, chrome-devtools, axon
+- Plan 01-01 couvre toute la phase en 2 tâches massives
+- Task 1: _central_db_path helper + auto-migrate + all read/write paths (cli/main, mcp/server, mcp/tools)
+- Task 2: tests/cli/test_main.py + tests/mcp/test_tools.py + pytest tests/ -x -q
 
 ---
 *STATE.md — Updated after every significant action*

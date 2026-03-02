@@ -12,7 +12,7 @@ Phases: 0 of 3 complete
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
-| 1 | Centralisation du stockage | TBD | Not started | - |
+| 1 | Centralisation du stockage | 1 | Planning | - |
 | 2 | Daemon central | TBD | Not started | - |
 | 3 | Watch & filtrage | TBD | Not started | - |
 
