@@ -278,3 +278,60 @@ class TestWatchRepoSignature:
         sig = inspect.signature(watch_repo)
         assert "debounce_ms" in sig.parameters
         assert sig.parameters["debounce_ms"].default == 500
+
+
+class TestWatchRepoQueue:
+    """watch_repo() processes all batches via internal asyncio.Queue."""
+
+    def test_processes_multiple_batches(
+        self, tmp_repo: Path, storage: KuzuBackend
+    ) -> None:
+        """Both batches from distinct awatch events are processed."""
+        import asyncio
+        from unittest.mock import MagicMock, patch
+
+        call_batches: list[list[Path]] = []
+        _real_reindex = _reindex_files
+
+        def tracking_reindex(paths: list[Path], *args, **kwargs) -> int:
+            call_batches.append(list(paths))
+            return _real_reindex(paths, *args, **kwargs)
+
+        async def fake_awatch(*args, **kwargs):
+            yield {(MagicMock(), str(tmp_repo / "src" / "app.py"))}
+            yield {(MagicMock(), str(tmp_repo / "src" / "utils.py"))}
+
+        with patch("axon.core.ingestion.watcher._reindex_files", tracking_reindex):
+            with patch("watchfiles.awatch", fake_awatch):
+                asyncio.run(watch_repo(tmp_repo, storage))
+
+        # Both batches must be processed in separate _reindex_files calls
+        assert len(call_batches) == 2
+        paths_seen = {str(p) for batch in call_batches for p in batch}
+        assert str(tmp_repo / "src" / "app.py") in paths_seen
+        assert str(tmp_repo / "src" / "utils.py") in paths_seen
+
+    def test_empty_changeset_not_queued(
+        self, tmp_repo: Path, storage: KuzuBackend
+    ) -> None:
+        """An empty set of changes is not put into the queue."""
+        import asyncio
+        from unittest.mock import patch
+
+        call_count: list[int] = []
+
+        def counting_reindex(paths: list[Path], *args, **kwargs) -> int:
+            call_count.append(len(paths))
+            return 0
+
+        async def fake_awatch(*args, **kwargs):
+            # Empty set — all paths deduped away or watchfiles fires with no paths.
+            # The producer's `if changed_paths:` guard must prevent queuing.
+            yield set()
+
+        with patch("axon.core.ingestion.watcher._reindex_files", counting_reindex):
+            with patch("watchfiles.awatch", fake_awatch):
+                asyncio.run(watch_repo(tmp_repo, storage))
+
+        # Empty batch never enters the queue — _reindex_files never called.
+        assert call_count == []

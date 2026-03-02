@@ -128,6 +128,17 @@ async def watch_repo(
 ) -> None:
     """Main watch loop — monitor files and re-index on changes.
 
+    Uses a producer/consumer pattern with an asyncio.Queue:
+
+    - **Producer** runs the watchfiles loop, puts ``list[Path]`` batches into
+      the queue, then puts ``None`` as a sentinel when the loop exits.
+    - **Consumer** drains the queue sequentially, calling ``_reindex_files``
+      for each batch and managing the global-phase / embedding timers.
+
+    This decouples event collection from processing: the producer never stalls
+    waiting for a reindex to finish (important in ``serve --watch`` mode where
+    the lock may be held by an MCP query).
+
     Parameters
     ----------
     repo_path:
@@ -140,6 +151,8 @@ async def watch_repo(
     lock:
         Optional async lock for coordinating storage access with
         concurrent readers (e.g. the MCP server in combined mode).
+    debounce_ms:
+        Debounce interval passed to watchfiles (default 500 ms).
     """
     import watchfiles
 
@@ -151,46 +164,64 @@ async def watch_repo(
         return await asyncio.to_thread(fn, *args)
 
     gitignore = load_gitignore(repo_path)
-    dirty = False
-    last_global = time.monotonic()
-    last_embed = time.monotonic()
-    files_changed = 0
+    queue: asyncio.Queue[list[Path] | None] = asyncio.Queue()
+
+    async def _producer() -> None:
+        """Collect watchfiles events and put path batches into the queue."""
+        async for changes in watchfiles.awatch(
+            repo_path,
+            rust_timeout=debounce_ms,
+            watch_filter=_make_watch_filter(repo_path, gitignore),
+            stop_event=stop_event,
+            ignore_permission_denied=True,
+        ):
+            changed_paths: list[Path] = []
+            seen: set[str] = set()
+            for _change_type, path_str in changes:
+                if path_str not in seen:
+                    seen.add(path_str)
+                    changed_paths.append(Path(path_str))
+            if changed_paths:
+                await queue.put(changed_paths)
+        await queue.put(None)  # sentinel — consumer will exit after draining
+
+    async def _consumer() -> None:
+        """Drain the queue sequentially and run reindex + global phases."""
+        dirty = False
+        last_global = time.monotonic()
+        last_embed = time.monotonic()
+        files_changed = 0
+
+        while True:
+            batch = await queue.get()
+            if batch is None:
+                queue.task_done()
+                break
+
+            count = await _run_sync(_reindex_files, batch, repo_path, storage, gitignore)
+            if count > 0:
+                files_changed += count
+                dirty = True
+                logger.info("Reindexed %d file(s)", count)
+
+            now = time.monotonic()
+            if dirty and (now - last_global) >= GLOBAL_PHASE_INTERVAL:
+                with_embeddings = (now - last_embed) >= EMBEDDING_INTERVAL
+                logger.info(
+                    "Running global analysis phases (embeddings=%s)...", with_embeddings
+                )
+                await _run_sync(_run_global_phases, storage, repo_path, with_embeddings)
+                dirty = False
+                last_global = now
+                if with_embeddings:
+                    last_embed = now
+
+            queue.task_done()
+
+        logger.info("Watch stopped. Total files reindexed: %d", files_changed)
 
     logger.info("Watching %s for changes...", repo_path)
-
-    async for changes in watchfiles.awatch(
-        repo_path,
-        rust_timeout=debounce_ms,
-        watch_filter=_make_watch_filter(repo_path, gitignore),
-        stop_event=stop_event,
-        ignore_permission_denied=True,
-    ):
-        changed_paths: list[Path] = []
-        seen: set[str] = set()
-        for _change_type, path_str in changes:
-            if path_str not in seen:
-                seen.add(path_str)
-                changed_paths.append(Path(path_str))
-
-        if not changed_paths:
-            continue
-
-        count = await _run_sync(_reindex_files, changed_paths, repo_path, storage, gitignore)
-        if count > 0:
-            files_changed += count
-            dirty = True
-            logger.info("Reindexed %d file(s)", count)
-
-        now = time.monotonic()
-        if dirty and (now - last_global) >= GLOBAL_PHASE_INTERVAL:
-            with_embeddings = (now - last_embed) >= EMBEDDING_INTERVAL
-            logger.info(
-                "Running global analysis phases (embeddings=%s)...", with_embeddings
-            )
-            await _run_sync(_run_global_phases, storage, repo_path, with_embeddings)
-            dirty = False
-            last_global = now
-            if with_embeddings:
-                last_embed = now
-
-    logger.info("Watch stopped. Total files reindexed: %d", files_changed)
+    await asyncio.gather(
+        asyncio.create_task(_producer()),
+        asyncio.create_task(_consumer()),
+    )
