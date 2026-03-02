@@ -14,10 +14,9 @@ from typing import Any
 import kuzu
 
 from axon.core.graph.model import GraphNode, NodeLabel
-from axon.core.storage.base import NodeEmbedding, SearchResult
+from axon.core.storage.base import SearchResult
 from axon.core.storage.kuzu_backend import (
     _LABEL_MAP,
-    _LABEL_TO_TABLE,
     _SEARCHABLE_TABLES,
     _escape,
     _table_for_id,

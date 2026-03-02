@@ -91,13 +91,17 @@ class ElixirParser(LanguageParser):
             case "defmodule":
                 self._extract_module(node, content, result, pending_attrs)
             case "def":
-                self._extract_function(node, content, result, module_name, pending_attrs, private=False)
+                self._extract_function(
+                    node, content, result, module_name, pending_attrs, private=False)
             case "defp":
-                self._extract_function(node, content, result, module_name, pending_attrs, private=True)
+                self._extract_function(
+                    node, content, result, module_name, pending_attrs, private=True)
             case "defmacro":
-                self._extract_macro(node, content, result, module_name, pending_attrs, private=False)
+                self._extract_macro(
+                    node, content, result, module_name, pending_attrs, private=False)
             case "defmacrop":
-                self._extract_macro(node, content, result, module_name, pending_attrs, private=True)
+                self._extract_macro(
+                    node, content, result, module_name, pending_attrs, private=True)
             case "defstruct":
                 self._extract_struct(node, content, result, module_name, pending_attrs)
             case _ if identifier in _IMPORT_DIRECTIVES:
@@ -118,7 +122,11 @@ class ElixirParser(LanguageParser):
         decorators: list[str],
     ) -> None:
         """Extract a defmodule definition."""
-        args = node.child_by_field_name("arguments") if hasattr(node, "child_by_field_name") else None
+        args = (
+            node.child_by_field_name("arguments")
+            if hasattr(node, "child_by_field_name")
+            else None
+        )
         if args is None:
             args = self._find_child_by_type(node, "arguments")
 
@@ -138,6 +146,8 @@ class ElixirParser(LanguageParser):
                 kind="module",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
                 decorators=list(decorators),
             )
@@ -177,6 +187,8 @@ class ElixirParser(LanguageParser):
                 kind="function",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
                 decorators=effective_decorators,
                 class_name=module_name,
@@ -216,6 +228,8 @@ class ElixirParser(LanguageParser):
                 kind="macro",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
                 decorators=list(decorators),
                 class_name=module_name,
@@ -248,6 +262,8 @@ class ElixirParser(LanguageParser):
                 kind="struct",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
                 decorators=list(decorators),
                 class_name=module_name,

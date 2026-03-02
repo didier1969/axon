@@ -76,6 +76,8 @@ class CssParser(LanguageParser):
                 kind="function",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=content[node.start_byte : node.end_byte],
             )
         )
@@ -98,6 +100,8 @@ class CssParser(LanguageParser):
                 kind="function",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=content[node.start_byte : node.end_byte],
             )
         )

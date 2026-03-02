@@ -48,8 +48,7 @@ class MarkdownParser(LanguageParser):
         total_lines = len(lines)
 
         # --- Pass 1: Extract YAML frontmatter ---
-        frontmatter_end = 0
-        frontmatter_end = self._extract_frontmatter(lines, result)
+        self._extract_frontmatter(lines, result)
 
         # --- Pass 2: Tree-sitter for headings ---
         tree = self._parser.parse(bytes(content, "utf8"))
@@ -119,14 +118,16 @@ class MarkdownParser(LanguageParser):
         result: ParseResult,
     ) -> None:
         """Extract heading sections from the tree-sitter AST."""
-        headings: list[tuple[int, int, str]] = []
+        headings: list[tuple[int, int, str, int, int]] = []
         self._collect_headings(root, headings)
 
-        for idx, (start_line, level, name) in enumerate(headings):
+        for idx, (start_line, level, name, start_byte, _end_byte) in enumerate(headings):
             if idx + 1 < len(headings):
                 end_line = headings[idx + 1][0] - 1
+                end_byte = headings[idx + 1][3] - 1
             else:
                 end_line = total_lines
+                end_byte = len(content.encode("utf-8"))
 
             section_lines = lines[start_line - 1 : end_line]
             section_content = "\n".join(section_lines)
@@ -137,6 +138,8 @@ class MarkdownParser(LanguageParser):
                     kind="section",
                     start_line=start_line,
                     end_line=end_line,
+                    start_byte=start_byte,
+                    end_byte=end_byte,
                     content=section_content,
                 )
             )
@@ -146,7 +149,7 @@ class MarkdownParser(LanguageParser):
                 result.exports.append(name)
 
     def _collect_headings(
-        self, node: Node, headings: list[tuple[int, int, str]]
+        self, node: Node, headings: list[tuple[int, int, str, int, int]]
     ) -> None:
         """Recursively collect atx_heading nodes from the AST."""
         if node.type == "atx_heading":
@@ -159,7 +162,7 @@ class MarkdownParser(LanguageParser):
                     name = child.text.decode("utf8").strip()
             if name:
                 start_line = node.start_point[0] + 1
-                headings.append((start_line, level, name))
+                headings.append((start_line, level, name, node.start_byte, node.end_byte))
             return
 
         for child in node.children:

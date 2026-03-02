@@ -195,6 +195,8 @@ class TypeScriptParser(LanguageParser):
                 kind="function",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=content,
                 signature=signature,
             )
@@ -223,6 +225,8 @@ class TypeScriptParser(LanguageParser):
                 kind="method",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=content,
                 signature=signature,
                 class_name=class_name,
@@ -276,6 +280,8 @@ class TypeScriptParser(LanguageParser):
                 kind="function",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=outer.start_byte,
+                end_byte=outer.end_byte,
                 content=content,
                 signature=signature,
             )
@@ -332,6 +338,8 @@ class TypeScriptParser(LanguageParser):
                 kind="class",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=content,
             )
         )
@@ -369,6 +377,8 @@ class TypeScriptParser(LanguageParser):
                 kind="interface",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=content,
             )
         )
@@ -395,6 +405,8 @@ class TypeScriptParser(LanguageParser):
                 kind="type_alias",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=content,
             )
         )

@@ -105,6 +105,8 @@ class RustParser(LanguageParser):
                 kind=kind,
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
                 class_name=class_name,
             )
@@ -142,6 +144,8 @@ class RustParser(LanguageParser):
                 kind=kind,
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
                 class_name=class_name,
             )
@@ -170,6 +174,8 @@ class RustParser(LanguageParser):
                 kind="struct",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
             )
         )
@@ -200,6 +206,8 @@ class RustParser(LanguageParser):
                 kind="enum",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
             )
         )
@@ -230,6 +238,8 @@ class RustParser(LanguageParser):
                 kind="interface",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
             )
         )
@@ -290,6 +300,8 @@ class RustParser(LanguageParser):
                 kind="module",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
             )
         )
@@ -322,6 +334,8 @@ class RustParser(LanguageParser):
                 kind="type_alias",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
             )
         )
@@ -353,7 +367,6 @@ class RustParser(LanguageParser):
             full_path = node.text.decode("utf8")
             # The last segment is the imported name
             parts = full_path.replace("::", ".").split(".")
-            module = "::".join(parts[:-1]) if len(parts) > 1 else full_path
             name = parts[-1]
             result.imports.append(
                 ImportInfo(
@@ -376,11 +389,12 @@ class RustParser(LanguageParser):
             self._process_use_list(node, prefix=prefix, result=result)
 
         elif node.type == "identifier":
-            full_path = f"{prefix}::{node.text.decode('utf8')}" if prefix else node.text.decode("utf8")
+            node_text = node.text.decode("utf8")
+            full_path = f"{prefix}::{node_text}" if prefix else node_text
             result.imports.append(
                 ImportInfo(
                     module=full_path,
-                    names=[node.text.decode("utf8")],
+                    names=[node_text],
                 )
             )
 

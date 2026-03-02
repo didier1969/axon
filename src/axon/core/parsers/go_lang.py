@@ -81,6 +81,8 @@ class GoParser(LanguageParser):
                 kind="function",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
             )
         )
@@ -131,6 +133,8 @@ class GoParser(LanguageParser):
                 kind="method",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
                 class_name=receiver_type,
             )
@@ -180,6 +184,8 @@ class GoParser(LanguageParser):
                 kind=kind,
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
             )
         )
