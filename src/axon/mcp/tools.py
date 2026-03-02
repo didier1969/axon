@@ -21,6 +21,7 @@ from axon.core.storage.base import StorageBackend
 logger = logging.getLogger(__name__)
 
 MAX_TRAVERSE_DEPTH = 10
+_MAX_RELATIONS_DISPLAYED = 20
 
 
 def _escape_cypher(value: str) -> str:
@@ -61,6 +62,21 @@ def _resolve_symbol(storage: StorageBackend, symbol: str, limit: int = 1) -> lis
             return results
     return storage.fts_search(symbol, limit=limit)
 
+_SAFE_SLUG_RE = re.compile(r'^[a-zA-Z0-9._-]{1,200}$')
+
+
+def _sanitize_repo_slug(repo: str) -> str | None:
+    """Return repo if it is a safe single-component slug, else None."""
+    if not _SAFE_SLUG_RE.match(repo):
+        logger.warning("Invalid repo slug rejected: %r", repo)
+        return None
+    p = Path(repo)
+    if len(p.parts) != 1 or ".." in p.parts:
+        logger.warning("Invalid repo slug rejected: %r", repo)
+        return None
+    return repo
+
+
 def _load_repo_storage(repo: str) -> StorageBackend | None:
     """Open a read-only KuzuBackend for a named repo from the global registry.
 
@@ -71,6 +87,10 @@ def _load_repo_storage(repo: str) -> StorageBackend | None:
     Returns ``None`` (and logs at DEBUG) on any error so callers can return
     a user-friendly message without crashing.
     """
+    repo = _sanitize_repo_slug(repo)
+    if repo is None:
+        return None
+
     from axon.core.storage.kuzu_backend import KuzuBackend
 
     meta_path = Path.home() / ".axon" / "repos" / repo / "meta.json"
@@ -371,10 +391,14 @@ def handle_context(storage: StorageBackend, symbol: str, repo: str | None = None
             callers_raw = [(c, 1.0) for c in storage.get_callers(node.id)]
 
         if callers_raw:
-            lines.append(f"\nCallers ({len(callers_raw)}):")
-            for c, conf in callers_raw:
+            total = len(callers_raw)
+            shown = callers_raw[:_MAX_RELATIONS_DISPLAYED]
+            lines.append(f"\nCallers ({total}):")
+            for c, conf in shown:
                 tag = _confidence_tag(conf)
                 lines.append(f"  -> {c.name}  {c.file_path}:{c.start_line}{tag}")
+            if total > _MAX_RELATIONS_DISPLAYED:
+                lines.append(f"  ... and {total - _MAX_RELATIONS_DISPLAYED} more")
 
         try:
             callees_raw = storage.get_callees_with_confidence(node.id)
@@ -382,10 +406,14 @@ def handle_context(storage: StorageBackend, symbol: str, repo: str | None = None
             callees_raw = [(c, 1.0) for c in storage.get_callees(node.id)]
 
         if callees_raw:
-            lines.append(f"\nCallees ({len(callees_raw)}):")
-            for c, conf in callees_raw:
+            total = len(callees_raw)
+            shown = callees_raw[:_MAX_RELATIONS_DISPLAYED]
+            lines.append(f"\nCallees ({total}):")
+            for c, conf in shown:
                 tag = _confidence_tag(conf)
                 lines.append(f"  -> {c.name}  {c.file_path}:{c.start_line}{tag}")
+            if total > _MAX_RELATIONS_DISPLAYED:
+                lines.append(f"  ... and {total - _MAX_RELATIONS_DISPLAYED} more")
 
         type_refs = storage.get_type_refs(node.id)
         if type_refs:
@@ -555,33 +583,39 @@ def handle_detect_changes(storage: StorageBackend, diff: str) -> str:
     lines.append("")
     total_affected = 0
 
+    all_file_paths = list(changed_files.keys())
+    # Single parameterised query — no Cypher injection, no N+1
+    try:
+        all_rows = storage.execute_raw(
+            "MATCH (n) WHERE n.file_path IN $fps AND n.start_line > 0 "
+            "RETURN n.id, n.name, n.file_path, n.start_line, n.end_line",
+            parameters={"fps": all_file_paths},
+        ) or []
+    except (RuntimeError, ValueError) as exc:
+        logger.warning("Failed to query symbols for batch: %s", exc, exc_info=True)
+        all_rows = []
+
+    # Group results by file_path
+    results_by_file: dict[str, list] = {}
+    for row in all_rows:
+        fp = row[2] or ""
+        results_by_file.setdefault(fp, []).append(row)
+
     for file_path, ranges in changed_files.items():
         affected_symbols = []
-        try:
-            rows = storage.execute_raw(
-                f"MATCH (n) WHERE n.file_path = '{_escape_cypher(file_path)}' "
-                f"AND n.start_line > 0 "
-                f"RETURN n.id, n.name, n.file_path, n.start_line, n.end_line"
-            )
-            for row in rows or []:
-                node_id = row[0] or ""
-                name = row[1] or ""
-                start_line = row[3] or 0
-                end_line = row[4] or 0
-                label_prefix = node_id.split(":", 1)[0] if node_id else ""
-                for start, end in ranges:
-                    if start_line <= end and end_line >= start:
-                        affected_symbols.append(
-                            (name, label_prefix.title(), start_line, end_line)
-                        )
-                        break
-        except (RuntimeError, ValueError) as exc:
-            logger.warning("Failed to query symbols for %s: %s", file_path, exc, exc_info=True)
-            lines.append(f"  {file_path}:")
-            lines.append(f"    (error querying symbols: {exc})")
-            lines.append("")
-            continue
-
+        rows = results_by_file.get(file_path, [])
+        for row in rows:
+            node_id = row[0] or ""
+            name = row[1] or ""
+            start_line = row[3] or 0
+            end_line = row[4] or 0
+            label_prefix = node_id.split(":", 1)[0] if node_id else ""
+            for start, end in ranges:
+                if start_line <= end and end_line >= start:
+                    affected_symbols.append(
+                        (name, label_prefix.title(), start_line, end_line)
+                    )
+                    break
         lines.append(f"  {file_path}:")
         if affected_symbols:
             for sym_name, label, s_line, e_line in affected_symbols:
@@ -597,7 +631,8 @@ def handle_detect_changes(storage: StorageBackend, diff: str) -> str:
     return "\n".join(lines)
 
 _WRITE_KEYWORDS = re.compile(
-    r"\b(DELETE|DROP|CREATE|SET|REMOVE|MERGE|DETACH|INSTALL|LOAD|COPY|CALL)\b",
+    r"\b(DELETE|DROP|CREATE|SET|REMOVE|MERGE|DETACH|INSTALL|LOAD|COPY|CALL"
+    r"|RENAME|ALTER|IMPORT|TRUNCATE)\b",
     re.IGNORECASE,
 )
 

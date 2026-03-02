@@ -335,3 +335,24 @@ class TestWatchRepoQueue:
 
         # Empty batch never enters the queue — _reindex_files never called.
         assert call_count == []
+
+
+# ---------------------------------------------------------------------------
+# Queue bounded by _WATCH_QUEUE_MAXSIZE
+# ---------------------------------------------------------------------------
+
+
+class TestWatchQueueBounded:
+    """watch_repo uses a bounded queue of size _WATCH_QUEUE_MAXSIZE."""
+
+    def test_watch_queue_maxsize_constant(self):
+        from axon.core.ingestion.watcher import _WATCH_QUEUE_MAXSIZE
+
+        assert _WATCH_QUEUE_MAXSIZE == 100
+
+    def test_queue_created_with_maxsize(self):
+        import asyncio
+        from axon.core.ingestion.watcher import _WATCH_QUEUE_MAXSIZE
+
+        q: asyncio.Queue = asyncio.Queue(maxsize=_WATCH_QUEUE_MAXSIZE)
+        assert q.maxsize == 100

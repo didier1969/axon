@@ -431,3 +431,39 @@ class TestBatchAddRelationships:
         assert call_count["insert"] == 1
         callers = backend.get_callers(nodes[1].id)
         assert any(c.id == nodes[0].id for c in callers)
+
+
+# ---------------------------------------------------------------------------
+# remove_nodes_by_file returns correct count
+# ---------------------------------------------------------------------------
+
+
+class TestRemoveNodesByFileCount:
+    """remove_nodes_by_file() must return the number of deleted nodes."""
+
+    def test_returns_zero_for_unknown_file(self, backend: KuzuBackend):
+        """No nodes indexed for this file → returns 0."""
+        count = backend.remove_nodes_by_file("src/nonexistent.py")
+        assert isinstance(count, int)
+        assert count == 0
+
+    def test_returns_correct_count(self, backend: KuzuBackend):
+        """3 nodes indexed for a file → remove returns 3."""
+        nodes = [
+            _make_node(name="func_a", file_path="src/target.py"),
+            _make_node(name="func_b", file_path="src/target.py"),
+            _make_node(name="func_c", file_path="src/target.py"),
+            _make_node(name="other", file_path="src/other.py"),
+        ]
+        backend.add_nodes(nodes)
+        count = backend.remove_nodes_by_file("src/target.py")
+        assert count == 3
+
+    def test_nodes_gone_after_remove(self, backend: KuzuBackend):
+        """After removal, no symbols remain for that file."""
+        node = _make_node(name="to_delete", file_path="src/del.py")
+        backend.add_nodes([node])
+        backend.remove_nodes_by_file("src/del.py")
+        results = backend.exact_name_search("to_delete", limit=10)
+        file_results = [r for r in results if r.file_path == "src/del.py"]
+        assert len(file_results) == 0

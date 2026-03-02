@@ -324,3 +324,44 @@ class TestFuzzySearch:
         assert r.node_name == "my_handler"
         assert r.file_path == "src/handlers.py"
         assert r.snippet != ""
+
+
+# ---------------------------------------------------------------------------
+# _make_snippet unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestMakeSnippet:
+    """_make_snippet() respects max_chars and newline boundaries."""
+
+    def test_respects_newline_boundary(self):
+        from axon.core.storage.kuzu_search import _make_snippet
+
+        line = "x = 'hello world'\n"
+        content = line * 25  # ~475 chars
+        result = _make_snippet(content, "")
+        assert len(result) <= 400
+
+    def test_prefers_full_signature(self):
+        from axon.core.storage.kuzu_search import _make_snippet
+
+        sig = "def process_payment(amount: Decimal, currency: str, customer_id: int) -> dict:"
+        content = sig + "\n    pass\n" * 50
+        assert _make_snippet(content, sig) == sig
+
+    def test_short_content_returned_as_is(self):
+        from axon.core.storage.kuzu_search import _make_snippet
+
+        assert _make_snippet("short", "") == "short"
+
+    def test_empty_returns_empty(self):
+        from axon.core.storage.kuzu_search import _make_snippet
+
+        assert _make_snippet("", "") == ""
+
+    def test_long_content_no_newline_truncated_at_max(self):
+        from axon.core.storage.kuzu_search import _make_snippet
+
+        content = "a" * 800
+        result = _make_snippet(content, "")
+        assert len(result) == 400

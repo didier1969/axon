@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -370,7 +371,17 @@ def analyze(
         "last_indexed_at": datetime.now(tz=timezone.utc).isoformat(),
     }
     meta_path = axon_dir / "meta.json"
-    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    meta_content = json.dumps(meta, indent=2) + "\n"
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=axon_dir,
+        delete=False,
+        suffix=".tmp",
+    ) as tmp_f:
+        tmp_f.write(meta_content)
+        tmp_name = tmp_f.name
+    os.replace(tmp_name, meta_path)
 
     try:
         _register_in_global_registry(meta, repo_path)

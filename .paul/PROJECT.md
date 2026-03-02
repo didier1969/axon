@@ -12,7 +12,7 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 | Attribute | Value |
 |-----------|-------|
-| Version | 0.6.0 (complete) |
+| Version | 0.7.0 (in progress) |
 | Status | Active Development |
 | Last Updated | 2026-03-02 |
 
@@ -51,11 +51,28 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] Sequential watcher queue (asyncio.Queue producer/consumer, no producer stall under MCP lock) — v0.6 Phase 3, Plan 03-02
 - [x] Byte-offset caching (start_byte/end_byte in SymbolInfo, GraphNode, KuzuDB schema) — v0.6 Phase 3, Plan 03-03
 
+- [x] Security hardening Phase 1: path traversal, Cypher injection, DDL bypass, race condition, socket permissions — v0.7 Phase 1
+- [x] Snippet quality improvement: `_make_snippet()` 400-char semantic truncation — v0.7 Phase 1
+- [x] Callers/callees output cap (20 items + overflow) — v0.7 Phase 1
+- [x] Bounded watcher queue (maxsize=100, drop-oldest) — v0.7 Phase 1
+- [x] `remove_nodes_by_file()` correct return count — v0.7 Phase 1
+- [x] Atomic meta.json writes via tempfile + os.replace() — v0.7 Phase 1
+
 ### Active (In Progress)
-None — v0.6 milestone complete.
+Phase 2: Qualité, Parsers & Features — see ROADMAP.md
 
 ### Planned (Next)
-v0.7 — see ROADMAP.md (to be defined via /paul:discuss-milestone)
+- [ ] `axon read-symbol` MCP tool (O(1) via byte offsets)
+- [ ] Byte offsets for sql/yaml parsers
+- [ ] File size limit 512KB in walker.py
+- [ ] Dead code test pattern fixes (spec/, __tests__, _spec.rb)
+- [ ] TypeScript generics extraction for USES_TYPE
+- [ ] Python wildcard imports (from x import *)
+- [ ] `compute_repo_slug()` helper extraction
+- [ ] axon_batch partial failure summary
+- [ ] AXON_LRU_SIZE env var
+- [ ] MCP tool descriptions improvement
+- [ ] Socket buffer readline()
 
 ### Out of Scope
 - GUI / web interface — CLI and MCP-first
@@ -109,6 +126,10 @@ v0.7 — see ROADMAP.md (to be defined via /paul:discuss-milestone)
 | debounce_ms exposed as CLI param | --debounce flag on axon serve --watch; default 50ms; configures watchfiles rust_timeout | 2026-03-02 | Active |
 | asyncio.Queue producer/consumer in watch_repo() | _producer never stalls under MCP lock; _consumer drains sequentially; None sentinel for shutdown | 2026-03-02 | Active |
 | Byte offsets in schema, no migration | start_byte/end_byte INT64 in all node tables; old 12-col DBs still readable with len(row) guard | 2026-03-02 | Active |
+| _sanitize_repo_slug() as security gate | All filesystem path construction via repo= param now validated before use | 2026-03-02 | Active |
+| Parameterized KuzuDB queries | execute_raw(query, parameters={"key": val}) — no f-string Cypher, no N+1 | 2026-03-02 | Active |
+| Drop-oldest strategy for watcher queue | maxsize=100; overflow drops oldest batch (most recent = most relevant) | 2026-03-02 | Active |
+| _make_snippet() semantic truncation | 400-char limit, newline-aware, signature-preferred; replaces content[:200] slice | 2026-03-02 | Active |
 
 ## Success Metrics
 
@@ -130,4 +151,4 @@ v0.7 — see ROADMAP.md (to be defined via /paul:discuss-milestone)
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-03-02 — v0.6 complete (all 3 phases: centralisation, daemon, watch & filtrage)*
+*Last updated: 2026-03-02 — v0.7 Phase 1 complete (Sécurité & Robustesse: 11 fixes, 61→~75/100 audit score)*

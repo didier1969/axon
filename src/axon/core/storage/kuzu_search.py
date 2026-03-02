@@ -25,6 +25,26 @@ from axon.core.storage.kuzu_backend import (
 logger = logging.getLogger(__name__)
 
 
+def _make_snippet(content: str, signature: str, max_chars: int = 400) -> str:
+    """Return a semantically coherent snippet for LLM consumption.
+
+    Prefers the full signature if it fits. Otherwise returns up to max_chars
+    chars of content, truncated at a newline boundary when possible.
+    """
+    if signature and len(signature) <= max_chars:
+        return signature
+    src = content or signature
+    if not src:
+        return ""
+    if len(src) <= max_chars:
+        return src
+    truncated = src[:max_chars]
+    last_newline = truncated.rfind("\n")
+    if last_newline > max_chars // 2:
+        return truncated[:last_newline]
+    return truncated
+
+
 def _row_to_node(row: list[Any], node_id: str | None = None) -> GraphNode | None:
     """Convert a result row from ``RETURN n.*`` into a GraphNode.
 
@@ -84,7 +104,7 @@ def exact_name_search(
                 content = row[3] or ""
                 signature = row[4] or ""
                 label_prefix = node_id.split(":", 1)[0] if node_id else ""
-                snippet = content[:200] if content else signature[:200]
+                snippet = _make_snippet(content, signature)
                 score = 2.0 if "/tests/" not in file_path else 1.0
                 candidates.append(
                     SearchResult(
@@ -147,7 +167,7 @@ def fts_search(
                 if label_prefix in ("function", "class") and "/tests/" not in file_path:
                     bm25_score *= 1.2
 
-                snippet = content[:200] if content else signature[:200]
+                snippet = _make_snippet(content, signature)
 
                 candidates.append(
                     SearchResult(
@@ -207,7 +227,7 @@ def fuzzy_search(
                         node_name=name,
                         file_path=file_path,
                         label=label_prefix,
-                        snippet=content[:200] if content else "",
+                        snippet=_make_snippet(content, ""),
                     )
                 )
         except RuntimeError:
@@ -280,7 +300,10 @@ def vector_search(
                 node_name=node.name if node else "",
                 file_path=node.file_path if node else "",
                 label=label_prefix,
-                snippet=(node.content[:200] if node and node.content else ""),
+                snippet=_make_snippet(
+                    (node.content or "") if node else "",
+                    (node.signature or "") if node else "",
+                ),
                 language=node.language if node else "",
             )
         )

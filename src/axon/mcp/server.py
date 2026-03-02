@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import socket as _socket
+import threading
 from pathlib import Path
 
 from mcp.server import Server
@@ -46,6 +47,7 @@ logger = logging.getLogger(__name__)
 server = Server("axon")
 
 _storage: KuzuBackend | None = None
+_storage_lock = threading.Lock()
 _lock: asyncio.Lock | None = None
 
 
@@ -62,14 +64,18 @@ def set_lock(lock: asyncio.Lock) -> None:
 
 
 def _get_storage() -> KuzuBackend:
-    """Lazily initialise and return the KuzuDB storage backend.
+    """Lazily initialise and return the KuzuDB storage backend (thread-safe).
 
     Tries the centralised path (``~/.axon/repos/{slug}/kuzu``) from the
     local ``.axon/meta.json`` slug field.  Falls back to the legacy
     ``.axon/kuzu`` path for repos indexed before v0.6.
     """
     global _storage  # noqa: PLW0603
-    if _storage is None:
+    if _storage is not None:
+        return _storage
+    with _storage_lock:
+        if _storage is not None:  # double-checked
+            return _storage
         _storage = KuzuBackend()
         meta_path = Path.cwd() / ".axon" / "meta.json"
         db_path: Path | None = None
@@ -81,7 +87,6 @@ def _get_storage() -> KuzuBackend:
                     db_path = central_db_path(slug)
             except (json.JSONDecodeError, OSError):
                 pass
-        # Legacy fallback: local .axon/kuzu
         if db_path is None:
             db_path = Path.cwd() / ".axon" / "kuzu"
         if db_path.exists():

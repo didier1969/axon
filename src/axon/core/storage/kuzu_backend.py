@@ -140,17 +140,29 @@ class KuzuBackend:
                 self._insert_relationship(rel)
 
     def remove_nodes_by_file(self, file_path: str) -> int:
-        """Delete all nodes whose ``file_path`` matches across every table."""
+        """Delete all nodes whose ``file_path`` matches across every table.
+
+        Returns the total number of deleted nodes.
+        """
         assert self._conn is not None
+        total_deleted = 0
         for table in _NODE_TABLE_NAMES:
             try:
+                count_result = self._conn.execute(
+                    f"MATCH (n:{table}) WHERE n.file_path = $fp RETURN count(n)",
+                    parameters={"fp": file_path},
+                )
+                if count_result.has_next():
+                    total_deleted += int(count_result.get_next()[0] or 0)
                 self._conn.execute(
                     f"MATCH (n:{table}) WHERE n.file_path = $fp DETACH DELETE n",
                     parameters={"fp": file_path},
                 )
             except RuntimeError:
-                logger.debug("Failed to remove nodes from table %s", table, exc_info=True)
-        return 0
+                logger.debug(
+                    "Failed to remove nodes from table %s", table, exc_info=True
+                )
+        return total_deleted
 
     def get_node(self, node_id: str) -> GraphNode | None:
         """Return a single node by ID, or ``None`` if not found."""
@@ -275,10 +287,10 @@ class KuzuBackend:
             logger.debug("get_process_memberships failed", exc_info=True)
         return mapping
 
-    def execute_raw(self, query: str) -> list[list[Any]]:
+    def execute_raw(self, query: str, parameters: dict | None = None) -> list[list[Any]]:
         """Execute a raw Cypher query and return all result rows."""
         assert self._conn is not None
-        result = self._conn.execute(query)
+        result = self._conn.execute(query, parameters=parameters or {})
         rows: list[list[Any]] = []
         while result.has_next():
             rows.append(result.get_next())

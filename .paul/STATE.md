@@ -5,25 +5,26 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.6 complete — milestone done, ready to define v0.7.
+**Current focus:** v0.7 Quality & Security — Phase 2: axon read-symbol, byte offsets sql/yaml, parser quality (~75→81/100).
 
 ## Current Position
 
-Milestone: Awaiting next milestone
-Phase: None active
-Plan: None
-Status: v0.6 complete — ready to define v0.7
-Last activity: 2026-03-02 — Milestone v0.6 complete, git tag v0.6.0
+Milestone: v0.7 Quality & Security
+Phase: 2 of 2 — Qualité, Parsers & Features
+Plan: Not started
+Status: Phase 1 complete — ready to plan Phase 2
+Last activity: 2026-03-02 — Phase 1 (Sécurité & Robustesse) unified, transitioned to Phase 2
 
 Progress:
 - v0.6 Daemon & Centralisation: [██████████] 100% ✓
+- v0.7 Quality & Security: [█████░░░░░] 50% (Phase 1 ✓)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ○        ○        ○     [Milestone complete — ready for next]
+  ○        ○        ○     [Ready to plan Phase 2]
 ```
 
 ## Accumulated Context
@@ -54,6 +55,11 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | Byte offsets stored as INT64 in KuzuDB, no migration | v0.6 Plan 03-03 | Users must re-run axon analyze; old 12-col schemas still readable |
 | markdown sections use heading node.start_byte as section start | v0.6 Plan 03-03 | end_byte = next heading start_byte - 1; content assembled from lines |
 | sql_lang.py / yaml_lang.py left at start_byte=0 | v0.6 Plan 03-03 | Regex-based parsers have no tree-sitter node |
+| _sanitize_repo_slug() as security gate for repo= param | v0.7 Plan 01-01 | Rejects traversal, null bytes, spaces, >200 chars — applied in _load_repo_storage() |
+| execute_raw(parameters=dict) parameterized queries | v0.7 Plan 01-01 | Eliminates Cypher injection and N+1 in handle_detect_changes |
+| Drop-oldest strategy for bounded watcher queue | v0.7 Plan 01-01 | asyncio.Queue(maxsize=100); newest events preserved on overflow |
+| _make_snippet() semantic truncation | v0.7 Plan 01-01 | 400-char limit, newline-aware, signature-preferred; replaces content[:200] |
+| Count-before-delete in remove_nodes_by_file | v0.7 Plan 01-01 | KuzuDB lacks DETACH DELETE…RETURNING; COUNT per table then DELETE |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
@@ -72,13 +78,12 @@ Uncommitted: PAUL files (STATE.md, SUMMARY 03-03) pending docs commit
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: Milestone v0.6 complete — MILESTONES.md updated, git tag v0.6.0 created
-Next action: /paul:discuss-milestone (define v0.7 scope)
-Resume file: .paul/MILESTONES.md
+Stopped at: Phase 1 (Sécurité & Robustesse) complete — unified and transitioned
+Next action: /paul:plan for Phase 2 (Qualité, Parsers & Features)
 Resume context:
-- v0.6 shipped: central storage + daemon + LRU + MCP proxy + axon_batch + watch filter + queue + byte-offsets
-- 824 tests, 0 failures; pyproject.toml at 0.6.0
-- v0.7 scope not yet defined
+- Phase 1 delivered 11 fixes, audit 61→~75/100
+- 852 tests pass
+- Phase 2 scope: axon read-symbol, sql/yaml byte offsets, parser quality (11 items in ROADMAP)
 
 ---
 *STATE.md — Updated after every significant action*

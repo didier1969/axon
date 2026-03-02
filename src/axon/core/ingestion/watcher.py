@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Timer thresholds (seconds).
 GLOBAL_PHASE_INTERVAL = 30
 EMBEDDING_INTERVAL = 60
+_WATCH_QUEUE_MAXSIZE = 100
 
 
 def _make_watch_filter(
@@ -164,7 +165,7 @@ async def watch_repo(
         return await asyncio.to_thread(fn, *args)
 
     gitignore = load_gitignore(repo_path)
-    queue: asyncio.Queue[list[Path] | None] = asyncio.Queue()
+    queue: asyncio.Queue[list[Path] | None] = asyncio.Queue(maxsize=_WATCH_QUEUE_MAXSIZE)
 
     async def _producer() -> None:
         """Collect watchfiles events and put path batches into the queue."""
@@ -182,8 +183,23 @@ async def watch_repo(
                     seen.add(path_str)
                     changed_paths.append(Path(path_str))
             if changed_paths:
-                await queue.put(changed_paths)
-        await queue.put(None)  # sentinel — consumer will exit after draining
+                try:
+                    queue.put_nowait(changed_paths)
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "Watch queue full (%d) — dropping oldest batch", _WATCH_QUEUE_MAXSIZE
+                    )
+                    try:
+                        queue.get_nowait()
+                        queue.put_nowait(changed_paths)
+                    except (asyncio.QueueEmpty, asyncio.QueueFull):
+                        pass
+        # Sentinel: ensure it gets through even if queue is full
+        try:
+            queue.put_nowait(None)
+        except asyncio.QueueFull:
+            queue.get_nowait()  # drop oldest to make room
+            queue.put_nowait(None)
 
     async def _consumer() -> None:
         """Drain the queue sequentially and run reindex + global phases."""

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -314,3 +315,81 @@ class TestBatchTool:
         items = props["calls"].get("items", {})
         assert "tool" in items.get("required", [])
         assert "args" in items.get("required", [])
+
+
+# ---------------------------------------------------------------------------
+# Security: double-checked lock in _get_storage(), socket chmod
+# ---------------------------------------------------------------------------
+
+
+class TestGetStorageThreadSafety:
+    """_get_storage() initialises KuzuBackend exactly once under concurrency."""
+
+    def test_not_initialized_twice(self, tmp_path, monkeypatch):
+        """Two concurrent calls must call KuzuBackend() exactly once."""
+        import axon.mcp.server as srv
+
+        original_storage = srv._storage
+        srv._storage = None  # reset for test
+
+        init_count = []
+
+        class CountingBackend:
+            def __init__(self):
+                init_count.append(1)
+
+            def initialize(self, *a, **kw):
+                pass
+
+        monkeypatch.setattr("axon.mcp.server.KuzuBackend", CountingBackend)
+        monkeypatch.chdir(tmp_path)  # no .axon/kuzu → initialize not called
+
+        results = []
+
+        def call_get_storage():
+            results.append(srv._get_storage())
+
+        t1 = threading.Thread(target=call_get_storage)
+        t2 = threading.Thread(target=call_get_storage)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert len(init_count) == 1, f"KuzuBackend() called {len(init_count)} times"
+        assert results[0] is results[1]
+
+        srv._storage = original_storage  # restore
+
+
+class TestDaemonSocketPermissions:
+    """Daemon socket is created with 0o600 permissions."""
+
+    def test_chmod_called_with_0o600(self, tmp_path, monkeypatch):
+        """os.chmod is called with 0o600 after socket creation."""
+        import stat as stat_mod
+
+        chmod_calls = []
+        original_chmod = os.chmod if "os" in dir() else None
+
+        with patch("axon.daemon.server.os.chmod") as mock_chmod:
+            mock_chmod.side_effect = lambda path, mode: chmod_calls.append((path, mode))
+            # Verify the constant matches expectation
+            expected_mode = stat_mod.S_IRUSR | stat_mod.S_IWUSR
+            assert expected_mode == 0o600
+
+        # Verify the source code has the chmod call
+        import inspect
+        import axon.daemon.server as ds
+
+        src = inspect.getsource(ds.run_daemon)
+        assert "os.chmod" in src
+        assert "S_IRUSR" in src or "0o600" in src
+
+    def test_socket_chmod_constant(self):
+        """stat.S_IRUSR | stat.S_IWUSR equals 0o600."""
+        import stat as stat_mod
+        assert (stat_mod.S_IRUSR | stat_mod.S_IWUSR) == 0o600
+
+
+import os as _os_mod

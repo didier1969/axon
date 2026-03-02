@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import signal
+import stat
 
 from axon.core.paths import daemon_pid_path, daemon_sock_path
 from axon.daemon.lru_cache import LRUBackendCache
@@ -139,6 +140,7 @@ async def run_daemon(maxsize: int = 5) -> None:
         await _handle_connection(reader, writer, cache)
 
     server = await asyncio.start_unix_server(handle_conn, str(sock_path))
+    os.chmod(str(sock_path), stat.S_IRUSR | stat.S_IWUSR)  # 0o600 — owner only
     logger.info("Daemon listening on %s (PID %d, maxsize=%d)", sock_path, os.getpid(), maxsize)
 
     async with server:

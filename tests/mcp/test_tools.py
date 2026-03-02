@@ -20,6 +20,7 @@ from axon.mcp.tools import (
     _format_query_results,
     _group_by_process,
     _load_repo_storage,
+    _sanitize_repo_slug,
     handle_context,
     handle_cypher,
     handle_dead_code,
@@ -897,3 +898,105 @@ class TestMultiRepoRouting:
 
         mock_backend.initialize.assert_called_once_with(legacy_kuzu, read_only=True)
         assert result is mock_backend
+
+
+# ---------------------------------------------------------------------------
+# Security: path traversal, Cypher injection, WRITE_KEYWORDS, callers cap
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeRepoSlug:
+    """_sanitize_repo_slug() rejects unsafe slugs and accepts valid ones."""
+
+    @pytest.mark.parametrize("repo", [
+        "../../.ssh/id_rsa",
+        "../evil",
+        "/absolute/path",
+        "repo with spaces",
+        "a" * 201,
+        "repo\x00null",
+    ])
+    def test_rejects_traversal(self, repo):
+        assert _sanitize_repo_slug(repo) is None
+
+    def test_accepts_valid_slug(self):
+        assert _sanitize_repo_slug("my-repo_v2.0") == "my-repo_v2.0"
+
+    def test_load_repo_storage_rejects_traversal(self, tmp_path, monkeypatch):
+        """_load_repo_storage returns None for a traversal slug without touching fs."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        result = _load_repo_storage("../../etc/passwd")
+        assert result is None
+
+
+class TestDetectChangesSecurity:
+    """handle_detect_changes() uses a single batched parameterised query."""
+
+    def test_single_query_for_multi_file_diff(self, mock_storage):
+        """Two files in diff must result in exactly ONE execute_raw call."""
+        mock_storage.execute_raw.return_value = []
+        diff = (
+            "diff --git a/a.py b/a.py\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+            "diff --git a/b.py b/b.py\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+        )
+        handle_detect_changes(mock_storage, diff)
+        assert mock_storage.execute_raw.call_count == 1
+
+    def test_uses_named_parameters_not_fstring(self, mock_storage):
+        """Query must use named parameters (no f-string Cypher injection)."""
+        mock_storage.execute_raw.return_value = []
+        diff = "diff --git a/evil'; MATCH (n) RETURN n b/evil\n@@ -1 +1 @@\n-x\n+y\n"
+        handle_detect_changes(mock_storage, diff)
+        call = mock_storage.execute_raw.call_args
+        query_str = call.args[0] if call.args else ""
+        # Must not have interpolated quotes in the query string
+        assert "evil'" not in query_str
+        assert "$fps" in query_str
+
+
+class TestWriteKeywords:
+    """handle_cypher() rejects RENAME, ALTER, IMPORT (new additions)."""
+
+    def test_rejects_rename(self, mock_storage):
+        result = handle_cypher(mock_storage, "RENAME NODE foo TO bar")
+        assert "rejected" in result.lower()
+
+    def test_rejects_alter(self, mock_storage):
+        result = handle_cypher(mock_storage, "ALTER TABLE foo ADD col INT")
+        assert "rejected" in result.lower()
+
+    def test_rejects_import(self, mock_storage):
+        result = handle_cypher(mock_storage, "IMPORT DATABASE foo")
+        assert "rejected" in result.lower()
+
+
+class TestCallersCap:
+    """handle_context() caps callers and callees at 20."""
+
+    def _make_node(self, name: str) -> "GraphNode":
+        return GraphNode(
+            id=f"function:src/f.py:{name}",
+            label=NodeLabel.FUNCTION,
+            name=name,
+            file_path="src/f.py",
+            start_line=1,
+            end_line=5,
+        )
+
+    def test_caps_callers_at_20(self, mock_storage):
+        """100 callers → only 20 shown, '... and 80 more' appended."""
+        callers = [(self._make_node(f"caller_{i}"), 1.0) for i in range(100)]
+        mock_storage.get_callers_with_confidence.return_value = callers
+        result = handle_context(mock_storage, "validate")
+        caller_lines = [ln for ln in result.split("\n") if "-> caller_" in ln]
+        assert len(caller_lines) <= 20
+        assert "and 80 more" in result
+
+    def test_no_truncation_under_20(self, mock_storage):
+        """15 callers → all 15 shown, no 'more' line."""
+        callers = [(self._make_node(f"c_{i}"), 1.0) for i in range(15)]
+        mock_storage.get_callers_with_confidence.return_value = callers
+        result = handle_context(mock_storage, "validate")
+        caller_lines = [ln for ln in result.split("\n") if "-> c_" in ln]
+        assert len(caller_lines) == 15
+        assert "more" not in result
