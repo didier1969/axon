@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from axon.core.analytics import log_event
+from axon.core.paths import central_db_path
 from axon.core.search.hybrid import hybrid_search
 from axon.core.storage.base import StorageBackend
 
@@ -76,7 +77,7 @@ def _load_repo_storage(repo: str) -> StorageBackend | None:
     try:
         data = json.loads(meta_path.read_text(encoding="utf-8"))
         # Central path (v0.6+): registry dir itself holds kuzu
-        central_db = meta_path.parent / "kuzu"
+        central_db = central_db_path(repo)
         if central_db.exists():
             db_path = central_db
         else:

@@ -25,6 +25,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
 
+from axon.core.paths import central_db_path
 from axon.core.storage.kuzu_backend import KuzuBackend
 from axon.mcp.resources import get_dead_code_list, get_overview, get_schema
 from axon.mcp.tools import (
@@ -75,7 +76,7 @@ def _get_storage() -> KuzuBackend:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 slug = meta.get("slug")
                 if slug:
-                    db_path = Path.home() / ".axon" / "repos" / slug / "kuzu"
+                    db_path = central_db_path(slug)
             except (json.JSONDecodeError, OSError):
                 pass
         # Legacy fallback: local .axon/kuzu

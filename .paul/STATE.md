@@ -10,20 +10,21 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 ## Current Position
 
 Milestone: v0.6 Daemon & Centralisation
-Phase: 2 of 3 (Daemon central)
-Plan: Not started
-Status: Ready to plan Phase 2
-Last activity: 2026-03-02 — Phase 1 complete (Centralisation du stockage), 782 tests pass
+Phase: 2 of 3 (Daemon central) — Planning
+Plan: 02-01 executed, ready for UNIFY
+Status: APPLY complete, ready for UNIFY
+Last activity: 2026-03-02 — APPLY 02-01 complete (paths.py + daemon package + CLI + 16 tests, 798 passing)
 
 Progress:
 - v0.6 Daemon & Centralisation: [███░░░░░░░] 33% (1/3 phases)
+- Phase 2: [░░░░░░░░░░] 0%
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Phase 1 loop closed — ready for Phase 2 PLAN]
+  ✓        ✓        ○     [APPLY complete, ready for UNIFY]
 ```
 
 ## Accumulated Context
@@ -57,21 +58,24 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: 1abcb61 (chore(plan): create v0.6 Phase 1 plan — centralisation du stockage)
+Last commit: 2456f1b (feat(01-centralisation-stockage): centralise KuzuDB storage)
 Tag: v0.5.0
 Branch: main
-Uncommitted: cli/main.py, mcp/server.py, mcp/tools.py, tests/cli/test_main.py, tests/mcp/test_tools.py, 01-01-SUMMARY.md
+Uncommitted: stale handoff files only (.paul/HANDOFF-*.md)
 
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: /paul:unify — Phase 1 loop closed, git commit pending
-Next action: /paul:plan for Phase 2 (Daemon central)
-Resume file: .paul/ROADMAP.md
+Stopped at: /paul:pause — Plan 02-01 APPLIED, UNIFY pending
+Next action: /paul:unify .paul/phases/02-daemon-central/02-01-PLAN.md
+Resume file: .paul/HANDOFF-2026-03-02i.md
 Resume context:
-- Phase 1 complete: KuzuDB centralised at ~/.axon/repos/{slug}/kuzu
-- All phase 1 code committed as feat(01-centralisation-stockage)
-- Phase 2 focus: axon daemon start/stop/status, Unix socket, LRU cache 5 DBs
+- Plan 02-01 APPLIED: paths.py + daemon package + CLI daemon start/stop/status + 16 tests (798 total, ruff clean)
+- Daemon: asyncio Unix socket, JSON-line protocol, LRU cache maxsize=5
+- MCP still uses direct KuzuBackend (unchanged — proxy is plan 02-02)
+- 02-02 extended scope: max_tokens compression + axon_batch tool (claude-context-mode principles)
+- v0.7 planned: BM25 hybrid search (FTS5 + vector + graph distance, edgequake principles)
+- Uncommitted: all Plan 02-01 changes (paths.py, daemon/, cli, mcp, tests)
 
 ---
 *STATE.md — Updated after every significant action*

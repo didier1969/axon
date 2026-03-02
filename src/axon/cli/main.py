@@ -5,7 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
+import signal
+import subprocess
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -19,9 +24,7 @@ from axon import __version__
 console = Console()
 logger = logging.getLogger(__name__)
 
-def _central_db_path(slug: str) -> Path:
-    """Return the centralised KuzuDB path for a given slug."""
-    return Path.home() / ".axon" / "repos" / slug / "kuzu"
+from axon.core.paths import central_db_path as _central_db_path
 
 
 def _auto_migrate_local_kuzu(repo_path: Path, slug: str) -> None:
@@ -121,6 +124,124 @@ app = typer.Typer(
     help="Axon — Graph-powered code intelligence engine.",
     no_args_is_help=True,
 )
+
+daemon_app = typer.Typer(help="Manage the axon background daemon.")
+app.add_typer(daemon_app, name="daemon")
+
+
+@daemon_app.command("start")
+def daemon_start(
+    max_dbs: int = typer.Option(5, "--max-dbs", help="Max cached KuzuDB backends (default: 5)"),
+) -> None:
+    """Start the axon daemon in the background."""
+    from axon.core.paths import daemon_pid_path, daemon_sock_path
+
+    pid_path = daemon_pid_path()
+    sock_path = daemon_sock_path()
+
+    # Check if already running
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, 0)  # Raises ProcessLookupError if dead
+            console.print(f"[yellow]Daemon already running[/yellow] (PID {pid})")
+            return
+        except (ValueError, ProcessLookupError):
+            pid_path.unlink(missing_ok=True)  # Stale PID
+
+    # Remove stale socket
+    sock_path.unlink(missing_ok=True)
+
+    # Spawn daemon subprocess (detached)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "axon.daemon", "--max-dbs", str(max_dbs)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    # Wait for socket to appear (up to 5 s)
+    for _ in range(50):
+        if sock_path.exists():
+            console.print(f"[green]Daemon started[/green] (PID {proc.pid})")
+            return
+        time.sleep(0.1)
+
+    console.print(f"[red]Daemon failed to start[/red] (socket not created in 5 s, PID {proc.pid})")
+    raise typer.Exit(code=1)
+
+
+@daemon_app.command("stop")
+def daemon_stop() -> None:
+    """Stop the running axon daemon."""
+    from axon.core.paths import daemon_pid_path
+
+    pid_path = daemon_pid_path()
+    if not pid_path.exists():
+        console.print("[yellow]No daemon running[/yellow] (no PID file found)")
+        return
+
+    try:
+        pid = int(pid_path.read_text().strip())
+    except ValueError:
+        console.print("[red]Error:[/red] Invalid PID file")
+        pid_path.unlink(missing_ok=True)
+        raise typer.Exit(code=1)
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        console.print(f"[green]Daemon stopped[/green] (PID {pid})")
+    except ProcessLookupError:
+        console.print(f"[yellow]Daemon was not running[/yellow] (stale PID {pid})")
+        pid_path.unlink(missing_ok=True)
+
+
+@daemon_app.command("status")
+def daemon_status() -> None:
+    """Show axon daemon status and cached repos."""
+    from axon.core.paths import daemon_pid_path, daemon_sock_path
+    from axon.daemon.protocol import decode_request, encode_request
+
+    pid_path = daemon_pid_path()
+    sock_path = daemon_sock_path()
+
+    if not pid_path.exists():
+        console.print("[yellow]Daemon not running[/yellow] (no PID file)")
+        return
+
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 0)
+    except (ValueError, ProcessLookupError):
+        console.print("[yellow]Daemon not running[/yellow] (stale PID file)")
+        pid_path.unlink(missing_ok=True)
+        return
+
+    console.print(f"[green]Daemon running[/green] (PID {pid})")
+
+    # Query daemon for cache stats via socket (best-effort)
+    if not sock_path.exists():
+        console.print("[yellow]Socket not found[/yellow] — daemon may be starting")
+        return
+
+    try:
+        import socket as _socket
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
+            sock.settimeout(2.0)
+            sock.connect(str(sock_path))
+            sock.sendall(encode_request("axon_daemon_status", {}, request_id="status"))
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        resp = decode_request(data)
+        if resp.get("result"):
+            console.print(resp["result"])
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]Could not query daemon:[/yellow] {exc}")
+
 
 def _version_callback(value: bool) -> None:
     """Print the version and exit."""
