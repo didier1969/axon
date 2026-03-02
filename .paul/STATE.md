@@ -11,20 +11,20 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 Milestone: v0.6 Daemon & Centralisation
 Phase: 2 of 3 (Daemon central) — In Progress
-Plan: 02-02 created, awaiting APPLY
-Status: PLAN created, ready for APPLY
-Last activity: 2026-03-02 — Created 02-02-PLAN.md (MCP proxy + max_tokens)
+Plan: 02-02 complete; 02-03 pending (axon_batch tool)
+Status: APPLY + UNIFY complete for 02-02
+Last activity: 2026-03-02 — Applied 02-02 (MCP proxy + max_tokens, 812 tests pass)
 
 Progress:
 - v0.6 Daemon & Centralisation: [███░░░░░░░] 33% (1/3 phases)
-- Phase 2: [███░░░░░░░] 33% (1/3 plans complete)
+- Phase 2: [██████░░░░] 67% (2/3 plans complete)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ○        ○     [Plan 02-02 created, awaiting approval]
+  ✓        ✓        ✓     [02-02 complete; ready for 02-03]
 ```
 
 ## Accumulated Context
@@ -50,6 +50,8 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | Double-checked locking in LRU cache | v0.6 Plan 02-01 | KuzuBackend.initialize() I/O outside lock; insert+evict inside lock |
 | Popen(start_new_session=True) for daemon spawn | v0.6 Plan 02-01 | Portable orphan process; no os.fork() complexity |
 | MCP proxy deferred to Plan 02-02 | v0.6 Plan 02-01 | Daemon exists but MCP still uses direct KuzuBackend |
+| MCP proxy routes via daemon, fallback to direct | v0.6 Plan 02-02 | N×~10MB proxy processes share single ~200MB daemon |
+| max_tokens truncation is MCP-side only | v0.6 Plan 02-02 | Applied after daemon result or direct fallback; daemon_args stripped |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
@@ -61,7 +63,7 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: be2bad5 (feat(02-daemon-central): implement axon daemon package and CLI commands)
+Last commit: 36a5336 (feat(02-daemon-central): add MCP proxy to daemon with max_tokens support)
 Tag: v0.5.0
 Branch: main
 Uncommitted: stale handoffs (.paul/HANDOFF-2026-02-28e.md, HANDOFF-2026-03-02.md, HANDOFF-2026-03-02f.md) + uv.lock minor change
@@ -69,14 +71,12 @@ Uncommitted: stale handoffs (.paul/HANDOFF-2026-02-28e.md, HANDOFF-2026-03-02.md
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: /paul:pause — Plan 02-02 created, APPLY pending
-Next action: /paul:apply .paul/phases/02-daemon-central/02-02-PLAN.md
-Resume file: .paul/HANDOFF-2026-03-02j.md
+Stopped at: 02-02 APPLY complete
+Next action: /paul:plan (Phase 2, Plan 02-03 — axon_batch tool)
+Resume file: none
 Resume context:
-- Plan 02-02 READY: MCP proxy (_get_local_slug + _try_daemon_call in server.py), fallback to direct, max_tokens on all 7 tools
-- Daemon args: strip repo= and max_tokens= before sending to socket; slug = repo or local slug
-- New tests: tests/mcp/test_server.py (proxy happy path, fallback, max_tokens, schema)
-- Plan 02-03 pending: axon_batch tool
+- Phase 2 is 2/3 plans done (02-01 daemon + 02-02 MCP proxy)
+- Plan 02-03: axon_batch tool (batch queries in single socket round-trip)
 - v0.7 planned: BM25 hybrid search (FTS5 + vector + graph distance)
 
 ---
