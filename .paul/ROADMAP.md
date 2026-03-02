@@ -6,11 +6,34 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 ## Current Milestone
 
-TBD — run /paul:discuss-milestone or /paul:milestone to define v0.6.
+**v0.6 Daemon & Centralisation**
+Status: 🚧 In Progress
+Phases: 0 of 3 complete
+
+| Phase | Name | Plans | Status | Completed |
+|-------|------|-------|--------|-----------|
+| 1 | Centralisation du stockage | TBD | Not started | - |
+| 2 | Daemon central | TBD | Not started | - |
+| 3 | Watch & filtrage | TBD | Not started | - |
+
+### Phase 1: Centralisation du stockage
+
+Focus: Migrer toutes les KuzuDB vers `~/.axon/repos/{name}/kuzu`. Migration automatique des DBs locales existantes. Plus de `.axon/` éparpillé dans chaque projet.
+Plans: TBD (définis lors de /paul:plan)
+
+### Phase 2: Daemon central
+
+Focus: `axon daemon start/stop/status`. Unix socket `~/.axon/daemon.sock`. LRU cache DBs (max 5). Modèle d'embeddings partagé. MCP devient proxy léger (~10 MB).
+Plans: TBD (définis lors de /paul:plan)
+
+### Phase 3: Watch & filtrage
+
+Focus: Watcher séquentiel avec queue prioritaire. Debounce configurable. Filtrage `.paul/`, `_build/`, `target/` par défaut. Byte-offset caching pour récupération O(1) des symboles.
+Plans: TBD (définis lors de /paul:plan)
 
 ## Next Milestone
 
-Run /paul:discuss-milestone or /paul:milestone to define.
+Run /paul:discuss-milestone ou /paul:milestone pour définir.
 
 ## Completed Milestones
 
@@ -46,4 +69,4 @@ Run /paul:discuss-milestone or /paul:milestone to define.
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-02-28 — v0.5 Hardening complete, archived*
+*Last updated: 2026-03-02 — v0.6 Daemon & Centralisation created*

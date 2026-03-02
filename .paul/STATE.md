@@ -9,21 +9,21 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 ## Current Position
 
-Milestone: Awaiting next milestone
-Phase: None active
-Plan: None
-Status: Milestone v0.5 Hardening complete — ready for next
-Last activity: 2026-02-28 — Milestone v0.5 archived, git tag v0.5.0 created
+Milestone: v0.6 Daemon & Centralisation
+Phase: 1 of 3 (Centralisation du stockage)
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-03-02 — Milestone v0.6 created
 
 Progress:
-- v0.5 Hardening: [██████████] 100% ✓
+- v0.6 Daemon & Centralisation: [░░░░░░░░░░] 0%
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ○        ○        ○     [Milestone complete — ready for next]
+  ○        ○        ○     [Ready for first PLAN]
 ```
 
 ## Accumulated Context
@@ -61,10 +61,15 @@ Uncommitted: .paul docs only (milestone completion docs)
 
 ## Session Continuity
 
-Last session: 2026-02-28
-Stopped at: /paul:complete-milestone — v0.5 fully archived, v0.5.0 tagged
-Next action: /paul:discuss-milestone or /paul:milestone (define v0.6)
-Resume file: .paul/MILESTONES.md
+Last session: 2026-03-02
+Stopped at: /paul:pause — v0.6 créé, prêt pour Phase 1
+Next action: /paul:plan → Phase 1 Centralisation du stockage
+Resume file: .paul/HANDOFF-2026-03-02.md
+Resume context:
+- KuzuDB à migrer de {project}/.axon/kuzu vers ~/.axon/repos/{name}/kuzu
+- axon-mcp wrapper actif dans ~/.local/bin/axon-mcp (MCP only, pas de watchers)
+- nexus à réindexer après migration (DB supprimée car corrompue)
+- Engram/Mem0/code-search MCPs supprimés, 3 restants : playwright, chrome-devtools, axon
 
 ---
 *STATE.md — Updated after every significant action*
