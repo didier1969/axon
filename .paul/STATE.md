@@ -11,9 +11,9 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 Milestone: v0.6 Daemon & Centralisation
 Phase: 2 of 3 (Daemon central) — In Progress
-Plan: 02-02 complete; 02-03 pending (axon_batch tool)
-Status: APPLY + UNIFY complete for 02-02
-Last activity: 2026-03-02 — Applied 02-02 (MCP proxy + max_tokens, 812 tests pass)
+Plan: 02-03 created, awaiting APPLY (axon_batch tool)
+Status: PLAN created, ready for APPLY
+Last activity: 2026-03-02 — Created 02-03-PLAN.md (axon_batch)
 
 Progress:
 - v0.6 Daemon & Centralisation: [███░░░░░░░] 33% (1/3 phases)
@@ -24,7 +24,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [02-02 complete; ready for 02-03]
+  ✓        ○        ○     [Plan 02-03 created, awaiting approval]
 ```
 
 ## Accumulated Context
@@ -71,12 +71,13 @@ Uncommitted: stale handoffs (.paul/HANDOFF-2026-02-28e.md, HANDOFF-2026-03-02.md
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: 02-02 APPLY complete
-Next action: /paul:plan (Phase 2, Plan 02-03 — axon_batch tool)
-Resume file: none
+Stopped at: /paul:pause — Plan 02-03 created, APPLY pending
+Next action: /paul:apply .paul/phases/02-daemon-central/02-03-PLAN.md
+Resume file: .paul/HANDOFF-2026-03-02k.md
 Resume context:
-- Phase 2 is 2/3 plans done (02-01 daemon + 02-02 MCP proxy)
-- Plan 02-03: axon_batch tool (batch queries in single socket round-trip)
+- Plan 02-03 READY: axon_batch tool — _batch_daemon_call (1 socket, N sequential send/recv), call_tool() special-case, 6 new tests
+- Daemon unchanged; axon_batch is MCP-layer only
+- Phase 2 will be complete after this plan (3/3 plans done)
 - v0.7 planned: BM25 hybrid search (FTS5 + vector + graph distance)
 
 ---
