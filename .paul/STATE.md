@@ -5,15 +5,15 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.6 Phase 3 complete — ready for milestone completion and v0.7.
+**Current focus:** v0.6 complete — milestone done, ready to define v0.7.
 
 ## Current Position
 
-Milestone: v0.6 Daemon & Centralisation
+Milestone: v0.6 Daemon & Centralisation — COMPLETE
 Phase: 3 of 3 (Watch & filtrage) — COMPLETE
-Plan: 03-03 APPLY complete (3/3 plans done)
-Status: Phase complete — all 3 plans applied
-Last activity: 2026-03-02 — Completed .paul/phases/03-watch-filtrage/03-03-PLAN.md
+Plan: 03-03 UNIFY complete (all 3 phases done)
+Status: Milestone complete — ready for /paul:complete-milestone → v0.7
+Last activity: 2026-03-02 — UNIFY 03-03 complete, phase transition done
 
 Progress:
 - v0.6 Daemon & Centralisation: [██████████] 100% (3/3 phases)
@@ -24,7 +24,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ○     [03-03 applied; UNIFY + milestone completion pending]
+  ✓        ✓        ✓     [Loop complete — milestone complete]
 ```
 
 ## Accumulated Context
@@ -72,14 +72,14 @@ Uncommitted: PAUL files (STATE.md, SUMMARY 03-03) pending docs commit
 
 ## Session Continuity
 
-Last session: 2026-03-02T19:50Z
-Stopped at: 03-03 APPLY complete — byte-offset caching
-Next action: /paul:unify → then /paul:complete-milestone → v0.7
-Resume file: .paul/phases/03-watch-filtrage/03-03-SUMMARY.md
+Last session: 2026-03-02
+Stopped at: UNIFY 03-03 complete — phase transition done, milestone complete
+Next action: /paul:complete-milestone (tag v0.6.0, archive, start v0.7)
+Resume file: .paul/ROADMAP.md
 Resume context:
-- 03-03 adds start_byte/end_byte to SymbolInfo, GraphNode, KuzuDB schema + 8 parsers
-- Full suite: 824 tests, 0 failures, 0 ruff errors
-- UNIFY step pending, then milestone tag v0.6.0
+- v0.6 fully shipped: centralisation + daemon + watch & filtrage
+- 824 tests, 0 failures; byte-offset caching in schema
+- Ready to archive v0.6 and define v0.7 milestone
 
 ---
 *STATE.md — Updated after every significant action*

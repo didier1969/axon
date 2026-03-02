@@ -12,7 +12,7 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 | Attribute | Value |
 |-----------|-------|
-| Version | 0.6.0 (in progress) |
+| Version | 0.6.0 (complete) |
 | Status | Active Development |
 | Last Updated | 2026-03-02 |
 
@@ -47,12 +47,15 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] Daemon central (axon daemon start/stop/status, Unix socket, LRU cache, MCP proxy) — v0.6 Phase 2
 - [x] MCP proxy routes via daemon, fallback to direct (N×~10MB → single ~200MB daemon) — v0.6 Phase 2
 - [x] axon_batch tool: N calls on 1 socket connection, daemon-first with direct fallback — v0.6 Phase 2
+- [x] Watch filter (.paul/.git/.axon ignored), configurable debounce (--debounce CLI flag) — v0.6 Phase 3, Plan 03-01
+- [x] Sequential watcher queue (asyncio.Queue producer/consumer, no producer stall under MCP lock) — v0.6 Phase 3, Plan 03-02
+- [x] Byte-offset caching (start_byte/end_byte in SymbolInfo, GraphNode, KuzuDB schema) — v0.6 Phase 3, Plan 03-03
 
 ### Active (In Progress)
-- [ ] Watch & filtrage (sequential watcher queue, configurable debounce, built-in filters) — v0.6 Phase 3
+None — v0.6 milestone complete.
 
 ### Planned (Next)
-(Phases 2 and 3 of v0.6 — see ROADMAP.md)
+v0.7 — see ROADMAP.md (to be defined via /paul:discuss-milestone)
 
 ### Out of Scope
 - GUI / web interface — CLI and MCP-first
@@ -103,6 +106,9 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 | Double-checked locking in LRU cache | KuzuBackend.initialize() I/O outside lock; insert+evict inside lock — avoids holding lock during disk I/O | 2026-03-02 | Active |
 | MCP proxy: daemon-first, fallback to direct | N MCP proxy processes (~10MB each) share single ~200MB daemon; max_tokens truncation is MCP-side | 2026-03-02 | Active |
 | axon_batch is MCP-layer only | Daemon receives individual calls; axon_batch is transparent to the daemon protocol | 2026-03-02 | Active |
+| debounce_ms exposed as CLI param | --debounce flag on axon serve --watch; default 50ms; configures watchfiles rust_timeout | 2026-03-02 | Active |
+| asyncio.Queue producer/consumer in watch_repo() | _producer never stalls under MCP lock; _consumer drains sequentially; None sentinel for shutdown | 2026-03-02 | Active |
+| Byte offsets in schema, no migration | start_byte/end_byte INT64 in all node tables; old 12-col DBs still readable with len(row) guard | 2026-03-02 | Active |
 
 ## Success Metrics
 
@@ -124,4 +130,4 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-03-02 — v0.6 Phase 2 (Daemon central) complete*
+*Last updated: 2026-03-02 — v0.6 complete (all 3 phases: centralisation, daemon, watch & filtrage)*

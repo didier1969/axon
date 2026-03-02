@@ -6,36 +6,22 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 ## Current Milestone
 
-**v0.6 Daemon & Centralisation**
-Status: 🚧 In Progress
-Phases: 2 of 3 complete
-
-| Phase | Name | Plans | Status | Completed |
-|-------|------|-------|--------|-----------|
-| 1 | Centralisation du stockage | 1/1 | ✅ Complete | 2026-03-02 |
-| 2 | Daemon central | 3/3 | ✅ Complete | 2026-03-02 |
-| 3 | Watch & filtrage | 0/3 | 🚧 Planning | - |
-
-### Phase 1: Centralisation du stockage — ✅ Complete
-
-Focus: Migrer toutes les KuzuDB vers `~/.axon/repos/{name}/kuzu`. Migration automatique des DBs locales existantes. Plus de `.axon/` éparpillé dans chaque projet.
-Plans: 1/1 complete — see `phases/01-centralisation-stockage/01-01-SUMMARY.md`
-
-### Phase 2: Daemon central — ✅ Complete
-
-Focus: `axon daemon start/stop/status`. Unix socket `~/.axon/daemon.sock`. LRU cache DBs (max 5). Modèle d'embeddings partagé. MCP devient proxy léger (~10 MB). axon_batch pour N appels sur 1 socket.
-Plans: 3/3 complete — see `phases/02-daemon-central/`
-
-### Phase 3: Watch & filtrage
-
-Focus: Watcher séquentiel avec queue prioritaire. Debounce configurable. Filtrage `.paul/`, `_build/`, `target/` par défaut. Byte-offset caching pour récupération O(1) des symboles.
-Plans: 3 total — 03-01 (filtrage+debounce), 03-02 (queue séquentielle), 03-03 (byte-offset caching)
-
 ## Next Milestone
 
 Run /paul:discuss-milestone ou /paul:milestone pour définir.
 
 ## Completed Milestones
+
+<details>
+<summary>v0.6 Daemon & Centralisation — 2026-03-02 (3 phases, 7 plans)</summary>
+
+| Phase | Name | Plans | Status | Completed |
+|-------|------|-------|--------|-----------|
+| 1 | Centralisation du stockage | 1/1 | ✅ Complete | 2026-03-02 |
+| 2 | Daemon central | 3/3 | ✅ Complete | 2026-03-02 |
+| 3 | Watch & filtrage | 3/3 | ✅ Complete | 2026-03-02 |
+
+</details>
 
 <details>
 <summary>v0.5 Hardening — 2026-02-28 (2 phases, 4 plans)</summary>
@@ -69,4 +55,4 @@ Run /paul:discuss-milestone ou /paul:milestone pour définir.
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-03-02 — Phase 2 (Daemon central) complete*
+*Last updated: 2026-03-02 — v0.6 complete (all 3 phases shipped)*
