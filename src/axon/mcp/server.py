@@ -132,6 +132,50 @@ def _try_daemon_call(tool: str, slug: str | None, args: dict) -> str | None:
         return None
 
 
+def _batch_daemon_call(calls: list[dict], max_tokens: int | None) -> str | None:
+    """Execute multiple tool calls on a single daemon socket connection.
+
+    Sends requests sequentially (send → recv per call) on one socket.
+    Returns formatted result string, or None if daemon unavailable.
+    """
+    if not calls:
+        return ""
+    sock_path = daemon_sock_path()
+    if not sock_path.exists():
+        return None
+    try:
+        parts: list[str] = []
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
+            sock.settimeout(5.0)
+            sock.connect(str(sock_path))
+            total = len(calls)
+            for i, call in enumerate(calls):
+                tool = call.get("tool", "")
+                args = call.get("args", {})
+                slug: str | None = args.get("repo") or None
+                daemon_args = {k: v for k, v in args.items() if k != "repo"}
+                req_id = f"batch-{i}"
+                sock.sendall(encode_request(tool, daemon_args, slug=slug, request_id=req_id))
+                data = b""
+                while not data.endswith(b"\n"):
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                resp = decode_request(data)
+                if resp.get("error"):
+                    result = f"Error: {resp['error']}"
+                else:
+                    result = resp.get("result", "")
+                if max_tokens is not None and len(result) > max_tokens:
+                    result = result[:max_tokens] + f"\n[truncated at {max_tokens} chars]"
+                parts.append(f"### {tool} ({i + 1}/{total})\n{result}")
+        return "\n\n".join(parts)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.debug("Batch daemon call failed, falling back: %s", exc)
+        return None
+
+
 TOOLS: list[Tool] = [
     Tool(
         name="axon_list_repos",
@@ -157,7 +201,8 @@ TOOLS: list[Tool] = [
             "(keyword + vector) search. "
             "Use when you need to find relevant functions, classes, or files by concept or name. "
             "Returns ranked symbols with file path, label, and a code snippet per result. "
-            "Optionally filter by language or specify a repo to search a different indexed project. "
+            "Optionally filter by language or specify a repo to search "
+            "a different indexed project. "
             "Follow with axon_context on a specific result for its full dependency graph."
         ),
         inputSchema={
@@ -200,7 +245,8 @@ TOOLS: list[Tool] = [
             "Get a 360-degree view of a symbol: callers, callees, and type references. "
             "Use before modifying a symbol to understand its full dependency graph. "
             "Returns callers, callees, type refs, signature, file location, and dead-code status. "
-            "To disambiguate symbols with the same name across files, use 'path/to/file.py:symbol_name' format. "
+            "To disambiguate symbols with the same name across files, "
+            "use 'path/to/file.py:symbol_name' format. "
             "Optionally specify a repo to look up a symbol in a different indexed project. "
             "Follow with axon_impact to assess blast radius before making changes."
         ),
@@ -247,7 +293,7 @@ TOOLS: list[Tool] = [
                 },
                 "depth": {
                     "type": "integer",
-                    "description": f"Maximum traversal depth (default 3, max {MAX_TRAVERSE_DEPTH}).",
+                    "description": f"Maximum traversal depth (default 3, max {MAX_TRAVERSE_DEPTH}).",  # noqa: E501
                     "default": 3,
                     "minimum": 1,
                     "maximum": MAX_TRAVERSE_DEPTH,
@@ -288,7 +334,8 @@ TOOLS: list[Tool] = [
         name="axon_detect_changes",
         description=(
             "Map a git diff to the symbols it touches. "
-            "Pass raw `git diff HEAD` output to identify which indexed symbols are affected by a changeset. "
+            "Pass raw `git diff HEAD` output to identify which indexed symbols "
+            "are affected by a changeset. "
             "Use to understand scope before reviewing or testing a PR. "
             "Returns affected symbols per file. "
             "Follow with axon_impact on each affected symbol to see downstream effects."
@@ -329,6 +376,46 @@ TOOLS: list[Tool] = [
                 },
             },
             "required": ["query"],
+        },
+    ),
+    Tool(
+        name="axon_batch",
+        description=(
+            "Execute multiple axon tool calls in a single round-trip. "
+            "Use when you need results from several tools at once — "
+            "e.g., axon_context for 3 symbols. "
+            "Reduces connection overhead compared to N separate tool calls. "
+            "Each call in the list is executed in order; results are returned as a formatted block."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "calls": {
+                    "type": "array",
+                    "description": "Ordered list of tool calls to execute.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tool": {
+                                "type": "string",
+                                "description": "Tool name (e.g., 'axon_query', 'axon_context').",
+                            },
+                            "args": {
+                                "type": "object",
+                                "description": "Arguments for the tool "
+                                "(same as calling it directly).",
+                            },
+                        },
+                        "required": ["tool", "args"],
+                    },
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate each individual result to this many characters. "
+                    "Omit for full output.",
+                },
+            },
+            "required": ["calls"],
         },
     ),
 ]
@@ -372,29 +459,46 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Dispatch a tool call to the daemon (best-effort) or direct backend."""
-    # Resolve slug: explicit repo= param or local meta.json slug
+    # axon_batch: special multi-call path
+    if name == "axon_batch":
+        calls = arguments.get("calls", [])
+        max_tokens: int | None = arguments.get("max_tokens")
+        result: str | None = await asyncio.to_thread(_batch_daemon_call, calls, max_tokens)
+        if result is None:
+            # Fallback: direct dispatch per sub-call
+            storage = _get_storage()
+            parts: list[str] = []
+            total = len(calls)
+            for i, call in enumerate(calls):
+                sub_name = call.get("tool", "")
+                sub_args = call.get("args", {})
+                if _lock is not None:
+                    async with _lock:
+                        sub_result = await asyncio.to_thread(
+                            _dispatch_tool, sub_name, sub_args, storage
+                        )
+                else:
+                    sub_result = _dispatch_tool(sub_name, sub_args, storage)
+                if max_tokens is not None and len(sub_result) > max_tokens:
+                    sub_result = sub_result[:max_tokens] + f"\n[truncated at {max_tokens} chars]"
+                parts.append(f"### {sub_name} ({i + 1}/{total})\n{sub_result}")
+            result = "\n\n".join(parts)
+        return [TextContent(type="text", text=result)]
+
+    # Standard single-tool path (unchanged from 02-02)
     slug: str | None = arguments.get("repo") or _get_local_slug()
-
-    # Strip keys unknown to daemon before forwarding
-    max_tokens: int | None = arguments.get("max_tokens")
+    max_tokens = arguments.get("max_tokens")
     daemon_args = {k: v for k, v in arguments.items() if k not in {"repo", "max_tokens"}}
-
-    # Try daemon first (non-blocking, 5s timeout)
-    result: str | None = await asyncio.to_thread(_try_daemon_call, name, slug, daemon_args)
-
+    result = await asyncio.to_thread(_try_daemon_call, name, slug, daemon_args)
     if result is None:
-        # Fallback: direct dispatch with local storage
         storage = _get_storage()
         if _lock is not None:
             async with _lock:
                 result = await asyncio.to_thread(_dispatch_tool, name, arguments, storage)
         else:
             result = _dispatch_tool(name, arguments, storage)
-
-    # Apply max_tokens truncation (MCP-side, regardless of route taken)
     if max_tokens is not None and len(result) > max_tokens:
         result = result[:max_tokens] + f"\n[truncated at {max_tokens} chars]"
-
     return [TextContent(type="text", text=result)]
 
 @server.list_resources()

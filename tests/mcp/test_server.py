@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from axon.mcp.server import _get_local_slug, _try_daemon_call
+from axon.mcp.server import _batch_daemon_call, _get_local_slug, _try_daemon_call
 
 
 class TestGetLocalSlug:
@@ -187,3 +187,130 @@ class TestToolsHaveMaxTokensSchema:
             assert "max_tokens" not in required, (
                 f"Tool '{tool.name}' incorrectly marks max_tokens as required"
             )
+
+
+class TestBatchTool:
+    def test_empty_calls_returns_empty_string(self, tmp_path, monkeypatch):
+        """_batch_daemon_call returns empty string for empty calls list."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        result = _batch_daemon_call([], None)
+        assert result == ""
+
+    def test_returns_none_when_socket_absent(self, tmp_path, monkeypatch):
+        """_batch_daemon_call returns None when daemon socket absent."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        result = _batch_daemon_call([{"tool": "axon_query", "args": {"query": "foo"}}], None)
+        assert result is None
+
+    def test_returns_formatted_results_on_success(self, tmp_path, monkeypatch):
+        """_batch_daemon_call returns formatted results for 2 calls."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        sock_path = tmp_path / ".axon" / "daemon.sock"
+        sock_path.parent.mkdir(parents=True)
+        sock_path.touch()
+
+        responses = [
+            json.dumps({"id": "batch-0", "result": "result A", "error": None}) + "\n",
+            json.dumps({"id": "batch-1", "result": "result B", "error": None}) + "\n",
+        ]
+
+        call_count = [0]
+
+        mock_sock = MagicMock()
+        mock_sock.__enter__ = MagicMock(return_value=mock_sock)
+        mock_sock.__exit__ = MagicMock(return_value=False)
+
+        def fake_recv(n):
+            idx = call_count[0]
+            call_count[0] += 1
+            if idx < len(responses):
+                return responses[idx].encode()
+            return b""
+
+        mock_sock.recv = fake_recv
+
+        calls = [
+            {"tool": "axon_query", "args": {"query": "foo"}},
+            {"tool": "axon_context", "args": {"symbol": "Bar"}},
+        ]
+        with patch("axon.mcp.server._socket.socket", return_value=mock_sock):
+            result = _batch_daemon_call(calls, None)
+
+        assert "### axon_query (1/2)" in result
+        assert "result A" in result
+        assert "### axon_context (2/2)" in result
+        assert "result B" in result
+
+    def test_max_tokens_truncates_per_result(self, tmp_path, monkeypatch):
+        """_batch_daemon_call truncates each sub-result individually."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        sock_path = tmp_path / ".axon" / "daemon.sock"
+        sock_path.parent.mkdir(parents=True)
+        sock_path.touch()
+
+        long_result = "x" * 500
+        short_result = "ok"
+        responses = [
+            json.dumps({"id": "batch-0", "result": long_result, "error": None}) + "\n",
+            json.dumps({"id": "batch-1", "result": short_result, "error": None}) + "\n",
+        ]
+
+        call_count = [0]
+
+        mock_sock = MagicMock()
+        mock_sock.__enter__ = MagicMock(return_value=mock_sock)
+        mock_sock.__exit__ = MagicMock(return_value=False)
+
+        def fake_recv(n):
+            idx = call_count[0]
+            call_count[0] += 1
+            if idx < len(responses):
+                return responses[idx].encode()
+            return b""
+
+        mock_sock.recv = fake_recv
+
+        calls = [
+            {"tool": "axon_query", "args": {"query": "foo"}},
+            {"tool": "axon_context", "args": {"symbol": "Bar"}},
+        ]
+        with patch("axon.mcp.server._socket.socket", return_value=mock_sock):
+            result = _batch_daemon_call(calls, 100)
+
+        assert "[truncated at 100 chars]" in result
+        assert "ok" in result  # short result not truncated
+
+    def test_returns_none_on_connection_error(self, tmp_path, monkeypatch):
+        """_batch_daemon_call returns None (fallback) on connection error."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        sock_path = tmp_path / ".axon" / "daemon.sock"
+        sock_path.parent.mkdir(parents=True)
+        sock_path.touch()
+
+        mock_sock = MagicMock()
+        mock_sock.__enter__ = MagicMock(return_value=mock_sock)
+        mock_sock.__exit__ = MagicMock(return_value=False)
+        mock_sock.connect.side_effect = OSError("Connection refused")
+
+        with patch("axon.mcp.server._socket.socket", return_value=mock_sock):
+            result = _batch_daemon_call(
+                [{"tool": "axon_query", "args": {"query": "foo"}}], None
+            )
+
+        assert result is None
+
+    def test_batch_tool_schema_is_correct(self):
+        """axon_batch has correct schema: calls required, max_tokens optional."""
+        from axon.mcp.server import TOOLS
+
+        batch_tool = next((t for t in TOOLS if t.name == "axon_batch"), None)
+        assert batch_tool is not None, "axon_batch tool not found in TOOLS"
+        schema = batch_tool.inputSchema
+        assert "calls" in schema.get("required", [])
+        assert "max_tokens" not in schema.get("required", [])
+        props = schema.get("properties", {})
+        assert "calls" in props
+        assert props["calls"]["type"] == "array"
+        items = props["calls"].get("items", {})
+        assert "tool" in items.get("required", [])
+        assert "args" in items.get("required", [])

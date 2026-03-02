@@ -44,9 +44,11 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] Auto-migration of legacy local KuzuDB on axon analyze — v0.6 Phase 1
 - [x] Slug-based repo identity in local meta.json — v0.6 Phase 1
 - [x] Backward-compat fallback for pre-v0.6 repos (no slug in meta.json) — v0.6 Phase 1
+- [x] Daemon central (axon daemon start/stop/status, Unix socket, LRU cache, MCP proxy) — v0.6 Phase 2
+- [x] MCP proxy routes via daemon, fallback to direct (N×~10MB → single ~200MB daemon) — v0.6 Phase 2
+- [x] axon_batch tool: N calls on 1 socket connection, daemon-first with direct fallback — v0.6 Phase 2
 
 ### Active (In Progress)
-- [ ] Daemon central (axon daemon start/stop/status, Unix socket, LRU cache) — v0.6 Phase 2
 - [ ] Watch & filtrage (sequential watcher queue, configurable debounce, built-in filters) — v0.6 Phase 3
 
 ### Planned (Next)
@@ -98,6 +100,9 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 | Central KuzuDB at ~/.axon/repos/{slug}/kuzu | All DBs in one place; daemon Phase 2 can implement LRU cache over this directory | 2026-03-02 | Active |
 | Placeholder meta.json before KuzuDB init | _register_in_global_registry deletes slots without meta.json; placeholder prevents rmtree | 2026-03-02 | Active |
 | Slug computation inlined (not extracted to helper) | 3 call sites; minimal blast radius; no shared state needed | 2026-03-02 | Active |
+| Double-checked locking in LRU cache | KuzuBackend.initialize() I/O outside lock; insert+evict inside lock — avoids holding lock during disk I/O | 2026-03-02 | Active |
+| MCP proxy: daemon-first, fallback to direct | N MCP proxy processes (~10MB each) share single ~200MB daemon; max_tokens truncation is MCP-side | 2026-03-02 | Active |
+| axon_batch is MCP-layer only | Daemon receives individual calls; axon_batch is transparent to the daemon protocol | 2026-03-02 | Active |
 
 ## Success Metrics
 
@@ -119,4 +124,4 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-03-02 — v0.6 Phase 1 (Centralisation du stockage) complete*
+*Last updated: 2026-03-02 — v0.6 Phase 2 (Daemon central) complete*

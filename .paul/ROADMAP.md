@@ -8,12 +8,12 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 **v0.6 Daemon & Centralisation**
 Status: 🚧 In Progress
-Phases: 1 of 3 complete
+Phases: 2 of 3 complete
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
 | 1 | Centralisation du stockage | 1/1 | ✅ Complete | 2026-03-02 |
-| 2 | Daemon central | 3 | In progress | - |
+| 2 | Daemon central | 3/3 | ✅ Complete | 2026-03-02 |
 | 3 | Watch & filtrage | TBD | Not started | - |
 
 ### Phase 1: Centralisation du stockage — ✅ Complete
@@ -21,10 +21,10 @@ Phases: 1 of 3 complete
 Focus: Migrer toutes les KuzuDB vers `~/.axon/repos/{name}/kuzu`. Migration automatique des DBs locales existantes. Plus de `.axon/` éparpillé dans chaque projet.
 Plans: 1/1 complete — see `phases/01-centralisation-stockage/01-01-SUMMARY.md`
 
-### Phase 2: Daemon central
+### Phase 2: Daemon central — ✅ Complete
 
-Focus: `axon daemon start/stop/status`. Unix socket `~/.axon/daemon.sock`. LRU cache DBs (max 5). Modèle d'embeddings partagé. MCP devient proxy léger (~10 MB).
-Plans: TBD (définis lors de /paul:plan)
+Focus: `axon daemon start/stop/status`. Unix socket `~/.axon/daemon.sock`. LRU cache DBs (max 5). Modèle d'embeddings partagé. MCP devient proxy léger (~10 MB). axon_batch pour N appels sur 1 socket.
+Plans: 3/3 complete — see `phases/02-daemon-central/`
 
 ### Phase 3: Watch & filtrage
 
@@ -69,4 +69,4 @@ Run /paul:discuss-milestone ou /paul:milestone pour définir.
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-03-02 — Phase 1 (Centralisation du stockage) complete*
+*Last updated: 2026-03-02 — Phase 2 (Daemon central) complete*

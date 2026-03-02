@@ -5,26 +5,26 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.6 Phase 2 — Daemon central (Unix socket, LRU cache, shared embeddings model).
+**Current focus:** v0.6 Phase 3 — Watch & filtrage (sequential watcher queue, configurable debounce, built-in filters).
 
 ## Current Position
 
 Milestone: v0.6 Daemon & Centralisation
-Phase: 2 of 3 (Daemon central) — In Progress
-Plan: 02-03 created, awaiting APPLY (axon_batch tool)
-Status: PLAN created, ready for APPLY
-Last activity: 2026-03-02 — Created 02-03-PLAN.md (axon_batch)
+Phase: 3 of 3 (Watch & filtrage) — Not started
+Plan: Not started
+Status: Ready to plan Phase 3
+Last activity: 2026-03-02 — Phase 2 (Daemon central) complete, transitioned to Phase 3
 
 Progress:
-- v0.6 Daemon & Centralisation: [███░░░░░░░] 33% (1/3 phases)
-- Phase 2: [██████░░░░] 67% (2/3 plans complete)
+- v0.6 Daemon & Centralisation: [██████░░░░] 67% (2/3 phases)
+- Phase 3: [░░░░░░░░░░] 0% (0 plans complete)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ○        ○     [Plan 02-03 created, awaiting approval]
+  ✓        ✓        ✓     [Phase 2 complete — ready for Phase 3 PLAN]
 ```
 
 ## Accumulated Context
@@ -71,14 +71,14 @@ Uncommitted: stale handoffs (.paul/HANDOFF-2026-02-28e.md, HANDOFF-2026-03-02.md
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: /paul:pause — Plan 02-03 created, APPLY pending
-Next action: /paul:apply .paul/phases/02-daemon-central/02-03-PLAN.md
-Resume file: .paul/HANDOFF-2026-03-02k.md
+Stopped at: Phase 2 (Daemon central) complete — all 3 plans unified, transitioned to Phase 3
+Next action: /paul:plan for Phase 3 (Watch & filtrage)
+Resume file: .paul/ROADMAP.md
 Resume context:
-- Plan 02-03 READY: axon_batch tool — _batch_daemon_call (1 socket, N sequential send/recv), call_tool() special-case, 6 new tests
-- Daemon unchanged; axon_batch is MCP-layer only
-- Phase 2 will be complete after this plan (3/3 plans done)
-- v0.7 planned: BM25 hybrid search (FTS5 + vector + graph distance)
+- Phase 2 complete: daemon (02-01) + MCP proxy (02-02) + axon_batch (02-03)
+- 818 tests, 0 failures; 0 lint errors in server.py
+- Phase 3 scope: sequential watcher queue, configurable debounce, built-in filters (.paul/, _build/, target/)
+- v0.7 planned after v0.6: BM25 hybrid search (FTS5 + vector + graph distance)
 
 ---
 *STATE.md — Updated after every significant action*
