@@ -433,3 +433,23 @@ class TestParseDecorators:
         classes = [s for s in result.symbols if s.kind == "class"]
         assert len(classes) == 1
         assert classes[0].decorators == ["dataclass"]
+
+
+# ---------------------------------------------------------------------------
+# Byte offsets
+# ---------------------------------------------------------------------------
+
+
+class TestByteOffsets:
+    """PythonParser emits correct byte offsets for function symbols."""
+
+    def test_function_byte_offsets(self) -> None:
+        """Byte offsets are non-zero and recover the original content."""
+        content = "def foo():\n    pass\n"
+        result = PythonParser().parse(content, "test.py")
+        assert result.symbols, "expected at least one symbol"
+        func = result.symbols[0]
+        assert func.start_byte >= 0
+        assert func.end_byte > func.start_byte
+        # Byte slice must recover the original content
+        assert content.encode()[func.start_byte:func.end_byte].decode() == func.content

@@ -34,7 +34,8 @@ _SEARCHABLE_TABLES: list[str] = [
 
 _NODE_PROPERTIES = (
     "id STRING, name STRING, file_path STRING, start_line INT64, "
-    "end_line INT64, content STRING, signature STRING, language STRING, "
+    "end_line INT64, start_byte INT64, end_byte INT64, content STRING, "
+    "signature STRING, language STRING, "
     "class_name STRING, is_dead BOOL, is_entry_point BOOL, is_exported BOOL, "
     "PRIMARY KEY (id)"
 )
@@ -54,9 +55,10 @@ def _table_for_id(node_id: str) -> str | None:
 
 def _node_to_row(n: GraphNode) -> list:
     """Convert a GraphNode to a flat row for CSV COPY."""
-    return [n.id, n.name, n.file_path, n.start_line, n.end_line, n.content,
-            n.signature, n.language, n.class_name, n.is_dead, n.is_entry_point,
-            n.is_exported]
+    return [n.id, n.name, n.file_path, n.start_line, n.end_line,
+            n.start_byte, n.end_byte, n.content,
+            n.signature, n.language, n.class_name, n.is_dead,
+            n.is_entry_point, n.is_exported]
 
 def _rel_to_row(r: GraphRelationship) -> list:
     """Convert a GraphRelationship to a flat row for CSV COPY."""
@@ -208,13 +210,17 @@ class KuzuBackend:
         """Return ``(node, confidence)`` for all callers of *node_id*."""
         assert self._conn is not None
         q = self._rel_query(node_id, "calls", "incoming_conf")
-        return [] if q is None else self._query_nodes_with_confidence(q, parameters={"nid": node_id})
+        if q is None:
+            return []
+        return self._query_nodes_with_confidence(q, parameters={"nid": node_id})
 
     def get_callees_with_confidence(self, node_id: str) -> list[tuple[GraphNode, float]]:
         """Return ``(node, confidence)`` for all callees of *node_id*."""
         assert self._conn is not None
         q = self._rel_query(node_id, "calls", "outgoing_conf")
-        return [] if q is None else self._query_nodes_with_confidence(q, parameters={"nid": node_id})
+        if q is None:
+            return []
+        return self._query_nodes_with_confidence(q, parameters={"nid": node_id})
 
     _MAX_BFS_DEPTH = 10
 
@@ -345,7 +351,9 @@ class KuzuBackend:
 
     _INSERT_NODE_CYPHER = (
         "CREATE (:{table} {{id: $id, name: $name, file_path: $file_path, "
-        "start_line: $start_line, end_line: $end_line, content: $content, "
+        "start_line: $start_line, end_line: $end_line, "
+        "start_byte: $start_byte, end_byte: $end_byte, "
+        "content: $content, "
         "signature: $signature, language: $language, class_name: $class_name, "
         "is_dead: $is_dead, is_entry_point: $is_entry_point, "
         "is_exported: $is_exported}})"
@@ -360,6 +368,7 @@ class KuzuBackend:
             return
         params = {"id": node.id, "name": node.name, "file_path": node.file_path,
                   "start_line": node.start_line, "end_line": node.end_line,
+                  "start_byte": node.start_byte, "end_byte": node.end_byte,
                   "content": node.content, "signature": node.signature,
                   "language": node.language, "class_name": node.class_name,
                   "is_dead": node.is_dead, "is_entry_point": node.is_entry_point,
@@ -435,17 +444,31 @@ class KuzuBackend:
 
     @staticmethod
     def _row_to_node(row: list[Any], node_id: str | None = None) -> GraphNode | None:
-        """Convert a result row from ``RETURN n.*`` into a GraphNode."""
+        """Convert a result row from ``RETURN n.*`` into a GraphNode.
+
+        Supports both the new 14-column schema (with start_byte/end_byte at
+        positions 5,6) and the legacy 12-column schema (without byte offsets).
+        """
         try:
             nid = node_id or row[0]
             label = _LABEL_MAP.get(nid.split(":", 1)[0], NodeLabel.FILE)
+            # New schema: 14 cols — id,name,file_path,start_line,end_line,
+            #   start_byte,end_byte,content,signature,language,class_name,
+            #   is_dead,is_entry_point,is_exported
+            # Old schema: 12 cols — id,name,file_path,start_line,end_line,
+            #   content,signature,language,class_name,is_dead,is_entry_point,is_exported
             return GraphNode(
                 id=row[0], label=label, name=row[1] or "", file_path=row[2] or "",
                 start_line=row[3] or 0, end_line=row[4] or 0,
-                content=row[5] or "", signature=row[6] or "",
-                language=row[7] or "", class_name=row[8] or "",
-                is_dead=bool(row[9]), is_entry_point=bool(row[10]),
-                is_exported=bool(row[11]))
+                start_byte=row[5] if len(row) > 6 else 0,
+                end_byte=row[6] if len(row) > 6 else 0,
+                content=(row[7] if len(row) > 6 else row[5]) or "",
+                signature=(row[8] if len(row) > 6 else row[6]) or "",
+                language=(row[9] if len(row) > 6 else row[7]) or "",
+                class_name=(row[10] if len(row) > 6 else row[8]) or "",
+                is_dead=bool(row[11] if len(row) > 6 else row[9]),
+                is_entry_point=bool(row[12] if len(row) > 6 else row[10]),
+                is_exported=bool(row[13] if len(row) > 6 else row[11]))
         except (IndexError, KeyError):
             logger.debug("Failed to convert row to GraphNode: %s", row, exc_info=True)
             return None

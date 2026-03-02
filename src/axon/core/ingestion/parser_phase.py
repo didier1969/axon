@@ -243,6 +243,8 @@ def process_parsing(
                     file_path=file_entry.path,
                     start_line=symbol.start_line,
                     end_line=symbol.end_line,
+                    start_byte=symbol.start_byte,
+                    end_byte=symbol.end_byte,
                     content=symbol.content,
                     signature=symbol.signature,
                     class_name=symbol.class_name,

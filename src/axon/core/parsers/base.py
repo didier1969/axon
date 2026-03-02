@@ -9,6 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+
 @dataclass
 class SymbolInfo:
     """A parsed symbol (function, class, method, etc.)."""
@@ -17,10 +18,13 @@ class SymbolInfo:
     kind: str  # "function", "class", "method", "interface", "type_alias", "enum"
     start_line: int
     end_line: int
-    content: str
+    start_byte: int = 0
+    end_byte: int = 0
+    content: str = ""
     signature: str = ""
     class_name: str = ""  # for methods: the owning class
-    decorators: list[str] = field(default_factory=list)  # e.g. ["staticmethod", "server.list_tools"]
+    # e.g. ["staticmethod", "server.list_tools"]
+    decorators: list[str] = field(default_factory=list)
 
 @dataclass
 class ImportInfo:

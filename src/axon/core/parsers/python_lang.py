@@ -114,6 +114,8 @@ class PythonParser(LanguageParser):
                 kind=kind,
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
                 signature=signature,
                 class_name=class_name,
@@ -273,6 +275,8 @@ class PythonParser(LanguageParser):
                 kind="class",
                 start_line=start_line,
                 end_line=end_line,
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
                 content=node_content,
             )
         )

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+
 class NodeLabel(Enum):
     """Labels for graph nodes representing code-level entities."""
 
@@ -71,6 +72,8 @@ class GraphNode:
     file_path: str = ""
     start_line: int = 0
     end_line: int = 0
+    start_byte: int = 0
+    end_byte: int = 0
     content: str = ""
     signature: str = ""
     language: str = ""
