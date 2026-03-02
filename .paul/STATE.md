@@ -10,21 +10,21 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 ## Current Position
 
 Milestone: v0.6 Daemon & Centralisation
-Phase: 3 of 3 (Watch & filtrage) — Not started
-Plan: Not started
-Status: Ready to plan Phase 3
-Last activity: 2026-03-02 — Phase 2 (Daemon central) complete, transitioned to Phase 3
+Phase: 3 of 3 (Watch & filtrage) — Planning
+Plan: 03-01 created, awaiting approval
+Status: PLAN created, ready for APPLY
+Last activity: 2026-03-02 — APPLY 03-01 complete (821 tests, 0 failures, 0 lint errors)
 
 Progress:
 - v0.6 Daemon & Centralisation: [██████░░░░] 67% (2/3 phases)
-- Phase 3: [░░░░░░░░░░] 0% (0 plans complete)
+- Phase 3: [░░░░░░░░░░] 0% (0/3 plans complete)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Phase 2 complete — ready for Phase 3 PLAN]
+  ✓        ✓        ○     [Plan 03-01 executed, awaiting UNIFY]
 ```
 
 ## Accumulated Context
@@ -71,14 +71,13 @@ Uncommitted: stale handoffs (.paul/HANDOFF-2026-02-28e.md, HANDOFF-2026-03-02.md
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: Phase 2 (Daemon central) complete — all 3 plans unified, transitioned to Phase 3
-Next action: /paul:plan for Phase 3 (Watch & filtrage)
-Resume file: .paul/ROADMAP.md
+Stopped at: /paul:pause — APPLY 03-01 complete, UNIFY not yet run
+Next action: /paul:unify .paul/phases/03-watch-filtrage/03-01-PLAN.md
+Resume file: .paul/HANDOFF-2026-03-02n.md
 Resume context:
-- Phase 2 complete: daemon (02-01) + MCP proxy (02-02) + axon_batch (02-03)
-- 818 tests, 0 failures; 0 lint errors in server.py
-- Phase 3 scope: sequential watcher queue, configurable debounce, built-in filters (.paul/, _build/, target/)
-- v0.7 planned after v0.6: BM25 hybrid search (FTS5 + vector + graph distance)
+- 03-01 APPLY done: .paul/ filter, watchfiles pre-filter, debounce_ms param, --debounce CLI flag
+- 821 tests, 0 failures; 0 lint errors in all modified files
+- Phase 3 remaining: 03-02 (asyncio.Queue sequential consumer), 03-03 (byte-offset caching)
 
 ---
 *STATE.md — Updated after every significant action*

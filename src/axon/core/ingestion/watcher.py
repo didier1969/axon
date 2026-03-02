@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from axon.config.ignore import load_gitignore, should_ignore
@@ -25,6 +26,26 @@ logger = logging.getLogger(__name__)
 # Timer thresholds (seconds).
 GLOBAL_PHASE_INTERVAL = 30
 EMBEDDING_INTERVAL = 60
+
+
+def _make_watch_filter(
+    repo_path: Path,
+    gitignore_patterns: list[str],
+) -> Callable[[object, str], bool]:
+    """Return a watchfiles filter that pre-filters ignored paths.
+
+    Called by watchfiles before any event reaches the watcher loop.
+    Returning False drops the event; True passes it through.
+    Paths outside ``repo_path`` are always passed through (not our concern).
+    """
+    def _filter(_change_type: object, path_str: str) -> bool:
+        try:
+            relative = Path(path_str).relative_to(repo_path)
+        except ValueError:
+            return True  # outside repo — let watchfiles handle
+        return not should_ignore(relative, gitignore_patterns)
+
+    return _filter
 
 def _reindex_files(
     changed_paths: list[Path],
@@ -103,6 +124,7 @@ async def watch_repo(
     *,
     stop_event: asyncio.Event | None = None,
     lock: asyncio.Lock | None = None,
+    debounce_ms: int = 500,
 ) -> None:
     """Main watch loop — monitor files and re-index on changes.
 
@@ -138,7 +160,8 @@ async def watch_repo(
 
     async for changes in watchfiles.awatch(
         repo_path,
-        rust_timeout=500,
+        rust_timeout=debounce_ms,
+        watch_filter=_make_watch_filter(repo_path, gitignore),
         stop_event=stop_event,
         ignore_permission_denied=True,
     ):

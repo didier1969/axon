@@ -123,6 +123,10 @@ class TestDefaultIgnorePatterns:
         assert "*.pyc" in DEFAULT_IGNORE_PATTERNS
         assert ".git" in DEFAULT_IGNORE_PATTERNS
 
+    def test_ignores_paul_directory(self) -> None:
+        assert should_ignore(".paul/STATE.md") is True
+        assert should_ignore(".paul/HANDOFF-foo.md") is True
+
 
 # ---------------------------------------------------------------------------
 # languages.py tests

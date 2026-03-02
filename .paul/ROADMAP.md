@@ -14,7 +14,7 @@ Phases: 2 of 3 complete
 |-------|------|-------|--------|-----------|
 | 1 | Centralisation du stockage | 1/1 | ✅ Complete | 2026-03-02 |
 | 2 | Daemon central | 3/3 | ✅ Complete | 2026-03-02 |
-| 3 | Watch & filtrage | TBD | Not started | - |
+| 3 | Watch & filtrage | 0/3 | 🚧 Planning | - |
 
 ### Phase 1: Centralisation du stockage — ✅ Complete
 
@@ -29,7 +29,7 @@ Plans: 3/3 complete — see `phases/02-daemon-central/`
 ### Phase 3: Watch & filtrage
 
 Focus: Watcher séquentiel avec queue prioritaire. Debounce configurable. Filtrage `.paul/`, `_build/`, `target/` par défaut. Byte-offset caching pour récupération O(1) des symboles.
-Plans: TBD (définis lors de /paul:plan)
+Plans: 3 total — 03-01 (filtrage+debounce), 03-02 (queue séquentielle), 03-03 (byte-offset caching)
 
 ## Next Milestone
 

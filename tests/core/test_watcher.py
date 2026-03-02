@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 import shutil
 from pathlib import Path
 
 import pytest
 
 from axon.core.ingestion.pipeline import reindex_files, run_pipeline
-from axon.core.ingestion.watcher import _reindex_files
+from axon.core.ingestion.watcher import _reindex_files, watch_repo
 from axon.core.ingestion.walker import FileEntry, read_file
 from axon.core.storage.kuzu_backend import KuzuBackend
 
@@ -256,3 +257,24 @@ class TestWatcherReindexFiles:
         )
 
         assert count == 2
+
+    def test_paul_files_skipped_by_reindex_files(
+        self, tmp_repo: Path, storage: KuzuBackend
+    ) -> None:
+        paul_dir = tmp_repo / ".paul"
+        paul_dir.mkdir()
+        state_file = paul_dir / "STATE.md"
+        state_file.write_text("# state\n", encoding="utf-8")
+
+        count = _reindex_files([state_file], tmp_repo, storage)
+
+        assert count == 0
+
+
+class TestWatchRepoSignature:
+    """watch_repo() signature checks."""
+
+    def test_debounce_ms_param_accepted(self) -> None:
+        sig = inspect.signature(watch_repo)
+        assert "debounce_ms" in sig.parameters
+        assert sig.parameters["debounce_ms"].default == 500

@@ -24,7 +24,7 @@ from axon import __version__
 console = Console()
 logger = logging.getLogger(__name__)
 
-from axon.core.paths import central_db_path as _central_db_path
+from axon.core.paths import central_db_path as _central_db_path  # noqa: E402
 
 
 def _auto_migrate_local_kuzu(repo_path: Path, slug: str) -> None:
@@ -266,7 +266,9 @@ def main(
 def analyze(
     path: Path = typer.Argument(Path("."), help="Path to the repository to index."),
     full: bool = typer.Option(False, "--full", help="Perform a full re-index."),
-    no_embeddings: bool = typer.Option(False, "--no-embeddings", help="Skip vector embedding generation."),
+    no_embeddings: bool = typer.Option(
+        False, "--no-embeddings", help="Skip vector embedding generation."
+    ),
 ) -> None:
     """Index a repository into a knowledge graph."""
     from axon.core.ingestion.pipeline import PipelineResult, run_pipeline
@@ -320,7 +322,8 @@ def analyze(
                 if prev_stats.get("files", 0) > 0 and prev_stats.get("symbols", 0) == 0:
                     full = True
                     console.print(
-                        "[yellow]Warning: previous index has no symbols — forcing full re-index.[/yellow]"
+                        "[yellow]Warning: previous index has no symbols"
+                        " — forcing full re-index.[/yellow]"
                     )
             except (json.JSONDecodeError, KeyError):
                 pass
@@ -509,7 +512,9 @@ def impact(
 
 @app.command(name="dead-code")
 def dead_code(
-    exit_code: bool = typer.Option(False, "--exit-code", help="Exit 1 if dead code found (for CI)."),
+    exit_code: bool = typer.Option(
+        False, "--exit-code", help="Exit 1 if dead code found (for CI)."
+    ),
 ) -> None:
     """List all detected dead code."""
     from axon.mcp.tools import handle_dead_code
@@ -553,7 +558,9 @@ def setup(
         console.print(json.dumps({"axon": mcp_config}, indent=2))
 
 @app.command()
-def watch() -> None:
+def watch(
+    debounce: int = typer.Option(500, "--debounce", help="Debounce interval in ms (default: 500)."),
+) -> None:
     """Watch mode — re-index on file changes."""
     import asyncio
 
@@ -590,7 +597,7 @@ def watch() -> None:
     console.print(f"[bold]Watching[/bold] {repo_path} for changes (Ctrl+C to stop)")
 
     try:
-        asyncio.run(watch_repo(repo_path, storage))
+        asyncio.run(watch_repo(repo_path, storage, debounce_ms=debounce))
     except KeyboardInterrupt:
         console.print("\n[bold]Watch stopped.[/bold]")
     finally:
@@ -598,7 +605,9 @@ def watch() -> None:
 
 @app.command()
 def diff(
-    branch_range: str = typer.Argument(..., help="Branch range for comparison (e.g. main..feature)."),
+    branch_range: str = typer.Argument(
+        ..., help="Branch range for comparison (e.g. main..feature)."
+    ),
 ) -> None:
     """Structural branch comparison."""
     from axon.core.diff import diff_branches, format_diff
@@ -784,13 +793,17 @@ def stats() -> None:
 
 @app.command()
 def serve(
-    watch: bool = typer.Option(False, "--watch", "-w", help="Enable file watching with auto-reindex."),
+    watch: bool = typer.Option(
+        False, "--watch", "-w", help="Enable file watching with auto-reindex."
+    ),
+    debounce: int = typer.Option(500, "--debounce", help="Debounce interval in ms (default: 500)."),
 ) -> None:
     """Start MCP server, optionally with live file watching."""
     import asyncio
     import sys
 
-    from axon.mcp.server import main as mcp_main, set_lock, set_storage
+    from axon.mcp.server import main as mcp_main
+    from axon.mcp.server import set_lock, set_storage
 
     if not watch:
         asyncio.run(mcp_main())
@@ -832,6 +845,7 @@ def serve(
 
     async def _run() -> None:
         from mcp.server.stdio import stdio_server
+
         from axon.mcp.server import server as mcp_server
 
         stop = asyncio.Event()
@@ -843,7 +857,7 @@ def serve(
 
             await asyncio.gather(
                 _mcp_then_stop(),
-                watch_repo(repo_path, storage, stop_event=stop, lock=lock),
+                watch_repo(repo_path, storage, stop_event=stop, lock=lock, debounce_ms=debounce),
             )
 
     try:
