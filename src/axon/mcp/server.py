@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 
@@ -60,20 +61,31 @@ def set_lock(lock: asyncio.Lock) -> None:
 def _get_storage() -> KuzuBackend:
     """Lazily initialise and return the KuzuDB storage backend.
 
-    Looks for a ``.axon/kuzu`` directory in the current working directory.
-    If it exists, the backend is initialised from that path.  Otherwise a
-    bare (uninitialised) backend is returned so that tools can still be
-    called without crashing.
+    Tries the centralised path (``~/.axon/repos/{slug}/kuzu``) from the
+    local ``.axon/meta.json`` slug field.  Falls back to the legacy
+    ``.axon/kuzu`` path for repos indexed before v0.6.
     """
     global _storage  # noqa: PLW0603
     if _storage is None:
         _storage = KuzuBackend()
-        db_path = Path.cwd() / ".axon" / "kuzu"
+        meta_path = Path.cwd() / ".axon" / "meta.json"
+        db_path: Path | None = None
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                slug = meta.get("slug")
+                if slug:
+                    db_path = Path.home() / ".axon" / "repos" / slug / "kuzu"
+            except (json.JSONDecodeError, OSError):
+                pass
+        # Legacy fallback: local .axon/kuzu
+        if db_path is None:
+            db_path = Path.cwd() / ".axon" / "kuzu"
         if db_path.exists():
             _storage.initialize(db_path, read_only=True)
             logger.info("Initialised storage (read-only) from %s", db_path)
         else:
-            logger.warning("No .axon/kuzu directory found in %s", Path.cwd())
+            logger.warning("No axon DB found for %s", Path.cwd())
     return _storage
 
 TOOLS: list[Tool] = [

@@ -5,25 +5,25 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** Awaiting next milestone — v0.5 Hardening complete.
+**Current focus:** v0.6 Phase 2 — Daemon central (Unix socket, LRU cache, shared embeddings model).
 
 ## Current Position
 
 Milestone: v0.6 Daemon & Centralisation
-Phase: 1 of 3 (Centralisation du stockage) — Planning
-Plan: 01-01 created, awaiting approval
-Status: PLAN created, ready for APPLY
-Last activity: 2026-03-02 — Created .paul/phases/01-centralisation-stockage/01-01-PLAN.md
+Phase: 2 of 3 (Daemon central)
+Plan: Not started
+Status: Ready to plan Phase 2
+Last activity: 2026-03-02 — Phase 1 complete (Centralisation du stockage), 782 tests pass
 
 Progress:
-- v0.6 Daemon & Centralisation: [░░░░░░░░░░] 0%
+- v0.6 Daemon & Centralisation: [███░░░░░░░] 33% (1/3 phases)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ○        ○     [Plan created, awaiting approval]
+  ✓        ✓        ✓     [Phase 1 loop closed — ready for Phase 2 PLAN]
 ```
 
 ## Accumulated Context
@@ -43,6 +43,9 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | test_watcher.py floor is ~28s | v0.5 Plan 01-02 | KuzuDB open ~1.3s/test; accepted, not worth mocking |
 | USES is a distinct RelType (not USES_TYPE) | v0.5 Plan 02-01 | Elixir `use` is macro injection, different from type usage |
 | Community detection via WCC + ThreadPoolExecutor | v0.5 Plan 02-02 | Per-component Leiden; small (<3 node) components skipped |
+| Central KuzuDB at ~/.axon/repos/{slug}/kuzu | v0.6 Plan 01-01 | One storage location per repo, independent of project dir |
+| Placeholder meta.json before KuzuDB init | v0.6 Plan 01-01 | Prevents _register_in_global_registry from deleting central slot |
+| Auto-migration via shutil.move on analyze | v0.6 Plan 01-01 | Transparent migration for existing repos, no manual step |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
@@ -54,21 +57,21 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: e5495f4 (feat(02-parser-and-performance): Elixir USES + community parallelization)
+Last commit: 1abcb61 (chore(plan): create v0.6 Phase 1 plan — centralisation du stockage)
 Tag: v0.5.0
 Branch: main
-Uncommitted: .paul docs only (milestone completion docs)
+Uncommitted: cli/main.py, mcp/server.py, mcp/tools.py, tests/cli/test_main.py, tests/mcp/test_tools.py, 01-01-SUMMARY.md
 
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: /paul:pause — plan 01-01 créé, attente APPLY
-Next action: /paul:apply .paul/phases/01-centralisation-stockage/01-01-PLAN.md
-Resume file: .paul/HANDOFF-2026-03-02f.md
+Stopped at: /paul:unify — Phase 1 loop closed, git commit pending
+Next action: /paul:plan for Phase 2 (Daemon central)
+Resume file: .paul/ROADMAP.md
 Resume context:
-- Plan 01-01 couvre toute la phase en 2 tâches massives
-- Task 1: _central_db_path helper + auto-migrate + all read/write paths (cli/main, mcp/server, mcp/tools)
-- Task 2: tests/cli/test_main.py + tests/mcp/test_tools.py + pytest tests/ -x -q
+- Phase 1 complete: KuzuDB centralised at ~/.axon/repos/{slug}/kuzu
+- All phase 1 code committed as feat(01-centralisation-stockage)
+- Phase 2 focus: axon daemon start/stop/status, Unix socket, LRU cache 5 DBs
 
 ---
 *STATE.md — Updated after every significant action*

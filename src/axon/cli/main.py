@@ -19,12 +19,48 @@ from axon import __version__
 console = Console()
 logger = logging.getLogger(__name__)
 
+def _central_db_path(slug: str) -> Path:
+    """Return the centralised KuzuDB path for a given slug."""
+    return Path.home() / ".axon" / "repos" / slug / "kuzu"
+
+
+def _auto_migrate_local_kuzu(repo_path: Path, slug: str) -> None:
+    """Move {repo_path}/.axon/kuzu → ~/.axon/repos/{slug}/kuzu if needed.
+
+    Skips if central DB already exists or local DB doesn't exist.
+    Logs at INFO when migration happens.
+    """
+    local_kuzu = repo_path / ".axon" / "kuzu"
+    central = _central_db_path(slug)
+    if not local_kuzu.exists() or central.exists():
+        return
+    central.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(local_kuzu), str(central))
+    logger.info("Migrated KuzuDB: %s → %s", local_kuzu, central)
+
+
 def _load_storage(repo_path: Path | None = None) -> "KuzuBackend":  # noqa: F821
     """Load the KuzuDB backend for the given or current repo."""
     from axon.core.storage.kuzu_backend import KuzuBackend
 
     target = (repo_path or Path.cwd()).resolve()
-    db_path = target / ".axon" / "kuzu"
+    axon_dir = target / ".axon"
+    meta_path = axon_dir / "meta.json"
+
+    # Determine DB path: central (slug-based) or legacy fallback
+    db_path: Path | None = None
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            slug = meta.get("slug")
+            if slug:
+                db_path = _central_db_path(slug)
+        except (json.JSONDecodeError, OSError):
+            pass
+    # Legacy fallback (repos indexed before v0.6)
+    if db_path is None:
+        db_path = axon_dir / "kuzu"
+
     if not db_path.exists():
         console.print(
             f"[red]Error:[/red] No index found at {target}. Run 'axon analyze' first."
@@ -124,7 +160,34 @@ def analyze(
 
     axon_dir = repo_path / ".axon"
     axon_dir.mkdir(parents=True, exist_ok=True)
-    db_path = axon_dir / "kuzu"
+
+    # Compute slug (mirrors _register_in_global_registry logic)
+    slug = repo_path.name
+    registry_root = Path.home() / ".axon" / "repos"
+    candidate_meta = registry_root / slug / "meta.json"
+    if candidate_meta.exists():
+        try:
+            existing = json.loads(candidate_meta.read_text())
+            if existing.get("path") != str(repo_path):
+                slug = f"{repo_path.name}-{hashlib.sha256(str(repo_path).encode()).hexdigest()[:8]}"
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Auto-migrate existing local DB to central location
+    _auto_migrate_local_kuzu(repo_path, slug)
+
+    # Central DB path
+    central_slot = Path.home() / ".axon" / "repos" / slug
+    central_slot.mkdir(parents=True, exist_ok=True)
+    # Write a placeholder meta.json to the central slot so _register_in_global_registry
+    # doesn't treat it as a corrupt entry and delete the directory (and the kuzu DB).
+    central_placeholder = central_slot / "meta.json"
+    if not central_placeholder.exists():
+        central_placeholder.write_text(
+            json.dumps({"path": str(repo_path), "name": repo_path.name}) + "\n",
+            encoding="utf-8",
+        )
+    db_path = _central_db_path(slug)
 
     # Auto-detect stale index: files indexed but 0 symbols → force full re-index.
     if not full:
@@ -168,6 +231,7 @@ def analyze(
     meta = {
         "version": __version__,
         "name": repo_path.name,
+        "slug": slug,
         "path": str(repo_path),
         "stats": {
             "files": result.files,
@@ -267,6 +331,20 @@ def clean(
             console.print("Aborted.")
             raise typer.Exit()
 
+    # Delete central DB if slug is known
+    meta_path = axon_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            slug = meta.get("slug")
+            if slug:
+                central_dir = Path.home() / ".axon" / "repos" / slug
+                if central_dir.exists():
+                    shutil.rmtree(central_dir)
+                    console.print(f"[green]Deleted[/green] central DB {central_dir}")
+        except (json.JSONDecodeError, OSError):
+            pass
+
     shutil.rmtree(axon_dir)
     console.print(f"[green]Deleted[/green] {axon_dir}")
 
@@ -365,7 +443,21 @@ def watch() -> None:
     repo_path = Path.cwd().resolve()
     axon_dir = repo_path / ".axon"
     axon_dir.mkdir(parents=True, exist_ok=True)
-    db_path = axon_dir / "kuzu"
+
+    # Compute slug (inline, mirrors _register_in_global_registry)
+    slug = repo_path.name
+    registry_root = Path.home() / ".axon" / "repos"
+    candidate_meta = registry_root / slug / "meta.json"
+    if candidate_meta.exists():
+        try:
+            existing = json.loads(candidate_meta.read_text())
+            if existing.get("path") != str(repo_path):
+                slug = f"{repo_path.name}-{hashlib.sha256(str(repo_path).encode()).hexdigest()[:8]}"
+        except (json.JSONDecodeError, OSError):
+            pass
+    _auto_migrate_local_kuzu(repo_path, slug)
+    (Path.home() / ".axon" / "repos" / slug).mkdir(parents=True, exist_ok=True)
+    db_path = _central_db_path(slug)
 
     storage = KuzuBackend()
     storage.initialize(db_path)
@@ -590,7 +682,21 @@ def serve(
     repo_path = Path.cwd().resolve()
     axon_dir = repo_path / ".axon"
     axon_dir.mkdir(parents=True, exist_ok=True)
-    db_path = axon_dir / "kuzu"
+
+    # Compute slug (inline, mirrors _register_in_global_registry)
+    slug = repo_path.name
+    registry_root = Path.home() / ".axon" / "repos"
+    candidate_meta = registry_root / slug / "meta.json"
+    if candidate_meta.exists():
+        try:
+            existing = json.loads(candidate_meta.read_text())
+            if existing.get("path") != str(repo_path):
+                slug = f"{repo_path.name}-{hashlib.sha256(str(repo_path).encode()).hexdigest()[:8]}"
+        except (json.JSONDecodeError, OSError):
+            pass
+    _auto_migrate_local_kuzu(repo_path, slug)
+    (Path.home() / ".axon" / "repos" / slug).mkdir(parents=True, exist_ok=True)
+    db_path = _central_db_path(slug)
 
     storage = KuzuBackend()
     storage.initialize(db_path)

@@ -853,3 +853,47 @@ class TestMultiRepoRouting:
         mock_storage.fts_search.return_value = []
         handle_query(mock_storage, "hello", repo=None)
         assert called == []
+
+    def test_load_repo_storage_uses_central_path_when_exists(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Uses ~/.axon/repos/{repo}/kuzu when central kuzu file exists."""
+        from unittest.mock import patch, MagicMock
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        repo_dir = tmp_path / ".axon" / "repos" / "myapp"
+        repo_dir.mkdir(parents=True)
+        meta = {"name": "myapp", "path": str(tmp_path / "some-repo"), "slug": "myapp"}
+        (repo_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        # Simulate central kuzu file existing
+        (repo_dir / "kuzu").touch()
+
+        mock_backend = MagicMock()
+        with patch("axon.core.storage.kuzu_backend.KuzuBackend", return_value=mock_backend):
+            result = _load_repo_storage("myapp")
+
+        mock_backend.initialize.assert_called_once_with(repo_dir / "kuzu", read_only=True)
+        assert result is mock_backend
+
+    def test_load_repo_storage_legacy_fallback_when_no_central(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """Falls back to {meta[path]}/.axon/kuzu when central kuzu doesn't exist."""
+        from unittest.mock import patch, MagicMock
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        repo_dir = tmp_path / ".axon" / "repos" / "myapp"
+        repo_dir.mkdir(parents=True)
+        legacy_kuzu = tmp_path / "some-repo" / ".axon" / "kuzu"
+        legacy_kuzu.parent.mkdir(parents=True, exist_ok=True)
+        legacy_kuzu.touch()
+        meta = {"name": "myapp", "path": str(tmp_path / "some-repo"), "slug": "myapp"}
+        (repo_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        # No central kuzu file
+
+        mock_backend = MagicMock()
+        with patch("axon.core.storage.kuzu_backend.KuzuBackend", return_value=mock_backend):
+            result = _load_repo_storage("myapp")
+
+        mock_backend.initialize.assert_called_once_with(legacy_kuzu, read_only=True)
+        assert result is mock_backend

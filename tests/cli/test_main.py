@@ -9,8 +9,10 @@ from unittest.mock import MagicMock, patch
 import typer
 from typer.testing import CliRunner
 
+import pytest
+
 from axon import __version__
-from axon.cli.main import _register_in_global_registry, app
+from axon.cli.main import _central_db_path, _load_storage, _register_in_global_registry, app
 
 runner = CliRunner()
 
@@ -158,6 +160,87 @@ class TestClean:
 
         result = runner.invoke(app, ["clean"], input="n\n")
         assert axon_dir.exists()  # Not deleted
+
+    def test_clean_deletes_central_db_when_slug_present(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        """Clean should delete the central DB dir when slug is in meta.json."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        axon_dir = tmp_path / ".axon"
+        axon_dir.mkdir()
+        central_dir = tmp_path / ".axon" / "repos" / "myrepo"
+        central_dir.mkdir(parents=True)
+        (central_dir / "kuzu").touch()
+
+        meta = {"slug": "myrepo", "name": "myrepo", "path": str(tmp_path)}
+        (axon_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+        result = runner.invoke(app, ["clean", "--force"])
+        assert result.exit_code == 0
+        assert "Deleted" in result.output
+        assert not axon_dir.exists()
+        assert not central_dir.exists()
+
+
+class TestLoadStorage:
+    """Tests for _load_storage() central path behavior."""
+
+    def test_central_path_used_when_slug_present(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        """_load_storage uses central path when meta.json has a slug field."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        axon_dir = tmp_path / ".axon"
+        axon_dir.mkdir()
+
+        central_kuzu = tmp_path / ".axon" / "repos" / "myrepo" / "kuzu"
+        central_kuzu.parent.mkdir(parents=True, exist_ok=True)
+        central_kuzu.touch()
+
+        meta = {"slug": "myrepo", "version": "0.6.0", "name": "myrepo", "path": str(tmp_path)}
+        (axon_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+        mock_storage = MagicMock()
+        with patch("axon.core.storage.kuzu_backend.KuzuBackend", return_value=mock_storage):
+            result = _load_storage()
+
+        mock_storage.initialize.assert_called_once_with(central_kuzu, read_only=True)
+        assert result is mock_storage
+
+    def test_legacy_fallback_when_no_slug(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        """_load_storage falls back to .axon/kuzu when meta.json has no slug."""
+        monkeypatch.chdir(tmp_path)
+
+        axon_dir = tmp_path / ".axon"
+        axon_dir.mkdir()
+        legacy_kuzu = axon_dir / "kuzu"
+        legacy_kuzu.touch()
+
+        meta = {"version": "0.4.0", "name": "oldrepo", "path": str(tmp_path)}
+        (axon_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+        mock_storage = MagicMock()
+        with patch("axon.core.storage.kuzu_backend.KuzuBackend", return_value=mock_storage):
+            result = _load_storage()
+
+        mock_storage.initialize.assert_called_once_with(legacy_kuzu, read_only=True)
+        assert result is mock_storage
+
+    def test_no_index_exits_with_error(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ) -> None:
+        """_load_storage exits with code 1 when no DB found."""
+        import click
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(click.exceptions.Exit):
+            _load_storage()
 
 
 class TestQuery:

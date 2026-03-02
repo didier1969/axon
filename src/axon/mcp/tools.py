@@ -63,8 +63,9 @@ def _resolve_symbol(storage: StorageBackend, symbol: str, limit: int = 1) -> lis
 def _load_repo_storage(repo: str) -> StorageBackend | None:
     """Open a read-only KuzuBackend for a named repo from the global registry.
 
-    Reads ``~/.axon/repos/{repo}/meta.json``, resolves the repo path, and
-    initialises a backend from ``{path}/.axon/kuzu``.
+    Reads ``~/.axon/repos/{repo}/meta.json``. Opens the DB from the central
+    location: ``~/.axon/repos/{repo}/kuzu`` (v0.6+) or falls back to
+    ``{meta["path"]}/.axon/kuzu`` for repos not yet migrated.
 
     Returns ``None`` (and logs at DEBUG) on any error so callers can return
     a user-friendly message without crashing.
@@ -74,7 +75,13 @@ def _load_repo_storage(repo: str) -> StorageBackend | None:
     meta_path = Path.home() / ".axon" / "repos" / repo / "meta.json"
     try:
         data = json.loads(meta_path.read_text(encoding="utf-8"))
-        db_path = Path(data["path"]) / ".axon" / "kuzu"
+        # Central path (v0.6+): registry dir itself holds kuzu
+        central_db = meta_path.parent / "kuzu"
+        if central_db.exists():
+            db_path = central_db
+        else:
+            # Legacy fallback: kuzu was at {project}/.axon/kuzu
+            db_path = Path(data["path"]) / ".axon" / "kuzu"
         backend = KuzuBackend()
         backend.initialize(db_path, read_only=True)
         return backend

@@ -12,9 +12,9 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 | Attribute | Value |
 |-----------|-------|
-| Version | 0.5.0 |
+| Version | 0.6.0 (in progress) |
 | Status | Active Development |
-| Last Updated | 2026-02-28 |
+| Last Updated | 2026-03-02 |
 
 ## Requirements
 
@@ -40,12 +40,17 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] Watcher production-safe (embeddings on 60s interval, not 30s) — v0.5 Phase 1, Plan 01-02
 - [x] Elixir `use Module` → USES relationship in graph — v0.5 Phase 2, Plan 02-01
 - [x] Community detection parallelized (WCC + ThreadPoolExecutor) — v0.5 Phase 2, Plan 02-02
+- [x] Central KuzuDB storage at ~/.axon/repos/{slug}/kuzu — v0.6 Phase 1
+- [x] Auto-migration of legacy local KuzuDB on axon analyze — v0.6 Phase 1
+- [x] Slug-based repo identity in local meta.json — v0.6 Phase 1
+- [x] Backward-compat fallback for pre-v0.6 repos (no slug in meta.json) — v0.6 Phase 1
 
 ### Active (In Progress)
-(None — v0.5 complete)
+- [ ] Daemon central (axon daemon start/stop/status, Unix socket, LRU cache) — v0.6 Phase 2
+- [ ] Watch & filtrage (sequential watcher queue, configurable debounce, built-in filters) — v0.6 Phase 3
 
 ### Planned (Next)
-(To be defined for v0.6)
+(Phases 2 and 3 of v0.6 — see ROADMAP.md)
 
 ### Out of Scope
 - GUI / web interface — CLI and MCP-first
@@ -90,6 +95,9 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 | Watcher embeddings on 60s EMBEDDING_INTERVAL | _run_global_phases(embeddings=False); last_embed timer enforces 60s cadence | 2026-02-28 | Active |
 | USES is a distinct RelType (not USES_TYPE) | Elixir `use` is macro injection — semantically different from type usage | 2026-02-28 | Active |
 | Community detection: ThreadPoolExecutor default | Let stdlib pick min(32, cpu_count+4) per WCC component | 2026-02-28 | Active |
+| Central KuzuDB at ~/.axon/repos/{slug}/kuzu | All DBs in one place; daemon Phase 2 can implement LRU cache over this directory | 2026-03-02 | Active |
+| Placeholder meta.json before KuzuDB init | _register_in_global_registry deletes slots without meta.json; placeholder prevents rmtree | 2026-03-02 | Active |
+| Slug computation inlined (not extracted to helper) | 3 call sites; minimal blast radius; no shared state needed | 2026-03-02 | Active |
 
 ## Success Metrics
 
@@ -111,4 +119,4 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-02-28 — v0.5 Hardening complete (2 phases, 4 plans shipped)*
+*Last updated: 2026-03-02 — v0.6 Phase 1 (Centralisation du stockage) complete*

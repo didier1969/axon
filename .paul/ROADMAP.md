@@ -8,18 +8,18 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 **v0.6 Daemon & Centralisation**
 Status: 🚧 In Progress
-Phases: 0 of 3 complete
+Phases: 1 of 3 complete
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
-| 1 | Centralisation du stockage | 1 | Planning | - |
+| 1 | Centralisation du stockage | 1/1 | ✅ Complete | 2026-03-02 |
 | 2 | Daemon central | TBD | Not started | - |
 | 3 | Watch & filtrage | TBD | Not started | - |
 
-### Phase 1: Centralisation du stockage
+### Phase 1: Centralisation du stockage — ✅ Complete
 
 Focus: Migrer toutes les KuzuDB vers `~/.axon/repos/{name}/kuzu`. Migration automatique des DBs locales existantes. Plus de `.axon/` éparpillé dans chaque projet.
-Plans: TBD (définis lors de /paul:plan)
+Plans: 1/1 complete — see `phases/01-centralisation-stockage/01-01-SUMMARY.md`
 
 ### Phase 2: Daemon central
 
@@ -69,4 +69,4 @@ Run /paul:discuss-milestone ou /paul:milestone pour définir.
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-03-02 — v0.6 Daemon & Centralisation created*
+*Last updated: 2026-03-02 — Phase 1 (Centralisation du stockage) complete*
