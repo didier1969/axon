@@ -60,12 +60,17 @@ class SqlParser(LanguageParser):
             line_no = content[:m.start()].count("\n") + 1
             end_line = self._find_statement_end(lines, line_no - 1)
             stmt_content = "\n".join(lines[line_no - 1 : end_line])
+            start_byte = m.start()
+            semi_pos = content.find(";", start_byte)
+            end_byte = semi_pos + 1 if semi_pos != -1 else len(content)
             result.symbols.append(
                 SymbolInfo(
                     name=name,
                     kind="class",
                     start_line=line_no,
                     end_line=end_line,
+                    start_byte=start_byte,
+                    end_byte=end_byte,
                     content=stmt_content,
                 )
             )
@@ -76,12 +81,17 @@ class SqlParser(LanguageParser):
             line_no = content[:m.start()].count("\n") + 1
             end_line = self._find_statement_end(lines, line_no - 1)
             stmt_content = "\n".join(lines[line_no - 1 : end_line])
+            start_byte = m.start()
+            semi_pos = content.find(";", start_byte)
+            end_byte = semi_pos + 1 if semi_pos != -1 else len(content)
             result.symbols.append(
                 SymbolInfo(
                     name=name,
                     kind="function",
                     start_line=line_no,
                     end_line=end_line,
+                    start_byte=start_byte,
+                    end_byte=end_byte,
                     content=stmt_content,
                 )
             )
@@ -92,12 +102,17 @@ class SqlParser(LanguageParser):
             line_no = content[:m.start()].count("\n") + 1
             end_line = self._find_statement_end(lines, line_no - 1)
             stmt_content = "\n".join(lines[line_no - 1 : end_line])
+            start_byte = m.start()
+            semi_pos = content.find(";", start_byte)
+            end_byte = semi_pos + 1 if semi_pos != -1 else len(content)
             result.symbols.append(
                 SymbolInfo(
                     name=name,
                     kind="function",
                     start_line=line_no,
                     end_line=end_line,
+                    start_byte=start_byte,
+                    end_byte=end_byte,
                     content=stmt_content,
                 )
             )
@@ -108,12 +123,17 @@ class SqlParser(LanguageParser):
             line_no = content[:m.start()].count("\n") + 1
             end_line = self._find_statement_end(lines, line_no - 1)
             stmt_content = "\n".join(lines[line_no - 1 : end_line])
+            start_byte = m.start()
+            semi_pos = content.find(";", start_byte)
+            end_byte = semi_pos + 1 if semi_pos != -1 else len(content)
             result.symbols.append(
                 SymbolInfo(
                     name=name,
                     kind="function",
                     start_line=line_no,
                     end_line=end_line,
+                    start_byte=start_byte,
+                    end_byte=end_byte,
                     content=stmt_content,
                 )
             )

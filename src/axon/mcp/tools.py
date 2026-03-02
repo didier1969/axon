@@ -630,6 +630,84 @@ def handle_detect_changes(storage: StorageBackend, diff: str) -> str:
     lines.append("Next: Use impact() on affected symbols to see downstream effects.")
     return "\n".join(lines)
 
+def _get_repo_root_from_storage(storage: StorageBackend) -> Path | None:
+    """Derive the repo root path from the storage backend's db_path via meta.json."""
+    db_path = getattr(storage, "db_path", None)
+    if db_path is None:
+        return None
+    meta_path = Path(db_path).parent / "meta.json"
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        repo_path = data.get("path")
+        if repo_path:
+            return Path(repo_path)
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def handle_read_symbol(
+    storage: StorageBackend,
+    symbol: str,
+    file: str | None = None,
+    repo: str | None = None,
+) -> str:
+    """Return the exact source of a symbol using byte offsets (O(1) file read).
+
+    Looks up start_byte/end_byte from the graph and slices the source file
+    directly.  Falls back to the stored content field when byte offsets are
+    unavailable (e.g. legacy DBs or regex-based parsers not yet migrated).
+    """
+    _storage = storage
+    if repo:
+        repo_storage = _load_repo_storage(repo)
+        if repo_storage is None:
+            return f"Repository not found: {repo}"
+        _storage = repo_storage
+
+    if file:
+        rows = _storage.execute_raw(
+            "MATCH (n) WHERE n.name = $name AND n.file_path CONTAINS $file "
+            "RETURN n.name, n.file_path, n.start_line, n.start_byte, n.end_byte, n.content",
+            parameters={"name": symbol, "file": file},
+        )
+    else:
+        rows = _storage.execute_raw(
+            "MATCH (n) WHERE n.name = $name "
+            "RETURN n.name, n.file_path, n.start_line, n.start_byte, n.end_byte, n.content",
+            parameters={"name": symbol},
+        )
+
+    if not rows:
+        return f"Symbol not found: {symbol}"
+
+    if len(rows) > 1:
+        lines = [f"Multiple symbols named '{symbol}' — specify `file` to disambiguate:"]
+        for row in rows[:10]:
+            lines.append(f"  - {row[1]} (line {row[2]})")
+        if len(rows) > 10:
+            lines.append(f"  ... and {len(rows) - 10} more")
+        return "\n".join(lines)
+
+    row = rows[0]
+    sym_name, file_path, start_line, start_byte, end_byte, stored_content = row
+
+    if start_byte and end_byte and start_byte < end_byte:
+        repo_root = _get_repo_root_from_storage(_storage)
+        if repo_root is not None:
+            abs_path = repo_root / file_path
+            try:
+                raw = abs_path.read_bytes()[start_byte:end_byte]
+                source = raw.decode("utf-8", errors="replace")
+                return f"# {sym_name} — {file_path}:{start_line}\n\n{source}"
+            except OSError:
+                pass
+
+    note = "(byte offsets unavailable, using stored content)"
+    content_text = stored_content or "(no content stored)"
+    return f"# {sym_name} — {file_path}:{start_line}\n{note}\n\n{content_text}"
+
+
 _WRITE_KEYWORDS = re.compile(
     r"\b(DELETE|DROP|CREATE|SET|REMOVE|MERGE|DETACH|INSTALL|LOAD|COPY|CALL"
     r"|RENAME|ALTER|IMPORT|TRUNCATE)\b",

@@ -40,6 +40,7 @@ from axon.mcp.tools import (
     handle_impact,
     handle_list_repos,
     handle_query,
+    handle_read_symbol,
 )
 
 logger = logging.getLogger(__name__)
@@ -384,6 +385,37 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="axon_read_symbol",
+        description=(
+            "Get the exact source code of a symbol by name using byte offsets (O(1) file read). "
+            "Returns the precise source of a function, class, method, or interface. "
+            "Optionally filter by file path substring to disambiguate same-named symbols. "
+            "Use instead of reading the whole file when you know the symbol name."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Symbol name to look up (exact match).",
+                },
+                "file": {
+                    "type": "string",
+                    "description": "Optional file path substring filter (e.g. 'auth/login').",
+                },
+                "repo": {
+                    "type": "string",
+                    "description": "Optional repo slug. Defaults to current directory repo.",
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
+            },
+            "required": ["symbol"],
+        },
+    ),
+    Tool(
         name="axon_batch",
         description=(
             "Execute multiple axon tool calls in a single round-trip. "
@@ -457,6 +489,13 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
         return handle_detect_changes(storage, arguments.get("diff", ""))
     elif name == "axon_cypher":
         return handle_cypher(storage, arguments.get("query", ""))
+    elif name == "axon_read_symbol":
+        return handle_read_symbol(
+            storage,
+            symbol=arguments.get("symbol", ""),
+            file=arguments.get("file"),
+            repo=arguments.get("repo"),
+        )
     else:
         return f"Unknown tool: {name}"
 
