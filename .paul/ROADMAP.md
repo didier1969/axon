@@ -13,7 +13,7 @@ Phases: 1 of 3 complete
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
 | 1 | Centralisation du stockage | 1/1 | ✅ Complete | 2026-03-02 |
-| 2 | Daemon central | 2 | Planning | - |
+| 2 | Daemon central | 3 | In progress | - |
 | 3 | Watch & filtrage | TBD | Not started | - |
 
 ### Phase 1: Centralisation du stockage — ✅ Complete

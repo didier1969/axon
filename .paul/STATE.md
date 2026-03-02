@@ -10,21 +10,21 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 ## Current Position
 
 Milestone: v0.6 Daemon & Centralisation
-Phase: 2 of 3 (Daemon central) — Planning
-Plan: 02-01 executed, ready for UNIFY
-Status: APPLY complete, ready for UNIFY
-Last activity: 2026-03-02 — APPLY 02-01 complete (paths.py + daemon package + CLI + 16 tests, 798 passing)
+Phase: 2 of 3 (Daemon central) — In Progress
+Plan: 02-02 created, awaiting APPLY
+Status: PLAN created, ready for APPLY
+Last activity: 2026-03-02 — Created 02-02-PLAN.md (MCP proxy + max_tokens)
 
 Progress:
 - v0.6 Daemon & Centralisation: [███░░░░░░░] 33% (1/3 phases)
-- Phase 2: [░░░░░░░░░░] 0%
+- Phase 2: [███░░░░░░░] 33% (1/3 plans complete)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ○     [APPLY complete, ready for UNIFY]
+  ✓        ○        ○     [Plan 02-02 created, awaiting approval]
 ```
 
 ## Accumulated Context
@@ -47,6 +47,9 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | Central KuzuDB at ~/.axon/repos/{slug}/kuzu | v0.6 Plan 01-01 | One storage location per repo, independent of project dir |
 | Placeholder meta.json before KuzuDB init | v0.6 Plan 01-01 | Prevents _register_in_global_registry from deleting central slot |
 | Auto-migration via shutil.move on analyze | v0.6 Plan 01-01 | Transparent migration for existing repos, no manual step |
+| Double-checked locking in LRU cache | v0.6 Plan 02-01 | KuzuBackend.initialize() I/O outside lock; insert+evict inside lock |
+| Popen(start_new_session=True) for daemon spawn | v0.6 Plan 02-01 | Portable orphan process; no os.fork() complexity |
+| MCP proxy deferred to Plan 02-02 | v0.6 Plan 02-01 | Daemon exists but MCP still uses direct KuzuBackend |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
@@ -58,24 +61,23 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: 2456f1b (feat(01-centralisation-stockage): centralise KuzuDB storage)
+Last commit: be2bad5 (feat(02-daemon-central): implement axon daemon package and CLI commands)
 Tag: v0.5.0
 Branch: main
-Uncommitted: stale handoff files only (.paul/HANDOFF-*.md)
+Uncommitted: stale handoffs (.paul/HANDOFF-2026-02-28e.md, HANDOFF-2026-03-02.md, HANDOFF-2026-03-02f.md) + uv.lock minor change
 
 ## Session Continuity
 
 Last session: 2026-03-02
-Stopped at: /paul:pause — Plan 02-01 APPLIED, UNIFY pending
-Next action: /paul:unify .paul/phases/02-daemon-central/02-01-PLAN.md
-Resume file: .paul/HANDOFF-2026-03-02i.md
+Stopped at: /paul:pause — Plan 02-02 created, APPLY pending
+Next action: /paul:apply .paul/phases/02-daemon-central/02-02-PLAN.md
+Resume file: .paul/HANDOFF-2026-03-02j.md
 Resume context:
-- Plan 02-01 APPLIED: paths.py + daemon package + CLI daemon start/stop/status + 16 tests (798 total, ruff clean)
-- Daemon: asyncio Unix socket, JSON-line protocol, LRU cache maxsize=5
-- MCP still uses direct KuzuBackend (unchanged — proxy is plan 02-02)
-- 02-02 extended scope: max_tokens compression + axon_batch tool (claude-context-mode principles)
-- v0.7 planned: BM25 hybrid search (FTS5 + vector + graph distance, edgequake principles)
-- Uncommitted: all Plan 02-01 changes (paths.py, daemon/, cli, mcp, tests)
+- Plan 02-02 READY: MCP proxy (_get_local_slug + _try_daemon_call in server.py), fallback to direct, max_tokens on all 7 tools
+- Daemon args: strip repo= and max_tokens= before sending to socket; slug = repo or local slug
+- New tests: tests/mcp/test_server.py (proxy happy path, fallback, max_tokens, schema)
+- Plan 02-03 pending: axon_batch tool
+- v0.7 planned: BM25 hybrid search (FTS5 + vector + graph distance)
 
 ---
 *STATE.md — Updated after every significant action*

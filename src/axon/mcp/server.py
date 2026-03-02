@@ -19,14 +19,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket as _socket
 from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
 
-from axon.core.paths import central_db_path
+from axon.core.paths import central_db_path, daemon_sock_path
 from axon.core.storage.kuzu_backend import KuzuBackend
+from axon.daemon.protocol import decode_request, encode_request
 from axon.mcp.resources import get_dead_code_list, get_overview, get_schema
 from axon.mcp.tools import (
     MAX_TRAVERSE_DEPTH,
@@ -89,6 +91,47 @@ def _get_storage() -> KuzuBackend:
             logger.warning("No axon DB found for %s", Path.cwd())
     return _storage
 
+
+def _get_local_slug() -> str | None:
+    """Read the repo slug from .axon/meta.json in the current working directory."""
+    meta_path = Path.cwd() / ".axon" / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        return meta.get("slug")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _try_daemon_call(tool: str, slug: str | None, args: dict) -> str | None:
+    """Send a tool call to the daemon via Unix socket.
+
+    Returns the result string on success, or None if the daemon is unavailable
+    or returns an error (caller should fall back to direct dispatch).
+    """
+    sock_path = daemon_sock_path()
+    if not sock_path.exists():
+        return None
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
+            sock.settimeout(5.0)
+            sock.connect(str(sock_path))
+            sock.sendall(encode_request(tool, args, slug=slug, request_id="mcp"))
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        resp = decode_request(data)
+        if resp.get("error"):
+            logger.debug("Daemon error for tool %s: %s", tool, resp["error"])
+            return None
+        return resp.get("result", "")
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.debug("Daemon unavailable for %s, falling back to direct: %s", tool, exc)
+        return None
+
+
 TOOLS: list[Tool] = [
     Tool(
         name="axon_list_repos",
@@ -99,7 +142,12 @@ TOOLS: list[Tool] = [
         ),
         inputSchema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
+            },
         },
     ),
     Tool(
@@ -138,6 +186,10 @@ TOOLS: list[Tool] = [
                         "Defaults to the current directory. Optional."
                     ),
                 },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
             },
             "required": ["query"],
         },
@@ -168,6 +220,10 @@ TOOLS: list[Tool] = [
                         "Name of an indexed repository to query (from axon_list_repos). "
                         "Defaults to the current directory. Optional."
                     ),
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
                 },
             },
             "required": ["symbol"],
@@ -203,6 +259,10 @@ TOOLS: list[Tool] = [
                         "Defaults to the current directory. Optional."
                     ),
                 },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
             },
             "required": ["symbol"],
         },
@@ -216,7 +276,12 @@ TOOLS: list[Tool] = [
         ),
         inputSchema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
+            },
         },
     ),
     Tool(
@@ -234,6 +299,10 @@ TOOLS: list[Tool] = [
                 "diff": {
                     "type": "string",
                     "description": "Raw git diff output.",
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
                 },
             },
             "required": ["diff"],
@@ -253,6 +322,10 @@ TOOLS: list[Tool] = [
                 "query": {
                     "type": "string",
                     "description": "Cypher query string (read-only; MATCH/RETURN only).",
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
                 },
             },
             "required": ["query"],
@@ -298,14 +371,29 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Dispatch a tool call to the appropriate handler."""
-    storage = _get_storage()
+    """Dispatch a tool call to the daemon (best-effort) or direct backend."""
+    # Resolve slug: explicit repo= param or local meta.json slug
+    slug: str | None = arguments.get("repo") or _get_local_slug()
 
-    if _lock is not None:
-        async with _lock:
-            result = await asyncio.to_thread(_dispatch_tool, name, arguments, storage)
-    else:
-        result = _dispatch_tool(name, arguments, storage)
+    # Strip keys unknown to daemon before forwarding
+    max_tokens: int | None = arguments.get("max_tokens")
+    daemon_args = {k: v for k, v in arguments.items() if k not in {"repo", "max_tokens"}}
+
+    # Try daemon first (non-blocking, 5s timeout)
+    result: str | None = await asyncio.to_thread(_try_daemon_call, name, slug, daemon_args)
+
+    if result is None:
+        # Fallback: direct dispatch with local storage
+        storage = _get_storage()
+        if _lock is not None:
+            async with _lock:
+                result = await asyncio.to_thread(_dispatch_tool, name, arguments, storage)
+        else:
+            result = _dispatch_tool(name, arguments, storage)
+
+    # Apply max_tokens truncation (MCP-side, regardless of route taken)
+    if max_tokens is not None and len(result) > max_tokens:
+        result = result[:max_tokens] + f"\n[truncated at {max_tokens} chars]"
 
     return [TextContent(type="text", text=result)]
 
