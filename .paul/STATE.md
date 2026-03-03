@@ -10,21 +10,21 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 ## Current Position
 
 Milestone: v0.7 Quality & Security
-Phase: 2 of 2 — Qualité, Parsers & Features
-Plan: Not started
-Status: Phase 1 complete — ready to plan Phase 2
-Last activity: 2026-03-02 — Phase 1 (Sécurité & Robustesse) unified, transitioned to Phase 2
+Phase: 2 of 2 — Qualité, Parsers & Features — In Progress (2/4 plans done)
+Plan: 02-02 COMPLETE — ready for 02-03
+Status: Loop closed — 871 tests passing, all 6 AC met
+Last activity: 2026-03-03 — 02-02 complete: parser quality + test coverage (+19 tests)
 
 Progress:
 - v0.6 Daemon & Centralisation: [██████████] 100% ✓
-- v0.7 Quality & Security: [█████░░░░░] 50% (Phase 1 ✓)
+- v0.7 Quality & Security: [███████░░░] 70% (Phase 1 ✓, Phase 2 plan 2/4 ✓)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ○        ○        ○     [Ready to plan Phase 2]
+  ✓        ✓        ✓     [Plan 02-02 complete — ready for 02-03]
 ```
 
 ## Accumulated Context
@@ -54,7 +54,10 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | max_tokens truncation is MCP-side only | v0.6 Plan 02-02 | Applied after daemon result or direct fallback; daemon_args stripped |
 | Byte offsets stored as INT64 in KuzuDB, no migration | v0.6 Plan 03-03 | Users must re-run axon analyze; old 12-col schemas still readable |
 | markdown sections use heading node.start_byte as section start | v0.6 Plan 03-03 | end_byte = next heading start_byte - 1; content assembled from lines |
-| sql_lang.py / yaml_lang.py left at start_byte=0 | v0.6 Plan 03-03 | Regex-based parsers have no tree-sitter node |
+| sql_lang.py / yaml_lang.py left at start_byte=0 | v0.6 Plan 03-03 | Regex-based parsers have no tree-sitter node — RESOLVED in v0.7 Plan 02-01 |
+| SQL: char offset == byte offset (ASCII assumption) | v0.7 Plan 02-01 | start_byte=m.start(), end_byte=find(';')+1 — accurate for ASCII SQL files |
+| YAML: precompute line_start_bytes[] | v0.7 Plan 02-01 | Single pass before loop, passed to _parse_yaml/_parse_toml — UTF-8 accurate |
+| axon_read_symbol fallback on start_byte==0 | v0.7 Plan 02-01 | Returns stored content field with note when byte offsets unavailable |
 | _sanitize_repo_slug() as security gate for repo= param | v0.7 Plan 01-01 | Rejects traversal, null bytes, spaces, >200 chars — applied in _load_repo_storage() |
 | execute_raw(parameters=dict) parameterized queries | v0.7 Plan 01-01 | Eliminates Cypher injection and N+1 in handle_detect_changes |
 | Drop-oldest strategy for bounded watcher queue | v0.7 Plan 01-01 | asyncio.Queue(maxsize=100); newest events preserved on overflow |
@@ -66,24 +69,23 @@ PLAN ──▶ APPLY ──▶ UNIFY
 |-------|--------|--------|---------|
 | test_watcher.py at 28s (target was 15s) | v0.5 Plan 01-02 | S | accept as-is |
 | cohesion: 0.0 placeholder in communities | v0.5 Plan 02-02 | S | revisit if per-component modularity needed |
+| No tests for byte offsets or axon_read_symbol | v0.7 Plan 02-01 | S | add in 02-02 or standalone task |
 
 ### Blockers/Concerns
 None.
 
 ### Git State
-Last commit: b439476 (feat(03-watch-filtrage): 03-03 task 2 — propagate byte offsets in all tree-sitter parsers)
+Last commit: 31bd23e (feat(02-qualite-parsers-features): 02-01 — sql/yaml byte offsets + axon_read_symbol)
 Branch: main
-Uncommitted: PAUL files (STATE.md, SUMMARY 03-03) pending docs commit
+Uncommitted: PAUL files (STATE.md, 02-01-SUMMARY.md)
 
 ## Session Continuity
 
-Last session: 2026-03-02
-Stopped at: Phase 1 (Sécurité & Robustesse) complete — unified and transitioned
-Next action: /paul:plan for Phase 2 (Qualité, Parsers & Features)
-Resume context:
-- Phase 1 delivered 11 fixes, audit 61→~75/100
-- 852 tests pass
-- Phase 2 scope: axon read-symbol, sql/yaml byte offsets, parser quality (11 items in ROADMAP)
+Last session: 2026-03-03
+Stopped at: 02-02 UNIFY complete — 871 tests, commit 6016343
+Next action: /paul:plan for 02-03 (walker.py file size limits, compute_repo_slug helper)
+Resume file: .paul/phases/02-qualite-parsers-features/02-02-SUMMARY.md
+Resume context: 2 plans remaining in phase 2 (02-03, 02-04)
 
 ---
 *STATE.md — Updated after every significant action*
