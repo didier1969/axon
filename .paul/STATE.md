@@ -11,9 +11,9 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 Milestone: v0.7 Quality & Security
 Phase: 2 of 2 — Qualité, Parsers & Features — In Progress (3/4 plans done)
-Plan: 02-03 COMPLETE — ready for 02-04
-Status: Loop closed — 875 tests passing, all 4 AC met
-Last activity: 2026-03-03 — 02-03 complete: walker 512KB limit + compute_repo_slug (−34 LOC duplication)
+Plan: 02-04 APPLY complete — awaiting UNIFY
+Status: APPLY complete — 884 tests passing, all 4 AC met
+Last activity: 2026-03-03 — 02-04 applied: readline(), BATCH WARNING, AXON_LRU_SIZE
 
 Progress:
 - v0.6 Daemon & Centralisation: [██████████] 100% ✓
@@ -24,7 +24,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Plan 02-03 complete — ready for 02-04]
+  ✓        ✓        ○     [APPLY complete — ready for UNIFY]
 ```
 
 ## Accumulated Context
@@ -81,11 +81,11 @@ Uncommitted: PAUL files (STATE.md, 02-01-SUMMARY.md)
 
 ## Session Continuity
 
-Last session: 2026-03-03
-Stopped at: 02-03 UNIFY complete — 875 tests, commits 84dd27c + 63a9b66
-Next action: /paul:plan for 02-04 (socket buffer readline(), axon_batch partial failure, AXON_LRU_SIZE)
-Resume file: .paul/HANDOFF-2026-03-03b.md
-Resume context: Phase 2 has 1 plan remaining (02-04); loop fully closed
+Last session: 2026-03-04
+Stopped at: 02-04 APPLY complete — 884 tests passing, UNIFY not yet run
+Next action: /paul:unify .paul/phases/02-qualite-parsers-features/02-04-PLAN.md
+Resume file: .paul/HANDOFF-2026-03-04.md
+Resume context: UNIFY closes the loop; Phase 2 complete after → v0.7 milestone complete
 
 ---
 *STATE.md — Updated after every significant action*
