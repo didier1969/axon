@@ -84,9 +84,9 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: (phase commit pending — to be created during transition)
+Last commit: 9bc5726 (feat(02-mcp-tools-dx): complete — Phase 2 of v0.8)
 Branch: main
-Uncommitted: STATE.md, PROJECT.md, ROADMAP.md, 02-04-SUMMARY.md (phase transition files)
+Uncommitted: none (clean)
 
 ## Session Continuity
 
