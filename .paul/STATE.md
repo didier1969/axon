@@ -11,9 +11,9 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 Milestone: v0.8 Graph Intelligence & Search Quality
 Phase: 2 of 2 — MCP Tools & DX — IN PROGRESS
-Plan: 02-01 complete; 02-02 through 02-04 pending
-Status: Ready for next PLAN (02-02)
-Last activity: 2026-03-06 — UNIFY 02-01 complete (axon_find_usages, 917 tests, commit 40fcb2f)
+Plan: 02-02 APPLY complete, UNIFY pending; 02-03/04 not started
+Status: APPLY done, UNIFY needed for 02-02
+Last activity: 2026-03-06 — APPLY 02-02 (axon_lint + community cohesion, 924 tests, commit 7ef1cd8)
 
 Progress:
 - v0.7 Quality & Security: [██████████] 100% ✓
@@ -24,7 +24,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Loop complete - ready for next PLAN]
+  ✓        ✓        ○     [02-02 executed, UNIFY pending]
 ```
 
 ## Accumulated Context
@@ -87,10 +87,10 @@ Uncommitted: STATE.md (git hash update only)
 ## Session Continuity
 
 Last session: 2026-03-06
-Stopped at: UNIFY 02-01 complete; loop closed; 917 tests passing
-Next action: /paul:apply .paul/phases/02-mcp-tools-dx/02-02-PLAN.md
-Resume file: .paul/phases/02-mcp-tools-dx/02-01-SUMMARY.md
-Resume context: Plan 02-01 done (axon_find_usages); 3 plans remain (02-02 lint, 02-03 summarize, 02-04 multi-repo)
+Stopped at: APPLY 02-02 complete (axon_lint + community cohesion); UNIFY not yet run; context limit
+Next action: /paul:unify .paul/phases/02-mcp-tools-dx/02-02-PLAN.md
+Resume file: .paul/HANDOFF-2026-03-06.md
+Resume context: Plans 02-01 (UNIFY done) + 02-02 (APPLY done, UNIFY pending); 924 tests; clean git state (7ef1cd8)
 
 ---
 *STATE.md — Updated after every significant action*
