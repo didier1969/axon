@@ -122,12 +122,7 @@ def _try_daemon_call(tool: str, slug: str | None, args: dict) -> str | None:
             sock.settimeout(5.0)
             sock.connect(str(sock_path))
             sock.sendall(encode_request(tool, args, slug=slug, request_id="mcp"))
-            data = b""
-            while not data.endswith(b"\n"):
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
+            data = sock.makefile("rb").readline()
         resp = decode_request(data)
         if resp.get("error"):
             logger.debug("Daemon error for tool %s: %s", tool, resp["error"])
@@ -151,10 +146,12 @@ def _batch_daemon_call(calls: list[dict], max_tokens: int | None) -> str | None:
         return None
     try:
         parts: list[str] = []
+        failed_indices: list[int] = []
         with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
             sock.settimeout(5.0)
             sock.connect(str(sock_path))
             total = len(calls)
+            f = sock.makefile("rb")
             for i, call in enumerate(calls):
                 tool = call.get("tool", "")
                 args = call.get("args", {})
@@ -162,20 +159,20 @@ def _batch_daemon_call(calls: list[dict], max_tokens: int | None) -> str | None:
                 daemon_args = {k: v for k, v in args.items() if k != "repo"}
                 req_id = f"batch-{i}"
                 sock.sendall(encode_request(tool, daemon_args, slug=slug, request_id=req_id))
-                data = b""
-                while not data.endswith(b"\n"):
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
+                data = f.readline()
                 resp = decode_request(data)
                 if resp.get("error"):
                     result = f"Error: {resp['error']}"
+                    failed_indices.append(i)
                 else:
                     result = resp.get("result", "")
                 if max_tokens is not None and len(result) > max_tokens:
                     result = result[:max_tokens] + f"\n[truncated at {max_tokens} chars]"
                 parts.append(f"### {tool} ({i + 1}/{total})\n{result}")
+        if failed_indices:
+            parts.append(
+                f"[BATCH WARNING: {len(failed_indices)}/{total} failed: indices {failed_indices}]"
+            )
         return "\n\n".join(parts)
     except (OSError, json.JSONDecodeError) as exc:
         logger.debug("Batch daemon call failed, falling back: %s", exc)
@@ -512,6 +509,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # Fallback: direct dispatch per sub-call
             storage = _get_storage()
             parts: list[str] = []
+            failed_indices: list[int] = []
             total = len(calls)
             for i, call in enumerate(calls):
                 sub_name = call.get("tool", "")
@@ -523,9 +521,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         )
                 else:
                     sub_result = _dispatch_tool(sub_name, sub_args, storage)
+                if sub_result.startswith("Error: ") or sub_result.startswith("Unknown tool:"):
+                    failed_indices.append(i)
                 if max_tokens is not None and len(sub_result) > max_tokens:
                     sub_result = sub_result[:max_tokens] + f"\n[truncated at {max_tokens} chars]"
                 parts.append(f"### {sub_name} ({i + 1}/{total})\n{sub_result}")
+            if failed_indices:
+                parts.append(
+                    f"[BATCH WARNING: {len(failed_indices)}/{total} failed: indices {failed_indices}]"
+                )
             result = "\n\n".join(parts)
         return [TextContent(type="text", text=result)]
 

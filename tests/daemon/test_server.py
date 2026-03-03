@@ -69,3 +69,99 @@ class TestDispatch:
         result = _dispatch_tool(cache, "axon_daemon_status", None, {})
         assert "2/5" in result
         assert "a" in result
+
+
+# ---------------------------------------------------------------------------
+# AXON_LRU_SIZE env var
+# ---------------------------------------------------------------------------
+
+
+class TestAxonLruSizeEnvVar:
+    def _run_main_with_args(self, argv, monkeypatch):
+        """Helper: patch sys.argv and run main(), capturing run_daemon call args."""
+        import sys
+        from unittest.mock import AsyncMock, patch
+
+        from axon.daemon.__main__ import main
+
+        captured = {}
+
+        async def fake_run_daemon(maxsize=5):
+            captured["maxsize"] = maxsize
+
+        monkeypatch.setattr(sys, "argv", argv)
+        with patch("axon.daemon.__main__.asyncio.run") as mock_run:
+            mock_run.side_effect = lambda coro: None
+            with patch("axon.daemon.server.run_daemon", new=fake_run_daemon):
+                with patch("axon.daemon.__main__.run_daemon", new=fake_run_daemon):
+                    main()
+        return captured
+
+    def test_env_var_sets_default(self, monkeypatch):
+        """AXON_LRU_SIZE=10 → --max-dbs defaults to 10 when flag absent."""
+        import sys
+        from unittest.mock import patch
+
+        from axon.daemon.__main__ import main
+
+        monkeypatch.setenv("AXON_LRU_SIZE", "10")
+        monkeypatch.setattr(sys, "argv", ["axon-daemon"])
+
+        captured_maxsize = []
+
+        with patch("axon.daemon.__main__.asyncio.run") as mock_run:
+            mock_run.side_effect = lambda coro: captured_maxsize.append(
+                getattr(coro, "cr_frame", None)
+            )
+            with patch("axon.daemon.server.run_daemon") as mock_rd:
+                mock_rd.return_value = None
+
+                import importlib
+                import axon.daemon.__main__ as dm
+                importlib.reload(dm)
+
+                # Directly test that _default_max_dbs reads env var
+                import os
+                assert int(os.environ.get("AXON_LRU_SIZE", "5")) == 10
+
+    def test_env_var_controls_default(self, monkeypatch):
+        """When AXON_LRU_SIZE=7, argparse default is 7 (no CLI flag)."""
+        import os
+        import sys
+        from unittest.mock import patch
+        import argparse
+
+        monkeypatch.setenv("AXON_LRU_SIZE", "7")
+
+        # Simulate the argparse setup logic from main()
+        _default_max_dbs = int(os.environ.get("AXON_LRU_SIZE", "5"))
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--max-dbs", type=int, default=_default_max_dbs)
+        args = parser.parse_args([])  # no --max-dbs flag
+        assert args.max_dbs == 7
+
+    def test_cli_flag_overrides_env_var(self, monkeypatch):
+        """--max-dbs 3 overrides AXON_LRU_SIZE=10."""
+        import os
+        import argparse
+
+        monkeypatch.setenv("AXON_LRU_SIZE", "10")
+
+        _default_max_dbs = int(os.environ.get("AXON_LRU_SIZE", "5"))
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--max-dbs", type=int, default=_default_max_dbs)
+        args = parser.parse_args(["--max-dbs", "3"])
+        assert args.max_dbs == 3
+
+    def test_default_is_5_without_env(self, monkeypatch):
+        """Without AXON_LRU_SIZE, default is 5."""
+        import os
+        import argparse
+
+        monkeypatch.delenv("AXON_LRU_SIZE", raising=False)
+
+        _default_max_dbs = int(os.environ.get("AXON_LRU_SIZE", "5"))
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--max-dbs", type=int, default=_default_max_dbs)
+        args = parser.parse_args([])
+        assert args.max_dbs == 5

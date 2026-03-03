@@ -63,7 +63,7 @@ class TestTryDaemonCall:
         mock_sock = MagicMock()
         mock_sock.__enter__ = MagicMock(return_value=mock_sock)
         mock_sock.__exit__ = MagicMock(return_value=False)
-        mock_sock.recv.side_effect = [response_data.encode(), b""]
+        mock_sock.makefile.return_value.readline.return_value = response_data.encode()
 
         with patch("axon.mcp.server._socket.socket", return_value=mock_sock):
             result = _try_daemon_call("axon_query", "myapp", {"query": "foo"})
@@ -99,7 +99,7 @@ class TestTryDaemonCall:
         mock_sock = MagicMock()
         mock_sock.__enter__ = MagicMock(return_value=mock_sock)
         mock_sock.__exit__ = MagicMock(return_value=False)
-        mock_sock.recv.side_effect = [response_data.encode(), b""]
+        mock_sock.makefile.return_value.readline.return_value = response_data.encode()
 
         with patch("axon.mcp.server._socket.socket", return_value=mock_sock):
             result = _try_daemon_call("axon_query", "myapp", {"query": "foo"})
@@ -124,7 +124,7 @@ class TestTryDaemonCall:
         mock_sock.__enter__ = MagicMock(return_value=mock_sock)
         mock_sock.__exit__ = MagicMock(return_value=False)
         mock_sock.sendall = fake_sendall
-        mock_sock.recv.side_effect = [response_data.encode(), b""]
+        mock_sock.makefile.return_value.readline.return_value = response_data.encode()
 
         with patch("axon.mcp.server._socket.socket", return_value=mock_sock):
             _try_daemon_call(
@@ -215,20 +215,13 @@ class TestBatchTool:
             json.dumps({"id": "batch-1", "result": "result B", "error": None}) + "\n",
         ]
 
-        call_count = [0]
+        mock_file = MagicMock()
+        mock_file.readline.side_effect = [r.encode() for r in responses]
 
         mock_sock = MagicMock()
         mock_sock.__enter__ = MagicMock(return_value=mock_sock)
         mock_sock.__exit__ = MagicMock(return_value=False)
-
-        def fake_recv(n):
-            idx = call_count[0]
-            call_count[0] += 1
-            if idx < len(responses):
-                return responses[idx].encode()
-            return b""
-
-        mock_sock.recv = fake_recv
+        mock_sock.makefile.return_value = mock_file
 
         calls = [
             {"tool": "axon_query", "args": {"query": "foo"}},
@@ -256,20 +249,13 @@ class TestBatchTool:
             json.dumps({"id": "batch-1", "result": short_result, "error": None}) + "\n",
         ]
 
-        call_count = [0]
+        mock_file = MagicMock()
+        mock_file.readline.side_effect = [r.encode() for r in responses]
 
         mock_sock = MagicMock()
         mock_sock.__enter__ = MagicMock(return_value=mock_sock)
         mock_sock.__exit__ = MagicMock(return_value=False)
-
-        def fake_recv(n):
-            idx = call_count[0]
-            call_count[0] += 1
-            if idx < len(responses):
-                return responses[idx].encode()
-            return b""
-
-        mock_sock.recv = fake_recv
+        mock_sock.makefile.return_value = mock_file
 
         calls = [
             {"tool": "axon_query", "args": {"query": "foo"}},
@@ -393,3 +379,149 @@ class TestDaemonSocketPermissions:
 
 
 import os as _os_mod
+
+
+# ---------------------------------------------------------------------------
+# readline() replaces recv loop
+# ---------------------------------------------------------------------------
+
+
+class TestBatchSocketReadline:
+    def test_try_daemon_uses_makefile(self, tmp_path, monkeypatch):
+        """_try_daemon_call reads response via makefile("rb").readline(), not recv."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        sock_path = tmp_path / ".axon" / "daemon.sock"
+        sock_path.parent.mkdir(parents=True)
+        sock_path.touch()
+
+        response_data = json.dumps({"id": "mcp", "result": "ok", "error": None}) + "\n"
+
+        mock_sock = MagicMock()
+        mock_sock.__enter__ = MagicMock(return_value=mock_sock)
+        mock_sock.__exit__ = MagicMock(return_value=False)
+        mock_sock.makefile.return_value.readline.return_value = response_data.encode()
+
+        with patch("axon.mcp.server._socket.socket", return_value=mock_sock):
+            result = _try_daemon_call("axon_query", None, {"query": "x"})
+
+        mock_sock.makefile.assert_called_once_with("rb")
+        assert result == "ok"
+
+    def test_batch_daemon_uses_makefile(self, tmp_path, monkeypatch):
+        """_batch_daemon_call reads all responses via a single makefile("rb"), not recv."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        sock_path = tmp_path / ".axon" / "daemon.sock"
+        sock_path.parent.mkdir(parents=True)
+        sock_path.touch()
+
+        responses = [
+            json.dumps({"id": "batch-0", "result": "r0", "error": None}) + "\n",
+            json.dumps({"id": "batch-1", "result": "r1", "error": None}) + "\n",
+        ]
+
+        mock_file = MagicMock()
+        mock_file.readline.side_effect = [r.encode() for r in responses]
+
+        mock_sock = MagicMock()
+        mock_sock.__enter__ = MagicMock(return_value=mock_sock)
+        mock_sock.__exit__ = MagicMock(return_value=False)
+        mock_sock.makefile.return_value = mock_file
+
+        calls = [
+            {"tool": "axon_query", "args": {"query": "foo"}},
+            {"tool": "axon_context", "args": {"symbol": "Bar"}},
+        ]
+        with patch("axon.mcp.server._socket.socket", return_value=mock_sock):
+            result = _batch_daemon_call(calls, None)
+
+        mock_sock.makefile.assert_called_once_with("rb")
+        assert "r0" in result
+        assert "r1" in result
+
+
+# ---------------------------------------------------------------------------
+# axon_batch partial failure summary
+# ---------------------------------------------------------------------------
+
+
+class TestBatchPartialFailure:
+    def test_daemon_path_warning_on_error(self, tmp_path, monkeypatch):
+        """_batch_daemon_call appends BATCH WARNING when one call returns an error."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        sock_path = tmp_path / ".axon" / "daemon.sock"
+        sock_path.parent.mkdir(parents=True)
+        sock_path.touch()
+
+        responses = [
+            json.dumps({"id": "batch-0", "result": "ok", "error": None}) + "\n",
+            json.dumps({"id": "batch-1", "result": None, "error": "slug not found"}) + "\n",
+        ]
+
+        mock_file = MagicMock()
+        mock_file.readline.side_effect = [r.encode() for r in responses]
+
+        mock_sock = MagicMock()
+        mock_sock.__enter__ = MagicMock(return_value=mock_sock)
+        mock_sock.__exit__ = MagicMock(return_value=False)
+        mock_sock.makefile.return_value = mock_file
+
+        calls = [
+            {"tool": "axon_query", "args": {"query": "foo"}},
+            {"tool": "axon_context", "args": {"symbol": "Bar"}},
+        ]
+        with patch("axon.mcp.server._socket.socket", return_value=mock_sock):
+            result = _batch_daemon_call(calls, None)
+
+        assert "[BATCH WARNING: 1/2 failed: indices [1]]" in result
+        assert "ok" in result
+
+    def test_daemon_path_no_warning_on_all_success(self, tmp_path, monkeypatch):
+        """_batch_daemon_call has no BATCH WARNING when all calls succeed."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        sock_path = tmp_path / ".axon" / "daemon.sock"
+        sock_path.parent.mkdir(parents=True)
+        sock_path.touch()
+
+        responses = [
+            json.dumps({"id": "batch-0", "result": "ok", "error": None}) + "\n",
+        ]
+
+        mock_file = MagicMock()
+        mock_file.readline.side_effect = [r.encode() for r in responses]
+
+        mock_sock = MagicMock()
+        mock_sock.__enter__ = MagicMock(return_value=mock_sock)
+        mock_sock.__exit__ = MagicMock(return_value=False)
+        mock_sock.makefile.return_value = mock_file
+
+        with patch("axon.mcp.server._socket.socket", return_value=mock_sock):
+            result = _batch_daemon_call([{"tool": "axon_query", "args": {"query": "foo"}}], None)
+
+        assert "BATCH WARNING" not in result
+
+    def test_direct_path_warning_on_unknown_tool(self):
+        """Direct fallback appends BATCH WARNING when sub-calls return unknown tool errors."""
+        import asyncio
+
+        from axon.mcp.server import call_tool
+
+        with (
+            patch("axon.mcp.server._batch_daemon_call", return_value=None),
+            patch("axon.mcp.server._get_storage", return_value=MagicMock()),
+            patch("axon.mcp.server._lock", None),
+        ):
+            result_contents = asyncio.run(
+                call_tool(
+                    "axon_batch",
+                    {
+                        "calls": [
+                            {"tool": "axon_nonexistent_tool", "args": {}},
+                            {"tool": "axon_nonexistent_tool2", "args": {}},
+                        ]
+                    },
+                )
+            )
+
+        text = result_contents[0].text
+        assert "BATCH WARNING" in text
+        assert "2/2 failed" in text
