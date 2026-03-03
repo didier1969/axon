@@ -38,6 +38,7 @@ from axon.mcp.tools import (
     handle_dead_code,
     handle_detect_changes,
     handle_find_similar,
+    handle_find_usages,
     handle_impact,
     handle_list_repos,
     handle_query,
@@ -252,7 +253,9 @@ TOOLS: list[Tool] = [
             "To disambiguate symbols with the same name across files, "
             "use 'path/to/file.py:symbol_name' format. "
             "Optionally specify a repo to look up a symbol in a different indexed project. "
-            "Follow with axon_impact to assess blast radius before making changes."
+            "Follow with axon_impact to assess blast radius before making changes. "
+            "Symbol disambiguation: use 'path/to/file.py:symbol_name' format when the same name "
+            "exists in multiple files."
         ),
         inputSchema={
             "type": "object",
@@ -322,7 +325,9 @@ TOOLS: list[Tool] = [
         description=(
             "List all symbols detected as dead (unreachable) code. "
             "Use during code review or cleanup to identify safe deletions. "
-            "Returns symbols grouped by file with line numbers."
+            "Returns symbols grouped by file with line numbers. "
+            "Results are grouped by file with line numbers. "
+            "Add is_exported filter via axon_cypher for unexported-only dead code."
         ),
         inputSchema={
             "type": "object",
@@ -349,7 +354,10 @@ TOOLS: list[Tool] = [
             "properties": {
                 "diff": {
                     "type": "string",
-                    "description": "Raw git diff output.",
+                    "description": (
+                        "Raw output of 'git diff HEAD' or 'git diff branch1..branch2'. "
+                        "Pipe git output directly — do not pre-process."
+                    ),
                 },
                 "max_tokens": {
                     "type": "integer",
@@ -365,7 +373,9 @@ TOOLS: list[Tool] = [
             "Execute a raw read-only Cypher query directly against the knowledge graph. "
             "Use for custom queries not covered by other tools (e.g. counting nodes by label, "
             "finding symbols matching complex patterns). "
-            "Only MATCH/RETURN queries are allowed; write operations are rejected."
+            "Only MATCH/RETURN queries are allowed; write operations are rejected. "
+            "Example: MATCH (n:Function) WHERE n.centrality > 0.1 RETURN n.name, n.file_path "
+            "ORDER BY n.centrality DESC LIMIT 10"
         ),
         inputSchema={
             "type": "object",
@@ -419,7 +429,9 @@ TOOLS: list[Tool] = [
             "Find symbols semantically similar to a given symbol using stored embeddings. "
             "Use for semantic duplicate detection or to discover related functions/classes. "
             "Returns up to N symbols most semantically similar, with similarity scores. "
-            "Requires axon analyze to have been run with embeddings enabled."
+            "Requires axon analyze to have been run with embeddings enabled. "
+            "Requires embeddings — run 'axon analyze' (without --no-embeddings) first. "
+            "Returns 'No embedding found' if embeddings are absent."
         ),
         inputSchema={
             "type": "object",
@@ -437,6 +449,43 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": (
                         "Name of an indexed repository to query (from axon_list_repos). "
+                        "Defaults to the current directory. Optional."
+                    ),
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
+            },
+            "required": ["symbol"],
+        },
+    ),
+    Tool(
+        name="axon_find_usages",
+        description=(
+            "Find all call sites of a symbol in the repo — exhaustive list of callers "
+            "and files that import the symbol's file. "
+            "Use when you need every location where a function/class is used, "
+            "not just the top 20 shown by axon_context. "
+            "Returns call sites (CALLS edges) and import sites (IMPORTS edges) separately. "
+            "Optionally specify a repo to search a different indexed project."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Name of the symbol to find usages for (exact or partial name).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of usages to return (default 50).",
+                    "default": 50,
+                },
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "Name of an indexed repository (from axon_list_repos). "
                         "Defaults to the current directory. Optional."
                     ),
                 },
@@ -534,6 +583,13 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
             storage,
             symbol=arguments.get("symbol", ""),
             limit=arguments.get("limit", 10),
+            repo=arguments.get("repo"),
+        )
+    elif name == "axon_find_usages":
+        return handle_find_usages(
+            storage,
+            symbol=arguments.get("symbol", ""),
+            limit=arguments.get("limit", 50),
             repo=arguments.get("repo"),
         )
     else:

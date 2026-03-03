@@ -26,6 +26,7 @@ from axon.mcp.tools import (
     handle_dead_code,
     handle_detect_changes,
     handle_find_similar,
+    handle_find_usages,
     handle_impact,
     handle_list_repos,
     handle_query,
@@ -1170,3 +1171,98 @@ class TestHandleFindSimilar:
 
         # With only self returned and filtered out, no similar found
         assert "No similar symbols found" in result
+
+
+# ---------------------------------------------------------------------------
+# axon_find_usages tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandleFindUsages:
+    def test_find_usages_calls_only(self, mock_storage: MagicMock) -> None:
+        """Returns CALLS section when symbol has callers but no importers."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = [
+            SearchResult(
+                node_id="function:src/parsers/python.py:parse_file",
+                score=1.0,
+                node_name="parse_file",
+                file_path="src/parsers/python.py",
+                label="function",
+            )
+        ]
+
+        def execute_raw_side_effect(query, parameters=None):
+            if parameters and "nid" in parameters:
+                # CALLS query
+                return [
+                    ["pipeline", "src/pipeline.py", 42],
+                    ["indexer", "src/indexer.py", 10],
+                ]
+            # IMPORTS query
+            return []
+
+        mock_storage.execute_raw.side_effect = execute_raw_side_effect
+
+        result = handle_find_usages(mock_storage, "parse_file")
+
+        assert "CALLS" in result
+        assert "pipeline" in result
+        assert "2 call sites" in result
+        assert "No usages found" not in result
+
+    def test_find_usages_imports_only(self, mock_storage: MagicMock) -> None:
+        """Returns IMPORTS section when symbol has importers but no callers."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = [
+            SearchResult(
+                node_id="function:src/parsers/python.py:parse_file",
+                score=1.0,
+                node_name="parse_file",
+                file_path="src/parsers/python.py",
+                label="function",
+            )
+        ]
+
+        def execute_raw_side_effect(query, parameters=None):
+            if parameters and "nid" in parameters:
+                return []
+            # IMPORTS query
+            return [
+                ["src/cli.py", "src/cli.py", 1],
+                ["src/main.py", "src/main.py", 1],
+            ]
+
+        mock_storage.execute_raw.side_effect = execute_raw_side_effect
+
+        result = handle_find_usages(mock_storage, "parse_file")
+
+        assert "IMPORTS" in result
+        assert "src/cli.py" in result
+
+    def test_find_usages_not_found(self, mock_storage: MagicMock) -> None:
+        """Returns not-found message when symbol is not in the graph."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = []
+
+        result = handle_find_usages(mock_storage, "ghost_func")
+
+        assert "not found" in result.lower()
+
+    def test_find_usages_no_usages(self, mock_storage: MagicMock) -> None:
+        """Returns no-usages message when symbol exists but has no callers or importers."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = [
+            SearchResult(
+                node_id="function:src/utils.py:helper",
+                score=1.0,
+                node_name="helper",
+                file_path="src/utils.py",
+                label="function",
+            )
+        ]
+        mock_storage.execute_raw.return_value = []
+
+        result = handle_find_usages(mock_storage, "helper")
+
+        assert "No usages found" in result

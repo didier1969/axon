@@ -841,6 +841,99 @@ def handle_find_similar(
     return result
 
 
+def handle_find_usages(
+    storage: StorageBackend,
+    symbol: str,
+    limit: int = 50,
+    repo: str | None = None,
+) -> str:
+    """Find all call-sites and import-sites of a symbol across the repo.
+
+    Args:
+        storage: The storage backend.
+        symbol: Name of the symbol to find usages for.
+        limit: Maximum number of usages to return (default 50).
+        repo: Optional repository slug to query instead of the current directory.
+
+    Returns:
+        Formatted list of CALLS and IMPORTS sites, or a not-found message.
+    """
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
+        storage = _repo_storage
+
+    try:
+        results = _resolve_symbol(storage, symbol, limit=1)
+        if not results:
+            return f"Symbol '{symbol}' not found."
+
+        node_id = results[0].node_id
+        node_name = results[0].node_name
+        node_file = results[0].file_path
+
+        calls_rows = storage.execute_raw(
+            "MATCH (caller)-[r:CodeRelation]->(callee) "
+            "WHERE callee.id = $nid AND r.rel_type = 'calls' "
+            "RETURN caller.name, caller.file_path, caller.start_line "
+            f"LIMIT {limit}",
+            parameters={"nid": node_id},
+        ) or []
+
+        imports_rows = storage.execute_raw(
+            "MATCH (importer)-[r:CodeRelation]->(imported) "
+            "WHERE imported.file_path = $fp AND r.rel_type = 'imports' "
+            "RETURN importer.name, importer.file_path, importer.start_line "
+            f"LIMIT {limit}",
+            parameters={"fp": node_file},
+        ) or []
+
+        # Deduplicate importers by file_path
+        seen_files: set[str] = set()
+        unique_imports: list = []
+        for row in imports_rows:
+            fp = row[1] if len(row) > 1 else row[0]
+            if fp not in seen_files:
+                seen_files.add(fp)
+                unique_imports.append(row)
+
+        if not calls_rows and not unique_imports:
+            return f"No usages found for '{symbol}'."
+
+        lines = [f"{len(calls_rows)} call sites for '{node_name}' ({node_file}):", ""]
+
+        if calls_rows:
+            lines.append(f"CALLS ({len(calls_rows)}):")
+            for i, row in enumerate(calls_rows, 1):
+                name = row[0] if row else "?"
+                fp = row[1] if len(row) > 1 else "?"
+                line = row[2] if len(row) > 2 else None
+                loc = f"{fp}:L{line}" if line is not None else fp
+                lines.append(f"  {i}. {name}  {loc}")
+            lines.append("")
+
+        if unique_imports:
+            lines.append(f"IMPORTS ({len(unique_imports)}):")
+            for i, row in enumerate(unique_imports, 1):
+                fp = row[1] if len(row) > 1 else row[0]
+                lines.append(f"  {i}. {fp}")
+            lines.append("")
+
+        lines.append(f"Next: Use axon_impact('{node_name}') for transitive blast radius.")
+        result = "\n".join(lines)
+    finally:
+        if _repo_storage is not None:
+            try:
+                _repo_storage.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    log_event("find_usages", symbol=symbol[:200], repo=_repo_name_from_storage(storage, repo))
+    return result
+
+
 _WRITE_KEYWORDS = re.compile(
     r"\b(DELETE|DROP|CREATE|SET|REMOVE|MERGE|DETACH|INSTALL|LOAD|COPY|CALL"
     r"|RENAME|ALTER|IMPORT|TRUNCATE)\b",
