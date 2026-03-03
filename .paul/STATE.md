@@ -5,26 +5,26 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.7 Quality & Security — COMPLETE ✅. Ready for v0.8 milestone planning.
+**Current focus:** v0.8 Graph Intelligence & Search Quality — Phase 1: Graph Intelligence (not started).
 
 ## Current Position
 
-Milestone: v0.7 Quality & Security — COMPLETE ✅
-Phase: 2 of 2 — Qualité, Parsers & Features — COMPLETE (4/4 plans done)
-Plan: 02-04 UNIFY complete — loop closed, milestone transition done
-Status: v0.7 complete — 884 tests passing, ready for v0.8 planning
-Last activity: 2026-03-04 — v0.7 milestone complete (transition: PROJECT + ROADMAP + git commit)
+Milestone: v0.8 Graph Intelligence & Search Quality
+Phase: 1 of 2 — Graph Intelligence
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-03-04 — Milestone created, phase directories initialized
 
 Progress:
-- v0.6 Daemon & Centralisation: [██████████] 100% ✓
 - v0.7 Quality & Security: [██████████] 100% ✓
+- v0.8 Graph Intelligence & Search Quality: [░░░░░░░░░░] 0%
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Loop complete — Phase 2 done, v0.7 milestone complete]
+  ○        ○        ○     [Ready for first PLAN]
 ```
 
 ## Accumulated Context
@@ -75,17 +75,17 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: 3188006 (chore: UNIFY 02-04 — v0.7 milestone complete)
+Last commit: 1d76672 (chore: STATE.md final git hash after v0.7 milestone close)
 Branch: main
-Uncommitted: STATE.md (this update only)
+Uncommitted: STATE.md, ROADMAP.md (v0.8 milestone created)
 
 ## Session Continuity
 
 Last session: 2026-03-04
-Stopped at: v0.7 milestone complete — PAUL files committed, ready for v0.8 planning
-Next action: /paul:milestone to define v0.8, or /paul:plan to start ad-hoc work
+Stopped at: v0.8 milestone created — 2 phases defined, ready to plan Phase 1
+Next action: /paul:plan for Phase 1 (Graph Intelligence)
 Resume file: .paul/ROADMAP.md
-Resume context: v0.7 shipped (Quality & Security, 2 phases, 5 plans, 884 tests)
+Resume context: v0.8 Phase 1 = 10 items (TS generics, wildcard imports, test coverage, API surface, dead code patterns, hybrid search BM25+RRF, query expansion, PageRank, chunking, find_similar)
 
 ---
 *STATE.md — Updated after every significant action*
