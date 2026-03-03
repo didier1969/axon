@@ -10,21 +10,21 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 ## Current Position
 
 Milestone: v0.8 Graph Intelligence & Search Quality
-Phase: 2 of 2 — MCP Tools & DX — PLANNING
-Plan: 02-01 through 02-04 created, awaiting approval
-Status: PLAN created, ready for APPLY
-Last activity: 2026-03-05 — Created 4 PLAN.md files for Phase 2
+Phase: 2 of 2 — MCP Tools & DX — IN PROGRESS
+Plan: 02-01 complete; 02-02 through 02-04 pending
+Status: Ready for next PLAN (02-02)
+Last activity: 2026-03-06 — UNIFY 02-01 complete (axon_find_usages, 917 tests, commit 40fcb2f)
 
 Progress:
 - v0.7 Quality & Security: [██████████] 100% ✓
-- v0.8 Graph Intelligence & Search Quality: [█████░░░░░] ~50% (Phase 1 complete, 1/2 phases)
+- v0.8 Graph Intelligence & Search Quality: [██████░░░░] ~60% (Phase 1 complete; Phase 2: 1/4 plans done)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ○        ○     [Plans created, awaiting approval]
+  ✓        ✓        ✓     [Loop complete - ready for next PLAN]
 ```
 
 ## Accumulated Context
@@ -86,11 +86,11 @@ Uncommitted: STATE.md (git hash update only)
 
 ## Session Continuity
 
-Last session: 2026-03-05
-Stopped at: Phase 2 PLAN created (4 plans); session paused cleanly
-Next action: /paul:apply .paul/phases/02-mcp-tools-dx/02-01-PLAN.md
-Resume file: .paul/HANDOFF-2026-03-05.md
-Resume context: Phase 1 complete + committed; 4 Phase 2 plans ready; clean git state (913 tests)
+Last session: 2026-03-06
+Stopped at: UNIFY 02-01 complete; loop closed; 917 tests passing
+Next action: /paul:apply .paul/phases/02-mcp-tools-dx/02-02-PLAN.md
+Resume file: .paul/phases/02-mcp-tools-dx/02-01-SUMMARY.md
+Resume context: Plan 02-01 done (axon_find_usages); 3 plans remain (02-02 lint, 02-03 summarize, 02-04 multi-repo)
 
 ---
 *STATE.md — Updated after every significant action*
