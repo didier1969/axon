@@ -194,6 +194,24 @@ def process_communities(
         for future in futures:
             all_member_groups.extend(future.result())
 
+    # Compute full-graph membership list for global modularity score
+    membership: list[int] = [-1] * ig_graph.vcount()
+    for comm_idx, group in enumerate(all_member_groups):
+        for vertex_idx in group:
+            membership[vertex_idx] = comm_idx
+    singleton_idx = len(all_member_groups)
+    for vi, m in enumerate(membership):
+        if m == -1:
+            membership[vi] = singleton_idx
+            singleton_idx += 1
+
+    try:
+        global_modularity = ig_graph.modularity(membership)
+    except Exception:  # noqa: BLE001
+        global_modularity = 0.0
+
+    total_edges = ig_graph.ecount()
+
     community_count = 0
     for i, original_member_ids in enumerate(all_member_groups):
         if len(original_member_ids) < min_community_size:
@@ -204,13 +222,19 @@ def process_communities(
         community_id = generate_id(NodeLabel.COMMUNITY, f"community_{i}")
         label = generate_label(graph, member_ids)
 
+        # Per-community cohesion: intra-community edges / total graph edges
+        sub = ig_graph.subgraph(original_member_ids)
+        intra_edges = sub.ecount()
+        cohesion = intra_edges / total_edges if total_edges > 0 else 0.0
+
         community_node = GraphNode(
             id=community_id,
             label=NodeLabel.COMMUNITY,
             name=label,
             properties={
-                "cohesion": 0.0,
+                "cohesion": round(cohesion, 4),
                 "symbol_count": len(member_ids),
+                "modularity": round(global_modularity, 4),
             },
         )
         graph.add_node(community_node)

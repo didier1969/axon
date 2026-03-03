@@ -934,6 +934,118 @@ def handle_find_usages(
     return result
 
 
+_HIGH_COUPLING_THRESHOLD = 20
+_GOD_CLASS_THRESHOLD = 15
+
+
+def handle_lint(
+    storage: StorageBackend,
+    repo: str | None = None,
+) -> str:
+    """Detect structural anti-patterns in the codebase.
+
+    Three rules:
+    - High coupling: symbols with fan-out > 20 outgoing CALLS edges.
+    - God classes: CLASS nodes defining more than 15 METHOD children.
+    - Import cycles: 2-cycle mutual import pairs (A imports B imports A).
+
+    Args:
+        storage: The storage backend.
+        repo: Optional repository slug to query instead of the current directory.
+
+    Returns:
+        Formatted lint report or "No structural issues detected" message.
+    """
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
+        storage = _repo_storage
+
+    try:
+        # Rule 1 — High coupling (fan-out > threshold)
+        coupling_rows = storage.execute_raw(
+            "MATCH (n)-[r:CodeRelation]->(callee) "
+            "WHERE r.rel_type = 'calls' "
+            "RETURN n.name, n.file_path, count(callee) AS out_degree "
+            "ORDER BY out_degree DESC LIMIT 20"
+        ) or []
+        high_coupling = [
+            (row[0], row[1], int(row[2]))
+            for row in coupling_rows
+            if row[2] and int(row[2]) > _HIGH_COUPLING_THRESHOLD
+        ]
+
+        # Rule 2 — God classes (> threshold methods)
+        class_rows = storage.execute_raw(
+            "MATCH (cls:Class)-[r:CodeRelation]->(m:Method) "
+            "WHERE r.rel_type = 'defines' "
+            "RETURN cls.name, cls.file_path, count(m) AS method_count "
+            "ORDER BY method_count DESC LIMIT 20"
+        ) or []
+        god_classes = [
+            (row[0], row[1], int(row[2]))
+            for row in class_rows
+            if row[2] and int(row[2]) > _GOD_CLASS_THRESHOLD
+        ]
+
+        # Rule 3 — Import cycles (2-cycles only; a.file_path < b.file_path deduplicates pairs)
+        cycle_rows = storage.execute_raw(
+            "MATCH (a)-[r1:CodeRelation]->(b)-[r2:CodeRelation]->(a) "
+            "WHERE r1.rel_type = 'imports' AND r2.rel_type = 'imports' "
+            "AND a.file_path < b.file_path "
+            "RETURN a.file_path, b.file_path LIMIT 20"
+        ) or []
+        import_cycles = [
+            (row[0], row[1]) for row in cycle_rows if row[0] and row[1]
+        ]
+
+        if not high_coupling and not god_classes and not import_cycles:
+            return "No structural issues detected. Codebase looks healthy."
+
+        lines = ["# Lint Report", ""]
+
+        lines.append(f"## High Coupling (fan-out > {_HIGH_COUPLING_THRESHOLD}) — {len(high_coupling)} issues")
+        if high_coupling:
+            for i, (name, fp, deg) in enumerate(high_coupling, 1):
+                lines.append(f"  {i}. {name}  {fp}  [out-degree: {deg}]")
+        else:
+            lines.append("  None")
+        lines.append("")
+
+        lines.append(f"## God Classes (> {_GOD_CLASS_THRESHOLD} methods) — {len(god_classes)} issues")
+        if god_classes:
+            for i, (name, fp, cnt) in enumerate(god_classes, 1):
+                lines.append(f"  {i}. {name}  {fp}  [methods: {cnt}]")
+        else:
+            lines.append("  None")
+        lines.append("")
+
+        lines.append(f"## Import Cycles — {len(import_cycles)} issues")
+        if import_cycles:
+            for i, (a, b) in enumerate(import_cycles, 1):
+                lines.append(f"  {i}. {a}  ↔  {b}")
+        else:
+            lines.append("  None")
+        lines.append("")
+
+        lines.append("Tip: High coupling → consider splitting into smaller functions.")
+        lines.append("Tip: God classes → extract cohesive groups into separate classes.")
+        lines.append("Tip: Import cycles → introduce an interface or shared utility module.")
+
+        result = "\n".join(lines)
+    finally:
+        if _repo_storage is not None:
+            try:
+                _repo_storage.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    log_event("lint", repo=_repo_name_from_storage(storage, repo))
+    return result
+
+
 _WRITE_KEYWORDS = re.compile(
     r"\b(DELETE|DROP|CREATE|SET|REMOVE|MERGE|DETACH|INSTALL|LOAD|COPY|CALL"
     r"|RENAME|ALTER|IMPORT|TRUNCATE)\b",

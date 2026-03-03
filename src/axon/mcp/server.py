@@ -40,6 +40,7 @@ from axon.mcp.tools import (
     handle_find_similar,
     handle_find_usages,
     handle_impact,
+    handle_lint,
     handle_list_repos,
     handle_query,
     handle_read_symbol,
@@ -498,6 +499,32 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="axon_lint",
+        description=(
+            "Detect structural anti-patterns: high-coupling symbols (fan-out > 20 calls), "
+            "god classes (> 15 methods), and circular import dependencies (A imports B imports A). "
+            "Use during code review or refactoring planning to identify architectural debt. "
+            "Returns top offenders per rule, grouped by category. "
+            "Optionally specify a repo to lint a different indexed project."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "Name of an indexed repository (from axon_list_repos). "
+                        "Defaults to the current directory. Optional."
+                    ),
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
+            },
+        },
+    ),
+    Tool(
         name="axon_batch",
         description=(
             "Execute multiple axon tool calls in a single round-trip. "
@@ -592,6 +619,8 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
             limit=arguments.get("limit", 50),
             repo=arguments.get("repo"),
         )
+    elif name == "axon_lint":
+        return handle_lint(storage, repo=arguments.get("repo"))
     else:
         return f"Unknown tool: {name}"
 

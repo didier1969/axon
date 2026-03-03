@@ -28,6 +28,7 @@ from axon.mcp.tools import (
     handle_find_similar,
     handle_find_usages,
     handle_impact,
+    handle_lint,
     handle_list_repos,
     handle_query,
     handle_read_symbol,
@@ -1266,3 +1267,60 @@ class TestHandleFindUsages:
         result = handle_find_usages(mock_storage, "helper")
 
         assert "No usages found" in result
+
+
+# ---------------------------------------------------------------------------
+# axon_lint tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandleLint:
+    def test_lint_high_coupling(self, mock_storage: MagicMock) -> None:
+        """Returns High Coupling section when fan-out exceeds threshold."""
+        call_seq = [
+            [["god_func", "src/god.py", 25]],  # fan-out query
+            [],                                  # god class query
+            [],                                  # import cycles query
+        ]
+        mock_storage.execute_raw.side_effect = call_seq
+
+        result = handle_lint(mock_storage)
+
+        assert "High Coupling" in result
+        assert "god_func" in result
+
+    def test_lint_god_class(self, mock_storage: MagicMock) -> None:
+        """Returns God Classes section when class has too many methods."""
+        call_seq = [
+            [],                                        # fan-out query
+            [["BigClass", "src/models.py", 18]],       # god class query
+            [],                                        # import cycles query
+        ]
+        mock_storage.execute_raw.side_effect = call_seq
+
+        result = handle_lint(mock_storage)
+
+        assert "God" in result
+        assert "BigClass" in result
+
+    def test_lint_import_cycle(self, mock_storage: MagicMock) -> None:
+        """Returns Import Cycles section when mutual imports detected."""
+        call_seq = [
+            [],                                    # fan-out query
+            [],                                    # god class query
+            [["src/a.py", "src/b.py"]],            # import cycles query
+        ]
+        mock_storage.execute_raw.side_effect = call_seq
+
+        result = handle_lint(mock_storage)
+
+        assert "Import Cycle" in result or "cycles" in result.lower()
+        assert "src/a.py" in result
+
+    def test_lint_clean(self, mock_storage: MagicMock) -> None:
+        """Returns clean message when no structural issues found."""
+        mock_storage.execute_raw.side_effect = [[], [], []]
+
+        result = handle_lint(mock_storage)
+
+        assert "No structural issues" in result

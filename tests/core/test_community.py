@@ -351,3 +351,93 @@ class TestProcessCommunitiesMultiComponent:
         member_of_rels = graph.get_relationships_by_type(RelType.MEMBER_OF)
         member_ids = {r.source for r in member_of_rels}
         assert isolated.id not in member_ids
+
+
+# ---------------------------------------------------------------------------
+# test_community_cohesion
+# ---------------------------------------------------------------------------
+
+
+class TestCommunityCohesion:
+    """Community cohesion values are real (not always 0.0)."""
+
+    def _build_two_cluster_graph(self) -> KnowledgeGraph:
+        """Build graph with two fully-separated 3-node clusters (no cross edges)."""
+        graph = KnowledgeGraph()
+
+        # Cluster A: a0 → a1 → a2 → a0
+        nodes_a = [
+            GraphNode(
+                id=generate_id(NodeLabel.FUNCTION, "src/cluster_a.py", f"a{i}"),
+                label=NodeLabel.FUNCTION,
+                name=f"a{i}",
+                file_path="src/cluster_a.py",
+            )
+            for i in range(3)
+        ]
+        for n in nodes_a:
+            graph.add_node(n)
+        for src, tgt in [(0, 1), (1, 2), (2, 0)]:
+            graph.add_relationship(GraphRelationship(
+                id=f"calls:{nodes_a[src].id}->{nodes_a[tgt].id}",
+                type=RelType.CALLS,
+                source=nodes_a[src].id,
+                target=nodes_a[tgt].id,
+            ))
+
+        # Cluster B: b0 → b1 → b2 → b0
+        nodes_b = [
+            GraphNode(
+                id=generate_id(NodeLabel.FUNCTION, "src/cluster_b.py", f"b{i}"),
+                label=NodeLabel.FUNCTION,
+                name=f"b{i}",
+                file_path="src/cluster_b.py",
+            )
+            for i in range(3)
+        ]
+        for n in nodes_b:
+            graph.add_node(n)
+        for src, tgt in [(0, 1), (1, 2), (2, 0)]:
+            graph.add_relationship(GraphRelationship(
+                id=f"calls:{nodes_b[src].id}->{nodes_b[tgt].id}",
+                type=RelType.CALLS,
+                source=nodes_b[src].id,
+                target=nodes_b[tgt].id,
+            ))
+
+        return graph
+
+    def test_community_cohesion_nonzero(self) -> None:
+        """Communities in a structured graph have cohesion > 0.0."""
+        graph = self._build_two_cluster_graph()
+        process_communities(graph, min_community_size=2)
+
+        community_nodes = graph.get_nodes_by_label(NodeLabel.COMMUNITY)
+        assert len(community_nodes) >= 1
+
+        cohesion_values = [n.properties["cohesion"] for n in community_nodes]
+        assert any(c > 0.0 for c in cohesion_values), (
+            f"Expected at least one community with cohesion > 0.0, got: {cohesion_values}"
+        )
+
+    def test_community_cohesion_bounds(self) -> None:
+        """All community cohesion values are in [0.0, 1.0]."""
+        graph = self._build_two_cluster_graph()
+        process_communities(graph, min_community_size=2)
+
+        community_nodes = graph.get_nodes_by_label(NodeLabel.COMMUNITY)
+        for node in community_nodes:
+            cohesion = node.properties["cohesion"]
+            assert 0.0 <= cohesion <= 1.0, (
+                f"Cohesion {cohesion} out of bounds for community {node.name}"
+            )
+
+    def test_community_has_modularity_key(self) -> None:
+        """Community nodes store a modularity value in properties."""
+        graph = self._build_two_cluster_graph()
+        process_communities(graph, min_community_size=2)
+
+        community_nodes = graph.get_nodes_by_label(NodeLabel.COMMUNITY)
+        for node in community_nodes:
+            assert "modularity" in node.properties
+            assert isinstance(node.properties["modularity"], float)
