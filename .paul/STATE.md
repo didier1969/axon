@@ -82,10 +82,10 @@ Uncommitted: STATE.md, ROADMAP.md (v0.8 milestone created)
 ## Session Continuity
 
 Last session: 2026-03-04
-Stopped at: v0.8 milestone created — 2 phases defined, ready to plan Phase 1
-Next action: /paul:plan for Phase 1 (Graph Intelligence)
-Resume file: .paul/ROADMAP.md
-Resume context: v0.8 Phase 1 = 10 items (TS generics, wildcard imports, test coverage, API surface, dead code patterns, hybrid search BM25+RRF, query expansion, PageRank, chunking, find_similar)
+Stopped at: v0.8 milestone finalisé — scope arrêté, handoff créé, session terminée
+Next action: /paul:plan pour Phase 1 (Graph Intelligence)
+Resume file: .paul/HANDOFF-2026-03-04b.md
+Resume context: v0.8 Phase 1 = 10 items (TS generics, wildcard imports, test coverage, API surface, dead code patterns, hybrid BM25+RRF, query expansion, PageRank, smart chunking, find_similar)
 
 ---
 *STATE.md — Updated after every significant action*
