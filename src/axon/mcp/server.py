@@ -41,6 +41,7 @@ from axon.mcp.tools import (
     handle_find_usages,
     handle_impact,
     handle_lint,
+    handle_summarize,
     handle_list_repos,
     handle_query,
     handle_read_symbol,
@@ -525,6 +526,41 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="axon_summarize",
+        description=(
+            "Get a structured summary of a file or symbol (class, function) from graph data. "
+            "Pass a file path to get its symbol inventory (classes, functions, interfaces). "
+            "Pass a symbol name to get its callers count, callees count, methods, and quality flags. "
+            "Use before diving into implementation: saves reading entire files. "
+            "No LLM calls — pure structured summary from the knowledge graph. "
+            "Optionally specify a repo to summarize in a different indexed project."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "File path (e.g. 'src/parsers/python.py') or symbol name (e.g. 'MyClass'). "
+                        "File paths are matched by suffix — partial paths like 'parsers/python.py' work."
+                    ),
+                },
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "Name of an indexed repository (from axon_list_repos). "
+                        "Defaults to the current directory. Optional."
+                    ),
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
+            },
+            "required": ["path"],
+        },
+    ),
+    Tool(
         name="axon_batch",
         description=(
             "Execute multiple axon tool calls in a single round-trip. "
@@ -621,6 +657,12 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
         )
     elif name == "axon_lint":
         return handle_lint(storage, repo=arguments.get("repo"))
+    elif name == "axon_summarize":
+        return handle_summarize(
+            storage,
+            path=arguments.get("path", ""),
+            repo=arguments.get("repo"),
+        )
     else:
         return f"Unknown tool: {name}"
 

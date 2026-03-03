@@ -32,6 +32,7 @@ from axon.mcp.tools import (
     handle_list_repos,
     handle_query,
     handle_read_symbol,
+    handle_summarize,
 )
 
 
@@ -1324,3 +1325,95 @@ class TestHandleLint:
         result = handle_lint(mock_storage)
 
         assert "No structural issues" in result
+
+
+# ---------------------------------------------------------------------------
+# axon_summarize tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandleSummarize:
+    def test_summarize_file_path(self, mock_storage: MagicMock) -> None:
+        """File path input returns symbol inventory with Classes and Functions sections."""
+        mock_storage.execute_raw.side_effect = [
+            # File node lookup
+            [["file:src/py.py", "python.py", "src/parsers/python.py", "python"]],
+            # Children query
+            [
+                ["class:src/py.py:PyParser", "PyParser", "src/parsers/python.py", 10, "class PyParser:", True, True, 0.12],
+                ["function:src/py.py:parse", "parse_file", "src/parsers/python.py", 50, "def parse_file(p):", False, True, 0.05],
+            ],
+        ]
+
+        result = handle_summarize(mock_storage, "src/parsers/python.py")
+
+        assert "src/parsers/python.py" in result
+        assert "Classes" in result
+        assert "Functions" in result
+        assert "PyParser" in result
+        assert "parse_file" in result
+
+    def test_summarize_symbol_class(self, mock_storage: MagicMock) -> None:
+        """Symbol name input returns class summary with callers count and tested flag."""
+        mock_storage.execute_raw.side_effect = [
+            [],  # file lookup — no match
+            [["__init__", "def __init__"], ["parse", "def parse()"]],  # method children
+        ]
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = [
+            SearchResult(
+                node_id="class:src/models.py:MyParser",
+                score=1.0,
+                node_name="MyParser",
+                file_path="src/models.py",
+                label="class",
+            )
+        ]
+        mock_storage.get_node.return_value = GraphNode(
+            id="class:src/models.py:MyParser",
+            label=NodeLabel.CLASS,
+            name="MyParser",
+            file_path="src/models.py",
+            start_line=10,
+            tested=True,
+            is_exported=True,
+            centrality=0.12,
+        )
+        caller_node = GraphNode(
+            id="function:src/cli.py:main",
+            label=NodeLabel.FUNCTION,
+            name="main",
+            file_path="src/cli.py",
+            start_line=1,
+        )
+        mock_storage.get_callers_with_confidence.return_value = [(caller_node, 1.0)] * 12
+        mock_storage.get_callees_with_confidence.return_value = [(caller_node, 1.0)] * 5
+
+        result = handle_summarize(mock_storage, "MyParser")
+
+        assert "MyParser" in result
+        assert "Class" in result
+        assert "Callers: 12" in result
+        assert "tested: yes" in result
+
+    def test_summarize_not_found(self, mock_storage: MagicMock) -> None:
+        """Returns not-found message when neither file nor symbol matches."""
+        mock_storage.execute_raw.return_value = []
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = []
+
+        result = handle_summarize(mock_storage, "NonExistent")
+
+        assert "not found" in result.lower()
+
+    def test_summarize_file_no_symbols(self, mock_storage: MagicMock) -> None:
+        """File with no indexed symbols shows 0 symbols in result."""
+        mock_storage.execute_raw.side_effect = [
+            [["file:src/config.py", "config.py", "src/config.py", "python"]],  # file lookup
+            [],  # children — empty
+        ]
+
+        result = handle_summarize(mock_storage, "src/config.py")
+
+        assert "src/config.py" in result
+        assert "0 symbols" in result

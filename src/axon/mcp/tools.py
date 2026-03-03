@@ -1046,6 +1046,204 @@ def handle_lint(
     return result
 
 
+def _summarize_file(storage: StorageBackend, path: str, file_row: list) -> str:
+    """Format a file-level summary from graph data."""
+    file_path = file_row[2] or path
+    language = file_row[3] or ""
+
+    children_rows = storage.execute_raw(
+        "MATCH (n) WHERE n.file_path = $fp AND n.start_line > 0 "
+        "RETURN n.id, n.name, n.file_path, n.start_line, n.signature, n.tested, n.is_exported, n.centrality "
+        "ORDER BY n.start_line",
+        parameters={"fp": file_path},
+    ) or []
+
+    classes: list[dict] = []
+    functions: list[dict] = []
+    interfaces: list[dict] = []
+
+    for row in children_rows:
+        node_id = row[0] or ""
+        name = row[1] or ""
+        start_line = row[3] or 0
+        signature = row[4] or ""
+        tested = row[5]
+        is_exported = row[6]
+        centrality = row[7]
+        label_prefix = node_id.split(":", 1)[0] if node_id else ""
+
+        tags: list[str] = []
+        if is_exported:
+            tags.append("[exported]")
+        if tested:
+            tags.append("[tested]")
+        elif tested is False and label_prefix == "function":
+            tags.append("[untested]")
+        tag_str = " " + " ".join(tags) if tags else ""
+
+        entry: dict = {
+            "name": name,
+            "line": start_line,
+            "signature": signature,
+            "tags": tag_str,
+            "centrality": centrality,
+        }
+        if label_prefix == "class":
+            classes.append(entry)
+        elif label_prefix == "function":
+            functions.append(entry)
+        elif label_prefix == "interface":
+            interfaces.append(entry)
+
+    total = len(children_rows)
+    lines = [f"# {file_path} — {total} symbols"]
+    if language:
+        lines.append(f"Language: {language}")
+    lines.append("")
+
+    if classes:
+        lines.append(f"## Classes ({len(classes)})")
+        for i, c in enumerate(classes[:10], 1):
+            loc = f"{file_path}:L{c['line']}" if c["line"] else file_path
+            lines.append(f"  {i}. {c['name']}  {loc}{c['tags']}")
+        lines.append("")
+
+    if functions:
+        lines.append(f"## Functions ({len(functions)})")
+        for i, fn in enumerate(functions[:10], 1):
+            sig = (fn["signature"] or "")[:80]
+            centrality = fn["centrality"]
+            extras: list[str] = []
+            if sig:
+                extras.append(sig)
+            if isinstance(centrality, float) and centrality > 0.0:
+                extras.append(f"centrality: {centrality:.2f}")
+            extras_str = "  " + "  ".join(extras) if extras else ""
+            lines.append(f"  {i}. {fn['name']}{extras_str}{fn['tags']}")
+        lines.append("")
+
+    if interfaces:
+        lines.append(f"## Interfaces ({len(interfaces)})")
+        for i, iface in enumerate(interfaces[:10], 1):
+            loc = f"{file_path}:L{iface['line']}" if iface["line"] else file_path
+            lines.append(f"  {i}. {iface['name']}  {loc}{iface['tags']}")
+        lines.append("")
+
+    if not classes and not functions and not interfaces:
+        lines.append("0 symbols indexed.")
+        lines.append("")
+
+    lines.append("Next: Use axon_context('ClassName') for the full dependency graph of any symbol.")
+    return "\n".join(lines)
+
+
+def _summarize_symbol(storage: StorageBackend, path: str, results: list) -> str:
+    """Format a symbol-level summary from graph data."""
+    node = storage.get_node(results[0].node_id)
+    if not node:
+        return f"'{path}' not found as a file path or symbol name."
+
+    label_display = node.label.value.title() if node.label else "Unknown"
+    lines = [f"# {node.name} ({label_display}) — {node.file_path}:{node.start_line}"]
+    lines.append("")
+
+    if node.signature:
+        lines.append(f"Signature: {node.signature}")
+
+    tested_str = "yes" if getattr(node, "tested", False) else "no"
+    exported_str = "yes" if getattr(node, "is_exported", False) else "no"
+    centrality = getattr(node, "centrality", 0.0) or 0.0
+    attr_parts = [f"tested: {tested_str}", f"exported: {exported_str}"]
+    if isinstance(centrality, float) and centrality > 0.0:
+        attr_parts.append(f"centrality: {centrality:.3f}")
+    lines.append(" | ".join(attr_parts))
+    lines.append("")
+
+    is_class = node.label is not None and node.label.value.lower() in ("class", "interface")
+    if is_class:
+        method_rows = storage.execute_raw(
+            "MATCH (n:Method) WHERE n.class_name = $cn AND n.file_path = $fp "
+            "RETURN n.name, n.signature LIMIT 20",
+            parameters={"cn": node.name, "fp": node.file_path},
+        ) or []
+        if method_rows:
+            method_names = [row[0] for row in method_rows if row[0]]
+            lines.append(f"Methods ({len(method_rows)}):")
+            lines.append("  " + ", ".join(method_names))
+            lines.append("")
+
+    try:
+        callers = storage.get_callers_with_confidence(node.id)
+    except (AttributeError, TypeError):
+        callers = [(c, 1.0) for c in storage.get_callers(node.id)]
+
+    try:
+        callees = storage.get_callees_with_confidence(node.id)
+    except (AttributeError, TypeError):
+        callees = [(c, 1.0) for c in storage.get_callees(node.id)]
+
+    lines.append(f"Callers: {len(callers)} symbols call this")
+    lines.append(f"Callees: {len(callees)} symbols called by this")
+    lines.append("")
+    lines.append(f"Next: Use axon_context('{node.name}') for the full caller/callee list.")
+    return "\n".join(lines)
+
+
+def handle_summarize(
+    storage: StorageBackend,
+    path: str,
+    repo: str | None = None,
+) -> str:
+    """Return a structured summary of a file or symbol from graph data.
+
+    Resolves ``path`` as a file path first, then as a symbol name. For files,
+    returns a symbol inventory (classes, functions, interfaces). For symbols,
+    returns callers/callees counts, methods (for classes), and quality flags.
+
+    No LLM calls — pure structured summary from the knowledge graph.
+
+    Args:
+        storage: The storage backend.
+        path: File path (e.g. ``src/parsers/python.py``) or symbol name
+            (e.g. ``MyParser``). File paths are matched by suffix.
+        repo: Optional repository slug to query instead of the current directory.
+
+    Returns:
+        Formatted summary string, or a not-found message.
+    """
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
+        storage = _repo_storage
+
+    try:
+        file_rows = storage.execute_raw(
+            "MATCH (n:File) WHERE n.file_path = $fp OR n.file_path ENDS WITH $fp "
+            "RETURN n.id, n.name, n.file_path, n.language "
+            "LIMIT 1",
+            parameters={"fp": path},
+        ) or []
+
+        if file_rows:
+            result = _summarize_file(storage, path, file_rows[0])
+        else:
+            results = _resolve_symbol(storage, path, limit=1)
+            if not results:
+                return f"'{path}' not found as a file path or symbol name."
+            result = _summarize_symbol(storage, path, results)
+    finally:
+        if _repo_storage is not None:
+            try:
+                _repo_storage.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    log_event("summarize", path=path[:200], repo=_repo_name_from_storage(storage, repo))
+    return result
+
+
 _WRITE_KEYWORDS = re.compile(
     r"\b(DELETE|DROP|CREATE|SET|REMOVE|MERGE|DETACH|INSTALL|LOAD|COPY|CALL"
     r"|RENAME|ALTER|IMPORT|TRUNCATE)\b",
