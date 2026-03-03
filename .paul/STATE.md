@@ -80,9 +80,9 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: (phase commit pending — see session continuity)
+Last commit: e7d6ff5 (feat(01-graph-intelligence): Phase 1 complete)
 Branch: main
-Uncommitted: Phase 1 source + tests + .paul files (commit at end of UNIFY)
+Uncommitted: STATE.md (git hash update only)
 
 ## Session Continuity
 
