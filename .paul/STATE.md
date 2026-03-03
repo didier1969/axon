@@ -10,10 +10,10 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 ## Current Position
 
 Milestone: v0.8 Graph Intelligence & Search Quality
-Phase: 2 of 2 — MCP Tools & DX — NOT STARTED
-Plan: Not started
-Status: Ready to plan Phase 2
-Last activity: 2026-03-05 — Phase 1 (Graph Intelligence) UNIFY complete; 913 tests passing
+Phase: 2 of 2 — MCP Tools & DX — PLANNING
+Plan: 02-01 through 02-04 created, awaiting approval
+Status: PLAN created, ready for APPLY
+Last activity: 2026-03-05 — Created 4 PLAN.md files for Phase 2
 
 Progress:
 - v0.7 Quality & Security: [██████████] 100% ✓
@@ -24,7 +24,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Phase 1 complete — ready to plan Phase 2]
+  ✓        ○        ○     [Plans created, awaiting approval]
 ```
 
 ## Accumulated Context
@@ -87,10 +87,10 @@ Uncommitted: STATE.md (git hash update only)
 ## Session Continuity
 
 Last session: 2026-03-05
-Stopped at: Phase 1 (Graph Intelligence) UNIFY complete — 913 tests passing
-Next action: /paul:plan (Phase 2 — MCP Tools & DX)
-Resume file: .paul/ROADMAP.md
-Resume context: Phase 1 complete (3/3 plans: parser completeness, node enrichment, intelligence layer); Phase 2 items in ROADMAP.md
+Stopped at: Phase 2 plans created (02-01 through 02-04)
+Next action: /paul:apply .paul/phases/02-mcp-tools-dx/02-01-PLAN.md
+Resume file: .paul/phases/02-mcp-tools-dx/02-01-PLAN.md
+Resume context: 4 plans ready: axon_find_usages+MCP descriptions, axon_lint+cohesion, axon_summarize, multi-repo+progress; axon_diff+streaming deferred to v0.9
 
 ---
 *STATE.md — Updated after every significant action*

@@ -13,7 +13,7 @@ Phases: 1 of 2 complete
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
 | 1 | Graph Intelligence | 3/3 | ✅ Complete | 2026-03-05 |
-| 2 | MCP Tools & DX | TBD | 🔵 Next | - |
+| 2 | MCP Tools & DX | 4 | 🔵 Planning | - |
 
 ### Phase 1: Graph Intelligence
 
