@@ -25,7 +25,7 @@ from axon import __version__
 console = Console()
 logger = logging.getLogger(__name__)
 
-from axon.core.paths import central_db_path as _central_db_path  # noqa: E402
+from axon.core.paths import central_db_path as _central_db_path, compute_repo_slug  # noqa: E402
 
 
 def _auto_migrate_local_kuzu(repo_path: Path, slug: str) -> None:
@@ -285,17 +285,7 @@ def analyze(
     axon_dir = repo_path / ".axon"
     axon_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compute slug (mirrors _register_in_global_registry logic)
-    slug = repo_path.name
-    registry_root = Path.home() / ".axon" / "repos"
-    candidate_meta = registry_root / slug / "meta.json"
-    if candidate_meta.exists():
-        try:
-            existing = json.loads(candidate_meta.read_text())
-            if existing.get("path") != str(repo_path):
-                slug = f"{repo_path.name}-{hashlib.sha256(str(repo_path).encode()).hexdigest()[:8]}"
-        except (json.JSONDecodeError, OSError):
-            pass
+    slug = compute_repo_slug(repo_path)
 
     # Auto-migrate existing local DB to central location
     _auto_migrate_local_kuzu(repo_path, slug)
@@ -583,17 +573,7 @@ def watch(
     axon_dir = repo_path / ".axon"
     axon_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compute slug (inline, mirrors _register_in_global_registry)
-    slug = repo_path.name
-    registry_root = Path.home() / ".axon" / "repos"
-    candidate_meta = registry_root / slug / "meta.json"
-    if candidate_meta.exists():
-        try:
-            existing = json.loads(candidate_meta.read_text())
-            if existing.get("path") != str(repo_path):
-                slug = f"{repo_path.name}-{hashlib.sha256(str(repo_path).encode()).hexdigest()[:8]}"
-        except (json.JSONDecodeError, OSError):
-            pass
+    slug = compute_repo_slug(repo_path)
     _auto_migrate_local_kuzu(repo_path, slug)
     (Path.home() / ".axon" / "repos" / slug).mkdir(parents=True, exist_ok=True)
     db_path = _central_db_path(slug)
@@ -828,17 +808,7 @@ def serve(
     axon_dir = repo_path / ".axon"
     axon_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compute slug (inline, mirrors _register_in_global_registry)
-    slug = repo_path.name
-    registry_root = Path.home() / ".axon" / "repos"
-    candidate_meta = registry_root / slug / "meta.json"
-    if candidate_meta.exists():
-        try:
-            existing = json.loads(candidate_meta.read_text())
-            if existing.get("path") != str(repo_path):
-                slug = f"{repo_path.name}-{hashlib.sha256(str(repo_path).encode()).hexdigest()[:8]}"
-        except (json.JSONDecodeError, OSError):
-            pass
+    slug = compute_repo_slug(repo_path)
     _auto_migrate_local_kuzu(repo_path, slug)
     (Path.home() / ".axon" / "repos" / slug).mkdir(parents=True, exist_ok=True)
     db_path = _central_db_path(slug)

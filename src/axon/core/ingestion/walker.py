@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -9,6 +10,10 @@ from pathlib import Path
 
 from axon.config.ignore import should_ignore
 from axon.config.languages import get_language, is_supported
+
+logger = logging.getLogger(__name__)
+
+_MAX_FILE_BYTES = 512 * 1024
 
 @dataclass
 class FileEntry:
@@ -78,6 +83,9 @@ def read_file(repo_path: Path, file_path: Path) -> FileEntry | None:
     relative = file_path.relative_to(repo_path)
 
     try:
+        if file_path.stat().st_size > _MAX_FILE_BYTES:
+            logger.warning("Skipping %s: file size exceeds 512 KB", relative)
+            return None
         content = file_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, ValueError, OSError):
         return None

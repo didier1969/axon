@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -221,3 +222,48 @@ class TestWalkRepoSkipsBinary:
 
         assert "binary.py" not in paths
         assert "valid.py" in paths
+
+
+class TestWalkRepoSkipsLargeFiles:
+    """Files exceeding 512 KB are silently skipped with a warning."""
+
+    def test_large_file_skipped(self, tmp_path: Path) -> None:
+        # Create a .py file just over 512KB
+        large_file = tmp_path / "huge.py"
+        large_file.write_bytes(b"x = 1\n" * 90_000)  # ~540 KB
+
+        # Create a normal .py alongside it
+        small_file = tmp_path / "small.py"
+        small_file.write_text("y = 2", encoding="utf-8")
+
+        entries = walk_repo(tmp_path)
+        paths = {e.path for e in entries}
+
+        assert "huge.py" not in paths
+        assert "small.py" in paths
+
+    def test_large_file_triggers_warning(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        large_file = tmp_path / "big.py"
+        large_file.write_bytes(b"# comment\n" * 60_000)  # ~600 KB
+
+        with caplog.at_level(logging.WARNING, logger="axon.core.ingestion.walker"):
+            walk_repo(tmp_path)
+
+        assert any("big.py" in record.message for record in caplog.records)
+
+    def test_file_exactly_at_limit_skipped(self, tmp_path: Path) -> None:
+        # One byte over 512 * 1024 — should be skipped
+        boundary_file = tmp_path / "boundary.py"
+        boundary_file.write_bytes(b"a" * (512 * 1024 + 1))
+
+        entries = walk_repo(tmp_path)
+        paths = {e.path for e in entries}
+        assert "boundary.py" not in paths
+
+    def test_file_just_under_limit_included(self, tmp_path: Path) -> None:
+        under_file = tmp_path / "fine.py"
+        under_file.write_bytes(b"x = 1\n" * 85_000)  # ~510 KB
+
+        entries = walk_repo(tmp_path)
+        paths = {e.path for e in entries}
+        assert "fine.py" in paths
