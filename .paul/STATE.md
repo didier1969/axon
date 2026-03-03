@@ -5,26 +5,26 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.8 Graph Intelligence & Search Quality — Phase 2: MCP Tools & DX — 2/4 plans complete.
+**Current focus:** v0.8 Graph Intelligence & Search Quality — Phase 2: MCP Tools & DX — 3/4 plans complete.
 
 ## Current Position
 
 Milestone: v0.8 Graph Intelligence & Search Quality
 Phase: 2 of 2 — MCP Tools & DX — IN PROGRESS
-Plan: 02-03 APPLY complete, UNIFY pending
-Status: APPLY done, UNIFY needed for 02-03
-Last activity: 2026-03-07 — APPLY 02-03 complete (axon_summarize, 928 tests, commit e388d68)
+Plan: 02-04 APPLY complete, UNIFY pending
+Status: APPLY done, UNIFY needed for 02-04
+Last activity: 2026-03-07 — APPLY 02-04 complete (DEPENDS_ON edges + --progress, 935 tests, commit 2a78f69)
 
 Progress:
 - v0.7 Quality & Security: [██████████] 100% ✓
-- v0.8 Graph Intelligence & Search Quality: [███████░░░] ~70% (Phase 1 complete; Phase 2: 2/4 plans done)
+- v0.8 Graph Intelligence & Search Quality: [████████░░] ~80% (Phase 1 complete; Phase 2: 3/4 plans done)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ○     [02-03 executed, UNIFY pending]
+  ✓        ✓        ○     [02-04 executed, UNIFY pending]
 ```
 
 ## Accumulated Context
@@ -87,10 +87,10 @@ Uncommitted: STATE.md (loop closure update)
 ## Session Continuity
 
 Last session: 2026-03-07
-Stopped at: APPLY 02-03 complete (axon_summarize, 928 tests); UNIFY not yet run; context depleted
-Next action: /paul:unify .paul/phases/02-mcp-tools-dx/02-03-PLAN.md
+Stopped at: APPLY 02-04 complete (DEPENDS_ON edges + --progress, 935 tests); UNIFY not yet run; context depleted
+Next action: /paul:unify .paul/phases/02-mcp-tools-dx/02-04-PLAN.md
 Resume file: .paul/HANDOFF-2026-03-07.md
-Resume context: 02-01+02-02 UNIFY done; 02-03 APPLY done (UNIFY pending); 928 tests; clean git (e388d68)
+Resume context: 02-01+02-02+02-03 UNIFY done; 02-04 APPLY done (UNIFY pending); 935 tests; clean git (2a78f69)
 
 ---
 *STATE.md — Updated after every significant action*
