@@ -43,7 +43,6 @@ Items:
 - `axon_lint` — règles structurelles : couplage élevé, god classes, cycles IMPORTS
 - Community detection cohesion metric (remplace placeholder `cohesion: 0.0` de v0.5)
 - `axon_diff` — comparer un symbole entre commits (`axon_diff Symbol --from HEAD~5`)
-- `axon_refactor_hints` — suggère candidats à l'extraction, détecte high coupling/fan-in
 - Multi-repo dependency edges — `DEPENDS_ON` entre repos via `pyproject.toml`/`package.json`/`go.mod`
 - MCP tool descriptions — documenter les formats d'entrée attendus pour chaque outil
 - `axon analyze --progress` — barre de progression pendant l'indexing
@@ -51,27 +50,27 @@ Items:
 
 ## Planned Milestones
 
-### v0.9: Language Coverage & Visualization
+### v0.9: Language Coverage
 
-Focus: Parsers pour les grandes familles manquantes + export graph visuel via Memgraph
+Focus: Parsers pour les grandes familles manquantes
 Phases: TBD
 
 Items:
 - Parser Java (tree-sitter-java) — enterprise/Android
 - Parser C# (tree-sitter-c-sharp) — .NET/Unity
 - Parser Ruby (tree-sitter-ruby) — Rails
-- Graph visualization via Memgraph (affichage interactif, remplace idée Mermaid)
 - Parser Kotlin (tree-sitter-kotlin) — JVM moderne
 - Parser PHP (tree-sitter-php) — Laravel/WordPress/legacy
 - Parser C++ (tree-sitter-cpp) — systèmes, jeux, infra
 
 ### v0.10: Architecture Avancée & Observabilité
 
-Focus: Portabilité cross-machine, tracking de renommage, LSP, observabilité
+Focus: Portabilité cross-machine, visualisation graph, tracking de renommage, LSP, observabilité
 Phases: TBD
 
 Items:
-- `axon_refactor_hints` amélioré (si reporté depuis v0.8)
+- `axon_refactor_hints` — suggère candidats à l'extraction, détecte high coupling/fan-in
+- Graph visualization via Memgraph (affichage interactif — architecture TBD)
 - Symbol rename/move tracking — détecter via `git log --follow`, edge `RENAMED_FROM`
 - LSP integration — exposer axon via Language Server Protocol (VS Code, Neovim)
 - Watch mode real-time stats — dashboard ASCII live (events/s, queue depth, last indexed)
