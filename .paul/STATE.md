@@ -5,26 +5,26 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.7 Quality & Security — Phase 2: axon read-symbol, byte offsets sql/yaml, parser quality (~75→81/100).
+**Current focus:** v0.7 Quality & Security — COMPLETE ✅. Ready for v0.8 milestone planning.
 
 ## Current Position
 
-Milestone: v0.7 Quality & Security
-Phase: 2 of 2 — Qualité, Parsers & Features — In Progress (3/4 plans done)
-Plan: 02-04 APPLY complete — awaiting UNIFY
-Status: APPLY complete — 884 tests passing, all 4 AC met
-Last activity: 2026-03-03 — 02-04 applied: readline(), BATCH WARNING, AXON_LRU_SIZE
+Milestone: v0.7 Quality & Security — COMPLETE ✅
+Phase: 2 of 2 — Qualité, Parsers & Features — COMPLETE (4/4 plans done)
+Plan: 02-04 UNIFY complete — loop closed, milestone transition done
+Status: v0.7 complete — 884 tests passing, ready for v0.8 planning
+Last activity: 2026-03-04 — v0.7 milestone complete (transition: PROJECT + ROADMAP + git commit)
 
 Progress:
 - v0.6 Daemon & Centralisation: [██████████] 100% ✓
-- v0.7 Quality & Security: [████████░░] 80% (Phase 1 ✓, Phase 2 plan 3/4 ✓)
+- v0.7 Quality & Security: [██████████] 100% ✓
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ○     [APPLY complete — ready for UNIFY]
+  ✓        ✓        ✓     [Loop complete — Phase 2 done, v0.7 milestone complete]
 ```
 
 ## Accumulated Context
@@ -75,17 +75,17 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: 31bd23e (feat(02-qualite-parsers-features): 02-01 — sql/yaml byte offsets + axon_read_symbol)
+Last commit: (see below — phase commit pending)
 Branch: main
-Uncommitted: PAUL files (STATE.md, 02-01-SUMMARY.md)
+Uncommitted: PAUL files (STATE.md, 02-04-SUMMARY.md, ROADMAP.md, PROJECT.md, HANDOFF archived)
 
 ## Session Continuity
 
 Last session: 2026-03-04
-Stopped at: 02-04 APPLY complete — 884 tests passing, UNIFY not yet run
-Next action: /paul:unify .paul/phases/02-qualite-parsers-features/02-04-PLAN.md
-Resume file: .paul/HANDOFF-2026-03-04.md
-Resume context: UNIFY closes the loop; Phase 2 complete after → v0.7 milestone complete
+Stopped at: v0.7 milestone complete — PAUL files committed, ready for v0.8 planning
+Next action: /paul:milestone to define v0.8, or /paul:plan to start ad-hoc work
+Resume file: .paul/ROADMAP.md
+Resume context: v0.7 shipped (Quality & Security, 2 phases, 5 plans, 884 tests)
 
 ---
 *STATE.md — Updated after every significant action*

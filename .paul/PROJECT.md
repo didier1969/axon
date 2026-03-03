@@ -12,9 +12,9 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 | Attribute | Value |
 |-----------|-------|
-| Version | 0.7.0 (in progress) |
+| Version | 0.7.0 |
 | Status | Active Development |
-| Last Updated | 2026-03-02 |
+| Last Updated | 2026-03-04 |
 
 ## Requirements
 
@@ -58,21 +58,23 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] `remove_nodes_by_file()` correct return count — v0.7 Phase 1
 - [x] Atomic meta.json writes via tempfile + os.replace() — v0.7 Phase 1
 
+- [x] `axon_read_symbol` MCP tool — O(1) via start_byte/end_byte, exact source slice — v0.7 Phase 2, Plan 02-01
+- [x] Byte offsets for sql_lang.py + yaml_lang.py (regex span(), precomputed line_start_bytes[]) — v0.7 Phase 2, Plan 02-01
+- [x] Parser quality fixes + test coverage for byte offsets and axon_read_symbol — v0.7 Phase 2, Plan 02-02
+- [x] File size limit 512KB in walker.py (OOM protection, warning logged) — v0.7 Phase 2, Plan 02-03
+- [x] `compute_repo_slug()` helper extracted to core/paths.py (deduplicates 3 CLI call sites) — v0.7 Phase 2, Plan 02-03
+- [x] axon_batch partial failure summary `[BATCH WARNING: K/N failed: indices [...]]` — v0.7 Phase 2, Plan 02-04
+- [x] `AXON_LRU_SIZE` env var for daemon LRU maxsize (CLI `--max-dbs` overrides) — v0.7 Phase 2, Plan 02-04
+- [x] Socket buffer: `makefile("rb").readline()` replaces `recv(4096)` loop — v0.7 Phase 2, Plan 02-04
+
 ### Active (In Progress)
-Phase 2: Qualité, Parsers & Features — see ROADMAP.md
+None — v0.7 complete.
 
 ### Planned (Next)
-- [ ] `axon read-symbol` MCP tool (O(1) via byte offsets)
-- [ ] Byte offsets for sql/yaml parsers
-- [ ] File size limit 512KB in walker.py
-- [ ] Dead code test pattern fixes (spec/, __tests__, _spec.rb)
-- [ ] TypeScript generics extraction for USES_TYPE
-- [ ] Python wildcard imports (from x import *)
-- [ ] `compute_repo_slug()` helper extraction
-- [ ] axon_batch partial failure summary
-- [ ] AXON_LRU_SIZE env var
-- [ ] MCP tool descriptions improvement
-- [ ] Socket buffer readline()
+- [ ] Dead code test pattern fixes (spec/, __tests__, _spec.rb) — deferred from v0.7
+- [ ] TypeScript generics extraction for USES_TYPE — deferred from v0.7
+- [ ] Python wildcard imports (from x import *) — deferred from v0.7
+- [ ] MCP tool descriptions improvement — deferred from v0.7
 
 ### Out of Scope
 - GUI / web interface — CLI and MCP-first
@@ -151,4 +153,4 @@ Phase 2: Qualité, Parsers & Features — see ROADMAP.md
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-03-02 — v0.7 Phase 1 complete (Sécurité & Robustesse: 11 fixes, 61→~75/100 audit score)*
+*Last updated: 2026-03-04 — v0.7 complete (Phase 1: security hardening; Phase 2: parser quality, byte offsets, readline, BATCH WARNING, AXON_LRU_SIZE; 884 tests, ~81/100 audit score)*
