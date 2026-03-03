@@ -270,6 +270,9 @@ def analyze(
     no_embeddings: bool = typer.Option(
         False, "--no-embeddings", help="Skip vector embedding generation."
     ),
+    show_progress: bool = typer.Option(
+        False, "--progress", help="Print each completed phase to stderr during indexing."
+    ),
 ) -> None:
     """Index a repository into a knowledge graph."""
     from axon.core.ingestion.pipeline import PipelineResult, run_pipeline
@@ -331,8 +334,12 @@ def analyze(
     ) as progress:
         task = progress.add_task("Starting...", total=None)
 
+        _show_progress = show_progress or bool(os.getenv("AXON_ANALYZE_PROGRESS"))
+
         def on_progress(phase: str, pct: float) -> None:
             progress.update(task, description=f"{phase} ({pct:.0%})")
+            if _show_progress and pct >= 1.0:
+                print(f"[{phase}] done", file=sys.stderr, flush=True)
 
         _, result = run_pipeline(
             repo_path=repo_path,

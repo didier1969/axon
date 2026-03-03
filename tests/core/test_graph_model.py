@@ -67,6 +67,7 @@ class TestRelType:
         "USES_TYPE",
         "EXPORTS",
         "COUPLED_WITH",
+        "DEPENDS_ON",
     ]
 
     @pytest.mark.parametrize("name", EXPECTED)

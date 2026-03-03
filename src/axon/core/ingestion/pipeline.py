@@ -16,6 +16,7 @@ Phases executed:
     9. Process detection (PROCESS nodes + STEP_IN_PROCESS edges)
     10. Dead code detection (flags unreachable symbols)
     11. Change coupling (COUPLED_WITH edges from git history)
+    12. Cross-repo deps (DEPENDS_ON edges from manifest files)
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from axon.core.ingestion.calls import process_calls
 from axon.core.ingestion.centrality import process_centrality
 from axon.core.ingestion.community import process_communities
 from axon.core.ingestion.coupling import process_coupling
+from axon.core.ingestion.cross_repo import process_cross_repo_deps
 from axon.core.ingestion.dead_code import process_dead_code
 from axon.core.ingestion.heritage import process_heritage
 from axon.core.ingestion.imports import process_imports
@@ -65,6 +67,7 @@ class PhaseTimings:
     test_coverage: float = 0.0
     dead_code: float = 0.0
     coupling: float = 0.0
+    cross_repo: float = 0.0
     storage_load: float = 0.0
     embeddings: float = 0.0
 
@@ -80,6 +83,7 @@ class PipelineResult:
     processes: int = 0
     dead_code: int = 0
     coupled_pairs: int = 0
+    cross_repo_deps: int = 0
     embeddings: int = 0
     duration_seconds: float = 0.0
     incremental: bool = False
@@ -291,6 +295,12 @@ def run_pipeline(
     result.coupled_pairs = process_coupling(graph, repo_path)
     result.phase_timings.coupling = time.monotonic() - _t
     report("Analyzing git history", 1.0)
+
+    report("Resolving cross-repo deps", 0.0)
+    _t = time.monotonic()
+    result.cross_repo_deps = process_cross_repo_deps(graph, repo_path)
+    result.phase_timings.cross_repo = time.monotonic() - _t
+    report("Resolving cross-repo deps", 1.0)
 
     # Compute result counts before the optional embedding step so a
     # fastembed failure never leaves symbols/relationships at zero.
