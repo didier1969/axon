@@ -13,7 +13,7 @@ Phases: 1 of 2 complete
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
 | 1 | Sécurité & Robustesse | 1/1 | ✅ Complete | 2026-03-02 |
-| 2 | Qualité, Parsers & Features | TBD | Not started | - |
+| 2 | Qualité, Parsers & Features | TBD | Planning | - |
 
 ### Phase 1: Sécurité & Robustesse ✅
 

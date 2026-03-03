@@ -11,9 +11,9 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 Milestone: v0.7 Quality & Security
 Phase: 2 of 2 — Qualité, Parsers & Features — In Progress (2/4 plans done)
-Plan: 02-02 COMPLETE — ready for 02-03
-Status: Loop closed — 871 tests passing, all 6 AC met
-Last activity: 2026-03-03 — 02-02 complete: parser quality + test coverage (+19 tests)
+Plan: 02-03 created, awaiting approval
+Status: PLAN created, ready for APPLY
+Last activity: 2026-03-03 — Created .paul/phases/02-qualite-parsers-features/02-03-PLAN.md
 
 Progress:
 - v0.6 Daemon & Centralisation: [██████████] 100% ✓
@@ -24,7 +24,7 @@ Progress:
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ✓     [Plan 02-02 complete — ready for 02-03]
+  ✓        ✓        ○     [APPLY complete, ready for UNIFY]
 ```
 
 ## Accumulated Context
@@ -82,10 +82,10 @@ Uncommitted: PAUL files (STATE.md, 02-01-SUMMARY.md)
 ## Session Continuity
 
 Last session: 2026-03-03
-Stopped at: 02-02 UNIFY complete — 871 tests, commits 6016343 + a80f667
-Next action: /paul:plan for 02-03 (walker.py 512KB limit, compute_repo_slug helper)
-Resume file: .paul/HANDOFF-2026-03-03.md
-Resume context: Phase 2 has 2 plans remaining (02-03, 02-04); loop fully closed
+Stopped at: 02-03 APPLY complete — 875 tests passing, all 4 AC met
+Next action: /paul:unify .paul/phases/02-qualite-parsers-features/02-03-PLAN.md
+Resume file: .paul/phases/02-qualite-parsers-features/02-03-PLAN.md
+Resume context: Phase 2 has 2 plans remaining (02-03 unify, 02-04); walker 512KB + compute_repo_slug done
 
 ---
 *STATE.md — Updated after every significant action*
