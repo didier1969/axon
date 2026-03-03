@@ -6,47 +6,25 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 ## Current Milestone
 
-**v0.8 Graph Intelligence & Search Quality**
-Status: 🚧 In Progress
-Phases: 1 of 2 complete
+**v0.9: Language Coverage**
+Status: 🔵 Planning
+Phases: TBD
+
+## Completed Milestones (Recent)
+
+<details>
+<summary>v0.8 Graph Intelligence & Search Quality — 2026-03-07 (2 phases, 7 plans)</summary>
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
 | 1 | Graph Intelligence | 3/3 | ✅ Complete | 2026-03-05 |
-| 2 | MCP Tools & DX | 4 | 🔵 Planning | - |
+| 2 | MCP Tools & DX | 4/4 | ✅ Complete | 2026-03-07 |
 
-### Phase 1: Graph Intelligence
+Phase 1: TypeScript USES_TYPE generics, test coverage `tested: bool`, PageRank centrality + hybrid search boost, code-aware embeddings, `axon_find_similar`, attribute surfacing (`exported`/`untested` tags), `AXON_QUERY_EXPAND`. 913 tests.
 
-Focus: Boucher les trous dans le graphe + recherche hybride inspirée de qmd (fondations)
-Plans: 01-01 (Parser Completeness), 01-02 (Node Enrichment), 01-03 (Intelligence Layer)
+Phase 2: `axon_find_usages` (exhaustive call-sites), MCP tool descriptions, `axon_lint` structural rules, community cohesion real intra-edge density, `axon_summarize` LLM-ready summaries, multi-repo DEPENDS_ON edges (manifest parsing), `axon analyze --progress`. 936 tests. Deferred to v0.9: `axon_diff`, streaming batch.
 
-Items:
-- TypeScript generics → USES_TYPE edges (`Array<T>`, `Promise<User>`, etc.)
-- Python wildcard imports `from x import *` → IMPORTS edges
-- Test coverage integration — marquer `tested: bool` par symbole via croisement avec fichiers test
-- Dead code: patterns de test manquants (`spec/`, `__tests__/`, `_spec.rb`, `*_test.go`)
-- Private/public API surface — `exported: bool` sur les nœuds (Python `__all__`, TS `export`, Rust `pub`)
-- Hybrid search: BM25 (SQLite FTS5 sur noms de symboles) + vecteurs + Reciprocal Rank Fusion
-- Query expansion via LLM (2 variations sémantiques avant recherche)
-- Symbol centrality scoring (PageRank sur le graphe de relations) → ranker par importance réelle
-- Code-aware chunking pour les embeddings (couper aux frontières fonction/classe)
-- `axon_find_similar` — trouver les symboles sémantiquement proches (détection de doublons)
-
-### Phase 2: MCP Tools & DX
-
-Focus: Nouveaux outils MCP pour agents AI + améliorations architecture et DX
-Plans: TBD (defined during /paul:plan)
-
-Items:
-- `axon_find_usages` — tous les call-sites d'un symbole dans le repo (exhaustif)
-- `axon_summarize` — résumé LLM-ready d'un fichier/module/classe
-- `axon_lint` — règles structurelles : couplage élevé, god classes, cycles IMPORTS
-- Community detection cohesion metric (remplace placeholder `cohesion: 0.0` de v0.5)
-- `axon_diff` — comparer un symbole entre commits (`axon_diff Symbol --from HEAD~5`)
-- Multi-repo dependency edges — `DEPENDS_ON` entre repos via `pyproject.toml`/`package.json`/`go.mod`
-- MCP tool descriptions — documenter les formats d'entrée attendus pour chaque outil
-- `axon analyze --progress` — barre de progression pendant l'indexing
-- Streaming batch responses — `axon_batch` retourne les résultats au fil de l'eau
+</details>
 
 ## Planned Milestones
 
@@ -62,6 +40,8 @@ Items:
 - Parser Kotlin (tree-sitter-kotlin) — JVM moderne
 - Parser PHP (tree-sitter-php) — Laravel/WordPress/legacy
 - Parser C++ (tree-sitter-cpp) — systèmes, jeux, infra
+- `axon_diff` — comparer un symbole entre commits (deferred from v0.8)
+- Streaming batch responses — `axon_batch` retourne les résultats au fil de l'eau (deferred from v0.8)
 
 ### v0.10: Architecture Avancée & Observabilité
 
@@ -77,6 +57,8 @@ Items:
 - Changelog generation — diff de graphes entre tags git
 - Content-addressable storage (hash-based dedup, qmd-inspired)
 - Virtual URI scheme `axon://repo-slug/file.py:42` (portabilité cross-machine)
+
+## Completed Milestones
 
 ## Completed Milestones
 
@@ -137,4 +119,4 @@ Phase 2: axon_read_symbol O(1) MCP tool, sql/yaml byte offsets, parser quality t
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-03-05 — v0.8 Phase 1 complete (Graph Intelligence: 3 plans, 913 tests)*
+*Last updated: 2026-03-07 — v0.8 complete (2 phases, 7 plans, 936 tests); v0.9 Language Coverage next*

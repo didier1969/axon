@@ -5,26 +5,27 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.8 Graph Intelligence & Search Quality — Phase 2: MCP Tools & DX — 3/4 plans complete.
+**Current focus:** v0.9 Language Coverage — new milestone, ready to plan.
 
 ## Current Position
 
-Milestone: v0.8 Graph Intelligence & Search Quality
-Phase: 2 of 2 — MCP Tools & DX — IN PROGRESS
-Plan: 02-04 APPLY complete, UNIFY pending
-Status: APPLY done, UNIFY needed for 02-04
-Last activity: 2026-03-07 — APPLY 02-04 complete (DEPENDS_ON edges + --progress, 935 tests, commit 2a78f69)
+Milestone: v0.9 Language Coverage
+Phase: Not started
+Plan: Not started
+Status: v0.8 complete — ready to plan v0.9
+Last activity: 2026-03-07 — v0.8 complete (UNIFY 02-04 + phase transition; 936 tests)
 
 Progress:
 - v0.7 Quality & Security: [██████████] 100% ✓
-- v0.8 Graph Intelligence & Search Quality: [████████░░] ~80% (Phase 1 complete; Phase 2: 3/4 plans done)
+- v0.8 Graph Intelligence & Search Quality: [██████████] 100% ✓
+- v0.9 Language Coverage: [░░░░░░░░░░] 0% (not started)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ○     [02-04 executed, UNIFY pending]
+  ○        ○        ○     [v0.9 — new milestone, ready to plan]
 ```
 
 ## Accumulated Context
@@ -68,6 +69,9 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | isinstance(float) guard in hybrid centrality boost | v0.8 Plan 01-02 | MagicMock.centrality truthy but not float — guard prevents corrupted RRF scores |
 | kuzu_search._row_to_node 12-col bug fixed | v0.8 Plan 01-02 | Pre-existing: start_byte was reading content slot; fixed with explicit column guards |
 | test_coverage before dead_code in pipeline | v0.8 Plan 01-02 | Future: tested+dead = refactor candidate signal |
+| DEPENDS_ON exact slug-name matching only | v0.8 Plan 02-04 | Dep name must match ~/.axon/repos/ dir name exactly; no fuzzy match |
+| DEPENDS_ON placeholder File nodes | v0.8 Plan 02-04 | file_path='dep:{name}' — anchor for edge; no symbol children |
+| Cross-repo phase omitted from reindex_files() | v0.8 Plan 02-04 | DEPENDS_ON edges stable across incremental re-index; full analyze required |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
@@ -80,17 +84,17 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: 7ef1cd8 (feat(02-mcp-tools-dx): add axon_lint + fix community cohesion)
+Last commit: (phase commit pending — to be created during transition)
 Branch: main
-Uncommitted: STATE.md (loop closure update)
+Uncommitted: STATE.md, PROJECT.md, ROADMAP.md, 02-04-SUMMARY.md (phase transition files)
 
 ## Session Continuity
 
 Last session: 2026-03-07
-Stopped at: APPLY 02-04 complete (DEPENDS_ON edges + --progress, 935 tests); UNIFY not yet run; context depleted
-Next action: /paul:unify .paul/phases/02-mcp-tools-dx/02-04-PLAN.md
-Resume file: .paul/HANDOFF-2026-03-07.md
-Resume context: 02-01+02-02+02-03 UNIFY done; 02-04 APPLY done (UNIFY pending); 935 tests; clean git (2a78f69)
+Stopped at: v0.8 complete — UNIFY 02-04 done, phase transition done, milestone ready; phase commit pending
+Next action: /paul:milestone for v0.9 (or /paul:plan for first v0.9 phase after milestone init)
+Resume file: .paul/ROADMAP.md
+Resume context: 936 tests passing; v0.8 all shipped; pending: phase commit feat(02-mcp-tools-dx): complete
 
 ---
 *STATE.md — Updated after every significant action*

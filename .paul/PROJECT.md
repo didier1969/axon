@@ -12,9 +12,9 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 | Attribute | Value |
 |-----------|-------|
-| Version | 0.7.0 |
+| Version | 0.8.0 |
 | Status | Active Development |
-| Last Updated | 2026-03-04 |
+| Last Updated | 2026-03-07 |
 
 ## Requirements
 
@@ -78,11 +78,18 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] Attribute surfacing in `axon_context` (tested, exported, centrality) and `axon_query` (`[exported]`/`[untested]` tags) — v0.8 Phase 1, Plan 01-03
 - [x] Query expansion via `AXON_QUERY_EXPAND` env var (synonym heuristic, off by default) — v0.8 Phase 1, Plan 01-03
 
+- [x] `axon_find_usages` MCP tool — exhaustive call-site search across repo — v0.8 Phase 2, Plan 02-01
+- [x] MCP tool descriptions improved — expected input formats documented for all tools — v0.8 Phase 2, Plan 02-01
+- [x] `axon_lint` MCP tool — structural rules: high coupling, god classes, IMPORTS cycles — v0.8 Phase 2, Plan 02-02
+- [x] Community cohesion metric — real intra-edge density replaces placeholder 0.0 — v0.8 Phase 2, Plan 02-02
+- [x] `axon_summarize` MCP tool — LLM-ready file/module/class summary with symbol inventory — v0.8 Phase 2, Plan 02-03
+- [x] Multi-repo DEPENDS_ON edges — manifest parsing (pyproject.toml, package.json, go.mod) links indexed repos — v0.8 Phase 2, Plan 02-04
+- [x] `axon analyze --progress` / `AXON_ANALYZE_PROGRESS` — phase-completion output to stderr for CI/scripting — v0.8 Phase 2, Plan 02-04
+
 ### Active (In Progress)
-None — v0.8 Phase 1 complete.
+None — v0.8 complete.
 
 ### Planned (Next)
-- [ ] MCP tool descriptions improvement — deferred from v0.7
 
 ### Out of Scope
 - GUI / web interface — CLI and MCP-first
@@ -144,6 +151,10 @@ None — v0.8 Phase 1 complete.
 | kuzu_search._row_to_node fixed: 12-col offsets vs 14-col schema | Pre-existing bug caused content to read start_byte value; fixed with explicit column guards | 2026-03-05 | Active |
 | test_coverage phase before dead_code | Allows future: tested+dead_code = refactor candidate signal | 2026-03-05 | Active |
 | Python wildcard import: no bug found | names=['*'] correctly creates IMPORTS edge; regression test added as guard | 2026-03-05 | Active |
+| DEPENDS_ON exact slug-name matching | Dep name must match ~/.axon/repos/ dir name exactly; no fuzzy match or registry lookup | 2026-03-07 | Active |
+| DEPENDS_ON placeholder File nodes | file_path='dep:{name}' anchors edges without full repo context; queryable but no symbol children | 2026-03-07 | Active |
+| Cross-repo phase omitted from reindex_files() | DEPENDS_ON edges stable across incremental re-index; full axon analyze required to refresh | 2026-03-07 | Active |
+| go.mod last path segment only | github.com/gin-gonic/gin → "gin"; intentionally imprecise — sufficient for slug matching | 2026-03-07 | Active |
 
 ## Success Metrics
 
@@ -165,4 +176,4 @@ None — v0.8 Phase 1 complete.
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-03-05 — v0.8 Phase 1 complete (Graph Intelligence: TS generics, test coverage, PageRank centrality, axon_find_similar, attribute surfacing; 913 tests)*
+*Last updated: 2026-03-07 — v0.8 complete (Graph Intelligence + MCP Tools & DX: 7 plans, 936 tests)*
