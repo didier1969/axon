@@ -5,26 +5,26 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.8 Graph Intelligence & Search Quality — Phase 2: MCP Tools & DX (not started).
+**Current focus:** v0.8 Graph Intelligence & Search Quality — Phase 2: MCP Tools & DX — 2/4 plans complete.
 
 ## Current Position
 
 Milestone: v0.8 Graph Intelligence & Search Quality
 Phase: 2 of 2 — MCP Tools & DX — IN PROGRESS
-Plan: 02-02 APPLY complete, UNIFY pending; 02-03/04 not started
-Status: APPLY done, UNIFY needed for 02-02
-Last activity: 2026-03-06 — APPLY 02-02 (axon_lint + community cohesion, 924 tests, commit 7ef1cd8)
+Plan: 02-02 UNIFY complete; 02-03 not started
+Status: Ready for next PLAN (02-03)
+Last activity: 2026-03-07 — UNIFY 02-02 (axon_lint + community cohesion loop closed)
 
 Progress:
 - v0.7 Quality & Security: [██████████] 100% ✓
-- v0.8 Graph Intelligence & Search Quality: [██████░░░░] ~60% (Phase 1 complete; Phase 2: 1/4 plans done)
+- v0.8 Graph Intelligence & Search Quality: [███████░░░] ~70% (Phase 1 complete; Phase 2: 2/4 plans done)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ○     [02-02 executed, UNIFY pending]
+  ✓        ✓        ✓     [02-02 loop complete — ready for next PLAN]
 ```
 
 ## Accumulated Context
@@ -73,24 +73,24 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | Issue | Origin | Effort | Revisit |
 |-------|--------|--------|---------|
 | test_watcher.py at 28s (target was 15s) | v0.5 Plan 01-02 | S | accept as-is |
-| cohesion: 0.0 placeholder in communities | v0.5 Plan 02-02 | S | revisit if per-component modularity needed |
+| cohesion: 0.0 placeholder in communities | v0.5 Plan 02-02 | S | ✓ RESOLVED in v0.8 02-02 (real intra-edge density) |
 | No tests for byte offsets or axon_read_symbol | v0.7 Plan 02-01 | S | ✓ RESOLVED in 02-02 |
 
 ### Blockers/Concerns
 None.
 
 ### Git State
-Last commit: e7d6ff5 (feat(01-graph-intelligence): Phase 1 complete)
+Last commit: 7ef1cd8 (feat(02-mcp-tools-dx): add axon_lint + fix community cohesion)
 Branch: main
-Uncommitted: STATE.md (git hash update only)
+Uncommitted: STATE.md (loop closure update)
 
 ## Session Continuity
 
-Last session: 2026-03-06
-Stopped at: APPLY 02-02 complete (axon_lint + community cohesion); UNIFY not yet run; context limit
-Next action: /paul:unify .paul/phases/02-mcp-tools-dx/02-02-PLAN.md
-Resume file: .paul/HANDOFF-2026-03-06.md
-Resume context: Plans 02-01 (UNIFY done) + 02-02 (APPLY done, UNIFY pending); 924 tests; clean git state (7ef1cd8)
+Last session: 2026-03-07
+Stopped at: UNIFY 02-02 complete; loop closed; 924 tests passing
+Next action: /paul:apply .paul/phases/02-mcp-tools-dx/02-03-PLAN.md
+Resume file: .paul/phases/02-mcp-tools-dx/02-02-SUMMARY.md
+Resume context: Plans 02-01+02-02 UNIFY complete; 924 tests; ready for 02-03 (axon_summarize)
 
 ---
 *STATE.md — Updated after every significant action*
