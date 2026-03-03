@@ -34,9 +34,19 @@ def _is_test_class(name: str) -> bool:
 def _is_test_file(file_path: str) -> bool:
     """Return ``True`` if the file is in a test directory or is a test file.
 
-    Matches paths containing ``/tests/`` or files named ``test_*.py``.
+    Matches common test file conventions across Python, Ruby, JS/TS, and Elixir.
     """
-    return "/tests/" in file_path or "/test_" in file_path or file_path.endswith("conftest.py")
+    return (
+        "/tests/" in file_path
+        or "/test_" in file_path
+        or "__tests__/" in file_path
+        or "/spec/" in file_path
+        or file_path.endswith("conftest.py")
+        or file_path.endswith("_spec.rb")
+        or file_path.endswith("_test.exs")
+        or ".spec." in file_path
+        or ".test." in file_path
+    )
 
 def _is_dunder(name: str) -> bool:
     """Return ``True`` if *name* is a dunder (double-underscore) method.

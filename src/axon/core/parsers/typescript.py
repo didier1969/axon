@@ -344,6 +344,10 @@ class TypeScriptParser(LanguageParser):
             )
         )
 
+        type_params = node.child_by_field_name("type_parameters")
+        if type_params is not None:
+            self._extract_type_param_constraints(type_params, result)
+
         for child in node.children:
             if child.type == "class_heritage":
                 self._extract_class_heritage(name, child, result)
@@ -383,6 +387,10 @@ class TypeScriptParser(LanguageParser):
             )
         )
 
+        type_params = node.child_by_field_name("type_parameters")
+        if type_params is not None:
+            self._extract_type_param_constraints(type_params, result)
+
         for child in node.children:
             if child.type == "extends_type_clause":
                 for sub in child.children:
@@ -410,6 +418,10 @@ class TypeScriptParser(LanguageParser):
                 content=content,
             )
         )
+
+        type_params = node.child_by_field_name("type_parameters")
+        if type_params is not None:
+            self._extract_type_param_constraints(type_params, result)
 
     def _extract_import(self, node: Node, source: str, result: ParseResult) -> None:
         """Handle ES module import statements."""
@@ -567,29 +579,42 @@ class TypeScriptParser(LanguageParser):
 
                     for sub in param.children:
                         if sub.type == "type_annotation":
+                            line = sub.start_point[0] + 1
                             type_name = self._type_annotation_name(sub)
                             if type_name and type_name.lower() not in _BUILTIN_TYPES:
                                 result.type_refs.append(
                                     TypeRef(
                                         name=type_name,
                                         kind="param",
-                                        line=sub.start_point[0] + 1,
+                                        line=line,
                                         param_name=param_name,
                                     )
                                 )
+                            result.type_refs.extend(
+                                self._extract_generic_arg_refs(sub, "param", line, param_name)
+                            )
 
         # Return type: type_annotation directly on the function node (not inside params).
         for child in func_node.children:
             if child.type == "type_annotation":
+                line = child.start_point[0] + 1
                 type_name = self._type_annotation_name(child)
                 if type_name and type_name.lower() not in _BUILTIN_TYPES:
                     result.type_refs.append(
                         TypeRef(
                             name=type_name,
                             kind="return",
-                            line=child.start_point[0] + 1,
+                            line=line,
                         )
                     )
+                result.type_refs.extend(
+                    self._extract_generic_arg_refs(child, "return", line)
+                )
+
+        # Type parameter constraints: <T extends Schema> → TypeRef for Schema.
+        type_params = func_node.child_by_field_name("type_parameters")
+        if type_params is not None:
+            self._extract_type_param_constraints(type_params, result)
 
     def _extract_variable_type_annotation(
         self, declarator_node: Node, result: ParseResult
@@ -597,28 +622,90 @@ class TypeScriptParser(LanguageParser):
         """Extract type from ``const x: Config = ...``."""
         for child in declarator_node.children:
             if child.type == "type_annotation":
+                line = child.start_point[0] + 1
                 type_name = self._type_annotation_name(child)
                 if type_name and type_name.lower() not in _BUILTIN_TYPES:
                     result.type_refs.append(
                         TypeRef(
                             name=type_name,
                             kind="variable",
-                            line=child.start_point[0] + 1,
+                            line=line,
                         )
                     )
+                result.type_refs.extend(
+                    self._extract_generic_arg_refs(child, "variable", line)
+                )
 
     @staticmethod
     def _type_annotation_name(annotation_node: Node) -> str:
         """Return the simple type name from a ``type_annotation`` node.
 
-        Handles ``type_identifier``, ``predefined_type``, and ``identifier``
-        children.  For compound types (unions, generics, etc.) returns the
-        text of the first recognisable child.
+        Handles ``type_identifier``, ``predefined_type``, ``identifier``,
+        and ``generic_type`` children.  For generic types like ``Array<User>``
+        returns the base type name (``Array``).
         """
         for child in annotation_node.children:
             if child.type in ("type_identifier", "predefined_type", "identifier"):
                 return child.text.decode()
+            if child.type == "generic_type":
+                name_node = child.child_by_field_name("name")
+                if name_node is not None:
+                    return name_node.text.decode()
         return ""
+
+    @staticmethod
+    def _extract_generic_arg_refs(
+        annotation_node: Node, kind: str, line: int, param_name: str = ""
+    ) -> list[TypeRef]:
+        """Extract TypeRefs for type arguments inside generic annotations.
+
+        For ``Array<User>`` produces a TypeRef for ``User``.
+        For ``Map<string, User>`` produces a TypeRef for ``User`` (``string`` is builtin).
+        """
+        refs: list[TypeRef] = []
+        for child in annotation_node.children:
+            if child.type == "generic_type":
+                type_args = child.child_by_field_name("type_arguments")
+                if type_args is not None:
+                    for arg in type_args.children:
+                        if arg.type in ("type_identifier", "identifier"):
+                            name = arg.text.decode()
+                            if name.lower() not in _BUILTIN_TYPES:
+                                refs.append(
+                                    TypeRef(
+                                        name=name,
+                                        kind=kind,
+                                        line=line,
+                                        param_name=param_name,
+                                    )
+                                )
+        return refs
+
+    @staticmethod
+    def _extract_type_param_constraints(
+        type_params_node: Node, result: ParseResult
+    ) -> None:
+        """Extract TypeRefs for constraint types in type parameters.
+
+        For ``<T extends Schema, U extends Entity>`` adds TypeRefs for
+        ``Schema`` and ``Entity`` (the constraints, not the type variables).
+        """
+        for child in type_params_node.children:
+            if child.type == "type_parameter":
+                constraint = child.child_by_field_name("constraint")
+                if constraint is None:
+                    continue
+                for sub in constraint.children:
+                    if sub.type in ("type_identifier", "identifier"):
+                        name = sub.text.decode()
+                        if name.lower() not in _BUILTIN_TYPES:
+                            result.type_refs.append(
+                                TypeRef(
+                                    name=name,
+                                    kind="param",
+                                    line=sub.start_point[0] + 1,
+                                )
+                            )
 
     @staticmethod
     def _string_value(string_node: Node) -> str:

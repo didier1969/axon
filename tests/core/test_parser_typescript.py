@@ -375,3 +375,25 @@ module.exports = { Foo, Bar };
 
     assert "Foo" in result.exports
     assert "Bar" in result.exports
+
+
+# ---------------------------------------------------------------------------
+# Generic type args and type parameter constraints
+# ---------------------------------------------------------------------------
+
+
+def test_generic_type_annotation_args(ts_parser: TypeScriptParser) -> None:
+    """Array<UserData> param should create TypeRef for UserData."""
+    source = "function fetch(data: Array<UserData>): void {}"
+    result = ts_parser.parse(source, "test.ts")
+    names = {r.name for r in result.type_refs}
+    assert "UserData" in names
+
+
+def test_type_parameter_constraints(ts_parser: TypeScriptParser) -> None:
+    """<T extends Schema, U extends Entity> should create TypeRefs for constraints."""
+    source = "function process<T extends Schema, U extends Entity>(x: T): U { return x as unknown as U; }"
+    result = ts_parser.parse(source, "test.ts")
+    names = {r.name for r in result.type_refs}
+    assert "Schema" in names
+    assert "Entity" in names

@@ -198,6 +198,14 @@ class TestParseImports:
         assert "join" in imp.names
         assert "exists" in imp.names
 
+    def test_wildcard_import(self, parser: PythonParser) -> None:
+        result = parser.parse("from axon.mcp import *", "test.py")
+        assert len(result.imports) == 1
+        imp = result.imports[0]
+        assert imp.module == "axon.mcp"
+        assert imp.names == ["*"]
+        assert not imp.is_relative
+
 
 # ---------------------------------------------------------------------------
 # Function calls

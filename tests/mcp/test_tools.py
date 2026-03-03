@@ -28,6 +28,7 @@ from axon.mcp.tools import (
     handle_impact,
     handle_list_repos,
     handle_query,
+    handle_read_symbol,
 )
 
 
@@ -1000,3 +1001,24 @@ class TestCallersCap:
         caller_lines = [ln for ln in result.split("\n") if "-> c_" in ln]
         assert len(caller_lines) == 15
         assert "more" not in result
+
+
+# ---------------------------------------------------------------------------
+# handle_read_symbol tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandleReadSymbol:
+    def test_not_found(self, mock_storage: MagicMock) -> None:
+        mock_storage.execute_raw.return_value = []
+        result = handle_read_symbol(mock_storage, symbol="NonExistent")
+        assert "Symbol not found: NonExistent" in result
+
+    def test_fallback_to_stored_content(self, mock_storage: MagicMock) -> None:
+        """When start_byte=0 and end_byte=0, returns stored content with note."""
+        mock_storage.execute_raw.return_value = [
+            ["foo", "src/foo.py", 1, 0, 0, "def foo(): pass"]
+        ]
+        result = handle_read_symbol(mock_storage, symbol="foo")
+        assert "byte offsets unavailable" in result
+        assert "def foo(): pass" in result

@@ -339,6 +339,9 @@ class PythonParser(LanguageParser):
                 continue
             if past_import and child.type == "dotted_name":
                 names.append(child.text.decode("utf8"))
+            elif past_import and child.type == "wildcard_import":
+                names.append("*")
+                break
 
         result.imports.append(
             ImportInfo(

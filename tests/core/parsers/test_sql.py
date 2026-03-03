@@ -104,3 +104,17 @@ class TestSqlEdgeCases:
     def test_comments_only(self, parser: SqlParser) -> None:
         result = parser.parse("-- just a comment\n/* block */\n", "comments.sql")
         assert result.symbols == []
+
+
+class TestSqlByteOffsets:
+    def test_first_symbol_start_byte(self, parser: SqlParser) -> None:
+        SQL = "CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);\n"
+        result = parser.parse(SQL, "schema.sql")
+        assert result.symbols[0].start_byte == 0
+
+    def test_second_symbol_start_byte_positive(self, parser: SqlParser) -> None:
+        SQL = "CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);\n"
+        result = parser.parse(SQL, "schema.sql")
+        assert len(result.symbols) >= 2
+        assert result.symbols[1].start_byte > 0
+        assert result.symbols[1].end_byte > result.symbols[1].start_byte

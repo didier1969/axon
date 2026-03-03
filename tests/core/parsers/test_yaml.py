@@ -93,3 +93,12 @@ class TestYamlEdgeCases:
     def test_toml_extension_detection(self, parser: YamlParser) -> None:
         result = parser.parse(TOML_FIXTURE, "config.toml")
         assert len(result.symbols) > 0
+
+
+class TestYamlByteOffsets:
+    def test_second_key_start_byte_positive(self, parser: YamlParser) -> None:
+        result = parser.parse("name: axon\nversion: 1.0\n", "config.yaml")
+        symbols = result.symbols
+        assert len(symbols) >= 2
+        assert symbols[1].start_byte > 0
+        assert symbols[1].end_byte > symbols[1].start_byte

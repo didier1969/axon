@@ -12,7 +12,7 @@ from axon.core.graph.model import (
     RelType,
     generate_id,
 )
-from axon.core.ingestion.dead_code import process_dead_code
+from axon.core.ingestion.dead_code import _is_test_file, process_dead_code
 
 
 # ---------------------------------------------------------------------------
@@ -506,3 +506,26 @@ class TestProtocolConformance:
         partial_method = g.get_node(partial_method_id)
         assert partial_method is not None
         assert partial_method.is_dead is True
+
+
+# ---------------------------------------------------------------------------
+# _is_test_file tests
+# ---------------------------------------------------------------------------
+
+
+class TestIsTestFile:
+    @pytest.mark.parametrize("path,expected", [
+        ("src/tests/foo.py", True),
+        ("src/test_foo.py", True),
+        ("src/conftest.py", True),
+        ("spec/models/user_spec.rb", True),
+        ("__tests__/api.test.ts", True),
+        ("src/user_spec.rb", True),
+        ("src/user.spec.ts", True),
+        ("src/user.test.js", True),
+        ("src/auth_test.exs", True),
+        ("src/normal.py", False),
+        ("tests_helper.py", False),
+    ])
+    def test_is_test_file(self, path: str, expected: bool) -> None:
+        assert _is_test_file(path) == expected
