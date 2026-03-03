@@ -10,21 +10,21 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 ## Current Position
 
 Milestone: v0.7 Quality & Security
-Phase: 2 of 2 — Qualité, Parsers & Features — In Progress (2/4 plans done)
-Plan: 02-03 created, awaiting approval
-Status: PLAN created, ready for APPLY
-Last activity: 2026-03-03 — Created .paul/phases/02-qualite-parsers-features/02-03-PLAN.md
+Phase: 2 of 2 — Qualité, Parsers & Features — In Progress (3/4 plans done)
+Plan: 02-03 COMPLETE — ready for 02-04
+Status: Loop closed — 875 tests passing, all 4 AC met
+Last activity: 2026-03-03 — 02-03 complete: walker 512KB limit + compute_repo_slug (−34 LOC duplication)
 
 Progress:
 - v0.6 Daemon & Centralisation: [██████████] 100% ✓
-- v0.7 Quality & Security: [███████░░░] 70% (Phase 1 ✓, Phase 2 plan 2/4 ✓)
+- v0.7 Quality & Security: [████████░░] 80% (Phase 1 ✓, Phase 2 plan 3/4 ✓)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ✓        ✓        ○     [APPLY complete, ready for UNIFY]
+  ✓        ✓        ✓     [Plan 02-03 complete — ready for 02-04]
 ```
 
 ## Accumulated Context
@@ -69,7 +69,7 @@ PLAN ──▶ APPLY ──▶ UNIFY
 |-------|--------|--------|---------|
 | test_watcher.py at 28s (target was 15s) | v0.5 Plan 01-02 | S | accept as-is |
 | cohesion: 0.0 placeholder in communities | v0.5 Plan 02-02 | S | revisit if per-component modularity needed |
-| No tests for byte offsets or axon_read_symbol | v0.7 Plan 02-01 | S | add in 02-02 or standalone task |
+| No tests for byte offsets or axon_read_symbol | v0.7 Plan 02-01 | S | ✓ RESOLVED in 02-02 |
 
 ### Blockers/Concerns
 None.
@@ -82,10 +82,10 @@ Uncommitted: PAUL files (STATE.md, 02-01-SUMMARY.md)
 ## Session Continuity
 
 Last session: 2026-03-03
-Stopped at: 02-03 APPLY complete — 875 tests passing, all 4 AC met
-Next action: /paul:unify .paul/phases/02-qualite-parsers-features/02-03-PLAN.md
-Resume file: .paul/phases/02-qualite-parsers-features/02-03-PLAN.md
-Resume context: Phase 2 has 2 plans remaining (02-03 unify, 02-04); walker 512KB + compute_repo_slug done
+Stopped at: 02-03 UNIFY complete — 875 tests, commits 84dd27c + 63a9b66
+Next action: /paul:plan for 02-04 (socket buffer readline(), axon_batch partial failure, AXON_LRU_SIZE)
+Resume file: .paul/HANDOFF-2026-03-03b.md
+Resume context: Phase 2 has 1 plan remaining (02-04); loop fully closed
 
 ---
 *STATE.md — Updated after every significant action*
