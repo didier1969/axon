@@ -473,3 +473,92 @@ class TestEdgeCases:
         assert "Worker" in text
         assert "transform" in text
         assert "Data" in text
+
+
+# ---------------------------------------------------------------------------
+# Tests — Content inclusion (AC-1)
+# ---------------------------------------------------------------------------
+
+
+class TestContentInclusion:
+    """generate_text includes source snippet for function/class, not file."""
+
+    def test_function_includes_content_snippet(self) -> None:
+        """A function with content includes 'source:' in embedding text."""
+        graph = KnowledgeGraph()
+        fn = GraphNode(
+            id=generate_id(NodeLabel.FUNCTION, "src/auth.py", "do_work"),
+            label=NodeLabel.FUNCTION,
+            name="do_work",
+            file_path="src/auth.py",
+            content="def do_work(x):\n    return x * 2\n",
+        )
+        graph.add_node(fn)
+
+        text = generate_text(fn, graph)
+
+        assert "source:" in text
+        assert "def do_work" in text
+
+    def test_function_content_truncated_to_400(self) -> None:
+        """Content in embedding text is truncated to ≤400 chars."""
+        graph = KnowledgeGraph()
+        long_body = "x = 1\n" * 100  # 600 chars
+        fn = GraphNode(
+            id=generate_id(NodeLabel.FUNCTION, "src/app.py", "long_fn"),
+            label=NodeLabel.FUNCTION,
+            name="long_fn",
+            file_path="src/app.py",
+            content=long_body,
+        )
+        graph.add_node(fn)
+
+        text = generate_text(fn, graph)
+
+        # Extract the source section
+        source_idx = text.index("source:\n") + len("source:\n")
+        source_part = text[source_idx:]
+        assert len(source_part) <= 400
+
+    def test_function_no_content_no_source_line(self) -> None:
+        """Function with empty content does not produce 'source:' line."""
+        graph = KnowledgeGraph()
+        fn = _node(NodeLabel.FUNCTION, "bare_fn", file_path="src/app.py")
+        graph.add_node(fn)
+
+        text = generate_text(fn, graph)
+
+        assert "source:" not in text
+
+    def test_class_includes_content_snippet(self) -> None:
+        """A class with content includes 'source:' in embedding text."""
+        graph = KnowledgeGraph()
+        cls = GraphNode(
+            id=generate_id(NodeLabel.CLASS, "src/models.py", "User"),
+            label=NodeLabel.CLASS,
+            name="User",
+            file_path="src/models.py",
+            content="class User:\n    name: str\n    email: str\n",
+        )
+        graph.add_node(cls)
+
+        text = generate_text(cls, graph)
+
+        assert "source:" in text
+        assert "class User" in text
+
+    def test_file_node_does_not_include_content(self) -> None:
+        """FILE nodes must NOT include content to avoid embedding huge text."""
+        graph = KnowledgeGraph()
+        file_node = GraphNode(
+            id=generate_id(NodeLabel.FILE, "src/auth.py", "auth.py"),
+            label=NodeLabel.FILE,
+            name="auth.py",
+            file_path="src/auth.py",
+            content="import os\nimport sys\n" * 50,
+        )
+        graph.add_node(file_node)
+
+        text = generate_text(file_node, graph)
+
+        assert "source:" not in text

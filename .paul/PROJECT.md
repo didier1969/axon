@@ -67,13 +67,21 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 - [x] `AXON_LRU_SIZE` env var for daemon LRU maxsize (CLI `--max-dbs` overrides) — v0.7 Phase 2, Plan 02-04
 - [x] Socket buffer: `makefile("rb").readline()` replaces `recv(4096)` loop — v0.7 Phase 2, Plan 02-04
 
+- [x] TypeScript USES_TYPE edges for class properties, interface members, generic base classes — v0.8 Phase 1, Plan 01-01
+- [x] Dead code test pattern exemptions (Go `_test.go`, `spec/` root paths) — v0.8 Phase 1, Plan 01-01
+- [x] Python wildcard imports `from x import *` confirmed correct (regression test added) — v0.8 Phase 1, Plan 01-01
+- [x] `tested: bool` on GraphNode — marked via CALLS/IMPORTS from test files — v0.8 Phase 1, Plan 01-02
+- [x] `centrality: float` on GraphNode — PageRank on CALLS+IMPORTS graph (igraph) — v0.8 Phase 1, Plan 01-02
+- [x] Centrality boost in hybrid search (`score * (1 + centrality)`) — v0.8 Phase 1, Plan 01-02
+- [x] Code-aware embedding text (source snippet in `generate_text()` for function/class nodes) — v0.8 Phase 1, Plan 01-03
+- [x] `axon_find_similar` MCP tool — semantic duplicate detection via stored embeddings — v0.8 Phase 1, Plan 01-03
+- [x] Attribute surfacing in `axon_context` (tested, exported, centrality) and `axon_query` (`[exported]`/`[untested]` tags) — v0.8 Phase 1, Plan 01-03
+- [x] Query expansion via `AXON_QUERY_EXPAND` env var (synonym heuristic, off by default) — v0.8 Phase 1, Plan 01-03
+
 ### Active (In Progress)
-None — v0.7 complete.
+None — v0.8 Phase 1 complete.
 
 ### Planned (Next)
-- [ ] Dead code test pattern fixes (spec/, __tests__, _spec.rb) — deferred from v0.7
-- [ ] TypeScript generics extraction for USES_TYPE — deferred from v0.7
-- [ ] Python wildcard imports (from x import *) — deferred from v0.7
 - [ ] MCP tool descriptions improvement — deferred from v0.7
 
 ### Out of Scope
@@ -132,6 +140,10 @@ None — v0.7 complete.
 | Parameterized KuzuDB queries | execute_raw(query, parameters={"key": val}) — no f-string Cypher, no N+1 | 2026-03-02 | Active |
 | Drop-oldest strategy for watcher queue | maxsize=100; overflow drops oldest batch (most recent = most relevant) | 2026-03-02 | Active |
 | _make_snippet() semantic truncation | 400-char limit, newline-aware, signature-preferred; replaces content[:200] slice | 2026-03-02 | Active |
+| isinstance(float) guard in hybrid centrality boost | MagicMock.centrality is truthy but not float — guard prevents corrupting RRF scores in tests | 2026-03-05 | Active |
+| kuzu_search._row_to_node fixed: 12-col offsets vs 14-col schema | Pre-existing bug caused content to read start_byte value; fixed with explicit column guards | 2026-03-05 | Active |
+| test_coverage phase before dead_code | Allows future: tested+dead_code = refactor candidate signal | 2026-03-05 | Active |
+| Python wildcard import: no bug found | names=['*'] correctly creates IMPORTS edge; regression test added as guard | 2026-03-05 | Active |
 
 ## Success Metrics
 
@@ -153,4 +165,4 @@ None — v0.7 complete.
 
 ---
 *PROJECT.md — Updated when requirements or context change*
-*Last updated: 2026-03-04 — v0.7 complete (Phase 1: security hardening; Phase 2: parser quality, byte offsets, readline, BATCH WARNING, AXON_LRU_SIZE; 884 tests, ~81/100 audit score)*
+*Last updated: 2026-03-05 — v0.8 Phase 1 complete (Graph Intelligence: TS generics, test coverage, PageRank centrality, axon_find_similar, attribute surfacing; 913 tests)*

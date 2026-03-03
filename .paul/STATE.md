@@ -5,26 +5,26 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.8 Graph Intelligence & Search Quality — Phase 1: Graph Intelligence (not started).
+**Current focus:** v0.8 Graph Intelligence & Search Quality — Phase 2: MCP Tools & DX (not started).
 
 ## Current Position
 
 Milestone: v0.8 Graph Intelligence & Search Quality
-Phase: 1 of 2 — Graph Intelligence
+Phase: 2 of 2 — MCP Tools & DX — NOT STARTED
 Plan: Not started
-Status: Ready to plan
-Last activity: 2026-03-04 — Milestone created, phase directories initialized
+Status: Ready to plan Phase 2
+Last activity: 2026-03-05 — Phase 1 (Graph Intelligence) UNIFY complete; 913 tests passing
 
 Progress:
 - v0.7 Quality & Security: [██████████] 100% ✓
-- v0.8 Graph Intelligence & Search Quality: [░░░░░░░░░░] 0%
+- v0.8 Graph Intelligence & Search Quality: [█████░░░░░] ~50% (Phase 1 complete, 1/2 phases)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ○        ○        ○     [Ready for first PLAN]
+  ✓        ✓        ✓     [Phase 1 complete — ready to plan Phase 2]
 ```
 
 ## Accumulated Context
@@ -63,6 +63,11 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | Drop-oldest strategy for bounded watcher queue | v0.7 Plan 01-01 | asyncio.Queue(maxsize=100); newest events preserved on overflow |
 | _make_snippet() semantic truncation | v0.7 Plan 01-01 | 400-char limit, newline-aware, signature-preferred; replaces content[:200] |
 | Count-before-delete in remove_nodes_by_file | v0.7 Plan 01-01 | KuzuDB lacks DETACH DELETE…RETURNING; COUNT per table then DELETE |
+| Python wildcard import: no bug, regression test added | v0.8 Plan 01-01 | names=['*'] correctly creates IMPORTS edge |
+| _extract_class_heritage() unified for generic base types | v0.8 Plan 01-01 | Reuses _extract_generic_arg_refs for extends Base<User> |
+| isinstance(float) guard in hybrid centrality boost | v0.8 Plan 01-02 | MagicMock.centrality truthy but not float — guard prevents corrupted RRF scores |
+| kuzu_search._row_to_node 12-col bug fixed | v0.8 Plan 01-02 | Pre-existing: start_byte was reading content slot; fixed with explicit column guards |
+| test_coverage before dead_code in pipeline | v0.8 Plan 01-02 | Future: tested+dead = refactor candidate signal |
 
 ### Deferred Issues
 | Issue | Origin | Effort | Revisit |
@@ -75,17 +80,17 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: 1d76672 (chore: STATE.md final git hash after v0.7 milestone close)
+Last commit: (phase commit pending — see session continuity)
 Branch: main
-Uncommitted: STATE.md, ROADMAP.md (v0.8 milestone created)
+Uncommitted: Phase 1 source + tests + .paul files (commit at end of UNIFY)
 
 ## Session Continuity
 
-Last session: 2026-03-04
-Stopped at: v0.8 milestone finalisé — scope arrêté, handoff créé, session terminée
-Next action: /paul:plan pour Phase 1 (Graph Intelligence)
-Resume file: .paul/HANDOFF-2026-03-04b.md
-Resume context: v0.8 Phase 1 = 10 items (TS generics, wildcard imports, test coverage, API surface, dead code patterns, hybrid BM25+RRF, query expansion, PageRank, smart chunking, find_similar)
+Last session: 2026-03-05
+Stopped at: Phase 1 (Graph Intelligence) UNIFY complete — 913 tests passing
+Next action: /paul:plan (Phase 2 — MCP Tools & DX)
+Resume file: .paul/ROADMAP.md
+Resume context: Phase 1 complete (3/3 plans: parser completeness, node enrichment, intelligence layer); Phase 2 items in ROADMAP.md
 
 ---
 *STATE.md — Updated after every significant action*

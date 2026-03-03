@@ -37,6 +37,7 @@ from axon.mcp.tools import (
     handle_cypher,
     handle_dead_code,
     handle_detect_changes,
+    handle_find_similar,
     handle_impact,
     handle_list_repos,
     handle_query,
@@ -413,6 +414,41 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="axon_find_similar",
+        description=(
+            "Find symbols semantically similar to a given symbol using stored embeddings. "
+            "Use for semantic duplicate detection or to discover related functions/classes. "
+            "Returns up to N symbols most semantically similar, with similarity scores. "
+            "Requires axon analyze to have been run with embeddings enabled."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Name of the symbol to find similar symbols for.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of similar symbols to return (default 10).",
+                    "default": 10,
+                },
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "Name of an indexed repository to query (from axon_list_repos). "
+                        "Defaults to the current directory. Optional."
+                    ),
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
+            },
+            "required": ["symbol"],
+        },
+    ),
+    Tool(
         name="axon_batch",
         description=(
             "Execute multiple axon tool calls in a single round-trip. "
@@ -491,6 +527,13 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
             storage,
             symbol=arguments.get("symbol", ""),
             file=arguments.get("file"),
+            repo=arguments.get("repo"),
+        )
+    elif name == "axon_find_similar":
+        return handle_find_similar(
+            storage,
+            symbol=arguments.get("symbol", ""),
+            limit=arguments.get("limit", 10),
             repo=arguments.get("repo"),
         )
     else:

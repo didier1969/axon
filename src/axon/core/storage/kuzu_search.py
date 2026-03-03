@@ -48,16 +48,18 @@ def _make_snippet(content: str, signature: str, max_chars: int = 400) -> str:
 def _row_to_node(row: list[Any], node_id: str | None = None) -> GraphNode | None:
     """Convert a result row from ``RETURN n.*`` into a GraphNode.
 
-    Column order matches the property definition:
-    0=id, 1=name, 2=file_path, 3=start_line, 4=end_line,
-    5=content, 6=signature, 7=language, 8=class_name,
-    9=is_dead, 10=is_entry_point, 11=is_exported
+    Handles three schema versions:
+    - 12-col (legacy): id,name,file_path,start_line,end_line,
+        content,signature,language,class_name,is_dead,is_entry_point,is_exported
+    - 14-col (v0.6+): adds start_byte,end_byte at positions 5,6
+    - 16-col (v0.8+): adds tested,centrality at positions 14,15
     """
     try:
         nid = node_id or row[0]
         prefix = nid.split(":", 1)[0]
         label = _LABEL_MAP.get(prefix, NodeLabel.FILE)
 
+        has_bytes = len(row) > 6
         return GraphNode(
             id=row[0],
             label=label,
@@ -65,17 +67,38 @@ def _row_to_node(row: list[Any], node_id: str | None = None) -> GraphNode | None
             file_path=row[2] or "",
             start_line=row[3] or 0,
             end_line=row[4] or 0,
-            content=row[5] or "",
-            signature=row[6] or "",
-            language=row[7] or "",
-            class_name=row[8] or "",
-            is_dead=bool(row[9]),
-            is_entry_point=bool(row[10]),
-            is_exported=bool(row[11]),
+            start_byte=row[5] if has_bytes else 0,
+            end_byte=row[6] if has_bytes else 0,
+            content=(row[7] if has_bytes else row[5]) or "",
+            signature=(row[8] if has_bytes else row[6]) or "",
+            language=(row[9] if has_bytes else row[7]) or "",
+            class_name=(row[10] if has_bytes else row[8]) or "",
+            is_dead=bool(row[11] if has_bytes else row[9]),
+            is_entry_point=bool(row[12] if has_bytes else row[10]),
+            is_exported=bool(row[13] if has_bytes else row[11]),
+            tested=bool(row[14]) if len(row) > 14 else False,
+            centrality=float(row[15]) if len(row) > 15 else 0.0,
         )
     except (IndexError, KeyError):
         logger.debug("Failed to convert row to GraphNode: %s", row, exc_info=True)
         return None
+
+
+def get_embedding(conn: kuzu.Connection, node_id: str) -> list[float] | None:
+    """Return the stored embedding vector for *node_id*, or None if absent."""
+    try:
+        result = conn.execute(
+            "MATCH (e:Embedding) WHERE e.node_id = $nid RETURN e.vec",
+            parameters={"nid": node_id},
+        )
+        if result.has_next():
+            row = result.get_next()
+            vec = row[0]
+            if vec is not None:
+                return list(vec)
+    except RuntimeError:
+        logger.debug("get_embedding failed for node_id=%s", node_id, exc_info=True)
+    return None
 
 
 def exact_name_search(

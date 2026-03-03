@@ -8,17 +8,17 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 **v0.8 Graph Intelligence & Search Quality**
 Status: 🚧 In Progress
-Phases: 0 of 2 complete
+Phases: 1 of 2 complete
 
 | Phase | Name | Plans | Status | Completed |
 |-------|------|-------|--------|-----------|
-| 1 | Graph Intelligence | TBD | Not started | - |
-| 2 | MCP Tools & DX | TBD | Not started | - |
+| 1 | Graph Intelligence | 3/3 | ✅ Complete | 2026-03-05 |
+| 2 | MCP Tools & DX | TBD | 🔵 Next | - |
 
 ### Phase 1: Graph Intelligence
 
 Focus: Boucher les trous dans le graphe + recherche hybride inspirée de qmd (fondations)
-Plans: TBD (defined during /paul:plan)
+Plans: 01-01 (Parser Completeness), 01-02 (Node Enrichment), 01-03 (Intelligence Layer)
 
 Items:
 - TypeScript generics → USES_TYPE edges (`Array<T>`, `Promise<User>`, etc.)
@@ -137,4 +137,4 @@ Phase 2: axon_read_symbol O(1) MCP tool, sql/yaml byte offsets, parser quality t
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-03-04 — v0.7 complete (Quality & Security: 2 phases, 5 plans, 884 tests)*
+*Last updated: 2026-03-05 — v0.8 Phase 1 complete (Graph Intelligence: 3 plans, 913 tests)*

@@ -83,6 +83,9 @@ class GraphNode:
     is_entry_point: bool = False
     is_exported: bool = False
 
+    tested: bool = False
+    centrality: float = 0.0
+
     properties: dict[str, Any] = field(default_factory=dict)
 
 @dataclass

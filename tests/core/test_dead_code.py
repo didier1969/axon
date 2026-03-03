@@ -524,8 +524,14 @@ class TestIsTestFile:
         ("src/user.spec.ts", True),
         ("src/user.test.js", True),
         ("src/auth_test.exs", True),
+        # Go test files (suffix convention)
+        ("pkg/server/handler_test.go", True),
+        ("internal/parser/parser_test.go", True),
+        # spec/ at repo root (no leading slash)
+        ("spec/server_spec.rb", True),
         ("src/normal.py", False),
         ("tests_helper.py", False),
+        ("pkg/server/handler.go", False),
     ])
     def test_is_test_file(self, path: str, expected: bool) -> None:
         assert _is_test_file(path) == expected

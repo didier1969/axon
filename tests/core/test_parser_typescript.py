@@ -397,3 +397,31 @@ def test_type_parameter_constraints(ts_parser: TypeScriptParser) -> None:
     names = {r.name for r in result.type_refs}
     assert "Schema" in names
     assert "Entity" in names
+
+
+def test_class_property_type_refs(ts_parser: TypeScriptParser) -> None:
+    """Class property type annotations should create TypeRefs."""
+    source = "class Repo { items: Array<User>; config: Config; }"
+    result = ts_parser.parse(source, "test.ts")
+    names = {r.name for r in result.type_refs}
+    assert "User" in names
+    assert "Config" in names
+
+
+def test_interface_member_type_refs(ts_parser: TypeScriptParser) -> None:
+    """Interface member type annotations should create TypeRefs."""
+    source = "interface IService { bar: User; count: number; }"
+    result = ts_parser.parse(source, "test.ts")
+    names = {r.name for r in result.type_refs}
+    assert "User" in names
+    assert "number" not in names  # builtin filtered
+
+
+def test_generic_base_class_type_ref(ts_parser: TypeScriptParser) -> None:
+    """Generic base class type args should create TypeRefs."""
+    source = "class UserRepo extends Repository<User> {}"
+    result = ts_parser.parse(source, "test.ts")
+    names = {r.name for r in result.type_refs}
+    assert "User" in names
+    # heritage should also record the base class name
+    assert ("UserRepo", "extends", "Repository") in result.heritage

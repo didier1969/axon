@@ -25,6 +25,7 @@ from axon.mcp.tools import (
     handle_cypher,
     handle_dead_code,
     handle_detect_changes,
+    handle_find_similar,
     handle_impact,
     handle_list_repos,
     handle_query,
@@ -1022,3 +1023,150 @@ class TestHandleReadSymbol:
         result = handle_read_symbol(mock_storage, symbol="foo")
         assert "byte offsets unavailable" in result
         assert "def foo(): pass" in result
+
+
+# ---------------------------------------------------------------------------
+# axon_find_similar tests
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Attribute surfacing in axon_context (AC-3)
+# ---------------------------------------------------------------------------
+
+
+class TestContextAttributeSurfacing:
+    def test_shows_tested_exported_centrality(self, mock_storage: MagicMock) -> None:
+        """axon_context shows tested/exported/centrality attributes."""
+        mock_storage.get_node.return_value = GraphNode(
+            id="function:src/auth.py:validate",
+            label=NodeLabel.FUNCTION,
+            name="validate",
+            file_path="src/auth.py",
+            start_line=10,
+            end_line=30,
+            tested=True,
+            is_exported=True,
+            centrality=0.15,
+        )
+        result = handle_context(mock_storage, "validate")
+
+        assert "tested=yes" in result
+        assert "exported=yes" in result
+        assert "0.150" in result
+
+    def test_shows_no_centrality_when_zero(self, mock_storage: MagicMock) -> None:
+        """centrality is omitted from Attributes line when 0.0."""
+        mock_storage.get_node.return_value = GraphNode(
+            id="function:src/auth.py:validate",
+            label=NodeLabel.FUNCTION,
+            name="validate",
+            file_path="src/auth.py",
+            start_line=10,
+            end_line=30,
+            tested=False,
+            is_exported=False,
+            centrality=0.0,
+        )
+        result = handle_context(mock_storage, "validate")
+
+        assert "tested=no" in result
+        assert "exported=no" in result
+        assert "centrality=" not in result
+
+
+class TestHandleFindSimilar:
+    def test_returns_similar_symbols(self, mock_storage: MagicMock) -> None:
+        """Returns formatted list excluding the queried symbol itself."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = [
+            SearchResult(
+                node_id="function:src/parser.py:parse_file",
+                score=1.0,
+                node_name="parse_file",
+                file_path="src/parser.py",
+                label="function",
+            )
+        ]
+        mock_storage.get_embedding.return_value = [0.1, 0.2, 0.3]
+        mock_storage.vector_search.return_value = [
+            SearchResult(
+                node_id="function:src/parser.py:parse_file",  # self — should be excluded
+                score=1.0,
+                node_name="parse_file",
+                file_path="src/parser.py",
+                label="function",
+            ),
+            SearchResult(
+                node_id="function:src/lexer.py:tokenize",
+                score=0.87,
+                node_name="tokenize",
+                file_path="src/lexer.py",
+                label="function",
+                snippet="def tokenize(src): ...",
+            ),
+        ]
+
+        result = handle_find_similar(mock_storage, "parse_file")
+
+        assert "Similar to:" in result
+        assert "parse_file" in result
+        # queried symbol excluded from results list
+        assert "tokenize" in result
+        assert "87%" in result
+
+    def test_no_embedding_returns_error(self, mock_storage: MagicMock) -> None:
+        """Returns descriptive error when no embedding exists."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = [
+            SearchResult(
+                node_id="function:src/auth.py:validate",
+                score=1.0,
+                node_name="validate",
+                file_path="src/auth.py",
+                label="function",
+            )
+        ]
+        mock_storage.get_embedding.return_value = None
+
+        result = handle_find_similar(mock_storage, "validate")
+
+        assert "No embedding found" in result
+
+    def test_symbol_not_found(self, mock_storage: MagicMock) -> None:
+        """Returns not-found message when symbol lookup fails."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = []
+
+        result = handle_find_similar(mock_storage, "ghost_func")
+
+        assert "not found" in result.lower()
+
+    def test_self_excluded_from_results(self, mock_storage: MagicMock) -> None:
+        """The queried symbol does not appear in the results list."""
+        mock_storage.exact_name_search.return_value = []
+        node_id = "function:src/app.py:my_func"
+        mock_storage.fts_search.return_value = [
+            SearchResult(
+                node_id=node_id,
+                score=1.0,
+                node_name="my_func",
+                file_path="src/app.py",
+                label="function",
+            )
+        ]
+        mock_storage.get_embedding.return_value = [0.5, 0.5]
+        mock_storage.vector_search.return_value = [
+            SearchResult(
+                node_id=node_id,
+                score=1.0,
+                node_name="my_func",
+                file_path="src/app.py",
+                label="function",
+            ),
+        ]
+
+        result = handle_find_similar(mock_storage, "my_func")
+
+        # With only self returned and filtered out, no similar found
+        assert "No similar symbols found" in result

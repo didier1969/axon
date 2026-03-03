@@ -83,6 +83,11 @@ def _text_for_callable(node: GraphNode, graph: KnowledgeGraph) -> str:
     if type_names:
         lines.append(f"uses types: {', '.join(type_names)}")
 
+    if node.content:
+        code_snippet = node.content[:400].rstrip()
+        if code_snippet:
+            lines.append(f"source:\n{code_snippet}")
+
     return "\n".join(lines)
 
 def _text_for_class(
@@ -107,6 +112,11 @@ def _text_for_class(
     iface_names = _target_names(node.id, RelType.IMPLEMENTS, graph)
     if iface_names:
         lines.append(f"implements: {', '.join(iface_names)}")
+
+    if node.content:
+        code_snippet = node.content[:400].rstrip()
+        if code_snippet:
+            lines.append(f"source:\n{code_snippet}")
 
     return "\n".join(lines)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -197,6 +198,17 @@ def _group_by_process(
     return groups
 
 
+def _result_tags(r: Any) -> str:
+    """Build compact inline quality tags for a search result."""
+    tags: list[str] = []
+    if getattr(r, "is_exported", False):
+        tags.append("[exported]")
+    # Only flag untested for function/method labels
+    if not getattr(r, "tested", True) and r.label in ("function", "method"):
+        tags.append("[untested]")
+    return " " + " ".join(tags) if tags else ""
+
+
 def _format_query_results(results: list, groups: dict[str, list]) -> str:
     """Format search results with process grouping.
 
@@ -213,7 +225,8 @@ def _format_query_results(results: list, groups: dict[str, list]) -> str:
         lines.append(f"=== {process_name} ===")
         for r in proc_results:
             label = r.label.title() if r.label else "Unknown"
-            lines.append(f"{counter}. {r.node_name} ({label}) -- {r.file_path}")
+            tags = _result_tags(r)
+            lines.append(f"{counter}. {r.node_name} ({label}) -- {r.file_path}{tags}")
             if r.snippet:
                 snippet = r.snippet[:200].replace("\n", " ").strip()
                 lines.append(f"   {snippet}")
@@ -225,7 +238,8 @@ def _format_query_results(results: list, groups: dict[str, list]) -> str:
             lines.append("=== Other results ===")
         for r in ungrouped:
             label = r.label.title() if r.label else "Unknown"
-            lines.append(f"{counter}. {r.node_name} ({label}) -- {r.file_path}")
+            tags = _result_tags(r)
+            lines.append(f"{counter}. {r.node_name} ({label}) -- {r.file_path}{tags}")
             if r.snippet:
                 snippet = r.snippet[:200].replace("\n", " ").strip()
                 lines.append(f"   {snippet}")
@@ -234,6 +248,37 @@ def _format_query_results(results: list, groups: dict[str, list]) -> str:
 
     lines.append("Next: Use context() on a specific symbol for the full picture.")
     return "\n".join(lines)
+
+
+# Synonym map for simple heuristic query expansion (v0.8 placeholder).
+# LLM-based expansion deferred to v0.9.
+_EXPANSION_SYNONYMS: dict[str, str] = {
+    "find": "search locate",
+    "create": "build generate make",
+    "delete": "remove destroy",
+    "update": "modify change edit",
+    "read": "fetch load get",
+    "write": "save store persist",
+    "parse": "decode interpret",
+    "validate": "check verify",
+    "send": "emit dispatch publish",
+    "receive": "consume listen handle",
+}
+
+
+def _expand_query(query: str) -> str:
+    """Return a heuristic expansion of *query* using synonym substitution.
+
+    Appends synonym terms for the first matching keyword found.  Returns
+    the original query if no keyword matches.
+    """
+    words = query.lower().split()
+    for word in words:
+        base = word.rstrip("s")  # crude stemming: "deletes" → "delete"
+        for keyword, synonyms in _EXPANSION_SYNONYMS.items():
+            if word == keyword or base == keyword:
+                return f"{query} {synonyms}"
+    return query
 
 
 def handle_query(
@@ -262,6 +307,9 @@ def handle_query(
         if _repo_storage is None:
             return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
         storage = _repo_storage
+
+    if os.getenv("AXON_QUERY_EXPAND"):
+        query = _expand_query(query)
 
     try:
         query_embedding: list[float] | None = None
@@ -381,6 +429,15 @@ def handle_context(storage: StorageBackend, symbol: str, repo: str | None = None
 
         if node.signature:
             lines.append(f"Signature: {node.signature}")
+
+        # Attributes: tested, exported, centrality
+        tested_str = "yes" if getattr(node, "tested", False) else "no"
+        exported_str = "yes" if getattr(node, "is_exported", False) else "no"
+        centrality = getattr(node, "centrality", 0.0) or 0.0
+        attr_line = f"Attributes: tested={tested_str}  exported={exported_str}"
+        if centrality > 0.0:
+            attr_line += f"  centrality={centrality:.3f}"
+        lines.append(attr_line)
 
         if node.is_dead:
             lines.append("Status: DEAD CODE (unreachable)")
@@ -706,6 +763,82 @@ def handle_read_symbol(
     note = "(byte offsets unavailable, using stored content)"
     content_text = stored_content or "(no content stored)"
     return f"# {sym_name} — {file_path}:{start_line}\n{note}\n\n{content_text}"
+
+
+def handle_find_similar(
+    storage: StorageBackend,
+    symbol: str,
+    limit: int = 10,
+    repo: str | None = None,
+) -> str:
+    """Find symbols semantically similar to *symbol* using stored embeddings.
+
+    Args:
+        storage: The storage backend.
+        symbol: Name of the symbol to find similar symbols for.
+        limit: Maximum number of similar symbols to return (default 10).
+        repo: Optional repository slug to query instead of the current directory.
+
+    Returns:
+        Formatted list of semantically similar symbols with similarity scores.
+    """
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
+        storage = _repo_storage
+
+    try:
+        # Resolve symbol to a node
+        results = _resolve_symbol(storage, symbol, limit=5)
+        if not results:
+            return f"Symbol '{symbol}' not found."
+
+        node_id = results[0].node_id
+        node_name = results[0].node_name
+        node_file = results[0].file_path
+
+        # Get the stored embedding for the node
+        embedding: list[float] | None = None
+        if hasattr(storage, "get_embedding"):
+            embedding = storage.get_embedding(node_id)
+
+        if not embedding:
+            return (
+                f"No embedding found for '{symbol}'. "
+                "Run axon analyze first to generate embeddings."
+            )
+
+        # Find similar symbols (fetch limit+1 to exclude self)
+        similar = storage.vector_search(embedding, limit + 1)
+
+        # Filter out the queried symbol itself
+        similar = [r for r in similar if r.node_id != node_id][:limit]
+
+        if not similar:
+            return f"No similar symbols found for '{symbol}'."
+
+        lines = [f"Similar to: {node_name} ({node_file})"]
+        lines.append("─" * 45)
+        for i, r in enumerate(similar, 1):
+            label = r.label.title() if r.label else "Unknown"
+            sim_pct = int(r.score * 100)
+            lines.append(f"{i}. {r.node_name} ({label}) — {r.file_path}  [sim: {sim_pct}%]")
+            if r.snippet:
+                snippet = r.snippet[:120].replace("\n", " ").strip()
+                lines.append(f"   {snippet}")
+
+        result = "\n".join(lines)
+    finally:
+        if _repo_storage is not None:
+            try:
+                _repo_storage.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    log_event("find_similar", symbol=symbol[:200], repo=_repo_name_from_storage(storage, repo))
+    return result
 
 
 _WRITE_KEYWORDS = re.compile(

@@ -351,19 +351,30 @@ class TypeScriptParser(LanguageParser):
         for child in node.children:
             if child.type == "class_heritage":
                 self._extract_class_heritage(name, child, result)
+            elif child.type == "class_body":
+                for member in child.children:
+                    if member.type == "public_field_definition":
+                        self._extract_variable_type_annotation(member, result)
 
     def _extract_class_heritage(
         self, class_name: str, heritage_node: Node, result: ParseResult
     ) -> None:
         for child in heritage_node.children:
-            if child.type == "extends_clause":
+            if child.type in ("extends_clause", "implements_clause"):
+                rel = "extends" if child.type == "extends_clause" else "implements"
                 for sub in child.children:
                     if sub.type in ("identifier", "type_identifier"):
-                        result.heritage.append((class_name, "extends", sub.text.decode()))
-            elif child.type == "implements_clause":
-                for sub in child.children:
-                    if sub.type in ("identifier", "type_identifier"):
-                        result.heritage.append((class_name, "implements", sub.text.decode()))
+                        result.heritage.append((class_name, rel, sub.text.decode()))
+                    elif sub.type == "type_arguments":
+                        # Generic base: `extends Repository<User>` — extract User as type_ref
+                        line = sub.start_point[0] + 1
+                        for arg in sub.children:
+                            if arg.type in ("type_identifier", "identifier"):
+                                name = arg.text.decode()
+                                if name.lower() not in _BUILTIN_TYPES:
+                                    result.type_refs.append(
+                                        TypeRef(name=name, kind="variable", line=line)
+                                    )
 
     def _extract_interface(self, node: Node, source: str, result: ParseResult) -> None:
         name_node = node.child_by_field_name("name")
@@ -396,6 +407,10 @@ class TypeScriptParser(LanguageParser):
                 for sub in child.children:
                     if sub.type in ("identifier", "type_identifier"):
                         result.heritage.append((name, "extends", sub.text.decode()))
+            elif child.type == "interface_body":
+                for member in child.children:
+                    if member.type == "property_signature":
+                        self._extract_variable_type_annotation(member, result)
 
     def _extract_type_alias(self, node: Node, source: str, result: ParseResult) -> None:
         name_node = node.child_by_field_name("name")

@@ -37,6 +37,7 @@ _NODE_PROPERTIES = (
     "end_line INT64, start_byte INT64, end_byte INT64, content STRING, "
     "signature STRING, language STRING, "
     "class_name STRING, is_dead BOOL, is_entry_point BOOL, is_exported BOOL, "
+    "tested BOOL DEFAULT false, centrality DOUBLE DEFAULT 0.0, "
     "PRIMARY KEY (id)"
 )
 _REL_PROPERTIES = (
@@ -58,7 +59,7 @@ def _node_to_row(n: GraphNode) -> list:
     return [n.id, n.name, n.file_path, n.start_line, n.end_line,
             n.start_byte, n.end_byte, n.content,
             n.signature, n.language, n.class_name, n.is_dead,
-            n.is_entry_point, n.is_exported]
+            n.is_entry_point, n.is_exported, n.tested, n.centrality]
 
 def _rel_to_row(r: GraphRelationship) -> list:
     """Convert a GraphRelationship to a flat row for CSV COPY."""
@@ -322,6 +323,12 @@ class KuzuBackend:
         from axon.core.storage.kuzu_search import vector_search
         return vector_search(self._conn, vector, limit)
 
+    def get_embedding(self, node_id: str) -> list[float] | None:
+        """Return the stored embedding vector for *node_id*, or None if absent."""
+        assert self._conn is not None
+        from axon.core.storage.kuzu_search import get_embedding
+        return get_embedding(self._conn, node_id)
+
     def store_embeddings(self, embeddings: list[NodeEmbedding]) -> None:
         """Persist embedding vectors into the Embedding node table."""
         assert self._conn is not None
@@ -368,7 +375,7 @@ class KuzuBackend:
         "content: $content, "
         "signature: $signature, language: $language, class_name: $class_name, "
         "is_dead: $is_dead, is_entry_point: $is_entry_point, "
-        "is_exported: $is_exported}})"
+        "is_exported: $is_exported, tested: $tested, centrality: $centrality}})"
     )
 
     def _insert_node(self, node: GraphNode) -> None:
@@ -384,7 +391,8 @@ class KuzuBackend:
                   "content": node.content, "signature": node.signature,
                   "language": node.language, "class_name": node.class_name,
                   "is_dead": node.is_dead, "is_entry_point": node.is_entry_point,
-                  "is_exported": node.is_exported}
+                  "is_exported": node.is_exported,
+                  "tested": node.tested, "centrality": node.centrality}
         try:
             self._conn.execute(self._INSERT_NODE_CYPHER.format(table=table), parameters=params)
         except RuntimeError:
@@ -469,18 +477,22 @@ class KuzuBackend:
             #   is_dead,is_entry_point,is_exported
             # Old schema: 12 cols — id,name,file_path,start_line,end_line,
             #   content,signature,language,class_name,is_dead,is_entry_point,is_exported
+            has_bytes = len(row) > 6
             return GraphNode(
                 id=row[0], label=label, name=row[1] or "", file_path=row[2] or "",
                 start_line=row[3] or 0, end_line=row[4] or 0,
-                start_byte=row[5] if len(row) > 6 else 0,
-                end_byte=row[6] if len(row) > 6 else 0,
-                content=(row[7] if len(row) > 6 else row[5]) or "",
-                signature=(row[8] if len(row) > 6 else row[6]) or "",
-                language=(row[9] if len(row) > 6 else row[7]) or "",
-                class_name=(row[10] if len(row) > 6 else row[8]) or "",
-                is_dead=bool(row[11] if len(row) > 6 else row[9]),
-                is_entry_point=bool(row[12] if len(row) > 6 else row[10]),
-                is_exported=bool(row[13] if len(row) > 6 else row[11]))
+                start_byte=row[5] if has_bytes else 0,
+                end_byte=row[6] if has_bytes else 0,
+                content=(row[7] if has_bytes else row[5]) or "",
+                signature=(row[8] if has_bytes else row[6]) or "",
+                language=(row[9] if has_bytes else row[7]) or "",
+                class_name=(row[10] if has_bytes else row[8]) or "",
+                is_dead=bool(row[11] if has_bytes else row[9]),
+                is_entry_point=bool(row[12] if has_bytes else row[10]),
+                is_exported=bool(row[13] if has_bytes else row[11]),
+                tested=bool(row[14]) if len(row) > 14 else False,
+                centrality=float(row[15]) if len(row) > 15 else 0.0,
+            )
         except (IndexError, KeyError):
             logger.debug("Failed to convert row to GraphNode: %s", row, exc_info=True)
             return None

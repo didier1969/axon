@@ -67,9 +67,21 @@ def hybrid_search(
     merged: list[SearchResult] = []
     for node_id, score in rrf_scores.items():
         source = metadata[node_id]
-        merged.append(
-            replace(source, score=score),
-        )
+        merged.append(replace(source, score=score))
+
+    if hasattr(storage, "get_node"):
+        boosted: list[SearchResult] = []
+        for result in merged:
+            try:
+                node = storage.get_node(result.node_id)
+                centrality = node.centrality if node is not None else 0.0
+                if isinstance(centrality, float) and centrality > 0:
+                    boosted.append(replace(result, score=result.score * (1 + centrality)))
+                    continue
+            except (AttributeError, TypeError):
+                pass
+            boosted.append(result)
+        merged = boosted
 
     merged.sort(key=lambda r: r.score, reverse=True)
 

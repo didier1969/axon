@@ -34,6 +34,7 @@ from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import NodeLabel
 from axon.core.embeddings.embedder import embed_graph
 from axon.core.ingestion.calls import process_calls
+from axon.core.ingestion.centrality import process_centrality
 from axon.core.ingestion.community import process_communities
 from axon.core.ingestion.coupling import process_coupling
 from axon.core.ingestion.dead_code import process_dead_code
@@ -42,6 +43,7 @@ from axon.core.ingestion.imports import process_imports
 from axon.core.ingestion.parser_phase import process_parsing
 from axon.core.ingestion.processes import process_processes
 from axon.core.ingestion.structure import process_structure
+from axon.core.ingestion.test_coverage import process_test_coverage
 from axon.core.ingestion.types import process_types
 from axon.core.ingestion.walker import FileEntry, walk_repo
 from axon.core.storage.base import StorageBackend
@@ -58,7 +60,9 @@ class PhaseTimings:
     heritage: float = 0.0
     types: float = 0.0
     communities: float = 0.0
+    centrality: float = 0.0
     processes: float = 0.0
+    test_coverage: float = 0.0
     dead_code: float = 0.0
     coupling: float = 0.0
     storage_load: float = 0.0
@@ -262,11 +266,19 @@ def run_pipeline(
     result.phase_timings.communities = time.monotonic() - _t
     report("Detecting communities", 1.0)
 
+    _t = time.monotonic()
+    process_centrality(graph)
+    result.phase_timings.centrality = time.monotonic() - _t
+
     report("Detecting execution flows", 0.0)
     _t = time.monotonic()
     result.processes = process_processes(graph)
     result.phase_timings.processes = time.monotonic() - _t
     report("Detecting execution flows", 1.0)
+
+    _t = time.monotonic()
+    process_test_coverage(graph)
+    result.phase_timings.test_coverage = time.monotonic() - _t
 
     report("Finding dead code", 0.0)
     _t = time.monotonic()
