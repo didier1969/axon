@@ -42,6 +42,7 @@ Items:
 - Parser C++ (tree-sitter-cpp) — systèmes, jeux, infra
 - `axon_diff` — comparer un symbole entre commits (deferred from v0.8)
 - Streaming batch responses — `axon_batch` retourne les résultats au fil de l'eau (deferred from v0.8)
+- Schema version staleness detection — `SCHEMA_VERSION` constant + warning at `axon serve` start when repos indexed with older schema; `axon analyze --all-registered` to batch re-index all registered repos
 
 ### v0.10: Architecture Avancée & Observabilité
 
