@@ -44,6 +44,30 @@ def _auto_migrate_local_kuzu(repo_path: Path, slug: str) -> None:
     logger.info("Migrated KuzuDB: %s → %s", local_kuzu, central)
 
 
+def _daemon_evict(slug: str) -> None:
+    """Ask the running daemon to evict *slug* from its LRU cache before we write.
+
+    If the daemon is not running or the call fails, we silently continue — the
+    analyze will raise a KuzuDB lock error on its own if needed.
+    """
+    import socket as _socket
+
+    sock_path = Path.home() / ".axon" / "daemon.sock"
+    if not sock_path.exists():
+        return
+    try:
+        import json as _json
+
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+            s.settimeout(2.0)
+            s.connect(str(sock_path))
+            payload = _json.dumps({"tool": "_axon_evict", "repo": slug}) + "\n"
+            s.sendall(payload.encode())
+            s.recv(256)  # consume response
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _load_storage(repo_path: Path | None = None) -> "KuzuBackend":  # noqa: F821
     """Load the KuzuDB backend for the given or current repo."""
     from axon.core.storage.kuzu_backend import KuzuBackend
@@ -339,6 +363,7 @@ def analyze(
                 except (json.JSONDecodeError, KeyError):
                     pass
 
+        _daemon_evict(slug)
         storage = KuzuBackend()
         storage.initialize(db_path)
 

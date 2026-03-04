@@ -51,6 +51,10 @@ def _dispatch_tool(cache: LRUBackendCache, tool: str, slug: str | None, args: di
         repos = ", ".join(s["cached"]) if s["cached"] else "none"
         return f"Daemon running\nCached: {s['count']}/{s['maxsize']} repos: {repos}"
 
+    if tool == "_axon_evict":
+        evicted = cache.evict(slug) if slug else False
+        return f"evicted:{evicted}"
+
     if not slug:
         return "Error: slug required for tool " + tool
 

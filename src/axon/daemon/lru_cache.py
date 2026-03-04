@@ -78,6 +78,19 @@ class LRUBackendCache:
                 "maxsize": self._maxsize,
             }
 
+    def evict(self, slug: str) -> bool:
+        """Close and remove a single slug from the cache. Returns True if it was cached."""
+        with self._lock:
+            if slug not in self._cache:
+                return False
+            backend = self._cache.pop(slug)
+        try:
+            backend.close()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info("Evicted '%s' from backend cache (analyze requested)", slug)
+        return True
+
     def close_all(self) -> None:
         """Close all cached backends and clear the cache. Call on daemon shutdown."""
         with self._lock:
