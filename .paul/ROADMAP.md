@@ -7,8 +7,48 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 ## Current Milestone
 
 **v0.9: Language Coverage**
-Status: 🔵 Planning
-Phases: TBD
+Status: 🚧 In Progress
+Phases: 0 of 3 complete
+
+| Phase | Name | Plans | Status | Completed |
+|-------|------|-------|--------|-----------|
+| 3 | Language Parsers — Part 1 | TBD | Not started | - |
+| 4 | Language Parsers — Part 2 | TBD | Not started | - |
+| 5 | Registry & DX | TBD | Not started | - |
+
+### Phase 3: Language Parsers — Part 1
+
+Focus: Java, C#, Ruby parsers (enterprise, .NET, Rails)
+Plans: TBD (defined during /paul:plan)
+
+Items:
+- Parser Java (tree-sitter-java) — enterprise/Android
+- Parser C# (tree-sitter-c-sharp) — .NET/Unity
+- Parser Ruby (tree-sitter-ruby) — Rails
+
+### Phase 4: Language Parsers — Part 2
+
+Focus: Kotlin, PHP, C++ parsers (JVM, web, systems)
+Plans: TBD (defined during /paul:plan)
+
+Items:
+- Parser Kotlin (tree-sitter-kotlin) — JVM moderne
+- Parser PHP (tree-sitter-php) — Laravel/WordPress/legacy
+- Parser C++ (tree-sitter-cpp) — systèmes, jeux, infra
+
+### Phase 5: Registry & DX
+
+Focus: Registry management, schema evolution, deferred v0.8 tools
+Plans: TBD (defined during /paul:plan)
+
+Items:
+- `axon forget <slug>` — remove a repo from the registry with confirmation; `axon_list_repos` marks orphaned paths
+- Schema version staleness detection — `SCHEMA_VERSION` constant + warning at `axon serve` start; `axon analyze --all-registered` for batch re-index
+- `axon_diff` — compare a symbol between commits (deferred from v0.8)
+- Streaming batch responses — `axon_batch` returns results incrementally (deferred from v0.8)
+
+Already shipped (commit ae79bfe):
+- ~~`axon analyze` singleton lock per-repo~~ ✅ Done — fcntl.flock, kernel-managed, OOM-safe
 
 ## Completed Milestones (Recent)
 
@@ -27,24 +67,6 @@ Phase 2: `axon_find_usages` (exhaustive call-sites), MCP tool descriptions, `axo
 </details>
 
 ## Planned Milestones
-
-### v0.9: Language Coverage
-
-Focus: Parsers pour les grandes familles manquantes
-Phases: TBD
-
-Items:
-- Parser Java (tree-sitter-java) — enterprise/Android
-- Parser C# (tree-sitter-c-sharp) — .NET/Unity
-- Parser Ruby (tree-sitter-ruby) — Rails
-- Parser Kotlin (tree-sitter-kotlin) — JVM moderne
-- Parser PHP (tree-sitter-php) — Laravel/WordPress/legacy
-- Parser C++ (tree-sitter-cpp) — systèmes, jeux, infra
-- `axon_diff` — comparer un symbole entre commits (deferred from v0.8)
-- Streaming batch responses — `axon_batch` retourne les résultats au fil de l'eau (deferred from v0.8)
-- Schema version staleness detection — `SCHEMA_VERSION` constant + warning at `axon serve` start when repos indexed with older schema; `axon analyze --all-registered` to batch re-index all registered repos
-- `axon analyze` singleton lock per-repo — lock file at `~/.axon/repos/{slug}/analyze.lock` prevents concurrent writes; clear error message instead of KuzuDB RuntimeError
-- `axon forget <slug>` — remove a repo from the registry (`~/.axon/repos/{slug}/`) with confirmation; `axon_list_repos` marks orphaned paths (project dir deleted/moved) with a warning
 
 ### v0.10: Architecture Avancée & Observabilité
 
@@ -122,4 +144,4 @@ Phase 2: axon_read_symbol O(1) MCP tool, sql/yaml byte offsets, parser quality t
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-03-07 — v0.8 complete (2 phases, 7 plans, 936 tests); v0.9 Language Coverage next*
+*Last updated: 2026-03-07 — v0.9 Language Coverage started (3 phases planned); v0.8 complete (936 tests + 22 post-milestone = 958 tests)*

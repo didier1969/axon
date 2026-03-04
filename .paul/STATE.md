@@ -10,22 +10,22 @@ See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 ## Current Position
 
 Milestone: v0.9 Language Coverage
-Phase: Not started
+Phase: 3 of 5 (Language Parsers — Part 1)
 Plan: Not started
-Status: v0.8 complete — ready to plan v0.9
-Last activity: 2026-03-07 — v0.8 complete (UNIFY 02-04 + phase transition; 936 tests)
+Status: Milestone created — ready to plan Phase 3
+Last activity: 2026-03-07 — v0.9 milestone initialized (3 phases: 03-language-parsers-1, 04-language-parsers-2, 05-registry-dx)
 
 Progress:
 - v0.7 Quality & Security: [██████████] 100% ✓
 - v0.8 Graph Intelligence & Search Quality: [██████████] 100% ✓
-- v0.9 Language Coverage: [░░░░░░░░░░] 0% (not started)
+- v0.9 Language Coverage: [░░░░░░░░░░] 0% (Phase 3 not started)
 
 ## Loop Position
 
 Current loop state:
 ```
 PLAN ──▶ APPLY ──▶ UNIFY
-  ○        ○        ○     [v0.9 — new milestone, ready to plan]
+  ○        ○        ○     [Phase 03 — ready for first PLAN]
 ```
 
 ## Accumulated Context
@@ -84,17 +84,17 @@ PLAN ──▶ APPLY ──▶ UNIFY
 None.
 
 ### Git State
-Last commit: 9bc5726 (feat(02-mcp-tools-dx): complete — Phase 2 of v0.8)
+Last commit: ae79bfe (feat: axon_path, axon_entry_points, axon_coverage_gaps + analyze singleton lock)
 Branch: main
-Uncommitted: none (clean)
+Uncommitted: STATE.md, ROADMAP.md (milestone init — will commit)
 
 ## Session Continuity
 
 Last session: 2026-03-07
-Stopped at: v0.8 complete — UNIFY 02-04 done, phase transition done, milestone ready; phase commit pending
-Next action: /paul:milestone for v0.9 (or /paul:plan for first v0.9 phase after milestone init)
+Stopped at: v0.9 milestone created — Phase 3 (Language Parsers Part 1) ready to plan
+Next action: /paul:plan for Phase 3 (Java, C#, Ruby parsers)
 Resume file: .paul/ROADMAP.md
-Resume context: 936 tests passing; v0.8 all shipped; pending: phase commit feat(02-mcp-tools-dx): complete
+Resume context: 958 tests passing; v0.9 milestone initialized (phases 03-05); singleton lock already shipped (ae79bfe)
 
 ---
 *STATE.md — Updated after every significant action*
