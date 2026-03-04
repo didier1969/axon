@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _TOOL_NAMES = frozenset({
     "axon_query", "axon_context", "axon_impact", "axon_dead_code",
     "axon_detect_changes", "axon_cypher", "axon_list_repos", "axon_daemon_status",
+    "axon_entry_points", "axon_coverage_gaps", "axon_path",
 })
 
 
@@ -31,11 +32,14 @@ def _dispatch_tool(cache: LRUBackendCache, tool: str, slug: str | None, args: di
     from axon.mcp.tools import (
         MAX_TRAVERSE_DEPTH,
         handle_context,
+        handle_coverage_gaps,
         handle_cypher,
         handle_dead_code,
         handle_detect_changes,
+        handle_entry_points,
         handle_impact,
         handle_list_repos,
+        handle_path,
         handle_query,
     )
 
@@ -75,6 +79,16 @@ def _dispatch_tool(cache: LRUBackendCache, tool: str, slug: str | None, args: di
         return handle_detect_changes(storage, args.get("diff", ""))
     if tool == "axon_cypher":
         return handle_cypher(storage, args.get("query", ""))
+    if tool == "axon_entry_points":
+        return handle_entry_points(storage, limit=args.get("limit", 20))
+    if tool == "axon_coverage_gaps":
+        return handle_coverage_gaps(storage, limit=args.get("limit", 20))
+    if tool == "axon_path":
+        return handle_path(
+            storage,
+            from_symbol=args.get("from_symbol", ""),
+            to_symbol=args.get("to_symbol", ""),
+        )
 
     return f"Unknown tool: {tool}"
 

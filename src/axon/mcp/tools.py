@@ -1244,6 +1244,266 @@ def handle_summarize(
     return result
 
 
+def handle_entry_points(
+    storage: StorageBackend,
+    limit: int = 20,
+    repo: str | None = None,
+) -> str:
+    """Find symbols with no callers — execution entry points.
+
+    Queries for Function/Method nodes that have no incoming CALLS edges,
+    ordered by centrality descending.  These are likely CLI commands, HTTP
+    handlers, event handlers, or exported top-level functions that are never
+    called from within the indexed codebase.
+
+    Args:
+        storage: The storage backend.
+        limit: Maximum number of results (default 20).
+        repo: Optional repository slug to query instead of the current directory.
+
+    Returns:
+        Numbered list of entry-point symbols with file paths.
+    """
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
+        storage = _repo_storage
+
+    try:
+        rows = storage.execute_raw(
+            "MATCH (s:Symbol) "
+            "WHERE NOT ()-[:CALLS]->(s) AND s.label IN ['Function', 'Method'] "
+            "RETURN s.name, s.file_path, s.start_line, s.label, s.centrality "
+            f"ORDER BY s.centrality DESC LIMIT {limit}"
+        ) or []
+
+        if not rows:
+            # Fallback: use CodeRelation pattern matching existing schema
+            rows = storage.execute_raw(
+                "MATCH (s) "
+                "WHERE (s.label = 'function' OR s.label = 'method') "
+                "AND NOT ()-[r:CodeRelation]->(s) "
+                "RETURN s.name, s.file_path, s.start_line, s.label, s.centrality "
+                f"ORDER BY s.centrality DESC LIMIT {limit}"
+            ) or []
+
+        if not rows:
+            return "No entry points found. All functions/methods have callers, or no symbols indexed."
+
+        lines = [f"Entry points ({len(rows)} symbols with no callers):"]
+        lines.append("")
+        for i, row in enumerate(rows, 1):
+            name = row[0] if row else "?"
+            fp = row[1] if len(row) > 1 else "?"
+            line_num = row[2] if len(row) > 2 else None
+            label = row[3] if len(row) > 3 else ""
+            centrality = row[4] if len(row) > 4 else None
+            loc = f"{fp}:L{line_num}" if line_num else (fp or "?")
+            label_str = f"  [{label}]" if label else ""
+            centrality_str = f"  centrality: {centrality:.3f}" if isinstance(centrality, float) and centrality > 0 else ""
+            lines.append(f"  {i}. {name}  {loc}{label_str}{centrality_str}")
+
+        result = "\n".join(lines)
+    finally:
+        if _repo_storage is not None:
+            try:
+                _repo_storage.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    log_event("entry_points", limit=limit, repo=_repo_name_from_storage(storage, repo))
+    return result
+
+
+def handle_coverage_gaps(
+    storage: StorageBackend,
+    limit: int = 20,
+    repo: str | None = None,
+) -> str:
+    """Find untested high-centrality symbols — the most dangerous untested code.
+
+    Queries for Function/Method nodes where ``tested = false``, ordered by
+    centrality descending.  High-centrality untested symbols represent the
+    greatest risk: they are called by many other symbols but lack test coverage.
+
+    Args:
+        storage: The storage backend.
+        limit: Maximum number of results (default 20).
+        repo: Optional repository slug to query instead of the current directory.
+
+    Returns:
+        Numbered list of untested symbols with centrality scores.
+    """
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
+        storage = _repo_storage
+
+    try:
+        rows = storage.execute_raw(
+            "MATCH (s:Symbol) "
+            "WHERE s.tested = false AND s.label IN ['Function', 'Method'] "
+            "RETURN s.name, s.file_path, s.start_line, s.label, s.centrality "
+            f"ORDER BY s.centrality DESC LIMIT {limit}"
+        ) or []
+
+        if not rows:
+            # Fallback: label stored lowercase in most schemas
+            rows = storage.execute_raw(
+                "MATCH (s) "
+                "WHERE s.tested = false "
+                "AND (s.label = 'function' OR s.label = 'method') "
+                "RETURN s.name, s.file_path, s.start_line, s.label, s.centrality "
+                f"ORDER BY s.centrality DESC LIMIT {limit}"
+            ) or []
+
+        if not rows:
+            return "No coverage gaps found. All functions/methods are tested, or 'tested' data is not available."
+
+        lines = [f"Coverage gaps (untested high-centrality symbols) — {len(rows)} found:"]
+        lines.append("")
+        for i, row in enumerate(rows, 1):
+            name = row[0] if row else "?"
+            fp = row[1] if len(row) > 1 else "?"
+            line_num = row[2] if len(row) > 2 else None
+            label = row[3] if len(row) > 3 else ""
+            centrality = row[4] if len(row) > 4 else None
+            loc = f"{fp}:L{line_num}" if line_num else (fp or "?")
+            label_str = f"  [{label}]" if label else ""
+            centrality_str = f"  centrality: {centrality:.3f}" if isinstance(centrality, float) and centrality > 0 else ""
+            lines.append(f"  {i}. {name}  {loc}{label_str}{centrality_str}")
+
+        result = "\n".join(lines)
+    finally:
+        if _repo_storage is not None:
+            try:
+                _repo_storage.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    log_event("coverage_gaps", limit=limit, repo=_repo_name_from_storage(storage, repo))
+    return result
+
+
+def handle_path(
+    storage: StorageBackend,
+    from_symbol: str,
+    to_symbol: str,
+    repo: str | None = None,
+) -> str:
+    """Find the shortest call path between two symbols.
+
+    Performs a BFS over CALLS edges from ``from_symbol`` to ``to_symbol``,
+    limited to 10 hops.  Returns the path as an arrow-separated chain with
+    file locations.
+
+    Args:
+        storage: The storage backend.
+        from_symbol: Name of the starting symbol.
+        to_symbol: Name of the target symbol.
+        repo: Optional repository slug to query instead of the current directory.
+
+    Returns:
+        Arrow-separated call chain, or a not-found message.
+    """
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found in registry. Use axon_list_repos to see available repos."
+        storage = _repo_storage
+
+    try:
+        from_results = _resolve_symbol(storage, from_symbol, limit=1)
+        if not from_results:
+            return f"Symbol '{from_symbol}' not found."
+
+        to_results = _resolve_symbol(storage, to_symbol, limit=1)
+        if not to_results:
+            return f"Symbol '{to_symbol}' not found."
+
+        from_id = from_results[0].node_id
+        to_id = to_results[0].node_id
+
+        if from_id == to_id:
+            name = from_results[0].node_name
+            fp = from_results[0].file_path
+            return f"Path (0 hops): {name} ({fp})"
+
+        # BFS over CALLS edges via execute_raw
+        # visited maps node_id -> (node_name, file_path, predecessor_id)
+        visited: dict[str, tuple[str, str, str | None]] = {}
+        from_name = from_results[0].node_name
+        from_fp = from_results[0].file_path
+        visited[from_id] = (from_name, from_fp, None)
+
+        frontier: list[str] = [from_id]
+        found = False
+        max_hops = 10
+
+        for _hop in range(max_hops):
+            if not frontier:
+                break
+            next_frontier: list[str] = []
+            # Batch-fetch callees for all frontier nodes
+            placeholders = ", ".join(f"$id{i}" for i in range(len(frontier)))
+            params = {f"id{i}": nid for i, nid in enumerate(frontier)}
+            rows = storage.execute_raw(
+                "MATCH (caller)-[r:CodeRelation]->(callee) "
+                f"WHERE caller.id IN [{placeholders}] AND r.rel_type = 'calls' "
+                "RETURN caller.id, callee.id, callee.name, callee.file_path",
+                parameters=params,
+            ) or []
+
+            for row in rows:
+                caller_id = row[0]
+                callee_id = row[1]
+                callee_name = row[2] or "?"
+                callee_fp = row[3] or "?"
+                if callee_id not in visited:
+                    visited[callee_id] = (callee_name, callee_fp, caller_id)
+                    if callee_id == to_id:
+                        found = True
+                        break
+                    next_frontier.append(callee_id)
+
+            if found:
+                break
+            frontier = next_frontier
+
+        if not found:
+            return f"No call path found between '{from_symbol}' and '{to_symbol}'."
+
+        # Reconstruct path by walking predecessor chain
+        path_ids: list[str] = []
+        cur: str | None = to_id
+        while cur is not None:
+            path_ids.append(cur)
+            cur = visited[cur][2]
+        path_ids.reverse()
+
+        hops = len(path_ids) - 1
+        path_parts: list[str] = []
+        for nid in path_ids:
+            name, fp, _ = visited[nid]
+            path_parts.append(f"{name} ({fp})")
+
+        result = f"Path ({hops} hop{'s' if hops != 1 else ''}):\n  " + " → ".join(path_parts)
+    finally:
+        if _repo_storage is not None:
+            try:
+                _repo_storage.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    log_event("path", from_symbol=from_symbol[:200], to_symbol=to_symbol[:200], repo=_repo_name_from_storage(storage, repo))
+    return result
+
+
 _WRITE_KEYWORDS = re.compile(
     r"\b(DELETE|DROP|CREATE|SET|REMOVE|MERGE|DETACH|INSTALL|LOAD|COPY|CALL"
     r"|RENAME|ALTER|IMPORT|TRUNCATE)\b",

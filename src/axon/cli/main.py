@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
@@ -306,103 +307,122 @@ def analyze(
         )
     db_path = _central_db_path(slug)
 
-    # Auto-detect stale index: files indexed but 0 symbols → force full re-index.
-    if not full:
-        meta_path = axon_dir / "meta.json"
-        if meta_path.exists():
-            try:
-                prev = json.loads(meta_path.read_text(encoding="utf-8"))
-                prev_stats = prev.get("stats", {})
-                if prev_stats.get("files", 0) > 0 and prev_stats.get("symbols", 0) == 0:
-                    full = True
-                    console.print(
-                        "[yellow]Warning: previous index has no symbols"
-                        " — forcing full re-index.[/yellow]"
-                    )
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-    storage = KuzuBackend()
-    storage.initialize(db_path)
-
-    result: PipelineResult | None = None
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("Starting...", total=None)
-
-        _show_progress = show_progress or bool(os.getenv("AXON_ANALYZE_PROGRESS"))
-
-        def on_progress(phase: str, pct: float) -> None:
-            progress.update(task, description=f"{phase} ({pct:.0%})")
-            if _show_progress and pct >= 1.0:
-                print(f"[{phase}] done", file=sys.stderr, flush=True)
-
-        _, result = run_pipeline(
-            repo_path=repo_path,
-            storage=storage,
-            full=full,
-            progress_callback=on_progress,
-            embeddings=not no_embeddings,
-            wait_embeddings=True,
+    # Singleton lock — prevents two concurrent `axon analyze` on the same repo.
+    # fcntl.flock is released automatically on process death (SIGKILL/OOM), so
+    # there is no risk of stale locks blocking future runs.
+    lock_path = central_slot / "analyze.lock"
+    lock_fd = open(lock_path, "w")  # noqa: SIM115
+    try:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_fd.close()
+        console.print(
+            f"[red]Error:[/red] '{slug}' is already being indexed by another process.\n"
+            "Wait for it to complete, or kill the blocking process."
         )
-
-    meta = {
-        "version": __version__,
-        "name": repo_path.name,
-        "slug": slug,
-        "path": str(repo_path),
-        "stats": {
-            "files": result.files,
-            "symbols": result.symbols,
-            "relationships": result.relationships,
-            "clusters": result.clusters,
-            "flows": result.processes,
-            "dead_code": result.dead_code,
-            "coupled_pairs": result.coupled_pairs,
-            "embeddings": result.embeddings,
-        },
-        "last_indexed_at": datetime.now(tz=timezone.utc).isoformat(),
-    }
-    meta_path = axon_dir / "meta.json"
-    meta_content = json.dumps(meta, indent=2) + "\n"
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=axon_dir,
-        delete=False,
-        suffix=".tmp",
-    ) as tmp_f:
-        tmp_f.write(meta_content)
-        tmp_name = tmp_f.name
-    os.replace(tmp_name, meta_path)
+        raise typer.Exit(code=1)
 
     try:
-        _register_in_global_registry(meta, repo_path)
-    except (OSError, ValueError, KeyError):
-        logger.debug("Failed to register repo in global registry", exc_info=True)
+        # Auto-detect stale index: files indexed but 0 symbols → force full re-index.
+        if not full:
+            meta_path = axon_dir / "meta.json"
+            if meta_path.exists():
+                try:
+                    prev = json.loads(meta_path.read_text(encoding="utf-8"))
+                    prev_stats = prev.get("stats", {})
+                    if prev_stats.get("files", 0) > 0 and prev_stats.get("symbols", 0) == 0:
+                        full = True
+                        console.print(
+                            "[yellow]Warning: previous index has no symbols"
+                            " — forcing full re-index.[/yellow]"
+                        )
+                except (json.JSONDecodeError, KeyError):
+                    pass
 
-    console.print()
-    console.print("[bold green]Indexing complete.[/bold green]")
-    console.print(f"  Files:          {result.files}")
-    console.print(f"  Symbols:        {result.symbols}")
-    console.print(f"  Relationships:  {result.relationships}")
-    if result.clusters > 0:
-        console.print(f"  Clusters:       {result.clusters}")
-    if result.processes > 0:
-        console.print(f"  Flows:          {result.processes}")
-    if result.dead_code > 0:
-        console.print(f"  Dead code:      {result.dead_code}")
-    if result.coupled_pairs > 0:
-        console.print(f"  Coupled pairs:  {result.coupled_pairs}")
-    if result.embeddings > 0:
-        console.print(f"  Embeddings:     {result.embeddings}")
-    console.print(f"  Duration:       {result.duration_seconds:.2f}s")
+        storage = KuzuBackend()
+        storage.initialize(db_path)
 
-    storage.close()
+        result: PipelineResult | None = None
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("Starting...", total=None)
+
+            _show_progress = show_progress or bool(os.getenv("AXON_ANALYZE_PROGRESS"))
+
+            def on_progress(phase: str, pct: float) -> None:
+                progress.update(task, description=f"{phase} ({pct:.0%})")
+                if _show_progress and pct >= 1.0:
+                    print(f"[{phase}] done", file=sys.stderr, flush=True)
+
+            _, result = run_pipeline(
+                repo_path=repo_path,
+                storage=storage,
+                full=full,
+                progress_callback=on_progress,
+                embeddings=not no_embeddings,
+                wait_embeddings=True,
+            )
+
+        meta = {
+            "version": __version__,
+            "name": repo_path.name,
+            "slug": slug,
+            "path": str(repo_path),
+            "stats": {
+                "files": result.files,
+                "symbols": result.symbols,
+                "relationships": result.relationships,
+                "clusters": result.clusters,
+                "flows": result.processes,
+                "dead_code": result.dead_code,
+                "coupled_pairs": result.coupled_pairs,
+                "embeddings": result.embeddings,
+            },
+            "last_indexed_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        meta_path = axon_dir / "meta.json"
+        meta_content = json.dumps(meta, indent=2) + "\n"
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=axon_dir,
+            delete=False,
+            suffix=".tmp",
+        ) as tmp_f:
+            tmp_f.write(meta_content)
+            tmp_name = tmp_f.name
+        os.replace(tmp_name, meta_path)
+
+        try:
+            _register_in_global_registry(meta, repo_path)
+        except (OSError, ValueError, KeyError):
+            logger.debug("Failed to register repo in global registry", exc_info=True)
+
+        console.print()
+        console.print("[bold green]Indexing complete.[/bold green]")
+        console.print(f"  Files:          {result.files}")
+        console.print(f"  Symbols:        {result.symbols}")
+        console.print(f"  Relationships:  {result.relationships}")
+        if result.clusters > 0:
+            console.print(f"  Clusters:       {result.clusters}")
+        if result.processes > 0:
+            console.print(f"  Flows:          {result.processes}")
+        if result.dead_code > 0:
+            console.print(f"  Dead code:      {result.dead_code}")
+        if result.coupled_pairs > 0:
+            console.print(f"  Coupled pairs:  {result.coupled_pairs}")
+        if result.embeddings > 0:
+            console.print(f"  Embeddings:     {result.embeddings}")
+        console.print(f"  Duration:       {result.duration_seconds:.2f}s")
+
+        storage.close()
+    finally:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+        lock_fd.close()
 
 @app.command()
 def status() -> None:

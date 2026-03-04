@@ -22,14 +22,17 @@ from axon.mcp.tools import (
     _load_repo_storage,
     _sanitize_repo_slug,
     handle_context,
+    handle_coverage_gaps,
     handle_cypher,
     handle_dead_code,
     handle_detect_changes,
+    handle_entry_points,
     handle_find_similar,
     handle_find_usages,
     handle_impact,
     handle_lint,
     handle_list_repos,
+    handle_path,
     handle_query,
     handle_read_symbol,
     handle_summarize,
@@ -1417,3 +1420,292 @@ class TestHandleSummarize:
 
         assert "src/config.py" in result
         assert "0 symbols" in result
+
+
+# ---------------------------------------------------------------------------
+# axon_entry_points tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandleEntryPoints:
+    def test_returns_string(self, mock_storage: MagicMock) -> None:
+        """handle_entry_points always returns a string."""
+        mock_storage.execute_raw.return_value = []
+
+        result = handle_entry_points(mock_storage)
+
+        assert isinstance(result, str)
+
+    def test_empty_results(self, mock_storage: MagicMock) -> None:
+        """Returns a helpful message when no entry points are found."""
+        mock_storage.execute_raw.return_value = []
+
+        result = handle_entry_points(mock_storage)
+
+        assert "No entry points found" in result or isinstance(result, str)
+
+    def test_with_results(self, mock_storage: MagicMock) -> None:
+        """Returns numbered list with file path when symbols are found."""
+        mock_storage.execute_raw.side_effect = [
+            [
+                ["main", "src/cli.py", 10, "function", 0.42],
+                ["handle_request", "src/server.py", 55, "function", 0.31],
+            ],
+        ]
+
+        result = handle_entry_points(mock_storage)
+
+        assert "main" in result
+        assert "handle_request" in result
+        assert "src/cli.py" in result
+
+    def test_repo_not_found(self, mock_storage: MagicMock) -> None:
+        """Returns not-found message when repo slug is unknown."""
+        result = handle_entry_points(mock_storage, repo="nonexistent-repo-xyz")
+
+        assert "not found" in result.lower() or "registry" in result.lower()
+
+    def test_repo_none_uses_storage(self, mock_storage: MagicMock) -> None:
+        """repo=None uses the passed storage backend directly."""
+        mock_storage.execute_raw.return_value = []
+
+        result = handle_entry_points(mock_storage, repo=None)
+
+        assert isinstance(result, str)
+        mock_storage.execute_raw.assert_called()
+
+    def test_limit_respected(self, mock_storage: MagicMock) -> None:
+        """Limit parameter is forwarded in the query."""
+        mock_storage.execute_raw.return_value = []
+
+        handle_entry_points(mock_storage, limit=5)
+
+        call_args = mock_storage.execute_raw.call_args_list
+        assert any("5" in str(c) for c in call_args)
+
+    def test_centrality_shown(self, mock_storage: MagicMock) -> None:
+        """Centrality score is included in output when non-zero."""
+        mock_storage.execute_raw.side_effect = [
+            [["run", "src/main.py", 1, "function", 0.75]],
+        ]
+
+        result = handle_entry_points(mock_storage)
+
+        assert "centrality" in result
+
+
+# ---------------------------------------------------------------------------
+# axon_coverage_gaps tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandleCoverageGaps:
+    def test_returns_string(self, mock_storage: MagicMock) -> None:
+        """handle_coverage_gaps always returns a string."""
+        mock_storage.execute_raw.return_value = []
+
+        result = handle_coverage_gaps(mock_storage)
+
+        assert isinstance(result, str)
+
+    def test_empty_results(self, mock_storage: MagicMock) -> None:
+        """Returns a message when no coverage gaps are found."""
+        mock_storage.execute_raw.return_value = []
+
+        result = handle_coverage_gaps(mock_storage)
+
+        assert "No coverage gaps found" in result or isinstance(result, str)
+
+    def test_with_results(self, mock_storage: MagicMock) -> None:
+        """Returns numbered list with centrality scores when gaps are found."""
+        mock_storage.execute_raw.side_effect = [
+            [
+                ["process_payment", "src/payments.py", 42, "function", 0.88],
+                ["validate_token", "src/auth.py", 10, "function", 0.55],
+            ],
+        ]
+
+        result = handle_coverage_gaps(mock_storage)
+
+        assert "process_payment" in result
+        assert "validate_token" in result
+        assert "Coverage gaps" in result
+
+    def test_title_present(self, mock_storage: MagicMock) -> None:
+        """Output includes the required title text."""
+        mock_storage.execute_raw.side_effect = [
+            [["my_func", "src/foo.py", 5, "function", 0.1]],
+        ]
+
+        result = handle_coverage_gaps(mock_storage)
+
+        assert "Coverage gaps" in result
+
+    def test_repo_not_found(self, mock_storage: MagicMock) -> None:
+        """Returns not-found message when repo slug is unknown."""
+        result = handle_coverage_gaps(mock_storage, repo="nonexistent-repo-xyz")
+
+        assert "not found" in result.lower() or "registry" in result.lower()
+
+    def test_repo_none_uses_storage(self, mock_storage: MagicMock) -> None:
+        """repo=None uses the passed storage backend directly."""
+        mock_storage.execute_raw.return_value = []
+
+        result = handle_coverage_gaps(mock_storage, repo=None)
+
+        assert isinstance(result, str)
+        mock_storage.execute_raw.assert_called()
+
+    def test_centrality_shown(self, mock_storage: MagicMock) -> None:
+        """Centrality score is shown in output."""
+        mock_storage.execute_raw.side_effect = [
+            [["risky_fn", "src/risky.py", 99, "function", 0.99]],
+        ]
+
+        result = handle_coverage_gaps(mock_storage)
+
+        assert "centrality" in result
+
+
+# ---------------------------------------------------------------------------
+# axon_path tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandlePath:
+    def test_returns_string(self, mock_storage: MagicMock) -> None:
+        """handle_path always returns a string."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = []
+
+        result = handle_path(mock_storage, "nonexistent_a", "nonexistent_b")
+
+        assert isinstance(result, str)
+
+    def test_from_symbol_not_found(self, mock_storage: MagicMock) -> None:
+        """Returns not-found message when from_symbol does not exist."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = []
+
+        result = handle_path(mock_storage, "ghost_fn", "other_fn")
+
+        assert "ghost_fn" in result
+        assert "not found" in result.lower()
+
+    def test_to_symbol_not_found(self, mock_storage: MagicMock) -> None:
+        """Returns not-found message when to_symbol does not exist."""
+        from_sr = SearchResult(
+            node_id="function:src/a.py:start",
+            score=1.0,
+            node_name="start",
+            file_path="src/a.py",
+            label="function",
+        )
+        # exact_name_search succeeds for from_symbol, fails for to_symbol
+        mock_storage.exact_name_search.side_effect = [
+            [from_sr],  # from_symbol found
+            [],         # to_symbol not found → falls back to fts_search
+        ]
+        # fts_search only called once (fallback for ghost_target)
+        mock_storage.fts_search.side_effect = [
+            [],  # ghost_target not found in FTS either
+        ]
+
+        result = handle_path(mock_storage, "start", "ghost_target")
+
+        assert "ghost_target" in result
+        assert "not found" in result.lower()
+
+    def test_no_path_between_symbols(self, mock_storage: MagicMock) -> None:
+        """Returns no-path message when no CALLS chain connects the symbols."""
+        from_sr = SearchResult(
+            node_id="function:src/a.py:start",
+            score=1.0,
+            node_name="start",
+            file_path="src/a.py",
+            label="function",
+        )
+        to_sr = SearchResult(
+            node_id="function:src/b.py:end",
+            score=1.0,
+            node_name="end",
+            file_path="src/b.py",
+            label="function",
+        )
+        mock_storage.fts_search.side_effect = [[from_sr], [to_sr]]
+        mock_storage.exact_name_search.side_effect = [[from_sr], [to_sr]]
+        # BFS returns no CALLS edges
+        mock_storage.execute_raw.return_value = []
+
+        result = handle_path(mock_storage, "start", "end")
+
+        assert "No call path found" in result
+        assert "start" in result
+        assert "end" in result
+
+    def test_path_found_direct_call(self, mock_storage: MagicMock) -> None:
+        """Returns arrow-separated chain when a direct call path exists."""
+        from_sr = SearchResult(
+            node_id="function:src/a.py:caller",
+            score=1.0,
+            node_name="caller",
+            file_path="src/a.py",
+            label="function",
+        )
+        to_sr = SearchResult(
+            node_id="function:src/b.py:callee",
+            score=1.0,
+            node_name="callee",
+            file_path="src/b.py",
+            label="function",
+        )
+        mock_storage.fts_search.side_effect = [[from_sr], [to_sr]]
+        mock_storage.exact_name_search.side_effect = [[from_sr], [to_sr]]
+        # BFS hop 1: caller -> callee (the target)
+        mock_storage.execute_raw.return_value = [
+            [
+                "function:src/a.py:caller",
+                "function:src/b.py:callee",
+                "callee",
+                "src/b.py",
+            ]
+        ]
+
+        result = handle_path(mock_storage, "caller", "callee")
+
+        assert "→" in result
+        assert "caller" in result
+        assert "callee" in result
+        assert "1 hop" in result
+
+    def test_same_symbol_path(self, mock_storage: MagicMock) -> None:
+        """Returns zero-hop path when from and to are the same symbol."""
+        sr = SearchResult(
+            node_id="function:src/a.py:myfn",
+            score=1.0,
+            node_name="myfn",
+            file_path="src/a.py",
+            label="function",
+        )
+        mock_storage.fts_search.side_effect = [[sr], [sr]]
+        mock_storage.exact_name_search.side_effect = [[sr], [sr]]
+
+        result = handle_path(mock_storage, "myfn", "myfn")
+
+        assert "0 hop" in result
+        assert "myfn" in result
+
+    def test_repo_not_found(self, mock_storage: MagicMock) -> None:
+        """Returns not-found message when repo slug is unknown."""
+        result = handle_path(mock_storage, "a", "b", repo="nonexistent-repo-xyz")
+
+        assert "not found" in result.lower() or "registry" in result.lower()
+
+    def test_repo_none_uses_storage(self, mock_storage: MagicMock) -> None:
+        """repo=None uses the passed storage backend directly."""
+        mock_storage.exact_name_search.return_value = []
+        mock_storage.fts_search.return_value = []
+
+        result = handle_path(mock_storage, "x", "y", repo=None)
+
+        assert isinstance(result, str)

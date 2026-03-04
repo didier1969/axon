@@ -34,13 +34,16 @@ from axon.mcp.resources import get_dead_code_list, get_overview, get_schema
 from axon.mcp.tools import (
     MAX_TRAVERSE_DEPTH,
     handle_context,
+    handle_coverage_gaps,
     handle_cypher,
     handle_dead_code,
     handle_detect_changes,
+    handle_entry_points,
     handle_find_similar,
     handle_find_usages,
     handle_impact,
     handle_lint,
+    handle_path,
     handle_summarize,
     handle_list_repos,
     handle_query,
@@ -561,6 +564,108 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="axon_entry_points",
+        description=(
+            "Find symbols with no callers — execution entry points of the codebase. "
+            "Returns Functions and Methods that are never called from within the indexed repo: "
+            "CLI commands, HTTP handlers, event handlers, and exported top-level functions. "
+            "Use to discover where execution begins and to audit public API surface. "
+            "Ordered by centrality — highest-impact entry points first. "
+            "Optionally specify a repo to query a different indexed project."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results (default 20).",
+                    "default": 20,
+                },
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "Name of an indexed repository (from axon_list_repos). "
+                        "Defaults to the current directory. Optional."
+                    ),
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="axon_coverage_gaps",
+        description=(
+            "Find untested high-centrality symbols — the most dangerous untested code. "
+            "Returns Functions and Methods where tested=false, ordered by centrality. "
+            "High-centrality untested symbols are called by many others and lack test coverage: "
+            "prime candidates for test writing. "
+            "Use during sprint planning or code review to prioritise test work. "
+            "Requires axon analyze to have been run with coverage data. "
+            "Optionally specify a repo to query a different indexed project."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results (default 20).",
+                    "default": 20,
+                },
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "Name of an indexed repository (from axon_list_repos). "
+                        "Defaults to the current directory. Optional."
+                    ),
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="axon_path",
+        description=(
+            "Find the shortest call path between two symbols. "
+            "Use to understand how control flow reaches a function from a higher-level entry point, "
+            "or to trace an execution chain for debugging. "
+            "Returns the call chain as 'A → B → C → D' with file paths. "
+            "Returns 'No call path found' if the symbols are not connected via CALLS edges. "
+            "BFS up to 10 hops — paths longer than 10 are not returned. "
+            "Optionally specify a repo to query a different indexed project."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "from_symbol": {
+                    "type": "string",
+                    "description": "Name of the starting symbol (caller side).",
+                },
+                "to_symbol": {
+                    "type": "string",
+                    "description": "Name of the target symbol (callee side).",
+                },
+                "repo": {
+                    "type": "string",
+                    "description": (
+                        "Name of an indexed repository (from axon_list_repos). "
+                        "Defaults to the current directory. Optional."
+                    ),
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters. Omit for full output.",
+                },
+            },
+            "required": ["from_symbol", "to_symbol"],
+        },
+    ),
+    Tool(
         name="axon_batch",
         description=(
             "Execute multiple axon tool calls in a single round-trip. "
@@ -661,6 +766,25 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
         return handle_summarize(
             storage,
             path=arguments.get("path", ""),
+            repo=arguments.get("repo"),
+        )
+    elif name == "axon_entry_points":
+        return handle_entry_points(
+            storage,
+            limit=arguments.get("limit", 20),
+            repo=arguments.get("repo"),
+        )
+    elif name == "axon_coverage_gaps":
+        return handle_coverage_gaps(
+            storage,
+            limit=arguments.get("limit", 20),
+            repo=arguments.get("repo"),
+        )
+    elif name == "axon_path":
+        return handle_path(
+            storage,
+            from_symbol=arguments.get("from_symbol", ""),
+            to_symbol=arguments.get("to_symbol", ""),
             repo=arguments.get("repo"),
         )
     else:
