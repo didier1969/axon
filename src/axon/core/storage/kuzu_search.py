@@ -15,11 +15,11 @@ import kuzu
 
 from axon.core.graph.model import GraphNode, NodeLabel
 from axon.core.storage.base import SearchResult
-from axon.core.storage.kuzu_backend import (
+from axon.core.storage.kuzu_constants import (
     _LABEL_MAP,
     _SEARCHABLE_TABLES,
-    _escape,
-    _table_for_id,
+    escape as _escape,
+    get_table_for_id as _table_for_id,
 )
 
 logger = logging.getLogger(__name__)

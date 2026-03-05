@@ -7,7 +7,6 @@ Each tool handler is tested for both success and edge-case paths.
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -37,7 +36,6 @@ from axon.mcp.tools import (
     handle_read_symbol,
     handle_summarize,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -814,8 +812,8 @@ class TestMultiRepoRouting:
     def test_handle_query_repo_not_found(self, mock_storage):
         """handle_query returns registry error when named repo does not exist."""
         # Use a patched home so the registry is empty
-        from unittest.mock import patch
         from pathlib import Path as _Path
+        from unittest.mock import patch
 
         with patch.object(_Path, "home", return_value=_Path("/nonexistent_registry_xyz")):
             result = handle_query(mock_storage, "test query", repo="missing-repo")
@@ -824,8 +822,8 @@ class TestMultiRepoRouting:
 
     def test_handle_context_repo_not_found(self, mock_storage):
         """handle_context returns registry error when named repo does not exist."""
-        from unittest.mock import patch
         from pathlib import Path as _Path
+        from unittest.mock import patch
 
         with patch.object(_Path, "home", return_value=_Path("/nonexistent_registry_xyz")):
             result = handle_context(mock_storage, "some_symbol", repo="missing-repo")
@@ -834,8 +832,8 @@ class TestMultiRepoRouting:
 
     def test_handle_impact_repo_not_found(self, mock_storage):
         """handle_impact returns registry error when named repo does not exist."""
-        from unittest.mock import patch
         from pathlib import Path as _Path
+        from unittest.mock import patch
 
         with patch.object(_Path, "home", return_value=_Path("/nonexistent_registry_xyz")):
             result = handle_impact(mock_storage, "some_symbol", repo="missing-repo")
@@ -867,7 +865,7 @@ class TestMultiRepoRouting:
         self, tmp_path: Path, monkeypatch
     ):
         """Uses ~/.axon/repos/{repo}/kuzu when central kuzu file exists."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         repo_dir = tmp_path / ".axon" / "repos" / "myapp"
@@ -888,7 +886,7 @@ class TestMultiRepoRouting:
         self, tmp_path: Path, monkeypatch
     ):
         """Falls back to {meta[path]}/.axon/kuzu when central kuzu doesn't exist."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         repo_dir = tmp_path / ".axon" / "repos" / "myapp"

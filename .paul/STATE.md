@@ -93,8 +93,8 @@ Uncommitted: STATE.md, ROADMAP.md (milestone init — will commit)
 Last session: 2026-03-07
 Stopped at: v0.9 milestone created — Phase 3 (Language Parsers Part 1) ready to plan
 Next action: /paul:plan for Phase 3 (Java, C#, Ruby parsers)
-Resume file: .paul/ROADMAP.md
-Resume context: 958 tests passing; v0.9 milestone initialized (phases 03-05); singleton lock already shipped (ae79bfe)
+Resume file: .paul/handoffs/archive/HANDOFF-2026-03-07b.md
+Resume context: 958 tests passing; daemon evict fix (707ef43); Gemini MCP+GEMINI.md configured; systemd pending wsl --shutdown
 
 ---
 *STATE.md — Updated after every significant action*

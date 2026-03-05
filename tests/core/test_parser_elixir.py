@@ -63,13 +63,13 @@ end
         result = parser.parse(self.CODE, "calc.ex")
         funcs = [s for s in result.symbols if s.kind == "function"]
         names = {f.name for f in funcs}
-        assert "add" in names
+        assert "Calc.add" in names
 
     def test_private_function_extracted(self, parser: ElixirParser) -> None:
         result = parser.parse(self.CODE, "calc.ex")
         funcs = [s for s in result.symbols if s.kind == "function"]
         names = {f.name for f in funcs}
-        assert "subtract" in names
+        assert "Calc.subtract" in names
 
     def test_public_function_exported(self, parser: ElixirParser) -> None:
         result = parser.parse(self.CODE, "calc.ex")
@@ -108,13 +108,13 @@ end
         result = parser.parse(self.CODE, "macros.ex")
         macros = [s for s in result.symbols if s.kind == "macro"]
         names = {m.name for m in macros}
-        assert "my_macro" in names
+        assert "MyMacros.my_macro" in names
 
     def test_private_macro_extracted(self, parser: ElixirParser) -> None:
         result = parser.parse(self.CODE, "macros.ex")
         macros = [s for s in result.symbols if s.kind == "macro"]
         names = {m.name for m in macros}
-        assert "private_macro" in names
+        assert "MyMacros.private_macro" in names
 
     def test_public_macro_exported(self, parser: ElixirParser) -> None:
         result = parser.parse(self.CODE, "macros.ex")
@@ -284,13 +284,13 @@ end
 
     def test_impl_decorator_captured(self, parser: ElixirParser) -> None:
         result = parser.parse(self.CODE, "server.ex")
-        handle_call = [s for s in result.symbols if s.name == "handle_call"]
+        handle_call = [s for s in result.symbols if s.name == "MyServer.handle_call"]
         assert len(handle_call) >= 1
         assert "@impl" in handle_call[0].decorators
 
     def test_init_otp_entry_point_decorator(self, parser: ElixirParser) -> None:
         result = parser.parse(self.CODE, "server.ex")
-        init_syms = [s for s in result.symbols if s.name == "init"]
+        init_syms = [s for s in result.symbols if s.name == "MyServer.init"]
         assert len(init_syms) >= 1
         assert "init" in init_syms[0].decorators
 

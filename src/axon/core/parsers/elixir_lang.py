@@ -134,11 +134,11 @@ class ElixirParser(LanguageParser):
         if args is not None:
             alias_node = self._find_child_by_type(args, "alias")
             if alias_node is not None:
-                module_name = alias_node.text.decode("utf8")
+                module_name = alias_node.text.decode("utf-8", errors="replace")
 
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -174,16 +174,19 @@ class ElixirParser(LanguageParser):
 
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         # OTP entry-point detection — mark as decorator
         effective_decorators = list(decorators)
         if func_name in _OTP_ENTRY_POINTS:
             effective_decorators.append(func_name)
 
+        # Fully qualified name: Module.func
+        full_name = f"{module_name}.{func_name}" if module_name else func_name
+
         result.symbols.append(
             SymbolInfo(
-                name=func_name,
+                name=full_name,
                 kind="function",
                 start_line=start_line,
                 end_line=end_line,
@@ -220,11 +223,14 @@ class ElixirParser(LanguageParser):
 
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
+
+        # Fully qualified name: Module.macro
+        full_name = f"{module_name}.{macro_name}" if module_name else macro_name
 
         result.symbols.append(
             SymbolInfo(
-                name=macro_name,
+                name=full_name,
                 kind="macro",
                 start_line=start_line,
                 end_line=end_line,
@@ -254,7 +260,7 @@ class ElixirParser(LanguageParser):
         """Extract a defstruct definition."""
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -393,7 +399,7 @@ class ElixirParser(LanguageParser):
                     if args is not None:
                         alias_node = self._find_child_by_type(args, "alias")
                         if alias_node is not None:
-                            behaviour_name = alias_node.text.decode("utf8")
+                            behaviour_name = alias_node.text.decode("utf-8", errors="replace")
                             result.heritage.append((module_name, "implements", behaviour_name))
 
     # ------------------------------------------------------------------

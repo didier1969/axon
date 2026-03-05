@@ -12,7 +12,7 @@ import logging
 
 import kuzu
 
-from axon.core.storage.kuzu_backend import (
+from axon.core.storage.kuzu_constants import (
     _EMBEDDING_PROPERTIES,
     _NODE_PROPERTIES,
     _NODE_TABLE_NAMES,

@@ -1504,6 +1504,59 @@ def handle_path(
     return result
 
 
+def handle_diff(
+    storage: StorageBackend,
+    symbol: str,
+    branch_range: str,
+    repo: str | None = None,
+) -> str:
+    """Compare a symbol across two branches/commits.
+
+    Args:
+        storage: The storage backend.
+        symbol: The symbol name to compare.
+        branch_range: Git branch range (e.g. "main..feature").
+        repo: Optional repository slug.
+
+    Returns:
+        Formatted diff of the symbol's source code.
+    """
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found."
+        storage = _repo_storage
+
+    try:
+        repo_root = _get_repo_root_from_storage(storage)
+        if repo_root is None:
+            return "Could not determine repository root path."
+
+        # We use git to extract the symbol's content from the two revisions.
+        # But first we need to find which file the symbol is in.
+        results = _resolve_symbol(storage, symbol, limit=1)
+        if not results:
+            return f"Symbol '{symbol}' not found in current index."
+        
+        file_path = results[0].file_path
+        
+        from axon.core.diff import get_symbol_diff
+        try:
+            diff_text = get_symbol_diff(repo_root, file_path, symbol, branch_range)
+            if not diff_text:
+                return f"No changes found for '{symbol}' in {branch_range}."
+            return diff_text
+        except Exception as e:
+            return f"Error comparing symbol: {e}"
+
+    finally:
+        if _repo_storage is not None:
+            _repo_storage.close()
+
+    log_event("diff", symbol=symbol[:200], repo=_repo_name_from_storage(storage, repo))
+    return result
+
 _WRITE_KEYWORDS = re.compile(
     r"\b(DELETE|DROP|CREATE|SET|REMOVE|MERGE|DETACH|INSTALL|LOAD|COPY|CALL"
     r"|RENAME|ALTER|IMPORT|TRUNCATE)\b",

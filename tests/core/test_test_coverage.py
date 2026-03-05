@@ -12,7 +12,6 @@ from axon.core.graph.model import (
 )
 from axon.core.ingestion.test_coverage import process_test_coverage
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

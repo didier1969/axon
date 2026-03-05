@@ -80,7 +80,7 @@ class TestAxonLruSizeEnvVar:
     def _run_main_with_args(self, argv, monkeypatch):
         """Helper: patch sys.argv and run main(), capturing run_daemon call args."""
         import sys
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import patch
 
         from axon.daemon.__main__ import main
 
@@ -102,7 +102,6 @@ class TestAxonLruSizeEnvVar:
         import sys
         from unittest.mock import patch
 
-        from axon.daemon.__main__ import main
 
         monkeypatch.setenv("AXON_LRU_SIZE", "10")
         monkeypatch.setattr(sys, "argv", ["axon-daemon"])
@@ -117,6 +116,7 @@ class TestAxonLruSizeEnvVar:
                 mock_rd.return_value = None
 
                 import importlib
+
                 import axon.daemon.__main__ as dm
                 importlib.reload(dm)
 
@@ -126,10 +126,8 @@ class TestAxonLruSizeEnvVar:
 
     def test_env_var_controls_default(self, monkeypatch):
         """When AXON_LRU_SIZE=7, argparse default is 7 (no CLI flag)."""
-        import os
-        import sys
-        from unittest.mock import patch
         import argparse
+        import os
 
         monkeypatch.setenv("AXON_LRU_SIZE", "7")
 
@@ -142,8 +140,8 @@ class TestAxonLruSizeEnvVar:
 
     def test_cli_flag_overrides_env_var(self, monkeypatch):
         """--max-dbs 3 overrides AXON_LRU_SIZE=10."""
-        import os
         import argparse
+        import os
 
         monkeypatch.setenv("AXON_LRU_SIZE", "10")
 
@@ -155,8 +153,8 @@ class TestAxonLruSizeEnvVar:
 
     def test_default_is_5_without_env(self, monkeypatch):
         """Without AXON_LRU_SIZE, default is 5."""
-        import os
         import argparse
+        import os
 
         monkeypatch.delenv("AXON_LRU_SIZE", raising=False)
 

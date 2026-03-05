@@ -11,7 +11,7 @@ import bisect
 from collections import defaultdict
 
 from axon.core.graph.graph import KnowledgeGraph
-from axon.core.graph.model import GraphNode, NodeLabel
+from axon.core.graph.model import NodeLabel
 
 
 def build_name_index(
@@ -137,3 +137,8 @@ def find_containing_symbol(
             best_id = nid
 
     return best_id
+
+def build_file_index(graph: KnowledgeGraph) -> dict[str, str]:
+    """Return a mapping of relative file paths to their graph node IDs."""
+    from axon.core.graph.model import NodeLabel
+    return {n.file_path: n.id for n in graph.get_nodes_by_label(NodeLabel.FILE)}

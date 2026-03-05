@@ -70,10 +70,10 @@ class GoParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -104,10 +104,10 @@ class GoParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         # Extract receiver type
         receiver_type = ""
@@ -118,7 +118,7 @@ class GoParser(LanguageParser):
                 if child.type == "parameter_declaration":
                     type_node = self._find_child_by_type(child, "type_identifier")
                     if type_node is not None:
-                        receiver_type = type_node.text.decode("utf8")
+                        receiver_type = type_node.text.decode("utf-8", errors="replace")
                     else:
                         # Pointer receiver: *Type
                         pointer_type = self._find_child_by_type(child, "pointer_type")
@@ -163,10 +163,10 @@ class GoParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         # Determine kind from the type body
         kind = "type_alias"
@@ -238,7 +238,7 @@ class GoParser(LanguageParser):
 
         if func_node.type == "identifier":
             result.calls.append(
-                CallInfo(name=func_node.text.decode("utf8"), line=line)
+                CallInfo(name=func_node.text.decode("utf-8", errors="replace"), line=line)
             )
         elif func_node.type == "selector_expression":
             # pkg.Function() or obj.Method()

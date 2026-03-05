@@ -70,9 +70,9 @@ class KnowledgeGraph:
         old = self._nodes.get(node.id)
         if old is not None and old.label != node.label:
             self._by_label[old.label].pop(node.id, None)
+
         self._nodes[node.id] = node
         self._by_label[node.label][node.id] = node
-
     def get_node(self, node_id: str) -> GraphNode | None:
         """Return the node with *node_id*, or ``None`` if it does not exist."""
         return self._nodes.get(node_id)

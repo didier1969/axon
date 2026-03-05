@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Iterable, Protocol, runtime_checkable
 
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import GraphNode, GraphRelationship
@@ -132,7 +132,7 @@ class StorageBackend(Protocol):
         """Fuzzy name search by edit distance."""
         ...
 
-    def store_embeddings(self, embeddings: list[NodeEmbedding]) -> None:
+    def store_embeddings(self, embeddings: Iterable[NodeEmbedding]) -> None:
         """Persist embedding vectors for the given nodes."""
         ...
 
@@ -144,6 +144,6 @@ class StorageBackend(Protocol):
         """Return a mapping of ``{file_path: content_hash}`` for all indexed files."""
         ...
 
-    def bulk_load(self, graph: KnowledgeGraph) -> None:
-        """Replace the entire store contents with *graph*."""
+    def bulk_load(self, nodes: Iterable[GraphNode], rels: Iterable[GraphRelationship]) -> None:
+        """Replace the entire store contents."""
         ...

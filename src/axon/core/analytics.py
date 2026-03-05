@@ -7,6 +7,7 @@ are silently swallowed so that a logging failure never affects callers.
 from __future__ import annotations
 
 import json
+import platform
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,11 @@ def log_event(type: str, **kwargs: Any) -> None:  # noqa: A002
         event: dict[str, Any] = {
             "ts": datetime.now(tz=timezone.utc).isoformat(),
             "type": type,
+            "env": {
+                "os": platform.system(),
+                "python": platform.python_version()
+            },
+
             **kwargs,
         }
         events_path = Path.home() / ".axon" / "events.jsonl"

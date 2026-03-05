@@ -7,8 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from axon.core.ingestion.walker import FileEntry, discover_files, walk_repo
-
+from axon.core.ingestion.walker import discover_files, walk_repo
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -222,6 +221,23 @@ class TestWalkRepoSkipsBinary:
 
         assert "binary.py" not in paths
         assert "valid.py" in paths
+
+    def test_walk_repo_skips_metadata_dirs(self, tmp_path: Path) -> None:
+        """Directories like .claude/worktrees and .axon should be skipped."""
+        # Create a metadata directory that should be ignored
+        worktree_dir = tmp_path / ".claude" / "worktrees" / "agent-1"
+        worktree_dir.mkdir(parents=True)
+        (worktree_dir / "ignored.py").write_text("print('ignore me')")
+
+        # Create a legitimate file
+        (tmp_path / "legit.py").write_text("print('keep me')", encoding="utf-8")
+
+        entries = walk_repo(tmp_path)
+        paths = {e.path for e in entries}
+
+        assert "legit.py" in paths
+        # Check that no file from .claude or its subdirs is present
+        assert not any(".claude" in p for p in paths)
 
 
 class TestWalkRepoSkipsLargeFiles:

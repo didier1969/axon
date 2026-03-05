@@ -133,20 +133,20 @@ class TypeScriptParser(LanguageParser):
             ):
                 name_node = child.child_by_field_name("name")
                 if name_node is not None:
-                    result.exports.append(name_node.text.decode())
+                    result.exports.append(name_node.text.decode("utf-8", errors="replace"))
             elif child.type in ("lexical_declaration", "variable_declaration"):
                 for sub in child.children:
                     if sub.type == "variable_declarator":
                         name_node = sub.child_by_field_name("name")
                         if name_node is not None:
-                            result.exports.append(name_node.text.decode())
+                            result.exports.append(name_node.text.decode("utf-8", errors="replace"))
             elif child.type == "export_clause":
                 # export { name1, name2 }
                 for spec in child.children:
                     if spec.type == "export_specifier":
                         name_node = spec.child_by_field_name("name")
                         if name_node is not None:
-                            result.exports.append(name_node.text.decode())
+                            result.exports.append(name_node.text.decode("utf-8", errors="replace"))
 
     def _maybe_extract_module_exports(
         self, node: Node, source: str, result: ParseResult
@@ -160,21 +160,21 @@ class TypeScriptParser(LanguageParser):
             if left is None or right is None:
                 continue
 
-            left_text = left.text.decode()
+            left_text = left.text.decode("utf-8", errors="replace")
             if left_text not in ("module.exports", "exports"):
                 continue
 
             if right.type == "identifier":
-                result.exports.append(right.text.decode())
+                result.exports.append(right.text.decode("utf-8", errors="replace"))
             elif right.type == "object":
                 # module.exports = { Foo, Bar, baz: something }
                 for prop in right.children:
                     if prop.type == "shorthand_property_identifier":
-                        result.exports.append(prop.text.decode())
+                        result.exports.append(prop.text.decode("utf-8", errors="replace"))
                     elif prop.type == "pair":
                         key_node = prop.child_by_field_name("key")
                         if key_node is not None:
-                            result.exports.append(key_node.text.decode())
+                            result.exports.append(key_node.text.decode("utf-8", errors="replace"))
 
     def _extract_function_declaration(
         self, node: Node, source: str, result: ParseResult
@@ -183,10 +183,10 @@ class TypeScriptParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode()
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        content = node.text.decode()
+        content = node.text.decode("utf-8", errors="replace")
         signature = self._build_function_signature(node, name)
 
         result.symbols.append(
@@ -210,10 +210,10 @@ class TypeScriptParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode()
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        content = node.text.decode()
+        content = node.text.decode("utf-8", errors="replace")
 
         class_name = self._find_parent_class_name(node)
 
@@ -248,7 +248,7 @@ class TypeScriptParser(LanguageParser):
             if name_node is None or value_node is None:
                 continue
 
-            var_name = name_node.text.decode()
+            var_name = name_node.text.decode("utf-8", errors="replace")
 
             if value_node.type in ("arrow_function", "function_expression"):
                 self._extract_assigned_function(child, var_name, value_node, result)
@@ -271,7 +271,7 @@ class TypeScriptParser(LanguageParser):
 
         start_line = outer.start_point[0] + 1
         end_line = outer.end_point[0] + 1
-        content = outer.text.decode()
+        content = outer.text.decode("utf-8", errors="replace")
         signature = self._build_function_signature(func_node, name)
 
         result.symbols.append(
@@ -298,7 +298,7 @@ class TypeScriptParser(LanguageParser):
     ) -> None:
         """If the call is ``require('./foo')``, emit an ImportInfo."""
         func_node = call_node.child_by_field_name("function")
-        if func_node is None or func_node.text.decode() != "require":
+        if func_node is None or func_node.text.decode("utf-8", errors="replace") != "require":
             return
 
         args = call_node.child_by_field_name("arguments")
@@ -327,10 +327,10 @@ class TypeScriptParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode()
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        content = node.text.decode()
+        content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -364,13 +364,13 @@ class TypeScriptParser(LanguageParser):
                 rel = "extends" if child.type == "extends_clause" else "implements"
                 for sub in child.children:
                     if sub.type in ("identifier", "type_identifier"):
-                        result.heritage.append((class_name, rel, sub.text.decode()))
+                        result.heritage.append((class_name, rel, sub.text.decode("utf-8", errors="replace")))
                     elif sub.type == "type_arguments":
                         # Generic base: `extends Repository<User>` — extract User as type_ref
                         line = sub.start_point[0] + 1
                         for arg in sub.children:
                             if arg.type in ("type_identifier", "identifier"):
-                                name = arg.text.decode()
+                                name = arg.text.decode("utf-8", errors="replace")
                                 if name.lower() not in _BUILTIN_TYPES:
                                     result.type_refs.append(
                                         TypeRef(name=name, kind="variable", line=line)
@@ -381,10 +381,10 @@ class TypeScriptParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode()
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        content = node.text.decode()
+        content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -406,7 +406,7 @@ class TypeScriptParser(LanguageParser):
             if child.type == "extends_type_clause":
                 for sub in child.children:
                     if sub.type in ("identifier", "type_identifier"):
-                        result.heritage.append((name, "extends", sub.text.decode()))
+                        result.heritage.append((name, "extends", sub.text.decode("utf-8", errors="replace")))
             elif child.type == "interface_body":
                 for member in child.children:
                     if member.type == "property_signature":
@@ -417,10 +417,10 @@ class TypeScriptParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode()
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        content = node.text.decode()
+        content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -471,17 +471,17 @@ class TypeScriptParser(LanguageParser):
                         if spec.type == "import_specifier":
                             name_node = spec.child_by_field_name("name")
                             if name_node is not None:
-                                names.append(name_node.text.decode())
+                                names.append(name_node.text.decode("utf-8", errors="replace"))
                 elif clause_child.type == "namespace_import":
                     # import * as utils from '...'
                     for ns_child in clause_child.children:
                         if ns_child.type == "identifier":
-                            alias = ns_child.text.decode()
+                            alias = ns_child.text.decode("utf-8", errors="replace")
                             names.append(alias)
                             break
                 elif clause_child.type == "identifier":
                     # import Foo from '...'  (default import)
-                    names.append(clause_child.text.decode())
+                    names.append(clause_child.text.decode("utf-8", errors="replace"))
 
         result.imports.append(
             ImportInfo(
@@ -504,17 +504,17 @@ class TypeScriptParser(LanguageParser):
             obj_node = func_node.child_by_field_name("object")
             prop_node = func_node.child_by_field_name("property")
             if prop_node is not None:
-                receiver = obj_node.text.decode() if obj_node else ""
+                receiver = obj_node.text.decode("utf-8", errors="replace") if obj_node else ""
                 result.calls.append(
                     CallInfo(
-                        name=prop_node.text.decode(),
+                        name=prop_node.text.decode("utf-8", errors="replace"),
                         line=line,
                         receiver=receiver,
                         arguments=arguments,
                     )
                 )
         elif func_node.type == "identifier":
-            name = func_node.text.decode()
+            name = func_node.text.decode("utf-8", errors="replace")
             # Skip require() since it's handled as an import.
             if name != "require":
                 result.calls.append(CallInfo(name=name, line=line, arguments=arguments))
@@ -533,7 +533,7 @@ class TypeScriptParser(LanguageParser):
         if constructor_node.type == "identifier":
             result.calls.append(
                 CallInfo(
-                    name=constructor_node.text.decode(),
+                    name=constructor_node.text.decode("utf-8", errors="replace"),
                     line=line,
                     arguments=arguments,
                 )
@@ -542,10 +542,10 @@ class TypeScriptParser(LanguageParser):
             obj_node = constructor_node.child_by_field_name("object")
             prop_node = constructor_node.child_by_field_name("property")
             if prop_node is not None:
-                receiver = obj_node.text.decode() if obj_node else ""
+                receiver = obj_node.text.decode("utf-8", errors="replace") if obj_node else ""
                 result.calls.append(
                     CallInfo(
-                        name=prop_node.text.decode(),
+                        name=prop_node.text.decode("utf-8", errors="replace"),
                         line=line,
                         receiver=receiver,
                         arguments=arguments,
@@ -562,7 +562,7 @@ class TypeScriptParser(LanguageParser):
         identifiers: list[str] = []
         for child in args_node.children:
             if child.type == "identifier":
-                identifiers.append(child.text.decode())
+                identifiers.append(child.text.decode("utf-8", errors="replace"))
         return identifiers
 
     def _extract_function_types(
@@ -590,7 +590,7 @@ class TypeScriptParser(LanguageParser):
                     if param_name_node is None:
                         continue
 
-                    param_name = param_name_node.text.decode()
+                    param_name = param_name_node.text.decode("utf-8", errors="replace")
 
                     for sub in param.children:
                         if sub.type == "type_annotation":
@@ -661,11 +661,11 @@ class TypeScriptParser(LanguageParser):
         """
         for child in annotation_node.children:
             if child.type in ("type_identifier", "predefined_type", "identifier"):
-                return child.text.decode()
+                return child.text.decode("utf-8", errors="replace")
             if child.type == "generic_type":
                 name_node = child.child_by_field_name("name")
                 if name_node is not None:
-                    return name_node.text.decode()
+                    return name_node.text.decode("utf-8", errors="replace")
         return ""
 
     @staticmethod
@@ -684,7 +684,7 @@ class TypeScriptParser(LanguageParser):
                 if type_args is not None:
                     for arg in type_args.children:
                         if arg.type in ("type_identifier", "identifier"):
-                            name = arg.text.decode()
+                            name = arg.text.decode("utf-8", errors="replace")
                             if name.lower() not in _BUILTIN_TYPES:
                                 refs.append(
                                     TypeRef(
@@ -712,7 +712,7 @@ class TypeScriptParser(LanguageParser):
                     continue
                 for sub in constraint.children:
                     if sub.type in ("type_identifier", "identifier"):
-                        name = sub.text.decode()
+                        name = sub.text.decode("utf-8", errors="replace")
                         if name.lower() not in _BUILTIN_TYPES:
                             result.type_refs.append(
                                 TypeRef(
@@ -730,9 +730,9 @@ class TypeScriptParser(LanguageParser):
         """
         for child in string_node.children:
             if child.type == "string_fragment":
-                return child.text.decode()
+                return child.text.decode("utf-8", errors="replace")
         # Fallback: strip outer quotes from the whole text.
-        text = string_node.text.decode()
+        text = string_node.text.decode("utf-8", errors="replace")
         if len(text) >= 2 and text[0] in ("'", '"', "`") and text[-1] in ("'", '"', "`"):
             return text[1:-1]
         return text
@@ -748,9 +748,9 @@ class TypeScriptParser(LanguageParser):
 
         for child in node.children:
             if child.type == "formal_parameters":
-                params_text = child.text.decode()
+                params_text = child.text.decode("utf-8", errors="replace")
             elif child.type == "type_annotation":
-                return_type = child.text.decode()
+                return_type = child.text.decode("utf-8", errors="replace")
 
         sig = f"{name}{params_text}"
         if return_type:
@@ -765,6 +765,6 @@ class TypeScriptParser(LanguageParser):
             if current.type == "class_declaration":
                 name_node = current.child_by_field_name("name")
                 if name_node is not None:
-                    return name_node.text.decode()
+                    return name_node.text.decode("utf-8", errors="replace")
             current = current.parent
         return ""

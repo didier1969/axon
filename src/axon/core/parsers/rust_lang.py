@@ -92,11 +92,11 @@ class RustParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         is_pub = self._has_visibility(node)
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
         kind = "method" if class_name else "function"
 
         result.symbols.append(
@@ -132,10 +132,10 @@ class RustParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
         kind = "method" if class_name else "function"
 
         result.symbols.append(
@@ -162,11 +162,11 @@ class RustParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         is_pub = self._has_visibility(node)
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -194,11 +194,11 @@ class RustParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         is_pub = self._has_visibility(node)
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -226,11 +226,11 @@ class RustParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         is_pub = self._has_visibility(node)
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -289,10 +289,10 @@ class RustParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -322,11 +322,11 @@ class RustParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         is_pub = self._has_visibility(node)
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -364,7 +364,7 @@ class RustParser(LanguageParser):
         """Recursively process a use path and emit ImportInfo entries."""
         if node.type == "scoped_identifier":
             # e.g. std::collections::HashMap
-            full_path = node.text.decode("utf8")
+            full_path = node.text.decode("utf-8", errors="replace")
             # The last segment is the imported name
             parts = full_path.replace("::", ".").split(".")
             name = parts[-1]
@@ -389,7 +389,7 @@ class RustParser(LanguageParser):
             self._process_use_list(node, prefix=prefix, result=result)
 
         elif node.type == "identifier":
-            node_text = node.text.decode("utf8")
+            node_text = node.text.decode("utf-8", errors="replace")
             full_path = f"{prefix}::{node_text}" if prefix else node_text
             result.imports.append(
                 ImportInfo(
@@ -429,7 +429,7 @@ class RustParser(LanguageParser):
 
         if func_node.type == "identifier":
             result.calls.append(
-                CallInfo(name=func_node.text.decode("utf8"), line=line)
+                CallInfo(name=func_node.text.decode("utf-8", errors="replace"), line=line)
             )
         elif func_node.type == "field_expression":
             # obj.method(args) — but tree-sitter Rust uses method_call_expression for this
@@ -442,7 +442,7 @@ class RustParser(LanguageParser):
                 result.calls.append(CallInfo(name=name, line=line, receiver=receiver))
         elif func_node.type == "scoped_identifier":
             # e.g. HashMap::new()
-            full = func_node.text.decode("utf8")
+            full = func_node.text.decode("utf-8", errors="replace")
             parts = full.split("::")
             name = parts[-1]
             receiver = "::".join(parts[:-1]) if len(parts) > 1 else ""
@@ -457,14 +457,14 @@ class RustParser(LanguageParser):
         name_node = self._find_child_by_type(node, "field_identifier")
         if name_node is None:
             return
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
 
         # Receiver is the first child
         receiver = ""
         if node.children:
             recv_node = node.children[0]
             if recv_node.type in ("identifier", "self"):
-                receiver = recv_node.text.decode("utf8")
+                receiver = recv_node.text.decode("utf-8", errors="replace")
 
         result.calls.append(CallInfo(name=name, line=line, receiver=receiver))
 
@@ -477,7 +477,7 @@ class RustParser(LanguageParser):
         name_node = self._find_child_by_type(node, "identifier")
         if name_node is None:
             return
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         result.calls.append(CallInfo(name=f"{name}!", line=line))
 
     def _walk_for_calls(self, node: Node, result: ParseResult, skip_first: bool) -> None:

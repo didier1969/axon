@@ -148,7 +148,6 @@ def diff_branches(
 
 def _build_graph_for_ref(repo_path: Path, ref: str) -> "KnowledgeGraph":
     """Build an in-memory graph for a git ref using a temporary worktree."""
-    from axon.core.graph.graph import KnowledgeGraph
     from axon.core.ingestion.pipeline import build_graph
 
     with tempfile.TemporaryDirectory(prefix="axon_diff_") as tmp_dir:
@@ -182,6 +181,75 @@ def _build_graph_for_ref(repo_path: Path, ref: str) -> "KnowledgeGraph":
                 logger.warning("Failed to remove worktree at %s", worktree_path)
 
     return graph
+
+def get_symbol_diff(
+    repo_path: Path,
+    file_path: str,
+    symbol_name: str,
+    branch_range: str,
+) -> str:
+    """Compare a symbol's source code between two git revisions.
+
+    Args:
+        repo_path: Root of the git repository.
+        file_path: Relative path to the file containing the symbol.
+        symbol_name: Name of the symbol to compare.
+        branch_range: Git branch range (e.g. "main..feature").
+
+    Returns:
+        Unified diff string.
+    """
+    if ".." in branch_range:
+        parts = branch_range.split("..", 1)
+        base_ref = parts[0].strip()
+        current_ref = parts[1].strip() if parts[1].strip() else "HEAD"
+    else:
+        base_ref = branch_range.strip()
+        current_ref = "HEAD"
+
+    def _get_symbol_source(ref: str) -> str:
+        # We need to re-parse the file at this ref to find the symbol's offsets.
+        # This is expensive but accurate.
+        try:
+            cmd = ["git", "show", f"{ref}:{file_path}"]
+            res = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True, check=True)
+            content = res.stdout
+        except subprocess.CalledProcessError:
+            return ""
+
+        # Use the appropriate parser
+        from axon.core.ingestion.parser_phase import get_parser, _detect_language
+        lang = _detect_language(file_path)
+        if not lang:
+            return ""
+        
+        try:
+            parser = get_parser(lang)
+            parse_result = parser.parse(content, file_path)
+            # Find symbol by name
+            for sym in parse_result.symbols:
+                # Handle methods (ClassName.method)
+                full_name = f"{sym.class_name}.{sym.name}" if sym.class_name and sym.kind == "method" else sym.name
+                if full_name == symbol_name or sym.name == symbol_name:
+                    return sym.content
+        except Exception:
+            pass
+        return ""
+
+    base_source = _get_symbol_source(base_ref)
+    current_source = _get_symbol_source(current_ref)
+
+    if not base_source and not current_source:
+        return f"Symbol '{symbol_name}' not found in either {base_ref} or {current_ref}."
+
+    import difflib
+    diff = difflib.unified_diff(
+        base_source.splitlines(keepends=True),
+        current_source.splitlines(keepends=True),
+        fromfile=f"{base_ref}:{symbol_name}",
+        tofile=f"{current_ref}:{symbol_name}",
+    )
+    return "".join(diff)
 
 def format_diff(diff: StructuralDiff) -> str:
     """Format a StructuralDiff as human-readable output.

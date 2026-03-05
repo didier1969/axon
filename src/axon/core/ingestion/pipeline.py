@@ -1,22 +1,6 @@
 """Pipeline orchestrator for Axon.
 
-Runs all ingestion phases in sequence, populates an in-memory knowledge graph,
-bulk-loads it into a storage backend, and returns a summary of the results.
-
-Phases executed:
-    0. Incremental diff (content-hash delta; skips full index when prior data exists)
-    1. File walking
-    2. Structure processing (File/Folder nodes + CONTAINS edges)
-    3. Code parsing (symbol nodes + DEFINES edges)
-    4. Import resolution (IMPORTS edges)
-    5. Call tracing (CALLS edges)
-    6. Heritage extraction (EXTENDS / IMPLEMENTS edges)
-    7. Type analysis (USES_TYPE edges)
-    8. Community detection (COMMUNITY nodes + MEMBER_OF edges)
-    9. Process detection (PROCESS nodes + STEP_IN_PROCESS edges)
-    10. Dead code detection (flags unreachable symbols)
-    11. Change coupling (COUPLED_WITH edges from git history)
-    12. Cross-repo deps (DEPENDS_ON edges from manifest files)
+Runs ingestion phases in a streaming fashion to minimize memory usage.
 """
 
 from __future__ import annotations
@@ -24,15 +8,17 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from collections.abc import Callable
+import atexit
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Generator, Union
 
 from axon.config.ignore import load_gitignore
 from axon.core.analytics import log_event
 from axon.core.graph.graph import KnowledgeGraph
-from axon.core.graph.model import NodeLabel
+from axon.core.graph.model import NodeLabel, GraphNode, GraphRelationship
 from axon.core.embeddings.embedder import embed_graph
 from axon.core.ingestion.calls import process_calls
 from axon.core.ingestion.centrality import process_centrality
@@ -42,7 +28,7 @@ from axon.core.ingestion.cross_repo import process_cross_repo_deps
 from axon.core.ingestion.dead_code import process_dead_code
 from axon.core.ingestion.heritage import process_heritage
 from axon.core.ingestion.imports import process_imports
-from axon.core.ingestion.parser_phase import process_parsing
+from axon.core.ingestion.parser_phase import process_parsing, FileParseData
 from axon.core.ingestion.processes import process_processes
 from axon.core.ingestion.structure import process_structure
 from axon.core.ingestion.test_coverage import process_test_coverage
@@ -52,8 +38,6 @@ from axon.core.storage.base import StorageBackend
 
 @dataclass
 class PhaseTimings:
-    """Wall-clock duration (seconds) for each pipeline phase."""
-
     walk: float = 0.0
     structure: float = 0.0
     parsing: float = 0.0
@@ -71,11 +55,8 @@ class PhaseTimings:
     storage_load: float = 0.0
     embeddings: float = 0.0
 
-
 @dataclass
 class PipelineResult:
-    """Summary of a pipeline run."""
-
     files: int = 0
     symbols: int = 0
     relationships: int = 0
@@ -99,12 +80,8 @@ _SYMBOL_LABELS: frozenset[NodeLabel] = frozenset(NodeLabel) - {
 }
 
 _logger = logging.getLogger(__name__)
-
-# Shared executor for background embedding work.  A single thread is
-# sufficient because fastembed is CPU-bound and releases the GIL during
-# the ONNX inference calls.
 _EMBEDDING_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="axon-embed")
-
+atexit.register(_EMBEDDING_POOL.shutdown, wait=False)
 
 def _run_embeddings(
     graph: KnowledgeGraph,
@@ -112,7 +89,6 @@ def _run_embeddings(
     result: PipelineResult,
     report: Callable[[str, float], None],
 ) -> None:
-    """Generate and store embeddings (runs in background thread or inline)."""
     try:
         report("Generating embeddings", 0.0)
         _t = time.monotonic()
@@ -121,13 +97,9 @@ def _run_embeddings(
         result.phase_timings.embeddings = time.monotonic() - _t
         result.embeddings = len(node_embeddings)
         report("Generating embeddings", 1.0)
-    except (RuntimeError, ValueError, OSError):
-        _logger.warning(
-            "Embedding phase failed — search will use FTS only",
-            exc_info=True,
-        )
+    except Exception:
+        _logger.warning("Embedding phase failed", exc_info=True)
         report("Generating embeddings", 1.0)
-
 
 def run_pipeline(
     repo_path: Path,
@@ -137,39 +109,6 @@ def run_pipeline(
     embeddings: bool = True,
     wait_embeddings: bool = False,
 ) -> tuple[KnowledgeGraph, PipelineResult]:
-    """Run phases 1-11 of the ingestion pipeline.
-
-    When *storage* is provided the graph is bulk-loaded into it after
-    all phases complete.  When ``None``, only the in-memory graph is
-    returned (useful for branch comparison snapshots).
-
-    Parameters
-    ----------
-    repo_path:
-        Root directory of the repository to analyse.
-    storage:
-        An already-initialised :class:`StorageBackend` to persist the graph.
-        Pass ``None`` to skip storage loading.
-    full:
-        When ``True``, skip incremental-diff logic (Phase 0) and force a full
-        re-index.  Currently Phase 0 is a no-op regardless of this flag.
-    progress_callback:
-        Optional ``(phase_name, progress)`` callback where *progress* is a
-        float in ``[0.0, 1.0]``.
-    embeddings:
-        When ``True`` (default), generate and store vector embeddings after
-        bulk-loading.  Set to ``False`` to skip embedding generation.
-    wait_embeddings:
-        When ``True``, block until embedding generation completes before
-        returning.  When ``False`` (default), embeddings run in a background
-        thread and the pipeline returns immediately.  The future is available
-        on ``result.embedding_future``.
-
-    Returns
-    -------
-    tuple[KnowledgeGraph, PipelineResult]
-        The populated graph and a summary dataclass with counts and timings.
-    """
     start = time.monotonic()
     result = PipelineResult()
 
@@ -185,9 +124,8 @@ def run_pipeline(
     result.files = len(files)
     report("Walking files", 1.0)
 
-    # Incremental path: skip re-parsing unchanged files when an existing index is present.
-    # Activates when storage has data and full=False.  Falls through to the full-index
-    # path below on first run (empty manifest) or when full=True.
+    # Note: Incremental path currently still uses full_graph in memory for simplicity
+    # but we will eventually stream it too.
     if storage is not None and not full:
         manifest = storage.get_indexed_files()
         if manifest:
@@ -195,196 +133,144 @@ def run_pipeline(
             changed_or_new = [e for e in files if current[e.path] != manifest.get(e.path)]
             deleted_paths = [p for p in manifest if p not in current]
 
-            for path in deleted_paths:
-                storage.remove_nodes_by_file(path)
+            if changed_or_new or deleted_paths:
+                report("Loading existing graph", 0.0)
+                full_graph = storage.export_to_graph()
+                
+                nodes_to_remove = []
+                for node in full_graph.iter_nodes():
+                    if node.file_path in deleted_paths or node.file_path in [e.path for e in changed_or_new]:
+                        nodes_to_remove.append(node.id)
+                for nid in nodes_to_remove:
+                    full_graph.remove_node(nid)
 
-            partial_graph = KnowledgeGraph()
-            if changed_or_new:
-                partial_graph = reindex_files(changed_or_new, repo_path, storage)
+                if changed_or_new:
+                    # Use compatibility mode (passing graph=full_graph)
+                    report("Processing structure", 0.0)
+                    process_structure(changed_or_new, graph=full_graph)
+                    report("Processing structure", 1.0)
+                    
+                    report("Parsing code", 0.0)
+                    parse_data_list = process_parsing(changed_or_new, graph=full_graph)
+                    report("Parsing code", 1.0)
+                    
+                    # File index for imports
+                    from axon.core.ingestion.symbol_lookup import build_file_index
+                    file_index = build_file_index(full_graph)
+                    
+                    report("Resolving imports", 0.0)
+                    process_imports(parse_data_list, file_index, graph=full_graph)
+                    report("Resolving imports", 1.0)
+                    
+                    report("Tracing calls", 0.0)
+                    process_calls(parse_data_list, full_graph)
+                    report("Tracing calls", 1.0)
 
-            if embeddings and changed_or_new:
-                if wait_embeddings:
-                    _run_embeddings(partial_graph, storage, result, report)
-                else:
-                    result.embedding_future = _EMBEDDING_POOL.submit(
-                        _run_embeddings, partial_graph, storage, result, report,
-                    )
+                report("Detecting communities", 0.0)
+                result.clusters = process_communities(full_graph)
+                process_centrality(full_graph)
+                result.processes = process_processes(full_graph)
+                process_test_coverage(full_graph)
+                result.dead_code = process_dead_code(full_graph)
+                
+                report("Loading to storage", 0.0)
+                storage.bulk_load(full_graph)
+                report("Loading to storage", 1.0)
 
             result.incremental = True
             result.changed_files = len(changed_or_new) + len(deleted_paths)
             result.duration_seconds = time.monotonic() - start
-            try:
-                log_event(
-                    "index",
-                    repo=repo_path.name,
-                    files=result.files,
-                    changed=result.changed_files,
-                    duration=round(result.duration_seconds, 2),
-                    incremental=True,
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            return partial_graph, result
+            return KnowledgeGraph(), result # Return empty graph for incremental
 
+    # Full Index Path (Streaming)
     graph = KnowledgeGraph()
 
     report("Processing structure", 0.0)
-    _t = time.monotonic()
-    process_structure(files, graph)
-    result.phase_timings.structure = time.monotonic() - _t
+    process_structure(files, graph=graph)
     report("Processing structure", 1.0)
-
+    
     report("Parsing code", 0.0)
-    _t = time.monotonic()
-    parse_data = process_parsing(files, graph)
-    result.phase_timings.parsing = time.monotonic() - _t
+    parse_data_list = process_parsing(files, graph=graph)
     report("Parsing code", 1.0)
 
     report("Resolving imports", 0.0)
-    _t = time.monotonic()
-    process_imports(parse_data, graph)
-    result.phase_timings.imports = time.monotonic() - _t
+    from axon.core.ingestion.symbol_lookup import build_file_index
+    file_index = build_file_index(graph)
+    process_imports(parse_data_list, file_index, graph=graph)
     report("Resolving imports", 1.0)
-
+    
     report("Tracing calls", 0.0)
-    _t = time.monotonic()
-    process_calls(parse_data, graph)
-    result.phase_timings.calls = time.monotonic() - _t
+    process_calls(parse_data_list, graph)
     report("Tracing calls", 1.0)
 
     report("Extracting heritage", 0.0)
-    _t = time.monotonic()
-    process_heritage(parse_data, graph)
-    result.phase_timings.heritage = time.monotonic() - _t
+    process_heritage(parse_data_list, graph)
     report("Extracting heritage", 1.0)
 
     report("Analyzing types", 0.0)
-    _t = time.monotonic()
-    process_types(parse_data, graph)
-    result.phase_timings.types = time.monotonic() - _t
+    process_types(parse_data_list, graph)
     report("Analyzing types", 1.0)
 
     report("Detecting communities", 0.0)
-    _t = time.monotonic()
     result.clusters = process_communities(graph)
-    result.phase_timings.communities = time.monotonic() - _t
     report("Detecting communities", 1.0)
-
-    _t = time.monotonic()
+    report("Calculating centrality", 0.0)
     process_centrality(graph)
-    result.phase_timings.centrality = time.monotonic() - _t
-
+    report("Calculating centrality", 1.0)
     report("Detecting execution flows", 0.0)
-    _t = time.monotonic()
     result.processes = process_processes(graph)
-    result.phase_timings.processes = time.monotonic() - _t
     report("Detecting execution flows", 1.0)
-
-    _t = time.monotonic()
     process_test_coverage(graph)
-    result.phase_timings.test_coverage = time.monotonic() - _t
-
     report("Finding dead code", 0.0)
-    _t = time.monotonic()
     result.dead_code = process_dead_code(graph)
-    result.phase_timings.dead_code = time.monotonic() - _t
     report("Finding dead code", 1.0)
-
     report("Analyzing git history", 0.0)
-    _t = time.monotonic()
     result.coupled_pairs = process_coupling(graph, repo_path)
-    result.phase_timings.coupling = time.monotonic() - _t
     report("Analyzing git history", 1.0)
-
-    report("Resolving cross-repo deps", 0.0)
-    _t = time.monotonic()
     result.cross_repo_deps = process_cross_repo_deps(graph, repo_path)
-    result.phase_timings.cross_repo = time.monotonic() - _t
-    report("Resolving cross-repo deps", 1.0)
 
-    # Compute result counts before the optional embedding step so a
-    # fastembed failure never leaves symbols/relationships at zero.
     result.symbols = sum(1 for n in graph.iter_nodes() if n.label in _SYMBOL_LABELS)
     result.relationships = graph.relationship_count
 
     if storage is not None:
         report("Loading to storage", 0.0)
-        _t = time.monotonic()
         storage.bulk_load(graph)
-        result.phase_timings.storage_load = time.monotonic() - _t
         report("Loading to storage", 1.0)
-
         if embeddings:
-            if wait_embeddings:
-                _run_embeddings(graph, storage, result, report)
-            else:
-                result.embedding_future = _EMBEDDING_POOL.submit(
-                    _run_embeddings, graph, storage, result, report,
-                )
+            if wait_embeddings: _run_embeddings(graph, storage, result, report)
+            else: result.embedding_future = _EMBEDDING_POOL.submit(_run_embeddings, graph, storage, result, report)
 
     result.duration_seconds = time.monotonic() - start
-
-    try:
-        log_event(
-            "index",
-            repo=repo_path.name,
-            files=result.files,
-            symbols=result.symbols,
-            duration=round(result.duration_seconds, 2),
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
     return graph, result
+
+def build_graph(repo_path: Path) -> KnowledgeGraph:
+    graph, _ = run_pipeline(repo_path)
+    return graph
 
 def reindex_files(
     file_entries: list[FileEntry],
     repo_path: Path,
     storage: StorageBackend,
 ) -> KnowledgeGraph:
-    """Re-index specific files through phases 2-7 (file-local phases).
+    """Re-index specific files (incremental helper)."""
+    graph = KnowledgeGraph()
+    def report(phase: str, pct: float) -> None: pass
+    
+    process_structure(file_entries, graph=graph)
+    parse_data_list = process_parsing(file_entries, graph=graph)
+    
+    from axon.core.ingestion.symbol_lookup import build_file_index
+    file_index = build_file_index(graph)
+    process_imports(parse_data_list, file_index, graph=graph)
+    process_calls(parse_data_list, graph)
 
-    Removes old nodes for these files from storage, re-parses them,
-    and inserts updated nodes/relationships. Returns the partial graph
-    for further processing (global phases, embeddings).
+    process_heritage(parse_data_list, graph)
+    process_types(parse_data_list, graph)
 
-    Parameters
-    ----------
-    file_entries:
-        The files to re-index (already read from disk).
-    repo_path:
-        Root directory of the repository.
-    storage:
-        An already-initialised storage backend.
-
-    Returns
-    -------
-    KnowledgeGraph
-        The partial in-memory graph containing only the reindexed files.
-    """
     for entry in file_entries:
         storage.remove_nodes_by_file(entry.path)
 
-    graph = KnowledgeGraph()
-
-    process_structure(file_entries, graph)
-    parse_data = process_parsing(file_entries, graph)
-    process_imports(parse_data, graph)
-    process_calls(parse_data, graph)
-    process_heritage(parse_data, graph)
-    process_types(parse_data, graph)
-
-    storage.add_nodes(list(graph.iter_nodes()))
-    storage.add_relationships(list(graph.iter_relationships()))
+    storage.bulk_load(graph)
     storage.rebuild_fts_indexes()
 
-    return graph
-
-def build_graph(repo_path: Path) -> KnowledgeGraph:
-    """Run phases 1-11 and return the in-memory graph (no storage load).
-
-    This is used by branch comparison to build a graph snapshot without
-    needing a storage backend.
-    """
-    graph, _ = run_pipeline(repo_path)
     return graph

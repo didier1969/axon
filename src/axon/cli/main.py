@@ -26,7 +26,8 @@ from axon import __version__
 console = Console()
 logger = logging.getLogger(__name__)
 
-from axon.core.paths import central_db_path as _central_db_path, compute_repo_slug  # noqa: E402
+from axon.core.paths import central_db_path as _central_db_path  # noqa: E402
+from axon.core.paths import compute_repo_slug
 
 
 def _auto_migrate_local_kuzu(repo_path: Path, slug: str) -> None:
@@ -298,10 +299,41 @@ def analyze(
     show_progress: bool = typer.Option(
         False, "--progress", help="Print each completed phase to stderr during indexing."
     ),
+    all_registered: bool = typer.Option(
+        False, "--all-registered", help="Index all repositories in the global registry."
+    ),
 ) -> None:
     """Index a repository into a knowledge graph."""
     from axon.core.ingestion.pipeline import PipelineResult, run_pipeline
     from axon.core.storage.kuzu_backend import KuzuBackend
+
+    if all_registered:
+        registry_root = Path.home() / ".axon" / "repos"
+        if not registry_root.exists():
+            console.print("[yellow]No repositories registered.[/yellow]")
+            return
+        
+        for slug_dir in registry_root.iterdir():
+            if not slug_dir.is_dir():
+                continue
+            meta_path = slug_dir / "meta.json"
+            if not meta_path.exists():
+                continue
+            try:
+                meta_data = json.loads(meta_path.read_text())
+                repo_path_str = meta_data.get("path")
+                if repo_path_str:
+                    repo_path = Path(repo_path_str)
+                    if repo_path.exists():
+                        console.print(f"\n[bold]Re-indexing {repo_path.name} ({repo_path})[/bold]")
+                        # Recursively call analyze for this repo
+                        # We use a simplified version here to avoid complex Typer re-entry
+                        analyze(path=repo_path, full=full, no_embeddings=no_embeddings, show_progress=show_progress)
+                    else:
+                        console.print(f"[yellow]Skipping {slug_dir.name}: path {repo_path} does not exist.[/yellow]")
+            except Exception:
+                logger.debug("Failed to process registered repo %s", slug_dir.name, exc_info=True)
+        return
 
     repo_path = path.resolve()
     if not repo_path.is_dir():
@@ -479,6 +511,32 @@ def status() -> None:
         console.print(f"  Dead code:      {stats['dead_code']}")
     if stats.get("coupled_pairs", 0) > 0:
         console.print(f"  Coupled pairs:  {stats['coupled_pairs']}")
+
+@app.command()
+def forget(
+    slug: str = typer.Argument(..., help="Slug of the repository to forget."),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt."),
+) -> None:
+    """Remove a repository from the global registry and delete its index."""
+    registry_root = Path.home() / ".axon" / "repos"
+    slot = registry_root / slug
+
+    if not slot.exists():
+        console.print(f"[red]Error:[/red] Slug '{slug}' not found in registry.")
+        raise typer.Exit(code=1)
+
+    if not force:
+        confirm = typer.confirm(f"Permanently delete index and registry entry for '{slug}'?")
+        if not confirm:
+            console.print("Aborted.")
+            raise typer.Exit()
+
+    try:
+        shutil.rmtree(slot)
+        console.print(f"[green]Successfully forgot repository '{slug}'.[/green]")
+    except Exception as exc:
+        console.print(f"[red]Error:[/red] Could not delete {slot}: {exc}")
+        raise typer.Exit(code=1)
 
 @app.command(name="list")
 def list_repos() -> None:

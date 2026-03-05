@@ -12,13 +12,12 @@ from axon.core.graph.model import (
     generate_id,
 )
 from axon.core.ingestion.imports import (
-    build_file_index,
     process_imports,
     resolve_import_path,
 )
+from axon.core.ingestion.symbol_lookup import build_file_index
 from axon.core.ingestion.parser_phase import FileParseData
 from axon.core.parsers.base import ImportInfo, ParseResult
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

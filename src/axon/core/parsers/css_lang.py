@@ -66,7 +66,7 @@ class CssParser(LanguageParser):
         if name_node is None:
             return
 
-        name = f"#{name_node.text.decode('utf8')}"
+        name = f"#{name_node.text.decode('utf-8', errors='replace')}"
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
 
@@ -78,7 +78,7 @@ class CssParser(LanguageParser):
                 end_line=end_line,
                 start_byte=node.start_byte,
                 end_byte=node.end_byte,
-                content=content[node.start_byte : node.end_byte],
+                content=node.text.decode("utf-8", errors="replace"),
             )
         )
 
@@ -90,7 +90,7 @@ class CssParser(LanguageParser):
         if name_node is None:
             return
 
-        name = f".{name_node.text.decode('utf8')}"
+        name = f".{name_node.text.decode('utf-8', errors='replace')}"
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
 
@@ -102,7 +102,7 @@ class CssParser(LanguageParser):
                 end_line=end_line,
                 start_byte=node.start_byte,
                 end_byte=node.end_byte,
-                content=content[node.start_byte : node.end_byte],
+                content=node.text.decode("utf-8", errors="replace"),
             )
         )
 

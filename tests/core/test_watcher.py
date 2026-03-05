@@ -8,11 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from axon.core.ingestion.pipeline import reindex_files, run_pipeline
-from axon.core.ingestion.watcher import _reindex_files, watch_repo
+from axon.core.ingestion.pipeline import reindex_files
 from axon.core.ingestion.walker import FileEntry, read_file
+from axon.core.ingestion.watcher import _reindex_files, watch_repo
 from axon.core.storage.kuzu_backend import KuzuBackend
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -352,6 +351,7 @@ class TestWatchQueueBounded:
 
     def test_queue_created_with_maxsize(self):
         import asyncio
+
         from axon.core.ingestion.watcher import _WATCH_QUEUE_MAXSIZE
 
         q: asyncio.Queue = asyncio.Queue(maxsize=_WATCH_QUEUE_MAXSIZE)

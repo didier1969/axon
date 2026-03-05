@@ -20,6 +20,8 @@ import asyncio
 import json
 import logging
 import socket as _socket
+import os
+_DAEMON_TIMEOUT = float(os.environ.get("AXON_TIMEOUT", "30.0"))
 import threading
 from pathlib import Path
 
@@ -38,16 +40,17 @@ from axon.mcp.tools import (
     handle_cypher,
     handle_dead_code,
     handle_detect_changes,
+    handle_diff,
     handle_entry_points,
     handle_find_similar,
     handle_find_usages,
     handle_impact,
     handle_lint,
-    handle_path,
-    handle_summarize,
     handle_list_repos,
+    handle_path,
     handle_query,
     handle_read_symbol,
+    handle_summarize,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,7 +129,7 @@ def _try_daemon_call(tool: str, slug: str | None, args: dict) -> str | None:
         return None
     try:
         with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
-            sock.settimeout(5.0)
+            sock.settimeout(_DAEMON_TIMEOUT)
             sock.connect(str(sock_path))
             sock.sendall(encode_request(tool, args, slug=slug, request_id="mcp"))
             data = sock.makefile("rb").readline()
@@ -155,7 +158,7 @@ def _batch_daemon_call(calls: list[dict], max_tokens: int | None) -> str | None:
         parts: list[str] = []
         failed_indices: list[int] = []
         with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
-            sock.settimeout(5.0)
+            sock.settimeout(_DAEMON_TIMEOUT)
             sock.connect(str(sock_path))
             total = len(calls)
             f = sock.makefile("rb")
@@ -666,8 +669,36 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
-        name="axon_batch",
+        name="axon_diff",
         description=(
+            "Compare a symbol's source code between two git revisions. "
+            "Returns a unified diff showing how the symbol changed."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Symbol name to compare.",
+                },
+                "branch_range": {
+                    "type": "string",
+                    "description": "Git branch range (e.g. 'main..feature' or just 'main').",
+                },
+                "repo": {
+                    "type": "string",
+                    "description": "Repository slug (from axon_list_repos).",
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate result to this many characters.",
+                },
+            },
+            "required": ["symbol", "branch_range", "repo"],
+        },
+    ),
+    Tool(
+        name="axon_batch",        description=(
             "Execute multiple axon tool calls in a single round-trip. "
             "Use when you need results from several tools at once — "
             "e.g., axon_context for 3 symbols. "
@@ -785,6 +816,13 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
             storage,
             from_symbol=arguments.get("from_symbol", ""),
             to_symbol=arguments.get("to_symbol", ""),
+            repo=arguments.get("repo"),
+        )
+    elif name == "axon_diff":
+        return handle_diff(
+            storage,
+            symbol=arguments.get("symbol", ""),
+            branch_range=arguments.get("branch_range", ""),
             repo=arguments.get("repo"),
         )
     else:

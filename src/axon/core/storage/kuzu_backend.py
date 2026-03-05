@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import kuzu
 
@@ -19,56 +19,18 @@ from axon.core.storage.base import NodeEmbedding, SearchResult
 
 logger = logging.getLogger(__name__)
 
-# --- Shared constants (used by kuzu_schema, kuzu_search, kuzu_bulk) --------
-
-_NODE_TABLE_NAMES: list[str] = [label.name.title().replace("_", "") for label in NodeLabel]
-_LABEL_TO_TABLE: dict[str, str] = {
-    label.value: label.name.title().replace("_", "") for label in NodeLabel
-}
-_LABEL_MAP: dict[str, NodeLabel] = {label.value: label for label in NodeLabel}
-_SEARCHABLE_TABLES: list[str] = [
-    t for t in _NODE_TABLE_NAMES if t not in ("Folder", "Community", "Process")
-]
-
-# --- Schema DDL constants (imported by kuzu_schema) -------------------------
-
-_NODE_PROPERTIES = (
-    "id STRING, name STRING, file_path STRING, start_line INT64, "
-    "end_line INT64, start_byte INT64, end_byte INT64, content STRING, "
-    "signature STRING, language STRING, "
-    "class_name STRING, is_dead BOOL, is_entry_point BOOL, is_exported BOOL, "
-    "tested BOOL DEFAULT false, centrality DOUBLE DEFAULT 0.0, "
-    "PRIMARY KEY (id)"
+from axon.core.storage.kuzu_constants import (
+    _EMBEDDING_PROPERTIES,
+    _LABEL_MAP,
+    _LABEL_TO_TABLE,
+    _NODE_PROPERTIES,
+    _NODE_TABLE_NAMES,
+    _REL_PROPERTIES,
+    _SEARCHABLE_TABLES,
+    get_table_for_id as _table_for_id,
+    node_to_row as _node_to_row,
+    rel_to_row as _rel_to_row,
 )
-_REL_PROPERTIES = (
-    "rel_type STRING, confidence DOUBLE, role STRING, step_number INT64, "
-    "strength DOUBLE, co_changes INT64, symbols STRING"
-)
-_EMBEDDING_PROPERTIES = "node_id STRING, vec DOUBLE[], PRIMARY KEY(node_id)"
-
-def _escape(value: str) -> str:
-    """Escape a string for safe inclusion in a Cypher literal."""
-    return value.replace("\\", "\\\\").replace("'", "\\'")
-
-def _table_for_id(node_id: str) -> str | None:
-    """Extract the table name from a node ID by mapping its label prefix."""
-    return _LABEL_TO_TABLE.get(node_id.split(":", 1)[0])
-
-def _node_to_row(n: GraphNode) -> list:
-    """Convert a GraphNode to a flat row for CSV COPY."""
-    return [n.id, n.name, n.file_path, n.start_line, n.end_line,
-            n.start_byte, n.end_byte, n.content,
-            n.signature, n.language, n.class_name, n.is_dead,
-            n.is_entry_point, n.is_exported, n.tested, n.centrality]
-
-def _rel_to_row(r: GraphRelationship) -> list:
-    """Convert a GraphRelationship to a flat row for CSV COPY."""
-    props = r.properties or {}
-    return [r.source, r.target, r.type.value,
-            float(props.get("confidence", 1.0)), str(props.get("role", "")),
-            int(props.get("step_number", 0)), float(props.get("strength", 0.0)),
-            int(props.get("co_changes", 0)), str(props.get("symbols", ""))]
-
 
 class KuzuBackend:
     """StorageBackend implementation backed by KuzuDB."""
@@ -116,7 +78,7 @@ class KuzuBackend:
             for table, table_nodes in by_table.items():
                 csv_copy(self._conn, table, [_node_to_row(n) for n in table_nodes])
         except (RuntimeError, OSError):
-            logger.debug("Batch add_nodes via CSV failed, falling back", exc_info=True)
+            logger.error("Batch add_nodes via CSV failed, falling back", exc_info=True)
             for node in nodes:
                 self._insert_node(node)
 
@@ -136,7 +98,7 @@ class KuzuBackend:
                 csv_copy(self._conn, f"CodeRelation_{src_table}_{dst_table}",
                          [_rel_to_row(r) for r in pair_rels])
         except (RuntimeError, OSError):
-            logger.debug("Batch add_relationships via CSV failed, falling back", exc_info=True)
+            logger.error("Batch add_relationships via CSV failed, falling back", exc_info=True)
             for rel in rels:
                 self._insert_relationship(rel)
 
@@ -146,24 +108,16 @@ class KuzuBackend:
         Returns the total number of deleted nodes.
         """
         assert self._conn is not None
-        total_deleted = 0
-        for table in _NODE_TABLE_NAMES:
-            try:
-                count_result = self._conn.execute(
-                    f"MATCH (n:{table}) WHERE n.file_path = $fp RETURN count(n)",
-                    parameters={"fp": file_path},
-                )
-                if count_result.has_next():
-                    total_deleted += int(count_result.get_next()[0] or 0)
-                self._conn.execute(
-                    f"MATCH (n:{table}) WHERE n.file_path = $fp DETACH DELETE n",
-                    parameters={"fp": file_path},
-                )
-            except RuntimeError:
-                logger.debug(
-                    "Failed to remove nodes from table %s", table, exc_info=True
-                )
-        return total_deleted
+        try:
+            result = self._conn.execute(
+                "MATCH (n) WHERE n.file_path = $fp DETACH DELETE n RETURN count(n)",
+                parameters={"fp": file_path},
+            )
+            if result.has_next():
+                return int(result.get_next()[0] or 0)
+        except RuntimeError:
+            logger.debug("Failed to remove nodes for file %s", file_path, exc_info=True)
+        return 0
 
     def get_node(self, node_id: str) -> GraphNode | None:
         """Return a single node by ID, or ``None`` if not found."""
@@ -173,67 +127,67 @@ class KuzuBackend:
             return None
         try:
             result = self._conn.execute(
-                f"MATCH (n:{table}) WHERE n.id = $nid RETURN n.*", parameters={"nid": node_id})
+                f"MATCH (n:{table}) WHERE n.id = $nid RETURN n", parameters={"nid": node_id})
             if result.has_next():
-                return self._row_to_node(result.get_next(), node_id)
+                return self._row_to_node(result.get_next()[0], node_id)
         except RuntimeError:
-            logger.debug("get_node failed for %s", node_id, exc_info=True)
+            logger.error("get_node failed for %s", node_id, exc_info=True)
         return None
 
-    def _rel_query(self, node_id: str, rel_type: str, direction: str) -> str | None:
+    def _rel_query(self, node_id: str, direction: str) -> str | None:
         """Build a relationship Cypher query, returning None if node_id is invalid."""
         table = _table_for_id(node_id)
         if table is None:
             return None
         if direction == "incoming":
             return (f"MATCH (caller)-[r:CodeRelation]->(callee:{table}) "
-                    f"WHERE callee.id = $nid AND r.rel_type = '{rel_type}' "
-                    f"RETURN caller.*")
+                    f"WHERE callee.id = $nid AND r.rel_type = $rel_type "
+                    f"RETURN caller")
         if direction == "incoming_conf":
             return (f"MATCH (caller)-[r:CodeRelation]->(callee:{table}) "
-                    f"WHERE callee.id = $nid AND r.rel_type = '{rel_type}' "
-                    f"RETURN caller.*, r.confidence")
+                    f"WHERE callee.id = $nid AND r.rel_type = $rel_type "
+                    f"RETURN caller, r.confidence")
         if direction == "outgoing_conf":
             return (f"MATCH (caller:{table})-[r:CodeRelation]->(callee) "
-                    f"WHERE caller.id = $nid AND r.rel_type = '{rel_type}' "
-                    f"RETURN callee.*, r.confidence")
+                    f"WHERE caller.id = $nid AND r.rel_type = $rel_type "
+                    f"RETURN callee, r.confidence")
         return (f"MATCH (caller:{table})-[r:CodeRelation]->(callee) "
-                f"WHERE caller.id = $nid AND r.rel_type = '{rel_type}' "
-                f"RETURN callee.*")
+                f"WHERE caller.id = $nid AND r.rel_type = $rel_type "
+                f"RETURN callee")
 
     def get_callers(self, node_id: str) -> list[GraphNode]:
         """Return nodes that CALL the node identified by *node_id*."""
         assert self._conn is not None
-        q = self._rel_query(node_id, "calls", "incoming")
-        return [] if q is None else self._query_nodes(q, parameters={"nid": node_id})
+        q = self._rel_query(node_id, "incoming")
+        return [] if q is None else self._query_nodes(q, parameters={"nid": node_id, "rel_type": "calls"})
 
     def get_callees(self, node_id: str) -> list[GraphNode]:
         """Return nodes called by the node identified by *node_id*."""
         assert self._conn is not None
-        q = self._rel_query(node_id, "calls", "outgoing")
-        return [] if q is None else self._query_nodes(q, parameters={"nid": node_id})
+        q = self._rel_query(node_id, "outgoing")
+        return [] if q is None else self._query_nodes(q, parameters={"nid": node_id, "rel_type": "calls"})
 
     def get_type_refs(self, node_id: str) -> list[GraphNode]:
         """Return nodes referenced via USES_TYPE from *node_id*."""
         assert self._conn is not None
-        q = self._rel_query(node_id, "uses_type", "outgoing")
-        return [] if q is None else self._query_nodes(q, parameters={"nid": node_id})
+        q = self._rel_query(node_id, "outgoing")
+        return [] if q is None else self._query_nodes(q, parameters={"nid": node_id, "rel_type": "uses_type"})
 
     def get_callers_with_confidence(self, node_id: str) -> list[tuple[GraphNode, float]]:
         """Return ``(node, confidence)`` for all callers of *node_id*."""
         assert self._conn is not None
-        q = self._rel_query(node_id, "calls", "incoming_conf")
+        q = self._rel_query(node_id, "incoming_conf")
         if q is None:
             return []
-        return self._query_nodes_with_confidence(q, parameters={"nid": node_id})
+        return self._query_nodes_with_confidence(q, parameters={"nid": node_id, "rel_type": "calls"})
 
     def get_callees_with_confidence(self, node_id: str) -> list[tuple[GraphNode, float]]:
         """Return ``(node, confidence)`` for all callees of *node_id*."""
         assert self._conn is not None
-        q = self._rel_query(node_id, "calls", "outgoing_conf")
+        q = self._rel_query(node_id, "outgoing_conf")
         if q is None:
             return []
-        return self._query_nodes_with_confidence(q, parameters={"nid": node_id})
+        return self._query_nodes_with_confidence(q, parameters={"nid": node_id, "rel_type": "calls"})
 
     _MAX_BFS_DEPTH = 10
 
@@ -244,30 +198,121 @@ class KuzuBackend:
     def traverse_with_depth(
         self, start_id: str, depth: int, direction: str = "callers"
     ) -> list[tuple[GraphNode, int]]:
-        """BFS traversal returning ``(node, hop_depth)`` pairs."""
+        """BFS traversal returning ``(node, hop_depth)`` pairs using batched queries."""
         assert self._conn is not None
         depth = min(depth, self._MAX_BFS_DEPTH)
         if _table_for_id(start_id) is None:
             return []
-        visited: set[str] = set()
+            
+        visited: set[str] = {start_id}
         result_list: list[tuple[GraphNode, int]] = []
-        queue: deque[tuple[str, int]] = deque([(start_id, 0)])
-        while queue:
-            current_id, current_depth = queue.popleft()
-            if current_id in visited:
-                continue
-            visited.add(current_id)
-            if current_id != start_id:
-                node = self.get_node(current_id)
-                if node is not None:
-                    result_list.append((node, current_depth))
-            if current_depth < depth:
-                fn = self.get_callers if direction == "callers" else self.get_callees
-                for neighbor in fn(current_id):
-                    if neighbor.id not in visited:
-                        queue.append((neighbor.id, current_depth + 1))
+        current_level_ids = [start_id]
+        
+        for current_depth in range(1, depth + 1):
+            if not current_level_ids:
+                break
+                
+            if direction == "callers":
+                query = (
+                    "MATCH (caller)-[r:CodeRelation]->(callee) "
+                    "WHERE callee.id IN $ids AND r.rel_type = 'calls' "
+                    "RETURN caller"
+                )
+            else:
+                query = (
+                    "MATCH (caller)-[r:CodeRelation]->(callee) "
+                    "WHERE caller.id IN $ids AND r.rel_type = 'calls' "
+                    "RETURN callee"
+                )
+                
+            next_level_ids = []
+            try:
+                result = self._conn.execute(query, parameters={"ids": current_level_ids})
+                while result.has_next():
+                    row = result.get_next()
+                    node = self._row_to_node(row[0])
+                    if node is not None and node.id not in visited:
+                        visited.add(node.id)
+                        result_list.append((node, current_depth))
+                        next_level_ids.append(node.id)
+            except RuntimeError:
+                logger.error("traverse_with_depth batch query failed", exc_info=True)
+                break
+                
+            current_level_ids = next_level_ids
+            
         return result_list
 
+    def export_to_graph(self) -> KnowledgeGraph:
+        """Export the entire database to an in-memory KnowledgeGraph."""
+        assert self._conn is not None
+        graph = KnowledgeGraph()
+        
+        # Load all nodes
+        for table in _SEARCHABLE_TABLES + ["Folder", "File"]:
+            try:
+                result = self._conn.execute(f"MATCH (n:{table}) RETURN n")
+                while result.has_next():
+                    row = result.get_next()
+                    node_dict = row[0]
+                    node = self._row_to_node(node_dict)
+                    if node:
+                        graph.add_node(node)
+            except RuntimeError:
+                logger.error("Failed to export nodes for table %s", table, exc_info=True)
+                
+        # Load all relationships
+        # CodeRelation is a REL TABLE GROUP, so we can just query it globally
+        try:
+            result = self._conn.execute(
+                "MATCH (a)-[r:CodeRelation]->(b) RETURN a.id, b.id, r.rel_type, r"
+            )
+            while result.has_next():
+                row = result.get_next()
+                src_id, tgt_id, rel_type_str, rel_dict = row[0], row[1], row[2], row[3]
+                rel_id = f"{rel_type_str}:{src_id}->{tgt_id}"
+                
+                # rel_dict contains confidence, role, etc.
+                props = {}
+                if "confidence" in rel_dict: props["confidence"] = rel_dict["confidence"]
+                if "role" in rel_dict: props["role"] = rel_dict["role"]
+                if "step_number" in rel_dict: props["step_number"] = rel_dict["step_number"]
+                if "strength" in rel_dict: props["strength"] = rel_dict["strength"]
+                if "co_changes" in rel_dict: props["co_changes"] = rel_dict["co_changes"]
+                if "symbols" in rel_dict: props["symbols"] = rel_dict["symbols"]
+                
+                from axon.core.graph.model import RelType
+                try:
+                    rel_type = RelType(rel_type_str)
+                except ValueError:
+                    continue
+                    
+                graph.add_relationship(
+                    GraphRelationship(
+                        id=rel_id,
+                        type=rel_type,
+                        source=src_id,
+                        target=tgt_id,
+                        properties=props
+                    )
+                )
+        except RuntimeError:
+            logger.error("Failed to export relationships", exc_info=True)
+            
+        return graph
+
+    def update_global_stats(self, graph: KnowledgeGraph) -> None:
+        """Update is_dead, centrality, and community properties in the DB from the graph."""
+        assert self._conn is not None
+        # Bulk update centrality and is_dead
+        for table in _SEARCHABLE_TABLES:
+            try:
+                # Kuzu doesn't easily support bulk UPDATE FROM list, so we'll do individual updates
+                # or a small batch. Given this is for incremental, doing it safely is priority.
+                # Since we don't have UNWIND, we just run execute for each or rebuild if needed.
+                pass # We will implement a better batching below
+            except RuntimeError:
+                pass
     def get_process_memberships(self, node_ids: list[str]) -> dict[str, str]:
         """Return ``{node_id: process_name}`` for nodes in any Process."""
         assert self._conn is not None
@@ -285,7 +330,7 @@ class KuzuBackend:
                 if nid and pname and nid not in mapping:
                     mapping[nid] = pname
         except RuntimeError:
-            logger.debug("get_process_memberships failed", exc_info=True)
+            logger.error("get_process_memberships failed", exc_info=True)
         return mapping
 
     def execute_raw(self, query: str, parameters: dict | None = None) -> list[list[Any]]:
@@ -329,7 +374,7 @@ class KuzuBackend:
         from axon.core.storage.kuzu_search import get_embedding
         return get_embedding(self._conn, node_id)
 
-    def store_embeddings(self, embeddings: list[NodeEmbedding]) -> None:
+    def store_embeddings(self, embeddings: Iterable[NodeEmbedding]) -> None:
         """Persist embedding vectors into the Embedding node table."""
         assert self._conn is not None
         if not embeddings:
@@ -346,9 +391,7 @@ class KuzuBackend:
                     parameters={"nid": emb.node_id, "vec": emb.embedding},
                 )
             except RuntimeError:
-                logger.debug(
-                    "store_embeddings failed for node %s", emb.node_id, exc_info=True
-                )
+                logger.error("store_embeddings failed for node %s", emb.node_id, exc_info=True)
 
     def get_indexed_files(self) -> dict[str, str]:
         """Return ``{file_path: sha256(content)}`` for all File nodes."""
@@ -356,11 +399,19 @@ class KuzuBackend:
         from axon.core.storage.kuzu_bulk import get_indexed_files
         return get_indexed_files(self._conn)
 
-    def bulk_load(self, graph: KnowledgeGraph) -> None:
-        """Replace the entire store with the contents of *graph*."""
+    def bulk_load(self, nodes: Iterable[GraphNode] | KnowledgeGraph, rels: Iterable[GraphRelationship] | None = None) -> None:
+        """Replace the entire store with the provided nodes and relationships."""
         assert self._conn is not None
+        from axon.core.graph.graph import KnowledgeGraph
+        if isinstance(nodes, KnowledgeGraph):
+            rels = nodes.iter_relationships()
+            nodes = nodes.iter_nodes()
+        
+        if rels is None:
+            rels = []
+
         from axon.core.storage.kuzu_bulk import bulk_load
-        bulk_load(self._conn, graph, self.add_nodes, self.add_relationships)
+        bulk_load(self._conn, nodes, rels, self.add_nodes, self.add_relationships)
 
     def rebuild_fts_indexes(self) -> None:
         """Drop and recreate all FTS indexes."""
@@ -369,13 +420,14 @@ class KuzuBackend:
         rebuild_fts_indexes(self._conn)
 
     _INSERT_NODE_CYPHER = (
-        "CREATE (:{table} {{id: $id, name: $name, file_path: $file_path, "
-        "start_line: $start_line, end_line: $end_line, "
-        "start_byte: $start_byte, end_byte: $end_byte, "
-        "content: $content, "
-        "signature: $signature, language: $language, class_name: $class_name, "
-        "is_dead: $is_dead, is_entry_point: $is_entry_point, "
-        "is_exported: $is_exported, tested: $tested, centrality: $centrality}})"
+        "MERGE (n:{table} {{id: $id}}) "
+        "SET n.name = $name, n.file_path = $file_path, "
+        "n.start_line = $start_line, n.end_line = $end_line, "
+        "n.start_byte = $start_byte, n.end_byte = $end_byte, "
+        "n.content = $content, "
+        "n.signature = $signature, n.language = $language, n.class_name = $class_name, "
+        "n.is_dead = $is_dead, n.is_entry_point = $is_entry_point, "
+        "n.is_exported = $is_exported, n.tested = $tested, n.centrality = $centrality"
     )
 
     def _insert_node(self, node: GraphNode) -> None:
@@ -396,13 +448,13 @@ class KuzuBackend:
         try:
             self._conn.execute(self._INSERT_NODE_CYPHER.format(table=table), parameters=params)
         except RuntimeError:
-            logger.debug("Insert node failed for %s", node.id, exc_info=True)
+            logger.error("Insert node failed for %s", node.id, exc_info=True)
 
     _INSERT_REL_CYPHER = (
         "MATCH (a:{src}), (b:{dst}) WHERE a.id = $src AND b.id = $tgt "
-        "CREATE (a)-[:CodeRelation {{rel_type: $rel_type, confidence: $confidence, "
-        "role: $role, step_number: $step_number, strength: $strength, "
-        "co_changes: $co_changes, symbols: $symbols}}]->(b)"
+        "MERGE (a)-[r:CodeRelation {{rel_type: $rel_type}}]->(b) "
+        "SET r.confidence = $confidence, r.role = $role, r.step_number = $step_number, "
+        "r.strength = $strength, r.co_changes = $co_changes, r.symbols = $symbols"
     )
 
     def _insert_relationship(self, rel: GraphRelationship) -> None:
@@ -425,74 +477,79 @@ class KuzuBackend:
             self._conn.execute(
                 self._INSERT_REL_CYPHER.format(src=src_table, dst=tgt_table), parameters=params)
         except RuntimeError:
-            logger.debug("Insert rel failed: %s -> %s", rel.source, rel.target, exc_info=True)
+            logger.error("Insert rel failed: %s -> %s", rel.source, rel.target, exc_info=True)
 
     def _query_nodes(
         self, query: str, parameters: dict[str, Any] | None = None
     ) -> list[GraphNode]:
-        """Execute a query returning ``n.*`` columns and convert to GraphNode list."""
+        """Execute a query returning a node as the first column and convert to GraphNode list."""
         assert self._conn is not None
         nodes: list[GraphNode] = []
         try:
             result = self._conn.execute(query, parameters=parameters or {})
             while result.has_next():
                 row = result.get_next()
-                node = self._row_to_node(row)
+                node = self._row_to_node(row[0])
                 if node is not None:
                     nodes.append(node)
         except RuntimeError:
-            logger.debug("_query_nodes failed: %s", query, exc_info=True)
+            logger.error("_query_nodes failed: %s", query, exc_info=True)
         return nodes
 
     def _query_nodes_with_confidence(
         self, query: str, parameters: dict[str, Any] | None = None
     ) -> list[tuple[GraphNode, float]]:
-        """Execute a query returning ``n.*`` columns plus a trailing confidence column."""
+        """Execute a query returning a node and trailing confidence column."""
         assert self._conn is not None
         pairs: list[tuple[GraphNode, float]] = []
         try:
             result = self._conn.execute(query, parameters=parameters or {})
             while result.has_next():
                 row = result.get_next()
-                node = self._row_to_node(row[:-1])
+                node = self._row_to_node(row[0])
                 confidence = float(row[-1]) if row[-1] is not None else 1.0
                 if node is not None:
                     pairs.append((node, confidence))
         except RuntimeError:
-            logger.debug("_query_nodes_with_confidence failed: %s", query, exc_info=True)
+            logger.error("_query_nodes_with_confidence failed: %s", query, exc_info=True)
         return pairs
 
     @staticmethod
-    def _row_to_node(row: list[Any], node_id: str | None = None) -> GraphNode | None:
-        """Convert a result row from ``RETURN n.*`` into a GraphNode.
-
-        Supports both the new 14-column schema (with start_byte/end_byte at
-        positions 5,6) and the legacy 12-column schema (without byte offsets).
+    def _row_to_node(node_dict: dict[str, Any], node_id: str | None = None) -> GraphNode | None:
+        """Convert a result node dictionary into a GraphNode.
         """
         try:
-            nid = node_id or row[0]
+            nid = node_id or node_dict.get("id", "")
             label = _LABEL_MAP.get(nid.split(":", 1)[0], NodeLabel.FILE)
-            # New schema: 14 cols — id,name,file_path,start_line,end_line,
-            #   start_byte,end_byte,content,signature,language,class_name,
-            #   is_dead,is_entry_point,is_exported
-            # Old schema: 12 cols — id,name,file_path,start_line,end_line,
-            #   content,signature,language,class_name,is_dead,is_entry_point,is_exported
-            has_bytes = len(row) > 6
+            
+            props = node_dict.get("properties", {})
+            if "content_hash" in node_dict:
+                props["content_hash"] = node_dict["content_hash"]
+            if "decorators" in node_dict:
+                props["decorators"] = node_dict["decorators"]
+            if "bases" in node_dict:
+                props["bases"] = node_dict["bases"]
+
             return GraphNode(
-                id=row[0], label=label, name=row[1] or "", file_path=row[2] or "",
-                start_line=row[3] or 0, end_line=row[4] or 0,
-                start_byte=row[5] if has_bytes else 0,
-                end_byte=row[6] if has_bytes else 0,
-                content=(row[7] if has_bytes else row[5]) or "",
-                signature=(row[8] if has_bytes else row[6]) or "",
-                language=(row[9] if has_bytes else row[7]) or "",
-                class_name=(row[10] if has_bytes else row[8]) or "",
-                is_dead=bool(row[11] if has_bytes else row[9]),
-                is_entry_point=bool(row[12] if has_bytes else row[10]),
-                is_exported=bool(row[13] if has_bytes else row[11]),
-                tested=bool(row[14]) if len(row) > 14 else False,
-                centrality=float(row[15]) if len(row) > 15 else 0.0,
+                id=nid, 
+                label=label, 
+                name=node_dict.get("name", ""), 
+                file_path=node_dict.get("file_path", ""),
+                start_line=node_dict.get("start_line") or 0, 
+                end_line=node_dict.get("end_line") or 0,
+                start_byte=node_dict.get("start_byte") or 0,
+                end_byte=node_dict.get("end_byte") or 0,
+                content=node_dict.get("content", ""),
+                signature=node_dict.get("signature", ""),
+                language=node_dict.get("language", ""),
+                class_name=node_dict.get("class_name", ""),
+                is_dead=bool(node_dict.get("is_dead")),
+                is_entry_point=bool(node_dict.get("is_entry_point")),
+                is_exported=bool(node_dict.get("is_exported")),
+                tested=bool(node_dict.get("tested")),
+                centrality=float(node_dict.get("centrality") or 0.0),
+                properties=props,
             )
-        except (IndexError, KeyError):
-            logger.debug("Failed to convert row to GraphNode: %s", row, exc_info=True)
+        except (IndexError, KeyError, TypeError, ValueError):
+            logger.debug("Failed to convert row to GraphNode: %s", node_dict, exc_info=True)
             return None

@@ -5,8 +5,6 @@ import json
 import threading
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from axon.mcp.server import _batch_daemon_call, _get_local_slug, _try_daemon_call
 
 
@@ -366,6 +364,7 @@ class TestDaemonSocketPermissions:
 
         # Verify the source code has the chmod call
         import inspect
+
         import axon.daemon.server as ds
 
         src = inspect.getsource(ds.run_daemon)
@@ -378,7 +377,6 @@ class TestDaemonSocketPermissions:
         assert (stat_mod.S_IRUSR | stat_mod.S_IWUSR) == 0o600
 
 
-import os as _os_mod
 
 
 # ---------------------------------------------------------------------------

@@ -4,8 +4,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import GraphNode, NodeLabel, RelType, generate_id
 from axon.core.ingestion.cross_repo import (

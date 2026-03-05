@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "axon": {
+      "command": "/home/dstadel/.local/bin/axon",
+      "args": [
+        "serve"
+      ]
+    }
+  }
+}

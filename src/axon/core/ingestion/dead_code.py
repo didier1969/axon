@@ -125,6 +125,17 @@ def _is_python_public_api(name: str, file_path: str) -> bool:
     """Return ``True`` if *name* is a public symbol in an ``__init__.py`` file."""
     return file_path.endswith("__init__.py") and not name.startswith("_")
 
+def _is_dynamic_entry_point_file(file_path: str) -> bool:
+    """Return True if the file is known to contain dynamic entry points or meta-programming."""
+    parts = file_path.split('/')
+    if not parts:
+        return False
+    name = parts[-1]
+    return name in (
+        "manage.py", "setup.py", "wsgi.py", "asgi.py", "celery.py",
+        "app.py", "main.py", "conftest.py", "noxfile.py"
+    )
+
 def _is_exempt(
     name: str, is_entry_point: bool, is_exported: bool, file_path: str = ""
 ) -> bool:
@@ -140,6 +151,7 @@ def _is_exempt(
     - It lives in a test file (fixtures, helpers are not dead code).
     - It is a dunder method (``__str__``, ``__repr__``, etc.).
     - It is a public symbol in a Python ``__init__.py`` file.
+    - It is in a known dynamic entry point file.
     """
     return (
         is_entry_point
@@ -150,6 +162,7 @@ def _is_exempt(
         or _is_test_file(file_path)
         or _is_dunder(name)
         or _is_python_public_api(name, file_path)
+        or _is_dynamic_entry_point_file(file_path)
     )
 
 def _clear_override_false_positives(graph: KnowledgeGraph) -> int:

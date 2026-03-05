@@ -6,13 +6,11 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import typer
+import pytest
 from typer.testing import CliRunner
 
-import pytest
-
 from axon import __version__
-from axon.cli.main import _central_db_path, _load_storage, _register_in_global_registry, app
+from axon.cli.main import _load_storage, _register_in_global_registry, app
 
 runner = CliRunner()
 

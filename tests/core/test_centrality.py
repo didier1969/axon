@@ -12,7 +12,6 @@ from axon.core.graph.model import (
 )
 from axon.core.ingestion.centrality import process_centrality
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

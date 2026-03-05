@@ -9,29 +9,27 @@ and indexed file queries.  These are called by
 from __future__ import annotations
 
 import csv
-import hashlib
 import logging
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterable
 
 import kuzu
 
-from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import GraphNode, GraphRelationship
 from axon.core.storage.base import NodeEmbedding
-from axon.core.storage.kuzu_backend import (
+from axon.core.storage.kuzu_constants import (
     _LABEL_TO_TABLE,
     _NODE_TABLE_NAMES,
-    _node_to_row,
-    _rel_to_row,
-    _table_for_id,
+    get_table_for_id as _table_for_id,
+    node_to_row as _node_to_row,
+    rel_to_row as _rel_to_row,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def csv_copy(conn: kuzu.Connection, table: str, rows: list[list[Any]]) -> None:
+def csv_copy(conn: kuzu.Connection, table: str, rows: Iterable[list[Any]]) -> None:
     """Write *rows* to a temporary CSV and COPY FROM into *table*.
 
     Always cleans up the temp file, even on failure.
@@ -44,56 +42,56 @@ def csv_copy(conn: kuzu.Connection, table: str, rows: list[list[Any]]) -> None:
             writer = csv.writer(f)
             writer.writerows(rows)
             csv_path = f.name
-        conn.execute(f'COPY {table} FROM "{csv_path}" (HEADER=false)')
+        conn.execute(f'COPY {table} FROM "{csv_path}" (HEADER=false, PARALLEL=FALSE)')
     finally:
         if csv_path:
             Path(csv_path).unlink(missing_ok=True)
 
 
-def bulk_load_nodes_csv(conn: kuzu.Connection, graph: KnowledgeGraph) -> bool:
+def bulk_load_nodes_csv(conn: kuzu.Connection, nodes: Iterable[GraphNode]) -> bool:
     """Load all nodes via temporary CSV files + COPY FROM.
 
     Returns True on success, False if COPY FROM is not available.
     """
     by_table: dict[str, list[GraphNode]] = {}
-    for node in graph.iter_nodes():
+    for node in nodes:
         table = _LABEL_TO_TABLE.get(node.label.value)
         if table:
             by_table.setdefault(table, []).append(node)
 
     try:
-        for table, nodes in by_table.items():
-            csv_copy(conn, table, [_node_to_row(node) for node in nodes])
+        for table, table_nodes in by_table.items():
+            csv_copy(conn, table, [_node_to_row(node) for node in table_nodes])
         return True
     except (RuntimeError, OSError):
-        logger.debug("CSV bulk_load_nodes failed, falling back", exc_info=True)
+        logger.error("CSV bulk_load_nodes failed, falling back", exc_info=True)
         return False
 
 
-def bulk_load_rels_csv(conn: kuzu.Connection, graph: KnowledgeGraph) -> bool:
+def bulk_load_rels_csv(conn: kuzu.Connection, rels: Iterable[GraphRelationship]) -> bool:
     """Load all relationships via temporary CSV files + COPY FROM.
 
     Returns True on success, False if COPY FROM is not available.
     """
     by_pair: dict[tuple[str, str], list[GraphRelationship]] = {}
-    for rel in graph.iter_relationships():
+    for rel in rels:
         src_table = _table_for_id(rel.source)
         dst_table = _table_for_id(rel.target)
         if src_table and dst_table:
             by_pair.setdefault((src_table, dst_table), []).append(rel)
 
     try:
-        for (src_table, dst_table), rels in by_pair.items():
+        for (src_table, dst_table), pair_rels in by_pair.items():
             csv_copy(conn, f"CodeRelation_{src_table}_{dst_table}",
-                     [_rel_to_row(rel) for rel in rels])
+                     [_rel_to_row(rel) for rel in pair_rels])
         return True
     except (RuntimeError, OSError):
-        logger.debug("CSV bulk_load_rels failed, falling back", exc_info=True)
+        logger.error("CSV bulk_load_rels failed, falling back", exc_info=True)
         return False
 
 
 def bulk_store_embeddings_csv(
-    conn: kuzu.Connection, embeddings: list[NodeEmbedding]
+    conn: kuzu.Connection, embeddings: Iterable[NodeEmbedding]
 ) -> bool:
     """Store embeddings via temporary CSV + COPY FROM.
 
@@ -112,7 +110,7 @@ def bulk_store_embeddings_csv(
         ])
         return True
     except (RuntimeError, OSError):
-        logger.debug("CSV bulk_store_embeddings failed, falling back", exc_info=True)
+        logger.error("CSV bulk_store_embeddings failed, falling back", exc_info=True)
         return False
 
 
@@ -134,53 +132,52 @@ def rebuild_fts_indexes(conn: kuzu.Connection) -> None:
                 f"['name', 'content', 'signature'])"
             )
         except RuntimeError:
-            logger.debug("FTS index rebuild failed for %s", table, exc_info=True)
+            logger.error("FTS index rebuild failed for %s", table, exc_info=True)
 
 
 def get_indexed_files(conn: kuzu.Connection) -> dict[str, str]:
     """Return ``{file_path: sha256(content)}`` for all File nodes.
-
-    Attempts to read pre-computed ``content_hash`` first. Falls back
-    to computing the hash from content for databases that predate the
-    schema addition.
+    
+    Uses KuzuDB's native sha256 function to avoid memory issues on large codebases.
     """
     mapping: dict[str, str] = {}
     try:
         result = conn.execute(
-            "MATCH (n:File) RETURN n.file_path, n.content"
+            "MATCH (n:File) RETURN n.file_path, sha256(n.content)"
         )
         while result.has_next():
             row = result.get_next()
             fp = row[0] or ""
-            content = row[1] or ""
-            mapping[fp] = hashlib.sha256(content.encode()).hexdigest()
+            content_hash = row[1] or ""
+            mapping[fp] = content_hash
     except RuntimeError:
-        logger.debug("get_indexed_files failed", exc_info=True)
+        logger.error("get_indexed_files failed", exc_info=True)
     return mapping
 
 
 def bulk_load(
     conn: kuzu.Connection,
-    graph: KnowledgeGraph,
-    add_nodes_fallback,
-    add_relationships_fallback,
+    nodes: Iterable[GraphNode],
+    rels: Iterable[GraphRelationship],
+    add_nodes_fallback: Callable[[list[GraphNode]], None],
+    add_relationships_fallback: Callable[[list[GraphRelationship]], None],
 ) -> None:
-    """Replace the entire store with the contents of *graph*.
-
-    Uses CSV-based COPY FROM for bulk loading nodes and relationships,
-    falling back to *add_nodes_fallback* / *add_relationships_fallback*
-    callables if COPY FROM fails.
-    """
+    """Replace the entire store with the provided nodes and relationships."""
     for table in _NODE_TABLE_NAMES:
         try:
             conn.execute(f"MATCH (n:{table}) DETACH DELETE n")
         except RuntimeError:
             pass
 
-    if not bulk_load_nodes_csv(conn, graph):
-        add_nodes_fallback(list(graph.iter_nodes()))
+    # Note: We convert to list here to support the fallback mechanism
+    # which expects a list. In a future iteration, the fallbacks themselves
+    # should be chunked.
+    node_list = list(nodes)
+    if not bulk_load_nodes_csv(conn, node_list):
+        add_nodes_fallback(node_list)
 
-    if not bulk_load_rels_csv(conn, graph):
-        add_relationships_fallback(list(graph.iter_relationships()))
+    rel_list = list(rels)
+    if not bulk_load_rels_csv(conn, rel_list):
+        add_relationships_fallback(rel_list)
 
     rebuild_fts_indexes(conn)

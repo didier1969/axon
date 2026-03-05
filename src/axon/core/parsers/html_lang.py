@@ -77,7 +77,7 @@ class HtmlParser(LanguageParser):
                     end_line=end_line,
                     start_byte=node.start_byte,
                     end_byte=node.end_byte,
-                    content=content[node.start_byte : node.end_byte][:200],
+                    content=node.text.decode("utf-8", errors="replace")[:200],
                 )
             )
 
@@ -107,7 +107,7 @@ class HtmlParser(LanguageParser):
         """Extract the tag name from a start_tag or self_closing_tag."""
         tag_node = self._find_child_by_type(start_tag, "tag_name")
         if tag_node is not None:
-            return tag_node.text.decode("utf8").lower()
+            return tag_node.text.decode("utf-8", errors="replace").lower()
         return ""
 
     def _get_attributes(self, start_tag: Node) -> dict[str, str]:

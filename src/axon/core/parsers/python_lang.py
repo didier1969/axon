@@ -19,24 +19,22 @@ from axon.core.parsers.base import (
 )
 
 PY_LANGUAGE = Language(tspython.language())
-
 _BUILTIN_TYPES: frozenset[str] = frozenset(
     {
-        "str",
-        "int",
-        "float",
-        "bool",
-        "None",
-        "list",
-        "dict",
-        "set",
-        "tuple",
-        "Any",
-        "Optional",
-        "bytes",
-        "complex",
-        "object",
-        "type",
+        # Builtins
+        "str", "int", "float", "bool", "None", "list", "dict", "set", "tuple",
+        "bytes", "bytearray", "complex", "frozenset", "memoryview", "object",
+        "type", "Exception", "BaseException", "classmethod", "staticmethod",
+        "property", "super",
+        # Typing module
+        "Any", "Callable", "Sequence", "Mapping", "Iterable", "Iterator",
+        "Generator", "TypeVar", "Generic", "Optional", "Union", "Type",
+        "Coroutine", "AsyncGenerator", "AsyncIterable", "AsyncIterator",
+        "Awaitable", "Literal", "Annotated", "ClassVar", "Final", "ForwardRef",
+        "Protocol", "TypedDict", "NoReturn", "Never", "Self", "TypeAlias",
+        "TypeGuard",
+        # Collections
+        "deque", "defaultdict", "OrderedDict", "Counter", "namedtuple",
     }
 )
 
@@ -100,10 +98,10 @@ class PythonParser(LanguageParser):
         if name_node is None:
             return
 
-        name = name_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         kind = "method" if class_name else "function"
         signature = self._build_signature(node, content)
@@ -152,12 +150,18 @@ class PythonParser(LanguageParser):
         if name_node is None or params_node is None:
             return ""
 
-        name = name_node.text.decode("utf8")
-        params = params_node.text.decode("utf8")
+        name = name_node.text.decode("utf-8", errors="replace")
+        params = params_node.text.decode("utf-8", errors="replace")
+        
+        # Normalize multi-line parameters
+        params = " ".join(params.split())
+
         sig = f"def {name}{params}"
 
         if return_type is not None:
-            sig += f" -> {return_type.text.decode('utf8')}"
+            ret_text = return_type.text.decode("utf-8", errors="replace")
+            ret_text = " ".join(ret_text.split())
+            sig += f" -> {ret_text}"
 
         return sig
 
@@ -264,10 +268,10 @@ class PythonParser(LanguageParser):
         if name_node is None:
             return
 
-        class_name = name_node.text.decode("utf8")
+        class_name = name_node.text.decode("utf-8", errors="replace")
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        node_content = content[node.start_byte : node.end_byte]
+        node_content = node.text.decode("utf-8", errors="replace")
 
         result.symbols.append(
             SymbolInfo(
@@ -311,9 +315,9 @@ class PythonParser(LanguageParser):
                 name_node = child.child_by_field_name("name")
                 alias_node = child.child_by_field_name("alias")
                 if name_node is not None:
-                    module = name_node.text.decode("utf8")
+                    module = name_node.text.decode("utf-8", errors="replace")
                     parts = module.split(".")
-                    alias = alias_node.text.decode("utf8") if alias_node else ""
+                    alias = alias_node.text.decode("utf-8", errors="replace") if alias_node else ""
                     result.imports.append(
                         ImportInfo(
                             module=module,
@@ -329,7 +333,7 @@ class PythonParser(LanguageParser):
             return
 
         is_relative = module_name_node.type == "relative_import"
-        module = module_name_node.text.decode("utf8")
+        module = module_name_node.text.decode("utf-8", errors="replace")
 
         names: list[str] = []
         past_import = False
@@ -483,7 +487,7 @@ class PythonParser(LanguageParser):
         if func_node.type == "identifier":
             result.calls.append(
                 CallInfo(
-                    name=func_node.text.decode("utf8"),
+                    name=func_node.text.decode("utf-8", errors="replace"),
                     line=line,
                     arguments=arguments,
                 )
@@ -517,7 +521,7 @@ class PythonParser(LanguageParser):
         obj_node = attr_node.children[0] if attr_node.children else None
         if obj_node is not None:
             if obj_node.type == "identifier":
-                receiver = obj_node.text.decode("utf8")
+                receiver = obj_node.text.decode("utf-8", errors="replace")
             elif obj_node.type == "attribute":
                 # Nested attribute access like ``self.logger.info()`` — use the root.
                 receiver = self._root_identifier(obj_node)
@@ -546,7 +550,7 @@ class PythonParser(LanguageParser):
             elif child.type == "keyword_argument":
                 value_node = child.child_by_field_name("value")
                 if value_node is not None and value_node.type == "identifier":
-                    identifiers.append(value_node.text.decode("utf8"))
+                    identifiers.append(value_node.text.decode("utf-8", errors="replace"))
         return identifiers
 
     def _root_identifier(self, node: Node) -> str:
@@ -581,14 +585,14 @@ class PythonParser(LanguageParser):
             # Fallback: return text of first identifier found anywhere.
             return PythonParser._find_first_identifier(inner)
         if type_node.type == "identifier":
-            return type_node.text.decode("utf8")
+            return type_node.text.decode("utf-8", errors="replace")
         return PythonParser._find_first_identifier(type_node)
 
     @staticmethod
     def _find_first_identifier(node: Node) -> str:
         """DFS for the first identifier node."""
         if node.type == "identifier":
-            return node.text.decode("utf8")
+            return node.text.decode("utf-8", errors="replace")
         for child in node.children:
             found = PythonParser._find_first_identifier(child)
             if found:
