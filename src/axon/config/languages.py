@@ -21,8 +21,6 @@ SUPPORTED_EXTENSIONS: dict[str, str] = {
     ".yaml": "yaml",
     ".toml": "toml",
     ".sql": "sql",
-    ".html": "html",
-    ".htm": "html",
     ".css": "css",
     ".scss": "css",
 }
