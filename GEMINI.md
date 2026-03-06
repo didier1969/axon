@@ -15,6 +15,7 @@ Axon est une **Boussole** (intelligence sémantique et structurelle). Grep est u
 | Évaluer le rayon d'impact avant une modification | `axon_impact` |
 | Tracer le chemin critique entre deux fonctions | `axon_path` |
 | Auditer la qualité structurelle (cycles, couplage) | `axon_lint` |
+| **Audit Architectural (Détection proactive d'anomalies)** | `axon audit` |
 | Lister les points d'entrée (entry points) du projet | `axon_entry_points` |
 | Identifier les zones à risque non testées | `axon_coverage_gaps` |
 

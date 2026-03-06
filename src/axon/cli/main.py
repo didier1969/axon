@@ -650,6 +650,33 @@ def cypher(
     storage.close()
 
 @app.command()
+def audit() -> None:
+    """Run standardized architectural audit (Immune System)."""
+    from rich.table import Table
+    from axon.core.analysis.audit import AuditEngine
+
+    storage = _load_storage()
+    graph = storage.export_to_graph()
+    engine = AuditEngine(graph)
+    reports = engine.run_all()
+    storage.close()
+
+    if not reports:
+        console.print("[green]✓ No architectural anomalies detected. Your system immune system is healthy.[/green]")
+        return
+
+    table = Table(title="Axon Architectural Audit Report")
+    table.add_column("Type", style="cyan")
+    table.add_column("Severity", style="magenta")
+    table.add_column("Message", style="white")
+
+    for r in reports:
+        color = "red" if r.severity == "High" else "yellow"
+        table.add_row(r.type, f"[{color}]{r.severity}[/{color}]", r.message)
+
+    console.print(table)
+
+@app.command()
 def setup(
     claude: bool = typer.Option(False, "--claude", help="Configure MCP for Claude Code."),
     cursor: bool = typer.Option(False, "--cursor", help="Configure MCP for Cursor."),

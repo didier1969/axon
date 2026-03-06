@@ -12,6 +12,7 @@ Axon est un moteur d'intelligence structurelle. Utilisez Axon comme une **Bousso
 | Analyser l'impact d'un changement | `axon_impact` |
 | Tracer un flux entre deux fonctions | `axon_path` |
 | Détecter des anti-patterns (Cycles, God classes) | `axon_lint` |
+| **Audit Architectural (Immune System)** | `axon audit` |
 
 **IMPORTANT:** Tous les outils Axon EXIGENT le paramètre `repo` (slug).
 - Utilisez `axon_list_repos` une fois par session pour trouver les noms.
