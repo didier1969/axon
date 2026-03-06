@@ -51,96 +51,77 @@ class FileParseData:
 
 _PARSER_CACHE: dict[str, LanguageParser] = {}
 
-def get_parser(language: str) -> LanguageParser:
-    """Return the appropriate tree-sitter parser for *language*."""
+def get_parser(language: str) -> LanguageParser | None:
+    """Return the appropriate tree-sitter parser for *language*, or ``None``."""
     cached = _PARSER_CACHE.get(language)
     if cached is not None:
         return cached
 
-    if language == "python":
-        from axon.core.parsers.python_lang import PythonParser
-        parser = PythonParser()
-    elif language == "typescript":
-        from axon.core.parsers.typescript import TypeScriptParser
-        parser = TypeScriptParser(dialect="typescript")
-    elif language == "javascript":
-        from axon.core.parsers.typescript import TypeScriptParser
-        parser = TypeScriptParser(dialect="javascript")
-    elif language == "elixir":
-        from axon.core.parsers.elixir_lang import ElixirParser
-        parser = ElixirParser()
-    elif language == "rust":
-        from axon.core.parsers.rust_lang import RustParser
-        parser = RustParser()
-    elif language == "markdown":
-        from axon.core.parsers.markdown import MarkdownParser
-        parser = MarkdownParser()
-    elif language == "go":
-        from axon.core.parsers.go_lang import GoParser
-        parser = GoParser()
-    elif language in ("yaml", "toml"):
-        from axon.core.parsers.yaml_lang import YamlParser
-        parser = YamlParser()
-    elif language == "sql":
-        from axon.core.parsers.sql_lang import SqlParser
-        parser = SqlParser()
-    elif language == "html":
-        from axon.core.parsers.html_lang import HtmlParser
-        parser = HtmlParser()
-    elif language == "css":
-        from axon.core.parsers.css_lang import CssParser
-        parser = CssParser()
-    elif language == "java":
-        from axon.core.parsers.java_lang import JavaParser
-        parser = JavaParser()
-    else:
-        raise ValueError(f"Unsupported language {language!r}")
+    parser: LanguageParser | None = None
+    try:
+        if language == "python":
+            from axon.core.parsers.python_lang import PythonParser
+            parser = PythonParser()
+        elif language == "typescript":
+            from axon.core.parsers.typescript import TypeScriptParser
+            parser = TypeScriptParser(dialect="typescript")
+        elif language == "javascript":
+            from axon.core.parsers.typescript import TypeScriptParser
+            parser = TypeScriptParser(dialect="javascript")
+        elif language == "elixir":
+            from axon.core.parsers.elixir_lang import ElixirParser
+            parser = ElixirParser()
+        elif language == "rust":
+            from axon.core.parsers.rust_lang import RustParser
+            parser = RustParser()
+        elif language == "markdown":
+            from axon.core.parsers.markdown import MarkdownParser
+            parser = MarkdownParser()
+        elif language == "go":
+            from axon.core.parsers.go_lang import GoParser
+            parser = GoParser()
+        elif language in ("yaml", "toml"):
+            from axon.core.parsers.yaml_lang import YamlParser
+            parser = YamlParser()
+        elif language == "sql":
+            from axon.core.parsers.sql_lang import SqlParser
+            parser = SqlParser()
+        elif language == "html":
+            from axon.core.parsers.html_lang import HtmlParser
+            parser = HtmlParser()
+        elif language == "css":
+            from axon.core.parsers.css_lang import CssParser
+            parser = CssParser()
+        elif language == "java":
+            from axon.core.parsers.java_lang import JavaParser
+            parser = JavaParser()
+    except (ImportError, ValueError):
+        # Specific parser module not found or failed to load
+        return None
 
-    _PARSER_CACHE[language] = parser
+    if parser:
+        _PARSER_CACHE[language] = parser
     return parser
 
-def _detect_language(file_path: str) -> str:
-    """Infer language from a file's extension."""
-    from pathlib import PurePosixPath
-    suffix = PurePosixPath(file_path).suffix.lower()
-    if suffix == ".py":
-        return "python"
-    if suffix in (".ts", ".tsx"):
-        return "typescript"
-    if suffix in (".js", ".jsx"):
-        return "javascript"
-    if suffix == ".ex" or suffix == ".exs":
-        return "elixir"
-    if suffix == ".rs":
-        return "rust"
-    if suffix == ".go":
-        return "go"
-    if suffix == ".java":
-        return "java"
-    if suffix == ".md":
-        return "markdown"
-    if suffix in (".yaml", ".yml"):
-        return "yaml"
-    if suffix == ".toml":
-        return "toml"
-    if suffix == ".sql":
-        return "sql"
-    if suffix == ".html":
-        return "html"
-    if suffix == ".css":
-        return "css"
-    return ""
 
 def parse_file(file_path: str, content: str, language: str) -> FileParseData:
-    """Parse a single file and return structured parse data."""
+    """Parse a single file and return structured parse data.
+    
+    If no parser is available for *language*, returns an empty ParseResult
+    so the file content remains searchable (FTS) without symbol nodes.
+    """
+    parser = get_parser(language)
+    if parser is None:
+        return FileParseData(file_path=file_path, language=language, parse_result=ParseResult())
+
     try:
-        parser = get_parser(language)
         result = parser.parse(content, file_path)
     except (RuntimeError, ValueError, OSError):
-        logger.warning("Failed to parse %s (%s), skipping", file_path, language, exc_info=True)
+        logger.warning("Failed to parse %s (%s), indexing as plain text", file_path, language, exc_info=True)
         result = ParseResult()
 
     return FileParseData(file_path=file_path, language=language, parse_result=result)
+
 
 def process_parsing(
     files: list[FileEntry],
@@ -163,78 +144,74 @@ def _process_parsing_generator(
     graph: KnowledgeGraph | None = None,
     max_workers: int | None = None,
 ) -> Generator[Union[GraphNode, GraphRelationship, FileParseData], None, None]:
-    # Phase 1: Parse all files in parallel.
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        all_parse_data = list(
-            executor.map(
-                lambda f: parse_file(f.path, f.content, f.language),
-                files,
-            )
-        )
-
     def _output(item: Union[GraphNode, GraphRelationship]):
         if graph is not None:
             if isinstance(item, GraphNode): graph.add_node(item)
             else: graph.add_relationship(item)
         return item
 
-    # Phase 2: Yield nodes/rels and FileParseData.
-    for file_entry, parse_data in zip(files, all_parse_data):
-        file_id = generate_id(NodeLabel.FILE, file_entry.path)
-        exported_names: set[str] = set(parse_data.parse_result.exports)
+    # Use executor.map to stream results as they are parsed,
+    # avoiding a massive intermediate list of all results.
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for parse_data in executor.map(
+            lambda f: parse_file(f.path, f.content, f.language),
+            files,
+        ):
+            file_id = generate_id(NodeLabel.FILE, parse_data.file_path)
+            exported_names: set[str] = set(parse_data.parse_result.exports)
 
-        # Build class -> base class names for storing on class nodes.
-        class_bases: dict[str, list[str]] = {}
-        for cls_name, kind, parent_name in parse_data.parse_result.heritage:
-            if kind == "extends":
-                class_bases.setdefault(cls_name, []).append(parent_name)
+            # Build class -> base class names for storing on class nodes.
+            class_bases: dict[str, list[str]] = {}
+            for cls_name, kind, parent_name in parse_data.parse_result.heritage:
+                if kind == "extends":
+                    class_bases.setdefault(cls_name, []).append(parent_name)
 
-        for symbol in parse_data.parse_result.symbols:
-            label = _KIND_TO_LABEL.get(symbol.kind)
-            if label is None:
-                continue
+            for symbol in parse_data.parse_result.symbols:
+                label = _KIND_TO_LABEL.get(symbol.kind)
+                if label is None:
+                    continue
 
-            symbol_name = (
-                f"{symbol.class_name}.{symbol.name}"
-                if symbol.kind == "method" and symbol.class_name
-                else symbol.name
-            )
+                symbol_name = (
+                    f"{symbol.class_name}.{symbol.name}"
+                    if symbol.kind == "method" and symbol.class_name
+                    else symbol.name
+                )
 
-            symbol_id = generate_id(label, file_entry.path, symbol_name)
+                symbol_id = generate_id(label, parse_data.file_path, symbol_name)
 
-            props: dict[str, Any] = {}
-            if symbol.decorators:
-                props["decorators"] = symbol.decorators
-            if symbol.kind == "class" and symbol.name in class_bases:
-                props["bases"] = class_bases[symbol.name]
+                props: dict[str, Any] = {}
+                if symbol.decorators:
+                    props["decorators"] = symbol.decorators
+                if symbol.kind == "class" and symbol.name in class_bases:
+                    props["bases"] = class_bases[symbol.name]
 
-            is_exported = symbol.name in exported_names
+                is_exported = symbol.name in exported_names
 
-            node = GraphNode(
-                id=symbol_id,
-                label=label,
-                name=symbol.name,
-                file_path=file_entry.path,
-                start_line=symbol.start_line,
-                end_line=symbol.end_line,
-                start_byte=symbol.start_byte,
-                end_byte=symbol.end_byte,
-                content=symbol.content,
-                signature=symbol.signature,
-                class_name=symbol.class_name,
-                language=file_entry.language,
-                is_exported=is_exported,
-                properties=props,
-            )
-            yield _output(node)
+                node = GraphNode(
+                    id=symbol_id,
+                    label=label,
+                    name=symbol.name,
+                    file_path=parse_data.file_path,
+                    start_line=symbol.start_line,
+                    end_line=symbol.end_line,
+                    start_byte=symbol.start_byte,
+                    end_byte=symbol.end_byte,
+                    content=symbol.content,
+                    signature=symbol.signature,
+                    class_name=symbol.class_name,
+                    language=parse_data.language,
+                    is_exported=is_exported,
+                    properties=props,
+                )
+                yield _output(node)
 
-            rel_id = f"defines:{file_id}->{symbol_id}"
-            rel = GraphRelationship(
-                id=rel_id,
-                type=RelType.DEFINES,
-                source=file_id,
-                target=symbol_id,
-            )
-            yield _output(rel)
+                rel_id = f"defines:{file_id}->{symbol_id}"
+                rel = GraphRelationship(
+                    id=rel_id,
+                    type=RelType.DEFINES,
+                    source=file_id,
+                    target=symbol_id,
+                )
+                yield _output(rel)
 
-        yield parse_data
+            yield parse_data

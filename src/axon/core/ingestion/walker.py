@@ -13,7 +13,7 @@ from axon.config.languages import get_language, is_supported
 
 logger = logging.getLogger(__name__)
 
-_MAX_FILE_BYTES = 512 * 1024
+_MAX_FILE_BYTES = 1024 * 1024
 
 @dataclass
 class FileEntry:

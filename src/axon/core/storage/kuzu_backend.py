@@ -43,7 +43,13 @@ class KuzuBackend:
     def initialize(self, path: Path, *, read_only: bool = False) -> None:
         """Open or create the KuzuDB database at *path* and set up the schema."""
         self.db_path = path
-        self._db = kuzu.Database(str(path), read_only=read_only)
+        # Limit buffer pool size to 12GB to prevent OOM on 32GB machines
+        # especially when multiple agents/node processes are running.
+        self._db = kuzu.Database(
+            str(path),
+            read_only=read_only,
+            buffer_pool_size=12 * 1024 * 1024 * 1024
+        )
         self._conn = kuzu.Connection(self._db)
         if not read_only:
             from axon.core.storage.kuzu_schema import create_schema

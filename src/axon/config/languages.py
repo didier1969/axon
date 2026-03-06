@@ -17,22 +17,41 @@ SUPPORTED_EXTENSIONS: dict[str, str] = {
     ".rs": "rust",
     ".md": "markdown",
     ".go": "go",
+    ".java": "java",
     ".yml": "yaml",
     ".yaml": "yaml",
     ".toml": "toml",
     ".sql": "sql",
+    ".html": "html",
     ".css": "css",
     ".scss": "css",
+    ".json": "json",
+    ".csv": "csv",
+    ".txt": "text",
 }
 
 def get_language(file_path: str | Path) -> str | None:
-    """Return the language name for *file_path* based on its extension.
+    """Return the language name for *file_path* based on its extension or name.
 
     Returns ``None`` when the extension is not in :data:`SUPPORTED_EXTENSIONS`.
     """
-    suffix = Path(file_path).suffix
+    path = Path(file_path)
+    # Check specific manifest files first
+    if path.name == "Cargo.toml":
+        return "toml"
+    if path.name == "pyproject.toml":
+        return "toml"
+    if path.name == "package.json":
+        return "json"
+    if path.name == "mix.exs":
+        return "elixir"
+
+    suffix = path.suffix.lower()
     return SUPPORTED_EXTENSIONS.get(suffix)
 
 def is_supported(file_path: str | Path) -> bool:
-    """Return ``True`` if *file_path* has a supported extension."""
-    return Path(file_path).suffix in SUPPORTED_EXTENSIONS
+    """Return ``True`` if *file_path* has a supported extension or name."""
+    path = Path(file_path)
+    if path.name in ("Cargo.toml", "pyproject.toml", "package.json", "mix.exs"):
+        return True
+    return path.suffix.lower() in SUPPORTED_EXTENSIONS

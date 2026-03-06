@@ -7,7 +7,24 @@ from pathlib import Path
 
 DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset(
     {
-        # Directories
+        # Data & Binaries
+        "*.parquet",
+        "*.hdf5",
+        "*.onnx",
+        "*.sqlite",
+        "*.db",
+        "*.bin",
+        "*.exe",
+        "*.rlib",
+        "*.rmeta",
+        # Lockfiles
+        "package-lock.json",
+        "yarn.lock",
+        "uv.lock",
+        "poetry.lock",
+        "mix.lock",
+        "Cargo.lock",
+        # Specific folders
         "node_modules",
         "__pycache__",
         ".git",
@@ -26,9 +43,6 @@ DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset(
         "target",
         ".elixir_ls",
         ".devbox",
-        "node_modules",
-        "__pycache__",
-        "html",
         ".idea",
         ".vscode",
         ".mypy_cache",
@@ -39,24 +53,9 @@ DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset(
         ".eggs",
         "coverage",
         "htmlcov",
-        # Elixir/Mix
         "deps",
-        "_build",
-        "_build.old",   # leftover renamed _build dirs
-        ".elixir_ls",
-        ".fetch",
-        # Rust/Cargo
-        "target",
-        # Ruby
         "vendor",
         "bundle",
-        # Files (exact names)
-        ".DS_Store",
-        ".coverage",
-        "package-lock.json",
-        "yarn.lock",
-        "uv.lock",
-        "poetry.lock",
         # File globs
         "*.pyc",
         "*.pyo",
