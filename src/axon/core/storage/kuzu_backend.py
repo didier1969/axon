@@ -249,7 +249,8 @@ class KuzuBackend:
         graph = KnowledgeGraph()
         
         # Load all nodes
-        for table in _SEARCHABLE_TABLES + ["Folder", "File"]:
+        from axon.core.storage.kuzu_constants import _NODE_TABLE_NAMES
+        for table in _NODE_TABLE_NAMES:
             try:
                 result = self._conn.execute(f"MATCH (n:{table}) RETURN n")
                 while result.has_next():

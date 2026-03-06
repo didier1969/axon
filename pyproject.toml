@@ -40,6 +40,8 @@ dependencies = [
     "tree-sitter-go>=0.25.0",
     "tree-sitter-html>=0.23.0",
     "tree-sitter-css>=0.25.0",
+    "pyarrow>=23.0.1",
+    "pandas>=3.0.1",
 ]
 
 [project.urls]
