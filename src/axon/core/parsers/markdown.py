@@ -217,6 +217,9 @@ class MarkdownParser(LanguageParser):
     ) -> None:
         """Extract Markdown links and code fence language tags."""
         in_code_block = False
+        lang_tag = ""
+        block_start = 0
+        
         for i, line in enumerate(lines):
             line_no = i + 1
 
@@ -225,6 +228,7 @@ class MarkdownParser(LanguageParser):
                 if not in_code_block:
                     in_code_block = True
                     lang_tag = fence_m.group(1)
+                    block_start = line_no
                     if lang_tag:
                         result.calls.append(CallInfo(name=lang_tag, line=line_no))
                 else:
@@ -233,6 +237,18 @@ class MarkdownParser(LanguageParser):
 
             if line.strip() == "```" and in_code_block:
                 in_code_block = False
+                # Expert: Save architecture diagrams as symbols
+                if lang_tag in ("mermaid", "plantuml", "dot"):
+                    result.symbols.append(
+                        SymbolInfo(
+                            name=f"diagram:{lang_tag}",
+                            kind="section",
+                            start_line=block_start,
+                            end_line=line_no,
+                            content="\n".join(lines[block_start:line_no-1]),
+                            properties={"diagram": True}
+                        )
+                    )
                 continue
 
             if not in_code_block:

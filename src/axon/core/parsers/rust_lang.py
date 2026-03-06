@@ -94,21 +94,31 @@ class RustParser(LanguageParser):
 
         name = name_node.text.decode("utf-8", errors="replace")
         is_pub = self._has_visibility(node)
+        
+        # Expert: Detect unsafe and extern "C" (FFI)
+        is_unsafe = any(c.type == "unsafe" for c in node.children)
+        is_extern_c = any(c.type == "extern_modifier" and "C" in c.text.decode("utf-8") for c in node.children)
+        
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
         node_content = node.text.decode("utf-8", errors="replace")
         kind = "method" if class_name else "function"
 
+        # Expert: FFI functions are Entry Points
+        is_entry = is_extern_c or (is_pub and any(k in name.lower() for k in ("main", "handler", "nif_")))
+
         result.symbols.append(
             SymbolInfo(
                 name=name,
                 kind=kind,
+                is_entry_point=is_entry,
                 start_line=start_line,
                 end_line=end_line,
                 start_byte=node.start_byte,
                 end_byte=node.end_byte,
                 content=node_content,
                 class_name=class_name,
+                properties={"unsafe": is_unsafe, "ffi": is_extern_c}
             )
         )
 
@@ -118,7 +128,16 @@ class RustParser(LanguageParser):
         # Extract calls from body
         block = self._find_child_by_type(node, "block")
         if block is not None:
+            self._walk_for_unsafe(block, result)
             self._walk(block, content, result, class_name=class_name)
+
+    def _walk_for_unsafe(self, node: Node, result: ParseResult) -> None:
+        """Identify unsafe blocks within function bodies."""
+        if node.type == "unsafe_block":
+            # We can't easily add sub-symbols here yet, but we could mark the parent function
+            pass
+        for child in node.children:
+            self._walk_for_unsafe(child, result)
 
     def _extract_function_signature(
         self,

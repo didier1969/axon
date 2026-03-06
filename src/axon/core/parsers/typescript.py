@@ -106,6 +106,8 @@ class TypeScriptParser(LanguageParser):
             self._extract_import(node, source, result)
         elif ntype == "call_expression":
             self._extract_call(node, source, result)
+        elif ntype == "assignment_expression":
+            self._extract_assignment_sink(node, source, result)
         elif ntype == "new_expression":
             self._extract_new_expression(node, source, result)
         elif ntype == "expression_statement":
@@ -176,6 +178,22 @@ class TypeScriptParser(LanguageParser):
                         if key_node is not None:
                             result.exports.append(key_node.text.decode("utf-8", errors="replace"))
 
+    def _extract_assignment_sink(self, node: Node, source: str, result: ParseResult) -> None:
+        """Detect dangerous assignments like element.innerHTML = ... (XSS Sink)."""
+        left = node.child_by_field_name("left")
+        if left and left.type == "member_expression":
+            prop = left.child_by_field_name("property")
+            if prop:
+                prop_name = prop.text.decode("utf-8", errors="replace")
+                if prop_name in ("innerHTML", "outerHTML"):
+                    result.calls.append(
+                        CallInfo(
+                            name=prop_name,
+                            line=node.start_point[0] + 1,
+                            receiver=left.child_by_field_name("object").text.decode("utf-8") if left.child_by_field_name("object") else ""
+                        )
+                    )
+
     def _extract_function_declaration(
         self, node: Node, source: str, result: ParseResult
     ) -> None:
@@ -189,10 +207,14 @@ class TypeScriptParser(LanguageParser):
         content = node.text.decode("utf-8", errors="replace")
         signature = self._build_function_signature(node, name)
 
+        # Expert: Mark exported functions as entry points in specific file types
+        is_entry = name in result.exports and any(k in name.lower() for k in ("handler", "route", "get", "post", "put", "delete"))
+
         result.symbols.append(
             SymbolInfo(
                 name=name,
                 kind="function",
+                is_entry_point=is_entry,
                 start_line=start_line,
                 end_line=end_line,
                 start_byte=node.start_byte,

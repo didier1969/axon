@@ -67,17 +67,35 @@ class HtmlParser(LanguageParser):
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
 
-        # Elements with id attribute -> SymbolInfo
-        if "id" in attrs:
+        # Elements with id or class -> SymbolInfo
+        if "id" in attrs or "class" in attrs:
+            name = attrs.get("id") or f".{attrs.get('class').split()[0]}"
             result.symbols.append(
                 SymbolInfo(
-                    name=attrs["id"],
-                    kind="function",
+                    name=name,
+                    kind="element",
                     start_line=start_line,
                     end_line=end_line,
                     start_byte=node.start_byte,
                     end_byte=node.end_byte,
                     content=node.text.decode("utf-8", errors="replace")[:200],
+                    properties={"tag": tag_name, "classes": attrs.get("class", "").split()}
+                )
+            )
+
+        # Form inputs and fields -> Entry Points for OWASP
+        if tag_name in ("input", "textarea", "select", "form"):
+            result.symbols.append(
+                SymbolInfo(
+                    name=attrs.get("name") or attrs.get("id") or tag_name,
+                    kind="field",
+                    is_entry_point=True,
+                    start_line=start_line,
+                    end_line=end_line,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte,
+                    content=node.text.decode("utf-8", errors="replace")[:100],
+                    properties={"tag": tag_name, "type": attrs.get("type", "text")}
                 )
             )
 
@@ -92,6 +110,16 @@ class HtmlParser(LanguageParser):
             result.imports.append(
                 ImportInfo(module=attrs["href"])
             )
+
+        # Inline JS Events (onclick, onsubmit, etc.) -> CallInfo
+        for attr_name, attr_value in attrs.items():
+            if attr_name.startswith("on"):
+                # Simplified: try to extract function name from "myFunc(event)"
+                func_name = attr_value.split("(")[0].strip()
+                if func_name:
+                    result.calls.append(
+                        CallInfo(name=func_name, line=start_line)
+                    )
 
         # <a href="..."> -> CallInfo
         if tag_name == "a" and "href" in attrs:

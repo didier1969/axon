@@ -42,7 +42,7 @@ class CssParser(LanguageParser):
     # ------------------------------------------------------------------
 
     def _walk(self, node: Node, content: str, result: ParseResult) -> None:
-        """Walk tree and extract selectors and imports."""
+        """Walk tree and extract selectors, variables, and imports."""
         match node.type:
             case "id_selector":
                 self._extract_id_selector(node, content, result)
@@ -50,6 +50,10 @@ class CssParser(LanguageParser):
                 self._extract_class_selector(node, content, result)
             case "import_statement":
                 self._extract_import(node, result)
+            case "declaration":
+                self._extract_variable(node, content, result)
+            case "at_rule":
+                self._extract_at_rule(node, content, result)
 
         for child in node.children:
             self._walk(child, content, result)
@@ -73,7 +77,7 @@ class CssParser(LanguageParser):
         result.symbols.append(
             SymbolInfo(
                 name=name,
-                kind="function",
+                kind="element",
                 start_line=start_line,
                 end_line=end_line,
                 start_byte=node.start_byte,
@@ -97,7 +101,7 @@ class CssParser(LanguageParser):
         result.symbols.append(
             SymbolInfo(
                 name=name,
-                kind="function",
+                kind="element",
                 start_line=start_line,
                 end_line=end_line,
                 start_byte=node.start_byte,
@@ -105,6 +109,40 @@ class CssParser(LanguageParser):
                 content=node.text.decode("utf-8", errors="replace"),
             )
         )
+
+    def _extract_variable(self, node: Node, content: str, result: ParseResult) -> None:
+        """Extract CSS variables like --main-color."""
+        prop_node = self._find_child_by_type(node, "property_name")
+        if prop_node and prop_node.text.decode("utf-8").startswith("--"):
+            name = prop_node.text.decode("utf-8")
+            result.symbols.append(
+                SymbolInfo(
+                    name=name,
+                    kind="variable",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte,
+                    content=node.text.decode("utf-8", errors="replace"),
+                )
+            )
+
+    def _extract_at_rule(self, node: Node, content: str, result: ParseResult) -> None:
+        """Extract @rules like @font-face or @media."""
+        at_keyword = self._find_child_by_type(node, "at_keyword")
+        if at_keyword:
+            name = at_keyword.text.decode("utf-8")
+            result.symbols.append(
+                SymbolInfo(
+                    name=name,
+                    kind="interface",
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte,
+                    content=node.text.decode("utf-8", errors="replace")[:100],
+                )
+            )
 
     # ------------------------------------------------------------------
     # Import extractors

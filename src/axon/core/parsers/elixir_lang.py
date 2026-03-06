@@ -176,9 +176,10 @@ class ElixirParser(LanguageParser):
         end_line = node.end_point[0] + 1
         node_content = node.text.decode("utf-8", errors="replace")
 
-        # OTP entry-point detection — mark as decorator
+        # OTP entry-point detection — mark as decorator and is_entry_point
         effective_decorators = list(decorators)
-        if func_name in _OTP_ENTRY_POINTS:
+        is_otp_entry = func_name in _OTP_ENTRY_POINTS
+        if is_otp_entry:
             effective_decorators.append(func_name)
 
         # Fully qualified name: Module.func
@@ -188,6 +189,7 @@ class ElixirParser(LanguageParser):
             SymbolInfo(
                 name=full_name,
                 kind="function",
+                is_entry_point=is_otp_entry,
                 start_line=start_line,
                 end_line=end_line,
                 start_byte=node.start_byte,
@@ -205,6 +207,10 @@ class ElixirParser(LanguageParser):
         # Extract calls from the body
         do_block = self._find_child_by_type(node, "do_block")
         if do_block is not None:
+            # Expert: Detect NIF loading in function body
+            if "load_nif" in node_content:
+                result.symbols[-1].properties["nif_loader"] = True
+            
             self._extract_calls_from_block(do_block, result)
 
     def _extract_macro(
@@ -360,8 +366,15 @@ class ElixirParser(LanguageParser):
                 elif child.type == "identifier":
                     func_name = child.text.decode("utf8")
             if func_name:
+                # Expert: Identify GenServer calls as special cross-process relations
+                is_genserver = receiver == "GenServer" and func_name in ("call", "cast")
                 result.calls.append(
-                    CallInfo(name=func_name, line=line, receiver=receiver)
+                    CallInfo(
+                        name=func_name, 
+                        line=line, 
+                        receiver=receiver,
+                        properties={"genserver": is_genserver}
+                    )
                 )
             return
 

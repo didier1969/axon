@@ -281,22 +281,23 @@ def _process_single_file_calls(
     call_index: dict[str, list[str]],
     file_sym_index: dict[str, list[dict]],
     graph: KnowledgeGraph,
-) -> list[tuple[str, str, float]]:
+) -> list[tuple[str, str, float, list[str]]]:
     """Resolve call expressions for a single file (thread-safe, read-only)."""
-    edges: list[tuple[str, str, float]] = []
+    edges: list[tuple[str, str, float, list[str]]] = []
     seen: set[str] = set()
 
-    def _add_edge(src: str, tgt: str, conf: float) -> None:
+    def _add_edge(src: str, tgt: str, conf: float, args: list[str] = None) -> None:
         rel_id = f"calls:{src}->{tgt}"
         if rel_id not in seen:
             seen.add(rel_id)
-            edges.append((src, tgt, conf))
+            edges.append((src, tgt, conf, args or []))
 
     def _resolve_receiver_method_local(
         receiver: str,
         method_name: str,
         source_id: str,
         file_path: str,
+        args: list[str]
     ) -> None:
         same_file_match: str | None = None
         global_match: str | None = None
@@ -316,7 +317,7 @@ def _process_single_file_calls(
 
         target = same_file_match or global_match
         if target is not None:
-            _add_edge(source_id, target, 0.8)
+            _add_edge(source_id, target, 0.8, args)
 
     for call in fpd.parse_result.calls:
         if call.name in _CALL_BLOCKLIST and call.receiver not in ("self", "this"):
@@ -332,7 +333,7 @@ def _process_single_file_calls(
             call, fpd.file_path, call_index, graph, fpd.parse_result, fpd.language
         )
         if target_id is not None:
-            _add_edge(source_id, target_id, confidence)
+            _add_edge(source_id, target_id, confidence, call.arguments)
 
         for arg_name in call.arguments:
             if arg_name in _CALL_BLOCKLIST:
@@ -354,7 +355,7 @@ def _process_single_file_calls(
                 _add_edge(source_id, recv_id, recv_conf)
 
             _resolve_receiver_method_local(
-                receiver, call.name, source_id, fpd.file_path
+                receiver, call.name, source_id, fpd.file_path, call.arguments
             )
 
     for symbol in fpd.parse_result.symbols:
@@ -433,7 +434,7 @@ def _process_calls_generator(
         return item
 
     # Phase 1: Resolve calls in parallel (read-only)
-    all_edges: list[tuple[str, str, float]] = []
+    all_edges: list[tuple[str, str, float, list[str]]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = executor.map(
             lambda fpd: _process_single_file_calls(fpd, call_index, file_sym_index, graph),
@@ -444,7 +445,7 @@ def _process_calls_generator(
 
     # Phase 2: Yield relationships
     seen: set[str] = set()
-    for src, tgt, conf in all_edges:
+    for src, tgt, conf, args in all_edges:
         rel_id = f"calls:{src}->{tgt}"
         if rel_id not in seen:
             seen.add(rel_id)
@@ -453,5 +454,5 @@ def _process_calls_generator(
                 type=RelType.CALLS,
                 source=src,
                 target=tgt,
-                properties={"confidence": conf},
+                properties={"confidence": conf, "arguments": args},
             ))

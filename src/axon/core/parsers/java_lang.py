@@ -73,15 +73,31 @@ class JavaParser(LanguageParser):
             return
         name = name_node.text.decode("utf-8", errors="replace")
         
+        # Expert: Detect Entry Points via Spring/Jakarta annotations
+        decorators = []
+        is_entry = False
+        modifiers = node.child_by_field_name("modifiers")
+        if modifiers:
+            for mod in modifiers.children:
+                if mod.type == "annotation":
+                    ann_name = mod.child_by_field_name("name")
+                    if ann_name:
+                        ann_text = ann_name.text.decode("utf-8", errors="replace")
+                        decorators.append(ann_text)
+                        if any(mapping in ann_text for mapping in ("Mapping", "Route", "Endpoint", "GET", "POST", "PUT", "DELETE")):
+                            is_entry = True
+
         result.symbols.append(SymbolInfo(
             name=name,
             kind="method",
             class_name=class_name,
+            is_entry_point=is_entry,
             start_line=node.start_point[0] + 1,
             end_line=node.end_point[0] + 1,
             start_byte=node.start_byte,
             end_byte=node.end_byte,
-            content=node.text.decode("utf-8", errors="replace")
+            content=node.text.decode("utf-8", errors="replace"),
+            decorators=decorators
         ))
 
     def _extract_import(self, node: Node, result: ParseResult) -> None:

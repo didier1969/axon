@@ -103,6 +103,22 @@ class PythonParser(LanguageParser):
         end_line = node.end_point[0] + 1
         node_content = node.text.decode("utf-8", errors="replace")
 
+        # Expert: Handle decorators and Entry Point detection
+        is_async = any(c.type == "async" for c in node.children)
+        
+        # Check if parent is a decorated_definition to inherit decorators
+        decorators = []
+        if node.parent and node.parent.type == "decorated_definition":
+            for child in node.parent.children:
+                if child.type == "decorator":
+                    dec_name = self._extract_decorator_name(child)
+                    if dec_name:
+                        decorators.append(dec_name)
+
+        # Expert: Detect Entry Points (Routes, CLI, main)
+        is_entry = any(k in name.lower() for k in ("main", "handler", "run")) or \
+                   any(any(k in d.lower() for k in ("route", "get", "post", "command")) for d in decorators)
+
         kind = "method" if class_name else "function"
         signature = self._build_signature(node, content)
 
@@ -110,6 +126,7 @@ class PythonParser(LanguageParser):
             SymbolInfo(
                 name=name,
                 kind=kind,
+                is_entry_point=is_entry,
                 start_line=start_line,
                 end_line=end_line,
                 start_byte=node.start_byte,
@@ -117,6 +134,8 @@ class PythonParser(LanguageParser):
                 content=node_content,
                 signature=signature,
                 class_name=class_name,
+                decorators=decorators,
+                properties={"async": is_async}
             )
         )
 

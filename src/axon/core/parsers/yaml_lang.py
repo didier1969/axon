@@ -72,6 +72,10 @@ class YamlParser(LanguageParser):
             if m:
                 key = m.group(1)
                 current_top_key = key
+                
+                # Expert: Detect sensitive keys or commands
+                is_sensitive = any(s in key.lower() for s in ("secret", "password", "token", "key"))
+                
                 result.symbols.append(
                     SymbolInfo(
                         name=key,
@@ -81,6 +85,7 @@ class YamlParser(LanguageParser):
                         start_byte=start_byte,
                         end_byte=end_byte,
                         content=line,
+                        properties={"sensitive": is_sensitive}
                     )
                 )
                 continue
@@ -89,6 +94,9 @@ class YamlParser(LanguageParser):
             m = _YAML_NESTED_KEY_RE.match(line)
             if m and current_top_key:
                 child_key = m.group(1)
+                
+                is_sensitive = any(s in child_key.lower() for s in ("secret", "password", "token", "key"))
+                
                 result.symbols.append(
                     SymbolInfo(
                         name=f"{current_top_key}.{child_key}",
@@ -98,6 +106,7 @@ class YamlParser(LanguageParser):
                         start_byte=start_byte,
                         end_byte=end_byte,
                         content=line,
+                        properties={"sensitive": is_sensitive}
                     )
                 )
 

@@ -40,6 +40,10 @@ _ALTER_RE = re.compile(
     r"^\s*ALTER\s+TABLE\s+(?:`|\")?(\w+)(?:`|\")?",
     re.IGNORECASE | re.MULTILINE,
 )
+_DML_RE = re.compile(
+    r"^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:`|\")?(\w+)(?:`|\")?",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 class SqlParser(LanguageParser):
@@ -148,6 +152,14 @@ class SqlParser(LanguageParser):
             name = m.group(1)
             line_no = content[:m.start()].count("\n") + 1
             result.calls.append(CallInfo(name=f"ALTER:{name}", line=line_no))
+
+        # Expert: Extract DML operations (INSERT, UPDATE, DELETE)
+        for m in _DML_RE.finditer(content):
+            action = m.group(1).upper()
+            table = m.group(2)
+            line_no = content[:m.start()].count("\n") + 1
+            is_dangerous = "DELETE" in action or "UPDATE" in action
+            result.calls.append(CallInfo(name=f"{action.split()[0]}:{table}", line=line_no, properties={"dangerous": is_dangerous}))
 
         return result
 

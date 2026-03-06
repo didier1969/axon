@@ -30,11 +30,8 @@ SUPPORTED_EXTENSIONS: dict[str, str] = {
     ".txt": "text",
 }
 
-def get_language(file_path: str | Path) -> str | None:
-    """Return the language name for *file_path* based on its extension or name.
-
-    Returns ``None`` when the extension is not in :data:`SUPPORTED_EXTENSIONS`.
-    """
+def get_language(file_path: str | Path) -> str:
+    """Return the language name for *file_path*. Fallback to "text"."""
     path = Path(file_path)
     # Check specific manifest files first
     if path.name == "Cargo.toml":
@@ -47,11 +44,8 @@ def get_language(file_path: str | Path) -> str | None:
         return "elixir"
 
     suffix = path.suffix.lower()
-    return SUPPORTED_EXTENSIONS.get(suffix)
+    return SUPPORTED_EXTENSIONS.get(suffix, "text")
 
 def is_supported(file_path: str | Path) -> bool:
-    """Return ``True`` if *file_path* has a supported extension or name."""
-    path = Path(file_path)
-    if path.name in ("Cargo.toml", "pyproject.toml", "package.json", "mix.exs"):
-        return True
-    return path.suffix.lower() in SUPPORTED_EXTENSIONS
+    """Return ``True`` for any file (filtering happens at the I/O level)."""
+    return True

@@ -29,11 +29,6 @@ DEFAULT_IGNORE_PATTERNS: frozenset[str] = frozenset(
         "__pycache__",
         ".git",
         ".axon",
-        ".paul",
-        ".claude",
-        "worktrees",
-        "GEMINI.md",
-        "CLAUDE.md",
         ".venv",
         "venv",
         ".env",
@@ -122,14 +117,13 @@ def should_ignore(
 ) -> bool:
     """Return ``True`` if *path* should be ignored during file discovery.
 
-    Parameters
-    ----------
-    path:
-        A relative file path (e.g. ``src/main.py`` or ``node_modules/pkg/index.js``).
-    gitignore_patterns:
-        Optional list of gitignore-style patterns loaded via :func:`load_gitignore`.
+    Markdown files (.md) are an exception and are NEVER ignored.
     """
     p = Path(path)
+
+    # ALL Markdown files must be indexed
+    if p.suffix.lower() == ".md":
+        return False
 
     if _matches_default_patterns(p):
         return True

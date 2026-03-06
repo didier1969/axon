@@ -75,10 +75,14 @@ class GoParser(LanguageParser):
         end_line = node.end_point[0] + 1
         node_content = node.text.decode("utf-8", errors="replace")
 
+        # Expert: Detect Entry Point (main)
+        is_entry = name == "main" or any(k in name.lower() for k in ("handler", "route"))
+
         result.symbols.append(
             SymbolInfo(
                 name=name,
                 kind="function",
+                is_entry_point=is_entry,
                 start_line=start_line,
                 end_line=end_line,
                 start_byte=node.start_byte,
@@ -91,9 +95,11 @@ class GoParser(LanguageParser):
         if name[0].isupper():
             result.exports.append(name)
 
-        # Walk body for calls
+        # Walk body for calls and unsafe check
         body = self._find_child_by_type(node, "block")
         if body is not None:
+            if "unsafe." in node_content:
+                result.symbols[-1].properties["unsafe"] = True
             self._walk_for_calls(body, result)
 
     def _extract_method(
@@ -236,18 +242,25 @@ class GoParser(LanguageParser):
         if func_node is None:
             return
 
+        name = ""
+        receiver = ""
+
         if func_node.type == "identifier":
-            result.calls.append(
-                CallInfo(name=func_node.text.decode("utf-8", errors="replace"), line=line)
-            )
+            name = func_node.text.decode("utf-8", errors="replace")
         elif func_node.type == "selector_expression":
             # pkg.Function() or obj.Method()
             field = self._find_child_by_type(func_node, "field_identifier")
             operand = func_node.children[0] if func_node.children else None
             name = field.text.decode("utf8") if field else ""
             receiver = operand.text.decode("utf8") if operand is not None else ""
-            if name:
-                result.calls.append(CallInfo(name=name, line=line, receiver=receiver))
+
+        if name:
+            result.calls.append(CallInfo(name=name, line=line, receiver=receiver))
+            
+            # Security Sink detection for OWASP in Go
+            if name in ("Command", "CommandContext", "Exec", "Query", "QueryRow", "eval"):
+                # Handle specific sinks if needed
+                pass
 
         self._walk_for_calls(node, result, skip_first=True)
 

@@ -639,9 +639,9 @@ def dead_code(
 
 @app.command()
 def cypher(
-    query: str = typer.Argument(..., help="Raw Cypher query to execute."),
+    query: str = typer.Argument(..., help="Cypher query to execute."),
 ) -> None:
-    """Execute raw Cypher against the knowledge graph."""
+    """Execute raw Cypher query against the knowledge graph."""
     from axon.mcp.tools import handle_cypher
 
     storage = _load_storage()
@@ -650,12 +650,60 @@ def cypher(
     storage.close()
 
 @app.command()
-def audit() -> None:
+def trace(
+    symbol: str = typer.Argument(..., help="Source symbol name to trace from."),
+    variable: str = typer.Argument(..., help="Variable name to trace."),
+    path: Path = typer.Option(Path("."), "--path", "-p", help="Path to repo."),
+    depth: int = typer.Option(5, "--depth", "-d", help="Max traversal depth.")
+) -> None:
+    """Trace data flow of a variable starting from a source symbol."""
+    from rich.tree import Tree
+    from axon.core.analysis.data_flow import DataFlowAnalyzer
+    from axon.core.graph.model import NodeLabel
+
+    storage = _load_storage(path)
+    graph = storage.export_to_graph()
+    analyzer = DataFlowAnalyzer(graph)
+
+    matches = []
+    for node in graph.iter_nodes():
+        if node.name == symbol and node.label in (NodeLabel.FUNCTION, NodeLabel.METHOD):
+            matches.append(node)
+
+    if not matches:
+        console.print(f"[red]Error: Could not find symbol '{symbol}'[/red]")
+        storage.close()
+        raise typer.Exit(1)
+
+    if len(matches) > 1:
+        console.print(f"[yellow]Warning: Found {len(matches)} matches for '{symbol}'. Using: {matches[0].id}[/yellow]")
+
+    source_id = matches[0].id
+    paths = analyzer.trace_variable(source_id, variable, max_depth=depth)
+    storage.close()
+
+    if not paths:
+         console.print(f"No data flow path found for variable '{variable}' starting from '{symbol}'.")
+         return
+
+    console.print(f"\n[bold green]Data Flow Paths for '{variable}' from '{symbol}':[/bold green]\n")
+    for idx, p in enumerate(paths, 1):
+        tree = Tree(f"Path {idx}: reaches [cyan]{p.target_id}[/cyan]")
+        for step in p.steps:
+            args_str = ", ".join(step.passed_arguments)
+            tree.add(f"[white]{step.symbol_name}[/white] [dim]({step.file_path})[/dim] [yellow]- args: [{args_str}][/yellow]")
+        console.print(tree)
+        console.print()
+
+@app.command()
+def audit(
+    path: Path = typer.Argument(Path("."), help="Path to the repository to audit."),
+) -> None:
     """Run standardized architectural audit (Immune System)."""
     from rich.table import Table
     from axon.core.analysis.audit import AuditEngine
 
-    storage = _load_storage()
+    storage = _load_storage(path)
     graph = storage.export_to_graph()
     engine = AuditEngine(graph)
     reports = engine.run_all()
@@ -667,12 +715,20 @@ def audit() -> None:
 
     table = Table(title="Axon Architectural Audit Report")
     table.add_column("Type", style="cyan")
+    table.add_column("Location", style="green")
     table.add_column("Severity", style="magenta")
-    table.add_column("Message", style="white")
+    table.add_column("Anomalies & Risks", style="white")
 
     for r in reports:
         color = "red" if r.severity == "High" else "yellow"
-        table.add_row(r.type, f"[{color}]{r.severity}[/{color}]", r.message)
+        
+        # Get node details for location
+        node = graph.get_node(r.symbol_id)
+        location = "unknown"
+        if node:
+            location = f"{node.file_path}:{node.start_line}"
+            
+        table.add_row(r.type, location, f"[{color}]{r.severity}[/{color}]", r.message)
 
     console.print(table)
 
