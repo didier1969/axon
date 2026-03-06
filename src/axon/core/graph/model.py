@@ -55,8 +55,10 @@ def generate_id(label: NodeLabel, file_path: str, symbol_name: str = "") -> str:
 
     Returns:
         A colon-separated string suitable for use as a graph node ID.
+        Commas are replaced with underscores to prevent CSV parsing issues.
     """
-    return f"{label.value}:{file_path}:{symbol_name}"
+    raw_id = f"{label.value}:{file_path}:{symbol_name}"
+    return raw_id.replace(",", "_")
 
 @dataclass
 class GraphNode:

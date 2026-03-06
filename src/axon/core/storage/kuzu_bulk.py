@@ -37,9 +37,9 @@ def csv_copy(conn: kuzu.Connection, table: str, rows: Iterable[list[Any]]) -> No
     csv_path: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".csv", delete=False, newline=""
+            mode="w", suffix=".csv", delete=False, newline="", encoding="utf-8"
         ) as f:
-            writer = csv.writer(f)
+            writer = csv.writer(f, quoting=csv.QUOTE_NONNUMERIC, quotechar='"')
             writer.writerows(rows)
             csv_path = f.name
         conn.execute(f'COPY {table} FROM "{csv_path}" (HEADER=false, PARALLEL=FALSE)')
