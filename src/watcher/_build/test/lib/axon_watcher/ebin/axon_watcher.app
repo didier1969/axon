@@ -1,0 +1,12 @@
+{application,axon_watcher,
+             [{modules,['Elixir.Axon.Watcher.Application',
+                        'Elixir.Axon.Watcher.PoolFacade',
+                        'Elixir.Axon.Watcher.Server',
+                        'Elixir.Axon.Watcher.Worker']},
+              {optional_applications,[]},
+              {applications,[kernel,stdlib,elixir,logger,jason,msgpax,
+                             nimble_pool,file_system]},
+              {description,"axon_watcher"},
+              {registered,[]},
+              {vsn,"1.0.0"},
+              {mod,{'Elixir.Axon.Watcher.Application',[]}}]}.

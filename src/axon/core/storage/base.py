@@ -147,3 +147,19 @@ class StorageBackend(Protocol):
     def bulk_load(self, nodes: Iterable[GraphNode], rels: Iterable[GraphRelationship]) -> None:
         """Replace the entire store contents."""
         ...
+
+    def export_to_graph(self) -> "KnowledgeGraph":
+        """Export the entire storage backend into an in-memory KnowledgeGraph."""
+        ...
+
+    def update_global_stats(self, graph: "KnowledgeGraph") -> None:
+        """Update node statistics (centrality, dead code flags) from an analyzed KnowledgeGraph."""
+        ...
+
+    def get_embedding(self, node_id: str) -> list[float] | None:
+        """Retrieve the raw embedding vector for a node."""
+        ...
+
+    def rebuild_fts_indexes(self) -> None:
+        """Rebuild or optimize Full-Text Search indexes after bulk operations."""
+        ...

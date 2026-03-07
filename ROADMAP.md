@@ -1,43 +1,36 @@
 # Roadmap: axon
 
-## Overview
+## 💎 v1.0 - The Intelligent Immune System (IN PROGRESS)
+**Focus :** Intelligence de flux, Intégration HydraDB et Performance Native.
 
-Axon évolue d'un simple indexeur de code vers un **Copilote Architectural** (AI-powered structure engine). Notre priorité est d'offrir une compréhension profonde de n'importe quel projet à n'importe quelle échelle, en intégrant la sémantique multi-langage, le versionnage d'architecture et l'analyse de flux.
+### 🛡️ Sécurité & Audit (The Taint Analysis Engine)
+- [ ] **Analyse de Propagation (Taint Analysis) :** Passer d'une recherche par mots-clés à un suivi réel de la donnée (`Source` -> `Sanitizer` -> `Sink`).
+- [ ] **Détection de Backdoors sémantiques :** Identifier les fonctions dont le nom cache la dangerosité réelle (ex: `run_task` qui appelle `eval`).
+- [ ] **Clustering Auto-Adaptatif :** Remplacer les seuils fixes par une analyse de la densité locale du graphe.
+- [ ] **Visualisation de Flux :** Exporter les chemins d'exposition critiques vers des diagrammes Mermaid/SVG.
 
-## État Actuel
+### ⚡ Performance & Scalabilité (The Hydra Engine)
+- [ ] **Intégration HydraDB :** Déportation de la persistence vers RocksDB/Dolt (Elixir/Rust).
+- [ ] **Stratégie Lazy vs Eager :** Implémentation de la file d'attente de tâches de fond via OTP (supervision Elixir).
+- [ ] **Embeddings Parallélisés :** Réduction radicale du temps d'indexation (Cible : < 10min pour 40k symboles).
 
-**v0.9 : Couverture Langage & Intelligence (En cours)**
-Status: 🚧 Phase 3 — En cours de planification
-Phases complétées : 0/3
-
-| Phase | Nom | Statut | Objectif |
-|-------|------|--------|-----------|
-| **3** | Parsers Part 1 (Java, C#, Ruby) | TBD | Couvrir l'entreprise et le web classique. |
-| **4** | Parsers Part 2 (Kotlin, PHP, C++) | TBD | Systèmes, mobile et legacy. |
-| **5** | Intelligence & DX | TBD | Améliorations MCP et intégration agent renforcée. |
-
----
-
-### Phase 3 : Langages d'Entreprise
-- Java (tree-sitter-java)
-- C# (tree-sitter-c-sharp)
-- Ruby (tree-sitter-ruby)
-
-## Milestones Suivantes
-
-### v0.10 : Moteur HydraDB & Copilote Architectural
-
-Focus: Migration infrastructure, versionnage Dolt, traçage de flux, raisonnement polyglotte.
-
-- **Backend HydraDB :** Utiliser les moteurs Rust/C++ de HydraDB pour le graphe (CozoDB) et le vecteur (HNSW).
-- **Time-Travel (Dolt) :** Versionner l'index structurel. `axon diff` au niveau architectural.
-- **Data Flow Tracing :** Suivre une donnée d'un point A à un point B (ex: API -> Disk).
-- **Transparence Polyglotte :** Traversée automatique des frontières (ex: Elixir ↔ Rust NIFs).
-- **Audit d'Alignement :** Vérification automatique de l'alignement entre Code et Documentation (GEMINI.md/Specs).
+### 🧠 Intelligence & UX
+- [ ] **Audit Proactif :** Alerte automatique dès qu'un changement dégrade le score de sécurité.
+- [ ] **Traçage Polyglotte :** Traversée automatique des frontières (ex: Elixir ↔ Rust NIFs).
 
 ---
 
-## Milestones Complétées
+## ✅ v0.9 - The Structural Copilot (COMPLETED 2026-03-07)
+**Focus :** Amélioration de la précision de l'audit architectural et de la performance globale.
+
+- [x] **Audit Clustering :** Réduction drastique du bruit dans les rapports d'audit (docs, tests).
+- [x] **Centrality-based Ejection :** Isolation automatique des hubs critiques pour la sécurité.
+- [x] **CLI DX :** Option `--verbose`, fix des boucles de récursion, commande `axon up`.
+- [x] **Fallback Parsers :** Support universel des fichiers texte/inconnus.
+
+---
+
+## 🏗️ Historique des Milestones Complétées
 
 <details>
 <summary>v0.8 Graph Intelligence — 2026-03-07</summary>
