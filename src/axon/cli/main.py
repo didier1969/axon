@@ -727,6 +727,7 @@ def trace(
 @app.command()
 def audit(
     path: Path = typer.Argument(Path("."), help="Path to the repository to audit."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show all occurrences individually."),
 ) -> None:
     """Run standardized architectural audit (Immune System)."""
     from rich.table import Table
@@ -735,7 +736,7 @@ def audit(
     storage = _load_storage(path)
     graph = storage.export_to_graph()
     engine = AuditEngine(graph)
-    reports = engine.run_all()
+    reports = engine.run_all(cluster=not verbose)
     storage.close()
 
     if not reports:
@@ -752,12 +753,24 @@ def audit(
         color = "red" if r.severity == "High" else "yellow"
         
         # Get node details for location
-        node = graph.get_node(r.symbol_id)
-        location = "unknown"
-        if node:
-            location = f"{node.file_path}:{node.start_line}"
+        node = graph.get_node(r.symbol_ids[0])
+        
+        if r.count > 1 and not verbose:
+            # Display folder-level location for clusters
+            if node and node.file_path:
+                parts = node.file_path.split("/")
+                folder = "/".join(parts[:-1]) if len(parts) > 1 else "."
+                location = f"{folder}/*"
+            else:
+                location = "multiple"
+        else:
+            location = f"{node.file_path}:{node.start_line}" if node else "unknown"
             
-        table.add_row(r.type, location, f"[{color}]{r.severity}[/{color}]", r.message)
+        message = r.message
+        if r.count > 1 and not verbose:
+            message = f"{message} [bold]({r.count} occurrences)[/bold]"
+            
+        table.add_row(r.type, location, f"[{color}]{r.severity}[/{color}]", message)
 
     console.print(table)
 

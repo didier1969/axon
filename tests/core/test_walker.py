@@ -223,11 +223,16 @@ class TestWalkRepoSkipsBinary:
         assert "valid.py" in paths
 
     def test_walk_repo_skips_metadata_dirs(self, tmp_path: Path) -> None:
-        """Directories like .claude/worktrees and .axon should be skipped."""
+        """Directories like .git and .axon should be skipped, but .claude is now kept."""
         # Create a metadata directory that should be ignored
-        worktree_dir = tmp_path / ".claude" / "worktrees" / "agent-1"
-        worktree_dir.mkdir(parents=True)
-        (worktree_dir / "ignored.py").write_text("print('ignore me')")
+        axon_dir = tmp_path / ".axon"
+        axon_dir.mkdir(parents=True)
+        (axon_dir / "ignored.py").write_text("print('ignore me')")
+
+        # Create a directory that is now KEPT (.claude)
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(parents=True)
+        (claude_dir / "kept.py").write_text("print('keep me')")
 
         # Create a legitimate file
         (tmp_path / "legit.py").write_text("print('keep me')", encoding="utf-8")
@@ -236,17 +241,17 @@ class TestWalkRepoSkipsBinary:
         paths = {e.path for e in entries}
 
         assert "legit.py" in paths
-        # Check that no file from .claude or its subdirs is present
-        assert not any(".claude" in p for p in paths)
+        assert ".claude/kept.py" in paths
+        assert not any(".axon" in p for p in paths)
 
 
 class TestWalkRepoSkipsLargeFiles:
-    """Files exceeding 512 KB are silently skipped with a warning."""
+    """Files exceeding 1 MB are silently skipped with a warning."""
 
     def test_large_file_skipped(self, tmp_path: Path) -> None:
-        # Create a .py file just over 512KB
+        # Create a .py file just over 1MB
         large_file = tmp_path / "huge.py"
-        large_file.write_bytes(b"x = 1\n" * 90_000)  # ~540 KB
+        large_file.write_bytes(b"x = 1\n" * 200_000)  # ~1.2 MB
 
         # Create a normal .py alongside it
         small_file = tmp_path / "small.py"
@@ -260,17 +265,18 @@ class TestWalkRepoSkipsLargeFiles:
 
     def test_large_file_triggers_warning(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         large_file = tmp_path / "big.py"
-        large_file.write_bytes(b"# comment\n" * 60_000)  # ~600 KB
+        large_file.write_bytes(b"# comment\n" * 150_000)  # ~1.5 MB
 
         with caplog.at_level(logging.WARNING, logger="axon.core.ingestion.walker"):
             walk_repo(tmp_path)
 
         assert any("big.py" in record.message for record in caplog.records)
+        assert any("1 MB" in record.message for record in caplog.records)
 
     def test_file_exactly_at_limit_skipped(self, tmp_path: Path) -> None:
-        # One byte over 512 * 1024 — should be skipped
+        # One byte over 1024 * 1024 — should be skipped
         boundary_file = tmp_path / "boundary.py"
-        boundary_file.write_bytes(b"a" * (512 * 1024 + 1))
+        boundary_file.write_bytes(b"a" * (1024 * 1024 + 1))
 
         entries = walk_repo(tmp_path)
         paths = {e.path for e in entries}
@@ -278,7 +284,7 @@ class TestWalkRepoSkipsLargeFiles:
 
     def test_file_just_under_limit_included(self, tmp_path: Path) -> None:
         under_file = tmp_path / "fine.py"
-        under_file.write_bytes(b"x = 1\n" * 85_000)  # ~510 KB
+        under_file.write_bytes(b"x = 1\n" * 170_000)  # ~1020 KB
 
         entries = walk_repo(tmp_path)
         paths = {e.path for e in entries}

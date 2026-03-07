@@ -97,10 +97,14 @@ def get_parser(language: str) -> LanguageParser | None:
             parser = JavaParser()
     except (ImportError, ValueError):
         # Specific parser module not found or failed to load
-        return None
+        from axon.core.parsers.base import TextParser
+        parser = TextParser()
 
-    if parser:
-        _PARSER_CACHE[language] = parser
+    if parser is None:
+        from axon.core.parsers.base import TextParser
+        parser = TextParser()
+
+    _PARSER_CACHE[language] = parser
     return parser
 
 

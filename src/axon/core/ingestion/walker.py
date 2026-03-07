@@ -84,7 +84,7 @@ def read_file(repo_path: Path, file_path: Path) -> FileEntry | None:
 
     try:
         if file_path.stat().st_size > _MAX_FILE_BYTES:
-            logger.warning("Skipping %s: file size exceeds 512 KB", relative)
+            logger.warning("Skipping %s: file size exceeds 1 MB", relative)
             return None
         content = file_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, ValueError, OSError):

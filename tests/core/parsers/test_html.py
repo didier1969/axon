@@ -47,7 +47,7 @@ class TestHtmlElements:
         result = parser.parse(HTML_FIXTURE, "index.html")
         id_symbols = [s for s in result.symbols if s.name == "title"]
         assert len(id_symbols) == 1
-        assert id_symbols[0].kind == "function"
+        assert id_symbols[0].kind == "element"
 
 
 class TestHtmlImports:

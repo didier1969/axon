@@ -51,7 +51,7 @@ class TestCssIdSelectors:
         result = parser.parse(CSS_FIXTURE, "style.css")
         id_sel = [s for s in result.symbols if s.name == "#main-container"]
         assert len(id_sel) == 1
-        assert id_sel[0].kind == "function"
+        assert id_sel[0].kind == "element"
 
 
 class TestCssClassSelectors:
@@ -65,7 +65,7 @@ class TestCssClassSelectors:
         result = parser.parse(CSS_FIXTURE, "style.css")
         cls_sel = [s for s in result.symbols if s.name == ".header"]
         assert len(cls_sel) == 1
-        assert cls_sel[0].kind == "function"
+        assert cls_sel[0].kind == "element"
 
 
 class TestCssImports:

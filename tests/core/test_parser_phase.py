@@ -127,8 +127,12 @@ class TestGetParserUnsupported:
     """get_parser raises ValueError for unknown languages."""
 
     def test_get_parser_unsupported(self) -> None:
-        with pytest.raises(ValueError, match="Unsupported language"):
-            get_parser("cobol")
+        # Unknown languages now fallback to TextParser (no exception)
+        parser = get_parser("unknown_lang")
+        from axon.core.parsers.base import LanguageParser
+        assert isinstance(parser, LanguageParser)
+        assert parser.__class__.__name__ == "TextParser"
+
 
 
 # ---------------------------------------------------------------------------
@@ -387,9 +391,10 @@ class TestProcessParsingHandlesError:
         files = [_make_file_entry("src/bad.cobol", "IDENTIFICATION DIVISION.", "cobol")]
         result = process_parsing(files, graph)
 
-        # Should still return a FileParseData with empty result.
+        # Should return a FileParseData with one fallback symbol (TextParser).
         assert len(result) == 1
-        assert result[0].parse_result.symbols == []
+        assert len(result[0].parse_result.symbols) == 1
+        assert result[0].parse_result.symbols[0].name == "bad.cobol"
         assert result[0].parse_result.imports == []
 
     def test_error_does_not_affect_other_files(
@@ -411,8 +416,8 @@ class TestProcessParsingHandlesError:
         result = process_parsing(files, graph)
 
         assert len(result) == 2
-        # The cobol file should have empty symbols (unsupported).
-        assert result[0].parse_result.symbols == []
+        # The cobol file should have the fallback symbol.
+        assert len(result[0].parse_result.symbols) == 1
         # The Python file should parse successfully.
         assert len(result[1].parse_result.symbols) > 0
 

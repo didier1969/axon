@@ -74,3 +74,23 @@ class LanguageParser(ABC):
 
     @abstractmethod
     def parse(self, content: str, file_path: str) -> ParseResult: ...
+
+class TextParser(LanguageParser):
+    """Fallback parser for plain text or unsupported files.
+    
+    Treats the whole file as a single 'text' symbol.
+    """
+
+    def parse(self, content: str, file_path: str) -> ParseResult:
+        result = ParseResult()
+        # Create a single symbol representing the whole file
+        result.symbols.append(
+            SymbolInfo(
+                name=file_path.rsplit("/", 1)[-1],
+                kind="function",
+                start_line=1,
+                end_line=content.count("\n") + 1,
+                content=content[:500], # Preview content
+            )
+        )
+        return result

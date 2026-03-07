@@ -70,13 +70,14 @@ class TestReadFileEntry:
         assert entry.language == "python"
         assert "hello" in entry.content
 
-    def test_returns_none_for_unsupported(self, tmp_repo: Path) -> None:
+    def test_returns_entry_for_any_text_file(self, tmp_repo: Path) -> None:
         data_file = tmp_repo / "data.csv"
         data_file.write_text("a,b,c", encoding="utf-8")
 
         entry = read_file(tmp_repo, data_file)
 
-        assert entry is None
+        assert entry is not None
+        assert entry.language in ("csv", "text")
 
     def test_returns_none_for_missing(self, tmp_repo: Path) -> None:
         entry = read_file(tmp_repo, tmp_repo / "nonexistent.py")
@@ -212,7 +213,7 @@ class TestWatcherReindexFiles:
 
         assert count == 0
 
-    def test_skips_unsupported_files(
+    def test_no_longer_skips_unknown_files(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
         data_file = tmp_repo / "data.csv"
@@ -220,7 +221,7 @@ class TestWatcherReindexFiles:
 
         count = _reindex_files([data_file], tmp_repo, storage)
 
-        assert count == 0
+        assert count == 1
 
     def test_handles_deleted_files(
         self, tmp_repo: Path, storage: KuzuBackend
@@ -257,7 +258,7 @@ class TestWatcherReindexFiles:
 
         assert count == 2
 
-    def test_paul_files_skipped_by_reindex_files(
+    def test_paul_files_are_now_reindexed(
         self, tmp_repo: Path, storage: KuzuBackend
     ) -> None:
         paul_dir = tmp_repo / ".paul"
@@ -267,7 +268,7 @@ class TestWatcherReindexFiles:
 
         count = _reindex_files([state_file], tmp_repo, storage)
 
-        assert count == 0
+        assert count == 1
 
 
 class TestWatchRepoSignature:
