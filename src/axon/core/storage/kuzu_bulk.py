@@ -29,7 +29,7 @@ from axon.core.storage.kuzu_constants import (
 logger = logging.getLogger(__name__)
 
 
-def csv_copy(conn: kuzu.Connection, table: str, rows: Iterable[list[Any]]) -> None:
+def csv_copy(conn: kuzu.Connection, table: str, rows: Iterable[list[Any]], options: str = "") -> None:
     """Write *rows* to a temporary CSV and COPY FROM into *table*.
 
     Always cleans up the temp file, even on failure.
@@ -42,7 +42,9 @@ def csv_copy(conn: kuzu.Connection, table: str, rows: Iterable[list[Any]]) -> No
             writer = csv.writer(f, quoting=csv.QUOTE_NONNUMERIC, quotechar='"')
             writer.writerows(rows)
             csv_path = f.name
-        conn.execute(f'COPY {table} FROM "{csv_path}" (HEADER=false, PARALLEL=FALSE)')
+        
+        copy_options = f"HEADER=false, PARALLEL=FALSE{options}"
+        conn.execute(f'COPY {table} FROM "{csv_path}" ({copy_options})')
     finally:
         if csv_path:
             Path(csv_path).unlink(missing_ok=True)
@@ -82,8 +84,9 @@ def bulk_load_rels_csv(conn: kuzu.Connection, rels: Iterable[GraphRelationship])
 
     try:
         for (src_table, dst_table), pair_rels in by_pair.items():
-            csv_copy(conn, f"CodeRelation_{src_table}_{dst_table}",
-                     [_rel_to_row(rel) for rel in pair_rels])
+            csv_copy(conn, "CodeRelation",
+                     [_rel_to_row(rel) for rel in pair_rels],
+                     options=f", FROM='{src_table}', TO='{dst_table}'")
         return True
     except (RuntimeError, OSError):
         logger.error("CSV bulk_load_rels failed, falling back", exc_info=True)

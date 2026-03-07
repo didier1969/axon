@@ -23,8 +23,10 @@ class SymbolInfo:
     content: str = ""
     signature: str = ""
     class_name: str = ""  # for methods: the owning class
+    is_entry_point: bool = False
     # e.g. ["staticmethod", "server.list_tools"]
     decorators: list[str] = field(default_factory=list)
+    properties: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class ImportInfo:
@@ -43,6 +45,7 @@ class CallInfo:
     line: int
     receiver: str = ""  # for method calls: the object (e.g., "self", "user")
     arguments: list[str] = field(default_factory=list)  # bare identifier arguments (callbacks)
+    properties: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class TypeRef:

@@ -17,11 +17,12 @@ _NODE_PROPERTIES = (
     "content_hash STRING, signature STRING, language STRING, "
     "class_name STRING, is_dead BOOL, is_entry_point BOOL, is_exported BOOL, "
     "tested BOOL DEFAULT false, centrality DOUBLE DEFAULT 0.0, "
+    "expert_properties STRING DEFAULT '', "
     "PRIMARY KEY (id)"
 )
 _REL_PROPERTIES = (
     "rel_type STRING, confidence DOUBLE, role STRING, step_number INT64, "
-    "strength DOUBLE, co_changes INT64, symbols STRING"
+    "strength DOUBLE, co_changes INT64, symbols STRING, arguments STRING"
 )
 _EMBEDDING_PROPERTIES = "node_id STRING, vec DOUBLE[], PRIMARY KEY(node_id)"
 
@@ -31,19 +32,27 @@ def get_table_for_id(node_id: str) -> str | None:
 
 def node_to_row(n: GraphNode) -> list:
     """Convert a GraphNode to a flat row for CSV COPY."""
+    import json
+    expert_props = {k: v for k, v in n.properties.items() if k not in ("content_hash",)}
+    
     return [n.id, n.name, n.file_path, n.start_line, n.end_line,
             n.start_byte, n.end_byte, n.content,
             n.properties.get("content_hash", ""),
             n.signature, n.language, n.class_name, n.is_dead,
-            n.is_entry_point, n.is_exported, n.tested, n.centrality]
+            n.is_entry_point, n.is_exported, n.tested, n.centrality,
+            json.dumps(expert_props) if expert_props else ""]
 
 def rel_to_row(r: GraphRelationship) -> list:
     """Convert a GraphRelationship to a flat row for CSV COPY."""
+    import json
     props = r.properties or {}
+    args = props.get("arguments", [])
+    
     return [r.source, r.target, r.type.value,
             float(props.get("confidence", 1.0)), str(props.get("role", "")),
             int(props.get("step_number", 0)), float(props.get("strength", 0.0)),
-            int(props.get("co_changes", 0)), str(props.get("symbols", ""))]
+            int(props.get("co_changes", 0)), str(props.get("symbols", "")),
+            json.dumps(args) if args else "[]"]
 
 def escape(value: str) -> str:
     """Escape a string for safe inclusion in a Cypher literal."""

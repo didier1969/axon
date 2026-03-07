@@ -89,7 +89,7 @@ class KuzuBackend:
                 self._insert_node(node)
 
     def add_relationships(self, rels: list[GraphRelationship]) -> None:
-        """Insert relationships by matching source and target nodes."""
+        """Insert relationships into the global CodeRelation table."""
         if not rels:
             return
         from axon.core.storage.kuzu_bulk import csv_copy
@@ -101,8 +101,9 @@ class KuzuBackend:
                 by_pair.setdefault((src_table, dst_table), []).append(rel)
         try:
             for (src_table, dst_table), pair_rels in by_pair.items():
-                csv_copy(self._conn, f"CodeRelation_{src_table}_{dst_table}",
-                         [_rel_to_row(r) for r in pair_rels])
+                csv_copy(self._conn, "CodeRelation",
+                         [_rel_to_row(r) for r in pair_rels],
+                         options=f", FROM='{src_table}', TO='{dst_table}'")
         except (RuntimeError, OSError):
             logger.error("Batch add_relationships via CSV failed, falling back", exc_info=True)
             for rel in rels:
@@ -288,6 +289,14 @@ class KuzuBackend:
                 if "co_changes" in rel_dict: props["co_changes"] = rel_dict["co_changes"]
                 if "symbols" in rel_dict: props["symbols"] = rel_dict["symbols"]
                 
+                # Expert: Load arguments
+                if "arguments" in rel_dict and rel_dict["arguments"]:
+                    import json
+                    try:
+                        props["arguments"] = json.loads(rel_dict["arguments"])
+                    except json.JSONDecodeError:
+                        props["arguments"] = []
+                
                 from axon.core.graph.model import RelType
                 try:
                     rel_type = RelType(rel_type_str)
@@ -434,7 +443,8 @@ class KuzuBackend:
         "n.content = $content, "
         "n.signature = $signature, n.language = $language, n.class_name = $class_name, "
         "n.is_dead = $is_dead, n.is_entry_point = $is_entry_point, "
-        "n.is_exported = $is_exported, n.tested = $tested, n.centrality = $centrality"
+        "n.is_exported = $is_exported, n.tested = $tested, n.centrality = $centrality, "
+        "n.expert_properties = $expert_properties"
     )
 
     def _insert_node(self, node: GraphNode) -> None:
@@ -444,6 +454,10 @@ class KuzuBackend:
         if table is None:
             logger.warning("Unknown label %s for node %s", node.label, node.id)
             return
+        
+        import json
+        expert_props = {k: v for k, v in node.properties.items() if k not in ("content_hash",)}
+        
         params = {"id": node.id, "name": node.name, "file_path": node.file_path,
                   "start_line": node.start_line, "end_line": node.end_line,
                   "start_byte": node.start_byte, "end_byte": node.end_byte,
@@ -451,7 +465,8 @@ class KuzuBackend:
                   "language": node.language, "class_name": node.class_name,
                   "is_dead": node.is_dead, "is_entry_point": node.is_entry_point,
                   "is_exported": node.is_exported,
-                  "tested": node.tested, "centrality": node.centrality}
+                  "tested": node.tested, "centrality": node.centrality,
+                  "expert_properties": json.dumps(expert_props) if expert_props else ""}
         try:
             self._conn.execute(self._INSERT_NODE_CYPHER.format(table=table), parameters=params)
         except RuntimeError:
@@ -461,7 +476,8 @@ class KuzuBackend:
         "MATCH (a:{src}), (b:{dst}) WHERE a.id = $src AND b.id = $tgt "
         "MERGE (a)-[r:CodeRelation {{rel_type: $rel_type}}]->(b) "
         "SET r.confidence = $confidence, r.role = $role, r.step_number = $step_number, "
-        "r.strength = $strength, r.co_changes = $co_changes, r.symbols = $symbols"
+        "r.strength = $strength, r.co_changes = $co_changes, r.symbols = $symbols, "
+        "r.arguments = $arguments"
     )
 
     def _insert_relationship(self, rel: GraphRelationship) -> None:
@@ -472,14 +488,19 @@ class KuzuBackend:
         if src_table is None or tgt_table is None:
             logger.warning("Cannot resolve tables for rel %s -> %s", rel.source, rel.target)
             return
+        
+        import json
         props = rel.properties or {}
+        args = props.get("arguments", [])
+        
         params = {"src": rel.source, "tgt": rel.target, "rel_type": rel.type.value,
                   "confidence": float(props.get("confidence", 1.0)),
                   "role": str(props.get("role", "")),
                   "step_number": int(props.get("step_number", 0)),
                   "strength": float(props.get("strength", 0.0)),
                   "co_changes": int(props.get("co_changes", 0)),
-                  "symbols": str(props.get("symbols", ""))}
+                  "symbols": str(props.get("symbols", "")),
+                  "arguments": json.dumps(args) if args else "[]"}
         try:
             self._conn.execute(
                 self._INSERT_REL_CYPHER.format(src=src_table, dst=tgt_table), parameters=params)
@@ -536,6 +557,15 @@ class KuzuBackend:
                 props["decorators"] = node_dict["decorators"]
             if "bases" in node_dict:
                 props["bases"] = node_dict["bases"]
+            
+            # Expert: Load expert_properties
+            if "expert_properties" in node_dict and node_dict["expert_properties"]:
+                import json
+                try:
+                    expert_props = json.loads(node_dict["expert_properties"])
+                    props.update(expert_props)
+                except json.JSONDecodeError:
+                    pass
 
             return GraphNode(
                 id=nid, 

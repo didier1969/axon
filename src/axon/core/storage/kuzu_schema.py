@@ -30,15 +30,27 @@ def create_schema(conn: kuzu.Connection) -> None:
     except RuntimeError:
         logger.debug("FTS extension load skipped (may already be loaded)", exc_info=True)
 
+    # Force drop of CodeRelation to ensure schema update
+    try:
+        conn.execute("DROP TABLE CodeRelation")
+    except RuntimeError:
+        pass
+
+    logger.info("Creating node tables: %s", _NODE_TABLE_NAMES)
     for table in _NODE_TABLE_NAMES:
         stmt = f"CREATE NODE TABLE IF NOT EXISTS {table}({_NODE_PROPERTIES})"
-        conn.execute(stmt)
+        try:
+            conn.execute(stmt)
+        except RuntimeError as e:
+            logger.error("Failed to create node table %s: %s", table, e)
+            raise
 
     conn.execute(
         f"CREATE NODE TABLE IF NOT EXISTS Embedding({_EMBEDDING_PROPERTIES})"
     )
 
-    # Build the REL TABLE GROUP covering all table-to-table combinations.
+    # Simplified: One REL TABLE for all relations instead of a complex GROUP.
+    # This avoids the "Table does not exist" errors for internal group tables.
     from_to_pairs: list[str] = []
     for src in _NODE_TABLE_NAMES:
         for dst in _NODE_TABLE_NAMES:
@@ -46,13 +58,14 @@ def create_schema(conn: kuzu.Connection) -> None:
 
     pairs_clause = ", ".join(from_to_pairs)
     rel_stmt = (
-        f"CREATE REL TABLE GROUP IF NOT EXISTS CodeRelation("
+        f"CREATE REL TABLE CodeRelation("
         f"{pairs_clause}, {_REL_PROPERTIES})"
     )
     try:
         conn.execute(rel_stmt)
-    except RuntimeError:
-        logger.debug("REL TABLE GROUP creation skipped", exc_info=True)
+    except RuntimeError as e:
+        logger.error("Critical: Failed to create CodeRelation table: %s", e)
+        raise
 
     create_fts_indexes(conn)
 

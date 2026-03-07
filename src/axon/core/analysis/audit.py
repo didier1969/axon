@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 from axon.core.graph.graph import KnowledgeGraph
-from axon.core.graph.model import NodeLabel, GraphNode
+from axon.core.graph.model import NodeLabel, GraphNode, RelType
 
 @dataclass
 class AuditReport:

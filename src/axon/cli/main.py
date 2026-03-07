@@ -289,6 +289,35 @@ def main(
 ) -> None:
     """Axon — Graph-powered code intelligence engine."""
 
+@app.command(name="start")
+def start_shortcut() -> None:
+    """Shortcut for daemon start."""
+    from axon.cli.main import start as daemon_start
+    daemon_start()
+
+@app.command(name="stop")
+def stop_shortcut() -> None:
+    """Shortcut for daemon stop."""
+    from axon.cli.main import stop as daemon_stop
+    daemon_stop()
+
+@app.command(name="up")
+def up_shortcut(
+    path: Path = typer.Argument(Path("."), help="Path to repo."),
+    no_embeddings: bool = typer.Option(False, "--no-embeddings", help="Skip embeddings."),
+) -> None:
+    """Shortcut for a full re-index: analyze . --full --progress."""
+    from axon.cli.main import analyze
+    analyze(path=path, full=True, progress=True, no_embeddings=no_embeddings)
+
+@app.command(name="check")
+def check_shortcut(
+    path: Path = typer.Argument(Path("."), help="Path to repo."),
+) -> None:
+    """Shortcut for axon audit."""
+    from axon.cli.main import audit
+    audit(path=path)
+
 @app.command()
 def analyze(
     path: Path = typer.Argument(Path("."), help="Path to the repository to index."),
