@@ -300,16 +300,16 @@ def stop_shortcut() -> None:
     """Shortcut for daemon stop."""
     from axon.cli.main import stop as daemon_stop
     daemon_stop()
-
 @app.command(name="up")
 def up_shortcut(
-    path: Path = typer.Argument(Path("."), help="Path to repo."),
-    no_embeddings: bool = typer.Option(False, "--no-embeddings", help="Skip embeddings."),
+    path: Path = typer.Argument(Path("."), help="Path to the repository to index."),
+    no_embeddings: bool = typer.Option(
+        False, "--no-embeddings", help="Skip vector embedding generation."
+    ),
 ) -> None:
     """Shortcut for a full re-index: analyze . --full --progress."""
     from axon.cli.main import analyze
-    analyze(path=path, full=True, progress=True, no_embeddings=no_embeddings)
-
+    analyze(path=path, full=True, show_progress=True, no_embeddings=no_embeddings)
 @app.command(name="check")
 def check_shortcut(
     path: Path = typer.Argument(Path("."), help="Path to repo."),
@@ -356,8 +356,8 @@ def analyze(
                     if repo_path.exists():
                         console.print(f"\n[bold]Re-indexing {repo_path.name} ({repo_path})[/bold]")
                         # Recursively call analyze for this repo
-                        # We use a simplified version here to avoid complex Typer re-entry
-                        analyze(path=repo_path, full=full, no_embeddings=no_embeddings, show_progress=show_progress)
+                        # MUST set all_registered=False to avoid infinite loop
+                        analyze(path=repo_path, full=full, no_embeddings=no_embeddings, show_progress=show_progress, all_registered=False)
                     else:
                         console.print(f"[yellow]Skipping {slug_dir.name}: path {repo_path} does not exist.[/yellow]")
             except Exception:
