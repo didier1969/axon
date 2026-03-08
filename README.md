@@ -30,20 +30,23 @@ Axon v1.0 utilise des protocoles de communication à ultra-faible latence :
 
 ## 🚀 Démarrage Rapide (Nix)
 
-Axon est entièrement géré par **Nix** pour garantir un environnement reproductible.
+Axon est entièrement géré par **Nix** pour garantir un environnement reproductible et stable.
 
 ```bash
-# Lancer l'environnement de développement complet
+# 1. Entrer dans l'environnement de l'agence
 nix develop
 
-# Lancer le daemon Axon (connecte les Pods)
-axon start
+# 2. Lancer le socle de stockage stable (Pod C - HydraDB v0.9.0)
+axon-db-start
 
-# Indexer un projet
-axon up --repo mon-projet
+# 3. Lancer le parser (Pod B - Python UDS)
+uv run python3 src/axon/bridge/worker.py
+
+# 4. Lancer le watcher (Pod A - Elixir)
+cd src/watcher && mix run --no-halt
 ```
 
-## 🧠 Intelligence de Graphe (MCP v1.1)
+## 🧠 Intelligence de Graphe (MCP v1.2)
 
 Axon expose ses capacités via le **Model Context Protocol (MCP)**. Les outils disponibles pour les agents IA sont :
 
