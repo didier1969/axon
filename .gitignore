@@ -19,3 +19,11 @@ wheels/
 
 # OS
 .DS_Store
+
+# Axon v1.0 Cleanups
+_build/
+deps/
+logs/
+*.log
+*.txt
+*.nix
