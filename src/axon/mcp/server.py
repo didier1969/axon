@@ -51,11 +51,18 @@ from axon.mcp.tools import (
     handle_query,
     handle_read_symbol,
     handle_summarize,
+    handle_audit,
 )
 
 logger = logging.getLogger(__name__)
 
 server = Server("axon")
+
+def create_mcp_server() -> Server:
+    """Factory function to create and configure the Axon MCP server."""
+    # The server instance is already created at module level, 
+    # we return it to maintain compatibility with existing registration.
+    return server
 
 _storage: AstralBackend | None = None
 _storage_lock = threading.Lock()
@@ -698,7 +705,34 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
-        name="axon_batch",        description=(
+        name="axon_audit",
+        description=(
+            "Run an architectural security audit (OWASP) on the codebase. "
+            "Detects authorization gaps, dangerous patterns, and fragile boundaries. "
+            "Returns a structured list of security risks and remediation steps."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Name of the indexed repository to audit.",
+                },
+                "check_type": {
+                    "type": "string",
+                    "description": "Type of audit to run ('security', 'quality', 'full').",
+                    "default": "security",
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Truncate output to this many characters.",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="axon_batch",
+        description=(
             "Execute multiple axon tool calls in a single round-trip. "
             "Use when you need results from several tools at once — "
             "e.g., axon_context for 3 symbols. "
@@ -824,6 +858,12 @@ def _dispatch_tool(name: str, arguments: dict, storage: AstralBackend) -> str:
             symbol=arguments.get("symbol", ""),
             branch_range=arguments.get("branch_range", ""),
             repo=arguments.get("repo"),
+        )
+    elif name == "axon_audit":
+        return handle_audit(
+            storage,
+            repo=arguments.get("repo"),
+            check_type=arguments.get("check_type", "security")
         )
     else:
         return f"Unknown tool: {name}"

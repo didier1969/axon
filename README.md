@@ -43,12 +43,17 @@ axon start
 axon up --repo mon-projet
 ```
 
-## 🧠 Intelligence de Graphe
+## 🧠 Intelligence de Graphe (MCP v1.1)
 
-Axon expose ses capacités via le **Model Context Protocol (MCP)**, permettant à n'importe quel agent IA (Claude Code, Gemini CLI) de :
-- Naviguer dans les relations (`CALLS`, `IMPORTS`, `TYPES`).
-- Calculer le rayon d'impact d'une modification.
-- Auditer la conformité architecturale et la sécurité (OWASP).
+Axon expose ses capacités via le **Model Context Protocol (MCP)**. Les outils disponibles pour les agents IA sont :
 
----
+- **`axon_query` :** Recherche sémantique et structurelle (Cypher/Datalog).
+- **`axon_context` :** Récupère le graphe de dépendances complet d'un symbole.
+- **`axon_audit` :** (Nouveau) Lance un audit OWASP sur un sous-ensemble du code.
+- **`axon_impact` :** Calcule le rayon d'impact et les risques de régression.
+- **`axon_read_symbol` :** Lecture intelligente du code source avec contexte.
+- **`axon_cross_repo` :** (Nouveau) Analyse les dépendances entre plusieurs projets indexés.
+
+## ⚡ Performance & Protocoles
+
 © 2025-2026 Nexus AI Agency - Didier Stadelmann

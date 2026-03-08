@@ -9,6 +9,11 @@
 - **Pod B (Parser) :** Analyse Python Stateless via MsgPack (Extraits : Symboles + Relations).
 - **Pod C (HydraDB) :** persistence, persistence Atomique (Dolt) et Graph Intelligence.
 
+## MCP v1.1
+- **Upgrade SDK :** Utilisation de `mcp[server]>=1.2.1`.
+- **Nouveau Tool :** `axon_audit` pour l'audit de sécurité OWASP délégué.
+- **Factory Pattern :** Serveur refactorisé pour une meilleure testabilité.
+
 ## Correctifs Critiques
 - **Crash Terminal :** RÉSOLU par la délégation de l'Audit au Pod C (Suppression du BFS local).
 - **Connectivité :** `AstralBackend` implémenté comme client TCP/MsgPack réel.

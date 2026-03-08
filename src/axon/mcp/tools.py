@@ -1597,3 +1597,58 @@ def handle_cypher(storage: StorageBackend, query: str) -> str:
         lines.append(f"  {i}. {' | '.join(formatted_values)}")
 
     return "\n".join(lines)
+
+
+def handle_audit(
+    storage: StorageBackend,
+    repo: str | None = None,
+    check_type: str = "security",
+) -> str:
+    """Run an architectural security audit and return formatted results.
+
+    Args:
+        storage: The storage backend.
+        repo: Optional repository slug.
+        check_type: Type of audit to run.
+
+    Returns:
+        Formatted audit report.
+    """
+    _repo_storage = None
+    if repo is not None:
+        _repo_storage = _load_repo_storage(repo)
+        if _repo_storage is None:
+            return f"Repository '{repo}' not found."
+        storage = _repo_storage
+
+    try:
+        from axon.core.analysis.audit import AuditEngine
+
+        engine = AuditEngine(storage)
+        # In v1.1, run_all handles the heavy lifting via Pod C
+        reports = engine.run_all()
+
+        if not reports:
+            return "✅ Audit complete: No security issues detected."
+
+        lines = [f"🛡️ Axon Security Audit Report for '{repo or 'current'}'"]
+        lines.append("=" * 50)
+        lines.append(f"Found {len(reports)} potential issues.")
+        lines.append("")
+
+        for i, report in enumerate(reports, 1):
+            lines.append(f"{i}. [{report.severity}] {report.type}")
+            lines.append(f"   Message: {report.message}")
+            if report.exposure_path:
+                lines.append(f"   Exposure Path: {' -> '.join(report.exposure_path)}")
+            if report.remediation:
+                lines.append(f"   Remediation: {report.remediation}")
+            lines.append("-" * 30)
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Error during audit: {e}"
+    finally:
+        if _repo_storage is not None:
+            _repo_storage.close()
