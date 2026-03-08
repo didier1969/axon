@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from axon.core.ingestion.pipeline import PipelineResult, run_pipeline
-from axon.core.storage.kuzu_backend import KuzuBackend
+from axon.core.storage.astral_backend import AstralBackend
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -56,14 +56,14 @@ def tmp_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def storage(tmp_path: Path, kuzu_template: Path) -> KuzuBackend:
-    """Provide an initialized KuzuBackend by copying the session schema template.
+def storage(tmp_path: Path, astral_template: Path) -> AstralBackend:
+    """Provide an initialized AstralBackend by copying the session schema template.
 
     Saves 4-5s per test vs. calling initialize() from scratch.
     """
     db_path = tmp_path / "test_db"
-    shutil.copy2(str(kuzu_template), str(db_path))
-    backend = KuzuBackend()
+    shutil.copy2(str(astral_template), str(db_path))
+    backend = AstralBackend()
     backend.initialize(db_path)  # all IF NOT EXISTS: no-ops
     yield backend
     backend.close()
@@ -78,7 +78,7 @@ class TestRunPipelineBasic:
     """run_pipeline completes without error and returns a PipelineResult."""
 
     def test_run_pipeline_basic(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         _, result = run_pipeline(tmp_repo, storage, embeddings=False)
 
@@ -95,7 +95,7 @@ class TestRunPipelineFileCount:
     """The result reports exactly 3 files from the fixture repo."""
 
     def test_run_pipeline_file_count(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         _, result = run_pipeline(tmp_repo, storage, embeddings=False)
 
@@ -111,7 +111,7 @@ class TestRunPipelineFindsSymbols:
     """At least 3 symbols are discovered (main, validate, helper)."""
 
     def test_run_pipeline_finds_symbols(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         _, result = run_pipeline(tmp_repo, storage, embeddings=False)
 
@@ -127,7 +127,7 @@ class TestRunPipelineFindsRelationships:
     """Relationships are created (CONTAINS, DEFINES, IMPORTS, CALLS)."""
 
     def test_run_pipeline_finds_relationships(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         _, result = run_pipeline(tmp_repo, storage, embeddings=False)
 
@@ -143,7 +143,7 @@ class TestRunPipelineProgressCallback:
     """The progress callback is invoked with expected phase names."""
 
     def test_run_pipeline_progress_callback(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         calls: list[tuple[str, float]] = []
 
@@ -174,7 +174,7 @@ class TestRunPipelineLoadsToStorage:
     """After the pipeline runs, nodes are retrievable from storage."""
 
     def test_run_pipeline_loads_to_storage(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         run_pipeline(tmp_repo, storage, embeddings=False)
 
@@ -247,11 +247,11 @@ def rich_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def rich_storage(tmp_path: Path, kuzu_template: Path) -> KuzuBackend:
-    """Provide an initialized KuzuBackend for the rich repo tests."""
+def rich_storage(tmp_path: Path, astral_template: Path) -> AstralBackend:
+    """Provide an initialized AstralBackend for the rich repo tests."""
     db_path = tmp_path / "rich_db"
-    shutil.copy2(str(kuzu_template), str(db_path))
-    backend = KuzuBackend()
+    shutil.copy2(str(astral_template), str(db_path))
+    backend = AstralBackend()
     backend.initialize(db_path)
     yield backend
     backend.close()
@@ -266,7 +266,7 @@ class TestRunPipelineFullPhases:
     """Pipeline phases 7-11 populate the corresponding PipelineResult fields."""
 
     def test_run_pipeline_full_phases(
-        self, rich_repo: Path, rich_storage: KuzuBackend
+        self, rich_repo: Path, rich_storage: AstralBackend
     ) -> None:
         _, result = run_pipeline(rich_repo, rich_storage, embeddings=False)
 
@@ -305,7 +305,7 @@ class TestRunPipelineProgressIncludesNewPhases:
     """Progress callback includes phase names for phases 7-11."""
 
     def test_run_pipeline_progress_includes_new_phases(
-        self, rich_repo: Path, rich_storage: KuzuBackend
+        self, rich_repo: Path, rich_storage: AstralBackend
     ) -> None:
         calls: list[tuple[str, float]] = []
 
@@ -350,7 +350,7 @@ class TestRunPipelineEmbeddings:
     """The pipeline's embedding phase fires correctly."""
 
     def test_embedding_phase_in_progress(
-        self, rich_repo: Path, rich_storage: KuzuBackend
+        self, rich_repo: Path, rich_storage: AstralBackend
     ) -> None:
         """Progress callback includes 'Generating embeddings' phase."""
         calls: list[tuple[str, float]] = []
@@ -364,7 +364,7 @@ class TestRunPipelineEmbeddings:
         assert "Generating embeddings" in phase_names
 
     def test_result_symbols_set_even_if_embed_fails(
-        self, rich_repo: Path, rich_storage: KuzuBackend
+        self, rich_repo: Path, rich_storage: AstralBackend
     ) -> None:
         """result.symbols is correct even when embedding phase raises."""
         from unittest.mock import patch
@@ -394,7 +394,7 @@ class TestRunPipelineEmbeddings:
         assert result.embeddings == 0
 
     def test_async_embeddings_returns_future(
-        self, rich_repo: Path, rich_storage: KuzuBackend
+        self, rich_repo: Path, rich_storage: AstralBackend
     ) -> None:
         """Default wait_embeddings=False returns a future on result."""
         from unittest.mock import patch
@@ -406,7 +406,7 @@ class TestRunPipelineEmbeddings:
             result.embedding_future.result(timeout=10)
 
     def test_wait_embeddings_blocks(
-        self, rich_repo: Path, rich_storage: KuzuBackend
+        self, rich_repo: Path, rich_storage: AstralBackend
     ) -> None:
         """wait_embeddings=True blocks and no future is set."""
         from unittest.mock import patch
@@ -426,7 +426,7 @@ class TestIncrementalPipeline:
     """run_pipeline() incremental path: unchanged files are skipped."""
 
     def test_incremental_no_changes(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         """Second run with no changes → incremental=True, changed_files=0."""
         run_pipeline(tmp_repo, storage, embeddings=False)
@@ -437,7 +437,7 @@ class TestIncrementalPipeline:
         assert result.files == 3  # tmp_repo has 3 .py files
 
     def test_incremental_changed_file(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         """Modified file is re-indexed; changed_files == 1."""
         run_pipeline(tmp_repo, storage, embeddings=False)
@@ -453,7 +453,7 @@ class TestIncrementalPipeline:
         assert result.changed_files == 1
 
     def test_incremental_new_file(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         """New file is indexed; changed_files == 1."""
         run_pipeline(tmp_repo, storage, embeddings=False)
@@ -469,7 +469,7 @@ class TestIncrementalPipeline:
         assert result.changed_files == 1
 
     def test_incremental_deleted_file(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         """Deleted file nodes are removed from storage; changed_files == 1."""
         run_pipeline(tmp_repo, storage, embeddings=False)
@@ -487,7 +487,7 @@ class TestIncrementalPipeline:
         assert not any("utils.py" in p for p in remaining)
 
     def test_full_flag_bypasses_incremental(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         """full=True forces a complete re-index regardless of existing data."""
         run_pipeline(tmp_repo, storage, embeddings=False)

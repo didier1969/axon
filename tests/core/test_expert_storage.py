@@ -2,11 +2,11 @@ from __future__ import annotations
 import pytest
 import json
 from pathlib import Path
-from axon.core.storage.kuzu_backend import KuzuBackend
+from axon.core.storage.astral_backend import AstralBackend
 from axon.core.graph.model import GraphNode, NodeLabel, RelType, GraphRelationship
 
 def test_expert_schema_serialization(tmp_path):
-    backend = KuzuBackend()
+    backend = AstralBackend()
     backend.initialize(tmp_path / "test_db")
     
     # 1. Create a node with expert properties

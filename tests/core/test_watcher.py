@@ -11,7 +11,7 @@ import pytest
 from axon.core.ingestion.pipeline import reindex_files
 from axon.core.ingestion.walker import FileEntry, read_file
 from axon.core.ingestion.watcher import _reindex_files, watch_repo
-from axon.core.storage.kuzu_backend import KuzuBackend
+from axon.core.storage.astral_backend import AstralBackend
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -40,15 +40,15 @@ def tmp_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def storage(tmp_path: Path, watcher_indexed_template: Path) -> KuzuBackend:
-    """Provide a KuzuBackend pre-indexed with src/app.py + src/utils.py.
+def storage(tmp_path: Path, watcher_indexed_template: Path) -> AstralBackend:
+    """Provide a AstralBackend pre-indexed with src/app.py + src/utils.py.
 
     Copies the session-level pre-indexed template instead of calling
     run_pipeline() from scratch, saving 9-12s per test.
     """
     db_path = tmp_path / "test_db"
     shutil.copy2(str(watcher_indexed_template), str(db_path))
-    backend = KuzuBackend()
+    backend = AstralBackend()
     backend.initialize(db_path)  # schema already present: IF NOT EXISTS no-ops
     yield backend
     backend.close()
@@ -102,7 +102,7 @@ class TestReindexFiles:
     """reindex_files() correctly removes old nodes and adds new ones."""
 
     def test_reindex_updates_content(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         # Verify initial node exists.
         node = storage.get_node("function:src/app.py:hello")
@@ -130,7 +130,7 @@ class TestReindexFiles:
         assert "goodbye" in node.content
 
     def test_reindex_handles_new_symbols(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         # Add a new function to the file.
         (tmp_repo / "src" / "app.py").write_text(
@@ -154,7 +154,7 @@ class TestReindexFiles:
         assert storage.get_node("function:src/app.py:world") is not None
 
     def test_reindex_removes_deleted_symbols(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         assert storage.get_node("function:src/app.py:hello") is not None
 
@@ -184,7 +184,7 @@ class TestWatcherReindexFiles:
     """_reindex_files filters and processes changed paths."""
 
     def test_reindexes_changed_files(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         # Modify a file.
         app_path = tmp_repo / "src" / "app.py"
@@ -201,7 +201,7 @@ class TestWatcherReindexFiles:
         assert "updated" in node.content
 
     def test_skips_ignored_files(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         # Create a file in an ignored directory.
         cache_dir = tmp_repo / "__pycache__"
@@ -214,7 +214,7 @@ class TestWatcherReindexFiles:
         assert count == 0
 
     def test_no_longer_skips_unknown_files(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         data_file = tmp_repo / "data.csv"
         data_file.write_text("a,b,c", encoding="utf-8")
@@ -224,7 +224,7 @@ class TestWatcherReindexFiles:
         assert count == 1
 
     def test_handles_deleted_files(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         # File exists in storage but is now deleted from disk.
         deleted_path = tmp_repo / "src" / "app.py"
@@ -238,7 +238,7 @@ class TestWatcherReindexFiles:
         assert count == 0
 
     def test_handles_multiple_files(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         # Modify both files.
         (tmp_repo / "src" / "app.py").write_text(
@@ -259,7 +259,7 @@ class TestWatcherReindexFiles:
         assert count == 2
 
     def test_paul_files_are_now_reindexed(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         paul_dir = tmp_repo / ".paul"
         paul_dir.mkdir()
@@ -284,7 +284,7 @@ class TestWatchRepoQueue:
     """watch_repo() processes all batches via internal asyncio.Queue."""
 
     def test_processes_multiple_batches(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         """Both batches from distinct awatch events are processed."""
         import asyncio
@@ -312,7 +312,7 @@ class TestWatchRepoQueue:
         assert str(tmp_repo / "src" / "utils.py") in paths_seen
 
     def test_empty_changeset_not_queued(
-        self, tmp_repo: Path, storage: KuzuBackend
+        self, tmp_repo: Path, storage: AstralBackend
     ) -> None:
         """An empty set of changes is not put into the queue."""
         import asyncio

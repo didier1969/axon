@@ -1,4 +1,4 @@
-"""Thread-safe LRU cache for KuzuBackend instances.
+"""Thread-safe LRU cache for AstralBackend instances.
 
 Evicts least-recently-used backend when at capacity, calling close() on evicted entries.
 """
@@ -12,26 +12,26 @@ from typing import TYPE_CHECKING
 from axon.core.paths import central_db_path
 
 if TYPE_CHECKING:
-    from axon.core.storage.kuzu_backend import KuzuBackend
+    from axon.core.storage.astral_backend import AstralBackend
 
 logger = logging.getLogger(__name__)
 
 
 class LRUBackendCache:
-    """Thread-safe LRU cache for up to `maxsize` KuzuBackend instances."""
+    """Thread-safe LRU cache for up to `maxsize` AstralBackend instances."""
 
     def __init__(self, maxsize: int = 5) -> None:
-        self._cache: OrderedDict = OrderedDict()  # slug → KuzuBackend
+        self._cache: OrderedDict = OrderedDict()  # slug → AstralBackend
         self._maxsize = maxsize
         self._lock = Lock()
 
-    def get_or_load(self, slug: str) -> "KuzuBackend | None":
+    def get_or_load(self, slug: str) -> "AstralBackend | None":
         """Return cached backend for slug, loading from central path if needed.
 
         Returns None if no central DB exists for the slug.
         Uses double-checked locking: load I/O happens outside the lock.
         """
-        from axon.core.storage.kuzu_backend import KuzuBackend
+        from axon.core.storage.astral_backend import AstralBackend
 
         # Fast path: already cached
         with self._lock:
@@ -45,7 +45,7 @@ class LRUBackendCache:
             logger.debug("No central DB for slug '%s' at %s", slug, db_path)
             return None
 
-        backend = KuzuBackend()
+        backend = AstralBackend()
         try:
             backend.initialize(db_path, read_only=True)
         except RuntimeError as exc:

@@ -16,6 +16,7 @@ from axon.core.parsers.base import (
     ParseResult,
     SymbolInfo,
 )
+from axon.core.parsers.utils import find_child_by_type
 
 ELIXIR_LANGUAGE = Language(tselixir.language())
 
@@ -128,11 +129,11 @@ class ElixirParser(LanguageParser):
             else None
         )
         if args is None:
-            args = self._find_child_by_type(node, "arguments")
+            args = find_child_by_type(node, "arguments")
 
         module_name = ""
         if args is not None:
-            alias_node = self._find_child_by_type(args, "alias")
+            alias_node = find_child_by_type(args, "alias")
             if alias_node is not None:
                 module_name = alias_node.text.decode("utf-8", errors="replace")
 
@@ -154,7 +155,7 @@ class ElixirParser(LanguageParser):
         )
 
         # Walk the do-block body
-        do_block = self._find_child_by_type(node, "do_block")
+        do_block = find_child_by_type(node, "do_block")
         if do_block is not None:
             self._walk(do_block, content, result, module_name=module_name, pending_attrs=[])
 
@@ -205,7 +206,7 @@ class ElixirParser(LanguageParser):
             result.exports.append(func_name)
 
         # Extract calls from the body
-        do_block = self._find_child_by_type(node, "do_block")
+        do_block = find_child_by_type(node, "do_block")
         if do_block is not None:
             # Expert: Detect NIF loading in function body
             if "load_nif" in node_content:
@@ -251,7 +252,7 @@ class ElixirParser(LanguageParser):
         if not private:
             result.exports.append(macro_name)
 
-        do_block = self._find_child_by_type(node, "do_block")
+        do_block = find_child_by_type(node, "do_block")
         if do_block is not None:
             self._extract_calls_from_block(do_block, result)
 
@@ -294,7 +295,7 @@ class ElixirParser(LanguageParser):
         module_name: str,
     ) -> None:
         """Extract alias/import/use/require directives."""
-        args = self._find_child_by_type(node, "arguments")
+        args = find_child_by_type(node, "arguments")
         if args is None:
             return
 
@@ -307,12 +308,12 @@ class ElixirParser(LanguageParser):
                 break
 
         # Check for `as:` keyword
-        keywords_node = self._find_child_by_type(args, "keywords")
+        keywords_node = find_child_by_type(args, "keywords")
         if keywords_node is not None:
             for pair in keywords_node.children:
                 if pair.type == "pair":
-                    kw = self._find_child_by_type(pair, "keyword")
-                    val = self._find_child_by_type(pair, "alias")
+                    kw = find_child_by_type(pair, "keyword")
+                    val = find_child_by_type(pair, "alias")
                     if kw is not None and kw.text.decode("utf8").rstrip(": ") == "as":
                         if val is not None:
                             as_alias = val.text.decode("utf8")
@@ -355,7 +356,7 @@ class ElixirParser(LanguageParser):
         line = node.start_point[0] + 1
 
         # Dotted call: Module.function(args) — the function part is a "dot" node
-        dot_node = self._find_child_by_type(node, "dot")
+        dot_node = find_child_by_type(node, "dot")
         if dot_node is not None:
             # dot: alias . identifier
             receiver = ""
@@ -408,9 +409,9 @@ class ElixirParser(LanguageParser):
             if child.type == "call":
                 ident = self._call_identifier(child)
                 if ident == "behaviour":
-                    args = self._find_child_by_type(child, "arguments")
+                    args = find_child_by_type(child, "arguments")
                     if args is not None:
-                        alias_node = self._find_child_by_type(args, "alias")
+                        alias_node = find_child_by_type(args, "alias")
                         if alias_node is not None:
                             behaviour_name = alias_node.text.decode("utf-8", errors="replace")
                             result.heritage.append((module_name, "implements", behaviour_name))
@@ -461,13 +462,13 @@ class ElixirParser(LanguageParser):
 
     def _extract_def_name(self, node: Node) -> str:
         """Extract function name from def/defp/defmacro/defmacrop call node."""
-        args = self._find_child_by_type(node, "arguments")
+        args = find_child_by_type(node, "arguments")
         if args is None:
             return ""
         # args contains either: alias | identifier | call(name, params)
         for child in args.children:
             if child.type == "call":
-                ident = self._find_child_by_type(child, "identifier")
+                ident = find_child_by_type(child, "identifier")
                 if ident is not None:
                     return ident.text.decode("utf8")
             if child.type == "identifier":
@@ -475,11 +476,3 @@ class ElixirParser(LanguageParser):
             if child.type == "alias":
                 return child.text.decode("utf8")
         return ""
-
-    @staticmethod
-    def _find_child_by_type(node: Node, type_name: str) -> Node | None:
-        """Return first direct child of *node* with type *type_name*."""
-        for child in node.children:
-            if child.type == type_name:
-                return child
-        return None

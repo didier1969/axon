@@ -1,15 +1,15 @@
 [project]
 name = "axoniq"
-version = "0.8.0"
-description = "Graph-powered code intelligence engine — indexes codebases into a knowledge graph, exposed via MCP tools for AI agents and a CLI for developers."
+version = "1.0.0"
+description = "Graph-powered code intelligence engine — Triple-Pod distributed architecture (Watcher, Parser, HydraDB)."
 readme = "README.md"
 license = {text = "Proprietary"}
 authors = [
     { name = "Didier Stadelmann", email = "didier@stadelmann.dev" }
 ]
-keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "static-analysis", "dead-code", "claude-code"]
+keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "static-analysis", "dead-code", "hydradb", "distributed"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3",
@@ -17,7 +17,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Quality Assurance",
-    "Topic :: Software Development :: Code Generators",
 ]
 requires-python = ">=3.11"
 dependencies = [
@@ -27,9 +26,6 @@ dependencies = [
     "tree-sitter-python>=0.23.0",
     "tree-sitter-javascript>=0.23.0",
     "tree-sitter-typescript>=0.23.0",
-    "kuzu>=0.11.0",
-    "igraph>=1.0.0",
-    "leidenalg>=0.11.0",
     "fastembed>=0.7.0",
     "mcp>=1.0.0",
     "watchfiles>=1.0.0",

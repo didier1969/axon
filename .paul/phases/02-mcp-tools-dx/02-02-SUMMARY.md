@@ -94,7 +94,7 @@ completed: 2026-03-06T20:00:00Z
 |----------|-----------|--------|
 | cohesion = intra_edges / total_edges | Bounded [0,1], no extra deps, intuitive | Future axon_summarize can rank communities by cohesion |
 | Global modularity stored per community node | igraph.modularity() gives one value for full partition | Available for future ML features |
-| 2-cycle import detection only | 3-cycles are O(n³), deferred to v0.9 | No regression; documented in SCOPE LIMITS |
+| 2-cycle import detection only | 3-cycles are O(n³), deferred to v1.0 | No regression; documented in SCOPE LIMITS |
 
 ## Deviations from Plan
 
@@ -112,7 +112,7 @@ None.
 - 924 tests passing, clean git state (`7ef1cd8`)
 
 **Concerns:**
-- Import cycle detection is 2-cycles only; 3+ cycle detection deferred to v0.9
+- Import cycle detection is 2-cycles only; 3+ cycle detection deferred to v1.0
 
 **Blockers:**
 - None

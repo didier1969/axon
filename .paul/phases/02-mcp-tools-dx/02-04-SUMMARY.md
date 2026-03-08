@@ -13,7 +13,7 @@ provides:
   - axon analyze --progress flag (stderr phase output)
   - RelType.DEPENDS_ON in model.py
   - PhaseTimings.cross_repo + PipelineResult.cross_repo_deps fields
-affects: v0.9 (Java/C# parsers will add DEPENDS_ON for Maven/NuGet), MCP axon_context (DEPENDS_ON visible in callee graph)
+affects: v1.0 (Java/C# parsers will add DEPENDS_ON for Maven/NuGet), MCP axon_context (DEPENDS_ON visible in callee graph)
 
 # Tech tracking
 tech-stack:

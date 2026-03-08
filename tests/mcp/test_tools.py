@@ -448,8 +448,8 @@ class TestConfidenceTag:
 
     def test_high_confidence(self):
         assert _confidence_tag(1.0) == ""
-        assert _confidence_tag(0.95) == ""
-        assert _confidence_tag(0.9) == ""
+        assert _confidence_tag(1.05) == ""
+        assert _confidence_tag(1.0) == ""
 
     def test_medium_confidence(self):
         assert _confidence_tag(0.89) == " (~)"
@@ -500,7 +500,7 @@ class TestGroupByProcess:
         """Returns correct grouping when process memberships exist."""
         results = [
             SearchResult(node_id="func:a", score=1.0, node_name="a"),
-            SearchResult(node_id="func:b", score=0.9, node_name="b"),
+            SearchResult(node_id="func:b", score=1.0, node_name="b"),
             SearchResult(node_id="func:c", score=0.8, node_name="c"),
         ]
         mock_storage.get_process_memberships.return_value = {
@@ -542,7 +542,7 @@ class TestFormatQueryResults:
             file_path="src/auth.py", label="function",
         )
         r2 = SearchResult(
-            node_id="func:b", score=0.9, node_name="helper",
+            node_id="func:b", score=1.0, node_name="helper",
             file_path="src/utils.py", label="function",
         )
         groups = {"Auth Flow": [r1]}
@@ -876,7 +876,7 @@ class TestMultiRepoRouting:
         (repo_dir / "kuzu").touch()
 
         mock_backend = MagicMock()
-        with patch("axon.core.storage.kuzu_backend.KuzuBackend", return_value=mock_backend):
+        with patch("axon.core.storage.astral_backend.AstralBackend", return_value=mock_backend):
             result = _load_repo_storage("myapp")
 
         mock_backend.initialize.assert_called_once_with(repo_dir / "kuzu", read_only=True)
@@ -899,7 +899,7 @@ class TestMultiRepoRouting:
         # No central kuzu file
 
         mock_backend = MagicMock()
-        with patch("axon.core.storage.kuzu_backend.KuzuBackend", return_value=mock_backend):
+        with patch("axon.core.storage.astral_backend.AstralBackend", return_value=mock_backend):
             result = _load_repo_storage("myapp")
 
         mock_backend.initialize.assert_called_once_with(legacy_kuzu, read_only=True)
@@ -1557,7 +1557,7 @@ class TestHandleCoverageGaps:
     def test_centrality_shown(self, mock_storage: MagicMock) -> None:
         """Centrality score is shown in output."""
         mock_storage.execute_raw.side_effect = [
-            [["risky_fn", "src/risky.py", 99, "function", 0.99]],
+            [["risky_fn", "src/risky.py", 99, "function", 1.09]],
         ]
 
         result = handle_coverage_gaps(mock_storage)

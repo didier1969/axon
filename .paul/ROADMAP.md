@@ -6,7 +6,7 @@ Axon evolves from a functional code indexer into a production-grade tool that se
 
 ## Current Milestone
 
-**v0.9: Language Coverage**
+**v1.0: Language Coverage**
 Status: 🚧 In Progress
 Phases: 0 of 3 complete
 
@@ -62,7 +62,7 @@ Already shipped (commit ae79bfe):
 
 Phase 1: TypeScript USES_TYPE generics, test coverage `tested: bool`, PageRank centrality + hybrid search boost, code-aware embeddings, `axon_find_similar`, attribute surfacing (`exported`/`untested` tags), `AXON_QUERY_EXPAND`. 913 tests.
 
-Phase 2: `axon_find_usages` (exhaustive call-sites), MCP tool descriptions, `axon_lint` structural rules, community cohesion real intra-edge density, `axon_summarize` LLM-ready summaries, multi-repo DEPENDS_ON edges (manifest parsing), `axon analyze --progress`. 936 tests. Deferred to v0.9: `axon_diff`, streaming batch.
+Phase 2: `axon_find_usages` (exhaustive call-sites), MCP tool descriptions, `axon_lint` structural rules, community cohesion real intra-edge density, `axon_summarize` LLM-ready summaries, multi-repo DEPENDS_ON edges (manifest parsing), `axon analyze --progress`. 936 tests. Deferred to v1.0: `axon_diff`, streaming batch.
 
 </details>
 
@@ -144,4 +144,4 @@ Phase 2: axon_read_symbol O(1) MCP tool, sql/yaml byte offsets, parser quality t
 
 ---
 *Roadmap created: 2026-02-26*
-*Last updated: 2026-03-07 — v0.9 Language Coverage started (3 phases planned); v0.8 complete (936 tests + 22 post-milestone = 958 tests)*
+*Last updated: 2026-03-07 — v1.0 Language Coverage started (3 phases planned); v0.8 complete (936 tests + 22 post-milestone = 958 tests)*

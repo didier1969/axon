@@ -27,7 +27,7 @@ class TestLRUBackendCache:
         db_path.mkdir(parents=True)
 
         mock_backend = _make_mock_backend()
-        with patch("axon.core.storage.kuzu_backend.KuzuBackend", return_value=mock_backend):
+        with patch("axon.core.storage.astral_backend.AstralBackend", return_value=mock_backend):
             cache = LRUBackendCache(maxsize=3)
             result = cache.get_or_load("myrepo")
 
@@ -41,7 +41,7 @@ class TestLRUBackendCache:
         db_path.mkdir(parents=True)
 
         mock_backend = _make_mock_backend()
-        with patch("axon.core.storage.kuzu_backend.KuzuBackend", return_value=mock_backend):
+        with patch("axon.core.storage.astral_backend.AstralBackend", return_value=mock_backend):
             cache = LRUBackendCache(maxsize=3)
             r1 = cache.get_or_load("myrepo")
             r2 = cache.get_or_load("myrepo")
@@ -60,7 +60,7 @@ class TestLRUBackendCache:
 
         cache = LRUBackendCache(maxsize=3)
 
-        with patch("axon.core.storage.kuzu_backend.KuzuBackend") as MockKuzu:
+        with patch("axon.core.storage.astral_backend.AstralBackend") as MockKuzu:
             MockKuzu.side_effect = [backends["a"], backends["b"], backends["c"], backends["d"]]
             cache.get_or_load("a")
             cache.get_or_load("b")
@@ -82,7 +82,7 @@ class TestLRUBackendCache:
         mock_backends = {s: _make_mock_backend() for s in ["a", "b", "c", "d"]}
         cache = LRUBackendCache(maxsize=3)
 
-        with patch("axon.core.storage.kuzu_backend.KuzuBackend") as MockKuzu:
+        with patch("axon.core.storage.astral_backend.AstralBackend") as MockKuzu:
             MockKuzu.side_effect = list(mock_backends.values())
             cache.get_or_load("a")
             cache.get_or_load("b")
@@ -104,7 +104,7 @@ class TestLRUBackendCache:
 
         bx, by = _make_mock_backend(), _make_mock_backend()
         cache = LRUBackendCache(maxsize=5)
-        with patch("axon.core.storage.kuzu_backend.KuzuBackend") as MockKuzu:
+        with patch("axon.core.storage.astral_backend.AstralBackend") as MockKuzu:
             MockKuzu.side_effect = [bx, by]
             cache.get_or_load("x")
             cache.get_or_load("y")
@@ -122,7 +122,7 @@ class TestLRUBackendCache:
 
         bp, bq = _make_mock_backend(), _make_mock_backend()
         cache = LRUBackendCache(maxsize=5)
-        with patch("axon.core.storage.kuzu_backend.KuzuBackend") as MockKuzu:
+        with patch("axon.core.storage.astral_backend.AstralBackend") as MockKuzu:
             MockKuzu.side_effect = [bp, bq]
             cache.get_or_load("p")
             cache.get_or_load("q")

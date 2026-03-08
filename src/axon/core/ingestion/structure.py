@@ -16,6 +16,7 @@ from axon.core.graph.model import (
     RelType,
     generate_id,
 )
+from axon.core.ingestion.utils import add_to_graph
 
 if TYPE_CHECKING:
     from axon.core.ingestion.walker import FileEntry
@@ -41,12 +42,6 @@ def _process_structure_generator(files: list[FileEntry], graph: KnowledgeGraph |
                 continue
             folder_paths.add(parent_str)
 
-    def _output(item: Union[GraphNode, GraphRelationship]):
-        if graph is not None:
-            if isinstance(item, GraphNode): graph.add_node(item)
-            else: graph.add_relationship(item)
-        return item
-
     for dir_path in sorted(list(folder_paths)):
         folder_id = generate_id(NodeLabel.FOLDER, dir_path)
         if folder_id not in yielded_ids:
@@ -57,7 +52,7 @@ def _process_structure_generator(files: list[FileEntry], graph: KnowledgeGraph |
                 name=PurePosixPath(dir_path).name,
                 file_path=dir_path,
             )
-            yield _output(node)
+            yield add_to_graph(graph, node)
 
     for file_info in files:
         file_id = generate_id(NodeLabel.FILE, file_info.path)
@@ -74,7 +69,7 @@ def _process_structure_generator(files: list[FileEntry], graph: KnowledgeGraph |
                 language=file_info.language,
                 properties={"content_hash": content_hash},
             )
-            yield _output(node)
+            yield add_to_graph(graph, node)
 
     # Folder -> Folder (parent contains child)
     for dir_path in sorted(list(folder_paths)):
@@ -91,7 +86,7 @@ def _process_structure_generator(files: list[FileEntry], graph: KnowledgeGraph |
             source=parent_id,
             target=child_id,
         )
-        yield _output(rel)
+        yield add_to_graph(graph, rel)
 
     # Folder -> File (immediate parent folder contains file)
     for file_info in files:
@@ -108,4 +103,4 @@ def _process_structure_generator(files: list[FileEntry], graph: KnowledgeGraph |
             source=parent_id,
             target=file_id,
         )
-        yield _output(rel)
+        yield add_to_graph(graph, rel)

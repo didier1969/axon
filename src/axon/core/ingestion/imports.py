@@ -18,7 +18,9 @@ from axon.core.graph.model import (
     RelType,
     generate_id,
 )
+from axon.config.languages import get_language
 from axon.core.ingestion.parser_phase import FileParseData
+from axon.core.ingestion.utils import add_to_graph
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +32,7 @@ def process_imports(
     file_index: dict[str, str] | KnowledgeGraph | None = None,
     graph: KnowledgeGraph | None = None,
 ) -> Any:
-    """Resolve imports and yield/create IMPORTS relationships.
-
-    Args:
-        parse_data: Parse results from the parsing phase.
-        file_index: Mapping of relative file paths to their graph node IDs or a KnowledgeGraph.
-        graph: Optional KnowledgeGraph to populate.
-    """
+    """Resolve imports and yield/create IMPORTS relationships."""
     if isinstance(file_index, KnowledgeGraph):
         graph = file_index
         file_index = None
@@ -61,11 +57,6 @@ def _process_imports_generator(
 ) -> Generator[GraphRelationship, None, None]:
     seen: set[tuple[str, str]] = set()
 
-    def _output(item: GraphRelationship):
-        if graph is not None:
-            graph.add_relationship(item)
-        return item
-
     for fpd in parse_data:
         source_file_id = generate_id(NodeLabel.FILE, fpd.file_path)
 
@@ -80,7 +71,7 @@ def _process_imports_generator(
             seen.add(pair)
 
             rel_id = f"imports:{source_file_id}->{target_id}"
-            yield _output(GraphRelationship(
+            yield add_to_graph(graph, GraphRelationship(
                 id=rel_id,
                 type=RelType.IMPORTS,
                 source=source_file_id,
@@ -95,7 +86,7 @@ def resolve_import_path(
 ) -> str | None:
     """Resolve an import string to a file node ID using the file index."""
     # Language-specific resolution logic
-    lang = _detect_language(importing_file)
+    lang = get_language(importing_file)
     if lang == "python":
         return _resolve_python(importing_file, import_info, file_index)
     if lang in ("typescript", "javascript"):
@@ -113,9 +104,7 @@ def _resolve_python(
 
     # Handle relative imports
     if import_info.is_relative:
-        # Simplified relative resolution
         parts = importing_file.split("/")[:-1]
-        # remove dots from start
         dots = 0
         while module.startswith("."):
             dots += 1
@@ -133,12 +122,10 @@ def _resolve_python(
         if candidate in file_index:
             return file_index[candidate]
         
-        # Try as __init__.py
         candidate_init = candidate.replace(".py", "/__init__.py")
         if candidate_init in file_index:
             return file_index[candidate_init]
 
-    # Global resolution (best effort)
     candidate = f"{module.replace('.', '/')}.py"
     if candidate in file_index:
         return file_index[candidate]
@@ -158,35 +145,20 @@ def _resolve_js_ts(
     if not module or not (module.startswith("./") or module.startswith("../")):
         return None
 
-    # Resolve relative to importing file
     importing_dir = str(PurePosixPath(importing_file).parent)
     base_path = str(PurePosixPath(importing_dir) / module)
 
-    # 1. Try with exact extensions
     for ext in _JS_TS_EXTENSIONS:
         candidate = f"{base_path}{ext}"
         if candidate in file_index:
             return file_index[candidate]
 
-    # 2. Try as file without extension (index.ts etc handled below)
     if base_path in file_index:
         return file_index[base_path]
 
-    # 3. Try as directory with index file.
     for ext in _JS_TS_EXTENSIONS:
         candidate = f"{base_path}/index{ext}"
         if candidate in file_index:
             return file_index[candidate]
 
     return None
-
-def _detect_language(file_path: str) -> str:
-    """Infer language from a file's extension."""
-    suffix = PurePosixPath(file_path).suffix.lower()
-    if suffix == ".py":
-        return "python"
-    if suffix in (".ts", ".tsx"):
-        return "typescript"
-    if suffix in (".js", ".jsx"):
-        return "javascript"
-    return ""

@@ -33,7 +33,7 @@ Tous les outils Axon **exigent** le paramètre `repo`. Appelez `axon_list_repos`
 - **Vecteur :** FastEmbed (Embeddings locaux)
 - **Sécurité :** Moteur d'audit OWASP intégré
 
-## 💎 Vision v0.9+
+## 💎 Vision v1.0+
 - **Data Flow End-to-End :** Suivi de la donnée de l'UI (HTML) à la DB (SQL).
 - **Audit d'Alignement :** Vérification automatique Code vs Documentation stratégique.
 - **Moteur HydraDB :** Backend multi-moteur avec versionnage Dolt.

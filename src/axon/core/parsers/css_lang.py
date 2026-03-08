@@ -15,6 +15,7 @@ from axon.core.parsers.base import (
     ParseResult,
     SymbolInfo,
 )
+from axon.core.parsers.utils import find_child_by_type
 
 CSS_LANGUAGE = Language(tscss.language())
 
@@ -66,7 +67,7 @@ class CssParser(LanguageParser):
         self, node: Node, content: str, result: ParseResult
     ) -> None:
         """Extract #id selector."""
-        name_node = self._find_child_by_type(node, "id_name")
+        name_node = find_child_by_type(node, "id_name")
         if name_node is None:
             return
 
@@ -90,7 +91,7 @@ class CssParser(LanguageParser):
         self, node: Node, content: str, result: ParseResult
     ) -> None:
         """Extract .class selector."""
-        name_node = self._find_child_by_type(node, "class_name")
+        name_node = find_child_by_type(node, "class_name")
         if name_node is None:
             return
 
@@ -112,7 +113,7 @@ class CssParser(LanguageParser):
 
     def _extract_variable(self, node: Node, content: str, result: ParseResult) -> None:
         """Extract CSS variables like --main-color."""
-        prop_node = self._find_child_by_type(node, "property_name")
+        prop_node = find_child_by_type(node, "property_name")
         if prop_node and prop_node.text.decode("utf-8").startswith("--"):
             name = prop_node.text.decode("utf-8")
             result.symbols.append(
@@ -129,7 +130,7 @@ class CssParser(LanguageParser):
 
     def _extract_at_rule(self, node: Node, content: str, result: ParseResult) -> None:
         """Extract @rules like @font-face or @media."""
-        at_keyword = self._find_child_by_type(node, "at_keyword")
+        at_keyword = find_child_by_type(node, "at_keyword")
         if at_keyword:
             name = at_keyword.text.decode("utf-8")
             result.symbols.append(
@@ -161,15 +162,3 @@ class CssParser(LanguageParser):
                 if url:
                     result.imports.append(ImportInfo(module=url))
                 return
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _find_child_by_type(node: Node, type_name: str) -> Node | None:
-        """Return first direct child of *node* with type *type_name*."""
-        for child in node.children:
-            if child.type == type_name:
-                return child
-        return None

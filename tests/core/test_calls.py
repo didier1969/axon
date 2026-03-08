@@ -6,7 +6,6 @@ import pytest
 
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import (
-    GraphNode,
     GraphRelationship,
     NodeLabel,
     RelType,
@@ -20,6 +19,7 @@ from axon.core.ingestion.calls import (
 from axon.core.ingestion.parser_phase import FileParseData
 from axon.core.ingestion.symbol_lookup import build_name_index
 from axon.core.parsers.base import CallInfo, ParseResult
+from tests.core.utils import add_file_node, add_symbol_node
 
 _CALLABLE_LABELS = (NodeLabel.FUNCTION, NodeLabel.METHOD, NodeLabel.CLASS)
 
@@ -27,57 +27,6 @@ _CALLABLE_LABELS = (NodeLabel.FUNCTION, NodeLabel.METHOD, NodeLabel.CLASS)
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-def _add_file_node(graph: KnowledgeGraph, path: str) -> str:
-    """Add a File node and return its ID."""
-    node_id = generate_id(NodeLabel.FILE, path)
-    graph.add_node(
-        GraphNode(
-            id=node_id,
-            label=NodeLabel.FILE,
-            name=path.rsplit("/", 1)[-1],
-            file_path=path,
-        )
-    )
-    return node_id
-
-
-def _add_symbol_node(
-    graph: KnowledgeGraph,
-    label: NodeLabel,
-    file_path: str,
-    name: str,
-    start_line: int,
-    end_line: int,
-    class_name: str = "",
-) -> str:
-    """Add a symbol node with a DEFINES relationship from the file node."""
-    symbol_name = (
-        f"{class_name}.{name}" if label == NodeLabel.METHOD and class_name else name
-    )
-    node_id = generate_id(label, file_path, symbol_name)
-    graph.add_node(
-        GraphNode(
-            id=node_id,
-            label=label,
-            name=name,
-            file_path=file_path,
-            start_line=start_line,
-            end_line=end_line,
-            class_name=class_name,
-        )
-    )
-    file_id = generate_id(NodeLabel.FILE, file_path)
-    graph.add_relationship(
-        GraphRelationship(
-            id=f"defines:{file_id}->{node_id}",
-            type=RelType.DEFINES,
-            source=file_id,
-            target=node_id,
-        )
-    )
-    return node_id
 
 
 @pytest.fixture()
@@ -97,19 +46,19 @@ def graph() -> KnowledgeGraph:
     g = KnowledgeGraph()
 
     # Files
-    _add_file_node(g, "src/auth.py")
-    _add_file_node(g, "src/app.py")
-    _add_file_node(g, "src/utils.py")
+    add_file_node(g, "src/auth.py")
+    add_file_node(g, "src/app.py")
+    add_file_node(g, "src/utils.py")
 
     # Symbols in src/auth.py
-    _add_symbol_node(g, NodeLabel.FUNCTION, "src/auth.py", "validate", 1, 10)
-    _add_symbol_node(g, NodeLabel.FUNCTION, "src/auth.py", "hash_password", 12, 20)
+    add_symbol_node(g, NodeLabel.FUNCTION, "src/auth.py", "validate", start_line=1, end_line=10)
+    add_symbol_node(g, NodeLabel.FUNCTION, "src/auth.py", "hash_password", start_line=12, end_line=20)
 
     # Symbols in src/app.py
-    _add_symbol_node(g, NodeLabel.FUNCTION, "src/app.py", "login", 1, 15)
+    add_symbol_node(g, NodeLabel.FUNCTION, "src/app.py", "login", start_line=1, end_line=15)
 
     # Symbols in src/utils.py
-    _add_symbol_node(g, NodeLabel.FUNCTION, "src/utils.py", "helper", 1, 5)
+    add_symbol_node(g, NodeLabel.FUNCTION, "src/utils.py", "helper", start_line=1, end_line=5)
 
     return g
 
@@ -169,8 +118,8 @@ class TestBuildCallIndex:
     def test_build_call_index_includes_classes(self) -> None:
         """Class nodes are included (for constructor calls)."""
         g = KnowledgeGraph()
-        _add_file_node(g, "src/models.py")
-        _add_symbol_node(g, NodeLabel.CLASS, "src/models.py", "User", 1, 20)
+        add_file_node(g, "src/models.py")
+        add_symbol_node(g, NodeLabel.CLASS, "src/models.py", "User", start_line=1, end_line=20)
 
         index = build_name_index(g, _CALLABLE_LABELS)
         assert "User" in index
@@ -179,10 +128,10 @@ class TestBuildCallIndex:
     def test_build_call_index_multiple_same_name(self) -> None:
         """Multiple symbols with the same name produce a list with all IDs."""
         g = KnowledgeGraph()
-        _add_file_node(g, "src/a.py")
-        _add_file_node(g, "src/b.py")
-        _add_symbol_node(g, NodeLabel.FUNCTION, "src/a.py", "init", 1, 5)
-        _add_symbol_node(g, NodeLabel.FUNCTION, "src/b.py", "init", 1, 5)
+        add_file_node(g, "src/a.py")
+        add_file_node(g, "src/b.py")
+        add_symbol_node(g, NodeLabel.FUNCTION, "src/a.py", "init", start_line=1, end_line=5)
+        add_symbol_node(g, NodeLabel.FUNCTION, "src/b.py", "init", start_line=1, end_line=5)
 
         index = build_name_index(g, _CALLABLE_LABELS)
         assert "init" in index
@@ -367,31 +316,31 @@ class TestResolveMethodCallSelf:
     def test_resolve_method_call_self(self) -> None:
         g = KnowledgeGraph()
 
-        _add_file_node(g, "src/service.py")
-        _add_symbol_node(
+        add_file_node(g, "src/service.py")
+        add_symbol_node(
             g,
             NodeLabel.CLASS,
             "src/service.py",
             "AuthService",
-            1,
-            30,
+            start_line=1,
+            end_line=30,
         )
-        _add_symbol_node(
+        add_symbol_node(
             g,
             NodeLabel.METHOD,
             "src/service.py",
             "login",
-            3,
-            15,
+            start_line=3,
+            end_line=15,
             class_name="AuthService",
         )
-        _add_symbol_node(
+        add_symbol_node(
             g,
             NodeLabel.METHOD,
             "src/service.py",
             "check_token",
-            17,
-            28,
+            start_line=17,
+            end_line=28,
             class_name="AuthService",
         )
 
@@ -412,22 +361,22 @@ class TestResolveMethodCallSelf:
         """this.method() also resolves within the same class."""
         g = KnowledgeGraph()
 
-        _add_file_node(g, "src/service.ts")
-        _add_symbol_node(
+        add_file_node(g, "src/service.ts")
+        add_symbol_node(
             g,
             NodeLabel.CLASS,
             "src/service.ts",
             "AuthService",
-            1,
-            30,
+            start_line=1,
+            end_line=30,
         )
-        _add_symbol_node(
+        add_symbol_node(
             g,
             NodeLabel.METHOD,
             "src/service.ts",
             "checkToken",
-            17,
-            28,
+            start_line=17,
+            end_line=28,
             class_name="AuthService",
         )
 
@@ -457,14 +406,14 @@ class TestResolveCallImportResolved:
         g = KnowledgeGraph()
 
         # Two files: app.py imports validate from auth.py.
-        _add_file_node(g, "src/auth.py")
-        _add_file_node(g, "src/app.py")
+        add_file_node(g, "src/auth.py")
+        add_file_node(g, "src/app.py")
 
-        _add_symbol_node(
-            g, NodeLabel.FUNCTION, "src/auth.py", "validate", 1, 10
+        add_symbol_node(
+            g, NodeLabel.FUNCTION, "src/auth.py", "validate", start_line=1, end_line=10
         )
-        _add_symbol_node(
-            g, NodeLabel.FUNCTION, "src/app.py", "login", 1, 15
+        add_symbol_node(
+            g, NodeLabel.FUNCTION, "src/app.py", "login", start_line=1, end_line=15
         )
 
         # IMPORTS relationship: app.py -> auth.py with symbol "validate"
@@ -524,8 +473,8 @@ class TestCallBlocklist:
     def test_blocklisted_call_creates_no_edge(self) -> None:
         """A call to 'print' inside a function produces no CALLS edge."""
         g = KnowledgeGraph()
-        _add_file_node(g, "src/main.py")
-        _add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "do_work", 1, 10)
+        add_file_node(g, "src/main.py")
+        add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "do_work", start_line=1, end_line=10)
 
         parse_data = [
             FileParseData(
@@ -544,8 +493,8 @@ class TestCallBlocklist:
     def test_blocklisted_argument_creates_no_edge(self) -> None:
         """A blocklisted name passed as argument produces no CALLS edge."""
         g = KnowledgeGraph()
-        _add_file_node(g, "src/main.py")
-        _add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "do_work", 1, 10)
+        add_file_node(g, "src/main.py")
+        add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "do_work", start_line=1, end_line=10)
 
         parse_data = [
             FileParseData(
@@ -567,9 +516,9 @@ class TestCallBlocklist:
     def test_non_blocklisted_call_still_resolves(self) -> None:
         """User-defined function names pass through the blocklist filter."""
         g = KnowledgeGraph()
-        _add_file_node(g, "src/main.py")
-        _add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "caller", 1, 10)
-        _add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "my_helper", 12, 20)
+        add_file_node(g, "src/main.py")
+        add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "caller", start_line=1, end_line=10)
+        add_symbol_node(g, NodeLabel.FUNCTION, "src/main.py", "my_helper", start_line=12, end_line=20)
 
         parse_data = [
             FileParseData(

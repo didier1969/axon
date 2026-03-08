@@ -13,7 +13,7 @@ Resolution priority:
 from __future__ import annotations
 
 import logging
-from typing import Generator, Iterable
+from typing import Generator, Iterable, Any
 
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import (
@@ -28,7 +28,8 @@ from axon.core.ingestion.symbol_lookup import (
     build_name_index,
     find_containing_symbol,
 )
-from axon.core.parsers.base import CallInfo
+from axon.core.ingestion.utils import add_to_graph, get_node_label
+from axon.core.parsers.base import CallInfo, ParseResult
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +38,6 @@ _CALLABLE_LABELS: tuple[NodeLabel, ...] = (
     NodeLabel.METHOD,
     NodeLabel.CLASS,
 )
-
-_KIND_TO_LABEL: dict[str, NodeLabel] = {
-    "function": NodeLabel.FUNCTION,
-    "method": NodeLabel.METHOD,
-    "class": NodeLabel.CLASS,
-}
 
 # Names that should never produce CALLS edges.  These are language builtins,
 # stdlib utilities, framework hooks, and common JS/TS globals whose definitions
@@ -90,24 +85,7 @@ def resolve_call(
     parse_result: ParseResult | None = None,
     language: str = "",
 ) -> tuple[str | None, float]:
-    """Resolve a call expression to a target node ID and confidence score.
-
-    Resolution strategy (tried in order):
-
-    1. **Alias resolution** (Elixir-style) -- if the name or receiver is an alias,
-       resolve it to the full module name before proceeding.
-    2. **Same-file exact match** (confidence 1.0) -- the called symbol is
-       defined in the same file as the caller.
-    3. **Import-resolved match** (confidence 1.0) -- the called name was
-       imported into this file; find the symbol in the imported file.
-    4. **Global fuzzy match** (confidence 0.5) -- any symbol with this name
-       anywhere in the codebase.
-
-    For method calls (``call.receiver`` is non-empty):
-    - If the receiver matches an alias/import name, resolve it.
-    - If the receiver is ``"self"`` or ``"this"``, look for a local method.
-    - Otherwise, try to resolve the method name globally.
-    """
+    """Resolve a call expression to a target node ID and confidence score."""
     name = call.name
     receiver = call.receiver
 
@@ -122,8 +100,6 @@ def resolve_call(
         if result is not None:
             return result, 1.0
 
-    # If we have a receiver that is now a full module name (after alias resolution),
-    # try to find the symbol in that specific module.
     if receiver and receiver not in ("self", "this"):
         target_id = _resolve_dotted_call(receiver, name, call_index, graph)
         if target_id:
@@ -133,35 +109,28 @@ def resolve_call(
     if not candidate_ids:
         return None, 0.0
 
-    # 1. Same-file exact match.
     for nid in candidate_ids:
         node = graph.get_node(nid)
         if node is not None and node.file_path == file_path:
             return nid, 1.0
 
-    # 2. Import-resolved match.
     imported_target = _resolve_via_imports(name, file_path, candidate_ids, graph)
     if imported_target is not None:
         return imported_target, 1.0
 
-    # 3. Global fuzzy match -- prefer shortest file path.
     return _pick_closest(candidate_ids, graph), 0.5
 
 def _resolve_aliases(
     name: str, receiver: str, parse_result: ParseResult
 ) -> tuple[str, str]:
     """Resolve Elixir-style aliases from ParseResult.imports."""
-    # If there's a receiver (e.g., Executor in Executor.run), check if it's an alias.
     if receiver:
         for imp in parse_result.imports:
-            # Match by alias (e.g., alias Foo.Bar, as: B -> B)
             if imp.alias == receiver:
                 return name, imp.module
-            # Match by last part (e.g., alias Foo.Bar -> Bar)
             if not imp.alias and imp.module.split(".")[-1] == receiver:
                 return name, imp.module
 
-    # If no receiver, check if the name itself is an alias
     for imp in parse_result.imports:
         if imp.alias == name:
             return imp.module, receiver
@@ -177,7 +146,6 @@ def _resolve_dotted_call(
     graph: KnowledgeGraph,
 ) -> str | None:
     """Find a symbol in a specific module (receiver)."""
-    # 1. Try unqualified name lookup
     for nid in call_index.get(method_name, []):
         node = graph.get_node(nid)
         if (
@@ -187,7 +155,6 @@ def _resolve_dotted_call(
         ):
             return nid
 
-    # 2. Try fully qualified name lookup (e.g. MyApp.Core.Executor.execute)
     full_name = f"{receiver}.{method_name}"
     for nid in call_index.get(full_name, []):
         node = graph.get_node(nid)
@@ -205,11 +172,7 @@ def _resolve_self_method(
     call_index: dict[str, list[str]],
     graph: KnowledgeGraph,
 ) -> str | None:
-    """Find a method with *method_name* in the same file (same class).
-
-    When the receiver is ``self`` or ``this`` the target must be a Method
-    node defined in the same file.
-    """
+    """Find a method with *method_name* in the same file (same class)."""
     for nid in call_index.get(method_name, []):
         node = graph.get_node(nid)
         if (
@@ -226,28 +189,18 @@ def _resolve_via_imports(
     candidate_ids: list[str],
     graph: KnowledgeGraph,
 ) -> str | None:
-    """Check if *name* was imported into *file_path* and resolve to the target.
-
-    Looks at IMPORTS relationships originating from this file's File node.
-    For each imported file, checks whether any candidate symbol is defined
-    there.  Also checks the ``symbols`` property to see if the specific
-    name was explicitly imported.
-    """
+    """Check if *name* was imported into *file_path* and resolve to the target."""
     source_file_id = generate_id(NodeLabel.FILE, file_path)
     import_rels = graph.get_outgoing(source_file_id, RelType.IMPORTS)
 
     if not import_rels:
         return None
 
-    # Collect file paths of imported files, optionally filtering by
-    # the imported symbol names.
     imported_file_ids: set[str] = set()
     for rel in import_rels:
         symbols_str = rel.properties.get("symbols", "")
         imported_names = {s.strip() for s in symbols_str.split(",") if s.strip()}
 
-        # If the specific name was imported, or if it's a wildcard/full
-        # module import (no specific names), include this target file.
         if not imported_names or name in imported_names:
             target_node = graph.get_node(rel.target)
             if target_node is not None:
@@ -261,10 +214,7 @@ def _resolve_via_imports(
     return None
 
 def _pick_closest(candidate_ids: list[str], graph: KnowledgeGraph) -> str | None:
-    """Pick the candidate with the shortest file path (proximity heuristic).
-
-    Returns ``None`` if no candidates can be resolved to actual nodes.
-    """
+    """Pick the candidate with the shortest file path (proximity heuristic)."""
     best_id: str | None = None
     best_path_len = float("inf")
 
@@ -367,9 +317,7 @@ def _process_single_file_calls(
             if symbol.kind == "method" and symbol.class_name
             else symbol.name
         )
-        label = _KIND_TO_LABEL.get(symbol.kind)
-        if label is None:
-            continue
+        label = get_node_label(symbol.kind)
         source_id = generate_id(label, fpd.file_path, symbol_name)
 
         for dec_name in symbol.decorators:
@@ -395,23 +343,11 @@ def process_calls(
     graph: KnowledgeGraph,
     max_workers: int | None = None,
 ) -> Any:
-    """Resolve call expressions and yield/create CALLS relationships.
-
-    Args:
-        parse_data: File parse results from the parsing phase.
-        graph: The knowledge graph (read-only for resolution, mutated if provided).
-        max_workers: Maximum threads for parallel processing.
-    """
-    # Note: We need the graph for resolution, so it's always required.
-    # The ambiguity is whether we YIELD or ADD to it.
-    # To keep compatibility with tests that don't iterate the generator,
-    # we detect if we are in a test context or if the caller expects a return.
-    
+    """Resolve call expressions and yield/create CALLS relationships."""
     gen = _process_calls_generator(parse_data, graph, max_workers)
     
     import sys
     if 'pytest' in sys.modules or graph is not None:
-        # Realize the generator to ensure the graph is populated
         list(gen)
         return None
         
@@ -427,13 +363,6 @@ def _process_calls_generator(
     call_index = build_name_index(graph, _CALLABLE_LABELS)
     file_sym_index = build_file_symbol_index(graph, _CALLABLE_LABELS)
 
-    def _output(item: GraphRelationship):
-        # Always add to graph because next steps might need these edges 
-        # (though usually they don't, but let's be safe for now)
-        graph.add_relationship(item)
-        return item
-
-    # Phase 1: Resolve calls in parallel (read-only)
     all_edges: list[tuple[str, str, float, list[str]]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = executor.map(
@@ -443,13 +372,12 @@ def _process_calls_generator(
         for edges in results:
             all_edges.extend(edges)
 
-    # Phase 2: Yield relationships
     seen: set[str] = set()
     for src, tgt, conf, args in all_edges:
         rel_id = f"calls:{src}->{tgt}"
         if rel_id not in seen:
             seen.add(rel_id)
-            yield _output(GraphRelationship(
+            yield add_to_graph(graph, GraphRelationship(
                 id=rel_id,
                 type=RelType.CALLS,
                 source=src,

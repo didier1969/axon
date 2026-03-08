@@ -307,10 +307,10 @@ class TestBatchTool:
 
 
 class TestGetStorageThreadSafety:
-    """_get_storage() initialises KuzuBackend exactly once under concurrency."""
+    """_get_storage() initialises AstralBackend exactly once under concurrency."""
 
     def test_not_initialized_twice(self, tmp_path, monkeypatch):
-        """Two concurrent calls must call KuzuBackend() exactly once."""
+        """Two concurrent calls must call AstralBackend() exactly once."""
         import axon.mcp.server as srv
 
         original_storage = srv._storage
@@ -325,7 +325,7 @@ class TestGetStorageThreadSafety:
             def initialize(self, *a, **kw):
                 pass
 
-        monkeypatch.setattr("axon.mcp.server.KuzuBackend", CountingBackend)
+        monkeypatch.setattr("axon.mcp.server.AstralBackend", CountingBackend)
         monkeypatch.chdir(tmp_path)  # no .axon/kuzu → initialize not called
 
         results = []
@@ -340,7 +340,7 @@ class TestGetStorageThreadSafety:
         t1.join()
         t2.join()
 
-        assert len(init_count) == 1, f"KuzuBackend() called {len(init_count)} times"
+        assert len(init_count) == 1, f"AstralBackend() called {len(init_count)} times"
         assert results[0] is results[1]
 
         srv._storage = original_storage  # restore

@@ -13,9 +13,9 @@ class TestSearchResult:
     """Verify SearchResult dataclass defaults and construction."""
 
     def test_creation_with_defaults(self) -> None:
-        result = SearchResult(node_id="n1", score=0.95)
+        result = SearchResult(node_id="n1", score=1.05)
         assert result.node_id == "n1"
-        assert result.score == 0.95
+        assert result.score == 1.05
         assert result.node_name == ""
         assert result.file_path == ""
         assert result.label == ""

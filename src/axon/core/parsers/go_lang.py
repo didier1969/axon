@@ -16,6 +16,7 @@ from axon.core.parsers.base import (
     ParseResult,
     SymbolInfo,
 )
+from axon.core.parsers.utils import find_child_by_type
 
 GO_LANGUAGE = Language(tsgo.language())
 
@@ -66,7 +67,7 @@ class GoParser(LanguageParser):
         self, node: Node, content: str, result: ParseResult
     ) -> None:
         """Extract a function_declaration."""
-        name_node = self._find_child_by_type(node, "identifier")
+        name_node = find_child_by_type(node, "identifier")
         if name_node is None:
             return
 
@@ -96,7 +97,7 @@ class GoParser(LanguageParser):
             result.exports.append(name)
 
         # Walk body for calls and unsafe check
-        body = self._find_child_by_type(node, "block")
+        body = find_child_by_type(node, "block")
         if body is not None:
             if "unsafe." in node_content:
                 result.symbols[-1].properties["unsafe"] = True
@@ -106,7 +107,7 @@ class GoParser(LanguageParser):
         self, node: Node, content: str, result: ParseResult
     ) -> None:
         """Extract a method_declaration (func (receiver) name())."""
-        name_node = self._find_child_by_type(node, "field_identifier")
+        name_node = find_child_by_type(node, "field_identifier")
         if name_node is None:
             return
 
@@ -117,19 +118,19 @@ class GoParser(LanguageParser):
 
         # Extract receiver type
         receiver_type = ""
-        param_list = self._find_child_by_type(node, "parameter_list")
+        param_list = find_child_by_type(node, "parameter_list")
         if param_list is not None:
             # Look for type_identifier in the receiver parameter
             for child in param_list.children:
                 if child.type == "parameter_declaration":
-                    type_node = self._find_child_by_type(child, "type_identifier")
+                    type_node = find_child_by_type(child, "type_identifier")
                     if type_node is not None:
                         receiver_type = type_node.text.decode("utf-8", errors="replace")
                     else:
                         # Pointer receiver: *Type
-                        pointer_type = self._find_child_by_type(child, "pointer_type")
+                        pointer_type = find_child_by_type(child, "pointer_type")
                         if pointer_type is not None:
-                            inner = self._find_child_by_type(pointer_type, "type_identifier")
+                            inner = find_child_by_type(pointer_type, "type_identifier")
                             if inner is not None:
                                 receiver_type = inner.text.decode("utf8")
 
@@ -149,7 +150,7 @@ class GoParser(LanguageParser):
         if name[0].isupper():
             result.exports.append(name)
 
-        body = self._find_child_by_type(node, "block")
+        body = find_child_by_type(node, "block")
         if body is not None:
             self._walk_for_calls(body, result)
 
@@ -165,7 +166,7 @@ class GoParser(LanguageParser):
         self, node: Node, content: str, result: ParseResult
     ) -> None:
         """Extract a single type_spec node."""
-        name_node = self._find_child_by_type(node, "type_identifier")
+        name_node = find_child_by_type(node, "type_identifier")
         if name_node is None:
             return
 
@@ -249,7 +250,7 @@ class GoParser(LanguageParser):
             name = func_node.text.decode("utf-8", errors="replace")
         elif func_node.type == "selector_expression":
             # pkg.Function() or obj.Method()
-            field = self._find_child_by_type(func_node, "field_identifier")
+            field = find_child_by_type(func_node, "field_identifier")
             operand = func_node.children[0] if func_node.children else None
             name = field.text.decode("utf8") if field else ""
             receiver = operand.text.decode("utf8") if operand is not None else ""
@@ -274,15 +275,3 @@ class GoParser(LanguageParser):
                 self._extract_call(child, result)
             else:
                 self._walk_for_calls(child, result)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _find_child_by_type(node: Node, type_name: str) -> Node | None:
-        """Return first direct child of *node* with type *type_name*."""
-        for child in node.children:
-            if child.type == type_name:
-                return child
-        return None

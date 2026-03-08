@@ -40,7 +40,7 @@ def test_audit_ejection_by_centrality():
     # This one is a twin but has HIGH CENTRALITY
     n3 = GraphNode(
         id="critical_hub", label=NodeLabel.FUNCTION, name="critical_report",
-        file_path=".paul/handoffs/archive/hub.md", content="Header1", centrality=0.9
+        file_path=".paul/handoffs/archive/hub.md", content="Header1", centrality=1.0
     )
     
     graph.add_node(n1)

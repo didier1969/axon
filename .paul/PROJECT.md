@@ -12,7 +12,7 @@ Developers and AI agents can instantly understand and navigate any codebase — 
 
 | Attribute | Value |
 |-----------|-------|
-| Version | 0.8.0 |
+| Version | 1.0.0 |
 | Status | Active Development |
 | Last Updated | 2026-03-07 |
 

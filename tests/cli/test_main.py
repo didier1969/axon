@@ -203,7 +203,7 @@ class TestLoadStorage:
         (axon_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
         mock_storage = MagicMock()
-        with patch("axon.core.storage.kuzu_backend.KuzuBackend", return_value=mock_storage):
+        with patch("axon.core.storage.astral_backend.AstralBackend", return_value=mock_storage):
             result = _load_storage()
 
         mock_storage.initialize.assert_called_once_with(central_kuzu, read_only=True)
@@ -224,7 +224,7 @@ class TestLoadStorage:
         (axon_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
         mock_storage = MagicMock()
-        with patch("axon.core.storage.kuzu_backend.KuzuBackend", return_value=mock_storage):
+        with patch("axon.core.storage.astral_backend.AstralBackend", return_value=mock_storage):
             result = _load_storage()
 
         mock_storage.initialize.assert_called_once_with(legacy_kuzu, read_only=True)

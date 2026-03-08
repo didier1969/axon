@@ -26,8 +26,8 @@ def mock_storage() -> MagicMock:
     ]
     # Vector returns results (some overlap with FTS)
     storage.vector_search.return_value = [
-        SearchResult(node_id="b", score=0.95, node_name="validate_input", file_path="src/forms.py", label="function"),
-        SearchResult(node_id="d", score=0.9, node_name="verify_user", file_path="src/verify.py", label="function"),
+        SearchResult(node_id="b", score=1.05, node_name="validate_input", file_path="src/forms.py", label="function"),
+        SearchResult(node_id="d", score=1.0, node_name="verify_user", file_path="src/verify.py", label="function"),
         SearchResult(node_id="a", score=0.7, node_name="validate_user", file_path="src/auth.py", label="function"),
     ]
     return storage
@@ -220,7 +220,7 @@ class TestEdgeCases:
         storage = MagicMock()
         storage.fts_search.return_value = []
         storage.vector_search.return_value = [
-            SearchResult(node_id="x", score=0.9, node_name="find_me"),
+            SearchResult(node_id="x", score=1.0, node_name="find_me"),
         ]
         results = hybrid_search("query", storage, query_embedding=[0.1])
         assert len(results) == 1

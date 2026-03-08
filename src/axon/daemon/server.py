@@ -1,6 +1,6 @@
 """Axon daemon — asyncio Unix socket server.
 
-Listens on ~/.axon/daemon.sock, dispatches MCP tool calls via LRU-cached KuzuBackend instances.
+Listens on ~/.axon/daemon.sock, dispatches MCP tool calls via LRU-cached AstralBackend instances.
 
 Protocol: JSON-line (one JSON object per line, newline-terminated).
 """

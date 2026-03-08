@@ -408,7 +408,7 @@ Un `repo` valant `"../../.ssh/config"` lirait `~/.ssh/config`. Un fichier JSON a
 ```python
 def _sanitize_repo_slug(repo: str) -> str | None:
     """Valide que le slug repo est un identifiant sûr (pas de traversée de chemin)."""
-    if not re.match(r'^[a-zA-Z0-9._-]+$', repo):
+    if not re.match(r'^[a-zA-Z1.0._-]+$', repo):
         return None
     p = Path(repo)
     if len(p.parts) != 1 or ".." in p.parts:

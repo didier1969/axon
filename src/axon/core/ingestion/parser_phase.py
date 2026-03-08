@@ -21,25 +21,11 @@ from axon.core.graph.model import (
     RelType,
     generate_id,
 )
+from axon.core.ingestion.utils import add_to_graph, get_node_label
 from axon.core.ingestion.walker import FileEntry
 from axon.core.parsers.base import LanguageParser, ParseResult
 
 logger = logging.getLogger(__name__)
-
-_KIND_TO_LABEL: dict[str, NodeLabel] = {
-    "function": NodeLabel.FUNCTION,
-    "class": NodeLabel.CLASS,
-    "method": NodeLabel.METHOD,
-    "interface": NodeLabel.INTERFACE,
-    "type_alias": NodeLabel.TYPE_ALIAS,
-    "enum": NodeLabel.ENUM,
-    # Elixir
-    "module": NodeLabel.CLASS,
-    "macro": NodeLabel.FUNCTION,
-    "struct": NodeLabel.CLASS,
-    # Markdown
-    "section": NodeLabel.FUNCTION,
-}
 
 @dataclass
 class FileParseData:
@@ -96,7 +82,6 @@ def get_parser(language: str) -> LanguageParser | None:
             from axon.core.parsers.java_lang import JavaParser
             parser = JavaParser()
     except (ImportError, ValueError):
-        # Specific parser module not found or failed to load
         from axon.core.parsers.base import TextParser
         parser = TextParser()
 
@@ -109,11 +94,7 @@ def get_parser(language: str) -> LanguageParser | None:
 
 
 def parse_file(file_path: str, content: str, language: str) -> FileParseData:
-    """Parse a single file and return structured parse data.
-    
-    If no parser is available for *language*, returns an empty ParseResult
-    so the file content remains searchable (FTS) without symbol nodes.
-    """
+    """Parse a single file and return structured parse data."""
     parser = get_parser(language)
     if parser is None:
         return FileParseData(file_path=file_path, language=language, parse_result=ParseResult())
@@ -135,9 +116,7 @@ def process_parsing(
     """Parse files and return/yield results. Supports both list and generator return."""
     gen = _process_parsing_generator(files, graph, max_workers)
     
-    # If graph is passed, we might be in a test expecting a list return
     if graph is not None:
-        # Realize the generator to populate the graph and return the list of FileParseData
         results = list(gen)
         return [item for item in results if isinstance(item, FileParseData)]
     
@@ -148,12 +127,6 @@ def _process_parsing_generator(
     graph: KnowledgeGraph | None = None,
     max_workers: int | None = None,
 ) -> Generator[Union[GraphNode, GraphRelationship, FileParseData], None, None]:
-    def _output(item: Union[GraphNode, GraphRelationship]):
-        if graph is not None:
-            if isinstance(item, GraphNode): graph.add_node(item)
-            else: graph.add_relationship(item)
-        return item
-
     # Use executor.map to stream results as they are parsed,
     # avoiding a massive intermediate list of all results.
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -164,17 +137,13 @@ def _process_parsing_generator(
             file_id = generate_id(NodeLabel.FILE, parse_data.file_path)
             exported_names: set[str] = set(parse_data.parse_result.exports)
 
-            # Build class -> base class names for storing on class nodes.
             class_bases: dict[str, list[str]] = {}
             for cls_name, kind, parent_name in parse_data.parse_result.heritage:
                 if kind == "extends":
                     class_bases.setdefault(cls_name, []).append(parent_name)
 
             for symbol in parse_data.parse_result.symbols:
-                label = _KIND_TO_LABEL.get(symbol.kind)
-                if label is None:
-                    continue
-
+                label = get_node_label(symbol.kind)
                 symbol_name = (
                     f"{symbol.class_name}.{symbol.name}"
                     if symbol.kind == "method" and symbol.class_name
@@ -207,7 +176,7 @@ def _process_parsing_generator(
                     is_exported=is_exported,
                     properties=props,
                 )
-                yield _output(node)
+                yield add_to_graph(graph, node)
 
                 rel_id = f"defines:{file_id}->{symbol_id}"
                 rel = GraphRelationship(
@@ -216,6 +185,6 @@ def _process_parsing_generator(
                     source=file_id,
                     target=symbol_id,
                 )
-                yield _output(rel)
+                yield add_to_graph(graph, rel)
 
             yield parse_data

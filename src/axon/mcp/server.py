@@ -2,7 +2,7 @@
 
 Registers seven tools and three resources that give AI agents and MCP clients
 access to the Axon knowledge graph.  The server lazily initialises a
-:class:`KuzuBackend` from the ``.axon/kuzu`` directory in the current
+:class:`AstralBackend` from the ``.axon/kuzu`` directory in the current
 working directory.
 
 Usage::
@@ -30,7 +30,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Resource, TextContent, Tool
 
 from axon.core.paths import central_db_path, daemon_sock_path
-from axon.core.storage.kuzu_backend import KuzuBackend
+from axon.core.storage.astral_backend import AstralBackend
 from axon.daemon.protocol import decode_request, encode_request
 from axon.mcp.resources import get_dead_code_list, get_overview, get_schema
 from axon.mcp.tools import (
@@ -57,12 +57,12 @@ logger = logging.getLogger(__name__)
 
 server = Server("axon")
 
-_storage: KuzuBackend | None = None
+_storage: AstralBackend | None = None
 _storage_lock = threading.Lock()
 _lock: asyncio.Lock | None = None
 
 
-def set_storage(storage: KuzuBackend) -> None:
+def set_storage(storage: AstralBackend) -> None:
     """Inject a pre-initialised storage backend (e.g. from ``axon serve --watch``)."""
     global _storage  # noqa: PLW0603
     _storage = storage
@@ -74,7 +74,7 @@ def set_lock(lock: asyncio.Lock) -> None:
     _lock = lock
 
 
-def _get_storage() -> KuzuBackend:
+def _get_storage() -> AstralBackend:
     """Lazily initialise and return the KuzuDB storage backend (thread-safe).
 
     Tries the centralised path (``~/.axon/repos/{slug}/kuzu``) from the
@@ -87,7 +87,7 @@ def _get_storage() -> KuzuBackend:
     with _storage_lock:
         if _storage is not None:  # double-checked
             return _storage
-        _storage = KuzuBackend()
+        _storage = AstralBackend()
         meta_path = Path.cwd() / ".axon" / "meta.json"
         db_path: Path | None = None
         if meta_path.exists():
@@ -743,7 +743,7 @@ async def list_tools() -> list[Tool]:
     """Return the list of available Axon tools."""
     return TOOLS
 
-def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
+def _dispatch_tool(name: str, arguments: dict, storage: AstralBackend) -> str:
     """Synchronous tool dispatch — called directly or via ``asyncio.to_thread``."""
     if name == "axon_list_repos":
         return handle_list_repos()
@@ -905,7 +905,7 @@ async def list_resources() -> list[Resource]:
         ),
     ]
 
-def _dispatch_resource(uri_str: str, storage: KuzuBackend) -> str:
+def _dispatch_resource(uri_str: str, storage: AstralBackend) -> str:
     """Synchronous resource dispatch."""
     if uri_str == "axon://overview":
         return get_overview(storage)

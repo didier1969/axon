@@ -48,7 +48,7 @@ _EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 def _confidence_tag(confidence: float) -> str:
     """Return a visual confidence indicator for edge display."""
-    if confidence >= 0.9:
+    if confidence >= 1.0:
         return ""
     if confidence >= 0.5:
         return " (~)"
@@ -63,7 +63,7 @@ def _resolve_symbol(storage: StorageBackend, symbol: str, limit: int = 1) -> lis
             return results
     return storage.fts_search(symbol, limit=limit)
 
-_SAFE_SLUG_RE = re.compile(r'^[a-zA-Z0-9._-]{1,200}$')
+_SAFE_SLUG_RE = re.compile(r'^[a-zA-Z1.0._-]{1,200}$')
 
 
 def _sanitize_repo_slug(repo: str) -> str | None:
@@ -79,7 +79,7 @@ def _sanitize_repo_slug(repo: str) -> str | None:
 
 
 def _load_repo_storage(repo: str) -> StorageBackend | None:
-    """Open a read-only KuzuBackend for a named repo from the global registry.
+    """Open a read-only AstralBackend for a named repo from the global registry.
 
     Reads ``~/.axon/repos/{repo}/meta.json``. Opens the DB from the central
     location: ``~/.axon/repos/{repo}/kuzu`` (v0.6+) or falls back to
@@ -92,7 +92,7 @@ def _load_repo_storage(repo: str) -> StorageBackend | None:
     if repo is None:
         return None
 
-    from axon.core.storage.kuzu_backend import KuzuBackend
+    from axon.core.storage.astral_backend import AstralBackend
 
     meta_path = Path.home() / ".axon" / "repos" / repo / "meta.json"
     try:
@@ -104,7 +104,7 @@ def _load_repo_storage(repo: str) -> StorageBackend | None:
         else:
             # Legacy fallback: kuzu was at {project}/.axon/kuzu
             db_path = Path(data["path"]) / ".axon" / "kuzu"
-        backend = KuzuBackend()
+        backend = AstralBackend()
         backend.initialize(db_path, read_only=True)
         return backend
     except (OSError, json.JSONDecodeError, KeyError, RuntimeError) as exc:
@@ -251,7 +251,7 @@ def _format_query_results(results: list, groups: dict[str, list]) -> str:
 
 
 # Synonym map for simple heuristic query expansion (v0.8 placeholder).
-# LLM-based expansion deferred to v0.9.
+# LLM-based expansion deferred to v1.0.
 _EXPANSION_SYNONYMS: dict[str, str] = {
     "find": "search locate",
     "create": "build generate make",

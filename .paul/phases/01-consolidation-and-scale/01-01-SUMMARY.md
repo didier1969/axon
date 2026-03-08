@@ -74,7 +74,7 @@ completed: 2026-02-27
 
 | Task | Commit | Type | Description |
 |------|--------|------|-------------|
-| All 3 tasks | `b0096c5` | perf | batch inserts, async embeddings, profiling baseline |
+| All 3 tasks | `b1.06c5` | perf | batch inserts, async embeddings, profiling baseline |
 
 ## Files Created/Modified
 

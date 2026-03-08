@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from axon.core.storage.kuzu_backend import KuzuBackend
+from axon.core.storage.astral_backend import AstralBackend
 
 
 @pytest.fixture(autouse=True)
@@ -20,36 +21,20 @@ def isolated_axon_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(scope="session")
-def kuzu_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Create a schema-initialized empty KuzuDB once per session.
-
-    Function-scoped storage fixtures copy this template instead of
-    calling KuzuBackend.initialize() from scratch, saving 4-5s per test.
-    The schema is already present in the copy so create_schema() IF NOT
-    EXISTS calls become no-ops.
-    """
-    db_path = tmp_path_factory.mktemp("kuzu_template") / "db"
-    backend = KuzuBackend()
-    backend.initialize(db_path)
-    backend.close()
+def astral_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Create a mock storage path for AstralBackend."""
+    db_path = tmp_path_factory.mktemp("astral_template") / "db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.touch()
     return db_path
 
 
 @pytest.fixture(scope="session")
 def watcher_indexed_template(
     tmp_path_factory: pytest.TempPathFactory,
-    kuzu_template: Path,
+    astral_template: Path,
 ) -> Path:
-    """KuzuDB pre-indexed with the standard watcher test repo (src/app.py + src/utils.py).
-
-    Amortizes run_pipeline() cost across all TestReindexFiles and
-    TestWatcherReindexFiles tests. Each test copies this template instead of
-    calling run_pipeline() from scratch, saving 5-7s per test.
-
-    Path.home() is patched during indexing to prevent events.jsonl pollution.
-    """
-    from unittest.mock import patch
-
+    """Mock pre-indexed repository for watcher tests."""
     from axon.core.ingestion.pipeline import run_pipeline
 
     # Create repo matching test_watcher.py's tmp_repo fixture exactly.
@@ -63,13 +48,14 @@ def watcher_indexed_template(
         "def helper():\n    pass\n", encoding="utf-8"
     )
 
-    # Copy empty schema template, index, close.
     db_path = tmp_path_factory.mktemp("watcher_indexed_db") / "db"
-    shutil.copy2(str(kuzu_template), str(db_path))
-
     fake_home = tmp_path_factory.mktemp("watcher_template_home")
-    with patch.object(Path, "home", return_value=fake_home):
-        backend = KuzuBackend()
+    
+    with patch.object(Path, "home", return_value=fake_home), \
+         patch("axon.core.storage.astral_backend.httpx.Client") as mock_client:
+        # Mock communication for pipeline indexing
+        mock_client.return_value.get.return_value.status_code = 200
+        backend = AstralBackend()
         backend.initialize(db_path)
         run_pipeline(repo_dir, backend, embeddings=False)
         backend.close()

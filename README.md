@@ -1,60 +1,54 @@
-# Axon : Copilote Architectural
+# Axon v1.0 (Triple-Pod)
 
-**L'intelligence structurelle pour les agents IA et les développeurs.**
+**Axon** est un moteur d'intelligence de code distribué haute performance. Il transforme n'importe quelle base de code en un graphe de connaissances structurelles exploitable par des agents IA et des développeurs.
 
-Axon transforme n'importe quelle base de code en un **graphe de connaissances**. Il ne se contente pas de chercher du texte : il comprend les appels de fonctions, les hiérarchies de types, les flux d'exécution et les couplages historiques pour offrir une vision à 360° de votre architecture.
+## 🏗️ Architecture Triple-Pod
 
----
+Depuis la v1.0, Axon abandonne le modèle monolithique pour une architecture distribuée basée sur trois unités autonomes (Pods) :
 
-## 🚀 Installation & Commandes Rapides (Docker-style UX)
+1.  **Pod A : Axon Watcher (Orchestrateur - Elixir/OTP)**
+    - Surveille le système de fichiers en temps réel.
+    - Orchestre le flux de travail entre le Parser et la Base de données.
+    - Gère la file d'attente d'ingestion et la résilience.
+
+2.  **Pod B : Axon Parser (Analyseur - Python/Tree-sitter)**
+    - **Stateless** : Reçoit du code, renvoie de la structure (Symboles + Relations).
+    - Utilise `tree-sitter` pour une analyse multi-langage précise.
+    - Communication ultra-rapide via MsgPack/TCP.
+
+3.  **Pod C : HydraDB (Persistence - Elixir/Rust/Dolt)**
+    - Le "Cerveau" central de persistence.
+    - Supporte le versionnage atomique du graphe via Dolt.
+    - Exécute les analyses lourdes (PageRank, Taint Analysis, Audit).
+
+## ⚡ Performance & Protocoles
+
+Axon v1.0 utilise des protocoles de communication à ultra-faible latence :
+- **Lien A ↔ B (Watcher ↔ Parser) :** Unix Domain Socket (UDS) + MsgPack via `/tmp/axon-parser.sock`.
+- **Lien B ↔ C (Parser ↔ HydraDB) :** TCP Socket brute + MsgPack sur le port `4040`.
+- **Lien A ↔ C (Watcher ↔ HydraDB) :** In-process BEAM (Erlang Distribution).
+
+## 🚀 Démarrage Rapide (Nix)
+
+Axon est entièrement géré par **Nix** pour garantir un environnement reproductible.
 
 ```bash
-uv tool install --editable /path/to/axon  # 1. Installation globale
+# Lancer l'environnement de développement complet
+nix develop
+
+# Lancer le daemon Axon (connecte les Pods)
+axon start
+
+# Indexer un projet
+axon up --repo mon-projet
 ```
 
-Désormais, utilisez Axon avec des commandes ultra-simplifiées :
+## 🧠 Intelligence de Graphe
 
-| Commande | Action | Description |
-|:---|:---|:---|
-| `axon start` | **Daemon Start** | Lance le moteur en arrière-plan pour des requêtes instantanées. |
-| `axon up` | **Deep Index** | Ré-indexation experte complète du projet actuel. |
-| `axon check` | **Expert Audit** | Lance le système immunitaire architectural (Audit OWASP). |
-| `axon stop` | **Daemon Stop** | Arrête le moteur de fond. |
+Axon expose ses capacités via le **Model Context Protocol (MCP)**, permettant à n'importe quel agent IA (Claude Code, Gemini CLI) de :
+- Naviguer dans les relations (`CALLS`, `IMPORTS`, `TYPES`).
+- Calculer le rayon d'impact d'une modification.
+- Auditer la conformité architecturale et la sécurité (OWASP).
 
 ---
-
-## 🛡️ Bouclier Architectural (OWASP Expert)
-
-Axon intègre nativement un moteur d'audit de sécurité structurel. Contrairement aux scanners classiques, il utilise le graphe pour tracer le **chemin d'exposition** réel d'une faille :
-
-- **OWASP A01 (Access Control)** : Détection d'opérations sensibles (delete, update) sans garde d'authentification.
-- **OWASP A03 (Injection)** : Suivi des données depuis un point d'entrée public jusqu'à un "Sink" dangereux (SQL, Eval, System).
-- **OWASP A07 (Auth Gaps)** : Identification des points d'entrée (Routes API) totalement déconnectés de vos modules de sécurité.
-
-Chaque alerte d'audit inclut désormais un **conseil de remédiation** concret.
-
----
-
-## 🧪 Analyse de Flux de Données (Taint Analysis)
-
-Tracez la propagation d'une variable à travers les fichiers et les langages (Elixir, Rust, Python, TS, etc.) :
-```bash
-axon trace <nom_fonction> <nom_variable>
-```
-Axon vous affichera un arbre visuel indiquant exactement comment votre donnée transite dans l'architecture.
-
----
-
-## Pourquoi Axon est différent ?
-
-*   **Intelligence Polyglotte Experte :** Analyse profonde de 12 langages (Python, TS, Rust, Elixir, Go, SQL, HTML, CSS, Java, YAML, Markdown).
-*   **Transparence Inter-langages :** Capacité unique à traverser les frontières (ex: un appel Elixir vers un NIF Rust).
-*   **Zéro Cloud :** Tout tourne localement. Vos données ne quittent jamais votre machine.
-*   **Pleine Conscience du Projet :** Indexe systématiquement les documents stratégiques (`GEMINI.md`, `.paul/`, etc.) pour relier l'intention au code.
-
----
-
-## Licence
-
-Propriétaire — Tous droits réservés.
-Bâti avec passion par l'équipe Axon.
+© 2025-2026 Nexus AI Agency - Didier Stadelmann

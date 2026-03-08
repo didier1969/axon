@@ -123,7 +123,7 @@ completed: 2026-03-05T00:00:00Z
 - Foundation for Plan 01-03: add centrality/tested to axon_query output, find_similar, query expansion
 
 **Concerns:**
-- centrality boost in hybrid_search makes N=`limit*3` `get_node` calls (no cache); acceptable for now, optimize in v0.9 if needed
+- centrality boost in hybrid_search makes N=`limit*3` `get_node` calls (no cache); acceptable for now, optimize in v1.0 if needed
 
 **Blockers:**
 - None

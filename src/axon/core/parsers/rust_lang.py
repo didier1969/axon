@@ -17,6 +17,7 @@ from axon.core.parsers.base import (
     ParseResult,
     SymbolInfo,
 )
+from axon.core.parsers.utils import find_child_by_type
 
 RUST_LANGUAGE = Language(tsrust.language())
 
@@ -88,7 +89,7 @@ class RustParser(LanguageParser):
         class_name: str,
     ) -> None:
         """Extract a fn item."""
-        name_node = self._find_child_by_type(node, "identifier")
+        name_node = find_child_by_type(node, "identifier")
         if name_node is None:
             return
 
@@ -126,7 +127,7 @@ class RustParser(LanguageParser):
             result.exports.append(name)
 
         # Extract calls from body
-        block = self._find_child_by_type(node, "block")
+        block = find_child_by_type(node, "block")
         if block is not None:
             self._walk_for_unsafe(block, result)
             self._walk(block, content, result, class_name=class_name)
@@ -147,7 +148,7 @@ class RustParser(LanguageParser):
         class_name: str,
     ) -> None:
         """Extract a fn signature (e.g. in traits)."""
-        name_node = self._find_child_by_type(node, "identifier")
+        name_node = find_child_by_type(node, "identifier")
         if name_node is None:
             return
 
@@ -177,7 +178,7 @@ class RustParser(LanguageParser):
         result: ParseResult,
     ) -> None:
         """Extract a struct item."""
-        name_node = self._find_child_by_type(node, "type_identifier")
+        name_node = find_child_by_type(node, "type_identifier")
         if name_node is None:
             return
 
@@ -209,7 +210,7 @@ class RustParser(LanguageParser):
         result: ParseResult,
     ) -> None:
         """Extract an enum item."""
-        name_node = self._find_child_by_type(node, "type_identifier")
+        name_node = find_child_by_type(node, "type_identifier")
         if name_node is None:
             return
 
@@ -241,7 +242,7 @@ class RustParser(LanguageParser):
         result: ParseResult,
     ) -> None:
         """Extract a trait item."""
-        name_node = self._find_child_by_type(node, "type_identifier")
+        name_node = find_child_by_type(node, "type_identifier")
         if name_node is None:
             return
 
@@ -267,7 +268,7 @@ class RustParser(LanguageParser):
             result.exports.append(name)
 
         # Walk trait body for function signatures
-        decl_list = self._find_child_by_type(node, "declaration_list")
+        decl_list = find_child_by_type(node, "declaration_list")
         if decl_list is not None:
             self._walk(decl_list, content, result, class_name=name)
 
@@ -293,7 +294,7 @@ class RustParser(LanguageParser):
             struct_name = type_nodes[0].text.decode("utf8")
 
         # Walk methods in the impl block
-        decl_list = self._find_child_by_type(node, "declaration_list")
+        decl_list = find_child_by_type(node, "declaration_list")
         if decl_list is not None:
             self._walk(decl_list, content, result, class_name=struct_name)
 
@@ -304,7 +305,7 @@ class RustParser(LanguageParser):
         result: ParseResult,
     ) -> None:
         """Extract a mod item."""
-        name_node = self._find_child_by_type(node, "identifier")
+        name_node = find_child_by_type(node, "identifier")
         if name_node is None:
             return
 
@@ -326,7 +327,7 @@ class RustParser(LanguageParser):
         )
 
         # Walk mod body
-        decl_list = self._find_child_by_type(node, "declaration_list")
+        decl_list = find_child_by_type(node, "declaration_list")
         if decl_list is not None:
             self._walk(decl_list, content, result, class_name="")
 
@@ -337,7 +338,7 @@ class RustParser(LanguageParser):
         result: ParseResult,
     ) -> None:
         """Extract a type alias."""
-        name_node = self._find_child_by_type(node, "type_identifier")
+        name_node = find_child_by_type(node, "type_identifier")
         if name_node is None:
             return
 
@@ -453,7 +454,7 @@ class RustParser(LanguageParser):
         elif func_node.type == "field_expression":
             # obj.method(args) — but tree-sitter Rust uses method_call_expression for this
             # This is for function pointer calls via field access
-            field_id = self._find_child_by_type(func_node, "field_identifier")
+            field_id = find_child_by_type(func_node, "field_identifier")
             obj = func_node.children[0] if func_node.children else None
             name = field_id.text.decode("utf8") if field_id else ""
             receiver = obj.text.decode("utf8") if obj is not None else ""
@@ -473,7 +474,7 @@ class RustParser(LanguageParser):
     def _extract_method_call(self, node: Node, result: ParseResult) -> None:
         """Extract a method_call_expression (receiver.method())."""
         line = node.start_point[0] + 1
-        name_node = self._find_child_by_type(node, "field_identifier")
+        name_node = find_child_by_type(node, "field_identifier")
         if name_node is None:
             return
         name = name_node.text.decode("utf-8", errors="replace")
@@ -493,7 +494,7 @@ class RustParser(LanguageParser):
     def _extract_macro_invocation(self, node: Node, result: ParseResult) -> None:
         """Extract a macro invocation like println! or vec!."""
         line = node.start_point[0] + 1
-        name_node = self._find_child_by_type(node, "identifier")
+        name_node = find_child_by_type(node, "identifier")
         if name_node is None:
             return
         name = name_node.text.decode("utf-8", errors="replace")
@@ -524,11 +525,3 @@ class RustParser(LanguageParser):
             if child.type == "visibility_modifier":
                 return True
         return False
-
-    @staticmethod
-    def _find_child_by_type(node: Node, type_name: str) -> Node | None:
-        """Return first direct child of *node* with type *type_name*."""
-        for child in node.children:
-            if child.type == type_name:
-                return child
-        return None

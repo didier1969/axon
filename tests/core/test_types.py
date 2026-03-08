@@ -6,8 +6,6 @@ import pytest
 
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import (
-    GraphNode,
-    GraphRelationship,
     NodeLabel,
     RelType,
     generate_id,
@@ -15,65 +13,10 @@ from axon.core.graph.model import (
 from axon.core.ingestion.parser_phase import FileParseData
 from axon.core.ingestion.symbol_lookup import build_name_index
 from axon.core.ingestion.types import process_types
+from tests.core.utils import add_file_node, add_symbol_node
 
 _TYPE_LABELS = (NodeLabel.CLASS, NodeLabel.INTERFACE, NodeLabel.TYPE_ALIAS)
 from axon.core.parsers.base import ParseResult, TypeRef
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _add_file_node(graph: KnowledgeGraph, path: str) -> str:
-    """Add a File node and return its ID."""
-    node_id = generate_id(NodeLabel.FILE, path)
-    graph.add_node(
-        GraphNode(
-            id=node_id,
-            label=NodeLabel.FILE,
-            name=path.rsplit("/", 1)[-1],
-            file_path=path,
-        )
-    )
-    return node_id
-
-
-def _add_symbol_node(
-    graph: KnowledgeGraph,
-    label: NodeLabel,
-    file_path: str,
-    name: str,
-    start_line: int,
-    end_line: int,
-    class_name: str = "",
-) -> str:
-    """Add a symbol node with a DEFINES relationship from the file node."""
-    symbol_name = (
-        f"{class_name}.{name}" if label == NodeLabel.METHOD and class_name else name
-    )
-    node_id = generate_id(label, file_path, symbol_name)
-    graph.add_node(
-        GraphNode(
-            id=node_id,
-            label=label,
-            name=name,
-            file_path=file_path,
-            start_line=start_line,
-            end_line=end_line,
-            class_name=class_name,
-        )
-    )
-    file_id = generate_id(NodeLabel.FILE, file_path)
-    graph.add_relationship(
-        GraphRelationship(
-            id=f"defines:{file_id}->{node_id}",
-            type=RelType.DEFINES,
-            source=file_id,
-            target=node_id,
-        )
-    )
-    return node_id
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -97,19 +40,19 @@ def graph() -> KnowledgeGraph:
     g = KnowledgeGraph()
 
     # Files
-    _add_file_node(g, "src/auth.py")
-    _add_file_node(g, "src/models.py")
-    _add_file_node(g, "src/types.ts")
+    add_file_node(g, "src/auth.py")
+    add_file_node(g, "src/models.py")
+    add_file_node(g, "src/types.ts")
 
     # Symbols in src/auth.py
-    _add_symbol_node(g, NodeLabel.FUNCTION, "src/auth.py", "validate", 1, 10)
+    add_symbol_node(g, NodeLabel.FUNCTION, "src/auth.py", "validate", start_line=1, end_line=10)
 
     # Symbols in src/models.py
-    _add_symbol_node(g, NodeLabel.CLASS, "src/models.py", "User", 1, 20)
-    _add_symbol_node(g, NodeLabel.CLASS, "src/models.py", "Config", 22, 40)
+    add_symbol_node(g, NodeLabel.CLASS, "src/models.py", "User", start_line=1, end_line=20)
+    add_symbol_node(g, NodeLabel.CLASS, "src/models.py", "Config", start_line=22, end_line=40)
 
     # Symbols in src/types.ts
-    _add_symbol_node(g, NodeLabel.INTERFACE, "src/types.ts", "AuthResult", 1, 10)
+    add_symbol_node(g, NodeLabel.INTERFACE, "src/types.ts", "AuthResult", start_line=1, end_line=10)
 
     return g
 
@@ -170,8 +113,8 @@ class TestBuildTypeIndex:
     def test_build_type_index_includes_type_alias(self) -> None:
         """TypeAlias nodes are included."""
         g = KnowledgeGraph()
-        _add_file_node(g, "src/aliases.py")
-        _add_symbol_node(g, NodeLabel.TYPE_ALIAS, "src/aliases.py", "UserID", 1, 1)
+        add_file_node(g, "src/aliases.py")
+        add_symbol_node(g, NodeLabel.TYPE_ALIAS, "src/aliases.py", "UserID", start_line=1, end_line=1)
 
         index = build_name_index(g, _TYPE_LABELS)
         assert "UserID" in index
@@ -180,10 +123,10 @@ class TestBuildTypeIndex:
     def test_build_type_index_multiple_same_name(self) -> None:
         """Multiple types with the same name produce a list with all IDs."""
         g = KnowledgeGraph()
-        _add_file_node(g, "src/a.py")
-        _add_file_node(g, "src/b.py")
-        _add_symbol_node(g, NodeLabel.CLASS, "src/a.py", "Base", 1, 10)
-        _add_symbol_node(g, NodeLabel.CLASS, "src/b.py", "Base", 1, 10)
+        add_file_node(g, "src/a.py")
+        add_file_node(g, "src/b.py")
+        add_symbol_node(g, NodeLabel.CLASS, "src/a.py", "Base", start_line=1, end_line=10)
+        add_symbol_node(g, NodeLabel.CLASS, "src/b.py", "Base", start_line=1, end_line=10)
 
         index = build_name_index(g, _TYPE_LABELS)
         assert "Base" in index

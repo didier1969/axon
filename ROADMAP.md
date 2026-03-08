@@ -20,7 +20,7 @@
 
 ---
 
-## ✅ v0.9 - The Structural Copilot (COMPLETED 2026-03-07)
+## ✅ v1.0 - The Structural Copilot (COMPLETED 2026-03-07)
 **Focus :** Amélioration de la précision de l'audit architectural et de la performance globale.
 
 - [x] **Audit Clustering :** Réduction drastique du bruit dans les rapports d'audit (docs, tests).

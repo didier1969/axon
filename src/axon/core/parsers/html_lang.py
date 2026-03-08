@@ -16,6 +16,7 @@ from axon.core.parsers.base import (
     ParseResult,
     SymbolInfo,
 )
+from axon.core.parsers.utils import find_child_by_type
 
 HTML_LANGUAGE = Language(tshtml.language())
 
@@ -54,10 +55,10 @@ class HtmlParser(LanguageParser):
         self, node: Node, content: str, result: ParseResult
     ) -> None:
         """Process an HTML element node."""
-        start_tag = self._find_child_by_type(node, "start_tag")
+        start_tag = find_child_by_type(node, "start_tag")
         if start_tag is None:
             # Self-closing tag
-            start_tag = self._find_child_by_type(node, "self_closing_tag")
+            start_tag = find_child_by_type(node, "self_closing_tag")
         if start_tag is None:
             return
 
@@ -133,7 +134,7 @@ class HtmlParser(LanguageParser):
 
     def _get_tag_name(self, start_tag: Node) -> str:
         """Extract the tag name from a start_tag or self_closing_tag."""
-        tag_node = self._find_child_by_type(start_tag, "tag_name")
+        tag_node = find_child_by_type(start_tag, "tag_name")
         if tag_node is not None:
             return tag_node.text.decode("utf-8", errors="replace").lower()
         return ""
@@ -157,11 +158,3 @@ class HtmlParser(LanguageParser):
                 if attr_name:
                     attrs[attr_name] = attr_value
         return attrs
-
-    @staticmethod
-    def _find_child_by_type(node: Node, type_name: str) -> Node | None:
-        """Return first direct child of *node* with type *type_name*."""
-        for child in node.children:
-            if child.type == type_name:
-                return child
-        return None

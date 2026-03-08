@@ -69,9 +69,9 @@ def _daemon_evict(slug: str) -> None:
         pass
 
 
-def _load_storage(repo_path: Path | None = None) -> "KuzuBackend":  # noqa: F821
+def _load_storage(repo_path: Path | None = None) -> "AstralBackend":  # noqa: F821
     """Load the KuzuDB backend for the given or current repo."""
-    from axon.core.storage.kuzu_backend import KuzuBackend
+    from axon.core.storage.astral_backend import AstralBackend
 
     target = (repo_path or Path.cwd()).resolve()
     axon_dir = target / ".axon"
@@ -97,7 +97,7 @@ def _load_storage(repo_path: Path | None = None) -> "KuzuBackend":  # noqa: F821
         )
         raise typer.Exit(code=1)
 
-    storage = KuzuBackend()
+    storage = AstralBackend()
     storage.initialize(db_path, read_only=True)
     return storage
 
@@ -332,183 +332,135 @@ def analyze(
         False, "--all-registered", help="Index all repositories in the global registry."
     ),
 ) -> None:
-    """Index a repository into a knowledge graph."""
-    from axon.core.ingestion.pipeline import PipelineResult, run_pipeline
-    from axon.core.storage.kuzu_backend import KuzuBackend
-
-    if all_registered:
-        registry_root = Path.home() / ".axon" / "repos"
-        if not registry_root.exists():
-            console.print("[yellow]No repositories registered.[/yellow]")
-            return
-        
-        for slug_dir in registry_root.iterdir():
-            if not slug_dir.is_dir():
-                continue
-            meta_path = slug_dir / "meta.json"
-            if not meta_path.exists():
-                continue
-            try:
-                meta_data = json.loads(meta_path.read_text())
-                repo_path_str = meta_data.get("path")
-                if repo_path_str:
-                    repo_path = Path(repo_path_str)
-                    if repo_path.exists():
-                        console.print(f"\n[bold]Re-indexing {repo_path.name} ({repo_path})[/bold]")
-                        # Recursively call analyze for this repo
-                        # MUST set all_registered=False to avoid infinite loop
-                        analyze(path=repo_path, full=full, no_embeddings=no_embeddings, show_progress=show_progress, all_registered=False)
-                    else:
-                        console.print(f"[yellow]Skipping {slug_dir.name}: path {repo_path} does not exist.[/yellow]")
-            except Exception:
-                logger.debug("Failed to process registered repo %s", slug_dir.name, exc_info=True)
-        return
-
+    """Index a repository into a knowledge graph using the v1.0 Triple-Pod engine."""
+    import subprocess
+    import sys
+    
     repo_path = path.resolve()
     if not repo_path.is_dir():
         console.print(f"[red]Error:[/red] {repo_path} is not a directory.")
         raise typer.Exit(code=1)
 
-    console.print(f"[bold]Indexing[/bold] {repo_path}")
-
-    axon_dir = repo_path / ".axon"
-    axon_dir.mkdir(parents=True, exist_ok=True)
-
-    slug = compute_repo_slug(repo_path)
-
-    # Auto-migrate existing local DB to central location
-    _auto_migrate_local_kuzu(repo_path, slug)
-
-    # Central DB path
-    central_slot = Path.home() / ".axon" / "repos" / slug
-    central_slot.mkdir(parents=True, exist_ok=True)
-    # Write a placeholder meta.json to the central slot so _register_in_global_registry
-    # doesn't treat it as a corrupt entry and delete the directory (and the kuzu DB).
-    central_placeholder = central_slot / "meta.json"
-    if not central_placeholder.exists():
-        central_placeholder.write_text(
-            json.dumps({"path": str(repo_path), "name": repo_path.name}) + "\n",
-            encoding="utf-8",
-        )
-    db_path = _central_db_path(slug)
-
-    # Singleton lock — prevents two concurrent `axon analyze` on the same repo.
-    # fcntl.flock is released automatically on process death (SIGKILL/OOM), so
-    # there is no risk of stale locks blocking future runs.
-    lock_path = central_slot / "analyze.lock"
-    lock_fd = open(lock_path, "w")  # noqa: SIM115
-    try:
-        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock_fd.close()
-        console.print(
-            f"[red]Error:[/red] '{slug}' is already being indexed by another process.\n"
-            "Wait for it to complete, or kill the blocking process."
-        )
+    console.print(f"[bold green]Starting Axon v1.0 Engine (Triple-Pod) on[/bold green] {repo_path}")
+    
+    watcher_dir = Path(__file__).parent.parent.parent.parent / "src" / "watcher"
+    
+    if not watcher_dir.exists():
+        console.print(f"[red]Error: Watcher directory not found at {watcher_dir}. Are you running from source?[/red]")
         raise typer.Exit(code=1)
 
     try:
-        # Auto-detect stale index: files indexed but 0 symbols → force full re-index.
-        if not full:
-            meta_path = axon_dir / "meta.json"
-            if meta_path.exists():
-                try:
-                    prev = json.loads(meta_path.read_text(encoding="utf-8"))
-                    prev_stats = prev.get("stats", {})
-                    if prev_stats.get("files", 0) > 0 and prev_stats.get("symbols", 0) == 0:
-                        full = True
-                        console.print(
-                            "[yellow]Warning: previous index has no symbols"
-                            " — forcing full re-index.[/yellow]"
-                        )
-                except (json.JSONDecodeError, KeyError):
-                    pass
+        # Lancer le pod Elixir qui va faire le scan initial puis surveiller
+        env = os.environ.copy()
+        # On peut passer le dossier à surveiller en variable d'environnement si besoin
+        # Mais le serveur par défaut regarde 5 crans au dessus, ce qui tombe sur la racine du projet
+        # Pour être dynamique sur n'importe quel dépôt :
+        subprocess.run(["mix", "run", "--no-halt"], cwd=str(watcher_dir), env=env, check=True)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Engine stopped.[/yellow]")
+    except subprocess.CalledProcessError as e:
+        console.print(f"\n[red]Engine crashed with exit code {e.returncode}[/red]")
+        raise typer.Exit(code=e.returncode)
 
-        _daemon_evict(slug)
-        storage = KuzuBackend()
-        storage.initialize(db_path)
+fleet_app = typer.Typer(help="Manage multiple project indexers (The Fleet).")
+app.add_typer(fleet_app, name="fleet")
 
-        result: PipelineResult | None = None
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-            transient=True,
-        ) as progress:
-            task = progress.add_task("Starting...", total=None)
+@fleet_app.command(name="up")
+def fleet_up() -> None:
+    """Launch indexers for all registered projects in background."""
+    registry_root = Path.home() / ".axon" / "repos"
+    watcher_dir = Path(__file__).parent.parent.parent.parent / "src" / "watcher"
+    
+    if not registry_root.exists():
+        console.print("[yellow]No registered repositories found.[/yellow]")
+        return
 
-            _show_progress = show_progress or bool(os.getenv("AXON_ANALYZE_PROGRESS"))
-
-            def on_progress(phase: str, pct: float) -> None:
-                progress.update(task, description=f"{phase} ({pct:.0%})")
-                if _show_progress and pct >= 1.0:
-                    print(f"[{phase}] done", file=sys.stderr, flush=True)
-
-            _, result = run_pipeline(
-                repo_path=repo_path,
-                storage=storage,
-                full=full,
-                progress_callback=on_progress,
-                embeddings=not no_embeddings,
-                wait_embeddings=True,
-            )
-
-        meta = {
-            "version": __version__,
-            "name": repo_path.name,
-            "slug": slug,
-            "path": str(repo_path),
-            "stats": {
-                "files": result.files,
-                "symbols": result.symbols,
-                "relationships": result.relationships,
-                "clusters": result.clusters,
-                "flows": result.processes,
-                "dead_code": result.dead_code,
-                "coupled_pairs": result.coupled_pairs,
-                "embeddings": result.embeddings,
-            },
-            "last_indexed_at": datetime.now(tz=timezone.utc).isoformat(),
-        }
-        meta_path = axon_dir / "meta.json"
-        meta_content = json.dumps(meta, indent=2) + "\n"
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=axon_dir,
-            delete=False,
-            suffix=".tmp",
-        ) as tmp_f:
-            tmp_f.write(meta_content)
-            tmp_name = tmp_f.name
-        os.replace(tmp_name, meta_path)
-
+    console.print("🚀 [bold green]Axon Fleet: Launching indexers for all projects...[/bold green]")
+    
+    for slug_dir in registry_root.iterdir():
+        if not slug_dir.is_dir(): continue
+        meta_path = slug_dir / "meta.json"
+        if not meta_path.exists(): continue
+        
         try:
-            _register_in_global_registry(meta, repo_path)
-        except (OSError, ValueError, KeyError):
-            logger.debug("Failed to register repo in global registry", exc_info=True)
+            meta = json.loads(meta_path.read_text())
+            repo_path = meta.get("path")
+            repo_name = meta.get("name")
+            
+            if repo_path and os.path.exists(repo_path):
+                console.print(f"  -> Launching indexer for [bold]{repo_name}[/bold]...")
+                env = os.environ.copy()
+                env["AXON_WATCH_DIR"] = repo_path
+                env["AXON_REPO_SLUG"] = slug_dir.name # C'est ici que réside la perfection
+                
+                # Launch detached process surviving CLI exit
+                subprocess.Popen(
+                    ["mix", "run", "--no-halt"],
+                    cwd=str(watcher_dir),
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+        except Exception as e:
+            console.print(f"  [red]!! Failed to launch {slug_dir.name}: {e}[/red]")
 
-        console.print()
-        console.print("[bold green]Indexing complete.[/bold green]")
-        console.print(f"  Files:          {result.files}")
-        console.print(f"  Symbols:        {result.symbols}")
-        console.print(f"  Relationships:  {result.relationships}")
-        if result.clusters > 0:
-            console.print(f"  Clusters:       {result.clusters}")
-        if result.processes > 0:
-            console.print(f"  Flows:          {result.processes}")
-        if result.dead_code > 0:
-            console.print(f"  Dead code:      {result.dead_code}")
-        if result.coupled_pairs > 0:
-            console.print(f"  Coupled pairs:  {result.coupled_pairs}")
-        if result.embeddings > 0:
-            console.print(f"  Embeddings:     {result.embeddings}")
-        console.print(f"  Duration:       {result.duration_seconds:.2f}s")
+    console.print("\n✅ [bold]Fleet launched.[/bold] Use 'axon fleet status' to track progress.")
 
-        storage.close()
-    finally:
-        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-        lock_fd.close()
+@fleet_app.command(name="stop")
+def fleet_stop() -> None:
+    """Stop all background project indexers."""
+    import signal
+    console.print("🛑 [bold red]Axon Fleet: Stopping all indexers...[/bold red]")
+    # On cherche les processus 'beam.smp' (Elixir) qui ont 'axon_watcher' dans leurs arguments
+    # Ou plus simple pour cette version : on tue tous les processus mix rattachés à src/watcher
+    try:
+        subprocess.run(["pkill", "-f", "mix run --no-halt"], check=False)
+        console.print("✅ All fleet processes terminated.")
+    except Exception as e:
+        console.print(f"[red]Error stopping fleet: {e}[/red]")
+
+@fleet_app.command(name="status")
+def fleet_status() -> None:
+    """Display synchronization status of all projects."""
+    from rich.table import Table
+    registry_root = Path.home() / ".axon" / "repos"
+    
+    table = Table(title="Axon Fleet Sync Status")
+    table.add_column("Project", style="cyan")
+    table.add_column("Status", style="magenta")
+    table.add_column("Progress", justify="right")
+    table.add_column("Files", justify="right")
+    table.add_column("Last Update", style="dim")
+
+    for slug_dir in sorted(registry_root.iterdir()):
+        if not slug_dir.is_dir(): continue
+        meta_path = slug_dir / "meta.json"
+        status_path = slug_dir / "status.json"
+        
+        if not meta_path.exists(): continue
+        
+        try:
+            meta = json.loads(meta_path.read_text())
+            name = meta.get("name", slug_dir.name)
+            
+            status_data = {"status": "stopped", "progress": 0, "synced": 0, "total": 0, "last_update": "-"}
+            if status_path.exists():
+                status_data = json.loads(status_path.read_text())
+
+            color = "green" if status_data["status"] == "live" else "yellow"
+            if status_data["status"] == "stopped": color = "red"
+
+            table.add_row(
+                name,
+                f"[{color}]{status_data['status']}[/{color}]",
+                f"{status_data['progress']}%",
+                f"{status_data['synced']}/{status_data['total']}",
+                status_data.get("last_update", "-")
+            )
+        except: pass
+
+    console.print(table)
 
 @app.command()
 def status() -> None:
@@ -802,7 +754,7 @@ def watch(
 
     from axon.core.ingestion.pipeline import run_pipeline
     from axon.core.ingestion.watcher import watch_repo
-    from axon.core.storage.kuzu_backend import KuzuBackend
+    from axon.core.storage.astral_backend import AstralBackend
 
     repo_path = Path.cwd().resolve()
     axon_dir = repo_path / ".axon"
@@ -813,7 +765,7 @@ def watch(
     (Path.home() / ".axon" / "repos" / slug).mkdir(parents=True, exist_ok=True)
     db_path = _central_db_path(slug)
 
-    storage = KuzuBackend()
+    storage = AstralBackend()
     storage.initialize(db_path)
 
     if not (axon_dir / "meta.json").exists():
@@ -1037,7 +989,7 @@ def serve(
 
     from axon.core.ingestion.pipeline import run_pipeline
     from axon.core.ingestion.watcher import watch_repo
-    from axon.core.storage.kuzu_backend import KuzuBackend
+    from axon.core.storage.astral_backend import AstralBackend
 
     repo_path = Path.cwd().resolve()
     axon_dir = repo_path / ".axon"
@@ -1048,7 +1000,7 @@ def serve(
     (Path.home() / ".axon" / "repos" / slug).mkdir(parents=True, exist_ok=True)
     db_path = _central_db_path(slug)
 
-    storage = KuzuBackend()
+    storage = AstralBackend()
     storage.initialize(db_path)
 
     if not (axon_dir / "meta.json").exists():

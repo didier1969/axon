@@ -5,20 +5,20 @@
 See: .paul/PROJECT.md (updated 2026-02-28 after v0.5 complete)
 
 **Core value:** Developers and AI agents can instantly understand any codebase — files auto-indexed, agents query the DB to reduce token usage and improve quality.
-**Current focus:** v0.9 Language Coverage — new milestone, ready to plan.
+**Current focus:** v1.0 Language Coverage — new milestone, ready to plan.
 
 ## Current Position
 
-Milestone: v0.9 Language Coverage
+Milestone: v1.0 Language Coverage
 Phase: 3 of 5 (Language Parsers — Part 1)
 Plan: Not started
 Status: Milestone created — ready to plan Phase 3
-Last activity: 2026-03-07 — v0.9 milestone initialized (3 phases: 03-language-parsers-1, 04-language-parsers-2, 05-registry-dx)
+Last activity: 2026-03-07 — v1.0 milestone initialized (3 phases: 03-language-parsers-1, 04-language-parsers-2, 05-registry-dx)
 
 Progress:
 - v0.7 Quality & Security: [██████████] 100% ✓
 - v0.8 Graph Intelligence & Search Quality: [██████████] 100% ✓
-- v0.9 Language Coverage: [░░░░░░░░░░] 0% (Phase 3 not started)
+- v1.0 Language Coverage: [░░░░░░░░░░] 0% (Phase 3 not started)
 
 ## Loop Position
 
@@ -77,7 +77,7 @@ PLAN ──▶ APPLY ──▶ UNIFY
 | Issue | Origin | Effort | Revisit |
 |-------|--------|--------|---------|
 | test_watcher.py at 28s (target was 15s) | v0.5 Plan 01-02 | S | accept as-is |
-| cohesion: 0.0 placeholder in communities | v0.5 Plan 02-02 | S | ✓ RESOLVED in v0.8 02-02 (real intra-edge density) |
+| cohesion: 0.0 placeholder in communities | v0.5 Plan 02-02 | S | ✓ RESOLVED in v1.0.02-02 (real intra-edge density) |
 | No tests for byte offsets or axon_read_symbol | v0.7 Plan 02-01 | S | ✓ RESOLVED in 02-02 |
 
 ### Blockers/Concerns
@@ -91,7 +91,7 @@ Uncommitted: STATE.md, ROADMAP.md (milestone init — will commit)
 ## Session Continuity
 
 Last session: 2026-03-07
-Stopped at: v0.9 milestone created — Phase 3 (Language Parsers Part 1) ready to plan
+Stopped at: v1.0 milestone created — Phase 3 (Language Parsers Part 1) ready to plan
 Next action: /paul:plan for Phase 3 (Java, C#, Ruby parsers)
 Resume file: .paul/handoffs/archive/HANDOFF-2026-03-07b.md
 Resume context: 958 tests passing; daemon evict fix (707ef43); Gemini MCP+GEMINI.md configured; systemd pending wsl --shutdown
