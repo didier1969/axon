@@ -20,6 +20,11 @@
 - **Optimisation Contexte :** Gain de ~40%% d'\''espace pour les prompts IA.
 - **Santé Globale :** Nouveau tool `axon_health` unifiant le diagnostic.
 
+## MCP v1.3
+- **Async-Native :** Passage au mode asynchrone complet pour le serveur MCP.
+- **Support Notifications :** Activation des notifications de changement d'\''outils et de ressources.
+- **Robustesse :** Amélioration de la gestion des erreurs et de l'\''initialisation du stockage.
+
 ## Correctifs Critiques
 - **Crash Terminal :** RÉSOLU par la délégation de l'Audit au Pod C (Suppression du BFS local).
 - **Connectivité :** `AstralBackend` implémenté comme client TCP/MsgPack réel.

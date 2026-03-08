@@ -18,6 +18,20 @@
         "type": "github"
       }
     },
+    "hydradb-src": {
+      "flake": false,
+      "locked": {
+        "dir": ".worktrees/feature-hydraDB-gemini",
+        "narHash": "sha256-HSxqO/7+/EK8+AExSqqeJcdKlkMP5kQB9JaI7RUXtBk=",
+        "path": "/home/dstadel/projects/multiDB",
+        "type": "path"
+      },
+      "original": {
+        "dir": ".worktrees/feature-hydraDB-gemini",
+        "path": "/home/dstadel/projects/multiDB",
+        "type": "path"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1772773019,
@@ -37,6 +51,7 @@
     "root": {
       "inputs": {
         "flake-utils": "flake-utils",
+        "hydradb-src": "hydradb-src",
         "nixpkgs": "nixpkgs"
       }
     },

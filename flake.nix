@@ -5,9 +5,10 @@ inputs = {
   flake-utils.url = "github:numtide/flake-utils";
   # HydraDB Stable Source
   hydradb-src = {
-    url = "github:didier1969/hydradb/v0.9.0";
+    url = "path:/home/dstadel/projects/multiDB?dir=.worktrees/feature-hydraDB-gemini";
     flake = false;
   };
+
 };
 
 outputs = { self, nixpkgs, flake-utils, hydradb-src, ... }:
