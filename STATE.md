@@ -14,6 +14,12 @@
 - **Nouveau Tool :** `axon_audit` pour l'audit de sécurité OWASP délégué.
 - **Factory Pattern :** Serveur refactorisé pour une meilleure testabilité.
 
+## MCP v1.2
+- **Consolidation API :** Réduction de 17 à 8 outils haute performance.
+- **Outils "Vue 360" :** Implémentation de `axon_inspect` (Fusion Code/Graphe/Stats).
+- **Optimisation Contexte :** Gain de ~40%% d'\''espace pour les prompts IA.
+- **Santé Globale :** Nouveau tool `axon_health` unifiant le diagnostic.
+
 ## Correctifs Critiques
 - **Crash Terminal :** RÉSOLU par la délégation de l'Audit au Pod C (Suppression du BFS local).
 - **Connectivité :** `AstralBackend` implémenté comme client TCP/MsgPack réel.

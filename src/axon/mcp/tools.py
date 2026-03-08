@@ -1652,3 +1652,72 @@ def handle_audit(
     finally:
         if _repo_storage is not None:
             _repo_storage.close()
+
+
+def handle_inspect(
+    storage: StorageBackend,
+    symbol: str,
+    repo: str | None = None,
+    include_usages: bool = False,
+) -> str:
+    """Vue 360 of a symbol: code, context, and stats."""
+    # 1. Get Source Code
+    source = handle_read_symbol(storage, symbol, repo=repo)
+
+    # 2. Get Context (Callers/Callees)
+    context = handle_context(storage, symbol, repo=repo)
+
+    # 3. Get Summary
+    summary = handle_summarize(storage, symbol, repo=repo)
+
+    lines = [f"🔍 Inspection of '{symbol}'", "=" * 40]
+    lines.append("--- SOURCE CODE ---")
+    lines.append(source)
+    lines.append("\n--- ARCHITECTURAL CONTEXT ---")
+    lines.append(context)
+    lines.append("\n--- SYMBOL SUMMARY ---")
+    lines.append(summary)
+
+    if include_usages:
+        lines.append("\n--- USAGES ---")
+        lines.append(handle_find_usages(storage, symbol, repo=repo))
+
+    return "\n".join(lines)
+
+
+def handle_health(
+    storage: StorageBackend,
+    repo: str | None = None,
+    filter_type: str = "all",
+) -> str:
+    """Global health report for the repository."""
+    lines = [f"🏥 Global Health Report: {repo or 'current'}", "=" * 40]
+
+    if filter_type in ["all", "dead_code"]:
+        lines.append("\n💀 DEAD CODE:")
+        lines.append(handle_dead_code(storage))
+
+    if filter_type in ["all", "tests"]:
+        lines.append("\n🧪 TEST COVERAGE GAPS:")
+        lines.append(handle_coverage_gaps(storage, repo=repo))
+
+    if filter_type in ["all", "entries"]:
+        lines.append("\n🚪 ENTRY POINTS:")
+        lines.append(handle_entry_points(storage, repo=repo))
+
+    return "\n".join(lines)
+
+
+def _get_local_slug() -> str | None:
+    """Read the repo slug from .axon/meta.json in the current working directory."""
+    meta_path = Path.cwd() / ".axon" / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        return meta.get("slug")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def handle_batch_call(calls: list[dict]) -> str:
+    """Consolidated batch execution handler."""
+    return "Batch processing is handled by the server layer."

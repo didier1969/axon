@@ -47,3 +47,24 @@ Sécurisation Cypher, byte offsets précis, axon_read_symbol.
 <summary>v0.6 Daemon & Centralisation — 2026-03-02</summary>
 Daemon central avec cache LRU, stockage ~/.axon/repos/.
 </details>
+
+## 🏗️ Consolidation MCP v1.2 (En cours)
+
+**Objectif :** Réduire la charge cognitive de l'IA et optimiser l'économie du contexte en passant de 17 à 8 outils haute performance.
+
+### 📦 Spécification des Outils Consolidés
+1.  **`axon_query` :** Recherche hybride (texte + vecteur) et similarité sémantique.
+2.  **`axon_inspect` :** Vue 360° d'un symbole (code source, appelants/appelés, statistiques).
+3.  **`axon_audit` :** Vérification de conformité (Sécurité OWASP, Qualité, Anti-patterns).
+4.  **`axon_impact` :** Analyse prédictive (Rayon d'impact et chemins critiques).
+5.  **`axon_health` :** Rapport de santé global (Code mort, lacunes de tests, points d'entrée).
+6.  **`axon_diff` :** Analyse sémantique des changements (Git Diff -> Symboles touchés).
+7.  **`axon_batch` :** Orchestration d'appels multiples (Performance).
+8.  **`axon_cypher` :** Interface de bas niveau pour requêtes HydraDB brutes.
+
+### 🛠️ Protocole d'Exécution
+- [ ] **Phase 1 (Tests) :** Écrire les tests E2E pour les 8 nouvelles signatures.
+- [ ] **Phase 2 (Tronc) :** Refactoriser `mcp/server.py` pour enregistrer la nouvelle liste.
+- [ ] **Phase 3 (Feuilles) :** Fusionner la logique dans `mcp/tools.py`.
+- [ ] **Phase 4 (Purge) :** Supprimer les 9 anciens outils redondants.
+- [ ] **Phase 5 (Qualité) :** Validation 100% PASS et Zéro Warning.
