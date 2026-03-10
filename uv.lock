@@ -62,11 +62,13 @@ version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastembed" },
+    { name = "loguru" },
     { name = "mcp" },
     { name = "msgpack" },
     { name = "pandas" },
     { name = "pathspec" },
     { name = "pyarrow" },
+    { name = "pydantic" },
     { name = "rich" },
     { name = "tree-sitter" },
     { name = "tree-sitter-css" },
@@ -103,12 +105,14 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastembed", specifier = ">=0.7.0" },
-    { name = "mcp", specifier = ">=1.0.0" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "mcp", extras = ["server"], specifier = ">=1.2.1" },
     { name = "msgpack", specifier = ">=1.1.2" },
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=5.0.0" },
     { name = "pandas", specifier = ">=3.0.1" },
     { name = "pathspec", specifier = ">=1.0.4" },
     { name = "pyarrow", specifier = ">=23.0.1" },
+    { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
@@ -2157,8 +2161,8 @@ name = "uvicorn"
 version = "0.41.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click" },
-    { name = "h11" },
+    { name = "click", marker = "sys_platform != 'emscripten'" },
+    { name = "h11", marker = "sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/32/ce/eeb58ae4ac36fe09e3842eb02e0eb676bf2c53ae062b98f1b2531673efdd/uvicorn-0.41.0.tar.gz", hash = "sha256:09d11cf7008da33113824ee5a1c6422d89fbc2ff476540d69a34c87fab8b571a", size = 82633, upload-time = "2026-02-16T23:07:24.1Z" }
 wheels = [

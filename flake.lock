@@ -21,15 +21,17 @@
     "hydradb-src": {
       "flake": false,
       "locked": {
-        "dir": ".worktrees/feature-hydraDB-gemini",
-        "narHash": "sha256-HSxqO/7+/EK8+AExSqqeJcdKlkMP5kQB9JaI7RUXtBk=",
-        "path": "/home/dstadel/projects/multiDB",
-        "type": "path"
+        "lastModified": 1773009479,
+        "narHash": "sha256-huUz2Sea8h/UKTPMhCEps5soRcZqfMxMEmVa5W+J4wY=",
+        "ref": "refs/heads/master",
+        "rev": "cd86c03c6519750c55a3b771df61f892c72ce159",
+        "revCount": 165,
+        "type": "git",
+        "url": "https://github.com/didier1969/hydraDB.git"
       },
       "original": {
-        "dir": ".worktrees/feature-hydraDB-gemini",
-        "path": "/home/dstadel/projects/multiDB",
-        "type": "path"
+        "type": "git",
+        "url": "https://github.com/didier1969/hydraDB.git"
       }
     },
     "nixpkgs": {

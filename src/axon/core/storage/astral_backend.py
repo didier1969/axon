@@ -17,7 +17,7 @@ class AstralBackend(StorageBackend):
     Communicates with Pod C (HydraDB) via TCP Socket + MsgPack on port 4040.
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 4040, timeout: int = 30):
+    def __init__(self, host: str = "127.0.0.1", port: int = 6040, timeout: int = 30):
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -112,3 +112,11 @@ class AstralBackend(StorageBackend):
 
     def get_indexed_files(self) -> dict[str, str]:
         return self._send_command("get_files", {}) or {}
+
+    def get_fleet_status(self) -> list[dict]:
+        """Fetch all repository metadata from HydraDB."""
+        # Use a specialized query to fetch all repo metadata keys
+        return self._send_command("query", {
+            "query": "MATCH (n:Metadata) WHERE n.key STARTS WITH 'axon:repo:' RETURN n.value as value, n.key as key",
+            "params": {}
+        }) or []

@@ -20,10 +20,17 @@ defmodule Axon.Watcher.MixProject do
 
   defp deps do
     [
-      {:jason, "~> 1.4"}, # Gardé pour du debug ou de la config si besoin
-      {:msgpax, "~> 2.4"}, # Pour le transport binaire ultra-rapide
-      {:nimble_pool, "~> 1.0"}, # Pour le pool de workers Python
-      {:file_system, "~> 1.0"} # Pour la surveillance native de l'OS
+      {:rustler, "~> 0.34.0"},
+      {:jason, "~> 1.4"},
+      {:msgpax, "~> 2.4"},
+      {:nimble_pool, "~> 1.0"},
+      {:file_system, "~> 1.0"},
+      {:phoenix, "~> 1.7"},
+      {:phoenix_live_view, "~> 1.0"},
+      {:bandit, "~> 1.0"},
+      {:ecto, "~> 3.10"},
+      {:ecto_sqlite3, "~> 0.10"},
+      {:oban, "~> 2.18"}
     ]
   end
 end

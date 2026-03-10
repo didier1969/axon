@@ -1,0 +1,17 @@
+[package]
+name = "axon_scanner"
+version = "0.1.0"
+authors = []
+edition = "2021"
+
+[lib]
+name = "axon_scanner"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.34.0"
+ignore = "0.4"
+notify = "6.1"
+sha2 = "0.10"
+walkdir = "2.4"

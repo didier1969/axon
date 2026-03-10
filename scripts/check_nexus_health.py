@@ -1,34 +1,56 @@
-#!/usr/bin/env python3
-import sys
 import socket
 import msgpack
-import struct
+import sys
 
-def check_pod_c():
-    print("[Nexus] Checking Pod C (HydraDB) on port 5000...", end=" ")
+def check_hydradb():
+    host = '127.0.0.1'
+    port = 6040
+    api_key = "dev_key"
+    
+    print(f"Connecting to HydraDB at {host}:{port}...")
     try:
-        with socket.create_connection(("127.0.0.1", 5000), timeout=2) as sock:
-            print("ONLINE 🟢")
+        # Create socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect((host, port))
+        
+        # 1. Ping (before auth)
+        ping_payload = msgpack.packb({"op": "ping"}, use_bin_type=True)
+        sock.sendall(len(ping_payload).to_bytes(4, byteorder='big') + ping_payload)
+        
+        header = sock.recv(4)
+        length = int.from_bytes(header, byteorder='big')
+        resp = msgpack.unpackb(sock.recv(length), raw=False)
+        print(f"Initial Ping response: {resp}")
+        
+        if resp.get("code") != "PONG":
+            print(f"FAILED: Unexpected initial ping response: {resp}")
+            return False
+
+        # 2. Auth (must follow ping if we didn't close)
+        auth_payload = msgpack.packb({"auth": api_key}, use_bin_type=True)
+        sock.sendall(len(auth_payload).to_bytes(4, byteorder='big') + auth_payload)
+        
+        header = sock.recv(4)
+        length = int.from_bytes(header, byteorder='big')
+        resp = msgpack.unpackb(sock.recv(length), raw=False)
+        print(f"Auth response: {resp}")
+        
+        if resp.get("code") == "AUTH_SUCCESS":
+            print("SUCCESS: HydraDB is industrial-ready!")
             return True
-    except ConnectionRefusedError:
-        print("OFFLINE 🔴 (Start HydraDB Elixir service)")
-        return False
+        else:
+            print(f"FAILED: Auth failed: {resp}")
+            return False
+            
     except Exception as e:
-        print(f"ERROR 🔴 ({e})")
+        print(f"FAILED: Connection error: {e}")
         return False
-
-def check_axon_version():
-    print("[Nexus] Checking Axon Core Version...", end=" ")
-    try:
-        import axon
-        from importlib.metadata import version
-        v = version("axoniq")
-        print(f"{v} 🟢")
-    except Exception:
-        print("UNKNOWN 🔴 (Check installation)")
+    finally:
+        sock.close()
 
 if __name__ == "__main__":
-    print("--- Axon v1.0 Nexus Health Check ---")
-    check_axon_version()
-    check_pod_c()
-    print("-------------------------------------")
+    if check_hydradb():
+        sys.exit(0)
+    else:
+        sys.exit(1)

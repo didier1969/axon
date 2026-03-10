@@ -17,27 +17,27 @@
   * Fixed error raising in `Msgpax.pack/1` when protocol `Msgpax.Packer` is not implemented for the given data types.
   * Complete IEEE 754 support: added NaN and ±infinity.
 
-## v2.2.4 – 21.0-07-23
+## v2.2.4 – 2019-07-23
 
   * Optimized list and map packing.
 
-## v2.2.3 – 21.0-05-13
+## v2.2.3 – 2019-05-13
 
   * Optimized packing by generating less garbage.
 
-## v2.2.2 – 21.0-02-25
+## v2.2.2 – 2019-02-25
 
   * Fixed bare struct unpacking in `Msgpax.PlugParser`—the same behaviour when unpacking maps.
 
-## v2.2.1 – 21.0-01-29
+## v2.2.1 – 2019-01-29
 
   * Fixed deprecation warnings for using non-empty lists with the Collectable protocol.
 
-## v2.2.0 – 21.0-01-16
+## v2.2.0 – 2019-01-16
 
   * Added the `:unpacker` option support in `Msgpax.PlugParser`.
 
-## v2.1.1 – 21.0.02-02
+## v2.1.1 – 2018-02-02
 
   * Made unpacking even slightly more optimized.
 

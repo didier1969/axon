@@ -7,9 +7,15 @@ defmodule Axon.Watcher.Application do
 
   @impl true
   def start(_type, _args) do
+    # On force le port pour le Cockpit
+    System.put_env("PHOENIX_PORT", "6061")
+
     children = [
+      Axon.Watcher.Repo,
+      {Oban, Application.fetch_env!(:axon_watcher, Oban)},
       {PartitionSupervisor, child_spec: Axon.Watcher.Worker, name: Axon.Watcher.WorkerPool},
-      {Axon.Watcher.Server, []}
+      {Axon.Watcher.Server, []},
+      Axon.Watcher.Endpoint
     ]
 
     opts = [strategy: :one_for_one, name: Axon.Watcher.Supervisor]

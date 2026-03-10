@@ -422,43 +422,44 @@ def fleet_stop() -> None:
 
 @fleet_app.command(name="status")
 def fleet_status() -> None:
-    """Display synchronization status of all projects."""
+    """Display synchronization status of all projects from HydraDB."""
     from rich.table import Table
-    registry_root = Path.home() / ".axon" / "repos"
+    from axon.core.storage.astral_backend import AstralBackend
     
-    table = Table(title="Axon Fleet Sync Status")
+    table = Table(title="Axon Fleet Sync Status (Source: HydraDB)")
     table.add_column("Project", style="cyan")
     table.add_column("Status", style="magenta")
     table.add_column("Progress", justify="right")
     table.add_column("Files", justify="right")
-    table.add_column("Last Update", style="dim")
+    table.add_column("Last Scan", style="dim")
+    table.add_column("Last Import", style="dim")
 
-    for slug_dir in sorted(registry_root.iterdir()):
-        if not slug_dir.is_dir(): continue
-        meta_path = slug_dir / "meta.json"
-        status_path = slug_dir / "status.json"
+    try:
+        db = AstralBackend(port=6040)
+        # Auth technique simplifiée pour la démo
+        db._connect()
+        db._socket.sendall(struct.pack('>I', 21) + msgpack.packb({"auth": "dev_key"}))
+        db._socket.recv(1024)
         
-        if not meta_path.exists(): continue
+        results = db.get_fleet_status()
         
-        try:
-            meta = json.loads(meta_path.read_text())
-            name = meta.get("name", slug_dir.name)
+        for item in sorted(results, key=lambda x: x['key']):
+            slug = item['key'].replace("axon:repo:", "")
+            data = item['value']
             
-            status_data = {"status": "stopped", "progress": 0, "synced": 0, "total": 0, "last_update": "-"}
-            if status_path.exists():
-                status_data = json.loads(status_path.read_text())
-
-            color = "green" if status_data["status"] == "live" else "yellow"
-            if status_data["status"] == "stopped": color = "red"
+            color = "green" if data.get("status") == "live" else "yellow"
+            if data.get("status") == "stopped": color = "red"
 
             table.add_row(
-                name,
-                f"[{color}]{status_data['status']}[/{color}]",
-                f"{status_data['progress']}%",
-                f"{status_data['synced']}/{status_data['total']}",
-                status_data.get("last_update", "-")
+                slug,
+                f"[{color}]{data.get('status', 'unknown')}[/{color}]",
+                f"{data.get('progress', 0)}%",
+                f"{data.get('synced', 0)}/{data.get('total', 0)}",
+                data.get("last_scan_at", "-").split("T")[0],
+                data.get("last_file_import_at", "-").split("T")[1][:8] if "T" in data.get("last_file_import_at", "") else "-"
             )
-        except: pass
+    except Exception as e:
+        console.print(f"[red]Error connecting to HydraDB: {e}[/red]")
 
     console.print(table)
 

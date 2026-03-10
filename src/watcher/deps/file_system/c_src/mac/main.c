@@ -106,7 +106,7 @@ static inline void parse_cli_settings(int argc, const char* argv[])
     if ((osMajorVersion > 10) | ((osMajorVersion == 10) & (osMinorVersion >= 9))) {
       config.flags |= kFSEventStreamCreateFlagMarkSelf;
     } else {
-      fprintf(stderr, "MacOSX 11.0 or later required for --mark-self\n");
+      fprintf(stderr, "MacOSX 10.9 or later required for --mark-self\n");
       exit(EXIT_FAILURE);
     }
   }
