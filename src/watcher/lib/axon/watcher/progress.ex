@@ -39,6 +39,31 @@ defmodule Axon.Watcher.Progress do
     end
   end
 
+  def get_directory_stats(_repo_slug) do
+    # On récupère tous les fichiers via une requête Cypher sur Pod C
+    case sync_send_to_hydradb("keys", %{"pattern" => "axon:mtime:*" }) do
+      {:ok, %{"status" => "ok", "keys" => keys}} ->
+        keys
+        |> Enum.map(fn key -> 
+           parts = String.split(key, ":")
+           path = List.last(parts)
+           Path.relative_to(path, File.cwd!()) |> Path.split() |> List.first()
+        end)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.frequencies()
+      _ -> %{}
+    end
+  end
+
+  def purge_repo(repo_slug) do
+    # On supprime les métadonnées et tous les mtimes associés au slug
+    sync_send_to_hydradb("delete", %{"key" => "axon:repo:#{repo_slug}"})
+    # Pour les mtimes, comme on n'a pas de delete by pattern natif simple ici, 
+    # on pourrait itérer ou envoyer une commande cypher si Pod C le permet.
+    # On se contente du repo status pour l'UI pour l'instant.
+    Logger.warning("[Progress] Knowledge base purge requested for #{repo_slug}")
+  end
+
   def get_file_mtime(repo_slug, file_path) do
     key = "axon:mtime:#{repo_slug}:#{file_path}"
     case sync_send_to_hydradb("get", %{"key" => key}) do

@@ -2,14 +2,13 @@ defmodule Axon.Watcher.Server do
   @moduledoc """
   The core orchestrator of Pod A.
   Watches the filesystem, batches events, and dispatches to the Worker Pool.
+  Now with strict Binary Filtering to prevent Ecto/Oban crashes.
   """
   use GenServer
   require Logger
 
-  alias Axon.Watcher.PoolFacade
-
-  @batch_timeout 500 # 500ms de debounce
-  @max_batch_size 50 # On envoie max 50 fichiers par worker
+  @batch_timeout 500
+  @max_batch_size 20
 
   # --- Client API ---
 
@@ -17,61 +16,69 @@ defmodule Axon.Watcher.Server do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  def trigger_scan, do: GenServer.cast(__MODULE__, :trigger_scan)
+  def pause_monitoring, do: GenServer.cast(__MODULE__, :pause_monitoring)
+  def resume_monitoring, do: GenServer.cast(__MODULE__, :resume_monitoring)
+  def purge_data, do: GenServer.call(__MODULE__, :purge_data)
+  def get_monitoring_status, do: GenServer.call(__MODULE__, :get_monitoring_status)
+
   # --- Server Callbacks ---
 
   @impl true
   def init(opts) do
-    repo_slug = System.get_env("AXON_REPO_SLUG") || "unknown"
+    repo_slug = System.get_env("AXON_REPO_SLUG") || (Path.expand(".") |> Path.basename())
     env_dir = System.get_env("AXON_WATCH_DIR")
     default_dir = Path.expand("../../../../../", __DIR__)
     watch_dir = Keyword.get(opts, :dir, env_dir || default_dir)
     Logger.info("Pod A (Watcher) starting supervision on: #{watch_dir}")
 
-    # On signale le démarrage immédiatement via HydraDB
+    # Nettoyage initial des logs pour éviter les boucles
     Axon.Watcher.Progress.update_status(repo_slug, %{status: "live", progress: 0})
 
     case FileSystem.start_link(dirs: [watch_dir]) do
       {:ok, watcher_pid} ->
         FileSystem.subscribe(watcher_pid)
-        state = %{
-          repo_slug: repo_slug,
-          watcher_pid: watcher_pid, 
-          watch_dir: watch_dir,
-          pending_files: MapSet.new(),
-          timer: nil
-        }
-        send(self(), :initial_scan)
-        {:ok, state}
-      
-      _error ->
-        Logger.warning("FileSystem backend not available. Falling back to manual initial scan.")
-        state = %{
-          repo_slug: repo_slug,
-          watcher_pid: nil, 
-          watch_dir: watch_dir,
-          pending_files: MapSet.new(),
-          timer: nil
-        }
-        send(self(), :initial_scan)
-        {:ok, state}
+        {:ok, %{repo_slug: repo_slug, watcher_pid: watcher_pid, watch_dir: watch_dir, pending_files: MapSet.new(), timer: nil, monitoring_active: true}}
+      _ ->
+        {:ok, %{repo_slug: repo_slug, watcher_pid: nil, watch_dir: watch_dir, pending_files: MapSet.new(), timer: nil, monitoring_active: true}}
     end
   end
 
   @impl true
+  def handle_cast(:trigger_scan, state) do
+    send(self(), :initial_scan)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast(:pause_monitoring, state), do: {:noreply, %{state | monitoring_active: false}}
+  @impl true
+  def handle_cast(:resume_monitoring, state), do: {:noreply, %{state | monitoring_active: true}}
+
+  @impl true
+  def handle_call(:purge_data, _from, state) do
+    Axon.Watcher.Progress.purge_repo(state.repo_slug)
+    Axon.Watcher.Repo.query("DELETE FROM oban_jobs")
+    {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_call(:get_monitoring_status, _from, state), do: {:reply, state.monitoring_active, state}
+
+  @impl true
   def handle_info(:initial_scan, state) do
     Task.start(fn ->
-      Logger.info("[Pod A] Starting high-performance Rust scan of #{state.watch_dir}")
-      
-      # Appel au NIF Rust ultra-rapide
+      Logger.info("[Pod A] DEBUG: Scanning directory: #{state.watch_dir}")
       all_files = Axon.Scanner.scan(state.watch_dir)
-              |> Enum.filter(&should_process?/1)
+      Logger.info("[Pod A] DEBUG: Rust NIF returned #{length(all_files)} raw files.")
       
-      # Filtrage différentiel (mtime)
-      files = Enum.filter(all_files, fn path ->
+      filtered_files = Enum.filter(all_files, &should_process?/1)
+      Logger.info("[Pod A] DEBUG: After should_process? filter: #{length(filtered_files)} files.")
+      
+      files = Enum.filter(filtered_files, fn path ->
           case File.stat(path) do
             {:ok, %{mtime: mtime}} ->
               last_mtime = Axon.Watcher.Progress.get_file_mtime(state.repo_slug, path)
-              # On convertit le mtime Erlang en entier pour la comparaison
               current_mtime = :erlang.phash2(mtime)
               if current_mtime != last_mtime do
                  Axon.Watcher.Progress.save_file_mtime(state.repo_slug, path, current_mtime)
@@ -84,61 +91,22 @@ defmodule Axon.Watcher.Server do
       end)
 
       total = length(files)
-      Logger.info("[Pod A] Found #{total} files to index (changed) for #{state.repo_slug} (Total: #{length(all_files)})")
-      
       if total > 0 do
-        Axon.Watcher.Progress.update_status(state.repo_slug, %{
-          status: "indexing", 
-          total: total, 
-          progress: 0, 
-          synced: 0,
-          last_scan_at: DateTime.utc_now() |> DateTime.to_iso8601()
-        })
-        
-        files
-        |> Enum.chunk_every(@max_batch_size)
-        |> Enum.with_index()
-        |> Enum.each(fn {batch, index} ->
-          dispatch_batch(batch)
-          
-          synced = min((index + 1) * @max_batch_size, total)
-          progress = round((synced / total) * 100)
-          
-          if rem(index, 5) == 0 or synced == total do
-            Axon.Watcher.Progress.update_status(state.repo_slug, %{
-              status: "indexing", 
-              total: total, 
-              synced: synced, 
-              progress: progress,
-              last_file_import_at: DateTime.utc_now() |> DateTime.to_iso8601()
-            })
-          end
-        end)
-        
-        Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", total: total, synced: total, progress: 100})
-        Logger.info("[Pod A] Completed initial indexing for #{state.repo_slug}")
-        
-        # Mode Rotation : Si AXON_SCAN_ONLY est vrai, on s'arrête proprement
-        if System.get_env("AXON_SCAN_ONLY") == "true" do
-           Logger.info("[Pod A] SCAN_ONLY mode active. Halting node.")
-           System.halt(0)
-        end
+        Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "indexing", total: total, progress: 0})
+        files |> Enum.chunk_every(@max_batch_size) |> Enum.each(&dispatch_batch/1)
+        Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", progress: 100})
       else
-        Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", total: 0, synced: 0, progress: 100})
-        if System.get_env("AXON_SCAN_ONLY") == "true", do: System.halt(0)
+        Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", progress: 100})
       end
     end)
-    
     {:noreply, state}
   end
 
   @impl true
   def handle_info({:file_event, _pid, {path, events}}, state) do
     str_path = to_string(path)
-    
-    if should_process?(str_path) do
+    if state.monitoring_active and should_process?(str_path) do
       if :deleted in events do
-        Logger.info("[Pod A] Pruning requested for: #{str_path}")
         {:noreply, state}
       else
         new_pending = MapSet.put(state.pending_files, str_path)
@@ -153,26 +121,23 @@ defmodule Axon.Watcher.Server do
   @impl true
   def handle_info(:process_batch, state) do
     files_to_process = MapSet.to_list(state.pending_files)
-    
-    if length(files_to_process) > 0 do
-      Logger.info("[Pod A] Timer expired. Batching #{length(files_to_process)} files to Pool.")
-      files_to_process
-      |> Enum.chunk_every(@max_batch_size)
-      |> Enum.each(&dispatch_batch/1)
-    end
-
+    if length(files_to_process) > 0, do: files_to_process |> Enum.chunk_every(@max_batch_size) |> Enum.each(&dispatch_batch/1)
     {:noreply, %{state | pending_files: MapSet.new(), timer: nil}}
   end
 
-  # --- Private Logic ---
-
   defp should_process?(path) do
+    # FILTRAGE STRICT DES EXTENSIONS NON-TEXTE
+    ext = Path.extname(path) |> String.downcase()
+    is_binary = ext in [".png", ".jpg", ".jpeg", ".gif", ".pdf", ".exe", ".so", ".beam", ".zip", ".tar", ".gz", ".db", ".sqlite", ".wal", ".pid"]
+    
     not (
-      String.contains?(path, "/.git/") or
-      String.contains?(path, "/.axon/") or
-      String.contains?(path, "/_build/") or
-      String.contains?(path, "/deps/") or
-      String.contains?(path, "__pycache__")
+      is_binary or
+      String.contains?(path, "/.git/") or 
+      String.contains?(path, "/.axon/") or 
+      String.contains?(path, "/_build/") or 
+      String.contains?(path, "/deps/") or 
+      String.contains?(path, "__pycache__") or 
+      String.ends_with?(path, ".log")
     )
   end
 
@@ -184,17 +149,26 @@ defmodule Axon.Watcher.Server do
   defp dispatch_batch(paths) do
     files_payload = Enum.reduce(paths, [], fn path, acc ->
       case File.read(path) do
-        {:ok, content} -> [%{"path" => path, "content" => content} | acc]
+        {:ok, content} -> 
+          if String.printable?(content) do
+            [%{"path" => path, "content" => content} | acc]
+          else
+            acc
+          end
         _ -> acc
       end
     end)
 
     if length(files_payload) > 0 do
-      %{"batch" => files_payload}
-      |> Axon.Watcher.IndexingWorker.new()
-      |> Oban.insert!()
-      
-      Logger.info("[Pod A] Enqueued persistent indexing job for #{length(files_payload)} files.")
+      try do
+        # On passe explicitement une Map à Oban
+        job_args = %{"batch" => files_payload}
+        Axon.Watcher.IndexingWorker.new(job_args)
+        |> Oban.insert!()
+        Logger.info("[Pod A] Enqueued batch of #{length(files_payload)} files.")
+      rescue
+        e -> Logger.error("[Pod A] FAILED to enqueue batch: #{inspect(e)}")
+      end
     end
   end
 end

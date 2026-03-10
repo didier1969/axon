@@ -7,6 +7,7 @@ config :axon_watcher, Axon.Watcher.Endpoint,
   http: [port: String.to_integer(System.get_env("PHOENIX_PORT") || "6061")],
   adapter: Bandit.PhoenixAdapter,
   server: true,
+  check_origin: false,
   live_view: [signing_salt: "axon_cockpit_salt"],
   secret_key_base: "uT+pL/Uv67tW4K1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1"
 
