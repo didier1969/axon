@@ -2,10 +2,12 @@ mod parser;
 mod scanner;
 mod bridge;
 mod graph;
+mod mcp;
 
 use parser::{Parser, python::PythonParser};
 use bridge::{Bridge, BridgeEvent};
 use graph::GraphStore;
+use mcp::McpServer;
 use rayon::prelude::*;
 use std::time::Instant;
 use std::fs;
@@ -13,20 +15,26 @@ use std::env;
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
-    println!("Axon v2 Data Plane : Operational");
-    
     let args: Vec<String> = env::args().collect();
-    let root = if args.len() > 1 { &args[1] } else { "." };
-
-    // Initialisation du Bridge Dashboard (UDS)
-    let socket_path = "/tmp/axon-v2.sock";
-    let bridge = Bridge::new(socket_path);
-    bridge.start_server()?;
+    let is_mcp = args.iter().any(|arg| arg == "--mcp");
+    let root = if args.len() > 1 && !args[1].starts_with("--") { &args[1] } else { "." };
 
     // Initialisation du GraphStore (LadybugDB)
     let db_path = format!("{}/.axon/graph_v2", root);
     let graph_store = Arc::new(GraphStore::new(&db_path)?);
-    println!("GraphStore initialized at {}", db_path);
+
+    if is_mcp {
+        println!("Axon v2 MCP Server : Operational");
+        let server = McpServer::new(graph_store);
+        return server.run();
+    }
+
+    println!("Axon v2 Data Plane : Operational");
+    
+    // Initialisation du Bridge Dashboard (UDS)
+    let socket_path = "/tmp/axon-v2.sock";
+    let bridge = Bridge::new(socket_path);
+    bridge.start_server()?;
 
     let start = Instant::now();
     let scanner = scanner::Scanner::new(root);
