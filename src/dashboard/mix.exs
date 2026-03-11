@@ -10,6 +10,17 @@ defmodule AxonDashboard.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      test_coverage: [
+        summary: [threshold: 85],
+        ignore_modules: [
+          AxonDashboardWeb.CoreComponents,
+          AxonDashboardWeb.Layouts,
+          AxonDashboardWeb.PageHTML,
+          AxonDashboardWeb.PageController,
+          AxonDashboard.Application,
+          AxonDashboardWeb.Telemetry
+        ]
+      ],
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader]
     ]
