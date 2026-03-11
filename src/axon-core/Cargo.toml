@@ -1,0 +1,13 @@
+[package]
+name = "axon-core"
+version = "2.0.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.36", features = ["full"] }
+ignore = "0.4"
+tree-sitter = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+rmp-serde = "1.1"
+anyhow = "1.0"
+rayon = "1.8"
