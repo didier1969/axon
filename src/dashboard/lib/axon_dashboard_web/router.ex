@@ -17,7 +17,7 @@ defmodule AxonDashboardWeb.Router do
   scope "/", AxonDashboardWeb do
     pipe_through :browser
 
-    get "/", PageController, :home
+    live "/", StatusLive, :index
   end
 
   # Other scopes may use custom stacks.

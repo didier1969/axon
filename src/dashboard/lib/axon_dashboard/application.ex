@@ -13,6 +13,7 @@ defmodule AxonDashboard.Application do
       {Phoenix.PubSub, name: AxonDashboard.PubSub},
       # Start a worker by calling: AxonDashboard.Worker.start_link(arg)
       # {AxonDashboard.Worker, arg},
+      AxonDashboard.BridgeClient,
       # Start to serve requests, typically the last entry
       AxonDashboardWeb.Endpoint
     ]
