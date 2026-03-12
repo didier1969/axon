@@ -12,8 +12,8 @@ defmodule Axon.Watcher.Application do
 
     children = [
       Axon.Watcher.Repo,
+      Axon.Watcher.Telemetry,
       {Oban, Application.fetch_env!(:axon_watcher, Oban)},
-      {PartitionSupervisor, child_spec: Axon.Watcher.Worker, name: Axon.Watcher.WorkerPool},
       {Axon.Watcher.Server, []},
       Axon.Watcher.Endpoint
     ]

@@ -1,4 +1,12 @@
 {
+  "model": {
+    "name": "gemini-3.1-pro-preview"
+  },
+  "general": {
+    "plan": {
+      "modelRouting": false
+    }
+  },
   "mcpServers": {
     "axon": {
       "command": "/home/dstadel/.local/bin/axon",

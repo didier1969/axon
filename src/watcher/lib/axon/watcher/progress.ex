@@ -32,6 +32,21 @@ defmodule Axon.Watcher.Progress do
   end
 
   def get_status(repo_slug) do
+    # 1. Try local status first (FAST & RELIABLE)
+    home = System.user_home!()
+    status_path = Path.join([home, ".axon", "repos", repo_slug, "status.json"])
+    
+    case File.read(status_path) do
+      {:ok, json} -> 
+        case Jason.decode(json) do
+          {:ok, data} -> data
+          _ -> fetch_from_hydradb(repo_slug)
+        end
+      _ -> fetch_from_hydradb(repo_slug)
+    end
+  end
+
+  defp fetch_from_hydradb(repo_slug) do
     key = "axon:repo:#{repo_slug}"
     case sync_send_to_hydradb("get", %{"key" => key}) do
       {:ok, %{"status" => "ok", "value" => data}} -> data

@@ -17,6 +17,7 @@
                         'Elixir.Msgpax.Packer.Msgpax.Ext',
                         'Elixir.Msgpax.Packer.Msgpax.Fragment',
                         'Elixir.Msgpax.Packer.Msgpax.ReservedExt',
+                        'Elixir.Msgpax.PlugParser',
                         'Elixir.Msgpax.ReservedExt',
                         'Elixir.Msgpax.UnpackError','Elixir.Msgpax.Unpacker']},
               {optional_applications,[plug]},

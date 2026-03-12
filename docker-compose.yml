@@ -1,0 +1,11 @@
+services:
+  graph-db:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6379:6333"
+    volumes:
+      - ./data/graph:/data
+    restart: always
+
+  # Optionnel : LadybugDB si vous préférez rester sur ce moteur spécifique
+  # mais FalkorDB est actuellement le plus stable en Docker pour du Cypher rapide.

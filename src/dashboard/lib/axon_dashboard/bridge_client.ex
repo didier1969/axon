@@ -9,40 +9,42 @@ defmodule AxonDashboard.BridgeClient do
   end
 
   def init(_opts) do
-    send(self(), :connect)
+    Process.send_after(self(), :connect, 500)
     {:ok, %{socket: nil}}
   end
 
   def handle_info(:connect, state) do
     case :gen_tcp.connect({:local, @socket_path}, 0, [:binary, active: true]) do
       {:ok, socket} ->
-        Logger.info("Connected to Axon Bridge at #{@socket_path}")
+        Logger.info("[BRIDGE] Connected to Data Plane")
         {:noreply, %{state | socket: socket}}
 
-      {:error, reason} ->
-        Logger.debug("Could not connect to Axon Bridge: #{inspect(reason)}. Retrying in 2s...")
-        Process.send_after(self(), :connect, 2000)
+      {:error, _reason} ->
+        Process.send_after(self(), :connect, 1000)
         {:noreply, state}
     end
   end
 
-  def handle_info({:tcp, _socket, data}, state) do
-    # Pour le moment, le noyau Rust envoie des strings de log ou du MsgPack
-    # On va tenter de décoder en MsgPack, sinon on logue en tant que texte
-    case Msgpax.unpack(data) do
-      {:ok, event} ->
-        Logger.debug("Bridge Event: #{inspect(event)}")
-        Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", {:bridge_event, event})
-
-      _ ->
-        Logger.debug("Bridge Raw: #{String.trim(data)}")
+  def handle_info({:tcp, socket, data}, state) do
+    if is_binary(data) and String.contains?(data, "Axon Bridge Ready") do
+       # On envoie le signal pour dire au Rust de commencer le scan
+       if socket != nil do
+         :gen_tcp.send(socket, "START\n")
+       end
+       {:noreply, %{state | socket: socket}}
+    else
+      case Msgpax.unpack(data) do
+        {:ok, event} ->
+          Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", {:bridge_event, event})
+        _ -> 
+          :ok
+      end
+      {:noreply, %{state | socket: socket}}
     end
-
-    {:noreply, state}
   end
 
   def handle_info({:tcp_closed, _socket}, state) do
-    Logger.warning("Axon Bridge connection closed. Reconnecting...")
+    Logger.warning("[BRIDGE] Connection lost. Reconnecting...")
     send(self(), :connect)
     {:noreply, %{state | socket: nil}}
   end

@@ -33,8 +33,15 @@ defmodule AxonDashboard.BridgeClientTest do
 
   test "handles raw text data from bridge" do
     pid = Process.whereis(BridgeClient)
+    # We pass a dummy port (self()) so it doesn't crash on :gen_tcp.send(nil, ...) in test
+    # In a real scenario, this would be a valid port. Since gen_tcp.send checks if it's a port,
+    # let's just make sure we don't pass nil if the logic expects a valid socket.
+    # Wait, the code uses :gen_tcp.send(socket, ...). If we pass a dummy pid, it might fail with badarg.
+    # Actually, if we just want to avoid the crash for coverage, we can just intercept the call or let the test gracefully handle it.
+    # The real issue is the previous test "handles scan complete event" failed because the BridgeClient crashed processing the "Axon Bridge Ready\n" message from the PREVIOUS test (msgpax decoding or handles raw text data) since the messages are processed asynchronously.
+    # The tests are not isolated enough and share the same BridgeClient process.
+    # Let's use an actual dummy port or mock it. The easiest is to make the `BridgeClient` handle `nil` gracefully.
     send(pid, {:tcp, nil, "Axon Bridge Ready\n"})
-    # On vérifie juste que ça ne crashe pas (couverture de la branche raw)
     assert Process.alive?(pid)
   end
 end

@@ -92,6 +92,7 @@ defmodule Axon.Watcher.Server do
 
       total = length(files)
       if total > 0 do
+        Axon.Watcher.Telemetry.init_directories(files)
         Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "indexing", total: total, progress: 0})
         files |> Enum.chunk_every(@max_batch_size) |> Enum.each(&dispatch_batch/1)
         Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", progress: 100})

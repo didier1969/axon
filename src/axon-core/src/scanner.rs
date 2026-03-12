@@ -35,7 +35,8 @@ impl Scanner {
     fn is_supported(&self, path: &PathBuf) -> bool {
         if let Some(ext) = path.extension() {
             match ext.to_str() {
-                Some("py") | Some("ex") | Some("exs") | Some("rs") | Some("ts") | Some("js") => true,
+                Some("py") | Some("ex") | Some("exs") | Some("rs") | Some("ts") | Some("tsx") | 
+                Some("js") | Some("jsx") | Some("go") | Some("java") => true,
                 _ => false,
             }
         } else {

@@ -4,17 +4,17 @@ defmodule Axon.Watcher.IndexingWorker do
   alias Axon.Watcher.PoolFacade
 
   @impl true
-  def perform(%Oban.Job{args: %{"batch" => batch}}) do
-    case PoolFacade.parse_batch(batch) do
-      %{"status" => "ok", "data" => data} ->
-        Logger.info("[Oban] Successfully parsed #{length(data)} files. Ingesting to HydraDB...")
-        # L'ingestion se fait dans PoolFacade ou ici
-        # Pour l'instant on se fie au succès du parsing
-        :ok
-
-      error ->
-        Logger.error("[Oban] Batch failed during parsing: #{inspect(error)}")
-        {:error, error}
-    end
+  def perform(%Oban.Job{args: %{"batch" => batch}, id: job_id}) do
+    Enum.each(batch, fn file ->
+      Axon.Watcher.Telemetry.report_start("oban:#{job_id}", file["path"])
+      
+      case PoolFacade.parse(file["path"], file["content"]) do
+        %{"status" => "ok"} ->
+          Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", file["path"], :ok)
+        error ->
+          Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", file["path"], {:error, error})
+      end
+    end)
+    :ok
   end
 end
