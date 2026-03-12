@@ -49,7 +49,7 @@ For each parser, the implementer MUST reference the legacy Python code from the 
   - Port logic from `origin/main:src/axon/core/parsers/java_lang.py`.
 - **Tests:** Add a unit test module.
 
-### Task 7: Web/Markup Parsers (HTML, CSS, Markdown)
+### Task 7: Web/Markup Parsers (HTML, CSS, Markdown) (COMPLETED)
 - **Files:** `html.rs`, `css.rs`, `markdown.rs` inside `src/axon-core/src/parser/`.
 - **Spec:** Port logic from their respective Python counterparts.
 - **Tests:** Add unit tests.

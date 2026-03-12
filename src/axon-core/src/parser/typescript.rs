@@ -15,7 +15,7 @@ impl Default for TypeScriptParser {
 impl TypeScriptParser {
     pub fn new() -> Self {
         Self {
-            language: tree_sitter_typescript::language_tsx(),
+            language: tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
     }
 
@@ -111,7 +111,7 @@ impl TypeScriptParser {
 impl Parser for TypeScriptParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut parser = TSParser::new();
-        parser.set_language(self.language).unwrap();
+        parser.set_language(&self.language).unwrap();
         let tree = parser.parse(content, None).unwrap();
 
         let source = content.as_bytes();
@@ -160,7 +160,7 @@ impl Parser for TypeScriptParser {
             )
         "#;
 
-        let query = Query::new(self.language, query_str).unwrap();
+        let query = Query::new(&self.language, query_str).unwrap();
         let mut cursor = QueryCursor::new();
         let mut symbols = Vec::new();
         let mut relations = Vec::new();
@@ -170,7 +170,7 @@ impl Parser for TypeScriptParser {
         for m in cursor.matches(&query, tree.root_node(), source) {
             for capture in m.captures {
                 let node = capture.node;
-                let kind = query.capture_names()[capture.index as usize].as_str();
+                let kind = query.capture_names()[capture.index as usize];
 
                 if !seen_nodes.insert((node.id(), kind)) {
                     continue;

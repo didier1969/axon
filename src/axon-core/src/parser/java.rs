@@ -8,7 +8,7 @@ pub struct JavaParser {
 impl JavaParser {
     pub fn new() -> Self {
         Self {
-            language: tree_sitter_java::language(),
+            language: tree_sitter_java::LANGUAGE.into(),
         }
     }
 
@@ -179,7 +179,7 @@ impl JavaParser {
 impl Parser for JavaParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut parser = TSParser::new();
-        parser.set_language(self.language).unwrap();
+        parser.set_language(&self.language).unwrap();
         let tree = parser.parse(content, None).unwrap();
 
         let mut symbols = Vec::new();

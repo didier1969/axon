@@ -21,7 +21,7 @@ impl Default for ElixirParser {
 impl ElixirParser {
     pub fn new() -> Self {
         Self {
-            language: unsafe { std::mem::transmute(tree_sitter_elixir::language()) },
+            language: tree_sitter_elixir::LANGUAGE.into(),
         }
     }
 
@@ -424,7 +424,7 @@ impl ElixirParser {
 impl Parser for ElixirParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut parser = TSParser::new();
-        parser.set_language(self.language).unwrap();
+        parser.set_language(&self.language).unwrap();
         let tree = parser.parse(content, None).unwrap();
 
         let mut result = ExtractionResult {

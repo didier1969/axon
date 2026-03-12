@@ -15,7 +15,7 @@ impl Default for RustParser {
 impl RustParser {
     pub fn new() -> Self {
         Self {
-            language: unsafe { std::mem::transmute(tree_sitter_rust::language()) },
+            language: tree_sitter_rust::LANGUAGE.into(),
         }
     }
 
@@ -479,7 +479,7 @@ impl RustParser {
 impl Parser for RustParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut parser = TSParser::new();
-        parser.set_language(self.language).unwrap();
+        parser.set_language(&self.language).unwrap();
         let tree = parser.parse(content, None).unwrap();
         
         let mut result = ExtractionResult {

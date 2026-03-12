@@ -8,7 +8,7 @@ pub struct PythonParser {
 impl PythonParser {
     pub fn new() -> Self {
         Self {
-            language: tree_sitter_python::language(),
+            language: tree_sitter_python::LANGUAGE.into(),
         }
     }
 }
@@ -16,7 +16,7 @@ impl PythonParser {
 impl Parser for PythonParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut parser = TSParser::new();
-        parser.set_language(self.language).unwrap();
+        parser.set_language(&self.language).unwrap();
         let tree = parser.parse(content, None).unwrap();
         
         let query_str = r#"
@@ -24,14 +24,14 @@ impl Parser for PythonParser {
             (function_definition name: (identifier) @func.name) @func
         "#;
         
-        let query = Query::new(self.language, query_str).unwrap();
+        let query = Query::new(&self.language, query_str).unwrap();
         let mut cursor = QueryCursor::new();
         let mut symbols = Vec::new();
         
         for m in cursor.matches(&query, tree.root_node(), content.as_bytes()) {
             for capture in m.captures {
                 let node = capture.node;
-                let kind = query.capture_names()[capture.index as usize].as_str();
+                let kind = query.capture_names()[capture.index as usize];
                 
                 // On ne garde que les noms pour identifier le symbole
                 if kind.ends_with(".name") {

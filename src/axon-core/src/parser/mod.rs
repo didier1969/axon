@@ -39,6 +39,10 @@ pub mod rust;
 pub mod typescript;
 pub mod go;
 pub mod java;
+pub mod yaml;
+pub mod html;
+pub mod css;
+pub mod markdown;
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
     match path.extension()?.to_str()? {
@@ -49,6 +53,10 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "js" | "jsx" => Some(Box::new(typescript::TypeScriptParser::new())), // TS parser handles JS
         "go" => Some(Box::new(go::GoParser::new())),
         "java" => Some(Box::new(java::JavaParser::new())),
+        "yaml" | "yml" => Some(Box::new(yaml::YamlParser::new())),
+        "html" | "htm" => Some(Box::new(html::HtmlParser::new())),
+        "css" | "scss" => Some(Box::new(css::CssParser::new())),
+        "md" | "markdown" => Some(Box::new(markdown::MarkdownParser::new())),
         _ => None,
     }
 }

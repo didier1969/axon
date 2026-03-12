@@ -92,6 +92,24 @@
   - `task_plan.md` (updated)
   - `progress.md` (updated)
 
+### Phase 7: Task 7 - Web/Markup Parsers (HTML, CSS, Markdown) Implementation
+- **Status:** complete
+- Actions taken:
+  - Checked old Python extraction logic for HTML, CSS, Markdown using `git show`.
+  - Implemented `HtmlParser`, `CssParser`, `MarkdownParser` via manual AST traversal.
+  - Extracted: HTML elements/fields, CSS selectors/variables, Markdown sections/links/fences.
+  - Linked old `tree_sitter_x::LANGUAGE` symbols cleanly through `extern "C"` blocks to maintain compatibility with `tree-sitter` v0.20 API.
+  - Registered routing rules in `mod.rs`.
+  - Added unit tests for each markup language verifying exact parsing behavior.
+  - Verified compilation and logic via `cargo check` and `cargo test`.
+- Files created/modified:
+  - `src/axon-core/src/parser/html.rs` (created)
+  - `src/axon-core/src/parser/css.rs` (created)
+  - `src/axon-core/src/parser/markdown.rs` (created)
+  - `src/axon-core/src/parser/mod.rs` (updated)
+  - `task_plan.md` (updated)
+  - `progress.md` (updated)
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.
