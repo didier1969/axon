@@ -35,6 +35,20 @@
   - `src/axon-core/src/parser/elixir.rs` (created)
   - `task_plan.md` (updated)
 
+### Phase 3: Task 3 - TypeScript Parser Implementation
+- **Status:** complete
+- Actions taken:
+  - Fetched legacy Python parser via git to analyze existing TypeScript extraction logic.
+  - Implemented `TypeScriptParser` in `src/axon-core/src/parser/typescript.rs` using a combined manual AST walker (for exports) and a single large `tree-sitter::Query` for symbols, heritage, imports, and calls.
+  - Extracted `class`, `interface`, `type_alias`, `function_declaration`, `method_definition`, and `arrow_function` using Scheme queries.
+  - Replicated exact Python behavior for XSS sink assignments (`innerHTML`) and exported module routing (`is_entry_point`).
+  - Extracted class heritage (extends/implements) relations automatically from the matched symbol nodes.
+  - Implemented a detailed unit test module.
+  - Verified `axon-core` compilation with `cargo check` and tests.
+- Files created/modified:
+  - `src/axon-core/src/parser/typescript.rs` (created)
+  - `task_plan.md` (updated)
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

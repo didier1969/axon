@@ -25,7 +25,7 @@ For each parser, the implementer MUST reference the legacy Python code from the 
   - **Critical features:** OTP entry points (`handle_call`, `init`, etc.), NIF loaders, GenServer specific cross-process calls, and `@behaviour` extraction for heritage.
 - **Tests:** Add a unit test module within the file.
 
-### Task 3: TypeScript/JavaScript Parser Implementation
+### Task 3: TypeScript/JavaScript Parser Implementation (COMPLETED)
 - **File:** `src/axon-core/src/parser/typescript.rs`
 - **Spec:** Implement the `Parser` trait for TS/JS.
   - Port logic from `origin/main:src/axon/core/parsers/typescript.py`.

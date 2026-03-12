@@ -1,15 +1,110 @@
-use super::{ExtractionResult, Parser, Symbol, Relation};
-use tree_sitter::{Language, Parser as TSParser, Query, QueryCursor};
+use super::{ExtractionResult, Parser, Relation, Symbol};
+use std::collections::{HashMap, HashSet};
+use tree_sitter::{Language, Node, Parser as TSParser, Query, QueryCursor};
 
 pub struct TypeScriptParser {
     language: Language,
 }
 
+impl Default for TypeScriptParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TypeScriptParser {
     pub fn new() -> Self {
         Self {
-            language: tree_sitter_typescript::language_typescript(),
+            language: tree_sitter_typescript::language_tsx(),
         }
+    }
+
+    fn collect_exports<'a>(&self, node: Node<'a>, source: &[u8], exports: &mut HashSet<String>) {
+        let kind = node.kind();
+        if kind == "export_statement" {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                let c_kind = child.kind();
+                if ["function_declaration", "class_declaration", "interface_declaration", "type_alias_declaration"].contains(&c_kind) {
+                    if let Some(name_node) = child.child_by_field_name("name") {
+                        if let Ok(name) = name_node.utf8_text(source) {
+                            exports.insert(name.to_string());
+                        }
+                    }
+                } else if ["lexical_declaration", "variable_declaration"].contains(&c_kind) {
+                    let mut c2 = child.walk();
+                    for sub in child.children(&mut c2) {
+                        if sub.kind() == "variable_declarator" {
+                            if let Some(name_node) = sub.child_by_field_name("name") {
+                                if let Ok(name) = name_node.utf8_text(source) {
+                                    exports.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                } else if c_kind == "export_clause" {
+                    let mut c2 = child.walk();
+                    for spec in child.children(&mut c2) {
+                        if spec.kind() == "export_specifier" {
+                            if let Some(name_node) = spec.child_by_field_name("name") {
+                                if let Ok(name) = name_node.utf8_text(source) {
+                                    exports.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if kind == "expression_statement" {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "assignment_expression" {
+                    if let (Some(left), Some(right)) = (child.child_by_field_name("left"), child.child_by_field_name("right")) {
+                        if let Ok(left_text) = left.utf8_text(source) {
+                            if left_text == "module.exports" || left_text == "exports" {
+                                if right.kind() == "identifier" {
+                                    if let Ok(name) = right.utf8_text(source) {
+                                        exports.insert(name.to_string());
+                                    }
+                                } else if right.kind() == "object" {
+                                    let mut r_cursor = right.walk();
+                                    for prop in right.children(&mut r_cursor) {
+                                        if prop.kind() == "shorthand_property_identifier" {
+                                            if let Ok(name) = prop.utf8_text(source) {
+                                                exports.insert(name.to_string());
+                                            }
+                                        } else if prop.kind() == "pair" {
+                                            if let Some(key_node) = prop.child_by_field_name("key") {
+                                                if let Ok(name) = key_node.utf8_text(source) {
+                                                    exports.insert(name.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_exports(child, source, exports);
+        }
+    }
+
+    fn find_class_name(&self, mut node: Node, source: &[u8]) -> Option<String> {
+        while let Some(parent) = node.parent() {
+            if parent.kind() == "class_declaration" {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    return Some(name_node.utf8_text(source).unwrap_or("").to_string());
+                }
+            }
+            node = parent;
+        }
+        None
     }
 }
 
@@ -18,55 +113,259 @@ impl Parser for TypeScriptParser {
         let mut parser = TSParser::new();
         parser.set_language(self.language).unwrap();
         let tree = parser.parse(content, None).unwrap();
-        
+
+        let source = content.as_bytes();
+        let mut exports = HashSet::new();
+        self.collect_exports(tree.root_node(), source, &mut exports);
+
         let query_str = r#"
             (class_declaration name: (type_identifier) @class.name)
-            (function_declaration name: (identifier) @func.name)
             (interface_declaration name: (type_identifier) @interface.name)
-            (type_alias_declaration name: (type_identifier) @type.name)
-            (call_expression function: (identifier) @call.name)
-            (call_expression function: (member_expression property: (property_identifier) @call.name))
+            (type_alias_declaration name: (type_identifier) @type_alias.name)
+
+            (function_declaration name: (identifier) @function.name)
+            (method_definition name: (property_identifier) @method.name)
+            
+            (variable_declarator 
+              name: (identifier) @arrow.name
+              value: [(arrow_function) (function_expression)])
+
+            (call_expression
+              function: [
+                (identifier) @call.name
+                (member_expression property: (property_identifier) @call.name)
+              ]
+            )
+
+            (new_expression
+              constructor: [
+                (identifier) @new.name
+                (member_expression property: (property_identifier) @new.name)
+              ]
+            )
+
+            (assignment_expression
+              left: (member_expression property: (property_identifier) @sink.name)
+              (#match? @sink.name "^(innerHTML|outerHTML)$")
+            )
+            
+            (import_statement
+              source: (string (string_fragment) @import.source)
+            )
+
+            (call_expression
+              function: (identifier) @req.name
+              arguments: (arguments (string (string_fragment) @require.source))
+              (#eq? @req.name "require")
+            )
         "#;
-        
+
         let query = Query::new(self.language, query_str).unwrap();
         let mut cursor = QueryCursor::new();
         let mut symbols = Vec::new();
         let mut relations = Vec::new();
         
-        for m in cursor.matches(&query, tree.root_node(), content.as_bytes()) {
+        let mut seen_nodes = HashSet::new();
+
+        for m in cursor.matches(&query, tree.root_node(), source) {
             for capture in m.captures {
                 let node = capture.node;
                 let kind = query.capture_names()[capture.index as usize].as_str();
-                let name = node.utf8_text(content.as_bytes()).unwrap_or("unknown").to_string();
+
+                if !seen_nodes.insert((node.id(), kind)) {
+                    continue;
+                }
+
+                let text = node.utf8_text(source).unwrap_or("").to_string();
 
                 match kind {
-                    "class.name" | "interface.name" | "type.name" => symbols.push(Symbol {
-                        name, kind: "type".to_string(),
-                        start_line: node.start_position().row + 1,
-                        end_line: node.end_position().row + 1,
-                        docstring: None,
-                        is_entry_point: false,
-                        properties: std::collections::HashMap::new(),
-                    }),
-                    "func.name" => symbols.push(Symbol {
-                        name, kind: "function".to_string(),
-                        start_line: node.start_position().row + 1,
-                        end_line: node.end_position().row + 1,
-                        docstring: None,
-                        is_entry_point: false,
-                        properties: std::collections::HashMap::new(),
-                    }),
-                    "call.name" => relations.push(Relation {
-                        from: "context".to_string(),
-                        to: name,
-                        rel_type: "CALLS".to_string(),
-                                        properties: std::collections::HashMap::new(),
-                    }),
+                    "class.name" => {
+                        symbols.push(Symbol {
+                            name: text.clone(),
+                            kind: "class".to_string(),
+                            start_line: node.start_position().row + 1,
+                            end_line: node.end_position().row + 1,
+                            docstring: None,
+                            is_entry_point: false,
+                            properties: HashMap::new(),
+                        });
+
+                        if let Some(parent) = node.parent() {
+                            let mut p_cursor = parent.walk();
+                            for child in parent.children(&mut p_cursor) {
+                                if child.kind() == "class_heritage" {
+                                    let mut h_cursor = child.walk();
+                                    for sub in child.children(&mut h_cursor) {
+                                        let rel_type = if sub.kind() == "extends_clause" { "extends" } else { "implements" };
+                                        if sub.kind() == "extends_clause" || sub.kind() == "implements_clause" {
+                                            let mut s_cursor = sub.walk();
+                                            for type_node in sub.children(&mut s_cursor) {
+                                                if type_node.kind() == "identifier" || type_node.kind() == "type_identifier" {
+                                                    relations.push(Relation {
+                                                        from: text.clone(),
+                                                        to: type_node.utf8_text(source).unwrap_or("").to_string(),
+                                                        rel_type: rel_type.to_string(),
+                                                        properties: HashMap::new(),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "interface.name" => {
+                        symbols.push(Symbol {
+                            name: text.clone(),
+                            kind: "interface".to_string(),
+                            start_line: node.start_position().row + 1,
+                            end_line: node.end_position().row + 1,
+                            docstring: None,
+                            is_entry_point: false,
+                            properties: HashMap::new(),
+                        });
+
+                        if let Some(parent) = node.parent() {
+                            let mut p_cursor = parent.walk();
+                            for child in parent.children(&mut p_cursor) {
+                                if child.kind() == "extends_type_clause" {
+                                    let mut c_cursor = child.walk();
+                                    for sub in child.children(&mut c_cursor) {
+                                        if sub.kind() == "identifier" || sub.kind() == "type_identifier" {
+                                            relations.push(Relation {
+                                                from: text.clone(),
+                                                to: sub.utf8_text(source).unwrap_or("").to_string(),
+                                                rel_type: "extends".to_string(),
+                                                properties: HashMap::new(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "type_alias.name" => {
+                        symbols.push(Symbol {
+                            name: text,
+                            kind: "type_alias".to_string(),
+                            start_line: node.start_position().row + 1,
+                            end_line: node.end_position().row + 1,
+                            docstring: None,
+                            is_entry_point: false,
+                            properties: HashMap::new(),
+                        });
+                    }
+                    "function.name" | "arrow.name" => {
+                        let lower_name = text.to_lowercase();
+                        let is_entry = exports.contains(&text) && 
+                            ["handler", "route", "get", "post", "put", "delete"].iter().any(|&k| lower_name.contains(k));
+                        
+                        symbols.push(Symbol {
+                            name: text,
+                            kind: "function".to_string(),
+                            start_line: node.start_position().row + 1,
+                            end_line: node.end_position().row + 1,
+                            docstring: None,
+                            is_entry_point: is_entry,
+                            properties: HashMap::new(),
+                        });
+                    }
+                    "method.name" => {
+                        let mut props = HashMap::new();
+                        if let Some(class_name) = self.find_class_name(node, source) {
+                            props.insert("class_name".to_string(), class_name);
+                        }
+
+                        symbols.push(Symbol {
+                            name: text,
+                            kind: "method".to_string(),
+                            start_line: node.start_position().row + 1,
+                            end_line: node.end_position().row + 1,
+                            docstring: None,
+                            is_entry_point: false,
+                            properties: props,
+                        });
+                    }
+                    "call.name" | "new.name" | "sink.name" => {
+                        relations.push(Relation {
+                            from: "".to_string(),
+                            to: text,
+                            rel_type: "calls".to_string(),
+                            properties: HashMap::new(),
+                        });
+                    }
+                    "import.source" | "require.source" => {
+                        relations.push(Relation {
+                            from: "".to_string(),
+                            to: text,
+                            rel_type: "imports".to_string(),
+                            properties: HashMap::new(),
+                        });
+                    }
                     _ => {}
                 }
             }
         }
         
         ExtractionResult { symbols, relations }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_typescript() {
+        let code = r#"
+            import { X } from "my-module";
+            const fs = require('fs');
+
+            export class MyClass extends BaseClass implements InterfaceA {
+                myMethod() {
+                    console.log("hello");
+                }
+            }
+
+            export function getHandler() {
+                myCall();
+                new OtherClass();
+            }
+
+            export const myArrowRoute = () => {
+                document.innerHTML = "<b>XSS</b>";
+            };
+
+            interface MyInt extends BaseInt {}
+            type MyType = string;
+        "#;
+        let parser = TypeScriptParser::new();
+        let result = parser.parse(code);
+        
+        assert!(result.symbols.iter().any(|s| s.name == "MyClass" && s.kind == "class"));
+        assert!(result.symbols.iter().any(|s| s.name == "MyInt" && s.kind == "interface"));
+        assert!(result.symbols.iter().any(|s| s.name == "MyType" && s.kind == "type_alias"));
+        
+        let get_handler = result.symbols.iter().find(|s| s.name == "getHandler").unwrap();
+        assert!(get_handler.is_entry_point);
+
+        let arrow_route = result.symbols.iter().find(|s| s.name == "myArrowRoute").unwrap();
+        assert!(arrow_route.is_entry_point);
+
+        let method = result.symbols.iter().find(|s| s.name == "myMethod").unwrap();
+        assert_eq!(method.properties.get("class_name").unwrap(), "MyClass");
+
+        assert!(result.relations.iter().any(|r| r.from == "MyClass" && r.to == "BaseClass" && r.rel_type == "extends"));
+        assert!(result.relations.iter().any(|r| r.from == "MyClass" && r.to == "InterfaceA" && r.rel_type == "implements"));
+        assert!(result.relations.iter().any(|r| r.from == "MyInt" && r.to == "BaseInt" && r.rel_type == "extends"));
+
+        assert!(result.relations.iter().any(|r| r.to == "my-module" && r.rel_type == "imports"));
+        assert!(result.relations.iter().any(|r| r.to == "fs" && r.rel_type == "imports"));
+
+        assert!(result.relations.iter().any(|r| r.to == "log" && r.rel_type == "calls"));
+        assert!(result.relations.iter().any(|r| r.to == "myCall" && r.rel_type == "calls"));
+        assert!(result.relations.iter().any(|r| r.to == "OtherClass" && r.rel_type == "calls"));
+        assert!(result.relations.iter().any(|r| r.to == "innerHTML" && r.rel_type == "calls"));
     }
 }
