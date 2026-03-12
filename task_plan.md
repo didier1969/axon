@@ -17,7 +17,7 @@ For each parser, the implementer MUST reference the legacy Python code from the 
   - Extract: Classes, Functions/Methods, Imports, Function Calls.
 - **Tests:** Add a unit test module within the file.
 
-### Task 2: Advanced Elixir Parser Implementation
+### Task 2: Advanced Elixir Parser Implementation (COMPLETED)
 - **File:** `src/axon-core/src/parser/elixir.rs`
 - **Spec:** Implement the `Parser` trait for Elixir.
   - Port advanced logic from `origin/main:src/axon/core/parsers/elixir_lang.py`.

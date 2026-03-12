@@ -21,16 +21,19 @@
   - `src/axon-core/src/parser/python.rs` (created)
   - `task_plan.md` (updated)
 
-### Phase 2: [Title]
-<!-- 
-  WHAT: Same structure as Phase 1, for the next phase.
-  WHY: Keep a separate log entry for each phase to track progress clearly.
--->
-- **Status:** pending
+### Phase 2: Task 2 - Advanced Elixir Parser Implementation
+- **Status:** complete
 - Actions taken:
-  -
+  - Fetched legacy Python parser via git to analyze existing Elixir extraction logic.
+  - Implemented `ElixirParser` in `src/axon-core/src/parser/elixir.rs` using a manual AST walker.
+  - Implemented extraction of `defmodule`, `def`, `defp`, `defmacro`, `defmacrop`.
+  - Added OTP entry point detection, NIF loaders detection (`load_nif`), GenServer call detection (`GenServer.call`/`GenServer.cast`), and `@behaviour` inheritance relations.
+  - Added unit test module.
+  - Fixed tree-sitter Language version mismatch using `std::mem::transmute`.
+  - Verified `axon-core` compilation with `cargo check` and tests.
 - Files created/modified:
-  -
+  - `src/axon-core/src/parser/elixir.rs` (created)
+  - `task_plan.md` (updated)
 
 ## Test Results
 <!-- 
