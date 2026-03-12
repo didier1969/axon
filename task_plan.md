@@ -31,19 +31,19 @@ For each parser, the implementer MUST reference the legacy Python code from the 
   - Port logic from `origin/main:src/axon/core/parsers/typescript.py`.
 - **Tests:** Add a unit test module.
 
-### Task 4: Rust Parser Implementation
+### Task 4: Rust Parser Implementation (COMPLETED)
 - **File:** `src/axon-core/src/parser/rust.rs`
 - **Spec:** Implement the `Parser` trait for Rust.
   - Port logic from `origin/main:src/axon/core/parsers/rust_lang.py`.
 - **Tests:** Add a unit test module.
 
-### Task 5: Go Parser Implementation
+### Task 5: Go Parser Implementation (COMPLETED)
 - **File:** `src/axon-core/src/parser/go.rs`
 - **Spec:** Implement the `Parser` trait for Go.
   - Port logic from `origin/main:src/axon/core/parsers/go_lang.py`.
 - **Tests:** Add a unit test module.
 
-### Task 6: Java Parser Implementation
+### Task 6: Java Parser Implementation (COMPLETED)
 - **File:** `src/axon-core/src/parser/java.rs`
 - **Spec:** Implement the `Parser` trait for Java.
   - Port logic from `origin/main:src/axon/core/parsers/java_lang.py`.

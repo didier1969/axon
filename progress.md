@@ -49,6 +49,49 @@
   - `src/axon-core/src/parser/typescript.rs` (created)
   - `task_plan.md` (updated)
 
+### Phase 4: Task 6 - Java Parser Implementation
+- **Status:** complete
+- Actions taken:
+  - Checked old Python extraction logic for Java parser via `git show origin/main:src/axon/core/parsers/java_lang.py`.
+  - Implemented `JavaParser` in `src/axon-core/src/parser/java.rs` via manual AST traversal (similar to the old Python approach).
+  - Extracted: Classes (`class_declaration`), Methods (`method_declaration`), Imports (`import_declaration`), and Method Calls (`method_invocation`).
+  - Adapted Spring / Jakarta annotations extraction to find `@GetMapping`, `@RestController`, etc. and set `is_entry_point` accordingly.
+  - Added unit test module asserting successful parsing of a basic Spring controller.
+  - Resolved `node.child_by_field_name("modifiers")` to direct AST iteration since field name missing.
+  - Verified `cargo check` and `cargo test`.
+- Files created/modified:
+  - `src/axon-core/src/parser/java.rs` (created)
+  - `task_plan.md` (updated)
+  - `progress.md` (updated)
+
+### Phase 5: Task 4 - Rust Parser Implementation
+- **Status:** complete
+- Actions taken:
+  - Read python legacy parser using `git show`.
+  - Wrote a new robust implementation in `src/axon-core/src/parser/rust.rs` mimicking exact python behavior.
+  - Extracted correctly `unsafe` and `extern "C"` modifiers inside `function_modifiers` to flag entry points.
+  - Handled recursive deep walking of `use_list` and `scoped_identifier` to extract imports.
+  - Extracted calls using `extract_call_expression` and macros.
+  - Wrote unit tests and verified with `cargo test parser::rust`.
+- Files created/modified:
+  - `src/axon-core/src/parser/rust.rs` (updated)
+  - `task_plan.md` (updated)
+  - `progress.md` (updated)
+
+### Phase 6: Task 5 - Go Parser Implementation
+- **Status:** complete
+- Actions taken:
+  - Retrieved legacy python Go parser using `git show` and stored temporarily.
+  - Implemented `GoParser` in `src/axon-core/src/parser/go.rs`.
+  - Migrated tree-sitter AST traversals (packages, funcs, types, structs, interfaces, calls, imports) to Rust.
+  - Maintained exact behavior for entry points ("main", "handler", "route") and properties ("exported", "unsafe").
+  - Extracted receiver types for method declarations.
+  - Added test module and successfully ran `cargo check`.
+- Files created/modified:
+  - `src/axon-core/src/parser/go.rs` (created)
+  - `task_plan.md` (updated)
+  - `progress.md` (updated)
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

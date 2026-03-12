@@ -128,7 +128,7 @@ impl Parser for TypeScriptParser {
             
             (variable_declarator 
               name: (identifier) @arrow.name
-              value: [(arrow_function) (function_expression)])
+              value: (arrow_function))
 
             (call_expression
               function: [
