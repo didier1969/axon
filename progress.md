@@ -264,6 +264,22 @@
   - `ROADMAP.md`
   - `progress.md`
 
+### Phase 17: Proactive Audit & Real-time Alerts
+- **Status:** complete
+- Actions taken:
+  - Drafted the architectural design specifying that proactive detection belongs to the Elixir Control Plane, leaving the Rust Data Plane pure and stateless (`docs/plans/2026-03-13-axon-proactive-audit-design.md`).
+  - Executed the implementation using Subagent-Driven Development.
+  - Enhanced the `BridgeClient` GenServer to statefully track security scores (`security_scores: %{}`) and broadcast `{:security_degraded, ...}` over PubSub when a regression is computed.
+  - Upgraded the `StatusLive` component to intercept these PubSub degradation events and immediately render a pulsing, critical alert overlay in the web dashboard.
+  - Confirmed the integrity of the LiveView layout and the correct Elixir compilation of the `dashboard` umbrella app.
+- Files modified:
+  - `src/dashboard/lib/axon_dashboard/bridge_client.ex`
+  - `src/dashboard/lib/axon_dashboard_web/live/status_live.ex`
+  - `docs/plans/2026-03-13-axon-proactive-audit-design.md`
+  - `docs/plans/2026-03-13-axon-proactive-audit-plan.md`
+  - `ROADMAP.md`
+  - `progress.md`
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

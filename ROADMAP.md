@@ -15,7 +15,7 @@
 - [x] **Embeddings Parallélisés :** Réduction radicale du temps d'indexation (Cible : < 10min pour 40k symboles).
 
 ### 🧠 Intelligence & UX
-- [ ] **Audit Proactif :** Alerte automatique dès qu'un changement dégrade le score de sécurité.
+- [x] **Audit Proactif :** Alerte automatique dès qu'un changement dégrade le score de sécurité.
 - [x] **Traçage Polyglotte :** Traversée automatique des frontières (ex: Elixir ↔ Rust NIFs).
 
 ---
