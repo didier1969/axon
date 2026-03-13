@@ -149,6 +149,20 @@
   - `src/axon-core/src/main.rs` (updated)
   - `progress.md` (updated)
 
+### Phase 10: Consolidation MCP v1.2 (Feuilles et Purge)
+- **Status:** complete
+- Actions taken:
+  - Applied Test-Driven Development (TDD) principles to write failing tests for `axon_batch`, `axon_diff`, `axon_cypher`, and `axon_inspect` before implementing or upgrading their logic.
+  - Implemented the actual file extraction logic for `axon_diff` based on git diffs parsing.
+  - Enhanced the Cypher query of `axon_inspect` to provide deep relational details (`callers`, `callees`).
+  - Purged deprecated MCP tools like `axon_list_repos` from the implementation to strictly match the new 8-tool interface.
+  - Executed `cargo test` and `cargo clippy` ensuring all 17 tests passed with an uncompromised zero-warning metric.
+- Files created/modified:
+  - `src/axon-core/src/mcp.rs` (updated)
+  - `src/axon-core/src/graph.rs` (updated: made `execute` public for testing)
+  - `task_plan.md` (updated)
+  - `progress.md` (updated)
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

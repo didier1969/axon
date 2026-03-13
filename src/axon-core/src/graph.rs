@@ -88,7 +88,7 @@ impl GraphStore {
         Err(anyhow!("Could not find plugin {}. Expected it to be compiled in axon-plugin-ladybug/target. You might need to run: cd src/axon-plugin-ladybug && cargo build", plugin_name))
     }
 
-    fn execute(&self, query: &str) -> Result<bool> {
+    pub fn execute(&self, query: &str) -> Result<bool> {
         unsafe {
             let exec_fn: Symbol<ExecuteFunc> = self.lib.get(b"ladybug_execute\0")?;
             let c_query = CString::new(query)?;
@@ -96,7 +96,7 @@ impl GraphStore {
         }
     }
 
-    fn query_count(&self, query: &str) -> Result<i64> {
+    pub fn query_count(&self, query: &str) -> Result<i64> {
         unsafe {
             let count_fn: Symbol<QueryCountFunc> = self.lib.get(b"ladybug_query_count\0")?;
             let c_query = CString::new(query)?;
@@ -134,13 +134,16 @@ impl GraphStore {
 
     pub fn insert_file_data(&self, path: &str, result: &crate::parser::ExtractionResult) -> Result<()> {
         let safe_path = path.replace("'", "''");
-        
+
+        // Use transaction if possible, if not, ignore error and continue
+        let _ = self.execute("BEGIN TRANSACTION");
+
         self.execute(&format!("MERGE (f:File {{path: '{}'}})", safe_path))?;
 
         for sym in &result.symbols {
             let safe_name = sym.name.replace("'", "''");
             let is_test = safe_name.contains("test_") || safe_path.contains("test");
-            
+
             self.execute(&format!(
                 "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}}})",
                 safe_name, sym.kind, is_test
@@ -163,9 +166,10 @@ impl GraphStore {
             }
         }
 
+        let _ = self.execute("COMMIT");
+
         Ok(())
     }
-
     pub fn get_security_score(&self, project_name: &str) -> Result<usize> {
         let query = format!(
             "MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS]->(d:Symbol) 

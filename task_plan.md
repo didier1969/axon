@@ -19,10 +19,10 @@ Réduire la charge cognitive de l'IA et optimiser l'économie du contexte en pas
   7. `axon_batch`
   8. `axon_cypher`
 
-### Phase 3: Feuilles (Fusion de la logique)
-- [ ] Implémenter les handlers pour `axon_diff`, `axon_batch`, et adapter `axon_cypher` (qui remplace l'ancienne implémentation brute de `axon_query`).
-- [ ] Mettre à jour les implémentations existantes (`axon_query`, `axon_inspect`, etc.) pour correspondre aux spécifications de la ROADMAP.
+### Phase 3: Feuilles (Fusion de la logique) (COMPLETED)
+- [x] Implémenter les handlers pour `axon_diff`, `axon_batch`, et adapter `axon_cypher` (qui remplace l'ancienne implémentation brute de `axon_query`).
+- [x] Mettre à jour les implémentations existantes (`axon_query`, `axon_inspect`, etc.) pour correspondre aux spécifications de la ROADMAP.
 
-### Phase 4: Purge & Qualité
-- [ ] Supprimer les anciens outils (comme `axon_list_repos` s'il est intégré ailleurs ou retiré de la liste).
-- [ ] Valider 100% PASS et Zéro Warning avec `cargo test` et `cargo clippy`.
+### Phase 4: Purge & Qualité (COMPLETED)
+- [x] Supprimer les anciens outils (comme `axon_list_repos` s'il est intégré ailleurs ou retiré de la liste).
+- [x] Valider 100% PASS et Zéro Warning avec `cargo test` et `cargo clippy`.

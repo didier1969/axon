@@ -159,24 +159,23 @@ impl McpServer {
             id: req.id,
         }
     }
+fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
+    let params = params?;
+    let name = params.get("name")?.as_str()?;
+    let arguments = params.get("arguments")?;
 
-    fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
-        let params = params?;
-        let name = params.get("name")?.as_str()?;
-        let arguments = params.get("arguments")?;
-
-        match name {
-            "axon_query" => self.axon_query(arguments),
-            "axon_inspect" => self.axon_inspect(arguments),
-            "axon_audit" => self.axon_audit(arguments),
-            "axon_impact" => self.axon_impact(arguments),
-            "axon_health" => self.axon_health(arguments),
-            "axon_diff" => self.axon_diff(arguments),
-            "axon_batch" => self.axon_batch(arguments),
-            "axon_cypher" => self.axon_cypher(arguments),
-            _ => Some(json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true })),
-        }
+    match name {
+        "axon_query" => self.axon_query(arguments),
+        "axon_inspect" => self.axon_inspect(arguments),
+        "axon_audit" => self.axon_audit(arguments),
+        "axon_impact" => self.axon_impact(arguments),
+        "axon_health" => self.axon_health(arguments),
+        "axon_diff" => self.axon_diff(arguments),
+        "axon_batch" => self.axon_batch(arguments),
+        "axon_cypher" => self.axon_cypher(arguments),
+        _ => Some(json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true })),
     }
+}
 
     fn axon_query(&self, args: &Value) -> Option<Value> {
         let query = args.get("query")?.as_str()?;
@@ -198,9 +197,15 @@ impl McpServer {
 
     fn axon_inspect(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
-        let query = format!("MATCH (s:Symbol {{name: '{}'}}) RETURN s.kind, s.tested", symbol);
+        let query = format!(
+            "MATCH (s:Symbol {{name: '{}'}}) \
+             OPTIONAL MATCH (caller:Symbol)-[:CALLS]->(s) \
+             OPTIONAL MATCH (s)-[:CALLS]->(callee:Symbol) \
+             RETURN s.name, s.kind, s.tested, count(caller) AS callers, count(callee) AS callees",
+            symbol
+        );
         match self.graph_store.query_json(&query) {
-            Ok(res) => Some(json!({ "content": [{ "type": "text", "text": format!("Symbol Details: {}", res) }] })),
+            Ok(res) => Some(json!({ "content": [{ "type": "text", "text": format!("Symbol Details:\n{}", res) }] })),
             Err(_) => None,
         }
     }
@@ -226,8 +231,32 @@ impl McpServer {
         Some(json!({ "content": [{ "type": "text", "text": format!("🏥 Health Report for {}: Coverage {}%. Stability high.", project, coverage) }] }))
     }
 
-    fn axon_diff(&self, _args: &Value) -> Option<Value> {
-        Some(json!({ "content": [{ "type": "text", "text": "Diff analysis not yet implemented in v2" }] }))
+    fn axon_diff(&self, args: &Value) -> Option<Value> {
+        let diff = args.get("diff_content")?.as_str()?;
+        let mut files = std::collections::HashSet::new();
+        for line in diff.lines() {
+            if let Some(path) = line.strip_prefix("+++ b/") {
+                files.insert(path.to_string());
+            } else if let Some(path) = line.strip_prefix("--- a/") {
+                if path != "/dev/null" {
+                    files.insert(path.to_string());
+                }
+            }
+        }
+        
+        if files.is_empty() {
+             return Some(json!({ "content": [{ "type": "text", "text": "No files modified." }] }));
+        }
+        
+        let mut all_results = Vec::new();
+        for file in files {
+            let query = format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' RETURN s.name, s.kind", file);
+            if let Ok(res) = self.graph_store.query_json(&query) {
+                all_results.push(format!("File: {}\nSymbols:\n{}", file, res));
+            }
+        }
+        
+        Some(json!({ "content": [{ "type": "text", "text": all_results.join("\n\n") }] }))
     }
 
     fn axon_batch(&self, args: &Value) -> Option<Value> {
@@ -302,5 +331,110 @@ mod tests {
         assert!(tool_names.contains(&"axon_diff"));
         assert!(tool_names.contains(&"axon_batch"));
         assert!(tool_names.contains(&"axon_cypher"));
+    }
+
+    #[test]
+    fn test_axon_batch() {
+        let server = create_test_server();
+        let req = JsonRpcRequest {
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_batch",
+                "arguments": {
+                    "calls": [
+                        { "tool": "axon_health", "args": { "project": "test_proj" } },
+                        { "tool": "axon_audit", "args": { "project": "test_proj" } }
+                    ]
+                }
+            })),
+            id: Some(json!(2)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        assert!(content.contains("axon_health"));
+        assert!(content.contains("axon_audit"));
+        assert!(content.contains("Coverage 100%"));
+        assert!(content.contains("Score 100/100"));
+    }
+
+    #[test]
+    fn test_axon_diff() {
+        let server = create_test_server();
+        // Insert a dummy file in the graph to test matching
+        server.graph_store.execute("MERGE (f:File {path: 'src/main.rs'})").unwrap();
+        server.graph_store.execute("MERGE (s:Symbol {name: 'main', kind: 'function', tested: false})").unwrap();
+        server.graph_store.execute("MATCH (f:File {path: 'src/main.rs'}), (s:Symbol {name: 'main'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+
+        let req = JsonRpcRequest {
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_diff",
+                "arguments": {
+                    "diff_content": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,4 @@\n+fn main() {}"
+                }
+            })),
+            id: Some(json!(3)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        assert!(content.contains("src/main.rs"));
+        assert!(content.contains("main"));
+    }
+
+    #[test]
+    fn test_axon_cypher() {
+        let server = create_test_server();
+        server.graph_store.execute("MERGE (f:File {path: 'test.py'})").unwrap();
+        
+        let req = JsonRpcRequest {
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_cypher",
+                "arguments": {
+                    "cypher": "MATCH (f:File {path: 'test.py'}) RETURN f.path"
+                }
+            })),
+            id: Some(json!(4)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        assert!(content.contains("test.py"));
+    }
+
+    #[test]
+    fn test_axon_inspect() {
+        let server = create_test_server();
+        server.graph_store.execute("MERGE (s:Symbol {name: 'core_func', kind: 'function', tested: true})").unwrap();
+        server.graph_store.execute("MERGE (c:Symbol {name: 'caller_func'})").unwrap();
+        server.graph_store.execute("MATCH (c:Symbol {name: 'caller_func'}), (s:Symbol {name: 'core_func'}) MERGE (c)-[:CALLS]->(s)").unwrap();
+
+        let req = JsonRpcRequest {
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_inspect",
+                "arguments": {
+                    "symbol": "core_func",
+                    "project": "test_proj"
+                }
+            })),
+            id: Some(json!(5)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        // Output format check based on query results
+        assert!(content.contains("core_func"));
+        assert!(content.contains("function"));
     }
 }
