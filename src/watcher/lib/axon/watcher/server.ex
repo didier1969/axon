@@ -110,7 +110,21 @@ defmodule Axon.Watcher.Server do
       if :deleted in events do
         {:noreply, state}
       else
-        new_pending = MapSet.put(state.pending_files, str_path)
+        parent_dir = Path.dirname(str_path)
+        
+        # Obtenir les fichiers voisins (proximité architecturale)
+        neighbors = 
+          case File.ls(parent_dir) do
+            {:ok, files} -> 
+              Enum.map(files, &Path.join(parent_dir, &1))
+              |> Enum.filter(&should_process?/1)
+              |> Enum.filter(&(File.regular?(&1)))
+            _ -> []
+          end
+        
+        # Fusionner avec les fichiers en attente
+        new_pending = Enum.reduce([str_path | neighbors], state.pending_files, &MapSet.put(&2, &1))
+        
         new_timer = reset_timer(state.timer)
         {:noreply, %{state | pending_files: new_pending, timer: new_timer}}
       end
