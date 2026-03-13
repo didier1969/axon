@@ -209,6 +209,25 @@
   - `ROADMAP.md`
   - `progress.md`
 
+### Phase 14: Adaptive Priority Queue (Lazy vs Eager)
+- **Status:** complete
+- Actions taken:
+  - Formulated an architectural design resolving the "Lazy vs Eager" dilemma by implementing a priority-based queue via Oban.
+  - Used Subagent-Driven Development to execute the implementation step-by-step.
+  - Updated Oban configuration to support `indexing_hot` (limit 5) and `indexing_default` (limit 10).
+  - Modified the daemon boot sequence (`handle_info(:initial_scan)`) to route massive background parsing to the cold path (`indexing_default`).
+  - Modified the FS Event watcher (`handle_info({:file_event})`) to route real-time changes to the high priority hot path (`indexing_hot`).
+  - Implemented "Directory Clustering": when a file is modified, its entire parent directory is automatically queued in the hot path to ensure local AST dependencies are instantly resolved for the AI agent.
+  - Successfully compiled the Watcher node and committed all changes cleanly.
+- Files modified:
+  - `src/watcher/config/config.exs`
+  - `src/watcher/lib/axon/watcher/indexing_worker.ex`
+  - `src/watcher/lib/axon/watcher/server.ex`
+  - `docs/plans/2026-03-13-axon-adaptive-queue-design.md`
+  - `docs/plans/2026-03-13-axon-adaptive-queue-plan.md`
+  - `ROADMAP.md`
+  - `progress.md`
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

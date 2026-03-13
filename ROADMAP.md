@@ -10,8 +10,8 @@
 - [x] **Visualisation de Flux :** Exporter les chemins d'exposition critiques vers des diagrammes Mermaid/SVG.
 
 ### ⚡ Performance & Scalabilité (The Hydra Engine)
-- [ ] **Intégration HydraDB :** Déportation de la persistence vers RocksDB/Dolt (Elixir/Rust).
-- [ ] **Stratégie Lazy vs Eager :** Implémentation de la file d'attente de tâches de fond via OTP (supervision Elixir).
+- [x] **Intégration HydraDB :** Déportation de la persistence vers RocksDB/Dolt (Elixir/Rust).
+- [x] **Stratégie Lazy vs Eager :** Implémentation de la file d'attente de tâches de fond via OTP (supervision Elixir).
 - [ ] **Embeddings Parallélisés :** Réduction radicale du temps d'indexation (Cible : < 10min pour 40k symboles).
 
 ### 🧠 Intelligence & UX
