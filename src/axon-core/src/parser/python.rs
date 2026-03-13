@@ -46,6 +46,8 @@ impl Parser for PythonParser {
                         docstring: None, // TODO: Extraction docstrings,
                         is_entry_point: false,
                         properties: std::collections::HashMap::new(),
+                    
+                        embedding: None,
                     });
                 }
             }

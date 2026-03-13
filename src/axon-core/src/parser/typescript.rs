@@ -188,6 +188,8 @@ impl Parser for TypeScriptParser {
                             docstring: None,
                             is_entry_point: false,
                             properties: HashMap::new(),
+                        
+                            embedding: None,
                         });
 
                         if let Some(parent) = node.parent() {
@@ -224,6 +226,8 @@ impl Parser for TypeScriptParser {
                             docstring: None,
                             is_entry_point: false,
                             properties: HashMap::new(),
+                        
+                            embedding: None,
                         });
 
                         if let Some(parent) = node.parent() {
@@ -254,6 +258,8 @@ impl Parser for TypeScriptParser {
                             docstring: None,
                             is_entry_point: false,
                             properties: HashMap::new(),
+                        
+                            embedding: None,
                         });
                     }
                     "function.name" | "arrow.name" => {
@@ -269,6 +275,8 @@ impl Parser for TypeScriptParser {
                             docstring: None,
                             is_entry_point: is_entry,
                             properties: HashMap::new(),
+                        
+                            embedding: None,
                         });
                     }
                     "method.name" => {
@@ -285,6 +293,8 @@ impl Parser for TypeScriptParser {
                             docstring: None,
                             is_entry_point: false,
                             properties: props,
+                        
+                            embedding: None,
                         });
                     }
                     "call.name" | "new.name" | "sink.name" => {

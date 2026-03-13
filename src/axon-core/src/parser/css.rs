@@ -50,6 +50,8 @@ impl CssParser {
                     docstring: None,
                     is_entry_point: false,
                     properties: HashMap::new(),
+                
+                    embedding: None,
                 });
                 break;
             }
@@ -69,6 +71,8 @@ impl CssParser {
                     docstring: None,
                     is_entry_point: false,
                     properties: HashMap::new(),
+                
+                    embedding: None,
                 });
                 break;
             }
@@ -89,6 +93,8 @@ impl CssParser {
                         docstring: None,
                         is_entry_point: false,
                         properties: HashMap::new(),
+                    
+                        embedding: None,
                     });
                 }
                 break;
@@ -109,6 +115,8 @@ impl CssParser {
                     docstring: None,
                     is_entry_point: false,
                     properties: HashMap::new(),
+                
+                    embedding: None,
                 });
                 break;
             }

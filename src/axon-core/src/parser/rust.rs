@@ -108,6 +108,8 @@ impl RustParser {
             docstring: None,
             is_entry_point: is_entry,
             properties: props,
+        
+            embedding: None,
         });
 
         if let Some(block) = self.find_child_by_type(node, "block") {
@@ -137,6 +139,8 @@ impl RustParser {
             docstring: None,
             is_entry_point: false,
             properties: props,
+        
+            embedding: None,
         });
     }
 
@@ -156,6 +160,8 @@ impl RustParser {
             docstring: None,
             is_entry_point: false,
             properties: HashMap::new(),
+        
+            embedding: None,
         });
     }
 
@@ -175,6 +181,8 @@ impl RustParser {
             docstring: None,
             is_entry_point: false,
             properties: HashMap::new(),
+        
+            embedding: None,
         });
     }
 
@@ -194,6 +202,8 @@ impl RustParser {
             docstring: None,
             is_entry_point: false,
             properties: HashMap::new(),
+        
+            embedding: None,
         });
 
         if let Some(decl_list) = self.find_child_by_type(node, "declaration_list") {
@@ -252,6 +262,8 @@ impl RustParser {
             docstring: None,
             is_entry_point: false,
             properties: HashMap::new(),
+        
+            embedding: None,
         });
 
         if let Some(decl_list) = self.find_child_by_type(node, "declaration_list") {
@@ -275,6 +287,8 @@ impl RustParser {
             docstring: None,
             is_entry_point: false,
             properties: HashMap::new(),
+        
+            embedding: None,
         });
     }
 

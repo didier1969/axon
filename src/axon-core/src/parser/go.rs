@@ -68,6 +68,8 @@ impl GoParser {
                 docstring: None,
                 is_entry_point: is_entry,
                 properties,
+            
+                embedding: None,
             });
         }
     }
@@ -122,6 +124,8 @@ impl GoParser {
                 docstring: None,
                 is_entry_point: false,
                 properties,
+            
+                embedding: None,
             });
         }
     }
@@ -173,6 +177,8 @@ impl GoParser {
                 docstring: None,
                 is_entry_point: false,
                 properties,
+            
+                embedding: None,
             });
         }
     }

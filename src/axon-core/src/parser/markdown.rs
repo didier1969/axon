@@ -71,6 +71,8 @@ impl MarkdownParser {
                         docstring: None,
                         is_entry_point: false,
                         properties: HashMap::new(),
+                    
+                        embedding: None,
                     });
                 }
             }
@@ -105,6 +107,8 @@ impl MarkdownParser {
                         docstring: None,
                         is_entry_point: false,
                         properties: HashMap::new(),
+                    
+                        embedding: None,
                     });
                     i = j;
                 } else {
@@ -180,6 +184,8 @@ impl MarkdownParser {
                             docstring: None,
                             is_entry_point: false,
                             properties: props,
+                        
+                            embedding: None,
                         });
                     }
                 }
@@ -227,6 +233,8 @@ impl Parser for MarkdownParser {
                 docstring: None,
                 is_entry_point: level == 1,
                 properties: HashMap::new(),
+            
+                embedding: None,
             });
         }
 

@@ -69,6 +69,8 @@ impl Parser for YamlParser {
                                 docstring: None,
                                 is_entry_point: false,
                                 properties,
+                            
+                                embedding: None,
                             });
                         }
 

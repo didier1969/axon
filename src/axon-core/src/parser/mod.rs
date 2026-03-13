@@ -12,6 +12,7 @@ pub struct Symbol {
     pub is_entry_point: bool,
     #[serde(default)]
     pub properties: std::collections::HashMap<String, String>,
+    pub embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -72,6 +72,8 @@ impl Parser for SqlParser {
                     docstring: None,
                     is_entry_point: false,
                     properties: HashMap::new(),
+                
+                    embedding: None,
                 });
             }
         }
@@ -91,6 +93,8 @@ impl Parser for SqlParser {
                     docstring: None,
                     is_entry_point: false,
                     properties: HashMap::new(),
+                
+                    embedding: None,
                 });
             }
         }
@@ -110,6 +114,8 @@ impl Parser for SqlParser {
                     docstring: None,
                     is_entry_point: false,
                     properties: HashMap::new(),
+                
+                    embedding: None,
                 });
             }
         }
@@ -129,6 +135,8 @@ impl Parser for SqlParser {
                     docstring: None,
                     is_entry_point: false,
                     properties: HashMap::new(),
+                
+                    embedding: None,
                 });
             }
         }

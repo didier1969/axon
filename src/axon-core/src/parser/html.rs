@@ -67,6 +67,8 @@ impl HtmlParser {
                 docstring: None,
                 is_entry_point: false,
                 properties: props,
+            
+                embedding: None,
             });
         } else if let Some(cls) = attrs.get("class") {
             let mut props = HashMap::new();
@@ -83,6 +85,8 @@ impl HtmlParser {
                     docstring: None,
                     is_entry_point: false,
                     properties: props,
+                
+                    embedding: None,
                 });
             }
         }
@@ -101,6 +105,8 @@ impl HtmlParser {
                 docstring: None,
                 is_entry_point: true,
                 properties: props,
+            
+                embedding: None,
             });
         }
 

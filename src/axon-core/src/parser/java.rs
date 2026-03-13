@@ -63,6 +63,8 @@ impl JavaParser {
                     docstring: None,
                     is_entry_point: false,
                     properties: std::collections::HashMap::new(),
+                
+                    embedding: None,
                 });
             }
         }
@@ -129,6 +131,8 @@ impl JavaParser {
                     docstring: None,
                     is_entry_point: is_entry,
                     properties,
+                
+                    embedding: None,
                 });
             }
         }

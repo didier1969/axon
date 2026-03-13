@@ -140,6 +140,8 @@ impl ElixirParser {
             docstring: None,
             is_entry_point: false,
             properties: HashMap::new(),
+        
+            embedding: None,
         });
 
         if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
@@ -194,6 +196,8 @@ impl ElixirParser {
             docstring: None,
             is_entry_point: is_otp_entry,
             properties,
+        
+            embedding: None,
         });
 
         if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
@@ -232,6 +236,8 @@ impl ElixirParser {
             docstring: None,
             is_entry_point: false,
             properties: HashMap::new(),
+        
+            embedding: None,
         });
 
         if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
