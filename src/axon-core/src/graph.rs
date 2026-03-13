@@ -245,4 +245,46 @@ impl GraphStore {
         
         Ok(god_objects)
     }
+
+    pub fn generate_mermaid_flow(paths_json: &str) -> String {
+        let mut mermaid = String::from("```mermaid\ngraph TD\n");
+        let mut has_paths = false;
+        
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(paths_json) {
+            if let Some(arr) = parsed.as_array() {
+                for item in arr {
+                    if let Some(path_str) = item.get("path").and_then(|v| v.as_str()) {
+                        let parts: Vec<&str> = path_str.split("-->").map(|s| s.trim()).collect();
+                        for i in 0..parts.len().saturating_sub(1) {
+                            mermaid.push_str(&format!("    {} --> {}\n", parts[i], parts[i+1]));
+                            has_paths = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if !has_paths {
+            return String::new();
+        }
+        
+        mermaid.push_str("```\n");
+        mermaid
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mermaid_generation() {
+        // Simulating JSON returned by Kuzu for paths
+        let paths_json = r#"[{"path": "source --> sanitizer --> sink"}]"#;
+        let mermaid = GraphStore::generate_mermaid_flow(paths_json);
+        
+        assert!(mermaid.contains("graph TD"));
+        assert!(mermaid.contains("source --> sanitizer"));
+        assert!(mermaid.contains("sanitizer --> sink"));
+    }
 }

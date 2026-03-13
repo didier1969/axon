@@ -223,8 +223,10 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         let project = args.get("project")?.as_str().unwrap_or("unknown");
         let (score, paths) = self.graph_store.get_security_audit(project).unwrap_or((100, "[]".to_string()));
         
+        let mermaid_diagram = crate::graph::GraphStore::generate_mermaid_flow(&paths);
+        
         let report = if score < 100 {
-            format!("🛡️ Security Audit for {}: Score {}/100.\nCritical Taint Paths found:\n{}", project, score, paths)
+            format!("🛡️ Security Audit for {}: Score {}/100.\nCritical Taint Paths found:\n{}\n\n{}", project, score, paths, mermaid_diagram)
         } else {
             format!("🛡️ Security Audit for {}: Score 100/100. Patterns analyzed against OWASP standards.", project)
         };

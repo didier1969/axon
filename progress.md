@@ -195,6 +195,20 @@
   - `ROADMAP.md`
   - `progress.md`
 
+### Phase 13: Visualisation de Flux (Mermaid Diagram)
+- **Status:** complete
+- Actions taken:
+  - Practiced TDD to add `test_mermaid_generation` which verifies that a Mermaid graph structure (`graph TD`) can be compiled from JSON paths.
+  - Implemented `generate_mermaid_flow` in `GraphStore` to perform naive parsing of `A --> B` structures from paths and wrap them into proper Mermaid syntax.
+  - Linked `generate_mermaid_flow` to the MCP `axon_audit` tool, giving AI agents visually explicit architecture reports.
+  - Ran full test suite (20 tests passed) and clippy to uphold the zero-warning rule.
+- Files modified:
+  - `src/axon-core/src/graph.rs`
+  - `src/axon-core/src/mcp.rs`
+  - `task_plan.md`
+  - `ROADMAP.md`
+  - `progress.md`
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

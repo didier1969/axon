@@ -7,7 +7,7 @@
 - [x] **Analyse de Propagation (Taint Analysis) :** Passer d'une recherche par mots-clés à un suivi réel de la donnée (`Source` -> `Sanitizer` -> `Sink`).
 - [x] **Détection de Backdoors sémantiques :** Identifier les fonctions dont le nom cache la dangerosité réelle (ex: `run_task` qui appelle `eval`).
 - [x] **Clustering Auto-Adaptatif :** Remplacer les seuils fixes par une analyse de la densité locale du graphe.
-- [ ] **Visualisation de Flux :** Exporter les chemins d'exposition critiques vers des diagrammes Mermaid/SVG.
+- [x] **Visualisation de Flux :** Exporter les chemins d'exposition critiques vers des diagrammes Mermaid/SVG.
 
 ### ⚡ Performance & Scalabilité (The Hydra Engine)
 - [ ] **Intégration HydraDB :** Déportation de la persistence vers RocksDB/Dolt (Elixir/Rust).
