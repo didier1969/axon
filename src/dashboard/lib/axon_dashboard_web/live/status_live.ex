@@ -3,15 +3,24 @@ defmodule AxonDashboardWeb.StatusLive do
   require Logger
 
   def mount(_params, _session, socket) do
+    if connected?(socket) do
+      :timer.send_interval(1000, self(), :tick)
+      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
+      send(self(), :trigger_initial_scan)
+    end
+
     {:ok, assign(socket, 
       projects: %{}, # %{ "axon" => %{symbols: 100, security: 95, coverage: 85} }
       total_projects: 0,
       scanned_projects: 0,
       total_symbols: 0, 
+      avg_security: 100,
+      avg_coverage: 0,
       status: :ready,
       last_event: nil,
       sys_time: Time.utc_now() |> Time.truncate(:second),
-      port: nil
+      engine_start_time: nil,
+      alerts: []
     )}
   end
 
@@ -19,58 +28,103 @@ defmodule AxonDashboardWeb.StatusLive do
     {:noreply, assign(socket, sys_time: Time.utc_now() |> Time.truncate(:second))}
   end
 
-  def handle_info({_port, {:data, data}}, socket) do
-    lines = String.split(data, "\n", trim: true)
-    new_socket = Enum.reduce(lines, socket, fn line, acc -> process_line(line, acc) end)
+  def handle_info(:trigger_initial_scan, socket) do
+    AxonDashboard.BridgeClient.trigger_scan()
+    {:noreply, assign(socket, status: :processing, total_symbols: 0, scanned_projects: 0, avg_security: 100, avg_coverage: 0)}
+  end
+
+  def handle_info({:bridge_event, event}, socket) do
+    new_socket = process_event(event, socket)
     {:noreply, new_socket}
   end
 
-  defp process_line("READY", socket), do: assign(socket, status: :ready)
-  
-  defp process_line(line, socket) do
-    case Jason.decode(line) do
-      {:ok, %{"ScanStarted" => %{"total_files" => count}}} ->
-        assign(socket, total_projects: count, scanned_projects: 0, projects: %{}, status: :processing)
+  def handle_info({:security_degraded, project, old, new}, socket) do
+    alert = "CRITICAL: #{project} security dropped from #{old}% to #{new}%!"
+    new_alerts = [alert | socket.assigns.alerts] |> Enum.take(3)
+    {:noreply, assign(socket, alerts: new_alerts)}
+  end
 
-      {:ok, %{"FileIndexed" => payload}} ->
-        name = Map.get(payload, "path", "unknown")
-        sym_count = Map.get(payload, "symbol_count", 0)
-        sec = Map.get(payload, "security_score", 100)
-        cov = Map.get(payload, "coverage_score", 0)
-
-        new_projects = Map.put(socket.assigns.projects, name, %{
-          symbols: sym_count,
-          security: sec,
-          coverage: cov
-        })
-
-        assign(socket, 
-          projects: new_projects,
-          scanned_projects: socket.assigns.scanned_projects + 1,
-          total_symbols: socket.assigns.total_symbols + sym_count,
-          last_event: "Project Sync: #{name}"
-        )
-
-      {:ok, %{"ScanComplete" => _data}} ->
-        assign(socket, status: :complete, last_event: "Fleet Ingestion Complete")
-
-      _ -> socket
+  defp process_event(%{"SystemReady" => %{"start_time_utc" => start_time}}, socket) do
+    # Format the boot time for display, or calculate uptime.
+    # We will just assign it to be displayed.
+    case DateTime.from_iso8601(start_time) do
+      {:ok, dt, _offset} ->
+        assign(socket, engine_start_time: dt)
+      _ ->
+        assign(socket, engine_start_time: nil)
     end
   end
 
+  defp process_event(%{"ScanStarted" => %{"total_files" => count}}, socket) do
+    assign(socket, total_projects: count, scanned_projects: 0, projects: %{}, status: :processing, avg_security: 100, avg_coverage: 0)
+  end
+
+  defp process_event(%{"FileIndexed" => payload}, socket) do
+    name = Map.get(payload, "path", "unknown")
+    sym_count = Map.get(payload, "symbol_count", 0)
+    rel_count = Map.get(payload, "relation_count", 0)
+    file_count = Map.get(payload, "file_count", 0)
+    entry_count = Map.get(payload, "entry_points", 0)
+    sec = Map.get(payload, "security_score", 100)
+    cov = Map.get(payload, "coverage_score", 0)
+
+    existing = Map.get(socket.assigns.projects, name, %{
+      symbols: 0, relations: 0, files: 0, entries: 0, security: 100, coverage: 0
+    })
+
+    # For symbols we add the chunk, for DB aggregates (relations/files) we take the latest which is cumulative
+    new_projects = Map.put(socket.assigns.projects, name, %{
+      symbols: existing.symbols + sym_count,
+      relations: rel_count,
+      files: file_count,
+      entries: entry_count,
+      security: sec,
+      coverage: cov
+    })
+
+    scanned = socket.assigns.scanned_projects + 1
+    
+    total_sec = Enum.reduce(new_projects, 0, fn {_, p}, acc -> acc + p.security end)
+    total_cov = Enum.reduce(new_projects, 0, fn {_, p}, acc -> acc + p.coverage end)
+    total_rel = Enum.reduce(new_projects, 0, fn {_, p}, acc -> acc + p.relations end)
+    
+    avg_sec = if scanned > 0, do: round(total_sec / scanned), else: 100
+    avg_cov = if scanned > 0, do: round(total_cov / scanned), else: 0
+
+    assign(socket, 
+      projects: new_projects,
+      scanned_projects: scanned,
+      total_symbols: socket.assigns.total_symbols + sym_count,
+      avg_security: avg_sec,
+      avg_coverage: avg_cov,
+      last_event: "Project Sync: #{name} [#{file_count} files, #{rel_count} rels]"
+    )
+  end
+
+  defp process_event(%{"ScanComplete" => _data}, socket) do
+    assign(socket, status: :complete, last_event: "Fleet Ingestion Complete")
+  end
+
+  defp process_event(_, socket), do: socket
+
   def handle_event("start_scan", _params, socket) do
-    project_root = "/home/dstadel/projects/axon"
-    bin_path = Path.join(project_root, "bin/axon-core")
-    
-    port = socket.assigns.port || Port.open({:spawn_executable, bin_path}, [:binary])
-    Port.command(port, "SCAN\n")
-    
-    {:noreply, assign(socket, port: port, status: :processing, total_symbols: 0, scanned_projects: 0)}
+    AxonDashboard.BridgeClient.trigger_scan()
+    {:noreply, assign(socket, status: :processing, total_symbols: 0, scanned_projects: 0, avg_security: 100, avg_coverage: 0)}
   end
 
   def render(assigns) do
     progress = if assigns.total_projects > 0, do: round((assigns.scanned_projects / assigns.total_projects) * 100), else: 0
     assigns = assign(assigns, :progress, progress)
+    
+    uptime_str = if assigns.engine_start_time do
+      diff = DateTime.diff(DateTime.utc_now(), assigns.engine_start_time, :second)
+      mins = div(diff, 60)
+      secs = rem(diff, 60)
+      "#{mins}m #{secs}s"
+    else
+      "Booting..."
+    end
+    assigns = assign(assigns, :uptime_str, uptime_str)
     
     ~H"""
     <div class="min-h-screen bg-base-100 text-base-content font-sans antialiased selection:bg-primary/30">
@@ -104,8 +158,8 @@ defmodule AxonDashboardWeb.StatusLive do
 
         <div class="flex items-center gap-6">
           <div class="text-right hidden xl:block">
-            <p class="text-[9px] opacity-40 uppercase tracking-[0.2em] font-bold">Node Time</p>
-            <p class="text-sm font-mono font-medium text-white"><%= @sys_time %></p>
+            <p class="text-[9px] opacity-40 uppercase tracking-[0.2em] font-bold">Engine Uptime</p>
+            <p class="text-sm font-mono font-medium text-white"><%= @uptime_str %></p>
           </div>
           <div class="h-8 w-px bg-base-content/10"></div>
           <button phx-click="start_scan" class="premium-btn premium-btn-primary h-11 px-6 group" disabled={@status == :processing}>
@@ -116,6 +170,19 @@ defmodule AxonDashboardWeb.StatusLive do
           </button>
         </div>
       </nav>
+
+      <%= if length(@alerts) > 0 do %>
+        <div class="fixed top-24 right-6 z-50 flex flex-col gap-2">
+          <%= for alert <- @alerts do %>
+            <div class="bg-red-500/20 border border-red-500 text-red-100 px-6 py-4 rounded-xl shadow-[0_0_20px_rgba(239,68,68,0.3)] backdrop-blur-md animate-pulse">
+              <div class="flex items-center gap-3">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                <span class="font-bold text-sm tracking-wide uppercase"><%= alert %></span>
+              </div>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
 
       <main class="max-w-[1600px] mx-auto p-6 md:p-10 space-y-10">
         
@@ -142,11 +209,11 @@ defmodule AxonDashboardWeb.StatusLive do
           <div class="premium-card p-8">
             <p class="text-[10px] uppercase tracking-[0.3em] opacity-40 mb-2 font-black">Average Security</p>
             <div class="flex items-center gap-4">
-              <div class="radial-progress text-accent" style={"--value: 94; --size: 4rem; --thickness: 4px;"} role="progressbar">
-                <span class="text-xs font-bold text-white">94%</span>
+              <div class="radial-progress text-accent" style={"--value: #{@avg_security}; --size: 4rem; --thickness: 4px;"} role="progressbar">
+                <span class="text-xs font-bold text-white"><%= @avg_security %>%</span>
               </div>
               <div>
-                <p class="text-sm font-bold text-white">OWASP Level High</p>
+                <p class="text-sm font-bold text-white">OWASP Level <%= if @avg_security > 90, do: "High", else: "Medium" %></p>
                 <p class="text-[9px] opacity-30 uppercase tracking-widest">Across all projects</p>
               </div>
             </div>
@@ -155,11 +222,11 @@ defmodule AxonDashboardWeb.StatusLive do
           <div class="premium-card p-8">
             <p class="text-[10px] uppercase tracking-[0.3em] opacity-40 mb-2 font-black">Fleet Integrity</p>
             <div class="flex items-center gap-4">
-              <div class="radial-progress text-primary" style={"--value: 87; --size: 4rem; --thickness: 4px;"} role="progressbar">
-                <span class="text-xs font-bold text-white">87%</span>
+              <div class="radial-progress text-primary" style={"--value: #{@avg_coverage}; --size: 4rem; --thickness: 4px;"} role="progressbar">
+                <span class="text-xs font-bold text-white"><%= @avg_coverage %>%</span>
               </div>
               <div>
-                <p class="text-sm font-bold text-white">Coverage Stable</p>
+                <p class="text-sm font-bold text-white">Coverage <%= if @avg_coverage > 80, do: "Stable", else: "Low" %></p>
                 <p class="text-[9px] opacity-30 uppercase tracking-widest">Verified by LadybugDB</p>
               </div>
             </div>
@@ -225,11 +292,21 @@ defmodule AxonDashboardWeb.StatusLive do
 
                   <!-- Nodes Stats -->
                   <div class="flex justify-between items-end border-t border-white/5 pt-4">
-                    <div>
-                      <p class="text-2xl font-light text-white"><%= info.symbols %></p>
-                      <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">Graph Nodes</p>
+                    <div class="flex gap-6">
+                      <div>
+                        <p class="text-2xl font-light text-white"><%= info.symbols %></p>
+                        <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">Nodes</p>
+                      </div>
+                      <div>
+                        <p class="text-2xl font-light text-accent"><%= info.relations %></p>
+                        <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">Relations</p>
+                      </div>
+                      <div>
+                        <p class="text-2xl font-light text-primary"><%= info.files %></p>
+                        <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">Files</p>
+                      </div>
                     </div>
-                    <div class="text-right">
+                    <div class="text-right hidden xl:block">
                       <p class="text-sm font-bold text-white italic">PROCESSED</p>
                       <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">System Status</p>
                     </div>
