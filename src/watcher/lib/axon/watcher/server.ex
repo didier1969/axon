@@ -122,7 +122,11 @@ defmodule Axon.Watcher.Server do
   @impl true
   def handle_info(:process_batch, state) do
     files_to_process = MapSet.to_list(state.pending_files)
-    if length(files_to_process) > 0, do: files_to_process |> Enum.chunk_every(@max_batch_size) |> Enum.each(&dispatch_batch/1)
+    if length(files_to_process) > 0 do
+      files_to_process 
+      |> Enum.chunk_every(@max_batch_size) 
+      |> Enum.each(&dispatch_batch(&1, :indexing_hot))
+    end
     {:noreply, %{state | pending_files: MapSet.new(), timer: nil}}
   end
 
