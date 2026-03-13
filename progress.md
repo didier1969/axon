@@ -280,6 +280,37 @@
   - `ROADMAP.md`
   - `progress.md`
 
+### Phase 18: MCP v1.3 (Async-Native & Notifications)
+- **Status:** complete
+- Actions taken:
+  - Drafted the plan to refactor MCP Server to native async using Tokio.
+  - Implemented `run_stdio` using `tokio::io::stdin()` and `tokio::io::stdout()`.
+  - Added `JsonRpcNotification` struct to support server-to-client notifications (e.g., `notifications/tools/list_changed`).
+  - Added robust JSON-RPC parse error handling returning code `-32700`.
+  - Authored a unit test `test_send_notification` ensuring correct serialization.
+  - Resolved unused code warnings by using `#[allow(dead_code)]` for future integration endpoints while preserving tests.
+  - Achieved zero warnings in `cargo clippy` and 100% pass rate in `cargo test` across 24 unit tests.
+- Files modified:
+  - `src/axon-core/src/mcp.rs`
+  - `task_plan.md`
+  - `progress.md`
+
+### Phase 19: Industrialization & Daemon Robustness
+- **Status:** complete
+- Actions taken:
+  - Created `scripts/start-v2.sh` and `scripts/stop-v2.sh` implementing rigorous PID locks to prevent the "Split-Brain" issue (multiples instances DDoS-ing the UI).
+  - Cleaned up orphan UDS sockets dynamically before boot.
+  - Refactored `BridgeClient` GenServer to act as the autonomous Master component managing Daemon State (`:idle`, `:indexing`).
+  - Decoupled `StatusLive` LiveView: it no longer initiates scans automatically on load, but purely subscribes to the telemetry stream.
+  - Added deterministic UI controls to the web dashboard: `[ START ]`, `[ STOP ]`, and `[ RESET DB ]`.
+  - Implemented dynamic database purging `RESET` command inside the Rust Data Plane (`main.rs`) via an asynchronous non-blocking thread lock swapping mechanism.
+- Files modified:
+  - `scripts/start-v2.sh`
+  - `scripts/stop-v2.sh`
+  - `src/axon-core/src/main.rs`
+  - `src/dashboard/lib/axon_dashboard/bridge_client.ex`
+  - `src/dashboard/lib/axon_dashboard_web/live/status_live.ex`
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

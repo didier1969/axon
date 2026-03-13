@@ -6,20 +6,30 @@ defmodule AxonDashboardWeb.StatusLive do
     if connected?(socket) do
       :timer.send_interval(1000, self(), :tick)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
-      send(self(), :trigger_initial_scan)
     end
 
+    state = try do
+      AxonDashboard.BridgeClient.get_state()
+    catch
+      :exit, _ -> %{}
+    end
+    
+    start_time = Map.get(state, :engine_start_time)
+    engine_state = Map.get(state, :engine_state, :idle)
+
+    status = if engine_state == :indexing, do: :processing, else: :ready
+
     {:ok, assign(socket, 
-      projects: %{}, # %{ "axon" => %{symbols: 100, security: 95, coverage: 85} }
+      projects: %{}, # %{ "axon" => %{symbols: 100, security: 95, coverage: 85, total_files: 100} }
       total_projects: 0,
       scanned_projects: 0,
       total_symbols: 0, 
       avg_security: 100,
       avg_coverage: 0,
-      status: :ready,
+      status: status,
       last_event: nil,
       sys_time: Time.utc_now() |> Time.truncate(:second),
-      engine_start_time: nil,
+      engine_start_time: start_time,
       alerts: []
     )}
   end
@@ -45,8 +55,6 @@ defmodule AxonDashboardWeb.StatusLive do
   end
 
   defp process_event(%{"SystemReady" => %{"start_time_utc" => start_time}}, socket) do
-    # Format the boot time for display, or calculate uptime.
-    # We will just assign it to be displayed.
     case DateTime.from_iso8601(start_time) do
       {:ok, dt, _offset} ->
         assign(socket, engine_start_time: dt)
@@ -59,6 +67,14 @@ defmodule AxonDashboardWeb.StatusLive do
     assign(socket, total_projects: count, scanned_projects: 0, projects: %{}, status: :processing, avg_security: 100, avg_coverage: 0)
   end
 
+  defp process_event(%{"ProjectScanStarted" => %{"project" => name, "total_files" => total}}, socket) do
+    existing = Map.get(socket.assigns.projects, name, %{
+      symbols: 0, relations: 0, files: 0, entries: 0, security: 100, coverage: 0, total_files: total
+    })
+    new_projects = Map.put(socket.assigns.projects, name, Map.put(existing, :total_files, total))
+    assign(socket, projects: new_projects, last_event: "Project Started: #{name} [#{total} files]")
+  end
+
   defp process_event(%{"FileIndexed" => payload}, socket) do
     name = Map.get(payload, "path", "unknown")
     sym_count = Map.get(payload, "symbol_count", 0)
@@ -69,24 +85,26 @@ defmodule AxonDashboardWeb.StatusLive do
     cov = Map.get(payload, "coverage_score", 0)
 
     existing = Map.get(socket.assigns.projects, name, %{
-      symbols: 0, relations: 0, files: 0, entries: 0, security: 100, coverage: 0
+      symbols: 0, relations: 0, files: 0, entries: 0, security: 100, coverage: 0, total_files: 0
     })
 
-    # For symbols we add the chunk, for DB aggregates (relations/files) we take the latest which is cumulative
+    # Accumulate parsed counts
+    new_files = existing.files + file_count
+    
     new_projects = Map.put(socket.assigns.projects, name, %{
       symbols: existing.symbols + sym_count,
-      relations: rel_count,
-      files: file_count,
-      entries: entry_count,
+      relations: existing.relations + rel_count,
+      files: new_files,
+      entries: max(existing.entries, entry_count),
       security: sec,
-      coverage: cov
+      coverage: cov,
+      total_files: existing.total_files
     })
 
     scanned = socket.assigns.scanned_projects + 1
     
     total_sec = Enum.reduce(new_projects, 0, fn {_, p}, acc -> acc + p.security end)
     total_cov = Enum.reduce(new_projects, 0, fn {_, p}, acc -> acc + p.coverage end)
-    total_rel = Enum.reduce(new_projects, 0, fn {_, p}, acc -> acc + p.relations end)
     
     avg_sec = if scanned > 0, do: round(total_sec / scanned), else: 100
     avg_cov = if scanned > 0, do: round(total_cov / scanned), else: 0
@@ -97,7 +115,7 @@ defmodule AxonDashboardWeb.StatusLive do
       total_symbols: socket.assigns.total_symbols + sym_count,
       avg_security: avg_sec,
       avg_coverage: avg_cov,
-      last_event: "Project Sync: #{name} [#{file_count} files, #{rel_count} rels]"
+      last_event: "Indexing #{name}: #{new_files}/#{existing.total_files} files"
     )
   end
 
@@ -110,6 +128,25 @@ defmodule AxonDashboardWeb.StatusLive do
   def handle_event("start_scan", _params, socket) do
     AxonDashboard.BridgeClient.trigger_scan()
     {:noreply, assign(socket, status: :processing, total_symbols: 0, scanned_projects: 0, avg_security: 100, avg_coverage: 0)}
+  end
+
+  def handle_event("stop_scan", _params, socket) do
+    AxonDashboard.BridgeClient.stop_scan()
+    {:noreply, assign(socket, status: :ready, last_event: "Scan stopped by user.")}
+  end
+
+  def handle_event("reset_db", _params, socket) do
+    AxonDashboard.BridgeClient.reset_db()
+    {:noreply, assign(socket, 
+      status: :ready, 
+      projects: %{},
+      total_projects: 0,
+      scanned_projects: 0,
+      total_symbols: 0, 
+      avg_security: 100,
+      avg_coverage: 0,
+      last_event: "Database RESET."
+    )}
   end
 
   def render(assigns) do
@@ -162,12 +199,28 @@ defmodule AxonDashboardWeb.StatusLive do
             <p class="text-sm font-mono font-medium text-white"><%= @uptime_str %></p>
           </div>
           <div class="h-8 w-px bg-base-content/10"></div>
-          <button phx-click="start_scan" class="premium-btn premium-btn-primary h-11 px-6 group" disabled={@status == :processing}>
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class={"w-5 h-5 #{if @status == :processing, do: "animate-spin"}"}>
-              <path fill-rule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.967.45 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.937a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.45-.968Z" clip-rule="evenodd" />
-            </svg>
-            Re-Synchronize Fleet
-          </button>
+          
+          <div class="flex gap-2">
+            <button phx-click="start_scan" class="premium-btn premium-btn-primary h-11 px-6 group" disabled={@status == :processing}>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class={"w-5 h-5 #{if @status == :processing, do: "animate-spin"}"}>
+                <path fill-rule="evenodd" d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.967.45 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.937a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.45-.968Z" clip-rule="evenodd" />
+              </svg>
+              Start
+            </button>
+            
+            <button phx-click="stop_scan" class="btn btn-outline border-white/20 text-white hover:bg-white/10 h-11 px-4" disabled={@status != :processing}>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-red-500">
+                <path fill-rule="evenodd" d="M4.5 7.5a3 3 0 0 1 3-3h9a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3h-9a3 3 0 0 1-3-3v-9Z" clip-rule="evenodd" />
+              </svg>
+              Stop
+            </button>
+
+            <button phx-click="reset_db" class="btn btn-ghost hover:bg-red-500/20 hover:text-red-300 text-white/50 h-11 px-4" data-confirm="Are you sure you want to completely erase the graph database?">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+              </svg>
+            </button>
+          </div>
         </div>
       </nav>
 
@@ -302,7 +355,7 @@ defmodule AxonDashboardWeb.StatusLive do
                         <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">Relations</p>
                       </div>
                       <div>
-                        <p class="text-2xl font-light text-primary"><%= info.files %></p>
+                        <p class="text-2xl font-light text-primary"><%= info.files %><span class="text-sm opacity-50 font-mono">/<%= info.total_files %></span></p>
                         <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">Files</p>
                       </div>
                     </div>

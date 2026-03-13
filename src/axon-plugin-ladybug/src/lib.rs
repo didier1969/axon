@@ -17,9 +17,11 @@ pub unsafe extern "C" fn ladybug_init_db(path: *const c_char) -> *mut PluginCont
         Err(_) => return std::ptr::null_mut(),
     };
     
-    if !Path::new(path_str).exists() {
-        if let Err(_) = std::fs::create_dir_all(path_str) {
-            return std::ptr::null_mut();
+    if let Some(parent) = Path::new(path_str).parent() {
+        if !parent.exists() {
+            if let Err(_) = std::fs::create_dir_all(parent) {
+                return std::ptr::null_mut();
+            }
         }
     }
     
@@ -29,7 +31,10 @@ pub unsafe extern "C" fn ladybug_init_db(path: *const c_char) -> *mut PluginCont
             let ctx = Box::new(PluginContext { db });
             Box::into_raw(ctx)
         }
-        Err(_) => std::ptr::null_mut()
+        Err(e) => {
+            eprintln!("Ladybug C-FFI Init Error: {:?}", e);
+            std::ptr::null_mut()
+        }
     }
 }
 

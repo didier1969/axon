@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::{self, BufRead};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use anyhow::Result;
 use crate::graph::GraphStore;
 use std::sync::Arc;
@@ -20,26 +20,70 @@ pub struct JsonRpcResponse {
     pub id: Option<Value>,
 }
 
+#[derive(Debug, Serialize)]
+#[allow(dead_code)]
+pub struct JsonRpcNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: Option<Value>,
+}
+
 pub struct McpServer {
-    graph_store: Arc<GraphStore>,
+    graph_store: Arc<std::sync::RwLock<GraphStore>>,
 }
 
 impl McpServer {
-    pub fn new(graph_store: Arc<GraphStore>) -> Self {
+    pub fn new(graph_store: Arc<std::sync::RwLock<GraphStore>>) -> Self {
         Self { graph_store }
     }
 
     #[allow(dead_code)]
-    pub fn run(&self) -> Result<()> {
-        let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            let line = line?;
-            if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(&line) {
-                let response = self.handle_request(request);
-                println!("{}", serde_json::to_string(&response)?);
+    pub async fn run_stdio(&self) -> Result<()> {
+        let mut stdin = BufReader::new(tokio::io::stdin());
+        let mut stdout = tokio::io::stdout();
+        let mut line = String::new();
+
+        while let Ok(bytes_read) = stdin.read_line(&mut line).await {
+            if bytes_read == 0 {
+                break;
             }
+            
+            match serde_json::from_str::<JsonRpcRequest>(&line) {
+                Ok(request) => {
+                    let response = self.handle_request(request);
+                    let mut response_str = serde_json::to_string(&response)?;
+                    response_str.push('\n');
+                    let _ = stdout.write_all(response_str.as_bytes()).await;
+                },
+                Err(e) => {
+                    let error_response = JsonRpcResponse {
+                        jsonrpc: "2.0".to_string(),
+                        result: None,
+                        error: Some(json!({
+                            "code": -32700,
+                            "message": "Parse error",
+                            "data": e.to_string()
+                        })),
+                        id: None,
+                    };
+                    if let Ok(mut response_str) = serde_json::to_string(&error_response) {
+                        response_str.push('\n');
+                        let _ = stdout.write_all(response_str.as_bytes()).await;
+                    }
+                }
+            }
+            line.clear();
         }
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn send_notification(&self, method: &str, params: Option<Value>) -> JsonRpcNotification {
+        JsonRpcNotification {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params,
+        }
     }
 
     pub fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
@@ -181,7 +225,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         let query = args.get("query")?.as_str()?;
         // Placeholder for hybrid search implementation
         let cypher = format!("MATCH (s:Symbol) WHERE s.name CONTAINS '{}' RETURN s.name, s.kind LIMIT 10", query);
-        match self.graph_store.query_json(&cypher) {
+        match self.graph_store.read().unwrap().query_json(&cypher) {
             Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Search Error: {}", e) }], "isError": true })),
         }
@@ -189,7 +233,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_cypher(&self, args: &Value) -> Option<Value> {
         let cypher = args.get("cypher")?.as_str()?;
-        match self.graph_store.query_json(cypher) {
+        match self.graph_store.read().unwrap().query_json(cypher) {
             Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Cypher Error: {}", e) }], "isError": true })),
         }
@@ -204,7 +248,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
              RETURN s.name, s.kind, s.tested, count(caller) AS callers, count(callee) AS callees",
             symbol
         );
-        match self.graph_store.query_json(&query) {
+        match self.graph_store.read().unwrap().query_json(&query) {
             Ok(res) => Some(json!({ "content": [{ "type": "text", "text": format!("Symbol Details:\n{}", res) }] })),
             Err(_) => None,
         }
@@ -213,7 +257,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     fn axon_impact(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
         let query = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS*1..3]-(affected) RETURN DISTINCT affected.name", symbol);
-        match self.graph_store.query_json(&query) {
+        match self.graph_store.read().unwrap().query_json(&query) {
             Ok(res) => Some(json!({ "content": [{ "type": "text", "text": format!("Affected Symbols: {}", res) }] })),
             Err(_) => None,
         }
@@ -221,7 +265,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_audit(&self, args: &Value) -> Option<Value> {
         let project = args.get("project")?.as_str().unwrap_or("unknown");
-        let (score, paths) = self.graph_store.get_security_audit(project).unwrap_or((100, "[]".to_string()));
+        let (score, paths) = self.graph_store.read().unwrap().get_security_audit(project).unwrap_or((100, "[]".to_string()));
         
         let mermaid_diagram = crate::graph::GraphStore::generate_mermaid_flow(&paths);
         
@@ -236,8 +280,8 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_health(&self, args: &Value) -> Option<Value> {
         let project = args.get("project")?.as_str().unwrap_or("unknown");
-        let coverage = self.graph_store.get_coverage_score(project).unwrap_or(0);
-        let god_objects = self.graph_store.get_god_objects(project).unwrap_or_default();
+        let coverage = self.graph_store.read().unwrap().get_coverage_score(project).unwrap_or(0);
+        let god_objects = self.graph_store.read().unwrap().get_god_objects(project).unwrap_or_default();
         
         let mut report = format!("🏥 Health Report for {}: Coverage {}%. Stability high.", project, coverage);
         
@@ -268,7 +312,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         let mut all_results = Vec::new();
         for file in files {
             let query = format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' RETURN s.name, s.kind", file);
-            if let Ok(res) = self.graph_store.query_json(&query) {
+            if let Ok(res) = self.graph_store.read().unwrap().query_json(&query) {
                 all_results.push(format!("File: {}\nSymbols:\n{}", file, res));
             }
         }
@@ -314,10 +358,22 @@ mod tests {
     use std::sync::Arc;
     use crate::graph::GraphStore;
 
+    #[test]
+    fn test_send_notification() {
+        let server = create_test_server();
+        let notif = server.send_notification("notifications/tools/list_changed", None);
+        assert_eq!(notif.method, "notifications/tools/list_changed");
+        assert_eq!(notif.jsonrpc, "2.0");
+        assert!(notif.params.is_none());
+        
+        let serialized = serde_json::to_string(&notif).unwrap();
+        assert!(serialized.contains("notifications/tools/list_changed"));
+    }
+
     // Helper function to create a dummy server for testing tool signatures
     fn create_test_server() -> McpServer {
         // Use an in-memory or temp DB if needed, here we use a dummy path
-        let store = Arc::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap()));
+        let store = Arc::new(std::sync::RwLock::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap())));
         McpServer::new(store)
     }
 
@@ -381,9 +437,9 @@ mod tests {
     fn test_axon_diff() {
         let server = create_test_server();
         // Insert a dummy file in the graph to test matching
-        server.graph_store.execute("MERGE (f:File {path: 'src/main.rs'})").unwrap();
-        server.graph_store.execute("MERGE (s:Symbol {name: 'main', kind: 'function', tested: false})").unwrap();
-        server.graph_store.execute("MATCH (f:File {path: 'src/main.rs'}), (s:Symbol {name: 'main'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (f:File {path: 'src/main.rs'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (s:Symbol {name: 'main', kind: 'function', tested: false})").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (f:File {path: 'src/main.rs'}), (s:Symbol {name: 'main'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
 
         let req = JsonRpcRequest {
             method: "tools/call".to_string(),
@@ -407,7 +463,7 @@ mod tests {
     #[test]
     fn test_axon_cypher() {
         let server = create_test_server();
-        server.graph_store.execute("MERGE (f:File {path: 'test.py'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (f:File {path: 'test.py'})").unwrap();
         
         let req = JsonRpcRequest {
             method: "tools/call".to_string(),
@@ -430,9 +486,9 @@ mod tests {
     #[test]
     fn test_axon_inspect() {
         let server = create_test_server();
-        server.graph_store.execute("MERGE (s:Symbol {name: 'core_func', kind: 'function', tested: true})").unwrap();
-        server.graph_store.execute("MERGE (c:Symbol {name: 'caller_func'})").unwrap();
-        server.graph_store.execute("MATCH (c:Symbol {name: 'caller_func'}), (s:Symbol {name: 'core_func'}) MERGE (c)-[:CALLS]->(s)").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (s:Symbol {name: 'core_func', kind: 'function', tested: true})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (c:Symbol {name: 'caller_func'})").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (c:Symbol {name: 'caller_func'}), (s:Symbol {name: 'core_func'}) MERGE (c)-[:CALLS]->(s)").unwrap();
 
         let req = JsonRpcRequest {
             method: "tools/call".to_string(),
@@ -459,14 +515,14 @@ mod tests {
     fn test_axon_audit_taint_analysis() {
         let server = create_test_server();
         // Setup a multi-hop path: user_input -> run_task -> eval
-        server.graph_store.execute("MERGE (f:File {path: 'src/api.rs'})").unwrap();
-        server.graph_store.execute("MERGE (s1:Symbol {name: 'user_input', kind: 'function', tested: false})").unwrap();
-        server.graph_store.execute("MERGE (s2:Symbol {name: 'run_task', kind: 'function', tested: false})").unwrap();
-        server.graph_store.execute("MERGE (s3:Symbol {name: 'eval', kind: 'function', tested: false})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (f:File {path: 'src/api.rs'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (s1:Symbol {name: 'user_input', kind: 'function', tested: false})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (s2:Symbol {name: 'run_task', kind: 'function', tested: false})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (s3:Symbol {name: 'eval', kind: 'function', tested: false})").unwrap();
         
-        server.graph_store.execute("MATCH (f:File {path: 'src/api.rs'}), (s1:Symbol {name: 'user_input'}) MERGE (f)-[:CONTAINS]->(s1)").unwrap();
-        server.graph_store.execute("MATCH (s1:Symbol {name: 'user_input'}), (s2:Symbol {name: 'run_task'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
-        server.graph_store.execute("MATCH (s2:Symbol {name: 'run_task'}), (s3:Symbol {name: 'eval'}) MERGE (s2)-[:CALLS]->(s3)").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (f:File {path: 'src/api.rs'}), (s1:Symbol {name: 'user_input'}) MERGE (f)-[:CONTAINS]->(s1)").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (s1:Symbol {name: 'user_input'}), (s2:Symbol {name: 'run_task'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (s2:Symbol {name: 'run_task'}), (s3:Symbol {name: 'eval'}) MERGE (s2)-[:CALLS]->(s3)").unwrap();
 
         let req = JsonRpcRequest {
             method: "tools/call".to_string(),
@@ -494,14 +550,14 @@ mod tests {
     #[test]
     fn test_axon_health_god_objects() {
         let server = create_test_server();
-        server.graph_store.execute("MERGE (f:File {path: 'src/god.rs'})").unwrap();
-        server.graph_store.execute("MERGE (god:Symbol {name: 'GodClass', kind: 'class', tested: false})").unwrap();
-        server.graph_store.execute("MATCH (f:File {path: 'src/god.rs'}), (s:Symbol {name: 'GodClass'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (f:File {path: 'src/god.rs'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (god:Symbol {name: 'GodClass', kind: 'class', tested: false})").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (f:File {path: 'src/god.rs'}), (s:Symbol {name: 'GodClass'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
         
         // Create 10 dependents to make it a God Object
         for i in 0..10 {
-            server.graph_store.execute(&format!("MERGE (dep{i}:Symbol {{name: 'dep{i}'}})")).unwrap();
-            server.graph_store.execute(&format!("MATCH (dep:Symbol {{name: 'dep{i}'}}), (god:Symbol {{name: 'GodClass'}}) MERGE (dep)-[:CALLS]->(god)")).unwrap();
+            server.graph_store.read().unwrap().execute(&format!("MERGE (dep{i}:Symbol {{name: 'dep{i}'}})")).unwrap();
+            server.graph_store.read().unwrap().execute(&format!("MATCH (dep:Symbol {{name: 'dep{i}'}}), (god:Symbol {{name: 'GodClass'}}) MERGE (dep)-[:CALLS]->(god)")).unwrap();
         }
 
         let req = JsonRpcRequest {

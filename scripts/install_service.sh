@@ -1,12 +1,12 @@
 #!/bin/bash
-# Axon Service Installer - Industrial v1.2
+# Axon Service Installer - Industrial v2
 # Installe Axon comme un service persistant avec logs tournants (48h)
 
 PROJECT_ROOT="/home/dstadel/projects/axon"
 LOG_DIR="$PROJECT_ROOT/logs"
 RETENTION_HOURS=48
 
-echo "🚀 Installing Axon System Service..."
+echo "🚀 Installing Axon System Service (Rust Core)..."
 
 # 1. Création des répertoires de logs
 mkdir -p "$LOG_DIR/watchers"
@@ -26,30 +26,51 @@ done
 EOF
 chmod +x "$PROJECT_ROOT/scripts/rotate_logs.sh"
 
-# 3. Création du service Systemd (pour Linux/WSL)
-cat <<EOF | sudo tee /etc/systemd/system/axon.service
+# 3. Création du service Systemd pour Axon Core (Data Plane)
+cat <<EOF | sudo tee /etc/systemd/system/axon-core.service
 [Unit]
-Description=Axon Code Intelligence Daemon
+Description=Axon Code Intelligence Daemon (Rust Core)
 After=network.target
 
 [Service]
 Type=simple
 User=dstadel
 WorkingDirectory=$PROJECT_ROOT
-Environment=PYTHONPATH=$PROJECT_ROOT/src
-ExecStart=/usr/bin/nix develop $PROJECT_ROOT --no-write-lock-file -c python3 -u $PROJECT_ROOT/scripts/axon-fleet-daemon.py
+ExecStart=$PROJECT_ROOT/bin/axon-core
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=always
-RestartSec=10
-StandardOutput=append:$LOG_DIR/axon.log
-StandardError=append:$LOG_DIR/axon.log
+RestartSec=3
+StandardOutput=append:$LOG_DIR/axon-core.log
+StandardError=append:$LOG_DIR/axon-core.log
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# 4. Activation
+# 4. Création du service Systemd pour le Dashboard (Control Plane)
+cat <<EOF | sudo tee /etc/systemd/system/axon-dashboard.service
+[Unit]
+Description=Axon Dashboard (Elixir/Phoenix)
+After=network.target axon-core.service
+
+[Service]
+Type=simple
+User=dstadel
+WorkingDirectory=$PROJECT_ROOT/src/dashboard
+Environment=MIX_ENV=prod
+Environment=PORT=44921
+ExecStart=/usr/bin/env mix phx.server
+Restart=always
+RestartSec=5
+StandardOutput=append:$LOG_DIR/axon-dashboard.log
+StandardError=append:$LOG_DIR/axon-dashboard.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 5. Activation
 sudo systemctl daemon-reload
-echo "✅ Axon Service configured."
-echo "💡 Use 'sudo systemctl start axon' to begin indexing."
+echo "✅ Axon Services configured."
+echo "💡 Use 'sudo systemctl start axon-core axon-dashboard' to begin indexing."
 echo "📊 Logs available in $LOG_DIR (Retention: 48h)"

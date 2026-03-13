@@ -10,7 +10,7 @@ use graph::GraphStore;
 use mcp::McpServer;
 use std::time::Instant;
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use log::{info, debug, error, warn};
@@ -26,8 +26,12 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting Axon Core v2");
     info!("Engine Boot Time: {}", boot_time);
     
+    // We wrap GraphStore in an Arc to be accessible and also an Arc<Mutex> maybe?
+    // Wait, GraphStore itself provides thread-safe access (it's using Kuzu connection). 
+    // To implement RESET, we need to be able to recreate the GraphStore. 
+    // Using Arc<tokio::sync::RwLock<GraphStore>> is safer for RESET.
     let graph_store = match GraphStore::new(db_path) {
-        Ok(store) => Arc::new(store),
+        Ok(store) => Arc::new(std::sync::RwLock::new(store)),
         Err(e) => {
             error!("Fatal Error initializing LadybugDB: {:?}", e);
             return Err(e);
@@ -36,7 +40,6 @@ async fn main() -> anyhow::Result<()> {
 
     let socket_path = "/tmp/axon-v2.sock";
     
-    // Remove existing socket if it exists
     if std::path::Path::new(socket_path).exists() {
         std::fs::remove_file(socket_path)?;
     }
@@ -69,6 +72,21 @@ async fn main() -> anyhow::Result<()> {
             let mut buf_reader = BufReader::new(reader);
             let mut line = String::new();
             
+            // Setup a channel for sending messages back to the UI asynchronously
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(100);
+            
+            // Spawn writer loop
+            tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    if writer.write_all(msg.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let mut cancel_token = Arc::new(AtomicBool::new(false));
+            let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
+
             while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
                 if bytes_read == 0 {
                     break; // EOF
@@ -77,124 +95,194 @@ async fn main() -> anyhow::Result<()> {
                 let command = line.trim();
                 
                 if command == "START" {
-                    info!("Received START command from Control Plane");
-                    let start = Instant::now();
+                    info!("Received START command");
+                    if let Some(task) = scan_task.take() {
+                        cancel_token.store(true, Ordering::Relaxed);
+                        let _ = task.await; // Wait for old task to finish cleanly
+                    }
+                    cancel_token = Arc::new(AtomicBool::new(false));
                     
-                    let project_dirs = fs::read_dir(projects_root).unwrap()
-                        .filter_map(|entry| entry.ok())
-                        .filter(|entry| entry.path().is_dir())
-                        .filter(|entry| {
-                            entry.path().join(".axon").exists()
-                        })
-                        .collect::<Vec<_>>();
+                    let token_clone = cancel_token.clone();
+                    let tx_clone = tx.clone();
+                    let store_for_scan = store_clone.clone();
+                    let proj_root = projects_root.to_string();
 
-                    let start_msg = serde_json::to_string(&BridgeEvent::ScanStarted { 
-                        total_files: project_dirs.len() 
-                    }).unwrap() + "\n";
-                    let _ = writer.write_all(start_msg.as_bytes()).await;
+                    scan_task = Some(tokio::spawn(async move {
+                        let start = Instant::now();
+                        
+                        let project_dirs = fs::read_dir(&proj_root).unwrap()
+                            .filter_map(|entry| entry.ok())
+                            .filter(|entry| entry.path().is_dir())
+                            .filter(|entry| entry.path().join(".axon").exists())
+                            .collect::<Vec<_>>();
 
-                    for project in project_dirs {
-                        let project_path = project.path();
-                        let project_name = project_path.file_name().unwrap().to_string_lossy().to_string();
-                        
-                        info!("Scanning project: {}", project_name);
-                        let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                        let files = scanner.scan();
-                        info!("Found {} files in {}", files.len(), project_name);
-                        
-                        let chunk_size = 50;
-                        let mut _total_symbols_for_project = 0;
-                        let mut _total_files_for_project = 0;
-                        let mut _total_rels_for_project = 0;
-                        
-                        for chunk in files.chunks(chunk_size) {
-                            let chunk_vec = chunk.to_vec();
-                            let store = store_clone.clone();
-                            let (chunk_symbols, chunk_rels): (usize, usize) = tokio::task::spawn_blocking(move || {
-                                let mut local_syms = 0;
-                                let mut local_rels = 0;
-                                for path in chunk_vec {
-                                    debug!("Parsing file: {:?}", path);
-                                    if let Some(parser) = parser::get_parser_for_file(&path) {
-                                        if let Ok(content) = fs::read_to_string(&path) {
-                                            let mut result = parser.parse(&content);
-                                            
-                                            let texts_to_embed: Vec<String> = result.symbols.iter()
-                                                .map(|s| {
-                                                    let doc = s.docstring.as_deref().unwrap_or("");
-                                                    format!("Symbol: {} Kind: {} Doc: {}", s.name, s.kind, doc)
-                                                })
-                                                .collect();
+                        let start_msg = serde_json::to_string(&BridgeEvent::ScanStarted { 
+                            total_files: project_dirs.len() 
+                        }).unwrap() + "\n";
+                        let _ = tx_clone.send(start_msg).await;
 
-                                            if let Ok(embeddings) = crate::embedder::batch_embed(texts_to_embed) {
-                                                for (sym, emb) in result.symbols.iter_mut().zip(embeddings.into_iter()) {
-                                                    sym.embedding = Some(emb);
+                        for project in project_dirs {
+                            if token_clone.load(Ordering::Relaxed) { break; }
+                            
+                            let project_path = project.path();
+                            let project_name = project_path.file_name().unwrap().to_string_lossy().to_string();
+                            
+                            info!("Scanning project: {}", project_name);
+                            let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
+                            let files = scanner.scan();
+                            
+                            let proj_start_msg = serde_json::to_string(&BridgeEvent::ProjectScanStarted {
+                                project: project_name.clone(),
+                                total_files: files.len(),
+                            }).unwrap() + "\n";
+                            let _ = tx_clone.send(proj_start_msg).await;
+                            
+                            let chunk_size = 50;
+                            let mut _total_symbols_for_project = 0;
+                            let mut _total_files_for_project = 0;
+                            let mut _total_rels_for_project = 0;
+                            
+                            for chunk in files.chunks(chunk_size) {
+                                if token_clone.load(Ordering::Relaxed) { break; }
+                                
+                                let chunk_vec = chunk.to_vec();
+                                let store_for_thread = store_for_scan.clone();
+                                
+                                let (chunk_symbols, chunk_rels): (usize, usize) = tokio::task::spawn_blocking(move || {
+                                    let locked_store = store_for_thread.read().unwrap();
+                                    // Do heavy work
+                                    let mut local_syms = 0;
+                                    let mut local_rels = 0;
+                                    for path in chunk_vec {
+                                        if let Some(parser) = parser::get_parser_for_file(&path) {
+                                            if let Ok(content) = fs::read_to_string(&path) {
+                                                let mut result = parser.parse(&content);
+                                                let texts_to_embed: Vec<String> = result.symbols.iter()
+                                                    .map(|s| {
+                                                        let doc = s.docstring.as_deref().unwrap_or("");
+                                                        format!("Symbol: {} Kind: {} Doc: {}", s.name, s.kind, doc)
+                                                    })
+                                                    .collect();
+                                                if let Ok(embeddings) = crate::embedder::batch_embed(texts_to_embed) {
+                                                    for (sym, emb) in result.symbols.iter_mut().zip(embeddings.into_iter()) {
+                                                        sym.embedding = Some(emb);
+                                                    }
                                                 }
-                                            }
-
-                                            local_syms += result.symbols.len();
-                                            local_rels += result.relations.len();
-                                            let path_str = path.to_string_lossy().to_string();
-                                            
-                                            if let Err(e) = store.insert_file_data(&path_str, &result) {
-                                                warn!("Failed to insert to DB for {:?}: {:?}", path, e);
+                                                local_syms += result.symbols.len();
+                                                local_rels += result.relations.len();
+                                                let path_str = path.to_string_lossy().to_string();
+                                                let _ = locked_store.insert_file_data(&path_str, &result);
                                             }
                                         }
                                     }
-                                }
-                                (local_syms, local_rels)
-                            }).await.unwrap_or_else(|e| {
-                                error!("Task panicked: {:?}", e);
-                                (0, 0)
-                            });
-                            
-                            _total_symbols_for_project += chunk_symbols;
-                            _total_files_for_project += chunk.len();
-                            _total_rels_for_project += chunk_rels;
+                                    (local_syms, local_rels)
+                                }).await.unwrap_or((0, 0));
+                                
+                                _total_symbols_for_project += chunk_symbols;
+                                _total_files_for_project += chunk.len();
+                                _total_rels_for_project += chunk_rels;
 
-                            let file_msg = serde_json::to_string(&BridgeEvent::FileIndexed { 
-                                path: project_name.clone(), 
-                                symbol_count: chunk_symbols, 
-                                relation_count: chunk_rels,
-                                file_count: chunk.len(),
-                                entry_points: 0, 
-                                security_score: 100, 
-                                coverage_score: 0,
-                            }).unwrap() + "\n";
+                                let file_msg = serde_json::to_string(&BridgeEvent::FileIndexed { 
+                                    path: project_name.clone(), 
+                                    symbol_count: chunk_symbols, 
+                                    relation_count: chunk_rels,
+                                    file_count: chunk.len(),
+                                    entry_points: 0, 
+                                    security_score: 100, 
+                                    coverage_score: 0,
+                                }).unwrap() + "\n";
+                                let _ = tx_clone.send(file_msg).await;
+                            }
                             
-                            let _ = writer.write_all(file_msg.as_bytes()).await;
+                            if !token_clone.load(Ordering::Relaxed) {
+                                let (sec_score, cov_score, entry_count) = {
+                                    let locked_store = store_for_scan.read().unwrap();
+                                    let (sec_score, _) = locked_store.get_security_audit(&project_name).unwrap_or((100, "".to_string()));
+                                    let cov_score = locked_store.get_coverage_score(&project_name).unwrap_or(0);
+                                    let entry_count = locked_store.query_count(&format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.tested = true RETURN count(s)", project_name)).unwrap_or(0) as usize; 
+                                    (sec_score, cov_score, entry_count)
+                                };
+
+                                let final_file_msg = serde_json::to_string(&BridgeEvent::FileIndexed { 
+                                    path: project_name.clone(), 
+                                    symbol_count: 0, 
+                                    relation_count: 0,
+                                    file_count: 0,
+                                    entry_points: entry_count,
+                                    security_score: sec_score,
+                                    coverage_score: cov_score,
+                                }).unwrap() + "\n";
+                                let _ = tx_clone.send(final_file_msg).await;
+                            }
                         }
-                        
-                        info!("Finalizing DB aggregates for {}", project_name);
-                        let (sec_score, _) = store_clone.get_security_audit(&project_name).unwrap_or((100, "".to_string()));
-                        let cov_score = store_clone.get_coverage_score(&project_name).unwrap_or(0);
-                        let entry_count = store_clone.query_count(&format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.tested = true RETURN count(s)", project_name)).unwrap_or(0) as usize; 
 
-                        let final_file_msg = serde_json::to_string(&BridgeEvent::FileIndexed { 
-                            path: project_name.clone(), 
-                            symbol_count: 0, 
-                            relation_count: 0,
-                            file_count: 0,
-                            entry_points: entry_count,
-                            security_score: sec_score,
-                            coverage_score: cov_score,
-                        }).unwrap() + "\n";
-                        let _ = writer.write_all(final_file_msg.as_bytes()).await;
+                        if !token_clone.load(Ordering::Relaxed) {
+                            let duration = start.elapsed();
+                            info!("Fleet Ingestion Complete in {:?}", duration);
+                            let complete_msg = serde_json::to_string(&BridgeEvent::ScanComplete { 
+                                total_files: 0, 
+                                duration_ms: duration.as_millis() as u64 
+                            }).unwrap() + "\n";
+                            let _ = tx_clone.send(complete_msg).await;
+                        } else {
+                            info!("Fleet Ingestion STOPPED by user.");
+                            let complete_msg = serde_json::to_string(&BridgeEvent::ScanComplete { 
+                                total_files: 0, 
+                                duration_ms: 0
+                            }).unwrap() + "\n";
+                            let _ = tx_clone.send(complete_msg).await;
+                        }
+                    }));
+                } else if command == "STOP" {
+                    info!("Received STOP command");
+                    cancel_token.store(true, Ordering::Relaxed);
+                    if let Some(task) = scan_task.take() {
+                        let _ = task.await; // Wait cleanly
                     }
-
-                    let duration = start.elapsed();
-                    info!("Fleet Ingestion Complete in {:?}", duration);
+                } else if command == "RESET" {
+                    info!("Received RESET command. Purging KuzuDB...");
+                    cancel_token.store(true, Ordering::Relaxed);
+                    if let Some(task) = scan_task.take() {
+                        let _ = task.await; // Ensure nothing is writing
+                    }
+                    
+                    // Drop the old graph_store instance explicitly inside a write lock block to free handles
+                    {
+                        let mut locked = store_clone.write().unwrap();
+                        if let Ok(temp_store) = GraphStore::new(":memory:") {
+                            *locked = temp_store;
+                        }
+                    }
+                    
+                    let db_path_str = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
+                    let _ = std::fs::remove_dir_all(db_path_str);
+                    
+                    // Recreate
+                    {
+                        let mut locked = store_clone.write().unwrap();
+                        match GraphStore::new(db_path_str) {
+                            Ok(new_store) => {
+                                *locked = new_store;
+                                info!("Database RESET complete.");
+                            },
+                            Err(e) => {
+                                error!("Failed to recreate database after reset: {}", e);
+                            }
+                        }
+                    }
                     let complete_msg = serde_json::to_string(&BridgeEvent::ScanComplete { 
                         total_files: 0, 
-                        duration_ms: duration.as_millis() as u64 
+                        duration_ms: 0
                     }).unwrap() + "\n";
-                    let _ = writer.write_all(complete_msg.as_bytes()).await;
+                    let _ = tx.send(complete_msg).await;
+                    
                 } else if command.starts_with('{') {
+                    // MCP Request
                     let mcp_server = McpServer::new(store_clone.clone());
                     if let Ok(request) = serde_json::from_str::<mcp::JsonRpcRequest>(command) {
                         let response = mcp_server.handle_request(request);
                         if let Ok(json_str) = serde_json::to_string(&response) {
-                            let _ = writer.write_all(format!("{}\n", json_str).as_bytes()).await;
+                            let _ = tx.send(format!("{}\n", json_str)).await;
                         }
                     }
                 }

@@ -12,16 +12,54 @@ defmodule AxonDashboard.BridgeClient do
     GenServer.cast(__MODULE__, :trigger_scan)
   end
 
+  def stop_scan do
+    GenServer.cast(__MODULE__, :stop_scan)
+  end
+
+  def reset_db do
+    GenServer.cast(__MODULE__, :reset_db)
+  end
+
+  def get_state do
+    GenServer.call(__MODULE__, :get_state)
+  end
+
   def init(_opts) do
     Process.send_after(self(), :connect, 500)
-    {:ok, %{socket: nil, security_scores: %{}}}
+    {:ok, %{
+      socket: nil, 
+      security_scores: %{}, 
+      engine_start_time: nil, 
+      engine_state: :idle # :idle | :indexing
+    }}
+  end
+
+  def handle_call(:get_state, _from, state) do
+    {:reply, state, state}
   end
 
   def handle_cast(:trigger_scan, state) do
     if state.socket != nil do
+      Logger.info("[BRIDGE] Sending START command")
       :gen_tcp.send(state.socket, "START\n")
     end
-    {:noreply, state}
+    {:noreply, %{state | engine_state: :indexing}}
+  end
+
+  def handle_cast(:stop_scan, state) do
+    if state.socket != nil do
+      Logger.info("[BRIDGE] Sending STOP command")
+      :gen_tcp.send(state.socket, "STOP\n")
+    end
+    {:noreply, %{state | engine_state: :idle}}
+  end
+
+  def handle_cast(:reset_db, state) do
+    if state.socket != nil do
+      Logger.info("[BRIDGE] Sending RESET command")
+      :gen_tcp.send(state.socket, "RESET\n")
+    end
+    {:noreply, %{state | engine_state: :idle}}
   end
 
   def handle_info(:connect, state) do
@@ -37,13 +75,10 @@ defmodule AxonDashboard.BridgeClient do
   end
 
   def handle_info({:tcp, socket, data}, state) do
-    if is_binary(data) and String.contains?(data, "Axon Bridge Ready") do
-       if socket != nil do
-         :gen_tcp.send(socket, "START\n")
-       end
-    end
+    # When Rust replies with Bridge Ready, we DO NOT automatically start index.
+    # The LiveView will request it via user button, OR we could do it on first boot.
+    # We will let it be manual to respect the user's "Job Interne" control logic.
     
-    # Toujours processer les lignes JSON (y compris SystemReady qui arrive juste après)
     lines = String.split(data, "\n", trim: true)
     
     new_state = Enum.reduce(lines, state, fn line, acc ->
@@ -62,6 +97,21 @@ defmodule AxonDashboard.BridgeClient do
     end)
     
     {:noreply, %{new_state | socket: socket}}
+  end
+
+  defp handle_bridge_event(%{"SystemReady" => %{"start_time_utc" => start_time}}, state) do
+    case DateTime.from_iso8601(start_time) do
+      {:ok, dt, _offset} -> %{state | engine_start_time: dt}
+      _ -> state
+    end
+  end
+
+  defp handle_bridge_event(%{"ScanStarted" => _}, state) do
+    %{state | engine_state: :indexing}
+  end
+
+  defp handle_bridge_event(%{"ScanComplete" => _}, state) do
+    %{state | engine_state: :idle}
   end
 
   defp handle_bridge_event(%{"FileIndexed" => payload}, state) do
@@ -87,6 +137,6 @@ defmodule AxonDashboard.BridgeClient do
   def handle_info({:tcp_closed, _socket}, state) do
     Logger.warning("[BRIDGE] Connection lost. Reconnecting...")
     send(self(), :connect)
-    {:noreply, %{state | socket: nil}}
+    {:noreply, %{state | socket: nil, engine_state: :idle}}
   end
 end
