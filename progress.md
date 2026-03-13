@@ -228,6 +228,26 @@
   - `ROADMAP.md`
   - `progress.md`
 
+### Phase 15: Parallel Embeddings (FastEmbed Rust)
+- **Status:** complete
+- Actions taken:
+  - Formulated a comprehensive TDD design doc (`2026-03-13-axon-parallel-embeddings-design.md`) selecting the Hybrid Batching approach (batch vectorization per file).
+  - Used Subagent-Driven Development to execute the implementation cleanly without blocking the orchestrator.
+  - Added `fastembed` and `once_cell` to `src/axon-core/Cargo.toml`.
+  - Added `embedding: Option<Vec<f32>>` to the core `Symbol` struct in `src/axon-core/src/parser/mod.rs` and dynamically fixed all 37 parser instantiations.
+  - Created a thread-safe singleton wrapper in `src/axon-core/src/embedder.rs` instantiating the `all-MiniLM-L6-v2` ONNX model lazily to avoid cold starts.
+  - Hooked the embedding batch logic into `main.rs` directly after AST extraction (`parser.parse()`), passing an array of formatted strings to leverage hardware SIMD acceleration safely.
+  - Re-ran tests, including new unit tests for vector dimensions (384), and confirmed zero clippy warnings.
+- Files modified:
+  - `src/axon-core/Cargo.toml`
+  - `src/axon-core/src/parser/*.rs`
+  - `src/axon-core/src/embedder.rs`
+  - `src/axon-core/src/main.rs`
+  - `docs/plans/2026-03-13-axon-parallel-embeddings-design.md`
+  - `docs/plans/2026-03-13-axon-parallel-embeddings-plan.md`
+  - `ROADMAP.md`
+  - `progress.md`
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.
