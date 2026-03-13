@@ -100,6 +100,20 @@ impl RustParser {
             props.insert("class_name".to_string(), class_name.to_string());
         }
 
+        let mut prev_node = node.prev_sibling();
+        while let Some(sibling) = prev_node {
+            if sibling.kind() == "attribute_item" {
+                if let Ok(attr_text) = sibling.utf8_text(source) {
+                    if attr_text.contains("rustler::nif") {
+                        props.insert("is_nif".to_string(), "true".to_string());
+                    }
+                }
+            } else if sibling.kind() != "line_comment" && sibling.kind() != "block_comment" {
+                break;
+            }
+            prev_node = sibling.prev_sibling();
+        }
+
         result.symbols.push(Symbol {
             name,
             kind: kind.to_string(),
@@ -543,5 +557,20 @@ mod tests {
         assert!(result.relations.iter().any(|r| r.to == "println!" && r.rel_type == "calls"));
         assert!(result.relations.iter().any(|r| r.to == "new" && r.rel_type == "calls"));
         assert!(result.relations.iter().any(|r| r.to == "insert" && r.rel_type == "calls"));
+    }
+
+    #[test]
+    fn test_parse_rustler_nif() {
+        let code = r#"
+            #[rustler::nif]
+            pub fn compute_hash(data: String) -> String {
+                "hash".to_string()
+            }
+        "#;
+        let parser = RustParser::new();
+        let result = parser.parse(code);
+
+        let nif_sym = result.symbols.iter().find(|s| s.name == "compute_hash").unwrap();
+        assert_eq!(nif_sym.properties.get("is_nif").map(|s| s.as_str()), Some("true"));
     }
 }
