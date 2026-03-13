@@ -94,7 +94,7 @@ defmodule Axon.Watcher.Server do
       if total > 0 do
         Axon.Watcher.Telemetry.init_directories(files)
         Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "indexing", total: total, progress: 0})
-        files |> Enum.chunk_every(@max_batch_size) |> Enum.each(&dispatch_batch/1)
+        files |> Enum.chunk_every(@max_batch_size) |> Enum.each(&dispatch_batch(&1, :indexing_default))
         Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", progress: 100})
       else
         Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", progress: 100})
@@ -147,7 +147,7 @@ defmodule Axon.Watcher.Server do
     Process.send_after(self(), :process_batch, @batch_timeout)
   end
 
-  defp dispatch_batch(paths) do
+  defp dispatch_batch(paths, queue \\ :indexing_default) do
     files_payload = Enum.reduce(paths, [], fn path, acc ->
       case File.read(path) do
         {:ok, content} -> 
@@ -164,9 +164,9 @@ defmodule Axon.Watcher.Server do
       try do
         # On passe explicitement une Map à Oban
         job_args = %{"batch" => files_payload}
-        Axon.Watcher.IndexingWorker.new(job_args)
+        Axon.Watcher.IndexingWorker.new(job_args, queue: queue)
         |> Oban.insert!()
-        Logger.info("[Pod A] Enqueued batch of #{length(files_payload)} files.")
+        Logger.info("[Pod A] Enqueued batch of #{length(files_payload)} files to #{queue}.")
       rescue
         e -> Logger.error("[Pod A] FAILED to enqueue batch: #{inspect(e)}")
       end
