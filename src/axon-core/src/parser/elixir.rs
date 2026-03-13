@@ -188,6 +188,15 @@ impl ElixirParser {
             properties.insert("nif_loader".to_string(), "true".to_string());
         }
 
+        if node_content.contains(":erlang.nif_error(:nif_not_loaded)") {
+            result.relations.push(Relation {
+                from: module_name.to_string(),
+                to: func_name.clone(),
+                rel_type: "calls_nif".to_string(),
+                properties: std::collections::HashMap::new(),
+            });
+        }
+
         result.symbols.push(Symbol {
             name: full_name,
             kind: "function".to_string(),
@@ -509,5 +518,23 @@ mod tests {
         let genserver_rel = result.relations.iter().find(|r| r.rel_type == "calls").unwrap();
         assert_eq!(genserver_rel.properties.get("genserver").map(|s| s.as_str()), Some("true"));
         assert_eq!(genserver_rel.to, "GenServer");
+    }
+
+    #[test]
+    fn test_elixir_nif_resolution() {
+        let code = r#"
+            defmodule Axon.Scanner do
+              use Rustler, otp_app: :axon_watcher, crate: "axon_scanner"
+              def scan(_path), do: :erlang.nif_error(:nif_not_loaded)
+            end
+        "#;
+        let parser = ElixirParser::new();
+        let result = parser.parse(code);
+
+        let has_nif_call = result.relations.iter().any(|r| {
+            r.rel_type == "calls_nif" && r.to == "scan"
+        });
+        
+        assert!(has_nif_call, "Elixir NIF resolution failed");
     }
 }
