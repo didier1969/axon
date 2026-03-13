@@ -27,3 +27,8 @@ logs/
 *.log
 *.txt
 *.nix
+
+# Rust & Build Artifacts
+target/
+bin/
+.fastembed_cache/
