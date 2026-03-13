@@ -117,7 +117,21 @@ async fn main() -> anyhow::Result<()> {
                                     debug!("Parsing file: {:?}", path);
                                     if let Some(parser) = parser::get_parser_for_file(&path) {
                                         if let Ok(content) = fs::read_to_string(&path) {
-                                            let result = parser.parse(&content);
+                                            let mut result = parser.parse(&content);
+                                            
+                                            let texts_to_embed: Vec<String> = result.symbols.iter()
+                                                .map(|s| {
+                                                    let doc = s.docstring.as_deref().unwrap_or("");
+                                                    format!("Symbol: {} Kind: {} Doc: {}", s.name, s.kind, doc)
+                                                })
+                                                .collect();
+
+                                            if let Ok(embeddings) = crate::embedder::batch_embed(texts_to_embed) {
+                                                for (sym, emb) in result.symbols.iter_mut().zip(embeddings.into_iter()) {
+                                                    sym.embedding = Some(emb);
+                                                }
+                                            }
+
                                             local_syms += result.symbols.len();
                                             local_rels += result.relations.len();
                                             let path_str = path.to_string_lossy().to_string();
