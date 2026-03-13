@@ -221,8 +221,15 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_audit(&self, args: &Value) -> Option<Value> {
         let project = args.get("project")?.as_str().unwrap_or("unknown");
-        let score = self.graph_store.get_security_score(project).unwrap_or(100);
-        Some(json!({ "content": [{ "type": "text", "text": format!("🛡️ Security Audit for {}: Score {}/100. Patterns analyzed against OWASP standards.", project, score) }] }))
+        let (score, paths) = self.graph_store.get_security_audit(project).unwrap_or((100, "[]".to_string()));
+        
+        let report = if score < 100 {
+            format!("🛡️ Security Audit for {}: Score {}/100.\nCritical Taint Paths found:\n{}", project, score, paths)
+        } else {
+            format!("🛡️ Security Audit for {}: Score 100/100. Patterns analyzed against OWASP standards.", project)
+        };
+        
+        Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
     fn axon_health(&self, args: &Value) -> Option<Value> {
@@ -436,5 +443,41 @@ mod tests {
         // Output format check based on query results
         assert!(content.contains("core_func"));
         assert!(content.contains("function"));
+    }
+
+    #[test]
+    fn test_axon_audit_taint_analysis() {
+        let server = create_test_server();
+        // Setup a multi-hop path: user_input -> run_task -> eval
+        server.graph_store.execute("MERGE (f:File {path: 'src/api.rs'})").unwrap();
+        server.graph_store.execute("MERGE (s1:Symbol {name: 'user_input', kind: 'function', tested: false})").unwrap();
+        server.graph_store.execute("MERGE (s2:Symbol {name: 'run_task', kind: 'function', tested: false})").unwrap();
+        server.graph_store.execute("MERGE (s3:Symbol {name: 'eval', kind: 'function', tested: false})").unwrap();
+        
+        server.graph_store.execute("MATCH (f:File {path: 'src/api.rs'}), (s1:Symbol {name: 'user_input'}) MERGE (f)-[:CONTAINS]->(s1)").unwrap();
+        server.graph_store.execute("MATCH (s1:Symbol {name: 'user_input'}), (s2:Symbol {name: 'run_task'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
+        server.graph_store.execute("MATCH (s2:Symbol {name: 'run_task'}), (s3:Symbol {name: 'eval'}) MERGE (s2)-[:CALLS]->(s3)").unwrap();
+
+        let req = JsonRpcRequest {
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_audit",
+                "arguments": {
+                    "project": "src/api.rs"
+                }
+            })),
+            id: Some(json!(6)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        // It should deduct points due to the indirect eval call (distance 2)
+        // Score should be < 100
+        assert!(!content.contains("Score 100/100"));
+        // Extra requirement: should report critical paths
+        assert!(content.contains("user_input"));
+        assert!(content.contains("eval"));
     }
 }

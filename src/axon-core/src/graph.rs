@@ -170,19 +170,32 @@ impl GraphStore {
 
         Ok(())
     }
-    pub fn get_security_score(&self, project_name: &str) -> Result<usize> {
-        let query = format!(
-            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS]->(d:Symbol) 
+    pub fn get_security_audit(&self, project_name: &str) -> Result<(usize, String)> {
+        // Taint analysis: Path from any symbol in the file to a dangerous sink, depth 1 to 4
+        let count_query = format!(
+            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS*1..4]->(d:Symbol) 
              WHERE f.path CONTAINS '{}' AND d.name IN ['eval', 'exec', 'system', 'pickle'] 
              RETURN count(DISTINCT s)",
             project_name
         );
-        let issues = self.query_count(&query)?;
-        if issues > 0 {
-            Ok((100 - (issues * 15).min(100)) as usize)
+        let issues = self.query_count(&count_query)?;
+        
+        let score = if issues > 0 {
+            (100 - (issues * 15).min(100)) as usize
         } else {
-            Ok(100)
-        }
+            100
+        };
+
+        let paths_query = format!(
+            "MATCH path = (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS*1..4]->(d:Symbol) 
+             WHERE f.path CONTAINS '{}' AND d.name IN ['eval', 'exec', 'system', 'pickle'] 
+             RETURN path LIMIT 5",
+            project_name
+        );
+        
+        let paths_json = self.query_json(&paths_query).unwrap_or_else(|_| "[]".to_string());
+        
+        Ok((score, paths_json))
     }
 
     pub fn get_coverage_score(&self, project_name: &str) -> Result<usize> {

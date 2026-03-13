@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                         
                         info!("Finalizing DB aggregates for {}", project_name);
-                        let sec_score = store_clone.get_security_score(&project_name).unwrap_or(100);
+                        let (sec_score, _) = store_clone.get_security_audit(&project_name).unwrap_or((100, "".to_string()));
                         let cov_score = store_clone.get_coverage_score(&project_name).unwrap_or(0);
                         let entry_count = store_clone.query_count(&format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.tested = true RETURN count(s)", project_name)).unwrap_or(0) as usize; 
 

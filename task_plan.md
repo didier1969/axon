@@ -1,28 +1,21 @@
-# Axon - Consolidation MCP v1.2 Plan
+# Axon - Taint Analysis Engine (v1.0)
 
 ## Goal
-Réduire la charge cognitive de l'IA et optimiser l'économie du contexte en passant à 8 outils haute performance.
+Améliorer le moteur de sécurité pour passer d'une simple recherche de mots-clés à un véritable "Taint Analysis" (Source -> Sink) via des chemins Cypher (depth > 1), permettant également de détecter les backdoors sémantiques.
 
 ## Phases
 
-### Phase 1: Tests E2E (Signatures)
-- [ ] Écrire/adapter les tests unitaires et E2E dans `src/axon-core/src/mcp.rs` pour valider les 8 nouvelles signatures d'outils.
+### Phase 1: TDD - Taint Analysis Paths (Rouge) (COMPLETED)
+- [x] Écrire un test dans `src/axon-core/src/graph.rs` (ou `mcp.rs`) simulant une chaîne d'appel (ex: `user_input` -> `run_task` -> `eval`) et s'assurer que `axon_audit` ou `get_security_score` le détecte.
+- [x] Le test doit échouer car l'implémentation actuelle limite la détection à un appel direct (`-[:CALLS]->`).
 
-### Phase 2: Tronc (Refactorisation du Serveur)
-- [ ] Mettre à jour `tools/list` dans `mcp.rs` pour enregistrer exactement les 8 outils consolidés :
-  1. `axon_query`
-  2. `axon_inspect`
-  3. `axon_audit`
-  4. `axon_impact`
-  5. `axon_health`
-  6. `axon_diff`
-  7. `axon_batch`
-  8. `axon_cypher`
+### Phase 2: Implémentation Cypher (Vert) (COMPLETED)
+- [x] Modifier la requête dans `get_security_score` (`src/axon-core/src/graph.rs`) pour utiliser des chemins de profondeur variable, par exemple `[:CALLS*1..4]`.
+- [x] Faire passer le test.
 
-### Phase 3: Feuilles (Fusion de la logique) (COMPLETED)
-- [x] Implémenter les handlers pour `axon_diff`, `axon_batch`, et adapter `axon_cypher` (qui remplace l'ancienne implémentation brute de `axon_query`).
-- [x] Mettre à jour les implémentations existantes (`axon_query`, `axon_inspect`, etc.) pour correspondre aux spécifications de la ROADMAP.
+### Phase 3: Enrichissement de la Réponse Audit (Refactor) (COMPLETED)
+- [x] Modifier `axon_audit` dans `mcp.rs` pour qu'il retourne non seulement le score, mais aussi les **chemins critiques** détectés. On devra ajouter une méthode dans `graph.rs` comme `get_critical_paths` ou ajuster la réponse de `axon_audit`.
 
-### Phase 4: Purge & Qualité (COMPLETED)
-- [x] Supprimer les anciens outils (comme `axon_list_repos` s'il est intégré ailleurs ou retiré de la liste).
-- [x] Valider 100% PASS et Zéro Warning avec `cargo test` et `cargo clippy`.
+### Phase 4: Zéro Warning & Commit (COMPLETED)
+- [x] Exécuter `cargo clippy -- -D warnings` et `cargo test`.
+- [x] Mettre à jour `ROADMAP.md` et `progress.md`.

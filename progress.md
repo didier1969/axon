@@ -163,6 +163,23 @@
   - `task_plan.md` (updated)
   - `progress.md` (updated)
 
+### Phase 11: Taint Analysis Engine & Semantic Backdoors
+- **Status:** complete
+- Actions taken:
+  - Applied TDD to implement a multi-hop test case checking `user_input` -> `run_task` -> `eval`.
+  - Refactored `get_security_score` to `get_security_audit` returning both the score and the critical paths serialized in JSON.
+  - Used Kuzu Cypher's variable-length paths `[:CALLS*1..4]` to recursively trace semantic backdoors.
+  - Integrated `get_security_audit` into `mcp.rs` for the `axon_audit` endpoint.
+  - Adapted `main.rs` daemon logic to use the updated API.
+  - Passed all tests (including the new taint analysis test) and achieved zero clippy warnings.
+- Files created/modified:
+  - `src/axon-core/src/mcp.rs` (updated)
+  - `src/axon-core/src/graph.rs` (updated)
+  - `src/axon-core/src/main.rs` (updated)
+  - `task_plan.md` (updated)
+  - `ROADMAP.md` (updated)
+  - `progress.md` (updated)
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.
