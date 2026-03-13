@@ -48,7 +48,7 @@ Sécurisation Cypher, byte offsets précis, axon_read_symbol.
 Daemon central avec cache LRU, stockage ~/.axon/repos/.
 </details>
 
-## 🏗️ Consolidation MCP v1.2 (En cours)
+## 🏗️ Consolidation MCP v1.2 (COMPLETED)
 
 **Objectif :** Réduire la charge cognitive de l'IA et optimiser l'économie du contexte en passant de 17 à 8 outils haute performance.
 
@@ -63,8 +63,8 @@ Daemon central avec cache LRU, stockage ~/.axon/repos/.
 8.  **`axon_cypher` :** Interface de bas niveau pour requêtes HydraDB brutes.
 
 ### 🛠️ Protocole d'Exécution
-- [ ] **Phase 1 (Tests) :** Écrire les tests E2E pour les 8 nouvelles signatures.
-- [ ] **Phase 2 (Tronc) :** Refactoriser `mcp/server.py` pour enregistrer la nouvelle liste.
-- [ ] **Phase 3 (Feuilles) :** Fusionner la logique dans `mcp/tools.py`.
-- [ ] **Phase 4 (Purge) :** Supprimer les 9 anciens outils redondants.
-- [ ] **Phase 5 (Qualité) :** Validation 100% PASS et Zéro Warning.
+- [x] **Phase 1 (Tests) :** Écrire les tests E2E pour les 8 nouvelles signatures.
+- [x] **Phase 2 (Tronc) :** Refactoriser le serveur (Rust MCP) pour enregistrer la nouvelle liste.
+- [x] **Phase 3 (Feuilles) :** Fusionner la logique (diff, batch, cypher, inspect, etc.).
+- [x] **Phase 4 (Purge) :** Supprimer les anciens outils redondants.
+- [x] **Phase 5 (Qualité) :** Validation 100% PASS et Zéro Warning.
