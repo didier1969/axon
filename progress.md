@@ -248,6 +248,22 @@
   - `ROADMAP.md`
   - `progress.md`
 
+### Phase 16: Polyglot Tracing (Elixir ↔ Rust NIFs)
+- **Status:** complete
+- Actions taken:
+  - Formulated the design (`2026-03-13-axon-polyglot-tracing-design.md`) to resolve language-barrier dependencies statically using AST markers.
+  - Used Subagent-Driven Development to execute the TDD implementation sequentially.
+  - Updated `rust.rs` to detect the `#[rustler::nif]` attribute macro on functions and automatically inject the `is_nif="true"` property to the extracted `Symbol`.
+  - Updated `elixir.rs` to detect `:erlang.nif_error(:nif_not_loaded)` inside function bodies, immediately generating a `calls_nif` cross-language relation targeting the external function name.
+  - Passed all new and existing tests ensuring zero-warnings compliance across the `axon-core` crate.
+- Files modified:
+  - `src/axon-core/src/parser/rust.rs`
+  - `src/axon-core/src/parser/elixir.rs`
+  - `docs/plans/2026-03-13-axon-polyglot-tracing-design.md`
+  - `docs/plans/2026-03-13-axon-polyglot-tracing-plan.md`
+  - `ROADMAP.md`
+  - `progress.md`
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

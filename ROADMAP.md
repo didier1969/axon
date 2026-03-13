@@ -12,11 +12,11 @@
 ### ⚡ Performance & Scalabilité (The Hydra Engine)
 - [x] **Intégration HydraDB :** Déportation de la persistence vers RocksDB/Dolt (Elixir/Rust).
 - [x] **Stratégie Lazy vs Eager :** Implémentation de la file d'attente de tâches de fond via OTP (supervision Elixir).
-- [ ] **Embeddings Parallélisés :** Réduction radicale du temps d'indexation (Cible : < 10min pour 40k symboles).
+- [x] **Embeddings Parallélisés :** Réduction radicale du temps d'indexation (Cible : < 10min pour 40k symboles).
 
 ### 🧠 Intelligence & UX
 - [ ] **Audit Proactif :** Alerte automatique dès qu'un changement dégrade le score de sécurité.
-- [ ] **Traçage Polyglotte :** Traversée automatique des frontières (ex: Elixir ↔ Rust NIFs).
+- [x] **Traçage Polyglotte :** Traversée automatique des frontières (ex: Elixir ↔ Rust NIFs).
 
 ---
 
