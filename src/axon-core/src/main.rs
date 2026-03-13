@@ -3,6 +3,7 @@ mod scanner;
 mod bridge;
 mod graph;
 mod mcp;
+mod embedder;
 
 use bridge::BridgeEvent;
 use graph::GraphStore;
