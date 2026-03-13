@@ -1,5 +1,5 @@
 defmodule Axon.Watcher.IndexingWorker do
-  use Oban.Worker, queue: :indexing, max_attempts: 3
+  use Oban.Worker, queue: :indexing_default, max_attempts: 3
   require Logger
   alias Axon.Watcher.PoolFacade
 
