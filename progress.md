@@ -110,6 +110,25 @@
   - `task_plan.md` (updated)
   - `progress.md` (updated)
 
+### Phase 8: Task 8 & 9 - SQL and YAML Parsers, Registry Integration
+- **Status:** complete
+- Actions taken:
+  - Validated that `tree-sitter-yaml` was already fully integrated and tested in `yaml.rs`.
+  - Added `regex` crate to `Cargo.toml`.
+  - Ported legacy regex-based logic from `sql_lang.py` into `src/axon-core/src/parser/sql.rs`.
+  - Extracted DDL, DROP, ALTER, and DML calls properly.
+  - Wrote robust tests inside `sql.rs`.
+  - Registered `pub mod sql;` and route logic inside `src/axon-core/src/parser/mod.rs`.
+  - Fixed unused imports/variables in `main.rs` to reach strictly zero compilation warnings.
+  - Successfully ran all tests.
+- Files created/modified:
+  - `src/axon-core/Cargo.toml` (updated)
+  - `src/axon-core/src/parser/sql.rs` (created)
+  - `src/axon-core/src/parser/mod.rs` (updated)
+  - `src/axon-core/src/main.rs` (updated)
+  - `task_plan.md` (updated)
+  - `progress.md` (updated)
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

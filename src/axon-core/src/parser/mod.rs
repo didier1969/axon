@@ -43,6 +43,7 @@ pub mod yaml;
 pub mod html;
 pub mod css;
 pub mod markdown;
+pub mod sql;
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
     match path.extension()?.to_str()? {
@@ -57,6 +58,7 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "html" | "htm" => Some(Box::new(html::HtmlParser::new())),
         "css" | "scss" => Some(Box::new(css::CssParser::new())),
         "md" | "markdown" => Some(Box::new(markdown::MarkdownParser::new())),
+        "sql" => Some(Box::new(sql::SqlParser::new())),
         _ => None,
     }
 }

@@ -54,12 +54,12 @@ For each parser, the implementer MUST reference the legacy Python code from the 
 - **Spec:** Port logic from their respective Python counterparts.
 - **Tests:** Add unit tests.
 
-### Task 8: Data/Config Parsers (SQL, YAML)
+### Task 8: Data/Config Parsers (SQL, YAML) (COMPLETED)
 - **Files:** `sql.rs`, `yaml.rs` inside `src/axon-core/src/parser/`.
 - **Spec:** Port logic from their respective Python counterparts.
 - **Tests:** Add unit tests.
 
-### Task 9: Parser Registry Integration
+### Task 9: Parser Registry Integration (COMPLETED)
 - **File:** `src/axon-core/src/parser/mod.rs`
 - **Spec:** Update the `get_parser_for_file(path: &Path)` function to route to the correct parser based on file extension for all 11 languages.
 - **Tests:** Add a unit test verifying routing works correctly for different extensions.
