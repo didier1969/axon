@@ -208,4 +208,41 @@ impl GraphStore {
         if total <= 0 { return Ok(100); }
         Ok(((tested as f64 / total as f64) * 100.0) as usize)
     }
+
+    pub fn get_god_objects(&self, project_name: &str) -> Result<Vec<String>> {
+        // Find symbols in the project that have a high in-degree (>= 10 dependents)
+        let query = format!(
+            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)<-[:CALLS]-(caller:Symbol) 
+             WHERE f.path CONTAINS '{}' 
+             WITH s, count(caller) AS degree 
+             WHERE degree >= 10 
+             RETURN s.name",
+            project_name
+        );
+        let result_json = self.query_json(&query).unwrap_or_else(|_| "[]".to_string());
+        
+        let mut god_objects = Vec::new();
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result_json) {
+            if let Some(arr) = parsed.as_array() {
+                for item in arr {
+                    if let Some(inner_arr) = item.as_array() {
+                        for inner_item in inner_arr {
+                            if let Some(val_str) = inner_item.as_str() {
+                                if val_str.starts_with("String(\"") && val_str.ends_with("\")") {
+                                    let name = val_str[8..val_str.len()-2].to_string();
+                                    god_objects.push(name);
+                                }
+                            }
+                        }
+                    } else if let Some(obj) = item.as_object() {
+                        if let Some(name) = obj.get("s.name").and_then(|v| v.as_str()) {
+                            god_objects.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(god_objects)
+    }
 }

@@ -180,6 +180,21 @@
   - `ROADMAP.md` (updated)
   - `progress.md` (updated)
 
+### Phase 12: Clustering Auto-Adaptatif (God Objects)
+- **Status:** complete
+- Actions taken:
+  - Applied TDD to implement a `test_axon_health_god_objects` test that creates a highly connected node.
+  - Implemented `get_god_objects` in `src/axon-core/src/graph.rs` executing Cypher query with degree >= 10 logic to find massive hubs.
+  - Integrated `get_god_objects` into the `axon_health` MCP tool, appending God Object detection directly to the health report text.
+  - Resolved JSON array string parsing bugs related to Kuzu JSON format.
+  - Checked everything through `cargo test` and `cargo clippy`, preserving zero warnings.
+- Files modified:
+  - `src/axon-core/src/mcp.rs`
+  - `src/axon-core/src/graph.rs`
+  - `task_plan.md`
+  - `ROADMAP.md`
+  - `progress.md`
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

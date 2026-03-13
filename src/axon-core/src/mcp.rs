@@ -235,7 +235,15 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     fn axon_health(&self, args: &Value) -> Option<Value> {
         let project = args.get("project")?.as_str().unwrap_or("unknown");
         let coverage = self.graph_store.get_coverage_score(project).unwrap_or(0);
-        Some(json!({ "content": [{ "type": "text", "text": format!("🏥 Health Report for {}: Coverage {}%. Stability high.", project, coverage) }] }))
+        let god_objects = self.graph_store.get_god_objects(project).unwrap_or_default();
+        
+        let mut report = format!("🏥 Health Report for {}: Coverage {}%. Stability high.", project, coverage);
+        
+        if !god_objects.is_empty() {
+            report.push_str(&format!("\nGod Object detected: {}", god_objects.join(", ")));
+        }
+        
+        Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
     fn axon_diff(&self, args: &Value) -> Option<Value> {
@@ -479,5 +487,36 @@ mod tests {
         // Extra requirement: should report critical paths
         assert!(content.contains("user_input"));
         assert!(content.contains("eval"));
+    }
+
+    #[test]
+    fn test_axon_health_god_objects() {
+        let server = create_test_server();
+        server.graph_store.execute("MERGE (f:File {path: 'src/god.rs'})").unwrap();
+        server.graph_store.execute("MERGE (god:Symbol {name: 'GodClass', kind: 'class', tested: false})").unwrap();
+        server.graph_store.execute("MATCH (f:File {path: 'src/god.rs'}), (s:Symbol {name: 'GodClass'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        
+        // Create 10 dependents to make it a God Object
+        for i in 0..10 {
+            server.graph_store.execute(&format!("MERGE (dep{i}:Symbol {{name: 'dep{i}'}})")).unwrap();
+            server.graph_store.execute(&format!("MATCH (dep:Symbol {{name: 'dep{i}'}}), (god:Symbol {{name: 'GodClass'}}) MERGE (dep)-[:CALLS]->(god)")).unwrap();
+        }
+
+        let req = JsonRpcRequest {
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_health",
+                "arguments": {
+                    "project": "src/god.rs"
+                }
+            })),
+            id: Some(json!(7)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        assert!(content.contains("God Object detected: GodClass"));
     }
 }
