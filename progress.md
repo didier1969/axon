@@ -129,6 +129,26 @@
   - `task_plan.md` (updated)
   - `progress.md` (updated)
 
+### Phase 9: Consolidation MCP v1.2 (Signatures et Tronc)
+- **Status:** complete
+- Actions taken:
+  - Created a new `task_plan.md` focused on consolidating MCP tools from 17 down to the 8 required signatures (`axon_query`, `axon_inspect`, `axon_audit`, `axon_impact`, `axon_health`, `axon_diff`, `axon_batch`, `axon_cypher`).
+  - Implemented the tool routing (`tools/list` and `tools/call`) in `src/axon-core/src/mcp.rs`.
+  - Stubbed out unimplemented handlers (`axon_diff`, `axon_batch`) so they return structured JSON describing their future use. Added an orchestrator skeleton for `axon_batch`.
+  - Wrote a unit test module `tests` in `mcp.rs` verifying the JSON-RPC list correctly includes exactly the 8 intended tools.
+  - Eliminated all new `clippy` warnings related to lifetimes, temporary JSON bindings, unneeded returns, and manual map/find/strip.
+  - Re-ran `cargo test` and `cargo clippy` and achieved 100% compliance with zero warnings.
+- Files created/modified:
+  - `task_plan.md` (overwritten with new roadmap plan)
+  - `src/axon-core/src/mcp.rs` (updated)
+  - `src/axon-core/src/parser/elixir.rs` (updated)
+  - `src/axon-core/src/parser/go.rs` (updated)
+  - `src/axon-core/src/parser/rust.rs` (updated)
+  - `src/axon-core/src/parser/markdown.rs` (updated)
+  - `src/axon-core/src/scanner.rs` (updated)
+  - `src/axon-core/src/main.rs` (updated)
+  - `progress.md` (updated)
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

@@ -21,12 +21,8 @@ impl RustParser {
 
     fn find_child_by_type<'a>(&self, node: Node<'a>, kind: &str) -> Option<Node<'a>> {
         let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-        }
-        None
+        let res = node.children(&mut cursor).find(|&child| child.kind() == kind);
+        res
     }
 
     fn has_visibility(&self, node: Node) -> bool {

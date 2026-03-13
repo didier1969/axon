@@ -14,31 +14,41 @@ impl Scanner {
 
     pub fn scan(&self) -> Vec<PathBuf> {
         let mut files = Vec::new();
-        let walker = WalkBuilder::new(&self.root)
-            .hidden(false) // On veut scanner les fichiers cachés si non ignorés
-            .git_ignore(true)
-            .build();
+        
+        let mut builder = WalkBuilder::new(&self.root);
+        builder.hidden(false) // On veut scanner les fichiers cachés si non ignorés
+               .git_ignore(true);
+               
+        // Respect Custom .axonignore from global and local dirs
+        let global_axonignore = std::path::Path::new("/home/dstadel/projects/.axonignore");
+        if global_axonignore.exists() {
+            let _ = builder.add_ignore(global_axonignore);
+        }
+        
+        let local_axonignore = self.root.join(".axonignore");
+        if local_axonignore.exists() {
+            let _ = builder.add_ignore(local_axonignore);
+        }
 
-        for result in walker {
-            if let Ok(entry) = result {
-                if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-                    let path = entry.path().to_path_buf();
-                    if self.is_supported(&path) {
-                        files.push(path);
-                    }
+        let walker = builder.build();
+
+        for entry in walker.flatten() {
+            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                let path = entry.path().to_path_buf();
+                if self.is_supported(&path) {
+                    files.push(path);
                 }
             }
         }
         files
     }
 
-    fn is_supported(&self, path: &PathBuf) -> bool {
+    fn is_supported(&self, path: &std::path::Path) -> bool {
         if let Some(ext) = path.extension() {
-            match ext.to_str() {
+            matches!(ext.to_str(),
                 Some("py") | Some("ex") | Some("exs") | Some("rs") | Some("ts") | Some("tsx") | 
-                Some("js") | Some("jsx") | Some("go") | Some("java") => true,
-                _ => false,
-            }
+                Some("js") | Some("jsx") | Some("go") | Some("java") | Some("sql") | Some("yml") | Some("yaml") | Some("md") | Some("markdown") | Some("html") | Some("css")
+            )
         } else {
             false
         }

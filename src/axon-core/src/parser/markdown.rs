@@ -118,11 +118,7 @@ impl MarkdownParser {
 
     fn is_fence(&self, line: &str) -> Option<String> {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            Some(trimmed[3..].trim().to_string())
-        } else {
-            None
-        }
+        trimmed.strip_prefix("```").map(|stripped| stripped.trim().to_string())
     }
 
     fn extract_links(&self, line: &str, relations: &mut Vec<Relation>) {

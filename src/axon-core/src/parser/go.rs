@@ -288,12 +288,8 @@ impl GoParser {
 
     fn find_child_by_type<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
         let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-        }
-        None
+        let res = node.named_children(&mut cursor).find(|&child| child.kind() == kind);
+        res
     }
 }
 

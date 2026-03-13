@@ -1,65 +1,28 @@
-# Axon v2 - Tree-sitter Parsers Porting Plan
+# Axon - Consolidation MCP v1.2 Plan
 
 ## Goal
-Replace the legacy Python Tree-sitter extractors with native Rust implementations inside `axon-core/src/parser/` to achieve the sub-millisecond parsing latency required by the v2 architecture. We must retain 100% of the advanced extraction capabilities that made the Python parsers "the best on the planet" (e.g., OTP patterns in Elixir, NIF detection, etc.).
+Réduire la charge cognitive de l'IA et optimiser l'économie du contexte en passant à 8 outils haute performance.
 
-## Context
-We have purged the legacy Python components (`src/axon/core/parsers/`). The new architecture expects files to be parsed natively within `axon-core` using `tree-sitter`. The core traits and structures are defined in `src/axon-core/src/parser/mod.rs`. We need to implement concrete parsers for all 11 languages previously supported.
+## Phases
 
-For each parser, the implementer MUST reference the legacy Python code from the `origin/main` branch (using `git show origin/main:src/axon/core/parsers/<lang>.py`) to accurately port the advanced AST traversal logic.
+### Phase 1: Tests E2E (Signatures)
+- [ ] Écrire/adapter les tests unitaires et E2E dans `src/axon-core/src/mcp.rs` pour valider les 8 nouvelles signatures d'outils.
 
-## Tasks
+### Phase 2: Tronc (Refactorisation du Serveur)
+- [ ] Mettre à jour `tools/list` dans `mcp.rs` pour enregistrer exactement les 8 outils consolidés :
+  1. `axon_query`
+  2. `axon_inspect`
+  3. `axon_audit`
+  4. `axon_impact`
+  5. `axon_health`
+  6. `axon_diff`
+  7. `axon_batch`
+  8. `axon_cypher`
 
-### Task 1: Python Parser Implementation (COMPLETED)
-- **File:** `src/axon-core/src/parser/python.rs`
-- **Spec:** Implement the `Parser` trait for Python.
-  - Port advanced Python logic from `origin/main:src/axon/core/parsers/python_lang.py`.
-  - Extract: Classes, Functions/Methods, Imports, Function Calls.
-- **Tests:** Add a unit test module within the file.
+### Phase 3: Feuilles (Fusion de la logique)
+- [ ] Implémenter les handlers pour `axon_diff`, `axon_batch`, et adapter `axon_cypher` (qui remplace l'ancienne implémentation brute de `axon_query`).
+- [ ] Mettre à jour les implémentations existantes (`axon_query`, `axon_inspect`, etc.) pour correspondre aux spécifications de la ROADMAP.
 
-### Task 2: Advanced Elixir Parser Implementation (COMPLETED)
-- **File:** `src/axon-core/src/parser/elixir.rs`
-- **Spec:** Implement the `Parser` trait for Elixir.
-  - Port advanced logic from `origin/main:src/axon/core/parsers/elixir_lang.py`.
-  - Extract: Modules, Functions (`def`, `defp`), Macros (`defmacro`).
-  - **Critical features:** OTP entry points (`handle_call`, `init`, etc.), NIF loaders, GenServer specific cross-process calls, and `@behaviour` extraction for heritage.
-- **Tests:** Add a unit test module within the file.
-
-### Task 3: TypeScript/JavaScript Parser Implementation (COMPLETED)
-- **File:** `src/axon-core/src/parser/typescript.rs`
-- **Spec:** Implement the `Parser` trait for TS/JS.
-  - Port logic from `origin/main:src/axon/core/parsers/typescript.py`.
-- **Tests:** Add a unit test module.
-
-### Task 4: Rust Parser Implementation (COMPLETED)
-- **File:** `src/axon-core/src/parser/rust.rs`
-- **Spec:** Implement the `Parser` trait for Rust.
-  - Port logic from `origin/main:src/axon/core/parsers/rust_lang.py`.
-- **Tests:** Add a unit test module.
-
-### Task 5: Go Parser Implementation (COMPLETED)
-- **File:** `src/axon-core/src/parser/go.rs`
-- **Spec:** Implement the `Parser` trait for Go.
-  - Port logic from `origin/main:src/axon/core/parsers/go_lang.py`.
-- **Tests:** Add a unit test module.
-
-### Task 6: Java Parser Implementation (COMPLETED)
-- **File:** `src/axon-core/src/parser/java.rs`
-- **Spec:** Implement the `Parser` trait for Java.
-  - Port logic from `origin/main:src/axon/core/parsers/java_lang.py`.
-- **Tests:** Add a unit test module.
-
-### Task 7: Web/Markup Parsers (HTML, CSS, Markdown) (COMPLETED)
-- **Files:** `html.rs`, `css.rs`, `markdown.rs` inside `src/axon-core/src/parser/`.
-- **Spec:** Port logic from their respective Python counterparts.
-- **Tests:** Add unit tests.
-
-### Task 8: Data/Config Parsers (SQL, YAML) (COMPLETED)
-- **Files:** `sql.rs`, `yaml.rs` inside `src/axon-core/src/parser/`.
-- **Spec:** Port logic from their respective Python counterparts.
-- **Tests:** Add unit tests.
-
-### Task 9: Parser Registry Integration (COMPLETED)
-- **File:** `src/axon-core/src/parser/mod.rs`
-- **Spec:** Update the `get_parser_for_file(path: &Path)` function to route to the correct parser based on file extension for all 11 languages.
-- **Tests:** Add a unit test verifying routing works correctly for different extensions.
+### Phase 4: Purge & Qualité
+- [ ] Supprimer les anciens outils (comme `axon_list_repos` s'il est intégré ailleurs ou retiré de la liste).
+- [ ] Valider 100% PASS et Zéro Warning avec `cargo test` et `cargo clippy`.

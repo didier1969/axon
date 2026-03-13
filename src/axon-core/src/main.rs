@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting Axon Core v2");
     info!("Engine Boot Time: {}", boot_time);
     
-    let graph_store = match GraphStore::new(&db_path) {
+    let graph_store = match GraphStore::new(db_path) {
         Ok(store) => Arc::new(store),
         Err(e) => {
             error!("Fatal Error initializing LadybugDB: {:?}", e);
@@ -176,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
                     let _ = writer.write_all(complete_msg.as_bytes()).await;
                 } else if command.starts_with('{') {
                     let mcp_server = McpServer::new(store_clone.clone());
-                    if let Ok(request) = serde_json::from_str::<mcp::JsonRpcRequest>(&command) {
+                    if let Ok(request) = serde_json::from_str::<mcp::JsonRpcRequest>(command) {
                         let response = mcp_server.handle_request(request);
                         if let Ok(json_str) = serde_json::to_string(&response) {
                             let _ = writer.write_all(format!("{}\n", json_str).as_bytes()).await;
