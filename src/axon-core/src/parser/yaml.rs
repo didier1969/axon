@@ -68,6 +68,7 @@ impl Parser for YamlParser {
                                 end_line: key_node.end_position().row + 1,
                                 docstring: None,
                                 is_entry_point: false,
+                        is_public: true,
                                 properties,
                             
                                 embedding: None,

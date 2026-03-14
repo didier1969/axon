@@ -39,12 +39,13 @@ impl Parser for PythonParser {
                     let actual_kind = if kind == "class.name" { "class" } else { "function" };
                     
                     symbols.push(Symbol {
-                        name,
+                        name: name.clone(),
                         kind: actual_kind.to_string(),
                         start_line: node.start_position().row + 1,
                         end_line: node.end_position().row + 1,
                         docstring: None,
                         is_entry_point: false,
+                        is_public: !name.starts_with("_"),
                         properties: std::collections::HashMap::new(),
                     
                         embedding: None,

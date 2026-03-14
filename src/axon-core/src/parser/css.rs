@@ -49,6 +49,7 @@ impl CssParser {
                     end_line: node.end_position().row + 1,
                     docstring: None,
                     is_entry_point: false,
+                        is_public: true,
                     properties: HashMap::new(),
                 
                     embedding: None,
@@ -70,6 +71,7 @@ impl CssParser {
                     end_line: node.end_position().row + 1,
                     docstring: None,
                     is_entry_point: false,
+                        is_public: true,
                     properties: HashMap::new(),
                 
                     embedding: None,
@@ -92,6 +94,7 @@ impl CssParser {
                         end_line: node.end_position().row + 1,
                         docstring: None,
                         is_entry_point: false,
+                        is_public: true,
                         properties: HashMap::new(),
                     
                         embedding: None,
@@ -114,6 +117,7 @@ impl CssParser {
                     end_line: node.end_position().row + 1,
                     docstring: None,
                     is_entry_point: false,
+                        is_public: true,
                     properties: HashMap::new(),
                 
                     embedding: None,

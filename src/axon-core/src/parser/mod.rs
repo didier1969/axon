@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+fn default_is_public() -> bool { true }
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
@@ -10,6 +12,8 @@ pub struct Symbol {
     pub docstring: Option<String>,
     #[serde(default)]
     pub is_entry_point: bool,
+    #[serde(default = "default_is_public")]
+    pub is_public: bool,
     #[serde(default)]
     pub properties: std::collections::HashMap<String, String>,
     pub embedding: Option<Vec<f32>>,

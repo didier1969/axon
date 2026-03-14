@@ -70,6 +70,7 @@ impl MarkdownParser {
                         end_line: i + 2,
                         docstring: None,
                         is_entry_point: false,
+                        is_public: true,
                         properties: HashMap::new(),
                     
                         embedding: None,
@@ -106,6 +107,7 @@ impl MarkdownParser {
                         end_line: j,
                         docstring: None,
                         is_entry_point: false,
+                        is_public: true,
                         properties: HashMap::new(),
                     
                         embedding: None,
@@ -183,6 +185,7 @@ impl MarkdownParser {
                             end_line: line_no,
                             docstring: None,
                             is_entry_point: false,
+                        is_public: true,
                             properties: props,
                         
                             embedding: None,
@@ -232,6 +235,7 @@ impl Parser for MarkdownParser {
                 end_line,
                 docstring: None,
                 is_entry_point: level == 1,
+                        is_public: true,
                 properties: HashMap::new(),
             
                 embedding: None,

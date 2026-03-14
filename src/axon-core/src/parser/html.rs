@@ -66,6 +66,7 @@ impl HtmlParser {
                 end_line,
                 docstring: None,
                 is_entry_point: false,
+                        is_public: true,
                 properties: props,
             
                 embedding: None,
@@ -84,6 +85,7 @@ impl HtmlParser {
                     end_line,
                     docstring: None,
                     is_entry_point: false,
+                        is_public: true,
                     properties: props,
                 
                     embedding: None,
@@ -104,6 +106,7 @@ impl HtmlParser {
                 end_line,
                 docstring: None,
                 is_entry_point: true,
+                        is_public: true,
                 properties: props,
             
                 embedding: None,

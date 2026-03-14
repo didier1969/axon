@@ -61,12 +61,13 @@ impl GoParser {
             }
 
             result.symbols.push(Symbol {
-                name,
+                name: name.clone(),
                 kind: "function".to_string(),
                 start_line,
                 end_line,
                 docstring: None,
                 is_entry_point: is_entry,
+                        is_public: name.chars().next().map_or(false, |c| c.is_uppercase()),
                 properties,
             
                 embedding: None,
@@ -117,12 +118,13 @@ impl GoParser {
             }
 
             result.symbols.push(Symbol {
-                name,
+                name: name.clone(),
                 kind: "method".to_string(),
                 start_line,
                 end_line,
                 docstring: None,
                 is_entry_point: false,
+                        is_public: name.chars().next().map_or(false, |c| c.is_uppercase()),
                 properties,
             
                 embedding: None,
@@ -170,12 +172,13 @@ impl GoParser {
             }
 
             result.symbols.push(Symbol {
-                name,
+                name: name.clone(),
                 kind,
                 start_line,
                 end_line,
                 docstring: None,
                 is_entry_point: false,
+                        is_public: name.chars().next().map_or(false, |c| c.is_uppercase()),
                 properties,
             
                 embedding: None,

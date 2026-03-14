@@ -139,6 +139,7 @@ impl ElixirParser {
             end_line,
             docstring: None,
             is_entry_point: false,
+                        is_public: true,
             properties: HashMap::new(),
         
             embedding: None,
@@ -204,6 +205,7 @@ impl ElixirParser {
             end_line,
             docstring: None,
             is_entry_point: is_otp_entry,
+                        is_public: _def_type == "def" || _def_type == "defmacro",
             properties,
         
             embedding: None,
@@ -244,6 +246,7 @@ impl ElixirParser {
             end_line,
             docstring: None,
             is_entry_point: false,
+                        is_public: true,
             properties: HashMap::new(),
         
             embedding: None,

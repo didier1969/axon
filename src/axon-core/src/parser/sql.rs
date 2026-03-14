@@ -71,6 +71,7 @@ impl Parser for SqlParser {
                     end_line,
                     docstring: None,
                     is_entry_point: false,
+                        is_public: true,
                     properties: HashMap::new(),
                 
                     embedding: None,
@@ -92,6 +93,7 @@ impl Parser for SqlParser {
                     end_line,
                     docstring: None,
                     is_entry_point: false,
+                        is_public: true,
                     properties: HashMap::new(),
                 
                     embedding: None,
@@ -113,6 +115,7 @@ impl Parser for SqlParser {
                     end_line,
                     docstring: None,
                     is_entry_point: false,
+                        is_public: true,
                     properties: HashMap::new(),
                 
                     embedding: None,
@@ -134,6 +137,7 @@ impl Parser for SqlParser {
                     end_line,
                     docstring: None,
                     is_entry_point: false,
+                        is_public: true,
                     properties: HashMap::new(),
                 
                     embedding: None,

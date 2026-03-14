@@ -322,6 +322,8 @@
   - Implemented `axon_api_break_check` to simulate impacts on public contracts.
   - Enhanced the existing `axon_audit` tool to automatically run a "Macro API Break Check" synthesis, pointing out heavily relied-upon symbols in the project.
   - Refactored `GraphStore` schema to natively support `FLOAT[384]` vector properties for FastEmbed integration.
+  - Refactored `Symbol` struct and 12 Tree-sitter parsers to extract strict `is_public` / `exported` visibility flags directly from the AST.
+  - Upgraded `axon_api_break_check` to eliminate heuristic matching and rely on pure `is_public` AST state.
   - Upgraded `axon_semantic_clones` from a heuristic placeholder to true K-Nearest Neighbors (KNN) vector search utilizing KuzuDB's `array_cosine_similarity`.
   - Validated via `cargo test` (100% pass across 26 tests, including new vector support tests).
 - Files modified:

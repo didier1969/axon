@@ -187,6 +187,7 @@ impl Parser for TypeScriptParser {
                             end_line: node.end_position().row + 1,
                             docstring: None,
                             is_entry_point: false,
+                            is_public: exports.contains(&text),
                             properties: HashMap::new(),
                         
                             embedding: None,
@@ -225,6 +226,7 @@ impl Parser for TypeScriptParser {
                             end_line: node.end_position().row + 1,
                             docstring: None,
                             is_entry_point: false,
+                            is_public: exports.contains(&text),
                             properties: HashMap::new(),
                         
                             embedding: None,
@@ -251,12 +253,13 @@ impl Parser for TypeScriptParser {
                     }
                     "type_alias.name" => {
                         symbols.push(Symbol {
-                            name: text,
+                            name: text.clone(),
                             kind: "type_alias".to_string(),
                             start_line: node.start_position().row + 1,
                             end_line: node.end_position().row + 1,
                             docstring: None,
                             is_entry_point: false,
+                            is_public: exports.contains(&text),
                             properties: HashMap::new(),
                         
                             embedding: None,
@@ -268,12 +271,13 @@ impl Parser for TypeScriptParser {
                             ["handler", "route", "get", "post", "put", "delete"].iter().any(|&k| lower_name.contains(k));
                         
                         symbols.push(Symbol {
-                            name: text,
+                            name: text.clone(),
                             kind: "function".to_string(),
                             start_line: node.start_position().row + 1,
                             end_line: node.end_position().row + 1,
                             docstring: None,
                             is_entry_point: is_entry,
+                            is_public: exports.contains(&text),
                             properties: HashMap::new(),
                         
                             embedding: None,
@@ -286,12 +290,13 @@ impl Parser for TypeScriptParser {
                         }
 
                         symbols.push(Symbol {
-                            name: text,
+                            name: text.clone(),
                             kind: "method".to_string(),
                             start_line: node.start_position().row + 1,
                             end_line: node.end_position().row + 1,
                             docstring: None,
                             is_entry_point: false,
+                            is_public: exports.contains(&text),
                             properties: props,
                         
                             embedding: None,

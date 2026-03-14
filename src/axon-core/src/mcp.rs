@@ -331,13 +331,13 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         
         let mermaid_diagram = crate::graph::GraphStore::generate_mermaid_flow(&paths);
         
-        // Macro API Break Check: Are there highly connected symbols in this project that act as public APIs?
+        // Macro API Break Check: Are there highly connected public symbols in this project?
         let break_query = format!(
-            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)<-[:CALLS]-(caller:Symbol) \
-             WHERE f.path CONTAINS '{}' AND NOT caller.name CONTAINS '{}' \
+            "MATCH (f:File)-[:CONTAINS]->(s:Symbol {{is_public: true}})<-[:CALLS]-(caller:Symbol) \
+             WHERE f.path CONTAINS '{}' \
              RETURN s.name, count(caller) AS external_callers \
              ORDER BY external_callers DESC LIMIT 3",
-            project, project
+            project
         );
         let break_report = store.query_json(&break_query).unwrap_or_default();
         
@@ -348,7 +348,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         };
         
         if break_report.len() > 5 && break_report != "[]" {
-            report.push_str(&format!("\n\n⚠️ MACRO API BREAK CHECK: The following symbols are heavily relied upon by other projects. Modify them with caution:\n{}", break_report));
+            report.push_str(&format!("\n\n⚠️ MACRO API BREAK CHECK: The following PUBLIC symbols are heavily relied upon. Modify them with caution:\n{}", break_report));
         }
         
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
@@ -464,19 +464,25 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     fn axon_api_break_check(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
         
-        // Simule un test de "Breaking Change"
         let query = format!(
-            "MATCH (s:Symbol {{name: '{}'}})<-[:CALLS]-(caller:Symbol)<-[:CONTAINS]-(f:File) \
+            "MATCH (s:Symbol {{name: '{}', is_public: true}})<-[:CALLS]-(caller:Symbol)<-[:CONTAINS]-(f:File) \
              RETURN f.path AS Project, caller.name AS Function",
             symbol
         );
         
         match self.graph_store.read().unwrap().query_json(&query) {
             Ok(res) => {
-                let report = if res.trim().len() > 5 {
-                    format!("⚠️ ATTENTION BREAKING CHANGE : Le symbole '{}' est utilisé par les composants suivants. Si vous modifiez sa signature, vous devez aussi mettre à jour :\n{}", symbol, res)
+                let report = if res.trim().len() > 5 && res != "[]" {
+                    format!("⚠️ ATTENTION BREAKING CHANGE : Le symbole public '{}' est utilisé par les composants suivants. Si vous modifiez sa signature, vous devez aussi mettre à jour :\n{}", symbol, res)
                 } else {
-                    format!("✅ SAFE TO MODIFY : Le symbole '{}' n'a aucune dépendance externe critique (ou est un appelant final).", symbol)
+                    // Check if it exists but is not public
+                    let check_exists = format!("MATCH (s:Symbol {{name: '{}'}}) RETURN s.is_public", symbol);
+                    match self.graph_store.read().unwrap().query_json(&check_exists) {
+                        Ok(exists_res) if exists_res.contains("false") => {
+                            format!("✅ SAFE TO MODIFY : Le symbole '{}' est PRIVÉ et ne devrait pas avoir d'impacts externes.", symbol)
+                        },
+                        _ => format!("✅ SAFE TO MODIFY : Le symbole '{}' n'a aucune dépendance critique ou est un appelant final.", symbol)
+                    }
                 };
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },

@@ -126,7 +126,7 @@ impl GraphStore {
 
     fn init_schema(&self) -> Result<()> {
         self.execute("CREATE NODE TABLE IF NOT EXISTS File (path STRING, PRIMARY KEY (path))")?;
-        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
+        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CONTAINS (FROM File TO Symbol)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CALLS (FROM Symbol TO Symbol)")?;
         Ok(())
@@ -147,13 +147,13 @@ impl GraphStore {
             if let Some(emb) = &sym.embedding {
                 let vec_str = format!("{:?}", emb); // e.g., [0.1, 0.2, ...]
                 self.execute(&format!(
-                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}, embedding: {}}})",
-                    safe_name, sym.kind, is_test, vec_str
+                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}, is_public: {}, embedding: {}}})",
+                    safe_name, sym.kind, is_test, sym.is_public, vec_str
                 )).ok();
             } else {
                 self.execute(&format!(
-                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}}})",
-                    safe_name, sym.kind, is_test
+                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}, is_public: {}}})",
+                    safe_name, sym.kind, is_test, sym.is_public
                 )).ok();
             }
 

@@ -55,6 +55,17 @@ impl JavaParser {
     fn extract_class(&self, node: Node, content: &[u8], symbols: &mut Vec<Symbol>) {
         if let Some(name_node) = node.child_by_field_name("name") {
             if let Ok(name) = name_node.utf8_text(content) {
+                let mut is_public = false;
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "modifiers" {
+                        if let Ok(mod_text) = child.utf8_text(content) {
+                            if mod_text.contains("public") {
+                                is_public = true;
+                            }
+                        }
+                    }
+                }
                 symbols.push(Symbol {
                     name: name.to_string(),
                     kind: "class".to_string(),
@@ -62,6 +73,7 @@ impl JavaParser {
                     end_line: node.end_position().row + 1,
                     docstring: None,
                     is_entry_point: false,
+                    is_public,
                     properties: std::collections::HashMap::new(),
                 
                     embedding: None,
@@ -80,6 +92,7 @@ impl JavaParser {
         if let Some(name_node) = node.child_by_field_name("name") {
             if let Ok(name) = name_node.utf8_text(content) {
                 let mut is_entry = false;
+                let mut is_public = false;
                 let mut decorators = Vec::new();
 
                 let mut modifiers_node = None;
@@ -87,7 +100,11 @@ impl JavaParser {
                 for child in node.children(&mut cursor) {
                     if child.kind() == "modifiers" {
                         modifiers_node = Some(child);
-                        break;
+                        if let Ok(mod_text) = child.utf8_text(content) {
+                            if mod_text.contains("public") {
+                                is_public = true;
+                            }
+                        }
                     }
                 }
 
@@ -130,6 +147,7 @@ impl JavaParser {
                     end_line: node.end_position().row + 1,
                     docstring: None,
                     is_entry_point: is_entry,
+                    is_public,
                     properties,
                 
                     embedding: None,
