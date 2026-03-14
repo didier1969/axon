@@ -6,6 +6,8 @@ defmodule AxonDashboardWeb.StatusLive do
     if connected?(socket) do
       :timer.send_interval(1000, self(), :tick)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
+      # Subscribe to Watcher if available via cluster
+      :rpc.call(:"watcher@localhost", Phoenix.PubSub, :subscribe, [Axon.PubSub, "watcher_events"])
     end
 
     state = try do
@@ -18,9 +20,12 @@ defmodule AxonDashboardWeb.StatusLive do
     engine_state = Map.get(state, :engine_state, :idle)
 
     status = if engine_state == :indexing, do: :processing, else: :ready
+    
+    # Check node connection
+    cluster_connected = Node.list() |> Enum.any?(&(&1 == :"watcher@localhost"))
 
     {:ok, assign(socket, 
-      projects: %{}, # %{ "axon" => %{symbols: 100, security: 95, coverage: 85, total_files: 100} }
+      projects: %{},
       total_projects: 0,
       scanned_projects: 0,
       total_symbols: 0, 
@@ -30,7 +35,10 @@ defmodule AxonDashboardWeb.StatusLive do
       last_event: nil,
       sys_time: Time.utc_now() |> Time.truncate(:second),
       engine_start_time: start_time,
-      alerts: []
+      alerts: [],
+      cluster_connected: cluster_connected,
+      live_files: [],
+      total_files_parsed: 0
     )}
   end
 
@@ -52,6 +60,19 @@ defmodule AxonDashboardWeb.StatusLive do
     alert = "CRITICAL: #{project} security dropped from #{old}% to #{new}%!"
     new_alerts = [alert | socket.assigns.alerts] |> Enum.take(3)
     {:noreply, assign(socket, alerts: new_alerts)}
+  end
+
+  def handle_info({:scan_started, _dir}, socket) do
+    {:noreply, assign(socket, status: :processing, live_files: [])}
+  end
+
+  def handle_info({:file_indexed, path, status}, socket) do
+    new_files = [{path, status} | socket.assigns.live_files] |> Enum.take(20)
+    {:noreply, assign(socket, 
+      live_files: new_files,
+      total_files_parsed: socket.assigns.total_files_parsed + 1,
+      status: :processing
+    )}
   end
 
   defp process_event(%{"SystemReady" => %{"start_time_utc" => start_time}}, socket) do
@@ -380,6 +401,31 @@ defmodule AxonDashboardWeb.StatusLive do
                   <p class="text-[10px] uppercase tracking-[0.4em] mt-2 font-bold">Awaiting Industrial Signal from ~/projects</p>
                 </div>
               </div>
+            <% end %>
+          </div>
+        </div>
+
+        <!-- Matrix View: Live Ingestion Log -->
+        <div class="mt-12 premium-card p-6 bg-black/80 border border-white/10">
+          <div class="flex justify-between items-center mb-4">
+            <h3 class="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
+              <div class={"w-2 h-2 rounded-full #{if @cluster_connected, do: "bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.8)]", else: "bg-red-500"}"}></div>
+              Neural Link (Pod A Watcher)
+            </h3>
+            <span class="text-xs font-mono text-primary font-bold tracking-widest"><%= @total_files_parsed %> FILES INGESTED</span>
+          </div>
+          <div class="h-64 overflow-y-auto font-mono text-xs space-y-1.5 flex flex-col-reverse p-2 bg-black rounded border border-white/5">
+            <%= for {file, status} <- @live_files do %>
+              <div class="flex items-center gap-4 py-1 border-b border-white/5 last:border-0">
+                <span class="opacity-50 text-white">>_</span>
+                <span class={"font-bold #{if status == :ok, do: "text-green-500", else: "text-red-500"}"}>
+                  [<%= if status == :ok, do: "OK", else: "ERR" %>]
+                </span>
+                <span class="text-green-400 opacity-80 truncate"><%= file %></span>
+              </div>
+            <% end %>
+            <%= if Enum.empty?(@live_files) do %>
+              <div class="text-white/30 italic py-4">Awaiting data stream from Watcher...</div>
             <% end %>
           </div>
         </div>
