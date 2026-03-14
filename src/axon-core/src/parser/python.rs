@@ -43,7 +43,7 @@ impl Parser for PythonParser {
                         kind: actual_kind.to_string(),
                         start_line: node.start_position().row + 1,
                         end_line: node.end_position().row + 1,
-                        docstring: None, // TODO: Extraction docstrings,
+                        docstring: None,
                         is_entry_point: false,
                         properties: std::collections::HashMap::new(),
                     
