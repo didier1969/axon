@@ -210,7 +210,8 @@ impl McpServer {
                         "inputSchema": {
                             "type": "object",
                             "properties": { 
-                                "symbol": { "type": "string", "description": "Symbole de départ" }
+                                "symbol": { "type": "string", "description": "Symbole de départ" },
+                                "depth": { "type": "integer", "description": "Profondeur maximale (défaut: sans limite pour être exhaustif, mais cappé par le moteur)" }
                             },
                             "required": ["symbol"]
                         }
@@ -232,7 +233,8 @@ impl McpServer {
                         "inputSchema": {
                             "type": "object",
                             "properties": { 
-                                "symbol": { "type": "string" }
+                                "symbol": { "type": "string" },
+                                "depth": { "type": "integer", "description": "Profondeur d'impact (optionnel)" }
                             },
                             "required": ["symbol"]
                         }
@@ -317,7 +319,11 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_impact(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
-        let query = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS*1..3]-(affected) RETURN DISTINCT affected.name", symbol);
+        let depth_str = match args.get("depth").and_then(|v| v.as_u64()) {
+            Some(d) => format!("*1..{}", d),
+            None => "*1..".to_string(), // Unbounded variable length
+        };
+        let query = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS{}]-(affected) RETURN DISTINCT affected.name", symbol, depth_str);
         match self.graph_store.read().unwrap().query_json(&query) {
             Ok(res) => Some(json!({ "content": [{ "type": "text", "text": format!("Affected Symbols: {}", res) }] })),
             Err(_) => None,
@@ -445,9 +451,13 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_bidi_trace(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
+        let depth_str = match args.get("depth").and_then(|v| v.as_u64()) {
+            Some(d) => format!("*1..{}", d),
+            None => "*1..".to_string(), // Unbounded variable length
+        };
         
-        let query_up = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS*1..5]-(entry:Symbol {{is_entry_point: true}}) RETURN DISTINCT entry.name", symbol);
-        let query_down = format!("MATCH (s:Symbol {{name: '{}'}})-[:CALLS*1..3]->(leaf:Symbol) RETURN DISTINCT leaf.name LIMIT 20", symbol);
+        let query_up = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS{}]-(entry:Symbol {{is_entry_point: true}}) RETURN DISTINCT entry.name", symbol, depth_str);
+        let query_down = format!("MATCH (s:Symbol {{name: '{}'}})-[:CALLS{}]->(leaf:Symbol) RETURN DISTINCT leaf.name LIMIT 20", symbol, depth_str);
         
         let store = self.graph_store.read().unwrap();
         let up_res = store.query_json(&query_up).unwrap_or_else(|_| "[]".to_string());
@@ -492,12 +502,16 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_simulate_mutation(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
+        let depth_str = match args.get("depth").and_then(|v| v.as_u64()) {
+            Some(d) => format!("*1..{}", d),
+            None => "*1..".to_string(), // Unbounded variable length
+        };
         
         // Calcule le rayon d'impact
         let query = format!(
-            "MATCH (s:Symbol {{name: '{}'}})<-[:CALLS*1..4]-(affected:Symbol) \
+            "MATCH (s:Symbol {{name: '{}'}})<-[:CALLS{}]-(affected:Symbol) \
              RETURN count(DISTINCT affected) AS impact_score",
-            symbol
+            symbol, depth_str
         );
         
         match self.graph_store.read().unwrap().query_json(&query) {
