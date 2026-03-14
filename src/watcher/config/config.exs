@@ -19,6 +19,10 @@ config :axon_watcher, Oban,
   repo: Axon.Watcher.Repo,
   engine: Oban.Engines.Lite,
   plugins: [Oban.Plugins.Pruner],
-  queues: [indexing_hot: [limit: 5], indexing_default: [limit: 10]]
+  queues: [
+    indexing_critical: [limit: 10],
+    indexing_hot: [limit: 5],
+    indexing_default: [limit: 10]
+  ]
 
 config :phoenix, :json_library, Jason
