@@ -21,8 +21,9 @@ check_pid() {
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
         if ps -p "$pid" > /dev/null 2>&1; then
-            echo "❌ $name is already running (PID: $pid). Please stop it first or use ./scripts/stop-v2.sh"
-            exit 1
+            echo "⚠️ $name is already running (PID: $pid). Initiating automated shutdown..."
+            "$PROJECT_ROOT/scripts/stop-v2.sh"
+            sleep 2
         else
             echo "⚠️ Found stale PID file for $name ($pid). Cleaning up..."
             rm -f "$pid_file"

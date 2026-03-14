@@ -32,5 +32,7 @@ rm -f "/tmp/axon-v2.sock"
 # Backup cleanup for orphan processes
 echo "Cleaning up orphan processes..."
 ps aux | grep axon-core | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null || true
+ps aux | grep "mix phx.server" | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null || true
+ps aux | grep "beam.smp" | grep "phx.server" | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null || true
 
 echo "✅ Axon stopped."
