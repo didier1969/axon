@@ -164,7 +164,7 @@ impl ElixirParser {
         result: &mut ExtractionResult,
         module_name: &str,
         _decorators: &[String],
-        _def_type: &str,
+        def_type: &str,
     ) {
         let func_name = match Self::extract_def_name(node, source_bytes) {
             Some(name) => name,
@@ -205,7 +205,7 @@ impl ElixirParser {
             end_line,
             docstring: None,
             is_entry_point: is_otp_entry,
-                        is_public: _def_type == "def" || _def_type == "defmacro",
+                        is_public: def_type == "def" || def_type == "defmacro",
             properties,
         
             embedding: None,
@@ -223,7 +223,7 @@ impl ElixirParser {
         result: &mut ExtractionResult,
         module_name: &str,
         _decorators: &[String],
-        _def_type: &str,
+        def_type: &str,
     ) {
         let macro_name = match Self::extract_def_name(node, source_bytes) {
             Some(name) => name,
@@ -246,7 +246,7 @@ impl ElixirParser {
             end_line,
             docstring: None,
             is_entry_point: false,
-                        is_public: true,
+                        is_public: def_type == "defmacro",
             properties: HashMap::new(),
         
             embedding: None,
