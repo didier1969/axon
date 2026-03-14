@@ -49,6 +49,8 @@ pub mod html;
 pub mod css;
 pub mod markdown;
 pub mod sql;
+pub mod typeql;
+pub mod datalog;
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
     match path.extension()?.to_str()? {
@@ -64,6 +66,8 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "css" | "scss" => Some(Box::new(css::CssParser::new())),
         "md" | "markdown" => Some(Box::new(markdown::MarkdownParser::new())),
         "sql" => Some(Box::new(sql::SqlParser::new())),
+        "tql" | "typeql" => Some(Box::new(typeql::TypeQLParser::new())),
+        "dl" | "datalog" => Some(Box::new(datalog::DatalogParser::new())),
         _ => None,
     }
 }

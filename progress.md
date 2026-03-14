@@ -331,6 +331,22 @@
   - `task_plan.md`
   - `progress.md`
 
+### Phase 21: TypeQL & Datalog Ontology Parsers
+- **Status:** complete
+- Actions taken:
+  - Added TypeQL and Datalog extraction capabilities using a Python bridge architecture to circumvent Rust crate incompatibilities (Macro/Syntax dependencies).
+  - Implemented `src/axon-core/src/parser/python_bridge/typeql_parser.py` using robust regex to extract entities, relations, and ontology definitions.
+  - Implemented `src/axon-core/src/parser/python_bridge/datalog_parser.py` to extract logical relations and deduction rules.
+  - Built Rust adapters (`typeql.rs`, `datalog.rs`) using `std::process::Command` to invoke the Python micro-services and map JSON directly into the central graph `Symbol` & `Relation` schemas.
+  - Added full test coverage for both ontologies with 100% success (28 tests passing).
+- Files modified:
+  - `src/axon-core/Cargo.toml`
+  - `src/axon-core/src/parser/mod.rs`
+  - `src/axon-core/src/parser/typeql.rs`
+  - `src/axon-core/src/parser/datalog.rs`
+  - `src/axon-core/src/parser/python_bridge/typeql_parser.py`
+  - `src/axon-core/src/parser/python_bridge/datalog_parser.py`
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.
