@@ -57,6 +57,7 @@ defmodule Axon.Watcher.Server do
   @impl true
   def handle_continue(:auto_trigger_scan, state) do
     Logger.info("[Pod A] AUTO-START: Triggering initial scan...")
+    Phoenix.PubSub.broadcast(Axon.PubSub, "watcher_events", {:scan_started, state.watch_dir})
     send(self(), :initial_scan)
     {:noreply, state}
   end
