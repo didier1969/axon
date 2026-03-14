@@ -13,7 +13,7 @@ use std::fs;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use log::{info, debug, error, warn};
+use log::{info, error};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
