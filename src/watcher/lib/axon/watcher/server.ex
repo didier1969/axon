@@ -35,12 +35,22 @@ defmodule Axon.Watcher.Server do
     # Nettoyage initial des logs pour éviter les boucles
     Axon.Watcher.Progress.update_status(repo_slug, %{status: "live", progress: 0})
 
+    initial_state = %{
+      repo_slug: repo_slug, 
+      watcher_pid: nil, 
+      watch_dir: watch_dir, 
+      pending_files: MapSet.new(), 
+      timer: nil, 
+      monitoring_active: true,
+      pending_batches: %{100 => [], 80 => [], 50 => [], 10 => []}
+    }
+
     case FileSystem.start_link(dirs: [watch_dir]) do
       {:ok, watcher_pid} ->
         FileSystem.subscribe(watcher_pid)
-        {:ok, %{repo_slug: repo_slug, watcher_pid: watcher_pid, watch_dir: watch_dir, pending_files: MapSet.new(), timer: nil, monitoring_active: true}}
+        {:ok, %{initial_state | watcher_pid: watcher_pid}}
       _ ->
-        {:ok, %{repo_slug: repo_slug, watcher_pid: nil, watch_dir: watch_dir, pending_files: MapSet.new(), timer: nil, monitoring_active: true}}
+        {:ok, initial_state}
     end
   end
 
@@ -67,40 +77,54 @@ defmodule Axon.Watcher.Server do
 
   @impl true
   def handle_info(:initial_scan, state) do
-    Task.start(fn ->
-      Logger.info("[Pod A] DEBUG: Scanning directory: #{state.watch_dir}")
-      all_files = Axon.Scanner.scan(state.watch_dir)
-      Logger.info("[Pod A] DEBUG: Rust NIF returned #{length(all_files)} raw files.")
-      
-      filtered_files = Enum.filter(all_files, &should_process?/1)
-      Logger.info("[Pod A] DEBUG: After should_process? filter: #{length(filtered_files)} files.")
-      
-      files = Enum.filter(filtered_files, fn path ->
-          case File.stat(path) do
-            {:ok, %{mtime: mtime}} ->
-              last_mtime = Axon.Watcher.Progress.get_file_mtime(state.repo_slug, path)
-              current_mtime = :erlang.phash2(mtime)
-              if current_mtime != last_mtime do
-                 Axon.Watcher.Progress.save_file_mtime(state.repo_slug, path, current_mtime)
-                 true
-              else
-                 false
-              end
-            _ -> true
-          end
-      end)
-
-      total = length(files)
-      if total > 0 do
-        Axon.Watcher.Telemetry.init_directories(files)
-        Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "indexing", total: total, progress: 0})
-        files |> Enum.chunk_every(@max_batch_size) |> Enum.each(&dispatch_batch(&1, :indexing_default))
-        Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", progress: 100})
-      else
-        Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", progress: 100})
-      end
-    end)
+    Logger.info("[Pod A] Triggering Reactive Streaming Scan on: #{state.watch_dir}")
+    Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "indexing", total: 0, progress: 0})
+    # Déclenche le scan asynchrone qui enverra des messages {:ok, path} ou {:ok, "done"}
+    Axon.Scanner.start_streaming(state.watch_dir, self())
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:ok, "done"}, state) do
+    Logger.info("[Pod A] Reactive Scan Completed.")
+    flush_all_batches(state.pending_batches)
+    Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", progress: 100})
+    {:noreply, %{state | pending_batches: %{100 => [], 80 => [], 50 => [], 10 => []}}}
+  end
+
+  @impl true
+  def handle_info({:ok, path}, state) do
+    str_path = to_string(path)
+    if should_process?(str_path) do
+      priority = calculate_priority(str_path)
+      
+      case File.stat(str_path) do
+        {:ok, %{mtime: mtime}} ->
+          last_mtime = Axon.Watcher.Progress.get_file_mtime(state.repo_slug, str_path)
+          current_mtime = :erlang.phash2(mtime)
+          if current_mtime != last_mtime do
+             Axon.Watcher.Progress.save_file_mtime(state.repo_slug, str_path, current_mtime)
+             
+             current_batch = state.pending_batches[priority]
+             new_batch = [str_path | current_batch]
+             
+             threshold = if priority >= 80, do: 10, else: @max_batch_size
+             
+             if length(new_batch) >= threshold do
+               queue = if priority >= 80, do: :indexing_hot, else: :indexing_default
+               dispatch_batch(new_batch, queue)
+               {:noreply, put_in(state.pending_batches[priority], [])}
+             else
+               {:noreply, put_in(state.pending_batches[priority], new_batch)}
+             end
+          else
+            {:noreply, state}
+          end
+        _ -> {:noreply, state}
+      end
+    else
+      {:noreply, state}
+    end
   end
 
   @impl true
@@ -165,7 +189,7 @@ defmodule Axon.Watcher.Server do
     Process.send_after(self(), :process_batch, @batch_timeout)
   end
 
-  defp dispatch_batch(paths, queue \\ :indexing_default) do
+  defp dispatch_batch(paths, queue) do
     files_payload = Enum.reduce(paths, [], fn path, acc ->
       case File.read(path) do
         {:ok, content} -> 
@@ -189,5 +213,24 @@ defmodule Axon.Watcher.Server do
         e -> Logger.error("[Pod A] FAILED to enqueue batch: #{inspect(e)}")
       end
     end
+  end
+
+  defp calculate_priority(path) do
+    ext = Path.extname(path) |> String.downcase()
+    cond do
+      ext in [".ex", ".exs", ".rs", ".py", ".go"] -> 100
+      ext in [".js", ".ts", ".c", ".cpp", ".h"] -> 80
+      ext in [".md", ".txt", ".json", ".yml", ".yaml", ".toml", ".conf"] -> 50
+      true -> 10
+    end
+  end
+
+  defp flush_all_batches(batches) do
+    Enum.each(batches, fn {priority, paths} ->
+      if length(paths) > 0 do
+        queue = if priority >= 80, do: :indexing_hot, else: :indexing_default
+        dispatch_batch(paths, queue)
+      end
+    end)
   end
 end
