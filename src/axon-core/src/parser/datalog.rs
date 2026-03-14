@@ -1,4 +1,4 @@
-use super::{ExtractionResult, Parser, Symbol, Relation};
+use super::{ExtractionResult, Parser};
 use std::process::Command;
 use std::io::Write;
 use tempfile::NamedTempFile;

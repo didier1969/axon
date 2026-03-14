@@ -121,7 +121,7 @@ impl RustParser {
             end_line,
             docstring: None,
             is_entry_point: is_entry,
-                        is_public: node.parent().map_or(false, |p| p.child(0).map_or(false, |c| c.kind() == "visibility_modifier")),
+                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
             properties: props,
         
             embedding: None,
@@ -153,7 +153,7 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().map_or(false, |p| p.child(0).map_or(false, |c| c.kind() == "visibility_modifier")),
+                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
             properties: props,
         
             embedding: None,
@@ -175,7 +175,7 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().map_or(false, |p| p.child(0).map_or(false, |c| c.kind() == "visibility_modifier")),
+                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
             properties: HashMap::new(),
         
             embedding: None,
@@ -197,7 +197,7 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().map_or(false, |p| p.child(0).map_or(false, |c| c.kind() == "visibility_modifier")),
+                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
             properties: HashMap::new(),
         
             embedding: None,
@@ -219,7 +219,7 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().map_or(false, |p| p.child(0).map_or(false, |c| c.kind() == "visibility_modifier")),
+                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
             properties: HashMap::new(),
         
             embedding: None,
@@ -280,7 +280,7 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().map_or(false, |p| p.child(0).map_or(false, |c| c.kind() == "visibility_modifier")),
+                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
             properties: HashMap::new(),
         
             embedding: None,
@@ -306,7 +306,7 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().map_or(false, |p| p.child(0).map_or(false, |c| c.kind() == "visibility_modifier")),
+                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
             properties: HashMap::new(),
         
             embedding: None,

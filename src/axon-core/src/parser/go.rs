@@ -67,7 +67,7 @@ impl GoParser {
                 end_line,
                 docstring: None,
                 is_entry_point: is_entry,
-                        is_public: name.chars().next().map_or(false, |c| c.is_uppercase()),
+                        is_public: name.chars().next().is_some_and(|c| c.is_uppercase()),
                 properties,
             
                 embedding: None,
@@ -124,7 +124,7 @@ impl GoParser {
                 end_line,
                 docstring: None,
                 is_entry_point: false,
-                        is_public: name.chars().next().map_or(false, |c| c.is_uppercase()),
+                        is_public: name.chars().next().is_some_and(|c| c.is_uppercase()),
                 properties,
             
                 embedding: None,
@@ -178,7 +178,7 @@ impl GoParser {
                 end_line,
                 docstring: None,
                 is_entry_point: false,
-                        is_public: name.chars().next().map_or(false, |c| c.is_uppercase()),
+                        is_public: name.chars().next().is_some_and(|c| c.is_uppercase()),
                 properties,
             
                 embedding: None,
