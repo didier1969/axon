@@ -29,8 +29,16 @@
 - **Crash Terminal :** RÉSOLU par la délégation de l'Audit au Pod C (Suppression du BFS local).
 - **Connectivité :** `AstralBackend` implémenté comme client TCP/MsgPack réel.
 
+## Axon v2.0 (Immune & Autonomous)
+- **Priority Streaming Scanner (APSS)** : Scan disque asynchrone (NIF Rust multithreadé) avec priorité sémantique (README/Config d'abord).
+- **Auto-Trigger Indexing** : Le Watcher déclenche l'indexation dès le démarrage sans intervention humaine.
+- **Resilient Bridge** : Restauration du pont UDS Pod A -> Pod B pour l'indexation granulaire en temps réel.
+- **Nix DevEnv Isolation** : Environnement de développement reproductible et isolé (BEAM cookies, CARGO cache).
+- **WSL Auto-Resurrection** : Lancement automatique et garde-fou via `.bashrc` et script de monitoring (gestion robuste par sessions **TMUX**).
+- **Industrial Persistence** : Utilisation de `setsid` et TMUX pour garantir que les services survivent à la fermeture du terminal utilisateur.
+
 ## Loop Position
 ```
-SYNC ──▶ GRAPH ──▶ AUDIT
-  ○        ○        ○     [v1.0 industrialisée]
+AUTO-SCAN ──▶ PRIORITY-INDEX ──▶ LIVE-COCKPIT
+    ●              ●                ●     [v2.0 Autonome]
 ```

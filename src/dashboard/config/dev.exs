@@ -9,7 +9,7 @@ import Config
 config :axon_dashboard, AxonDashboardWeb.Endpoint,
   # Binding to loopback ipv4 address prevents access from other machines.
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
-  http: [ip: {127, 0, 0, 1}],
+  http: [ip: {0, 0, 0, 0}],
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
@@ -43,17 +43,17 @@ config :axon_dashboard, AxonDashboardWeb.Endpoint,
 # different ports.
 
 # Reload browser tabs when matching files change.
-config :axon_dashboard, AxonDashboardWeb.Endpoint,
-  live_reload: [
-    web_console_logger: true,
-    patterns: [
-      # Static assets, except user uploads
-      ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$",
-      # Router, Controllers, LiveViews and LiveComponents
-      ~r"lib/axon_dashboard_web/router\.ex$",
-      ~r"lib/axon_dashboard_web/(controllers|live|components)/.*\.(ex|heex)$"
-    ]
-  ]
+# config :axon_dashboard, AxonDashboardWeb.Endpoint,
+#   live_reload: [
+#     web_console_logger: true,
+#     patterns: [
+#       # Static assets, except user uploads
+#       ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$",
+#       # Router, Controllers, LiveViews and LiveComponents
+#       ~r"lib/axon_dashboard_web/router\.ex$",
+#       ~r"lib/axon_dashboard_web/(controllers|live|components)/.*\.(ex|heex)$"
+#     ]
+#   ]
 
 # Enable dev routes for dashboard and mailbox
 config :axon_dashboard, dev_routes: true

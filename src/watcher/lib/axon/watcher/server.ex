@@ -48,10 +48,17 @@ defmodule Axon.Watcher.Server do
     case FileSystem.start_link(dirs: [watch_dir]) do
       {:ok, watcher_pid} ->
         FileSystem.subscribe(watcher_pid)
-        {:ok, %{initial_state | watcher_pid: watcher_pid}}
+        {:ok, %{initial_state | watcher_pid: watcher_pid}, {:continue, :auto_trigger_scan}}
       _ ->
-        {:ok, initial_state}
+        {:ok, initial_state, {:continue, :auto_trigger_scan}}
     end
+  end
+
+  @impl true
+  def handle_continue(:auto_trigger_scan, state) do
+    Logger.info("[Pod A] AUTO-START: Triggering initial scan...")
+    send(self(), :initial_scan)
+    {:noreply, state}
   end
 
   @impl true

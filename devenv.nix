@@ -27,6 +27,7 @@ in
   packages = with pkgs; [
     # General Native & Build Tools
     inotify-tools
+    watchman
     cmake
     pkg-config
     openssl
@@ -36,7 +37,31 @@ in
     stdenv.cc.cc.lib
     uv
     beamPackages.rebar3
+    psmisc
   ];
+
+  # Managed Processes (Triple-Pod Architecture)
+  processes = {
+    db.exec = "axon-db-start";
+    core.exec = "/home/dstadel/projects/axon/bin/axon-core";
+    
+    watcher.exec = ''
+      export PYTHONPATH="$PYTHONPATH:$PWD/src"
+      export ELIXIR_HOME="$PWD/.axon/elixir_home"
+      export MIX_HOME="$ELIXIR_HOME/mix"
+      export HEX_HOME="$ELIXIR_HOME/hex"
+      export PATH="$MIX_HOME/bin:$HEX_HOME/bin:$PATH"
+      cd src/watcher && AXON_REPO_SLUG=axon AXON_WATCH_DIR="/home/dstadel/projects/axon" mix run --no-halt
+    '';
+
+    dashboard.exec = ''
+      export ELIXIR_HOME="$PWD/.axon/elixir_home"
+      export MIX_HOME="$ELIXIR_HOME/mix"
+      export HEX_HOME="$ELIXIR_HOME/hex"
+      export PATH="$MIX_HOME/bin:$HEX_HOME/bin:$PATH"
+      cd src/dashboard && PHX_PORT=44921 mix phx.server
+    '';
+  };
 
   env = {
     # Nix Sovereign Architect Rule 1: Zero Impurity
@@ -47,15 +72,15 @@ in
     
     # Port Isolation for Axon (Series 6000)
     PORT = 6000;
+    PHX_PORT = 44921; # Force Dashboard Port
     HYDRA_HTTP_PORT = 6000;
     HYDRA_TCP_PORT = 6040;
     WATCHER_PORT = 6001;
 
     # devenv-nix-best-practices: Isolation Patterns
     RELEASE_COOKIE = "axon_v1_isolated_cookie";
-    MIX_BUILD_PATH = "_build_isolated";
-    CARGO_TARGET_DIR = "${builtins.toString ./.}/.devenv/state/cargo-target";
-    DATA_DIR = "${builtins.toString ./.}/.devenv/state/data";
+    CARGO_TARGET_DIR = "/home/dstadel/projects/axon/.axon/cargo-target";
+    DATA_DIR = "/home/dstadel/projects/axon/.axon/data";
     ERL_AFLAGS = "-kernel shell_history enabled";
   };
 

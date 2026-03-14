@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+exec /nix/store/r0hi49vs4da51ylbw305k6gik2m25x8z-devenv-up 
