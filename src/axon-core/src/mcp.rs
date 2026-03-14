@@ -182,6 +182,62 @@ impl McpServer {
                         }
                     },
                     {
+                        "name": "axon_semantic_clones",
+                        "description": "Trouve des fonctions sémantiquement similaires (clones de logique) dans le projet.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { 
+                                "symbol": { "type": "string", "description": "Nom du symbole source" }
+                            },
+                            "required": ["symbol"]
+                        }
+                    },
+                    {
+                        "name": "axon_architectural_drift",
+                        "description": "Vérifie les violations d'architecture entre deux couches (ex: 'ui' appelant directement 'db').",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { 
+                                "source_layer": { "type": "string", "description": "Couche source (ex: 'ui', 'frontend')" },
+                                "target_layer": { "type": "string", "description": "Couche interdite (ex: 'db', 'repository')" }
+                            },
+                            "required": ["source_layer", "target_layer"]
+                        }
+                    },
+                    {
+                        "name": "axon_bidi_trace",
+                        "description": "Trace bidirectionnelle: remonte aux Entry Points (haut) et liste les appels profonds (bas).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { 
+                                "symbol": { "type": "string", "description": "Symbole de départ" }
+                            },
+                            "required": ["symbol"]
+                        }
+                    },
+                    {
+                        "name": "axon_api_break_check",
+                        "description": "Vérifie si la modification d'un symbole public impacte des composants externes.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { 
+                                "symbol": { "type": "string" }
+                            },
+                            "required": ["symbol"]
+                        }
+                    },
+                    {
+                        "name": "axon_simulate_mutation",
+                        "description": "Dry-run : calcule le volume de l'impact d'une modification avant de coder.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { 
+                                "symbol": { "type": "string" }
+                            },
+                            "required": ["symbol"]
+                        }
+                    },
+                    {
                         "name": "axon_cypher",
                         "description": "Interface de bas niveau pour requêtes HydraDB brutes.",
                         "inputSchema": {
@@ -217,6 +273,11 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         "axon_diff" => self.axon_diff(arguments),
         "axon_batch" => self.axon_batch(arguments),
         "axon_cypher" => self.axon_cypher(arguments),
+        "axon_semantic_clones" => self.axon_semantic_clones(arguments),
+        "axon_architectural_drift" => self.axon_architectural_drift(arguments),
+        "axon_bidi_trace" => self.axon_bidi_trace(arguments),
+        "axon_api_break_check" => self.axon_api_break_check(arguments),
+        "axon_simulate_mutation" => self.axon_simulate_mutation(arguments),
         _ => Some(json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true })),
     }
 }
@@ -265,15 +326,30 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_audit(&self, args: &Value) -> Option<Value> {
         let project = args.get("project")?.as_str().unwrap_or("unknown");
-        let (score, paths) = self.graph_store.read().unwrap().get_security_audit(project).unwrap_or((100, "[]".to_string()));
+        let store = self.graph_store.read().unwrap();
+        let (score, paths) = store.get_security_audit(project).unwrap_or((100, "[]".to_string()));
         
         let mermaid_diagram = crate::graph::GraphStore::generate_mermaid_flow(&paths);
         
-        let report = if score < 100 {
+        // Macro API Break Check: Are there highly connected symbols in this project that act as public APIs?
+        let break_query = format!(
+            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)<-[:CALLS]-(caller:Symbol) \
+             WHERE f.path CONTAINS '{}' AND NOT caller.name CONTAINS '{}' \
+             RETURN s.name, count(caller) AS external_callers \
+             ORDER BY external_callers DESC LIMIT 3",
+            project, project
+        );
+        let break_report = store.query_json(&break_query).unwrap_or_default();
+        
+        let mut report = if score < 100 {
             format!("🛡️ Security Audit for {}: Score {}/100.\nCritical Taint Paths found:\n{}\n\n{}", project, score, paths, mermaid_diagram)
         } else {
             format!("🛡️ Security Audit for {}: Score 100/100. Patterns analyzed against OWASP standards.", project)
         };
+        
+        if break_report.len() > 5 && break_report != "[]" {
+            report.push_str(&format!("\n\n⚠️ MACRO API BREAK CHECK: The following symbols are heavily relied upon by other projects. Modify them with caution:\n{}", break_report));
+        }
         
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
@@ -318,6 +394,104 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         }
         
         Some(json!({ "content": [{ "type": "text", "text": all_results.join("\n\n") }] }))
+    }
+
+    fn axon_semantic_clones(&self, args: &Value) -> Option<Value> {
+        let symbol = args.get("symbol")?.as_str()?;
+        // Placeholder pour la recherche de clones sémantiques. En théorie, il faudrait faire une recherche KNN sur les vecteurs.
+        // Puisque nous sommes dans Kuzu, nous pouvons utiliser vector_search si disponible, ou une approximation textuelle/structurelle.
+        let query = format!(
+            "MATCH (s:Symbol {{name: '{}'}}), (other:Symbol) WHERE s <> other AND other.kind = s.kind AND other.name CONTAINS s.name RETURN other.name, other.kind LIMIT 5",
+            symbol
+        );
+        match self.graph_store.read().unwrap().query_json(&query) {
+            Ok(res) => Some(json!({ "content": [{ "type": "text", "text": format!("Clones potentiels pour {} :\n{}", symbol, res) }] })),
+            Err(_) => None,
+        }
+    }
+
+    fn axon_architectural_drift(&self, args: &Value) -> Option<Value> {
+        let source_layer = args.get("source_layer")?.as_str()?;
+        let target_layer = args.get("target_layer")?.as_str()?;
+        
+        let query = format!(
+            "MATCH (f1:File)-[:CONTAINS]->(s1:Symbol)-[:CALLS]->(s2:Symbol)<-[:CONTAINS]-(f2:File) \
+             WHERE f1.path CONTAINS '{}' AND f2.path CONTAINS '{}' \
+             RETURN f1.path AS Source, s1.name AS Caller, f2.path AS Target, s2.name AS Callee",
+            source_layer, target_layer
+        );
+        
+        match self.graph_store.read().unwrap().query_json(&query) {
+            Ok(res) => {
+                let report = if res.len() > 5 && res != "[]" {
+                    format!("🚨 Dérive Architecturale Détectée ! La couche '{}' appelle directement la couche '{}' :\n{}", source_layer, target_layer, res)
+                } else {
+                    format!("✅ Aucune dérive détectée entre '{}' et '{}'.", source_layer, target_layer)
+                };
+                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+            },
+            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur: {}", e) }] })),
+        }
+    }
+
+    fn axon_bidi_trace(&self, args: &Value) -> Option<Value> {
+        let symbol = args.get("symbol")?.as_str()?;
+        
+        let query_up = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS*1..5]-(entry:Symbol {{is_entry_point: true}}) RETURN DISTINCT entry.name", symbol);
+        let query_down = format!("MATCH (s:Symbol {{name: '{}'}})-[:CALLS*1..3]->(leaf:Symbol) RETURN DISTINCT leaf.name LIMIT 20", symbol);
+        
+        let store = self.graph_store.read().unwrap();
+        let up_res = store.query_json(&query_up).unwrap_or_else(|_| "[]".to_string());
+        let down_res = store.query_json(&query_down).unwrap_or_else(|_| "[]".to_string());
+        
+        let report = format!(
+            "Trace Bidirectionnelle pour '{}'\n\n🔼 Appelé par ces Entry Points :\n{}\n\n🔽 Appelle ces composants critiques :\n{}",
+            symbol, up_res, down_res
+        );
+        
+        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+    }
+
+    fn axon_api_break_check(&self, args: &Value) -> Option<Value> {
+        let symbol = args.get("symbol")?.as_str()?;
+        
+        // Simule un test de "Breaking Change"
+        let query = format!(
+            "MATCH (s:Symbol {{name: '{}'}})<-[:CALLS]-(caller:Symbol)<-[:CONTAINS]-(f:File) \
+             RETURN f.path AS Project, caller.name AS Function",
+            symbol
+        );
+        
+        match self.graph_store.read().unwrap().query_json(&query) {
+            Ok(res) => {
+                let report = if res.trim().len() > 5 {
+                    format!("⚠️ ATTENTION BREAKING CHANGE : Le symbole '{}' est utilisé par les composants suivants. Si vous modifiez sa signature, vous devez aussi mettre à jour :\n{}", symbol, res)
+                } else {
+                    format!("✅ SAFE TO MODIFY : Le symbole '{}' n'a aucune dépendance externe critique (ou est un appelant final).", symbol)
+                };
+                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+            },
+            Err(_) => None,
+        }
+    }
+
+    fn axon_simulate_mutation(&self, args: &Value) -> Option<Value> {
+        let symbol = args.get("symbol")?.as_str()?;
+        
+        // Calcule le rayon d'impact
+        let query = format!(
+            "MATCH (s:Symbol {{name: '{}'}})<-[:CALLS*1..4]-(affected:Symbol) \
+             RETURN count(DISTINCT affected) AS impact_score",
+            symbol
+        );
+        
+        match self.graph_store.read().unwrap().query_json(&query) {
+            Ok(res) => {
+                let report = format!("🔮 Dry-Run Mutation : Modifier '{}' va impacter en cascade ~{} composants dans l'architecture.", symbol, res);
+                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+            },
+            Err(_) => None,
+        }
     }
 
     fn axon_batch(&self, args: &Value) -> Option<Value> {
@@ -390,7 +564,7 @@ mod tests {
         let result = response.result.expect("Expected result");
         let tools = result.get("tools").expect("Expected tools array").as_array().expect("tools is array");
         
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 13);
         
         let tool_names: Vec<&str> = tools.iter()
             .map(|t| t.get("name").unwrap().as_str().unwrap())
@@ -404,6 +578,51 @@ mod tests {
         assert!(tool_names.contains(&"axon_diff"));
         assert!(tool_names.contains(&"axon_batch"));
         assert!(tool_names.contains(&"axon_cypher"));
+        assert!(tool_names.contains(&"axon_semantic_clones"));
+        assert!(tool_names.contains(&"axon_architectural_drift"));
+        assert!(tool_names.contains(&"axon_bidi_trace"));
+        assert!(tool_names.contains(&"axon_api_break_check"));
+        assert!(tool_names.contains(&"axon_simulate_mutation"));
+    }
+
+    #[test]
+    fn test_axon_advanced_tools() {
+        let server = create_test_server();
+        // Mock data
+        server.graph_store.read().unwrap().execute("MERGE (f:File {path: 'ui/app.js'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (s1:Symbol {name: 'fetchData'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (f2:File {path: 'db/repo.rs'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (s2:Symbol {name: 'executeSQL'})").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (f:File {path: 'ui/app.js'}), (s:Symbol {name: 'fetchData'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (f:File {path: 'db/repo.rs'}), (s:Symbol {name: 'executeSQL'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (s1:Symbol {name: 'fetchData'}), (s2:Symbol {name: 'executeSQL'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
+
+        // Architectural Drift
+        let req_drift = JsonRpcRequest {
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_architectural_drift",
+                "arguments": { "source_layer": "ui", "target_layer": "db" }
+            })),
+            id: Some(json!(10)),
+        };
+        let res_drift = server.handle_request(req_drift);
+        let text_drift = res_drift.result.unwrap().get("content").unwrap()[0].get("text").unwrap().as_str().unwrap().to_string();
+        assert!(text_drift.contains("🚨 Dérive Architecturale Détectée"));
+        assert!(text_drift.contains("fetchData"));
+
+        // Simulate Mutation
+        let req_mut = JsonRpcRequest {
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_simulate_mutation",
+                "arguments": { "symbol": "executeSQL" }
+            })),
+            id: Some(json!(11)),
+        };
+        let res_mut = server.handle_request(req_mut);
+        let text_mut = res_mut.result.unwrap().get("content").unwrap()[0].get("text").unwrap().as_str().unwrap().to_string();
+        assert!(text_mut.contains("Dry-Run Mutation"));
     }
 
     #[test]

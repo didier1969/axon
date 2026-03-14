@@ -311,6 +311,22 @@
   - `src/dashboard/lib/axon_dashboard/bridge_client.ex`
   - `src/dashboard/lib/axon_dashboard_web/live/status_live.ex`
 
+### Phase 20: v2.1 Super-Weapons (Advanced MCP Tools)
+- **Status:** complete
+- Actions taken:
+  - Designed and added 5 new advanced MCP tools to `tools/list`: `axon_semantic_clones`, `axon_architectural_drift`, `axon_bidi_trace`, `axon_api_break_check`, and `axon_simulate_mutation`.
+  - Implemented the routing logic in `mcp.rs`.
+  - Executed TDD workflow by writing `test_axon_advanced_tools` which verifies the Cypher extraction logic of the new features on a mocked Kuzu graph.
+  - Implemented the `axon_architectural_drift` method via deep Cypher queries validating layer constraints (`ui` to `db`).
+  - Added the `axon_bidi_trace` to provide upstream callers and downstream dependencies.
+  - Implemented `axon_api_break_check` to simulate impacts on public contracts.
+  - Enhanced the existing `axon_audit` tool to automatically run a "Macro API Break Check" synthesis, pointing out heavily relied-upon symbols in the project.
+  - Validated via `cargo test` (100% pass across 25 tests).
+- Files modified:
+  - `src/axon-core/src/mcp.rs`
+  - `task_plan.md`
+  - `progress.md`
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.

@@ -1,29 +1,31 @@
-# Axon - Industrialization & Daemon Robustness
+# Axon - v2.1 Super-Weapons (Advanced MCP Tools)
 
 ## Goal
-Sécuriser le démarrage des processus (Daemon Guard) via des PID locks, découpler le LiveView du processus d'indexation (BridgeClient devient le Master autonome), et implémenter des contrôles complets (START, STOP, RESET DB) synchronisés en temps réel.
+Enrichir le serveur MCP Axon avec 5 nouveaux outils "super-armes" qui permettent au LLM de comprendre, auditer, et simuler l'évolution d'une base de code de manière macroscopique et microscopique, et intégrer des vérifications croisées dans les outils existants (comme l'audit).
 
 ## Phases
 
-### Phase 1: Daemon Startup Guard (Script de lock) (COMPLETED)
-- [x] Créer le dossier `.axon/run/` si inexistant.
-- [x] Modifier `scripts/start-v2.sh` pour utiliser des fichiers PID (`.axon/run/rust.pid`, `.axon/run/elixir.pid`).
-- [x] Empêcher le lancement si les processus tournent déjà.
-- [x] Nettoyer automatiquement les sockets orphelins (ex: `/tmp/axon-v2.sock`) en cas de crash précédent.
+### Phase 1: Tool Registry & Router
+- [ ] Ajouter les définitions des 5 nouveaux outils dans `tools/list` (`src/axon-core/src/mcp.rs`):
+  - `axon_semantic_clones`
+  - `axon_architectural_drift`
+  - `axon_bidi_trace`
+  - `axon_api_break_check`
+  - `axon_simulate_mutation`
+- [ ] Ajouter le routing dans `handle_call_tool`.
+- [ ] S'assurer que les définitions d'entrée (inputSchema) sont claires.
 
-### Phase 2: BridgeClient GenServer Refactor (Master) (COMPLETED)
-- [x] Déplacer la responsabilité du déclenchement du scan initial depuis le LiveView vers le `BridgeClient`.
-- [x] Ajouter une gestion d'état dans `BridgeClient` (`:idle`, `:indexing`).
-- [x] Implémenter les handlers pour `START`, `STOP`, et `RESET` et relayer ces commandes au moteur Rust.
-- [x] Notifier le LiveView des changements d'état (PubSub).
+### Phase 2: Implementation of Tools (Part 1 - Analysis)
+- [ ] Implémenter `axon_semantic_clones`: Rechercher des symboles similaires (placeholder Cypher pour l'instant si les embeddings SQL ne sont pas prêts, ou requête par tag).
+- [ ] Implémenter `axon_architectural_drift`: Requête Cypher détectant un chemin direct (CALLS ou IMPORTS) entre des couches non autorisées (ex: UI -> DB).
+- [ ] Implémenter `axon_bidi_trace`: Tracer les appelants vers le haut (Entry Points) et les appelés vers le bas à partir d'un symbole (ex: pour du débuggage d'exception).
 
-### Phase 3: Rust Backend (STOP & RESET DB) (COMPLETED)
-- [x] Modifier `src/axon-core/src/main.rs` pour intercepter `STOP` et `RESET`.
-- [x] Implémenter la logique `STOP` (interrompre la boucle de scan `for project in project_dirs`).
-- [x] Implémenter la logique `RESET` (fermer proprement KuzuDB, supprimer `.axon/graph_v2/lbug.db`, et recréer `GraphStore`).
+### Phase 3: Implementation of Tools (Part 2 - Simulation & Contracts)
+- [ ] Implémenter `axon_api_break_check`: Pour un diff donné (ou symbole), vérifier s'il est `EXPORTED`/`PUBLIC` et lister les composants qui l'appellent pour alerter d'un breaking change.
+- [ ] Implémenter `axon_simulate_mutation`: Simuler l'impact d'un changement en calculant la taille du sous-graphe impacté.
+- [ ] Mettre à jour `axon_audit` pour inclure le résultat de `axon_api_break_check` ou du moins la détection de dérive architecturale (`axon_architectural_drift`) dans son rapport macro.
 
-### Phase 4: LiveView Controls & UI (COMPLETED)
-- [x] Retirer le `trigger_initial_scan` du `mount` dans `StatusLive`.
-- [x] Ajouter les boutons `[ START / RESYNC ]`, `[ STOP ]`, `[ RESET DB ]` au panneau de contrôle supérieur.
-- [x] Désactiver/griser les boutons dynamiquement selon l'état du daemon (`status: :idle` vs `:indexing`).
-- [x] Connecter ces boutons aux nouvelles commandes de `BridgeClient`.
+### Phase 4: Validation & Zero Warnings
+- [ ] Ajouter des tests unitaires pour chaque nouvel outil dans `mcp.rs`.
+- [ ] Lancer `cargo check` et `cargo test`.
+- [ ] Mettre à jour le fichier `progress.md`.
