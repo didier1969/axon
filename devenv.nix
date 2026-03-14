@@ -101,7 +101,7 @@ in
 
     echo "--- AXON v1.0 - DEVENV ARCHITECTURE ---"
     echo "Pod A (Watcher): Elixir $(elixir --version | awk '/Elixir/ {print $2}')"
-    echo "Pod B (Parser):  Python $(python --version | awk '{print $2}')"
+    echo "Pod B (Parser):  Python $(python --version | awk '/Python/ {print $2}')"
     echo "Pod C (HydraDB): v1.0.0 Stable (Run 'axon-db-start' to launch)"
     echo "---------------------------------------"
   '';

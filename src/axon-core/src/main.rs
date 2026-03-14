@@ -94,7 +94,37 @@ async fn main() -> anyhow::Result<()> {
                 
                 let command = line.trim();
                 
-                if command == "START" {
+                if command.starts_with("PARSE_FILE ") {
+                    let payload = &command[11..];
+                    if let Ok(file_data) = serde_json::from_str::<serde_json::Value>(payload) {
+                        let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
+                        let content = file_data["content"].as_str().unwrap_or("").to_string();
+                        info!("Received PARSE_FILE request for: {}", path);
+                        
+                        let store_for_parse = store_clone.clone();
+                        let tx_clone = tx.clone();
+                        
+                        tokio::spawn(async move {
+                            let result = parser::parse_content(&path, &content);
+                            let mut symbols_count = 0;
+                            let mut rels_count = 0;
+                            
+                            if let Ok(extraction) = result {
+                                symbols_count = extraction.symbols.len();
+                                rels_count = extraction.relationships.len();
+                                let _ = store_for_parse.ingest_extraction(extraction).await;
+                            }
+                            
+                            let finish_msg = serde_json::to_string(&BridgeEvent::FileIndexed {
+                                path: path.clone(),
+                                symbols: symbols_count,
+                                relationships: rels_count,
+                                security_score: 100, // Default for now
+                            }).unwrap() + "\n";
+                            let _ = tx_clone.send(finish_msg).await;
+                        });
+                    }
+                } else if command == "START" {
                     info!("Received START command");
                     if let Some(task) = scan_task.take() {
                         cancel_token.store(true, Ordering::Relaxed);

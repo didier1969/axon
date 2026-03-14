@@ -13,6 +13,7 @@ defmodule Axon.Watcher.Application do
     children = [
       Axon.Watcher.Repo,
       Axon.Watcher.Telemetry,
+      Axon.Watcher.PoolFacade,
       {Oban, Application.fetch_env!(:axon_watcher, Oban)},
       {Axon.Watcher.Server, []},
       Axon.Watcher.Endpoint
