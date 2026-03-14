@@ -398,15 +398,24 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_semantic_clones(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
-        // Placeholder pour la recherche de clones sémantiques. En théorie, il faudrait faire une recherche KNN sur les vecteurs.
-        // Puisque nous sommes dans Kuzu, nous pouvons utiliser vector_search si disponible, ou une approximation textuelle/structurelle.
+        
         let query = format!(
-            "MATCH (s:Symbol {{name: '{}'}}), (other:Symbol) WHERE s <> other AND other.kind = s.kind AND other.name CONTAINS s.name RETURN other.name, other.kind LIMIT 5",
+            "MATCH (s:Symbol {{name: '{}'}}), (other:Symbol) \
+             WHERE s <> other AND other.kind = s.kind AND s.embedding IS NOT NULL AND other.embedding IS NOT NULL \
+             RETURN other.name, other.kind, array_cosine_similarity(s.embedding, other.embedding) AS sim \
+             ORDER BY sim DESC LIMIT 5",
             symbol
         );
         match self.graph_store.read().unwrap().query_json(&query) {
-            Ok(res) => Some(json!({ "content": [{ "type": "text", "text": format!("Clones potentiels pour {} :\n{}", symbol, res) }] })),
-            Err(_) => None,
+            Ok(res) => {
+                let report = if res.len() > 5 && res != "[]" {
+                    format!("🔎 Clones Sémantiques (Top 5 vector similarity) pour '{}' :\n{}", symbol, res)
+                } else {
+                    format!("✅ Aucun clone similaire significatif trouvé pour '{}' (ou modèle vectoriel non initialisé).", symbol)
+                };
+                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+            },
+            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur: {}", e) }] })),
         }
     }
 

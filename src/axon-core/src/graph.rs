@@ -126,7 +126,7 @@ impl GraphStore {
 
     fn init_schema(&self) -> Result<()> {
         self.execute("CREATE NODE TABLE IF NOT EXISTS File (path STRING, PRIMARY KEY (path))")?;
-        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, PRIMARY KEY (name))")?;
+        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CONTAINS (FROM File TO Symbol)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CALLS (FROM Symbol TO Symbol)")?;
         Ok(())
@@ -144,10 +144,18 @@ impl GraphStore {
             let safe_name = sym.name.replace("'", "''");
             let is_test = safe_name.contains("test_") || safe_path.contains("test");
 
-            self.execute(&format!(
-                "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}}})",
-                safe_name, sym.kind, is_test
-            )).ok();
+            if let Some(emb) = &sym.embedding {
+                let vec_str = format!("{:?}", emb); // e.g., [0.1, 0.2, ...]
+                self.execute(&format!(
+                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}, embedding: {}}})",
+                    safe_name, sym.kind, is_test, vec_str
+                )).ok();
+            } else {
+                self.execute(&format!(
+                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}}})",
+                    safe_name, sym.kind, is_test
+                )).ok();
+            }
 
             self.execute(&format!(
                 "MATCH (f:File {{path: '{}'}}), (s:Symbol {{name: '{}'}}) MERGE (f)-[:CONTAINS]->(s)",
@@ -286,5 +294,25 @@ mod tests {
         assert!(mermaid.contains("graph TD"));
         assert!(mermaid.contains("source --> sanitizer"));
         assert!(mermaid.contains("sanitizer --> sink"));
+    }
+
+    #[test]
+    fn test_kuzu_vector_support() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let res = store.execute("CREATE NODE TABLE VectorNode (id INT64, vec FLOAT[3], PRIMARY KEY(id))");
+        assert!(res.is_ok(), "Failed to create table with FLOAT[3]");
+        
+        let insert_res = store.execute("CREATE (n:VectorNode {id: 1, vec: [1.0, 2.0, 3.0]})");
+        assert!(insert_res.unwrap(), "Failed to insert vector");
+        
+        let insert_res2 = store.execute("CREATE (n:VectorNode {id: 3})");
+        println!("Insert missing vector: {:?}", insert_res2);
+
+        // Try array_cosine_similarity
+        let _ = store.execute("CREATE (n:VectorNode {id: 2, vec: [1.0, 2.0, 3.1]})");
+        let query_res = store.query_json("MATCH (a:VectorNode {id: 1}), (b:VectorNode {id: 2}) RETURN array_cosine_similarity(a.vec, b.vec) AS sim");
+        assert!(query_res.is_ok(), "array_cosine_similarity failed");
+        let json_str = query_res.unwrap();
+        println!("Similarity: {}", json_str);
     }
 }

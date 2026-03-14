@@ -321,7 +321,9 @@
   - Added the `axon_bidi_trace` to provide upstream callers and downstream dependencies.
   - Implemented `axon_api_break_check` to simulate impacts on public contracts.
   - Enhanced the existing `axon_audit` tool to automatically run a "Macro API Break Check" synthesis, pointing out heavily relied-upon symbols in the project.
-  - Validated via `cargo test` (100% pass across 25 tests).
+  - Refactored `GraphStore` schema to natively support `FLOAT[384]` vector properties for FastEmbed integration.
+  - Upgraded `axon_semantic_clones` from a heuristic placeholder to true K-Nearest Neighbors (KNN) vector search utilizing KuzuDB's `array_cosine_similarity`.
+  - Validated via `cargo test` (100% pass across 26 tests, including new vector support tests).
 - Files modified:
   - `src/axon-core/src/mcp.rs`
   - `task_plan.md`
