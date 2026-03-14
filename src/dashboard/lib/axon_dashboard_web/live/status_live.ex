@@ -7,7 +7,7 @@ defmodule AxonDashboardWeb.StatusLive do
       :timer.send_interval(1000, self(), :tick)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
       # Subscribe to Watcher if available via cluster
-      :rpc.call(:"watcher@localhost", Phoenix.PubSub, :subscribe, [Axon.PubSub, "watcher_events"])
+      :rpc.call(:"watcher@127.0.0.1", Phoenix.PubSub, :subscribe, [Axon.PubSub, "watcher_events"])
     end
 
     state = try do
@@ -22,7 +22,7 @@ defmodule AxonDashboardWeb.StatusLive do
     status = if engine_state == :indexing, do: :processing, else: :ready
     
     # Check node connection
-    cluster_connected = Node.list() |> Enum.any?(&(&1 == :"watcher@localhost"))
+    cluster_connected = Node.list() |> Enum.any?(&(&1 == :"watcher@127.0.0.1"))
 
     {:ok, assign(socket, 
       projects: %{},

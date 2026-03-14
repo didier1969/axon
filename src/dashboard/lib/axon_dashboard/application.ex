@@ -8,7 +8,7 @@ defmodule AxonDashboard.Application do
   @impl true
   def start(_type, _args) do
     # 1. Start Erlang Clustering with Watcher
-    Node.connect(:"watcher@localhost")
+    Node.connect(:"watcher@127.0.0.1")
     
     children = [
       AxonDashboardWeb.Telemetry,

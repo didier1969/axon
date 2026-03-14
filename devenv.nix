@@ -51,7 +51,7 @@ in
       export MIX_HOME="$ELIXIR_HOME/mix"
       export HEX_HOME="$ELIXIR_HOME/hex"
       export PATH="$MIX_HOME/bin:$HEX_HOME/bin:$PATH"
-      cd src/watcher && AXON_REPO_SLUG=axon AXON_WATCH_DIR="/home/dstadel/projects/axon" elixir --sname watcher@localhost --cookie axon_v2_cluster -S mix run --no-halt
+      cd src/watcher && mix ecto.setup && AXON_REPO_SLUG=axon AXON_WATCH_DIR="/home/dstadel/projects/axon" elixir --name watcher@127.0.0.1 --cookie axon_v2_cluster -S mix run --no-halt
     '';
 
     dashboard.exec = ''
@@ -59,7 +59,7 @@ in
       export MIX_HOME="$ELIXIR_HOME/mix"
       export HEX_HOME="$ELIXIR_HOME/hex"
       export PATH="$MIX_HOME/bin:$HEX_HOME/bin:$PATH"
-      cd src/dashboard && PHX_PORT=44921 elixir --sname dashboard@localhost --cookie axon_v2_cluster -S mix phx.server
+      cd src/dashboard && PHX_PORT=44921 elixir --name dashboard@127.0.0.1 --cookie axon_v2_cluster -S mix phx.server
     '';
   };
 
