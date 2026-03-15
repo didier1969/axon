@@ -40,7 +40,7 @@ defmodule Axon.BackpressureControllerTest do
 
     assert_receive {:oban_scale, :indexing_default, 10}
     assert_receive {:oban_scale, :indexing_hot, 5}
-    
+
     GenServer.stop(pid)
   end
 
@@ -59,7 +59,7 @@ defmodule Axon.BackpressureControllerTest do
 
     assert_receive {:oban_scale, :indexing_default, 5}
     assert_receive {:oban_scale, :indexing_hot, 2}
-    
+
     GenServer.stop(pid)
   end
 
@@ -78,7 +78,7 @@ defmodule Axon.BackpressureControllerTest do
 
     assert_receive {:oban_scale, :indexing_default, 1}
     assert_receive {:oban_scale, :indexing_hot, 1}
-    
+
     GenServer.stop(pid)
   end
 
@@ -97,7 +97,7 @@ defmodule Axon.BackpressureControllerTest do
 
     assert_receive {:oban_pause, :indexing_default}
     assert_receive {:oban_pause, :indexing_hot}
-    
+
     GenServer.stop(pid)
   end
 
@@ -124,7 +124,21 @@ defmodule Axon.BackpressureControllerTest do
     assert_receive {:oban_resume, :indexing_default}
     assert_receive {:oban_resume, :indexing_hot}
     assert_receive {:oban_scale, :indexing_default, 10}
-    
+
     GenServer.stop(pid)
+  end
+
+  test "get_chunk_size returns correct size based on load" do
+    MockResourceMonitor.set_load(15.0, 10.0)
+    assert BackpressureController.get_chunk_size(MockResourceMonitor) == 100
+
+    MockResourceMonitor.set_load(25.0, 10.0)
+    assert BackpressureController.get_chunk_size(MockResourceMonitor) == 50
+
+    MockResourceMonitor.set_load(35.0, 10.0)
+    assert BackpressureController.get_chunk_size(MockResourceMonitor) == 10
+
+    MockResourceMonitor.set_load(45.0, 10.0)
+    assert BackpressureController.get_chunk_size(MockResourceMonitor) == 5
   end
 end

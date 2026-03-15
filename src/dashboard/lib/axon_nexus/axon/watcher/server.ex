@@ -8,7 +8,6 @@ defmodule Axon.Watcher.Server do
   require Logger
 
   @batch_timeout 500
-  @max_batch_size 20
 
   # --- Client API ---
 
@@ -132,7 +131,8 @@ defmodule Axon.Watcher.Server do
             current_batch = state.pending_batches[priority]
             new_batch = [str_path | current_batch]
 
-            threshold = if priority >= 80, do: 10, else: @max_batch_size
+            chunk_size = Axon.BackpressureController.get_chunk_size()
+            threshold = if priority >= 80, do: min(10, chunk_size), else: chunk_size
 
             if length(new_batch) >= threshold do
               queue = if priority >= 80, do: :indexing_hot, else: :indexing_default
@@ -178,8 +178,10 @@ defmodule Axon.Watcher.Server do
     files_to_process = MapSet.to_list(state.pending_files)
 
     if length(files_to_process) > 0 do
+      chunk_size = Axon.BackpressureController.get_chunk_size()
+
       files_to_process
-      |> Enum.chunk_every(@max_batch_size)
+      |> Enum.chunk_every(chunk_size)
       |> Enum.each(&dispatch_batch(&1, :indexing_hot))
     end
 

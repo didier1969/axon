@@ -13,6 +13,18 @@ defmodule Axon.BackpressureController do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
+  def get_chunk_size(monitor_mod \\ Axon.ResourceMonitor) do
+    load = monitor_mod.get_system_load()
+    max_load = max(load.cpu, load.ram)
+
+    cond do
+      max_load < 20.0 -> 100
+      max_load < 30.0 -> 50
+      max_load < 40.0 -> 10
+      true -> 5
+    end
+  end
+
   @impl true
   def init(opts) do
     poll_interval = Keyword.get(opts, :poll_interval, 2_000)
@@ -37,9 +49,11 @@ defmodule Axon.BackpressureController do
   @impl true
   def handle_info(:poll, state) do
     state = apply_backpressure(state)
+
     if state.poll_interval > 0 do
       schedule_poll(state.poll_interval)
     end
+
     {:noreply, state}
   end
 
@@ -61,21 +75,31 @@ defmodule Axon.BackpressureController do
     cond do
       max_load >= @hard_limit ->
         if not state.paused do
-          Logger.warning("System load high (#{Float.round(max_load, 1)}% >= #{@hard_limit}%). Pausing indexing queues.")
+          Logger.warning(
+            "System load high (#{Float.round(max_load, 1)}% >= #{@hard_limit}%). Pausing indexing queues."
+          )
+
           pause_queues(state.oban_mod)
         end
+
         %{state | paused: true, last_limit: 0}
 
       true ->
         if state.paused do
-          Logger.info("System load recovered (#{Float.round(max_load, 1)}% < #{@hard_limit}%). Resuming indexing queues.")
+          Logger.info(
+            "System load recovered (#{Float.round(max_load, 1)}% < #{@hard_limit}%). Resuming indexing queues."
+          )
+
           resume_queues(state.oban_mod)
         end
 
         limit = calculate_limit(max_load)
 
         if state.last_limit != limit do
-          Logger.info("Adjusting indexing_default limit to #{limit} (load: #{Float.round(max_load, 1)}%)")
+          Logger.info(
+            "Adjusting indexing_default limit to #{limit} (load: #{Float.round(max_load, 1)}%)"
+          )
+
           scale_queues(state.oban_mod, limit)
         end
 
