@@ -6,13 +6,16 @@ defmodule Axon.Watcher.Layouts do
     <!DOCTYPE html>
     <html lang="en">
       <head>
-        <meta charset="utf-8"/>
-        <meta name="viewport" content="width=device-width, initial-scale=1"/>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="csrf-token" content="axon_no_csrf" />
         <title>AXON | Industrial Command Center</title>
-        <link rel="preconnect" href="https://fonts.googleapis.com">
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&family=Open+Sans:wght@400;500&display=swap" rel="stylesheet">
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&family=Open+Sans:wght@400;500&display=swap"
+          rel="stylesheet"
+        />
         <style>
           :root {
             --bg-deep: #050505;
@@ -80,8 +83,10 @@ defmodule Axon.Watcher.Layouts do
         <div class="container">
           {@inner_content}
         </div>
-        <script src="https://cdn.jsdelivr.net/npm/phoenix@1.8.5/priv/static/phoenix.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/phoenix_live_view@1.0.18/priv/static/phoenix_live_view.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/phoenix@1.8.5/priv/static/phoenix.min.js">
+        </script>
+        <script src="https://cdn.jsdelivr.net/npm/phoenix_live_view@1.0.18/priv/static/phoenix_live_view.min.js">
+        </script>
         <script>
           window.addEventListener("load", () => {
             if (!window.liveSocket) {

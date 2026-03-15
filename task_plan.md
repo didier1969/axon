@@ -1,19 +1,17 @@
-# Axon - TypeQL & Datalog Integrations (Python Strategy)
+# Axon v2.2 - Resource-Aware Scaling (Dynamic Backpressure)
 
 ## Goal
-Permettre à Axon d'être l'unique porte d'entrée (Gateway MCP) en intégrant le support de Datalog et TypeQL. Puisque les crates Rust sont défaillants ou inadaptés, nous allons utiliser l'écosystème Python (qui possède des drivers/parseurs stables pour TypeDB et Datalog) via un appel système depuis le parseur Rust.
+Intelligence d'infrastructure et respect absolu de l'environnement développeur. Mettre en place un backpressure dynamique basé sur la charge de l'OS.
 
-## Phases
+## Tasks
 
-### Phase 1: Python Parsing Micro-Service
-- [ ] Créer le fichier `src/axon-core/src/parser/python_bridge/typeql_parser.py` qui utilise `typeql` ou `typedb-driver` en Python pour parser une ontologie et renvoyer un JSON compatible avec `ExtractionResult`.
-- [ ] Créer `src/axon-core/src/parser/python_bridge/datalog_parser.py` qui parse Datalog (via expressions régulières ou librairie) et renvoie le JSON.
+### Task 1: OS Telemetry Monitor
+- Intégration de `:os_mon` (Erlang) pour lire la charge CPU et RAM en temps réel.
+- Créer un `Axon.ResourceMonitor` (GenServer) qui poll régulièrement `:cpu_sup` et `:memsup`.
 
-### Phase 2: Rust Adapter
-- [ ] Créer `src/axon-core/src/parser/typeql.rs`.
-- [ ] Créer `src/axon-core/src/parser/datalog.rs`.
-- [ ] Ces deux parseurs Rust n'analyseront pas eux-mêmes le code, mais invoqueront `std::process::Command` pour exécuter le script Python correspondant et désérialiseront le résultat JSON en `ExtractionResult`.
+### Task 2: Dynamic Worker Scaling & Hard Limit 40%
+- Adaptation à la volée des limites d'Oban (`indexing_default` / `indexing_hot`) via le moniteur.
+- Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 40% des ressources globales de la machine, se mettant en "pause" automatique si le système utilisateur exige la pleine puissance.
 
-### Phase 3: Integration
-- [ ] Ajouter les extensions `.tql`, `.typeql`, `.dl`, `.datalog` dans `mod.rs` et `main.rs`.
-- [ ] Écrire un test unitaire qui valide que le pont Python fonctionne et extrait bien les entités et relations.
+### Task 3: Dynamic Batching
+- Réduction de la taille des lots (chunk size) envoyés au Data Plane Rust si la pression mémoire augmente. (Cela nécessitera de modifier `Axon.Watcher.Server` pour ajuster la taille du batch avant de l'insérer dans Oban).

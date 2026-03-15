@@ -24,13 +24,9 @@ defmodule Axon.ResourceMonitorTest do
   end
 
   test "handle_info(:poll, state) updates the state" do
-    # Trigger a poll manually to ensure the handle_info callback works
-    send(ResourceMonitor, :poll)
+    # Test the callback in isolation to avoid spawning a duplicate polling loop
+    {:noreply, load} = ResourceMonitor.handle_info(:poll, %{})
 
-    # Wait a tiny bit for the message to be processed
-    Process.sleep(50)
-
-    load = ResourceMonitor.get_system_load()
     assert is_map(load)
     assert Map.has_key?(load, :cpu)
     assert Map.has_key?(load, :ram)
