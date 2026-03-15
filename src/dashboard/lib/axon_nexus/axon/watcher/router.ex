@@ -16,7 +16,7 @@ defmodule Axon.Watcher.Router do
 end
 
 defmodule Axon.Watcher.FaviconController do
-  use Phoenix.Controller
+  use Phoenix.Controller, formats: [:html, :json]
   def none(conn, _params), do: send_resp(conn, 204, "")
 end
 
@@ -32,6 +32,7 @@ defmodule Axon.Watcher.Endpoint do
 
   plug Plug.MethodOverride
   plug Plug.Head
+
   plug Plug.Session,
     store: :cookie,
     key: "_axon_watcher_key",

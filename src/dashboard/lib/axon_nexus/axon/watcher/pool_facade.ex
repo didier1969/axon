@@ -39,10 +39,11 @@ defmodule Axon.Watcher.PoolFacade do
       event_json = Jason.encode!(%{type: type, payload: payload})
       :gen_tcp.send(state.socket, "WATCHER_EVENT #{event_json}\n")
     end
+
     {:noreply, state}
   end
 
-  def handle_call({:parse, path, content}, from, state) do
+  def handle_call({:parse, path, content}, _from, state) do
     if state.socket do
       payload = Jason.encode!(%{"path" => path, "content" => content})
       # We use a protocol: "PARSE_FILE <json_payload>\n"
@@ -53,7 +54,7 @@ defmodule Axon.Watcher.PoolFacade do
           # or return :ok immediately if we trust the buffer.
           # For consistency with IndexingWorker, we return immediately.
           {:reply, %{"status" => "ok"}, state}
-        
+
         {:error, reason} ->
           {:reply, {:error, reason}, state}
       end

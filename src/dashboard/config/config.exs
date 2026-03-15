@@ -12,6 +12,7 @@ config :axon_dashboard,
   generators: [timestamp_type: :utc_datetime]
 
 config :axon_dashboard, Axon.Watcher.Repo,
+  adapter: Ecto.Adapters.SQLite3,
   database: "axon_nexus.db",
   pool_size: 5
 

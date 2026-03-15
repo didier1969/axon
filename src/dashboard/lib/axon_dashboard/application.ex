@@ -9,12 +9,12 @@ defmodule AxonDashboard.Application do
   def start(_type, _args) do
     children = [
       AxonDashboardWeb.Telemetry,
+      {Phoenix.PubSub, name: AxonDashboard.PubSub},
       Axon.Watcher.Repo,
       {Oban, Application.fetch_env!(:axon_dashboard, Oban)},
       Axon.Watcher.PoolFacade,
       {Axon.Watcher.Server, []},
       {DNSCluster, query: Application.get_env(:axon_dashboard, :dns_cluster_query) || :ignore},
-      {Phoenix.PubSub, name: AxonDashboard.PubSub},
       # Start a worker by calling: AxonDashboard.Worker.start_link(arg)
       # {AxonDashboard.Worker, arg},
       AxonDashboard.BridgeClient,

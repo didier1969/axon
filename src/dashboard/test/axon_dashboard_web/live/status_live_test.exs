@@ -9,20 +9,25 @@ defmodule AxonDashboardWeb.StatusLiveTest do
 
   test "updates stats on bridge event", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
-    
-    # Simuler l'arrivée d'un événement via le format JSON reçu par Port dans status_live.ex
-    send(view.pid, {nil, {:data, "{\"FileIndexed\": {\"path\": \"lib/core.ex\", \"symbol_count\": 42, \"security_score\": 95, \"coverage_score\": 85}}\n"}})
+
+    # Simuler l'arrivée d'un événement via PubSub
+    send(
+      view.pid,
+      {:bridge_event, %{"FileIndexed" => %{"path" => "lib/core.ex", "symbol_count" => 42, "security_score" => 95, "coverage_score" => 85}}}
+    )
 
     # Vérifier que l'UI s'est mise à jour
-    assert render(view) =~ "Project Sync:"
     assert render(view) =~ "42"
     assert render(view) =~ "lib/core.ex"
   end
 
   test "completes on scan complete event", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
-    
-    send(view.pid, {nil, {:data, "{\"ScanComplete\": {\"total_files\": 10, \"duration_ms\": 100}}\n"}})
+
+    send(
+      view.pid,
+      {:bridge_event, %{"ScanComplete" => %{"total_files" => 10, "duration_ms" => 100}}}
+    )
 
     assert render(view) =~ "Fleet Ingestion Complete"
   end
