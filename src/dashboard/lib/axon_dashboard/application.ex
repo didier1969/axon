@@ -14,6 +14,7 @@ defmodule AxonDashboard.Application do
       {Oban, Application.fetch_env!(:axon_dashboard, Oban)},
       Axon.Watcher.PoolFacade,
       {Axon.Watcher.Server, []},
+      Axon.ResourceMonitor,
       {DNSCluster, query: Application.get_env(:axon_dashboard, :dns_cluster_query) || :ignore},
       # Start a worker by calling: AxonDashboard.Worker.start_link(arg)
       # {AxonDashboard.Worker, arg},
