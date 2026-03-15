@@ -132,6 +132,15 @@ defmodule AxonDashboard.BridgeClient do
     end
   end
 
+  defp handle_bridge_event(%{"type" => "WatcherFileIndexed", "payload" => payload}, state) do
+    path = payload["path"] || "unknown"
+    status_str = payload["status"] || "unknown"
+    status = if status_str == "ok", do: :ok, else: :error
+    
+    Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", {:file_indexed, path, status})
+    state
+  end
+
   defp handle_bridge_event(_, state), do: state
 
   def handle_info({:tcp_closed, _socket}, state) do

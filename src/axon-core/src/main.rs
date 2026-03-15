@@ -94,7 +94,14 @@ async fn main() -> anyhow::Result<()> {
                 
                 let command = line.trim();
                 
-                if command.starts_with("PARSE_FILE ") {
+                if command.starts_with("WATCHER_EVENT ") {
+                    let payload = &command[14..];
+                    if let Ok(event_data) = serde_json::from_str::<serde_json::Value>(payload) {
+                        // Forward the event directly to connected dashboard clients
+                        let forward_msg = serde_json::to_string(&event_data).unwrap() + "\n";
+                        let _ = tx.send(forward_msg).await;
+                    }
+                } else if command.starts_with("PARSE_FILE ") {
                     let payload = &command[11..];
                     if let Ok(file_data) = serde_json::from_str::<serde_json::Value>(payload) {
                         let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
@@ -105,21 +112,28 @@ async fn main() -> anyhow::Result<()> {
                         let tx_clone = tx.clone();
                         
                         tokio::spawn(async move {
-                            let result = parser::parse_content(&path, &content);
                             let mut symbols_count = 0;
                             let mut rels_count = 0;
                             
-                            if let Ok(extraction) = result {
+                            let path_obj = std::path::Path::new(&path);
+                            if let Some(parser) = parser::get_parser_for_file(path_obj) {
+                                let extraction = parser.parse(&content);
                                 symbols_count = extraction.symbols.len();
-                                rels_count = extraction.relationships.len();
-                                let _ = store_for_parse.ingest_extraction(extraction).await;
+                                rels_count = extraction.relations.len();
+                                
+                                if let Ok(store) = store_for_parse.read() {
+                                    let _ = store.insert_file_data(&path, &extraction);
+                                }
                             }
                             
                             let finish_msg = serde_json::to_string(&BridgeEvent::FileIndexed {
                                 path: path.clone(),
-                                symbols: symbols_count,
-                                relationships: rels_count,
+                                symbol_count: symbols_count,
+                                relation_count: rels_count,
+                                file_count: 1,
+                                entry_points: 0,
                                 security_score: 100, // Default for now
+                                coverage_score: 0,
                             }).unwrap() + "\n";
                             let _ = tx_clone.send(finish_msg).await;
                         });

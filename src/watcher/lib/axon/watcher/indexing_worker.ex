@@ -13,10 +13,11 @@ defmodule Axon.Watcher.IndexingWorker do
       case PoolFacade.parse(file["path"], file["content"]) do
         %{"status" => "ok"} ->
           Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", file["path"], :ok)
-          Phoenix.PubSub.broadcast(Axon.PubSub, "watcher_events", {:file_indexed, file["path"], :ok})
+          PoolFacade.broadcast_event("WatcherFileIndexed", %{path: file["path"], status: "ok"})
         error ->
           Logger.error("[Oban] Failed to parse #{file["path"]}: #{inspect(error)}")
           Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", file["path"], {:error, error})
+          PoolFacade.broadcast_event("WatcherFileIndexed", %{path: file["path"], status: "error"})
       end
     end)
     :ok

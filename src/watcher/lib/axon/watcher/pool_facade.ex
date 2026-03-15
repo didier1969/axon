@@ -20,11 +20,26 @@ defmodule Axon.Watcher.PoolFacade do
     GenServer.call(__MODULE__, {:parse, path, content}, 30_000)
   end
 
+  @doc """
+  Sends a telemetry event to the Dashboard via the Rust Bridge.
+  """
+  def broadcast_event(type, payload) do
+    GenServer.cast(__MODULE__, {:broadcast, type, payload})
+  end
+
   # --- Callbacks ---
 
   def init(_opts) do
     Process.send_after(self(), :connect, 500)
     {:ok, %{socket: nil, requests: %{}}}
+  end
+
+  def handle_cast({:broadcast, type, payload}, state) do
+    if state.socket do
+      event_json = Jason.encode!(%{type: type, payload: payload})
+      :gen_tcp.send(state.socket, "WATCHER_EVENT #{event_json}\n")
+    end
+    {:noreply, state}
   end
 
   def handle_call({:parse, path, content}, from, state) do

@@ -140,7 +140,8 @@ defmodule Axon.Watcher.Progress do
             :gen_tcp.close(socket)
         end
       {:error, reason} ->
-        Logger.error("[Progress] Could not connect to HydraDB at #{@hydra_port}: #{inspect(reason)}")
+        # Log only in debug to avoid pollution, as this is best-effort async reporting
+        Logger.debug("[Progress] HydraDB offline at #{@hydra_port}: #{inspect(reason)}")
     end
   end
 end

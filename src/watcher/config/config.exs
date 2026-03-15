@@ -12,7 +12,7 @@ config :axon_watcher, Axon.Watcher.Endpoint,
   secret_key_base: "uT+pL/Uv67tW4K1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z1"
 
 config :axon_watcher, Axon.Watcher.Repo,
-  database: Path.join(System.user_home!(), ".axon/runtime/oban.db"),
+  database: "axon_watcher.db",
   pool_size: 5
 
 config :axon_watcher, Oban,

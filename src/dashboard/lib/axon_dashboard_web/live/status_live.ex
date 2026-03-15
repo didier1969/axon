@@ -6,8 +6,8 @@ defmodule AxonDashboardWeb.StatusLive do
     if connected?(socket) do
       :timer.send_interval(1000, self(), :tick)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
-      # Subscribe to Watcher if available via cluster
-      :rpc.call(:"watcher@127.0.0.1", Phoenix.PubSub, :subscribe, [Axon.PubSub, "watcher_events"])
+      # Federated PubSub subscription
+      Phoenix.PubSub.subscribe(Axon.PubSub, "watcher_events")
     end
 
     state = try do
@@ -43,7 +43,20 @@ defmodule AxonDashboardWeb.StatusLive do
   end
 
   def handle_info(:tick, socket) do
-    {:noreply, assign(socket, sys_time: Time.utc_now() |> Time.truncate(:second))}
+    # Resilient Clustering: Try to connect if offline
+    current_cluster_state = socket.assigns.cluster_connected
+    new_cluster_state = Node.ping(:"watcher@127.0.0.1") == :pong
+    
+    if not current_cluster_state and new_cluster_state do
+      Logger.info("[LiveView] Neural Link established with Watcher")
+      # Force cross-node subscription by sending our PID to the remote PubSub
+      :rpc.call(:"watcher@127.0.0.1", Phoenix.PubSub, :subscribe, [Axon.PubSub, "watcher_events", [link: true]])
+    end
+
+    {:noreply, assign(socket, 
+      sys_time: Time.utc_now() |> Time.truncate(:second),
+      cluster_connected: new_cluster_state
+    )}
   end
 
   def handle_info(:trigger_initial_scan, socket) do
@@ -67,6 +80,7 @@ defmodule AxonDashboardWeb.StatusLive do
   end
 
   def handle_info({:file_indexed, path, status}, socket) do
+    Logger.info("[LiveView] Received file_indexed: #{path} with status #{status}")
     new_files = [{path, status} | socket.assigns.live_files] |> Enum.take(20)
     {:noreply, assign(socket, 
       live_files: new_files,

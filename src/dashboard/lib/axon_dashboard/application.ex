@@ -14,6 +14,7 @@ defmodule AxonDashboard.Application do
       AxonDashboardWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:axon_dashboard, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: AxonDashboard.PubSub},
+      Supervisor.child_spec({Phoenix.PubSub, name: Axon.PubSub}, id: :axon_pubsub),
       # Start a worker by calling: AxonDashboard.Worker.start_link(arg)
       # {AxonDashboard.Worker, arg},
       AxonDashboard.BridgeClient,

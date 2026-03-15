@@ -140,22 +140,11 @@ defmodule Axon.Watcher.Server do
     str_path = to_string(path)
     if state.monitoring_active and should_process?(str_path) do
       if :deleted in events do
+        # Dans le futur, on notifiera la suppression au Pod C. Pour l'instant on l'ignore.
         {:noreply, state}
       else
-        parent_dir = Path.dirname(str_path)
-        
-        # Obtenir les fichiers voisins (proximité architecturale)
-        neighbors = 
-          case File.ls(parent_dir) do
-            {:ok, files} -> 
-              Enum.map(files, &Path.join(parent_dir, &1))
-              |> Enum.filter(&should_process?/1)
-              |> Enum.filter(&(File.regular?(&1)))
-            _ -> []
-          end
-        
-        # Fusionner avec les fichiers en attente
-        new_pending = Enum.reduce([str_path | neighbors], state.pending_files, &MapSet.put(&2, &1))
+        # UNIQUEMENT réindexer le fichier modifié (suppression du "neighbor scan" causant des boucles infinies)
+        new_pending = MapSet.put(state.pending_files, str_path)
         
         new_timer = reset_timer(state.timer)
         {:noreply, %{state | pending_files: new_pending, timer: new_timer}}
@@ -187,8 +176,12 @@ defmodule Axon.Watcher.Server do
       String.contains?(path, "/.axon/") or 
       String.contains?(path, "/_build/") or 
       String.contains?(path, "/deps/") or 
+      String.contains?(path, "/.devenv/") or 
       String.contains?(path, "__pycache__") or 
-      String.ends_with?(path, ".log")
+      String.ends_with?(path, ".log") or
+      String.ends_with?(path, "erl_crash.dump") or
+      String.ends_with?(path, "mix.lock") or
+      String.ends_with?(path, "flake.lock")
     )
   end
 
