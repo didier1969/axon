@@ -7,14 +7,14 @@ defmodule AxonDashboard.Application do
 
   @impl true
   def start(_type, _args) do
-    # 1. Start Erlang Clustering with Watcher
-    Node.connect(:"watcher@127.0.0.1")
-    
     children = [
       AxonDashboardWeb.Telemetry,
+      Axon.Watcher.Repo,
+      {Oban, Application.fetch_env!(:axon_dashboard, Oban)},
+      Axon.Watcher.PoolFacade,
+      {Axon.Watcher.Server, []},
       {DNSCluster, query: Application.get_env(:axon_dashboard, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: AxonDashboard.PubSub},
-      Supervisor.child_spec({Phoenix.PubSub, name: Axon.PubSub}, id: :axon_pubsub),
       # Start a worker by calling: AxonDashboard.Worker.start_link(arg)
       # {AxonDashboard.Worker, arg},
       AxonDashboard.BridgeClient,

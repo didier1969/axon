@@ -6,8 +6,6 @@ defmodule AxonDashboardWeb.StatusLive do
     if connected?(socket) do
       :timer.send_interval(1000, self(), :tick)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
-      # Federated PubSub subscription
-      Phoenix.PubSub.subscribe(Axon.PubSub, "watcher_events")
     end
 
     state = try do
@@ -20,9 +18,6 @@ defmodule AxonDashboardWeb.StatusLive do
     engine_state = Map.get(state, :engine_state, :idle)
 
     status = if engine_state == :indexing, do: :processing, else: :ready
-    
-    # Check node connection
-    cluster_connected = Node.list() |> Enum.any?(&(&1 == :"watcher@127.0.0.1"))
 
     {:ok, assign(socket, 
       projects: %{},
@@ -36,27 +31,14 @@ defmodule AxonDashboardWeb.StatusLive do
       sys_time: Time.utc_now() |> Time.truncate(:second),
       engine_start_time: start_time,
       alerts: [],
-      cluster_connected: cluster_connected,
+      cluster_connected: true, # Always true in Monolithic Nexus
       live_files: [],
       total_files_parsed: 0
     )}
   end
 
   def handle_info(:tick, socket) do
-    # Resilient Clustering: Try to connect if offline
-    current_cluster_state = socket.assigns.cluster_connected
-    new_cluster_state = Node.ping(:"watcher@127.0.0.1") == :pong
-    
-    if not current_cluster_state and new_cluster_state do
-      Logger.info("[LiveView] Neural Link established with Watcher")
-      # Force cross-node subscription by sending our PID to the remote PubSub
-      :rpc.call(:"watcher@127.0.0.1", Phoenix.PubSub, :subscribe, [Axon.PubSub, "watcher_events", [link: true]])
-    end
-
-    {:noreply, assign(socket, 
-      sys_time: Time.utc_now() |> Time.truncate(:second),
-      cluster_connected: new_cluster_state
-    )}
+    {:noreply, assign(socket, sys_time: Time.utc_now() |> Time.truncate(:second))}
   end
 
   def handle_info(:trigger_initial_scan, socket) do
