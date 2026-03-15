@@ -8,7 +8,22 @@
 import Config
 
 config :axon_dashboard,
+  ecto_repos: [Axon.Watcher.Repo],
   generators: [timestamp_type: :utc_datetime]
+
+config :axon_dashboard, Axon.Watcher.Repo,
+  database: "axon_nexus.db",
+  pool_size: 5
+
+config :axon_dashboard, Oban,
+  repo: Axon.Watcher.Repo,
+  engine: Oban.Engines.Lite,
+  plugins: [Oban.Plugins.Pruner],
+  queues: [
+    indexing_critical: [limit: 10],
+    indexing_hot: [limit: 5],
+    indexing_default: [limit: 10]
+  ]
 
 # Configure the endpoint
 config :axon_dashboard, AxonDashboardWeb.Endpoint,

@@ -69,7 +69,11 @@ defmodule AxonDashboard.MixProject do
       {:jason, "~> 1.2"},
       {:msgpax, "~> 2.3"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"}
+      {:bandit, "~> 1.5"},
+      {:rustler, "~> 0.36.0", runtime: false},
+      {:file_system, "~> 1.0"},
+      {:ecto_sqlite3, "~> 0.10"},
+      {:oban, "~> 2.18"}
     ]
   end
 
@@ -81,7 +85,9 @@ defmodule AxonDashboard.MixProject do
   # See the documentation for `Mix` for more info on aliases.
   defp aliases do
     [
-      setup: ["deps.get", "assets.setup", "assets.build"],
+      setup: ["deps.get", "ecto.setup", "assets.setup", "assets.build"],
+      "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
+      "ecto.reset": ["ecto.drop", "ecto.setup"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
       "assets.build": ["compile", "tailwind axon_dashboard", "esbuild axon_dashboard"],
       "assets.deploy": [
