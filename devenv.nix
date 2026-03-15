@@ -45,21 +45,13 @@ in
     db.exec = "axon-db-start";
     core.exec = "/home/dstadel/projects/axon/bin/axon-core";
     
-    watcher.exec = ''
+    nexus.exec = ''
       export PYTHONPATH="$PYTHONPATH:$PWD/src"
       export ELIXIR_HOME="$PWD/.axon/elixir_home"
       export MIX_HOME="$ELIXIR_HOME/mix"
       export HEX_HOME="$ELIXIR_HOME/hex"
       export PATH="$MIX_HOME/bin:$HEX_HOME/bin:$PATH"
-      cd src/watcher && mix ecto.setup && AXON_REPO_SLUG=axon AXON_WATCH_DIR="/home/dstadel/projects/axon" elixir --name watcher@127.0.0.1 --cookie axon_v2_cluster -S mix run --no-halt
-    '';
-
-    dashboard.exec = ''
-      export ELIXIR_HOME="$PWD/.axon/elixir_home"
-      export MIX_HOME="$ELIXIR_HOME/mix"
-      export HEX_HOME="$ELIXIR_HOME/hex"
-      export PATH="$MIX_HOME/bin:$HEX_HOME/bin:$PATH"
-      cd src/dashboard && PHX_PORT=44921 elixir --name dashboard@127.0.0.1 --cookie axon_v2_cluster -S mix phx.server
+      cd src/dashboard && mix ecto.setup && PHX_PORT=44921 AXON_REPO_SLUG=axon AXON_WATCH_DIR="/home/dstadel/projects/axon" mix phx.server
     '';
   };
 
