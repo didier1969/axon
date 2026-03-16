@@ -40,20 +40,20 @@ for lang in "${!GRAMMARS[@]}"; do
     
     if [ "$lang" == "typescript" ]; then
         # Build typescript and tsx
-        tree-sitter build --wasm "tree-sitter-$lang/typescript"
-        mv tree-sitter-typescript.wasm "$PARSERS_DIR/" || true
+        cd "tree-sitter-$lang/typescript" && tree-sitter build --wasm && mv tree-sitter-typescript.wasm "$PARSERS_DIR/" || true
+        cd "$TMP_DIR"
         
-        tree-sitter build --wasm "tree-sitter-$lang/tsx"
-        mv tree-sitter-tsx.wasm "$PARSERS_DIR/" || true
+        cd "tree-sitter-$lang/tsx" && tree-sitter build --wasm && mv tree-sitter-tsx.wasm "$PARSERS_DIR/" || true
+        cd "$TMP_DIR"
     elif [ "$lang" == "markdown" ]; then
-        tree-sitter build --wasm "tree-sitter-$lang/tree-sitter-markdown"
-        mv tree-sitter-markdown.wasm "$PARSERS_DIR/" || true
+        cd "tree-sitter-$lang/tree-sitter-markdown" && tree-sitter build --wasm && mv tree-sitter-markdown.wasm "$PARSERS_DIR/" || true
+        cd "$TMP_DIR"
         
-        tree-sitter build --wasm "tree-sitter-$lang/tree-sitter-markdown-inline"
-        mv tree-sitter-markdown-inline.wasm "$PARSERS_DIR/" || true
+        cd "tree-sitter-$lang/tree-sitter-markdown-inline" && tree-sitter build --wasm && mv tree-sitter-markdown-inline.wasm "$PARSERS_DIR/" || true
+        cd "$TMP_DIR"
     else
-        tree-sitter build --wasm "tree-sitter-$lang"
-        mv "tree-sitter-${lang}.wasm" "$PARSERS_DIR/" || true
+        cd "tree-sitter-$lang" && tree-sitter build --wasm && mv "tree-sitter-${lang}.wasm" "$PARSERS_DIR/" || true
+        cd "$TMP_DIR"
     fi
 done
 

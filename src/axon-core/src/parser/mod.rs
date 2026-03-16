@@ -51,6 +51,7 @@ pub mod markdown;
 pub mod sql;
 pub mod typeql;
 pub mod datalog;
+pub mod wasm_poc;
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
     match path.extension()?.to_str()? {
