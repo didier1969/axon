@@ -21,6 +21,11 @@ if [ -S "/tmp/axon-v2.sock" ]; then
     rm -f "/tmp/axon-v2.sock"
 fi
 
+# Clean up dangling processes and database locks
+echo "🧹 Cleaning up legacy locks and orphan processes..."
+pkill -f "bin/axon-core" 2>/dev/null || true
+rm -f "$PROJECT_ROOT/.axon/graph_v2/lbug.db.lock"
+
 echo "🚀 Starting Axon v2 Architecture (Managed via TMUX)..."
 
 # Kill existing axon session if any
@@ -30,7 +35,7 @@ tmux kill-session -t axon 2>/dev/null || true
 tmux new-session -d -s axon -n "db" "nix develop --impure --command bash -c 'axon-db-start'"
 
 # Start Pod B (Core / Parser) with OS-level Niceness (Idle Priority for CPU and I/O)
-tmux new-window -t axon:1 -n "core" "nix develop --impure --command bash -c 'nice -n 19 ionice -c 3 bin/axon-core'"
+tmux new-window -t axon:1 -n "core" "nix develop --impure --command bash -c 'exec nice -n 19 ionice -c 3 bin/axon-core'"
 
 # Start Pod A/Control (Nexus Monolith)
 tmux new-window -t axon:2 -n "nexus" "bash -c 'cd src/dashboard && nix develop --impure --command bash -c \"mix ecto.setup && PHX_PORT=44921 AXON_REPO_SLUG=axon AXON_WATCH_DIR=../../ mix phx.server\"'"
