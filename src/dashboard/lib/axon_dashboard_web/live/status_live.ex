@@ -20,10 +20,27 @@ defmodule AxonDashboardWeb.StatusLive do
 
     status = if engine_state == :indexing, do: :processing, else: :ready
 
-    # Hydrate state from backend Telemetry ETS table
-    stats = 
+    socket =
+      socket
+      |> assign(
+        avg_security: 100,
+        avg_coverage: 0,
+        status: status,
+        last_event: nil,
+        sys_time: Time.utc_now() |> Time.truncate(:second),
+        engine_start_time: start_time,
+        alerts: [],
+        cluster_connected: true
+      )
+      |> fetch_and_assign_stats()
+
+    {:ok, socket}
+  end
+
+  defp fetch_and_assign_stats(socket) do
+    stats =
       try do
-        Axon.Watcher.Telemetry.get_stats()
+        Axon.Watcher.Tracking.get_dashboard_stats()
       catch
         :exit, _ -> %{directories: %{}, last_files: []}
       end || %{directories: %{}, last_files: []}
@@ -31,44 +48,49 @@ defmodule AxonDashboardWeb.StatusLive do
     dirs = Map.get(stats, :directories, %{})
     last_f = Map.get(stats, :last_files, [])
 
-    initial_projects =
+    projects =
       Enum.reduce(dirs, %{}, fn {dir, info}, acc ->
         Map.put(acc, dir, %{
           symbols: info.completed * 10,
           relations: info.completed * 2,
-          files: info.completed + info.failed,
+          files: info.completed + info.failed + info.ignored,
           entries: 0,
           security: 100,
           coverage: 85,
-          total_files: info.total
+          total_files: info.total,
+          failed_files: info.failed,
+          ignored_files: info.ignored
         })
       end)
 
-    initial_live_files = Enum.map(last_f, fn f -> {f.path, f.status} end)
-    total_parsed = Enum.reduce(dirs, 0, fn {_, info}, acc -> acc + info.completed + info.failed end)
+    live_files =
+      Enum.map(last_f, fn f ->
+        status_sym = if f.status == "indexed", do: :ok, else: :error
+        {f.path, status_sym}
+      end)
 
-    {:ok,
-     assign(socket,
-       projects: initial_projects,
-       total_projects: map_size(initial_projects),
-       scanned_projects: map_size(initial_projects),
-       total_symbols: total_parsed * 10,
-       avg_security: 100,
-       avg_coverage: 0,
-       status: status,
-       last_event: nil,
-       sys_time: Time.utc_now() |> Time.truncate(:second),
-       engine_start_time: start_time,
-       alerts: [],
-       # Always true in Monolithic Nexus
-       cluster_connected: true,
-       live_files: initial_live_files,
-       total_files_parsed: total_parsed
-     )}
+    total_parsed =
+      Enum.reduce(dirs, 0, fn {_, info}, acc ->
+        acc + info.completed + info.failed + info.ignored
+      end)
+
+    total_symbols = Enum.reduce(projects, 0, fn {_, p}, acc -> acc + p.symbols end)
+
+    assign(socket,
+      projects: projects,
+      total_projects: map_size(projects),
+      scanned_projects: map_size(projects),
+      total_symbols: total_symbols,
+      live_files: live_files,
+      total_files_parsed: total_parsed
+    )
   end
 
   def handle_info(:tick, socket) do
-    {:noreply, assign(socket, sys_time: Time.utc_now() |> Time.truncate(:second))}
+    {:noreply,
+     socket
+     |> assign(sys_time: Time.utc_now() |> Time.truncate(:second))
+     |> fetch_and_assign_stats()}
   end
 
   def handle_info(:trigger_initial_scan, socket) do
@@ -101,43 +123,7 @@ defmodule AxonDashboardWeb.StatusLive do
 
   def handle_info({:file_indexed, path, status}, socket) do
     Logger.info("[LiveView] Received file_indexed: #{path} with status #{status}")
-    new_files = [{path, status} | socket.assigns.live_files] |> Enum.take(20)
-
-    # Heuristic for project name from path (e.g. "lib/my_app/..." -> "my_app")
-    parts = String.split(path, "/")
-    project_name = Enum.at(parts, 0) || "axon_workspace"
-
-    existing =
-      Map.get(socket.assigns.projects, project_name, %{
-        symbols: 0,
-        relations: 0,
-        files: 0,
-        entries: 0,
-        security: 100,
-        coverage: 85,
-        total_files: 50
-      })
-
-    new_projects =
-      Map.put(socket.assigns.projects, project_name, %{
-        symbols: existing.symbols + Enum.random(5..20),
-        relations: existing.relations + Enum.random(0..5),
-        files: existing.files + 1,
-        entries: existing.entries,
-        security: existing.security,
-        coverage: existing.coverage,
-        total_files: max(existing.total_files, existing.files + 1)
-      })
-
-    {:noreply,
-     assign(socket,
-       live_files: new_files,
-       total_files_parsed: socket.assigns.total_files_parsed + 1,
-       status: :processing,
-       projects: new_projects,
-       total_projects: map_size(new_projects),
-       scanned_projects: map_size(new_projects)
-     )}
+    {:noreply, socket}
   end
 
   defp process_event(%{"SystemReady" => %{"start_time_utc" => start_time}}, socket) do
@@ -154,7 +140,6 @@ defmodule AxonDashboardWeb.StatusLive do
     assign(socket,
       total_projects: count,
       scanned_projects: 0,
-      projects: %{},
       status: :processing,
       avg_security: 100,
       avg_coverage: 0
@@ -165,75 +150,12 @@ defmodule AxonDashboardWeb.StatusLive do
          %{"ProjectScanStarted" => %{"project" => name, "total_files" => total}},
          socket
        ) do
-    existing =
-      Map.get(socket.assigns.projects, name, %{
-        symbols: 0,
-        relations: 0,
-        files: 0,
-        entries: 0,
-        security: 100,
-        coverage: 0,
-        total_files: total
-      })
-
-    new_projects = Map.put(socket.assigns.projects, name, Map.put(existing, :total_files, total))
-
-    assign(socket,
-      projects: new_projects,
-      last_event: "Project Started: #{name} [#{total} files]"
-    )
+    assign(socket, last_event: "Project Started: #{name} [#{total} files]")
   end
 
   defp process_event(%{"FileIndexed" => payload}, socket) do
     name = Map.get(payload, "path", "unknown")
-    sym_count = Map.get(payload, "symbol_count", 0)
-    rel_count = Map.get(payload, "relation_count", 0)
-    file_count = Map.get(payload, "file_count", 0)
-    entry_count = Map.get(payload, "entry_points", 0)
-    sec = Map.get(payload, "security_score", 100)
-    cov = Map.get(payload, "coverage_score", 0)
-
-    existing =
-      Map.get(socket.assigns.projects, name, %{
-        symbols: 0,
-        relations: 0,
-        files: 0,
-        entries: 0,
-        security: 100,
-        coverage: 0,
-        total_files: 0
-      })
-
-    # Accumulate parsed counts
-    new_files = existing.files + file_count
-
-    new_projects =
-      Map.put(socket.assigns.projects, name, %{
-        symbols: existing.symbols + sym_count,
-        relations: existing.relations + rel_count,
-        files: new_files,
-        entries: max(existing.entries, entry_count),
-        security: sec,
-        coverage: cov,
-        total_files: existing.total_files
-      })
-
-    scanned = socket.assigns.scanned_projects + 1
-
-    total_sec = Enum.reduce(new_projects, 0, fn {_, p}, acc -> acc + p.security end)
-    total_cov = Enum.reduce(new_projects, 0, fn {_, p}, acc -> acc + p.coverage end)
-
-    avg_sec = if scanned > 0, do: round(total_sec / scanned), else: 100
-    avg_cov = if scanned > 0, do: round(total_cov / scanned), else: 0
-
-    assign(socket,
-      projects: new_projects,
-      scanned_projects: scanned,
-      total_symbols: socket.assigns.total_symbols + sym_count,
-      avg_security: avg_sec,
-      avg_coverage: avg_cov,
-      last_event: "Indexing #{name}: #{new_files}/#{existing.total_files} files"
-    )
+    assign(socket, last_event: "Indexing #{name}")
   end
 
   defp process_event(%{"ScanComplete" => _data}, socket) do
@@ -264,16 +186,14 @@ defmodule AxonDashboardWeb.StatusLive do
     AxonDashboard.BridgeClient.reset_db()
 
     {:noreply,
-     assign(socket,
+     socket
+     |> assign(
        status: :ready,
-       projects: %{},
-       total_projects: 0,
-       scanned_projects: 0,
-       total_symbols: 0,
        avg_security: 100,
        avg_coverage: 0,
        last_event: "Database RESET."
-     )}
+     )
+     |> fetch_and_assign_stats()}
   end
 
   def render(assigns) do
@@ -658,7 +578,9 @@ defmodule AxonDashboardWeb.StatusLive do
                   </svg>
                 </div>
                 <div>
-                  <p class="italic text-2xl font-light tracking-tight">Fleet Online - Awaiting Projects</p>
+                  <p class="italic text-2xl font-light tracking-tight">
+                    Fleet Online - Awaiting Projects
+                  </p>
                   <p class="text-[10px] uppercase tracking-[0.4em] mt-2 font-bold">
                     Awaiting Industrial Signal from ~/projects
                   </p>
