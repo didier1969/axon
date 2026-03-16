@@ -1,30 +1,39 @@
-use super::{ExtractionResult, Parser, Symbol};
-use tree_sitter::{Language, Parser as TSParser, Query, QueryCursor};
+use super::{ExtractionResult, Parser, Symbol, parse_with_wasm_safe};
+use tree_sitter::{Query, QueryCursor};
 
 pub struct PythonParser {
-    language: Language,
+    wasm_bytes: &'static [u8],
 }
 
 impl PythonParser {
     pub fn new() -> Self {
         Self {
-            language: tree_sitter_python::LANGUAGE.into(),
+            wasm_bytes: include_bytes!("../../parsers/tree-sitter-python.wasm"),
         }
     }
 }
 
 impl Parser for PythonParser {
     fn parse(&self, content: &str) -> ExtractionResult {
-        let mut parser = TSParser::new();
-        parser.set_language(&self.language).unwrap();
-        let tree = parser.parse(content, None).unwrap();
+        let tree = match parse_with_wasm_safe("python", self.wasm_bytes, content) {
+            Some(t) => t,
+            None => return ExtractionResult { symbols: Vec::new(), relations: Vec::new() },
+        };
         
+        let language = tree.language();
         let query_str = r#"
             (class_definition name: (identifier) @class.name) @class
             (function_definition name: (identifier) @func.name) @func
         "#;
         
-        let query = Query::new(&self.language, query_str).unwrap();
+        let query = match Query::new(&language, query_str) {
+            Ok(q) => q,
+            Err(e) => {
+                log::warn!("Failed to create Python query: {}", e);
+                return ExtractionResult { symbols: Vec::new(), relations: Vec::new() };
+            }
+        };
+        
         let mut cursor = QueryCursor::new();
         let mut symbols = Vec::new();
         
@@ -35,7 +44,7 @@ impl Parser for PythonParser {
                 
                 // On ne garde que les noms pour identifier le symbole
                 if kind.ends_with(".name") {
-                    let name = node.utf8_text(content.as_bytes()).unwrap().to_string();
+                    let name = node.utf8_text(content.as_bytes()).unwrap_or("").to_string();
                     let actual_kind = if kind == "class.name" { "class" } else { "function" };
                     
                     symbols.push(Symbol {
