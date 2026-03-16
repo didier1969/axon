@@ -20,12 +20,39 @@ defmodule AxonDashboardWeb.StatusLive do
 
     status = if engine_state == :indexing, do: :processing, else: :ready
 
+    # Hydrate state from backend Telemetry ETS table
+    stats = 
+      try do
+        Axon.Watcher.Telemetry.get_stats()
+      catch
+        :exit, _ -> %{directories: %{}, last_files: []}
+      end || %{directories: %{}, last_files: []}
+
+    dirs = Map.get(stats, :directories, %{})
+    last_f = Map.get(stats, :last_files, [])
+
+    initial_projects =
+      Enum.reduce(dirs, %{}, fn {dir, info}, acc ->
+        Map.put(acc, dir, %{
+          symbols: info.completed * 10,
+          relations: info.completed * 2,
+          files: info.completed + info.failed,
+          entries: 0,
+          security: 100,
+          coverage: 85,
+          total_files: info.total
+        })
+      end)
+
+    initial_live_files = Enum.map(last_f, fn f -> {f.path, f.status} end)
+    total_parsed = Enum.reduce(dirs, 0, fn {_, info}, acc -> acc + info.completed + info.failed end)
+
     {:ok,
      assign(socket,
-       projects: %{},
-       total_projects: 0,
-       scanned_projects: 0,
-       total_symbols: 0,
+       projects: initial_projects,
+       total_projects: map_size(initial_projects),
+       scanned_projects: map_size(initial_projects),
+       total_symbols: total_parsed * 10,
        avg_security: 100,
        avg_coverage: 0,
        status: status,
@@ -35,8 +62,8 @@ defmodule AxonDashboardWeb.StatusLive do
        alerts: [],
        # Always true in Monolithic Nexus
        cluster_connected: true,
-       live_files: [],
-       total_files_parsed: 0
+       live_files: initial_live_files,
+       total_files_parsed: total_parsed
      )}
   end
 
