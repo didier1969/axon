@@ -60,12 +60,9 @@ defmodule Axon.ResourceMonitor do
         |> Enum.filter(&is_list/1) 
         |> List.flatten()
 
-      # We can also just get the basic util for overall cpu
-      total_cpu = 
-        case :cpu_sup.util() do
-          cpu when is_number(cpu) -> cpu
-          _ -> 0.0
-        end
+      # CPU utilization is 100.0 - idle
+      idle = Keyword.get(flattened, :idle, 100.0)
+      total_cpu = 100.0 - idle
         
       # IO Wait is usually in the detailed list as :wait
       # If not found, default to 0.0
