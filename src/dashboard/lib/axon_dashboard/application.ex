@@ -10,6 +10,7 @@ defmodule AxonDashboard.Application do
     children = [
       AxonDashboardWeb.Telemetry,
       {Phoenix.PubSub, name: AxonDashboard.PubSub},
+      Axon.Watcher.Telemetry,
       Axon.Watcher.Repo,
       {Oban, Application.fetch_env!(:axon_dashboard, Oban)},
       Axon.Watcher.PoolFacade,
