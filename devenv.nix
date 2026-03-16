@@ -38,6 +38,8 @@ in
     uv
     beamPackages.rebar3
     psmisc
+    tree-sitter
+    emscripten
   ];
 
   # Managed Processes (Triple-Pod Architecture)
