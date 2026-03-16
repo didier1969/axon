@@ -9,18 +9,22 @@ defmodule Axon.ResourceMonitorTest do
     :ok
   end
 
-  test "get_system_load/0 returns a map with :cpu and :ram percentages" do
+  test "get_system_load/0 returns a map with :cpu, :ram, and :io percentages" do
     load = ResourceMonitor.get_system_load()
 
     assert is_map(load)
     assert Map.has_key?(load, :cpu)
     assert Map.has_key?(load, :ram)
+    assert Map.has_key?(load, :io)
 
     assert is_number(load.cpu)
     assert load.cpu >= 0.0
 
     assert is_number(load.ram)
     assert load.ram >= 0.0 and load.ram <= 100.0
+
+    assert is_number(load.io)
+    assert load.io >= 0.0
   end
 
   test "handle_info(:poll, state) updates the state" do
@@ -30,5 +34,6 @@ defmodule Axon.ResourceMonitorTest do
     assert is_map(load)
     assert Map.has_key?(load, :cpu)
     assert Map.has_key?(load, :ram)
+    assert Map.has_key?(load, :io)
   end
 end

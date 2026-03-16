@@ -19,8 +19,8 @@ defmodule Axon.ResourceMonitor do
   @impl true
   def init(_opts) do
     # Initial call to clear garbage value per Erlang docs
-    _ = :cpu_sup.util()
-    state = %{cpu: 0.0, ram: 0.0}
+    _ = :cpu_sup.util([:detailed])
+    state = %{cpu: 0.0, ram: 0.0, io: 0.0}
     schedule_poll()
     {:ok, state}
   end
@@ -32,10 +32,14 @@ defmodule Axon.ResourceMonitor do
 
   @impl true
   def handle_info(:poll, _state) do
+    {cpu, io} = get_cpu_and_io()
+    
     new_state = %{
-      cpu: get_cpu(),
-      ram: get_ram()
+      cpu: cpu,
+      ram: get_ram(),
+      io: io
     }
+
     schedule_poll()
     {:noreply, new_state}
   end
@@ -44,18 +48,41 @@ defmodule Axon.ResourceMonitor do
     Process.send_after(self(), :poll, @poll_interval)
   end
 
-  defp get_cpu do
-    case :cpu_sup.util() do
-      cpu when is_number(cpu) ->
-        cpu
-      _ ->
-        0.0
+  defp get_cpu_and_io do
+    try do
+      result = :cpu_sup.util([:detailed])
+      
+      # result on Linux is often {NumList, List1, List2, []}
+      # We flatten all elements that are lists to search for the :wait key
+      flattened = 
+        result 
+        |> Tuple.to_list() 
+        |> Enum.filter(&is_list/1) 
+        |> List.flatten()
+
+      # We can also just get the basic util for overall cpu
+      total_cpu = 
+        case :cpu_sup.util() do
+          cpu when is_number(cpu) -> cpu
+          _ -> 0.0
+        end
+        
+      # IO Wait is usually in the detailed list as :wait
+      # If not found, default to 0.0
+      io_wait = Keyword.get(flattened, :wait, 0.0)
+      
+      {total_cpu, io_wait}
+    rescue
+      _ -> {0.0, 0.0}
     end
   end
 
   defp get_ram do
     mem_data = :memsup.get_system_memory_data()
-    total = Keyword.get(mem_data, :system_total_memory) || Keyword.get(mem_data, :total_memory) || 1
+
+    total =
+      Keyword.get(mem_data, :system_total_memory) || Keyword.get(mem_data, :total_memory) || 1
+
     free = Keyword.get(mem_data, :free_memory, 0)
     buffered = Keyword.get(mem_data, :buffered_memory, 0)
     cached = Keyword.get(mem_data, :cached_memory, 0)
@@ -64,7 +91,7 @@ defmodule Axon.ResourceMonitor do
     used = total - available
 
     if total > 0 do
-      (used / total) * 100.0
+      used / total * 100.0
     else
       0.0
     end

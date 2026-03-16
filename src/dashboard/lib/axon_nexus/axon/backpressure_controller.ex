@@ -1,13 +1,11 @@
 defmodule Axon.BackpressureController do
   @moduledoc """
-  Observes system load and adjusts Oban queues (acting as a Circuit Breaker).
-  If CPU or RAM > 40%, pauses Oban queues.
-  Otherwise, resumes and dynamically scales limits based on available resources.
+  Observes system load (CPU, RAM, IO) and adjusts Oban queues (acting as a Circuit Breaker).
+  If any resource exceeds its configurable hard limit, it pauses Oban queues.
+  Otherwise, it resumes and dynamically scales limits based on the pressure ratio.
   """
   use GenServer
   require Logger
-
-  @hard_limit 40.0
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -15,12 +13,12 @@ defmodule Axon.BackpressureController do
 
   def get_chunk_size(monitor_mod \\ Axon.ResourceMonitor) do
     load = monitor_mod.get_system_load()
-    max_load = max(load.cpu, load.ram)
+    pressure = compute_pressure(load)
 
     cond do
-      max_load < 20.0 -> 100
-      max_load < 30.0 -> 50
-      max_load < 40.0 -> 10
+      pressure < 0.50 -> 100
+      pressure < 0.75 -> 50
+      pressure < 1.00 -> 10
       true -> 5
     end
   end
@@ -68,38 +66,52 @@ defmodule Axon.BackpressureController do
     Process.send_after(self(), :poll, interval)
   end
 
+  def get_limits do
+    config = Application.get_env(:axon_dashboard, Axon.BackpressureController, [])
+    cpu_limit = Keyword.get(config, :cpu_hard_limit, 70.0)
+    ram_limit = Keyword.get(config, :ram_hard_limit, 70.0)
+    io_limit = Keyword.get(config, :io_hard_limit, 20.0)
+    {cpu_limit, ram_limit, io_limit}
+  end
+
+  def compute_pressure(load) do
+    {cpu_limit, ram_limit, io_limit} = get_limits()
+    
+    cpu_pressure = load.cpu / max(cpu_limit, 0.1)
+    ram_pressure = load.ram / max(ram_limit, 0.1)
+    io_pressure = Map.get(load, :io, 0.0) / max(io_limit, 0.1)
+    
+    max(cpu_pressure, max(ram_pressure, io_pressure))
+  end
+
   defp apply_backpressure(state) do
     load = state.monitor_mod.get_system_load()
-    max_load = max(load.cpu, load.ram)
+    pressure = compute_pressure(load)
 
     cond do
-      max_load >= @hard_limit ->
+      pressure >= 1.0 ->
         if not state.paused do
           Logger.warning(
-            "System load high (#{Float.round(max_load, 1)}% >= #{@hard_limit}%). Pausing indexing queues."
+            "System resources saturated (Pressure: #{Float.round(pressure * 100, 1)}%). Pausing indexing queues. (CPU: #{Float.round(load.cpu, 1)}%, RAM: #{Float.round(load.ram, 1)}%, IO Wait: #{Float.round(Map.get(load, :io, 0.0), 1)}%)"
           )
-
           pause_queues(state.oban_mod)
         end
-
         %{state | paused: true, last_limit: 0}
 
       true ->
         if state.paused do
           Logger.info(
-            "System load recovered (#{Float.round(max_load, 1)}% < #{@hard_limit}%). Resuming indexing queues."
+            "System load recovered (Pressure: #{Float.round(pressure * 100, 1)}%). Resuming indexing queues."
           )
-
           resume_queues(state.oban_mod)
         end
 
-        limit = calculate_limit(max_load)
+        limit = calculate_limit(pressure)
 
         if state.last_limit != limit do
           Logger.info(
-            "Adjusting indexing_default limit to #{limit} (load: #{Float.round(max_load, 1)}%)"
+            "Adjusting indexing_default limit to #{limit} (Pressure: #{Float.round(pressure * 100, 1)}%)"
           )
-
           scale_queues(state.oban_mod, limit)
         end
 
@@ -107,10 +119,10 @@ defmodule Axon.BackpressureController do
     end
   end
 
-  defp calculate_limit(load) do
+  defp calculate_limit(pressure) do
     cond do
-      load < 20.0 -> 10
-      load < 30.0 -> 5
+      pressure < 0.50 -> 10
+      pressure < 0.75 -> 5
       true -> 1
     end
   end

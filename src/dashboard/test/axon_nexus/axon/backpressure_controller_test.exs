@@ -8,8 +8,8 @@ defmodule Axon.BackpressureControllerTest do
       Agent.get(__MODULE__, & &1)
     end
 
-    def set_load(cpu, ram) do
-      Agent.update(__MODULE__, fn _ -> %{cpu: cpu, ram: ram} end)
+    def set_load(cpu, ram, io \\ 0.0) do
+      Agent.update(__MODULE__, fn _ -> %{cpu: cpu, ram: ram, io: io} end)
     end
   end
 
@@ -21,12 +21,20 @@ defmodule Axon.BackpressureControllerTest do
 
   setup do
     Process.register(self(), :test_pid)
-    {:ok, _pid} = Agent.start_link(fn -> %{cpu: 10.0, ram: 10.0} end, name: MockResourceMonitor)
+    {:ok, _pid} = Agent.start_link(fn -> %{cpu: 10.0, ram: 10.0, io: 0.0} end, name: MockResourceMonitor)
+
+    # Ensure consistent test environment config
+    Application.put_env(:axon_dashboard, Axon.BackpressureController,
+      cpu_hard_limit: 70.0,
+      ram_hard_limit: 70.0,
+      io_hard_limit: 20.0
+    )
+    
     :ok
   end
 
-  test "scales to 10 when load is under 20%" do
-    MockResourceMonitor.set_load(15.0, 10.0)
+  test "scales to 10 when pressure is under 50% (e.g. IO=5/20=0.25)" do
+    MockResourceMonitor.set_load(30.0, 30.0, 5.0)
 
     {:ok, pid} =
       BackpressureController.start_link(
@@ -44,8 +52,8 @@ defmodule Axon.BackpressureControllerTest do
     GenServer.stop(pid)
   end
 
-  test "scales to 5 when load is between 20% and 30%" do
-    MockResourceMonitor.set_load(25.0, 29.0)
+  test "scales to 5 when pressure is between 50% and 75% (e.g. IO=12/20=0.60)" do
+    MockResourceMonitor.set_load(30.0, 30.0, 12.0)
 
     {:ok, pid} =
       BackpressureController.start_link(
@@ -63,8 +71,8 @@ defmodule Axon.BackpressureControllerTest do
     GenServer.stop(pid)
   end
 
-  test "scales to 1 when load is between 30% and 40%" do
-    MockResourceMonitor.set_load(35.0, 10.0)
+  test "scales to 1 when pressure is between 75% and 100% (e.g. CPU=60/70=0.85)" do
+    MockResourceMonitor.set_load(60.0, 10.0, 5.0)
 
     {:ok, pid} =
       BackpressureController.start_link(
@@ -82,8 +90,8 @@ defmodule Axon.BackpressureControllerTest do
     GenServer.stop(pid)
   end
 
-  test "pauses queues when load hits 40% hard limit" do
-    MockResourceMonitor.set_load(40.0, 10.0)
+  test "pauses queues when IO hits 20% hard limit (pressure >= 1.0)" do
+    MockResourceMonitor.set_load(10.0, 10.0, 20.0)
 
     {:ok, pid} =
       BackpressureController.start_link(
@@ -101,8 +109,9 @@ defmodule Axon.BackpressureControllerTest do
     GenServer.stop(pid)
   end
 
-  test "resumes queues when load recovers from >40% to <40%" do
-    MockResourceMonitor.set_load(50.0, 50.0)
+  test "resumes queues when load recovers from >100% pressure to <100%" do
+    # Initial state: Paused due to RAM = 75/70
+    MockResourceMonitor.set_load(10.0, 75.0, 0.0)
 
     {:ok, pid} =
       BackpressureController.start_link(
@@ -117,8 +126,8 @@ defmodule Axon.BackpressureControllerTest do
     assert_receive {:oban_pause, :indexing_default}
     assert_receive {:oban_pause, :indexing_hot}
 
-    # Recover load
-    MockResourceMonitor.set_load(15.0, 15.0)
+    # Recover load: IO=5/20=0.25 (Pressure < 0.5)
+    MockResourceMonitor.set_load(10.0, 10.0, 5.0)
     GenServer.call(pid, :trigger_poll)
 
     assert_receive {:oban_resume, :indexing_default}
@@ -128,17 +137,21 @@ defmodule Axon.BackpressureControllerTest do
     GenServer.stop(pid)
   end
 
-  test "get_chunk_size returns correct size based on load" do
-    MockResourceMonitor.set_load(15.0, 10.0)
+  test "get_chunk_size returns correct size based on pressure" do
+    # Pressure 0.25 (< 0.50) -> 100
+    MockResourceMonitor.set_load(10.0, 10.0, 5.0)
     assert BackpressureController.get_chunk_size(MockResourceMonitor) == 100
 
-    MockResourceMonitor.set_load(25.0, 10.0)
+    # Pressure 0.60 (< 0.75) -> 50
+    MockResourceMonitor.set_load(10.0, 10.0, 12.0)
     assert BackpressureController.get_chunk_size(MockResourceMonitor) == 50
 
-    MockResourceMonitor.set_load(35.0, 10.0)
+    # Pressure 0.85 (< 1.00) -> 10
+    MockResourceMonitor.set_load(60.0, 10.0, 5.0)
     assert BackpressureController.get_chunk_size(MockResourceMonitor) == 10
 
-    MockResourceMonitor.set_load(45.0, 10.0)
+    # Pressure 1.0 (>= 1.00) -> 5
+    MockResourceMonitor.set_load(10.0, 10.0, 20.0)
     assert BackpressureController.get_chunk_size(MockResourceMonitor) == 5
   end
 end
