@@ -631,7 +631,7 @@ defmodule AxonDashboardWeb.StatusLive do
                   </svg>
                 </div>
                 <div>
-                  <p class="italic text-2xl font-light tracking-tight">Fleet Connection Offline</p>
+                  <p class="italic text-2xl font-light tracking-tight">Fleet Online - Awaiting Projects</p>
                   <p class="text-[10px] uppercase tracking-[0.4em] mt-2 font-bold">
                     Awaiting Industrial Signal from ~/projects
                   </p>
