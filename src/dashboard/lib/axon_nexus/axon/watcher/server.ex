@@ -117,6 +117,15 @@ defmodule Axon.Watcher.Server do
   def handle_info({:ok, path}, state) do
     str_path = to_string(path)
 
+    project_name = get_top_dir(str_path)
+    project_path = Path.expand(project_name, File.cwd!())
+
+    try do
+      Axon.Watcher.Tracking.upsert_project!(project_name, project_path)
+    rescue
+      _ -> :ok
+    end
+
     if should_process?(str_path) do
       priority = calculate_priority(str_path)
 
@@ -124,6 +133,12 @@ defmodule Axon.Watcher.Server do
         {:ok, %{mtime: mtime}} ->
           last_mtime = Axon.Watcher.Progress.get_file_mtime(state.repo_slug, str_path)
           current_mtime = :erlang.phash2(mtime)
+
+          try do
+            Axon.Watcher.Tracking.upsert_file!(project_name, str_path, to_string(current_mtime), "pending")
+          rescue
+            _ -> :ok
+          end
 
           if current_mtime != last_mtime do
             Axon.Watcher.Progress.save_file_mtime(state.repo_slug, str_path, current_mtime)
@@ -278,5 +293,15 @@ defmodule Axon.Watcher.Server do
         dispatch_batch(paths, queue)
       end
     end)
+  end
+
+  defp get_top_dir(path) do
+    relative_path = Path.relative_to(path, File.cwd!())
+    parts = Path.split(relative_path)
+
+    case parts do
+      [dir | _] when dir != "." -> dir
+      _ -> "root"
+    end
   end
 end

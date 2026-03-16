@@ -13,6 +13,12 @@ defmodule Axon.Watcher.IndexingWorker do
       case PoolFacade.parse(file["path"], file["content"]) do
         %{"status" => "ok"} ->
           Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", file["path"], :ok)
+          
+          try do
+            Axon.Watcher.Tracking.mark_file_status!(file["path"], "indexed")
+          rescue
+            _ -> :ok
+          end
 
           Phoenix.PubSub.broadcast(
             AxonDashboard.PubSub,
@@ -23,6 +29,12 @@ defmodule Axon.Watcher.IndexingWorker do
         error ->
           Logger.error("[Oban] Failed to parse #{file["path"]}: #{inspect(error)}")
           Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", file["path"], {:error, error})
+          
+          try do
+            Axon.Watcher.Tracking.mark_file_status!(file["path"], "failed", %{error_reason: inspect(error)})
+          rescue
+            _ -> :ok
+          end
 
           Phoenix.PubSub.broadcast(
             AxonDashboard.PubSub,
