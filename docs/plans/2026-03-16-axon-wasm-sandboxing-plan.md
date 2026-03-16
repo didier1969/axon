@@ -48,6 +48,16 @@ Nous n'avons pas besoin de réinventer la roue, mais de modifier notre pipeline 
 
 ---
 
+## 🧩 L'Exception TypeQL / Datalog (Architecture Hybride)
+La virtualisation WASM s'applique exclusivement aux grammaires supportées par **Tree-sitter**. Or, les langages spécifiques à nos bases de données (TypeQL pour TypeDB, Datalog pour CozoDB) ne possèdent pas de grammaire Tree-sitter mature.
+
+Pour ces fichiers, l'architecture v3.0 assumera une **voie lente hybride (Slow Path)** :
+1. **Maintien du Pont Python :** L'analyse des fichiers `.tql` et `.datalog` continuera de s'appuyer sur des scripts Python isolés (`typeql_parser.py`) appelés via `std::process::Command` depuis Rust.
+2. **Sandboxing par Processus OS :** Ce pont Python agit déjà comme une "Sandbox" naturelle. Un plantage de l'interpréteur Python sur un Datalog malformé entraînera la mort du sous-processus sans impacter le binaire parent Rust.
+3. **Justification de Performance :** L'overhead du démarrage de `python3` (l'équivalent d'un Extracteur au format Tracker 3) est lourd (~20ms), mais justifié car le volume de ces fichiers de configuration est infime (quelques dizaines max par projet) par rapport aux dizaines de milliers de fichiers de code source pris en charge par le moteur WASM.
+
+---
+
 ## 📈 Critères de Succès (Definition of Done)
 *   **Crash Test :** Un fichier C ou Python volontairement formaté pour déclencher un dépassement de tampon dans l'AST ne fait pas crasher le processus `axon-core`.
 *   **Temps de build :** Le temps de compilation du backend Rust passe de ~2 minutes (compilation C croisée) à < 10 secondes.
