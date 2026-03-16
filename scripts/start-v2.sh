@@ -5,6 +5,17 @@ set -e
 PROJECT_ROOT="/home/dstadel/projects/axon"
 cd "$PROJECT_ROOT"
 
+# Verify nix-daemon is running (WSL2 specific mitigation)
+if ! nix store info >/dev/null 2>&1; then
+    echo "⚠️ Nix daemon is not responding. Attempting to start it (sudo may be required)..."
+    if command -v systemctl >/dev/null && systemctl is-system-running >/dev/null 2>&1; then
+        sudo systemctl start nix-daemon
+    else
+        sudo bash -c "/nix/var/nix/profiles/default/bin/nix-daemon --daemon &"
+        sleep 2
+    fi
+fi
+
 # Clean up socket if exists
 if [ -S "/tmp/axon-v2.sock" ]; then
     rm -f "/tmp/axon-v2.sock"
