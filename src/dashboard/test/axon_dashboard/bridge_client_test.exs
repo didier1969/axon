@@ -18,12 +18,15 @@ defmodule AxonDashboard.BridgeClientTest do
 
     send(pid, {:tcp, nil, data})
 
-    assert_receive {:bridge_event, %{"FileIndexed" => %{"path" => "test.py", "symbol_count" => 10}}},
+    assert_receive {:bridge_event,
+                    %{"FileIndexed" => %{"path" => "test.py", "symbol_count" => 10}}},
                    1000
   end
 
   test "handles scan complete event" do
-    data = Jason.encode!(%{"ScanComplete" => %{"total_files" => 100, "duration_ms" => 500}}) <> "\n"
+    data =
+      Jason.encode!(%{"ScanComplete" => %{"total_files" => 100, "duration_ms" => 500}}) <> "\n"
+
     Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
 
     pid = Process.whereis(BridgeClient)

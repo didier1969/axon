@@ -13,7 +13,15 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     # Simuler l'arrivée d'un événement via PubSub
     send(
       view.pid,
-      {:bridge_event, %{"FileIndexed" => %{"path" => "lib/core.ex", "symbol_count" => 42, "security_score" => 95, "coverage_score" => 85}}}
+      {:bridge_event,
+       %{
+         "FileIndexed" => %{
+           "path" => "lib/core.ex",
+           "symbol_count" => 42,
+           "security_score" => 95,
+           "coverage_score" => 85
+         }
+       }}
     )
 
     # Vérifier que l'UI s'est mise à jour
