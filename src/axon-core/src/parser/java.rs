@@ -1,14 +1,14 @@
-use super::{ExtractionResult, Parser, Relation, Symbol};
-use tree_sitter::{Language, Node, Parser as TSParser};
+use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
+use tree_sitter::Node;
 
 pub struct JavaParser {
-    language: Language,
+    wasm_bytes: &'static [u8],
 }
 
 impl JavaParser {
     pub fn new() -> Self {
         Self {
-            language: tree_sitter_java::LANGUAGE.into(),
+            wasm_bytes: include_bytes!("../../parsers/tree-sitter-java.wasm"),
         }
     }
 
@@ -200,20 +200,18 @@ impl JavaParser {
 
 impl Parser for JavaParser {
     fn parse(&self, content: &str) -> ExtractionResult {
-        let mut parser = TSParser::new();
-        parser.set_language(&self.language).unwrap();
-        let tree = parser.parse(content, None).unwrap();
-
         let mut symbols = Vec::new();
         let mut relations = Vec::new();
 
-        self.walk(
-            tree.root_node(),
-            content.as_bytes(),
-            &mut symbols,
-            &mut relations,
-            "",
-        );
+        if let Some(tree) = parse_with_wasm_safe("java", self.wasm_bytes, content) {
+            self.walk(
+                tree.root_node(),
+                content.as_bytes(),
+                &mut symbols,
+                &mut relations,
+                "",
+            );
+        }
 
         ExtractionResult { symbols, relations }
     }

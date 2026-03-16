@@ -1,9 +1,9 @@
-use super::{ExtractionResult, Parser, Relation, Symbol};
+use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
 use std::collections::HashMap;
-use tree_sitter::{Language, Node, Parser as TSParser};
+use tree_sitter::Node;
 
 pub struct GoParser {
-    language: Language,
+    wasm_bytes: &'static [u8],
 }
 
 impl Default for GoParser {
@@ -15,7 +15,7 @@ impl Default for GoParser {
 impl GoParser {
     pub fn new() -> Self {
         Self {
-            language: tree_sitter_go::LANGUAGE.into(),
+            wasm_bytes: include_bytes!("../../parsers/tree-sitter-go.wasm"),
         }
     }
 
@@ -304,17 +304,15 @@ impl GoParser {
 
 impl Parser for GoParser {
     fn parse(&self, content: &str) -> ExtractionResult {
-        let mut parser = TSParser::new();
-        parser.set_language(&self.language).unwrap();
-        let tree = parser.parse(content, None).unwrap();
-
         let mut result = ExtractionResult {
             symbols: Vec::new(),
             relations: Vec::new(),
         };
 
-        let source_bytes = content.as_bytes();
-        Self::walk(tree.root_node(), source_bytes, &mut result);
+        if let Some(tree) = parse_with_wasm_safe("go", self.wasm_bytes, content) {
+            let source_bytes = content.as_bytes();
+            Self::walk(tree.root_node(), source_bytes, &mut result);
+        }
 
         result
     }

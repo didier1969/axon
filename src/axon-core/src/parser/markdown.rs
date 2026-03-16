@@ -1,9 +1,9 @@
-use super::{ExtractionResult, Parser, Relation, Symbol};
+use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
 use std::collections::HashMap;
-use tree_sitter::{Language, Node, Parser as TSParser};
+use tree_sitter::Node;
 
 pub struct MarkdownParser {
-    language: Language,
+    wasm_bytes: &'static [u8],
 }
 
 impl Default for MarkdownParser {
@@ -15,7 +15,7 @@ impl Default for MarkdownParser {
 impl MarkdownParser {
     pub fn new() -> Self {
         Self {
-            language: tree_sitter_md::LANGUAGE.into(),
+            wasm_bytes: include_bytes!("../../parsers/tree-sitter-markdown.wasm"),
         }
     }
 
@@ -204,48 +204,40 @@ impl MarkdownParser {
 
 impl Parser for MarkdownParser {
     fn parse(&self, content: &str) -> ExtractionResult {
-        let mut parser = TSParser::new();
-        parser.set_language(&self.language).unwrap();
-        let tree = parser.parse(content, None).unwrap();
-
         let mut symbols = Vec::new();
         let mut relations = Vec::new();
-
+        
         let lines: Vec<&str> = content.lines().collect();
-
-        // Pass 1: Frontmatter
         self.extract_frontmatter(&lines, &mut symbols);
 
-        // Pass 2: Headings via tree-sitter
-        let mut headings = Vec::new();
-        self.collect_headings(tree.root_node(), content.as_bytes(), &mut headings);
-        
-        let total_lines = lines.len();
-        for (idx, &(start_line, level, ref name)) in headings.iter().enumerate() {
-            let end_line = if idx + 1 < headings.len() {
-                headings[idx + 1].0 - 1
-            } else {
-                total_lines
-            };
-
-            symbols.push(Symbol {
-                name: name.clone(),
-                kind: "section".to_string(),
-                start_line,
-                end_line,
-                docstring: None,
-                is_entry_point: level == 1,
-                        is_public: true,
-                properties: HashMap::new(),
+        if let Some(tree) = parse_with_wasm_safe("markdown", self.wasm_bytes, content) {
+            let mut headings = Vec::new();
+            self.collect_headings(tree.root_node(), content.as_bytes(), &mut headings);
             
-                embedding: None,
-            });
+            let total_lines = lines.len();
+            for (idx, &(start_line, level, ref name)) in headings.iter().enumerate() {
+                let end_line = if idx + 1 < headings.len() {
+                    headings[idx + 1].0 - 1
+                } else {
+                    total_lines
+                };
+
+                symbols.push(Symbol {
+                    name: name.clone(),
+                    kind: "section".to_string(),
+                    start_line,
+                    end_line,
+                    docstring: None,
+                    is_entry_point: level == 1,
+                            is_public: true,
+                    properties: HashMap::new(),
+                
+                    embedding: None,
+                });
+            }
         }
 
-        // Pass 3: Tables
         self.extract_tables(&lines, &mut symbols);
-
-        // Pass 4: Links and code fences
         self.extract_links_and_fences(&lines, &mut symbols, &mut relations);
 
         ExtractionResult { symbols, relations }
