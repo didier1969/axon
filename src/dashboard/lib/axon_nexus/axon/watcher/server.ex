@@ -204,39 +204,18 @@ defmodule Axon.Watcher.Server do
   end
 
   defp should_process?(path) do
-    # FILTRAGE STRICT DES EXTENSIONS NON-TEXTE
-    ext = Path.extname(path) |> String.downcase()
-
-    is_binary =
-      ext in [
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".gif",
-        ".pdf",
-        ".exe",
-        ".so",
-        ".beam",
-        ".zip",
-        ".tar",
-        ".gz",
-        ".db",
-        ".sqlite",
-        ".wal",
-        ".pid"
-      ]
-
-    not (is_binary or
-           String.contains?(path, "/.git/") or
-           String.contains?(path, "/.axon/") or
-           String.contains?(path, "/_build/") or
-           String.contains?(path, "/deps/") or
-           String.contains?(path, "/.devenv/") or
-           String.contains?(path, "__pycache__") or
-           String.ends_with?(path, ".log") or
-           String.ends_with?(path, "erl_crash.dump") or
-           String.ends_with?(path, "mix.lock") or
-           String.ends_with?(path, "flake.lock"))
+    # BARE MINIMUM "ANTI-AVALANCHE" SHIELD
+    # This prevents the Erlang VM from being flooded by 10,000+ Inotify events during builds/deps installs.
+    # All other domain filtering (extensions, specific ignore rules) should be handled dynamically via .axonignore logic.
+    not (
+      String.contains?(path, "/.git/") or
+      String.contains?(path, "/.axon/") or
+      String.contains?(path, "/_build/") or
+      String.contains?(path, "/deps/") or
+      String.contains?(path, "/.devenv/") or
+      String.contains?(path, "/node_modules/") or
+      String.contains?(path, "/target/")
+    )
   end
 
   defp reset_timer(existing_timer) do
