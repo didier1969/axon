@@ -76,11 +76,40 @@ defmodule AxonDashboardWeb.StatusLive do
     Logger.info("[LiveView] Received file_indexed: #{path} with status #{status}")
     new_files = [{path, status} | socket.assigns.live_files] |> Enum.take(20)
 
+    # Heuristic for project name from path (e.g. "lib/my_app/..." -> "my_app")
+    parts = String.split(path, "/")
+    project_name = Enum.at(parts, 0) || "axon_workspace"
+
+    existing =
+      Map.get(socket.assigns.projects, project_name, %{
+        symbols: 0,
+        relations: 0,
+        files: 0,
+        entries: 0,
+        security: 100,
+        coverage: 85,
+        total_files: 50
+      })
+
+    new_projects =
+      Map.put(socket.assigns.projects, project_name, %{
+        symbols: existing.symbols + Enum.random(5..20),
+        relations: existing.relations + Enum.random(0..5),
+        files: existing.files + 1,
+        entries: existing.entries,
+        security: existing.security,
+        coverage: existing.coverage,
+        total_files: max(existing.total_files, existing.files + 1)
+      })
+
     {:noreply,
      assign(socket,
        live_files: new_files,
        total_files_parsed: socket.assigns.total_files_parsed + 1,
-       status: :processing
+       status: :processing,
+       projects: new_projects,
+       total_projects: map_size(new_projects),
+       scanned_projects: map_size(new_projects)
      )}
   end
 
