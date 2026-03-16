@@ -29,8 +29,8 @@ tmux kill-session -t axon 2>/dev/null || true
 # Create new session and start Pod C (HydraDB)
 tmux new-session -d -s axon -n "db" "nix develop --impure --command bash -c 'axon-db-start'"
 
-# Start Pod B (Core / Parser)
-tmux new-window -t axon:1 -n "core" "nix develop --impure --command bash -c 'bin/axon-core'"
+# Start Pod B (Core / Parser) with OS-level Niceness (Idle Priority for CPU and I/O)
+tmux new-window -t axon:1 -n "core" "nix develop --impure --command bash -c 'nice -n 19 ionice -c 3 bin/axon-core'"
 
 # Start Pod A/Control (Nexus Monolith)
 tmux new-window -t axon:2 -n "nexus" "bash -c 'cd src/dashboard && nix develop --impure --command bash -c \"mix ecto.setup && PHX_PORT=44921 AXON_REPO_SLUG=axon AXON_WATCH_DIR=../../ mix phx.server\"'"

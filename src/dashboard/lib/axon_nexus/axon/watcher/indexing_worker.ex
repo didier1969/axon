@@ -30,6 +30,10 @@ defmodule Axon.Watcher.IndexingWorker do
             {:file_indexed, file["path"], :error}
           )
       end
+
+      # Cooperative Yielding: Micro-pause to let the OS scheduler breathe
+      # This ensures the CPU is never hogged 100% continuously by the background indexer.
+      Process.sleep(10)
     end)
 
     :ok
