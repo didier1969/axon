@@ -37,17 +37,24 @@ fn scan(path: String) -> NifResult<Vec<String>> {
         }
     }
     
-    // 2. Règle d'Or : Scan forcé de TOUS les .md (même dans dossiers ignorés)
-    for entry in WalkDir::new(root_path)
-        .into_iter()
-        .filter_map(|e| e.ok()) {
-            if entry.file_type().is_file() {
-                if entry.path().extension().map(|ext| ext == "md").unwrap_or(false) {
-                    files_set.insert(entry.path().to_string_lossy().into_owned());
-                }
+    // 2. Règle d'Or : Scan forcé de TOUS les .md (même dans dossiers ignorés, mais en évitant les trous noirs)
+    let skip_dirs = vec![".git", ".axon", "_build", "deps", ".devenv", "node_modules", "target"];
+    let walker = WalkDir::new(root_path).into_iter().filter_entry(move |e| {
+        if e.file_type().is_dir() {
+            let name = e.file_name().to_string_lossy();
+            !skip_dirs.contains(&name.as_ref())
+        } else {
+            true
+        }
+    });
+
+    for entry in walker.filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            if entry.path().extension().map(|ext| ext == "md").unwrap_or(false) {
+                files_set.insert(entry.path().to_string_lossy().into_owned());
             }
         }
-    
+    }    
     let mut final_list: Vec<String> = files_set.into_iter().collect();
     final_list.sort();
     
@@ -87,10 +94,18 @@ fn start_streaming(path: String, pid: LocalPid) -> NifResult<Atom> {
             }
         }
 
-        // 2. Règle d'Or : Scan forcé de TOUS les .md (même dans dossiers ignorés)
-        for entry in WalkDir::new(root_path)
-            .into_iter()
-            .filter_map(|e| e.ok()) {
+        // 2. Règle d'Or : Scan forcé de TOUS les .md (même dans dossiers ignorés, mais en évitant les trous noirs)
+        let skip_dirs = vec![".git", ".axon", "_build", "deps", ".devenv", "node_modules", "target"];
+        let walker = WalkDir::new(root_path).into_iter().filter_entry(move |e| {
+            if e.file_type().is_dir() {
+                let name = e.file_name().to_string_lossy();
+                !skip_dirs.contains(&name.as_ref())
+            } else {
+                true
+            }
+        });
+
+        for entry in walker.filter_map(|e| e.ok()) {
                 if entry.file_type().is_file() {
                     if entry.path().extension().map(|ext| ext == "md").unwrap_or(false) {
                         let file_path = entry.path().to_string_lossy().into_owned();

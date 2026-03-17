@@ -44,7 +44,19 @@ defmodule Axon.Watcher.Server do
       pending_batches: %{100 => [], 80 => [], 50 => [], 10 => []}
     }
 
-    case FileSystem.start_link(dirs: [watch_dir]) do
+    backend_args =
+      case :os.type() do
+        {:unix, :linux} ->
+          [
+            "--exclude",
+            "(/.git/|/.axon/|/_build/|/deps/|/.devenv/|/node_modules/|/target/)"
+          ]
+
+        _ ->
+          []
+      end
+
+    case FileSystem.start_link(dirs: [watch_dir], backend_args: backend_args) do
       {:ok, watcher_pid} ->
         FileSystem.subscribe(watcher_pid)
         {:ok, %{initial_state | watcher_pid: watcher_pid}, {:continue, :auto_trigger_scan}}
