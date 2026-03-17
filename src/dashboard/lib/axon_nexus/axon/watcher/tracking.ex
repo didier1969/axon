@@ -89,16 +89,22 @@ defmodule Axon.Watcher.Tracking do
           count(f.id),
           fragment("coalesce(sum(case when ? = 'indexed' then 1 else 0 end), 0)", f.status),
           fragment("coalesce(sum(case when ? = 'failed' then 1 else 0 end), 0)", f.status),
-          fragment("coalesce(sum(case when ? = 'ignored_by_rule' then 1 else 0 end), 0)", f.status)
+          fragment("coalesce(sum(case when ? = 'ignored_by_rule' then 1 else 0 end), 0)", f.status),
+          fragment("coalesce(sum(?), 0)", f.symbols_count),
+          fragment("coalesce(sum(?), 0)", f.relations_count),
+          fragment("coalesce(sum(?), 0)", f.is_entry_point)
         }
 
     Repo.all(query)
-    |> Enum.reduce(%{}, fn {project_name, total, completed, failed, ignored}, acc ->
+    |> Enum.reduce(%{}, fn {project_name, total, completed, failed, ignored, syms, rels, entries}, acc ->
       Map.put(acc, project_name, %{
         total: total || 0,
         completed: completed || 0,
         failed: failed || 0,
-        ignored: ignored || 0
+        ignored: ignored || 0,
+        symbols: syms || 0,
+        relations: rels || 0,
+        entries: entries || 0
       })
     end)
   end

@@ -129,8 +129,8 @@ defmodule Axon.Watcher.Server do
   def handle_info({:ok, path}, state) do
     str_path = to_string(path)
 
-    project_name = get_top_dir(str_path)
-    project_path = Path.expand(project_name, File.cwd!())
+    project_name = get_top_dir(str_path, state.watch_dir)
+    project_path = Path.expand(project_name, state.watch_dir)
 
     try do
       Axon.Watcher.Tracking.upsert_project!(project_name, project_path)
@@ -286,13 +286,26 @@ defmodule Axon.Watcher.Server do
     end)
   end
 
-  defp get_top_dir(path) do
-    relative_path = Path.relative_to(path, File.cwd!())
-    parts = Path.split(relative_path)
+  defp get_top_dir(path, watch_dir) do
+    # On force la résolution absolue pour la sécurité
+    abs_path = Path.expand(path)
+    abs_watch_dir = Path.expand(watch_dir)
 
-    case parts do
-      [dir | _] when dir != "." -> dir
-      _ -> "root"
+    # On vérifie que le fichier est bien DANS le watch_dir
+    if String.starts_with?(abs_path, abs_watch_dir) do
+      # On soustrait le watch_dir au chemin complet
+      relative_path =
+        abs_path
+        |> String.replace_prefix(abs_watch_dir, "")
+        |> String.trim_leading("/")
+
+      # On prend le premier dossier de ce chemin relatif (le nom du projet)
+      case Path.split(relative_path) do
+        [dir | _] when dir != "." and dir != "" -> dir
+        _ -> "root"
+      end
+    else
+      "external"
     end
   end
 end
