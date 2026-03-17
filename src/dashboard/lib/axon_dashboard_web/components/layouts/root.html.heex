@@ -17,6 +17,41 @@
     />
 
     <link phx-track-static rel="stylesheet" href={~p"/assets/css/app.css"} />
+    
+    <!-- LiveView.Witness - Survival Watchdog -->
+    <script>
+      (function() {
+        const ORACLE_URL = "/liveview_witness/diagnose";
+        const pingOracle = (data) => {
+          console.warn("[Witness.Watchdog] Survival trigger:", data);
+          fetch(ORACLE_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...data, watchdog: true, url: window.location.href })
+          }).catch(() => {});
+        };
+
+        // Capture early JS errors
+        window.addEventListener("error", (e) => {
+          if (!window.liveSocket) {
+            pingOracle({ type: "bootstrap_error", message: e.message, source: e.filename });
+          }
+        });
+
+        // Connection Watchdog: if not live after 5s, something is wrong
+        setTimeout(() => {
+          if (!window.liveSocket || !window.liveSocket.isConnected()) {
+            const is500 = document.title.includes("Internal Server Error") || 
+                          document.body.innerText.includes("Internal Server Error");
+            pingOracle({ 
+              type: is500 ? "server_error_500" : "connection_timeout",
+              message: is500 ? "Server returned 500 or crash page" : "WebSocket failed to connect after 5s"
+            });
+          }
+        }, 5000);
+      })();
+    </script>
+
     <script defer phx-track-static type="text/javascript" src={~p"/assets/js/app.js"}>
     </script>
     <script>
