@@ -17,9 +17,11 @@ defmodule LiveView.Witness do
       socket
 
   """
-  @spec expect_ui(Phoenix.LiveView.Socket.t(), String.t(), keyword() | map()) ::
-          {:ok, String.t(), Phoenix.LiveView.Socket.t()}
-  def expect_ui(socket, selector, expectations \\ []) do
+  @spec expect_ui(Phoenix.LiveView.Socket.t() | Phoenix.LiveViewTest.View.t(), String.t(), keyword() | map()) ::
+          {:ok, String.t(), any()}
+  def expect_ui(socket_or_view, selector, expectations \\ [])
+
+  def expect_ui(%Phoenix.LiveView.Socket{} = socket, selector, expectations) do
     id = :crypto.strong_rand_bytes(8) |> Base.encode16()
 
     # Register the current process for this expectation id
@@ -35,9 +37,21 @@ defmodule LiveView.Witness do
     {:ok, id, socket}
   end
 
+  def expect_ui(%Phoenix.LiveViewTest.View{} = view, selector, _expectations) do
+    id = :crypto.strong_rand_bytes(8) |> Base.encode16()
+
+    # Register the current process for this expectation id
+    {:ok, _} = Registry.register(LiveView.Witness.Registry, id, :ok)
+
+    # In a test view, we can't easily push an event to the "client",
+    # but we register the expectation so verify_ui! can wait for it.
+    {:ok, id, view}
+  end
+
   @doc """
   Reports a certificate received from the client.
   """
+  @spec report_certificate(map()) :: :ok
   def report_certificate(report) do
     id = Map.fetch!(report, "id")
 
@@ -51,18 +65,23 @@ defmodule LiveView.Witness do
 
   Raises an error if verification fails or times out.
   """
+  @spec verify_ui!(String.t(), timeout()) :: :ok | no_return()
   def verify_ui!(id, timeout \\ 5000) do
     receive do
       {:witness_report, %{"id" => ^id, "status" => "ok"}} ->
+        Registry.unregister(LiveView.Witness.Registry, id)
         :ok
 
       {:witness_report, %{"id" => ^id, "status" => "error", "message" => msg}} ->
+        Registry.unregister(LiveView.Witness.Registry, id)
         raise "LiveView.Witness verification failed for #{id}: #{msg}"
 
       {:witness_report, %{"id" => ^id, "status" => "error"}} ->
+        Registry.unregister(LiveView.Witness.Registry, id)
         raise "LiveView.Witness verification failed for #{id}"
     after
       timeout ->
+        Registry.unregister(LiveView.Witness.Registry, id)
         raise "LiveView.Witness verification timeout for #{id}"
     end
   end
