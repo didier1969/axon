@@ -6,6 +6,7 @@ defmodule AxonDashboardWeb.StatusLive do
     if connected?(socket) do
       :timer.send_interval(1000, self(), :tick)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
+      Phoenix.PubSub.subscribe(LiveView.Witness.PubSub, "witness_alerts")
       LiveView.Witness.expect_ui(socket, ".project-card", min_items: 1)
     end
 
@@ -31,6 +32,7 @@ defmodule AxonDashboardWeb.StatusLive do
         sys_time: Time.utc_now() |> Time.truncate(:second),
         engine_start_time: start_time,
         alerts: [],
+        witness_alert: nil,
         cluster_connected: true
       )
       |> fetch_and_assign_stats()
@@ -112,6 +114,11 @@ defmodule AxonDashboardWeb.StatusLive do
     {:noreply, new_socket}
   end
 
+  def handle_info({:witness_alert, alert}, socket) do
+    Logger.error("[LiveView.Witness] Critical alert received: #{inspect(alert)}")
+    {:noreply, assign(socket, witness_alert: alert)}
+  end
+
   def handle_info({:security_degraded, project, old, new}, socket) do
     alert = "CRITICAL: #{project} security dropped from #{old}% to #{new}%!"
     new_alerts = [alert | socket.assigns.alerts] |> Enum.take(3)
@@ -183,6 +190,10 @@ defmodule AxonDashboardWeb.StatusLive do
     {:noreply, assign(socket, status: :ready, last_event: "Scan stopped by user.")}
   end
 
+  def handle_event("dismiss_witness_alert", _params, socket) do
+    {:noreply, assign(socket, witness_alert: nil)}
+  end
+
   def handle_event("reset_db", _params, socket) do
     AxonDashboard.BridgeClient.reset_db()
 
@@ -230,6 +241,66 @@ defmodule AxonDashboardWeb.StatusLive do
     ~H"""
     <div id="witness-container" phx-hook="LiveViewWitness" class="min-h-screen bg-base-100 text-base-content font-sans antialiased selection:bg-primary/30">
       
+    <!-- Emergency Diagnostic Alert Overlay -->
+      <%= if @witness_alert do %>
+        <div class="fixed inset-0 z-[100] flex items-center justify-center bg-red-950/80 backdrop-blur-md p-6">
+          <div class="max-w-2xl w-full bg-black border-2 border-red-500 rounded-3xl overflow-hidden shadow-[0_0_100px_rgba(239,68,68,0.5)] animate-in fade-in zoom-in duration-300">
+            <div class="bg-red-600 p-8 flex items-center justify-between">
+              <div class="flex items-center gap-4">
+                <div class="p-3 bg-white/20 rounded-xl animate-pulse">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-8 h-8 text-white">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 class="text-3xl font-black text-white uppercase italic tracking-tighter">EMERGENCY <span class="opacity-70">DIAGNOSTIC</span></h2>
+                  <p class="text-white/60 text-xs font-mono uppercase tracking-widest">Out-of-Bound Critical Event Detected</p>
+                </div>
+              </div>
+              <button phx-click="dismiss_witness_alert" class="p-2 hover:bg-white/20 rounded-full transition-colors">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-6 h-6 text-white">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            
+            <div class="p-10 space-y-8">
+              <div class="space-y-4">
+                <div class="flex items-center justify-between text-[10px] font-black uppercase tracking-[0.3em] text-red-500/60">
+                  <span>Source Signal</span>
+                  <span class="font-mono">POD_A_ORACLE_DIRECT</span>
+                </div>
+                <div class="p-6 bg-red-500/5 border border-red-500/20 rounded-2xl font-mono text-lg text-red-400">
+                  {Map.get(@witness_alert, "message") || Map.get(@witness_alert, "error") || inspect(@witness_alert)}
+                </div>
+              </div>
+
+              <div class="grid grid-cols-2 gap-6">
+                <div class="p-4 bg-white/5 rounded-xl border border-white/5">
+                  <p class="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-1">Timestamp</p>
+                  <p class="text-white font-mono">{Time.utc_now() |> Time.truncate(:second) |> Time.to_string()}</p>
+                </div>
+                <div class="p-4 bg-white/5 rounded-xl border border-white/5">
+                  <p class="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-1">Status Code</p>
+                  <p class="text-white font-mono">{Map.get(@witness_alert, "status") || "500 CRITICAL"}</p>
+                </div>
+              </div>
+
+              <div class="flex gap-4">
+                <button phx-click="dismiss_witness_alert" class="flex-grow bg-red-600 hover:bg-red-500 text-white font-black py-4 rounded-xl uppercase tracking-widest transition-all shadow-[0_10px_20px_rgba(220,38,38,0.3)]">
+                  Acknowledge & Clear Signal
+                </button>
+                <button class="px-6 border-2 border-white/10 hover:border-white/30 text-white/60 hover:text-white rounded-xl transition-all">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      <% end %>
+
     <!-- Top Navigation -->
       <nav class="border-b border-base-content/10 bg-base-200/50 backdrop-blur-md sticky top-0 z-50 px-6 py-4 flex justify-between items-center">
         <div class="flex items-center gap-3">
