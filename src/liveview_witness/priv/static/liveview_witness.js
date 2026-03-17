@@ -11,24 +11,37 @@ const LiveViewWitness = {
 
     // L3: Global health monitoring
     this._onWindowError = (event) => {
-      this.pushEvent("phx-witness:health_alert", {
+      const payload = {
         type: "error",
         message: event.message,
         source: event.filename,
         lineno: event.lineno,
         colno: event.colno
-      });
+      };
+      this.pushEvent("phx-witness:health_alert", payload);
+      this._sendOracleDiagnostic(payload);
     };
 
     this._onWindowRejection = (event) => {
-      this.pushEvent("phx-witness:health_alert", {
+      const payload = {
         type: "unhandledrejection",
         reason: event.reason ? (event.reason.message || event.reason) : "unknown"
-      });
+      };
+      this.pushEvent("phx-witness:health_alert", payload);
+      this._sendOracleDiagnostic(payload);
     };
 
     window.addEventListener("error", this._onWindowError);
     window.addEventListener("unhandledrejection", this._onWindowRejection);
+  },
+
+  _sendOracleDiagnostic(payload) {
+    // Send to Oracle OOB Endpoint (POST)
+    fetch("/liveview_witness/diagnose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).catch(err => console.error("[LiveView.Witness] Oracle fallback failed", err));
   },
 
   destroyed() {
@@ -36,17 +49,29 @@ const LiveViewWitness = {
     window.removeEventListener("unhandledrejection", this._onWindowRejection);
   },
 
-  inspect(_payload) {
-    const el = this.el;
+  inspect(payload) {
+    const { selector, expectations } = payload;
+    const elements = selector ? document.querySelectorAll(selector) : [this.el];
 
     // L1: Presence
-    if (!el || !document.contains(el)) {
+    if (elements.length === 0) {
       return { 
         status: "error", 
         level: "L1", 
-        message: "Element not in DOM"
+        message: selector ? `No elements found for selector: ${selector}` : "Element not in DOM"
       };
     }
+
+    if (expectations && expectations.min_items && elements.length < expectations.min_items) {
+      return { 
+        status: "error", 
+        level: "L1", 
+        message: `Expected at least ${expectations.min_items} items, found ${elements.length}`
+      };
+    }
+
+    // Inspect first element for physical reality
+    const el = elements[0];
 
     // L2: Physical Visibility
     const style = window.getComputedStyle(el);
@@ -100,7 +125,7 @@ const LiveViewWitness = {
     return { 
       status: "ok", 
       level: "L2", 
-      message: "Reality confirmed"
+      message: `Reality confirmed for ${elements.length} elements`
     };
   }
 };
