@@ -37,7 +37,7 @@ defmodule LiveView.Witness do
     {:ok, id, socket}
   end
 
-  def expect_ui(%Phoenix.LiveViewTest.View{} = view, selector, _expectations) do
+  def expect_ui(%Phoenix.LiveViewTest.View{} = view, _selector, _expectations) do
     id = :crypto.strong_rand_bytes(8) |> Base.encode16()
 
     # Register the current process for this expectation id

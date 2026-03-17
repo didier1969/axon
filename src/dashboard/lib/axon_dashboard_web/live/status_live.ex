@@ -3,12 +3,16 @@ defmodule AxonDashboardWeb.StatusLive do
   require Logger
 
   def mount(_params, _session, socket) do
-    if connected?(socket) do
-      :timer.send_interval(1000, self(), :tick)
-      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
-      Phoenix.PubSub.subscribe(LiveView.Witness.PubSub, "witness_alerts")
-      LiveView.Witness.expect_ui(socket, ".project-card", min_items: 1)
-    end
+    socket =
+      if connected?(socket) do
+        :timer.send_interval(1000, self(), :tick)
+        Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
+        Phoenix.PubSub.subscribe(LiveView.Witness.PubSub, "witness_alerts")
+        {:ok, _id, socket} = LiveView.Witness.expect_ui(socket, ".project-card", min_items: 1)
+        socket
+      else
+        socket
+      end
 
     state =
       try do
@@ -209,7 +213,7 @@ defmodule AxonDashboardWeb.StatusLive do
   end
 
   def handle_event("phx-witness:certificate", report, socket) do
-    Logger.info("[LiveView.Witness] UI Certificate received: #{inspect(report)}")
+    LiveView.Witness.report_certificate(report)
     {:noreply, socket}
   end
 

@@ -30,9 +30,9 @@ defmodule LiveView.Witness.Test do
     quote bind_quoted: [view: view, selector: selector, expectations: expectations] do
       case view do
         %Phoenix.LiveView.Socket{} = socket ->
-          {:ok, id, _} = LiveView.Witness.expect_ui(socket, selector, expectations)
+          {:ok, id, socket} = LiveView.Witness.expect_ui(socket, selector, expectations)
           LiveView.Witness.verify_ui!(id)
-          :ok
+          socket
 
         %Phoenix.LiveViewTest.View{} = view ->
           # L1 reality check: verify element presence in the HTML
@@ -68,7 +68,7 @@ defmodule LiveView.Witness.Test do
     quote bind_quoted: [view: view, selector: selector, expectations: expectations] do
       case view do
         %Phoenix.LiveView.Socket{} = socket ->
-          {:ok, id, _} = LiveView.Witness.expect_ui(socket, selector, expectations)
+          {:ok, id, socket} = LiveView.Witness.expect_ui(socket, selector, expectations)
 
           # We expect verify_ui! to raise when the client reports an error
           # If it returns :ok, the refutation fails.
@@ -78,6 +78,7 @@ defmodule LiveView.Witness.Test do
           rescue
             RuntimeError -> :ok
           end
+          socket
 
         %Phoenix.LiveViewTest.View{} = view ->
           # L1 reality check: verify element absence in the HTML
