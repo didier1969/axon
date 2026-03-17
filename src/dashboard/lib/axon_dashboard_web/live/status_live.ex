@@ -228,7 +228,7 @@ defmodule AxonDashboardWeb.StatusLive do
     assigns = assign(assigns, :uptime_str, uptime_str)
 
     ~H"""
-    <div class="min-h-screen bg-base-100 text-base-content font-sans antialiased selection:bg-primary/30">
+    <div id="witness-container" phx-hook="LiveViewWitness" class="min-h-screen bg-base-100 text-base-content font-sans antialiased selection:bg-primary/30">
       
     <!-- Top Navigation -->
       <nav class="border-b border-base-content/10 bg-base-200/50 backdrop-blur-md sticky top-0 z-50 px-6 py-4 flex justify-between items-center">
