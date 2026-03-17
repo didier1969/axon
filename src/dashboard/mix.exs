@@ -73,7 +73,8 @@ defmodule AxonDashboard.MixProject do
       {:rustler, "~> 0.36.0", runtime: false},
       {:file_system, "~> 1.0"},
       {:ecto_sqlite3, "~> 0.10"},
-      {:oban, "~> 2.18"}
+      {:oban, "~> 2.18"},
+      {:liveview_witness, path: "../liveview_witness"}
     ]
   end
 

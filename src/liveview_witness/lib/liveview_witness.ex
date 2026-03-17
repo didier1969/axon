@@ -1,6 +1,5 @@
 defmodule LiveView.Witness do
   @moduledoc """
-  Documentation for `LiveView.Witness`.
   The Elixir Contract API for LiveView.Witness.
   """
 
@@ -12,9 +11,10 @@ defmodule LiveView.Witness do
   ## Examples
 
       iex> LiveView.Witness.expect_ui(socket, ".project-grid")
-      {:ok, socket}
+      socket
 
   """
+  @spec expect_ui(Phoenix.LiveView.Socket.t(), String.t(), keyword() | map()) :: Phoenix.LiveView.Socket.t()
   def expect_ui(socket, selector, expectations \\ []) do
     contract = %{
       id: :crypto.strong_rand_bytes(8) |> Base.encode16(),

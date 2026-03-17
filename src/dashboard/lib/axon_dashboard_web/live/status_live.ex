@@ -6,6 +6,7 @@ defmodule AxonDashboardWeb.StatusLive do
     if connected?(socket) do
       :timer.send_interval(1000, self(), :tick)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
+      LiveView.Witness.expect_ui(socket, ".project-card", min_items: 1)
     end
 
     state =
@@ -51,12 +52,12 @@ defmodule AxonDashboardWeb.StatusLive do
     projects =
       Enum.reduce(dirs, %{}, fn {dir, info}, acc ->
         Map.put(acc, dir, %{
-          symbols: info.completed * 10,
-          relations: info.completed * 2,
+          symbols: info.symbols,
+          relations: info.relations,
           files: info.completed + info.failed + info.ignored,
-          entries: 0,
-          security: 100,
-          coverage: 85,
+          entries: info.entries,
+          security: 100, # We'll leave this to 100% for now until we query the Rust bridge
+          coverage: 85,  # We'll leave this to 85% for now until we query the Rust bridge
           total_files: info.total,
           failed_files: info.failed,
           ignored_files: info.ignored
@@ -194,6 +195,16 @@ defmodule AxonDashboardWeb.StatusLive do
        last_event: "Database RESET."
      )
      |> fetch_and_assign_stats()}
+  end
+
+  def handle_event("phx-witness:certificate", report, socket) do
+    Logger.info("[LiveView.Witness] UI Certificate received: #{inspect(report)}")
+    {:noreply, socket}
+  end
+
+  def handle_event("phx-witness:health_alert", alert, socket) do
+    Logger.warning("[LiveView.Witness] Client-side health alert: #{inspect(alert)}")
+    {:noreply, socket}
   end
 
   def render(assigns) do
@@ -459,7 +470,7 @@ defmodule AxonDashboardWeb.StatusLive do
 
           <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
             <%= for {name, info} <- Enum.sort_by(@projects, fn {n, _} -> n end) do %>
-              <div class="premium-card p-0 overflow-hidden hover:scale-[1.02] transition-all duration-300 cursor-pointer group border-white/5 hover:border-primary/40 shadow-2xl">
+              <div class="project-card premium-card p-0 overflow-hidden hover:scale-[1.02] transition-all duration-300 cursor-pointer group border-white/5 hover:border-primary/40 shadow-2xl">
                 <div class="p-8 space-y-6 bg-gradient-to-br from-white/5 to-transparent">
                   <!-- Project Title -->
                   <div class="flex justify-between items-start">
