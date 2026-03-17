@@ -10,7 +10,7 @@ const LiveViewWitness = {
     });
 
     // L3: Global health monitoring
-    window.addEventListener("error", (event) => {
+    this._onWindowError = (event) => {
       this.pushEvent("phx-witness:health_alert", {
         type: "error",
         message: event.message,
@@ -18,14 +18,22 @@ const LiveViewWitness = {
         lineno: event.lineno,
         colno: event.colno
       });
-    });
+    };
 
-    window.addEventListener("unhandledrejection", (event) => {
+    this._onWindowRejection = (event) => {
       this.pushEvent("phx-witness:health_alert", {
         type: "unhandledrejection",
         reason: event.reason ? (event.reason.message || event.reason) : "unknown"
       });
-    });
+    };
+
+    window.addEventListener("error", this._onWindowError);
+    window.addEventListener("unhandledrejection", this._onWindowRejection);
+  },
+
+  destroyed() {
+    window.removeEventListener("error", this._onWindowError);
+    window.removeEventListener("unhandledrejection", this._onWindowRejection);
   },
 
   inspect(_payload) {
@@ -77,7 +85,11 @@ const LiveViewWitness = {
     if (topEl !== el && !el.contains(topEl)) {
       const tag = topEl.tagName ? topEl.tagName.toLowerCase() : 'unknown';
       const id = topEl.id ? `#${topEl.id}` : '';
-      const className = topEl.className ? `.${topEl.className.split(' ').join('.')}` : '';
+      
+      // Safety check: SVG elements have SVGAnimatedString instead of a plain string
+      const rawClass = typeof topEl.className === 'string' ? topEl.className : '';
+      const className = rawClass ? `.${rawClass.split(' ').join('.')}` : '';
+      
       return { 
         status: "error", 
         level: "L2", 
