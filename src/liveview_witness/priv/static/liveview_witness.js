@@ -4,7 +4,8 @@
  */
 const LiveViewWitness = {
   mounted() {
-    this.handleEvent("phx-witness:contract", (payload) => {
+    this.handleEvent("phx-witness:contract", async (payload) => {
+      await this._waitUntilStable(payload.selector);
       const report = this.inspect(payload);
       this.pushEvent("phx-witness:certificate", report);
     });
@@ -33,6 +34,41 @@ const LiveViewWitness = {
 
     window.addEventListener("error", this._onWindowError);
     window.addEventListener("unhandledrejection", this._onWindowRejection);
+  },
+
+  /**
+   * Waits for the DOM to be stable and the element to be present.
+   */
+  _waitUntilStable(selector, timeout = 2000) {
+    return new Promise((resolve) => {
+      const done = () => {
+        // Double RAF ensures we wait for the next paint cycle
+        requestAnimationFrame(() => {
+          requestAnimationFrame(resolve);
+        });
+      };
+
+      const timer = setTimeout(() => {
+        console.warn(`[LiveView.Witness] Stability timeout for: ${selector || "hook element"}`);
+        done();
+      }, timeout);
+
+      if (!selector || document.querySelector(selector)) {
+        clearTimeout(timer);
+        done();
+        return;
+      }
+
+      const observer = new MutationObserver(() => {
+        if (document.querySelector(selector)) {
+          observer.disconnect();
+          clearTimeout(timer);
+          done();
+        }
+      });
+
+      observer.observe(document.body, { childList: true, subtree: true });
+    });
   },
 
   _sendOracleDiagnostic(payload) {
