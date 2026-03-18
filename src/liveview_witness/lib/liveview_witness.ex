@@ -4,6 +4,16 @@ defmodule LiveView.Witness do
   """
 
   @doc """
+  Returns the configured PubSub server name.
+  """
+  def pubsub, do: Application.get_env(:liveview_witness, :pubsub, LiveView.Witness.PubSub)
+
+  @doc """
+  Returns the configured Registry name.
+  """
+  def registry, do: Application.get_env(:liveview_witness, :registry, LiveView.Witness.Registry)
+
+  @doc """
   Pushes a rendering contract to the client.
 
   It generates a unique ID for the contract, registers the current process
@@ -25,9 +35,9 @@ defmodule LiveView.Witness do
     id = :crypto.strong_rand_bytes(8) |> Base.encode16()
 
     # Register the current process for this expectation id
-    {:ok, _} = Registry.register(LiveView.Witness.Registry, id, :ok)
+    {:ok, _} = Registry.register(registry(), id, :ok)
     # Global routing for multi-node support
-    :ok = Phoenix.PubSub.subscribe(LiveView.Witness.PubSub, "witness:cert:#{id}")
+    :ok = Phoenix.PubSub.subscribe(pubsub(), "witness:cert:#{id}")
 
     contract = %{
       id: id,
@@ -35,7 +45,7 @@ defmodule LiveView.Witness do
       expectations: Map.new(expectations)
     }
 
-    :telemetry.execute([:liveview_witness, :contract, :pushed], %{}, %{id: id, selector: selector})
+    :telemetry.execute([:liveview_witness, :contract, :pushed], %{count: 1}, %{id: id, selector: selector})
 
     socket = Phoenix.LiveView.push_event(socket, "phx-witness:contract", contract)
     {:ok, id, socket}
@@ -45,11 +55,11 @@ defmodule LiveView.Witness do
     id = :crypto.strong_rand_bytes(8) |> Base.encode16()
 
     # Register the current process for this expectation id
-    {:ok, _} = Registry.register(LiveView.Witness.Registry, id, :ok)
+    {:ok, _} = Registry.register(registry(), id, :ok)
     # Global routing for multi-node support
-    :ok = Phoenix.PubSub.subscribe(LiveView.Witness.PubSub, "witness:cert:#{id}")
+    :ok = Phoenix.PubSub.subscribe(pubsub(), "witness:cert:#{id}")
 
-    :telemetry.execute([:liveview_witness, :contract, :pushed], %{}, %{id: id, selector: selector})
+    :telemetry.execute([:liveview_witness, :contract, :pushed], %{count: 1}, %{id: id, selector: selector})
 
     # In a test view, we can't easily push an event to the "client",
     # but we register the expectation so verify_ui! can wait for it.
@@ -64,10 +74,14 @@ defmodule LiveView.Witness do
     id = Map.fetch!(report, "id")
     status = Map.get(report, "status")
 
-    :telemetry.execute([:liveview_witness, :certificate, :received], %{}, %{status: status, id: id})
+    :telemetry.execute([:liveview_witness, :certificate, :received], %{count: 1}, %{
+      status: status,
+      id: id,
+      reason: get_in(report, ["details", "reason"])
+    })
 
     # Global broadcast for multi-node support
-    Phoenix.PubSub.broadcast(LiveView.Witness.PubSub, "witness:cert:#{id}", {:witness_report, report})
+    Phoenix.PubSub.broadcast(pubsub(), "witness:cert:#{id}", {:witness_report, report})
   end
 
   @doc """
@@ -92,8 +106,8 @@ defmodule LiveView.Witness do
           raise "LiveView.Witness verification timeout for #{id}"
       end
     after
-      Registry.unregister(LiveView.Witness.Registry, id)
-      Phoenix.PubSub.unsubscribe(LiveView.Witness.PubSub, "witness:cert:#{id}")
+      Registry.unregister(registry(), id)
+      Phoenix.PubSub.unsubscribe(pubsub(), "witness:cert:#{id}")
     end
   end
 end

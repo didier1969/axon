@@ -9,7 +9,7 @@ defmodule LiveView.Witness.Oracle do
 
   def call(%Plug.Conn{path_info: ["liveview_witness", "diagnose"]} = conn, opts) do
     {:ok, body, conn} = read_body(conn)
-    pubsub = Keyword.get(opts, :pubsub, LiveView.Witness.PubSub)
+    pubsub = Keyword.get(opts, :pubsub, LiveView.Witness.pubsub())
     
     # Log the received diagnostic alert
     Logger.error("LiveView.Witness.Oracle received diagnostic: #{body}")
@@ -17,9 +17,10 @@ defmodule LiveView.Witness.Oracle do
     # Broadcast the alert to the dashboard
     case Jason.decode(body) do
       {:ok, alert} ->
-        :telemetry.execute([:liveview_witness, :health_alert, :received], %{}, %{
+        :telemetry.execute([:liveview_witness, :health_alert, :received], %{count: 1}, %{
           type: Map.get(alert, "type"),
-          watchdog: Map.get(alert, "watchdog")
+          watchdog: Map.get(alert, "watchdog"),
+          url: Map.get(alert, "url")
         })
 
         Phoenix.PubSub.broadcast(pubsub, "witness_alerts", {:witness_alert, alert})
