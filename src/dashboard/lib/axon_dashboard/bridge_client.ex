@@ -31,6 +31,7 @@ defmodule AxonDashboard.BridgeClient do
      %{
        socket: nil,
        security_scores: %{},
+       taint_paths: %{},
        engine_start_time: nil,
        # :idle | :indexing
        engine_state: :idle
@@ -137,6 +138,7 @@ defmodule AxonDashboard.BridgeClient do
   defp handle_bridge_event(%{"FileIndexed" => payload}, state) do
     project = Map.get(payload, "path")
     new_score = Map.get(payload, "security_score", 100)
+    paths_json = Map.get(payload, "taint_paths", "[]")
 
     if project && new_score > 0 do
       old_score = Map.get(state.security_scores, project, 100)
@@ -151,7 +153,15 @@ defmodule AxonDashboard.BridgeClient do
         )
       end
 
-      %{state | security_scores: Map.put(state.security_scores, project, new_score)}
+      state = %{state | security_scores: Map.put(state.security_scores, project, new_score)}
+      
+      paths = 
+        case Jason.decode(paths_json) do
+          {:ok, p} -> p
+          _ -> []
+        end
+
+      %{state | taint_paths: Map.put(state.taint_paths, project, paths)}
     else
       state
     end

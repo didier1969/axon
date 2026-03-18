@@ -132,8 +132,9 @@ async fn main() -> anyhow::Result<()> {
                                 relation_count: rels_count,
                                 file_count: 1,
                                 entry_points: 0,
-                                security_score: 100, // Default for now
+                                security_score: 100,
                                 coverage_score: 0,
+                                taint_paths: String::new(),
                             }).unwrap() + "\n";
                             let _ = tx_clone.send(finish_msg).await;
                         });
@@ -232,19 +233,19 @@ async fn main() -> anyhow::Result<()> {
                                     relation_count: chunk_rels,
                                     file_count: chunk.len(),
                                     entry_points: 0, 
-                                    security_score: 100, 
+                                    security_score: 100,
                                     coverage_score: 0,
-                                }).unwrap() + "\n";
-                                let _ = tx_clone.send(file_msg).await;
+                                    taint_paths: String::new(),
+                                    }).unwrap() + "\n";                                let _ = tx_clone.send(file_msg).await;
                             }
                             
                             if !token_clone.load(Ordering::Relaxed) {
-                                let (sec_score, cov_score, entry_count) = {
+                                let (sec_score, taint_paths, cov_score, entry_count) = {
                                     let locked_store = store_for_scan.read().unwrap();
-                                    let (sec_score, _) = locked_store.get_security_audit(&project_name).unwrap_or((100, "".to_string()));
+                                    let (sec_score, paths) = locked_store.get_security_audit(&project_name).unwrap_or((100, "[]".to_string()));
                                     let cov_score = locked_store.get_coverage_score(&project_name).unwrap_or(0);
                                     let entry_count = locked_store.query_count(&format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.tested = true RETURN count(s)", project_name)).unwrap_or(0) as usize; 
-                                    (sec_score, cov_score, entry_count)
+                                    (sec_score, paths, cov_score, entry_count)
                                 };
 
                                 let final_file_msg = serde_json::to_string(&BridgeEvent::FileIndexed { 
@@ -255,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
                                     entry_points: entry_count,
                                     security_score: sec_score,
                                     coverage_score: cov_score,
+                                    taint_paths,
                                 }).unwrap() + "\n";
                                 let _ = tx_clone.send(final_file_msg).await;
                             }

@@ -46,7 +46,9 @@ defmodule AxonDashboardWeb.StatusLive do
         ram_load: 0.0,
         io_wait: 0.0,
         queues_paused: false,
-        indexing_limit: 10
+        indexing_limit: 10,
+        # Taint paths
+        taint_paths: %{}
       )
       |> fetch_and_assign_stats()
 
@@ -54,6 +56,13 @@ defmodule AxonDashboardWeb.StatusLive do
   end
 
   defp fetch_and_assign_stats(socket) do
+    state =
+      try do
+        AxonDashboard.BridgeClient.get_state()
+      catch
+        :exit, _ -> %{security_scores: %{}, taint_paths: %{}}
+      end
+
     stats =
       try do
         Axon.Watcher.Tracking.get_dashboard_stats()
@@ -66,13 +75,15 @@ defmodule AxonDashboardWeb.StatusLive do
 
     projects =
       Enum.reduce(dirs, %{}, fn {dir, info}, acc ->
+        security = Map.get(state.security_scores, dir, 100)
+        
         Map.put(acc, dir, %{
           symbols: info.symbols,
           relations: info.relations,
           files: info.completed + info.failed + info.ignored,
           entries: info.entries,
-          security: 100, # We'll leave this to 100% for now until we query the Rust bridge
-          coverage: 85,  # We'll leave this to 85% for now until we query the Rust bridge
+          security: security,
+          coverage: 85,  # We'll leave this to 85% for now
           total_files: info.total,
           failed_files: info.failed,
           ignored_files: info.ignored
@@ -92,13 +103,22 @@ defmodule AxonDashboardWeb.StatusLive do
 
     total_symbols = Enum.reduce(projects, 0, fn {_, p}, acc -> acc + p.symbols end)
 
+    avg_security =
+      if map_size(projects) > 0 do
+        Enum.reduce(projects, 0, fn {_, p}, acc -> acc + p.security end) / map_size(projects)
+      else
+        100
+      end
+
     assign(socket,
       projects: projects,
       total_projects: map_size(projects),
       scanned_projects: map_size(projects),
       total_symbols: total_symbols,
       live_files: live_files,
-      total_files_parsed: total_parsed
+      total_files_parsed: total_parsed,
+      avg_security: round(avg_security),
+      taint_paths: Map.get(state, :taint_paths, %{})
     )
   end
 
@@ -625,6 +645,50 @@ defmodule AxonDashboardWeb.StatusLive do
           </div>
         </div>
         
+    <!-- Semantic Error Visualization (Taint Analysis) -->
+        <%= if map_size(@taint_paths) > 0 and Enum.any?(@taint_paths, fn {_, paths} -> length(paths) > 0 end) do %>
+          <div class="premium-card p-8 border-red-500/30 bg-red-500/5">
+            <h3 class="text-lg font-black text-white uppercase italic tracking-tighter flex items-center gap-2 mb-6">
+              <div class="w-2 h-2 rounded-full bg-red-500 animate-ping"></div>
+              Critical Semantic Violations <span class="text-red-500 opacity-50">// Taint Analysis Engine</span>
+            </h3>
+            
+            <div class="space-y-6">
+              <%= for {project, paths} <- @taint_paths, length(paths) > 0 do %>
+                <div class="space-y-3">
+                  <div class="flex items-center gap-2 text-xs font-bold text-red-400 uppercase tracking-widest">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+                    </svg>
+                    Project: {project}
+                  </div>
+                  <div class="grid grid-cols-1 gap-3">
+                    <%= for path <- Enum.take(paths, 3) do %>
+                      <div class="bg-black/40 border border-white/5 p-4 rounded-xl font-mono text-[10px] space-y-2">
+                        <div class="flex items-center gap-2 text-white/40">
+                          <span class="px-2 py-0.5 bg-red-500/20 text-red-400 rounded-md font-bold">EXPOSURE PATH</span>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2">
+                          <%= for node <- path["nodes"] do %>
+                            <span class={"px-2 py-1 rounded border #{if node["properties"]["is_unsafe"] == "true", do: "border-red-500/50 text-red-400 bg-red-500/10", else: "border-white/10 text-white/60 bg-white/5"}"}>
+                              {node["properties"]["name"] || "unknown"}
+                            </span>
+                            <%= if node != List.last(path["nodes"]) do %>
+                              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3 text-white/20">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
+                              </svg>
+                            <% end %>
+                          <% end %>
+                        </div>
+                      </div>
+                    <% end %>
+                  </div>
+                </div>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+
     <!-- Project Grid (The 10/10 UX Request) -->
         <div class="space-y-6">
           <div class="flex justify-between items-end px-2">

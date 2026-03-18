@@ -13,6 +13,8 @@ pub enum BridgeEvent {
         entry_points: usize,
         security_score: usize,
         coverage_score: usize,
+        #[serde(default)]
+        taint_paths: String,
     },
     ScanComplete { total_files: usize, duration_ms: u64 },
     Heartbeat,
