@@ -31,6 +31,7 @@ defmodule AxonDashboard.BridgeClient do
      %{
        socket: nil,
        security_scores: %{},
+       coverage_scores: %{},
        taint_paths: %{},
        engine_start_time: nil,
        # :idle | :indexing
@@ -142,6 +143,7 @@ defmodule AxonDashboard.BridgeClient do
 
     if project && new_score > 0 do
       old_score = Map.get(state.security_scores, project, 100)
+      cov_score = Map.get(payload, "coverage_score", 0)
 
       if new_score < old_score do
         Logger.warning("[BRIDGE] Security Degraded for #{project}: #{old_score} -> #{new_score}")
@@ -153,7 +155,10 @@ defmodule AxonDashboard.BridgeClient do
         )
       end
 
-      state = %{state | security_scores: Map.put(state.security_scores, project, new_score)}
+      state = %{state | 
+        security_scores: Map.put(state.security_scores, project, new_score),
+        coverage_scores: Map.put(state.coverage_scores, project, cov_score)
+      }
       
       paths = 
         case Jason.decode(paths_json) do

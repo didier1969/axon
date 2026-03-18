@@ -76,6 +76,7 @@ defmodule AxonDashboardWeb.StatusLive do
     projects =
       Enum.reduce(dirs, %{}, fn {dir, info}, acc ->
         security = Map.get(state.security_scores, dir, 100)
+        coverage = Map.get(state, :coverage_scores, %{}) |> Map.get(dir, 0)
         
         Map.put(acc, dir, %{
           symbols: info.symbols,
@@ -83,7 +84,7 @@ defmodule AxonDashboardWeb.StatusLive do
           files: info.completed + info.failed + info.ignored,
           entries: info.entries,
           security: security,
-          coverage: 85,  # We'll leave this to 85% for now
+          coverage: coverage,
           total_files: info.total,
           failed_files: info.failed,
           ignored_files: info.ignored
@@ -110,6 +111,13 @@ defmodule AxonDashboardWeb.StatusLive do
         100
       end
 
+    avg_coverage =
+      if map_size(projects) > 0 do
+        Enum.reduce(projects, 0, fn {_, p}, acc -> acc + p.coverage end) / map_size(projects)
+      else
+        0
+      end
+
     assign(socket,
       projects: projects,
       total_projects: map_size(projects),
@@ -118,6 +126,7 @@ defmodule AxonDashboardWeb.StatusLive do
       live_files: live_files,
       total_files_parsed: total_parsed,
       avg_security: round(avg_security),
+      avg_coverage: round(avg_coverage),
       taint_paths: Map.get(state, :taint_paths, %{})
     )
   end
