@@ -26,6 +26,8 @@ defmodule LiveView.Witness do
 
     # Register the current process for this expectation id
     {:ok, _} = Registry.register(LiveView.Witness.Registry, id, :ok)
+    # Global routing for multi-node support
+    :ok = Phoenix.PubSub.subscribe(LiveView.Witness.PubSub, "witness:cert:#{id}")
 
     contract = %{
       id: id,
@@ -42,6 +44,8 @@ defmodule LiveView.Witness do
 
     # Register the current process for this expectation id
     {:ok, _} = Registry.register(LiveView.Witness.Registry, id, :ok)
+    # Global routing for multi-node support
+    :ok = Phoenix.PubSub.subscribe(LiveView.Witness.PubSub, "witness:cert:#{id}")
 
     # In a test view, we can't easily push an event to the "client",
     # but we register the expectation so verify_ui! can wait for it.
@@ -55,9 +59,13 @@ defmodule LiveView.Witness do
   def report_certificate(report) do
     id = Map.fetch!(report, "id")
 
+    # Local optimization
     Registry.dispatch(LiveView.Witness.Registry, id, fn entries ->
       for {pid, _} <- entries, do: send(pid, {:witness_report, report})
     end)
+
+    # Global broadcast for multi-node support
+    Phoenix.PubSub.broadcast(LiveView.Witness.PubSub, "witness:cert:#{id}", {:witness_report, report})
   end
 
   @doc """
@@ -67,22 +75,23 @@ defmodule LiveView.Witness do
   """
   @spec verify_ui!(String.t(), timeout()) :: :ok | no_return()
   def verify_ui!(id, timeout \\ 5000) do
-    receive do
-      {:witness_report, %{"id" => ^id, "status" => "ok"}} ->
-        Registry.unregister(LiveView.Witness.Registry, id)
-        :ok
+    try do
+      receive do
+        {:witness_report, %{"id" => ^id, "status" => "ok"}} ->
+          :ok
 
-      {:witness_report, %{"id" => ^id, "status" => "error", "message" => msg}} ->
-        Registry.unregister(LiveView.Witness.Registry, id)
-        raise "LiveView.Witness verification failed for #{id}: #{msg}"
+        {:witness_report, %{"id" => ^id, "status" => "error", "message" => msg}} ->
+          raise "LiveView.Witness verification failed for #{id}: #{msg}"
 
-      {:witness_report, %{"id" => ^id, "status" => "error"}} ->
-        Registry.unregister(LiveView.Witness.Registry, id)
-        raise "LiveView.Witness verification failed for #{id}"
+        {:witness_report, %{"id" => ^id, "status" => "error"}} ->
+          raise "LiveView.Witness verification failed for #{id}"
+      after
+        timeout ->
+          raise "LiveView.Witness verification timeout for #{id}"
+      end
     after
-      timeout ->
-        Registry.unregister(LiveView.Witness.Registry, id)
-        raise "LiveView.Witness verification timeout for #{id}"
+      Registry.unregister(LiveView.Witness.Registry, id)
+      Phoenix.PubSub.unsubscribe(LiveView.Witness.PubSub, "witness:cert:#{id}")
     end
   end
 end
