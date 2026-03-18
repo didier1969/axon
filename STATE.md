@@ -11,14 +11,15 @@
 - **LiveView.Witness :** Boucle de vérité sémantique (Synchronisation DOM, Sécurité Token, Support Shadow DOM).
 
 ## Accomplissements Récents (Nexus Seal)
-- **Zéro Collision :** Isolation complète des ports (40000-50000) et des ressources (Cap 40%).
+- **Zero-Simplification Graph :** Le moteur de graphe respecte désormais la topologie exacte (`rel.from`) et les relations typées (`CALLS_NIF`, `IMPORTS`).
+- **Cross-Language Taint :** Suivi sémantique traversant le pont Elixir/Rust avec détection des puits `unsafe`.
+- **Telemetry Dashboard :** Moniteur de ressources temps réel intégré au Control Plane Phoenix.
 - **Witness v1.0 :** Implémentation d'une bibliothèque standalone pour garantir physiquement le rendu UI.
-- **Distributed Ready :** Passage à une architecture PubSub pour le routing des certificats de vérité.
 - **Survival Watchdog :** Script de survie dans le layout racine pour détecter les Pages 500 et les crashs JS dès le bootstrap.
 
 ## Roadmap Immédiate
-1.  **Cross-Language Taint :** Suivi sémantique des données entre composants multi-langages.
-2.  **Telemetry Dashboard :** Visualisation des erreurs sémantiques et de la santé du rendu.
+1.  **Semantic Error Visualization :** Visualisation des erreurs sémantiques et de la santé du rendu (exploiter les sondes LiveView.Witness).
+2.  **Distributed Graph Intelligence :** Support du clustering pour l'analyse de graphes multi-nœuds.
 
 ## Loop Position
 ```

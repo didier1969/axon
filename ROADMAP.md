@@ -78,3 +78,13 @@ Daemon central avec cache LRU, stockage ~/.axon/repos/.
 - [x] **Dynamic Worker Scaling :** Adaptation à la volée des limites d'Oban (`indexing_default` / `indexing_hot`).
 - [x] **Dynamic Batching :** Réduction de la taille des lots (chunk size) envoyés au Data Plane Rust si la pression mémoire augmente.
 - [x] **Hard Limit 70% :** Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 70% des ressources globales de la machine, se mettant en "pause" automatique si le système utilisateur exige la pleine puissance.
+
+---
+
+## 🛰️ v2.3 - Semantic Intelligence & Observability (COMPLETED)
+**Focus :** Profondeur d'analyse et visibilité en temps réel.
+
+- [x] **Cross-Language Taint Analysis :** Suivi sémantique des données entre Elixir et Rust NIFs. Identification des puits (`unsafe`) au travers du pont natif.
+- [x] **Telemetry Dashboard :** Intégration d'un moniteur de ressources temps réel dans le Phoenix Dashboard.
+- [x] **Witness Verification :** Certification physique du rendu des composants de télémétrie via `LiveView.Witness`.
+- [x] **Zero-Simplification Edge Mapping :** Le moteur de graphe respecte désormais la topologie exacte (`rel.from`) au lieu de liaisons globales par fichier.

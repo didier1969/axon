@@ -7,8 +7,10 @@ defmodule AxonDashboardWeb.StatusLive do
       if connected?(socket) do
         :timer.send_interval(1000, self(), :tick)
         Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
+        Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "telemetry_events")
         Phoenix.PubSub.subscribe(LiveView.Witness.PubSub, "witness_alerts")
         {:ok, _id, socket} = LiveView.Witness.expect_ui(socket, ".project-card", min_items: 1)
+        {:ok, _id, socket} = LiveView.Witness.expect_ui(socket, "#resource-monitor", text: "Resource Intelligence")
         socket
       else
         socket
@@ -37,7 +39,14 @@ defmodule AxonDashboardWeb.StatusLive do
         engine_start_time: start_time,
         alerts: [],
         witness_alert: nil,
-        cluster_connected: true
+        cluster_connected: true,
+        # Resource Telemetry
+        system_pressure: 0.0,
+        cpu_load: 0.0,
+        ram_load: 0.0,
+        io_wait: 0.0,
+        queues_paused: false,
+        indexing_limit: 10
       )
       |> fetch_and_assign_stats()
 
@@ -111,6 +120,38 @@ defmodule AxonDashboardWeb.StatusLive do
        avg_security: 100,
        avg_coverage: 0
      )}
+  end
+
+  def handle_info({:telemetry_event, [:axon, :backpressure, :pressure_computed], measurements, metadata}, socket) do
+    {:noreply, assign(socket, 
+      system_pressure: measurements.pressure,
+      cpu_load: metadata.cpu,
+      ram_load: metadata.ram,
+      io_wait: metadata.io
+    )}
+  end
+
+  def handle_info({:telemetry_event, [:axon, :backpressure, :queues_paused], _measurements, _metadata}, socket) do
+    {:noreply, assign(socket, queues_paused: true, indexing_limit: 0)}
+  end
+
+  def handle_info({:telemetry_event, [:axon, :backpressure, :queues_resumed], _measurements, _metadata}, socket) do
+    {:noreply, assign(socket, queues_paused: false)}
+  end
+
+  def handle_info({:telemetry_event, [:axon, :backpressure, :limit_adjusted], measurements, _metadata}, socket) do
+    {:noreply, assign(socket, indexing_limit: measurements.limit)}
+  end
+
+  def handle_info({:telemetry_event, [:axon, :watcher, :batch_enqueued], measurements, metadata}, socket) do
+    msg = "[Watcher] Enqueued batch of #{measurements.count} files to #{metadata.queue}"
+    {:noreply, assign(socket, last_event: msg)}
+  end
+
+  def handle_info({:telemetry_event, [:axon, :watcher, :batch_failed], _measurements, metadata}, socket) do
+    alert = "ERROR: Failed to enqueue batch: #{metadata.error}"
+    new_alerts = [alert | socket.assigns.alerts] |> Enum.take(3)
+    {:noreply, assign(socket, alerts: new_alerts)}
   end
 
   def handle_info({:bridge_event, event}, socket) do
@@ -517,6 +558,68 @@ defmodule AxonDashboardWeb.StatusLive do
                   Coverage {if @avg_coverage > 80, do: "Stable", else: "Low"}
                 </p>
                 <p class="text-[9px] opacity-30 uppercase tracking-widest">Verified by LadybugDB</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+    <!-- Resource Intelligence & Backpressure -->
+        <div id="resource-monitor" class="premium-card p-8 bg-gradient-to-br from-base-200 to-base-300 border-primary/20 shadow-[0_0_40px_rgba(var(--color-primary),0.05)]">
+          <div class="flex justify-between items-start mb-8">
+            <div>
+              <h3 class="text-lg font-black text-white uppercase italic tracking-tighter flex items-center gap-2">
+                <div class={"w-2 h-2 rounded-full #{if @queues_paused, do: "bg-red-500 animate-pulse", else: "bg-green-500"}"}></div>
+                Resource Intelligence <span class="text-primary opacity-50">// OS Monitor</span>
+              </h3>
+              <p class="text-[9px] opacity-40 uppercase tracking-widest font-bold mt-1">Real-time Backpressure & Oban Scaling</p>
+            </div>
+            <div class="text-right">
+              <span class="text-[10px] font-mono text-primary font-bold">MODE: {if @queues_paused, do: "CONSTRAINED (PAUSED)", else: "DYNAMIC SCALING"}</span>
+              <p class="text-[9px] opacity-30 uppercase tracking-widest mt-1">Worker Limit: {@indexing_limit} parallel jobs</p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-8">
+            <div class="space-y-3">
+              <div class="flex justify-between text-[10px] font-bold uppercase tracking-widest px-1">
+                <span class="opacity-40">System Pressure</span>
+                <span class={if @system_pressure >= 1.0, do: "text-red-500", else: "text-primary"}>
+                  {Float.round(@system_pressure * 100, 1)}%
+                </span>
+              </div>
+              <div class="h-2 bg-black/40 rounded-full overflow-hidden p-[1px] border border-white/5">
+                <div class={"h-full rounded-full transition-all duration-500 #{if @system_pressure >= 1.0, do: "bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]", else: "bg-primary shadow-[0_0_10px_rgba(var(--color-primary),0.5)]"}"} 
+                     style={"width: #{min(@system_pressure * 100, 100)}%"}></div>
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <div class="flex justify-between text-[10px] font-bold uppercase tracking-widest px-1">
+                <span class="opacity-40">CPU Load</span>
+                <span class="text-white">{Float.round(@cpu_load, 1)}%</span>
+              </div>
+              <div class="h-2 bg-black/40 rounded-full overflow-hidden p-[1px] border border-white/5">
+                <div class="h-full bg-white/20 rounded-full transition-all duration-500" style={"width: #{@cpu_load}%"}></div>
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <div class="flex justify-between text-[10px] font-bold uppercase tracking-widest px-1">
+                <span class="opacity-40">RAM Usage</span>
+                <span class="text-white">{Float.round(@ram_load, 1)}%</span>
+              </div>
+              <div class="h-2 bg-black/40 rounded-full overflow-hidden p-[1px] border border-white/5">
+                <div class="h-full bg-white/20 rounded-full transition-all duration-500" style={"width: #{@ram_load}%"}></div>
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <div class="flex justify-between text-[10px] font-bold uppercase tracking-widest px-1">
+                <span class="opacity-40">IO Wait</span>
+                <span class="text-white">{Float.round(@io_wait, 1)}%</span>
+              </div>
+              <div class="h-2 bg-black/40 rounded-full overflow-hidden p-[1px] border border-white/5">
+                <div class="h-full bg-white/20 rounded-full transition-all duration-500" style={"width: #{@io_wait}%"}></div>
               </div>
             </div>
           </div>

@@ -11,6 +11,7 @@ defmodule AxonDashboard.Application do
       AxonDashboardWeb.Telemetry,
       {Phoenix.PubSub, name: AxonDashboard.PubSub},
       Axon.Watcher.Telemetry,
+      AxonDashboard.TelemetryHandler,
       Axon.Watcher.Repo,
       {Oban, Application.fetch_env!(:axon_dashboard, Oban)},
       Axon.Watcher.PoolFacade,
