@@ -59,11 +59,6 @@ defmodule LiveView.Witness do
   def report_certificate(report) do
     id = Map.fetch!(report, "id")
 
-    # Local optimization
-    Registry.dispatch(LiveView.Witness.Registry, id, fn entries ->
-      for {pid, _} <- entries, do: send(pid, {:witness_report, report})
-    end)
-
     # Global broadcast for multi-node support
     Phoenix.PubSub.broadcast(LiveView.Witness.PubSub, "witness:cert:#{id}", {:witness_report, report})
   end
