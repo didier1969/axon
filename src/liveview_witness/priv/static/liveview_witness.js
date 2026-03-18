@@ -41,7 +41,13 @@ const LiveViewWitness = {
    */
   _waitUntilStable(selector, timeout = 2000) {
     return new Promise((resolve) => {
+      let observer = null;
+      let finished = false;
+
       const done = () => {
+        if (finished) return;
+        finished = true;
+        if (observer) observer.disconnect();
         // Double RAF ensures we wait for the next paint cycle
         requestAnimationFrame(() => {
           requestAnimationFrame(resolve);
@@ -53,15 +59,14 @@ const LiveViewWitness = {
         done();
       }, timeout);
 
-      if (!selector || document.querySelector(selector)) {
+      if (!selector || this._deepQuerySelector(selector)) {
         clearTimeout(timer);
         done();
         return;
       }
 
-      const observer = new MutationObserver(() => {
-        if (document.querySelector(selector)) {
-          observer.disconnect();
+      observer = new MutationObserver(() => {
+        if (this._deepQuerySelector(selector)) {
           clearTimeout(timer);
           done();
         }
@@ -80,6 +85,40 @@ const LiveViewWitness = {
     }).catch(err => console.error("[LiveView.Witness] Oracle fallback failed", err));
   },
 
+  _deepQuerySelector(selector, root = document) {
+    const el = root.querySelector(selector);
+    if (el) return el;
+
+    const all = root.querySelectorAll('*');
+    for (const node of all) {
+      if (node.shadowRoot) {
+        const found = this._deepQuerySelector(selector, node.shadowRoot);
+        if (found) return found;
+      }
+    }
+    return null;
+  },
+
+  _deepQuerySelectorAll(selector, root = document) {
+    let results = Array.from(root.querySelectorAll(selector));
+    const all = root.querySelectorAll('*');
+    for (const el of all) {
+      if (el.shadowRoot) {
+        results = results.concat(this._deepQuerySelectorAll(selector, el.shadowRoot));
+      }
+    }
+    return results;
+  },
+
+  _deepContains(container, target) {
+    let current = target;
+    while (current) {
+      if (current === container) return true;
+      current = current.assignedSlot || current.parentNode || (current.nodeType === 11 && current.host);
+    }
+    return false;
+  },
+
   destroyed() {
     window.removeEventListener("error", this._onWindowError);
     window.removeEventListener("unhandledrejection", this._onWindowRejection);
@@ -87,7 +126,7 @@ const LiveViewWitness = {
 
   inspect(payload) {
     const { selector, expectations } = payload;
-    const elements = selector ? document.querySelectorAll(selector) : [this.el];
+    const elements = selector ? this._deepQuerySelectorAll(selector) : [this.el];
 
     // L1: Presence
     if (elements.length === 0) {
@@ -138,12 +177,20 @@ const LiveViewWitness = {
         return { status: "error", level: "L2", message: "Off-screen" };
     }
 
-    const topEl = document.elementFromPoint(x, y);
+    let currentTop = document.elementFromPoint(x, y);
+    // Recursively traverse shadow roots to find the actual top element
+    while (currentTop && currentTop.shadowRoot && typeof currentTop.shadowRoot.elementFromPoint === 'function') {
+      const deeper = currentTop.shadowRoot.elementFromPoint(x, y);
+      if (!deeper || deeper === currentTop) break;
+      currentTop = deeper;
+    }
+    
+    const topEl = currentTop;
     if (!topEl) {
         return { status: "error", level: "L2", message: "No element at point" };
     }
 
-    if (topEl !== el && !el.contains(topEl)) {
+    if (topEl !== el && !this._deepContains(el, topEl)) {
       const tag = topEl.tagName ? topEl.tagName.toLowerCase() : 'unknown';
       const id = topEl.id ? `#${topEl.id}` : '';
       
