@@ -1,44 +1,29 @@
-# État du Projet : Axon v1.0 (Triple-Pod Ready)
+# État du Projet : Axon (Industrial Nexus Grade)
 
 ## Référence Projet
-**Vision :** Copilote Architectural distribué basé sur le modèle Triple-Pod.
-**Statut :** 🔵 TERMINÉ (Migration HydraDB validée).
+**Vision :** Source de Vérité Structurelle pour Humains et Agents IA.
+**Statut :** 🟠 EN AMÉLIORATION (Standard Industriel en cours de déploiement).
 
-## Architecture v1.0
-- **Pod A (Watcher) :** Orchestration Elixir/OTP.
-- **Pod B (Parser) :** Analyse Python Stateless via MsgPack (Extraits : Symboles + Relations).
-- **Pod C (HydraDB) :** persistence, persistence Atomique (Dolt) et Graph Intelligence.
+## Architecture & Fiabilité
+- **Pod A (Watcher) :** Orchestration Elixir/OTP avec Priority Streaming Scanner (NIF Rust).
+- **Pod B (Parser) :** Analyse polyglotte WASM haute performance.
+- **Pod C (HydraDB) :** Persistence et intelligence de graphe (Kuzu/Cozo).
+- **LiveView.Witness :** Boucle de vérité sémantique (Synchronisation DOM, Sécurité Token, Support Shadow DOM).
 
-## MCP v1.1
-- **Upgrade SDK :** Utilisation de `mcp[server]>=1.2.1`.
-- **Nouveau Tool :** `axon_audit` pour l'audit de sécurité OWASP délégué.
-- **Factory Pattern :** Serveur refactorisé pour une meilleure testabilité.
+## Accomplissements Récents (Nexus Seal)
+- **Zéro Collision :** Isolation complète des ports (40000-50000) et des ressources (Cap 40%).
+- **Witness v1.0 :** Implémentation d'une bibliothèque standalone pour garantir physiquement le rendu UI.
+- **Distributed Ready :** Passage à une architecture PubSub pour le routing des certificats de vérité.
+- **Survival Watchdog :** Script de survie dans le layout racine pour détecter les Pages 500 et les crashs JS dès le bootstrap.
 
-## MCP v1.2
-- **Consolidation API :** Réduction de 17 à 8 outils haute performance.
-- **Outils "Vue 360" :** Implémentation de `axon_inspect` (Fusion Code/Graphe/Stats).
-- **Optimisation Contexte :** Gain de ~40%% d'\''espace pour les prompts IA.
-- **Santé Globale :** Nouveau tool `axon_health` unifiant le diagnostic.
-
-## MCP v1.3
-- **Async-Native :** Passage au mode asynchrone complet pour le serveur MCP.
-- **Support Notifications :** Activation des notifications de changement d'\''outils et de ressources.
-- **Robustesse :** Amélioration de la gestion des erreurs et de l'\''initialisation du stockage.
-
-## Correctifs Critiques
-- **Crash Terminal :** RÉSOLU par la délégation de l'Audit au Pod C (Suppression du BFS local).
-- **Connectivité :** `AstralBackend` implémenté comme client TCP/MsgPack réel.
-
-## Axon v2.0 (Immune & Autonomous)
-- **Priority Streaming Scanner (APSS)** : Scan disque asynchrone (NIF Rust multithreadé) avec priorité sémantique (README/Config d'abord).
-- **Auto-Trigger Indexing** : Le Watcher déclenche l'indexation dès le démarrage sans intervention humaine.
-- **Resilient Bridge** : Restauration du pont UDS Pod A -> Pod B pour l'indexation granulaire en temps réel.
-- **Nix DevEnv Isolation** : Environnement de développement reproductible et isolé (BEAM cookies, CARGO cache).
-- **WSL Auto-Resurrection** : Lancement automatique et garde-fou via `.bashrc` et script de monitoring (gestion robuste par sessions **TMUX**).
-- **Industrial Persistence** : Utilisation de `setsid` et TMUX pour garantir que les services survivent à la fermeture du terminal utilisateur.
+## Roadmap Immédiate
+1.  **Dynamic Backpressure :** Régulation en temps réel de l'indexation selon la charge machine.
+2.  **Cross-Language Taint :** Suivi sémantique des données entre composants multi-langages.
+3.  **Telemetry Dashboard :** Visualisation des erreurs sémantiques et de la santé du rendu.
 
 ## Loop Position
 ```
-AUTO-SCAN ──▶ PRIORITY-INDEX ──▶ LIVE-COCKPIT
-    ●              ●                ●     [v2.0 Autonome]
+[INTENTION] ──▶ [RUST DATA PLANE] ──▶ [ELIXIR CONTROL] ──▶ [WITNESS VERIFICATION]
+      ●                 ●                   ●                    ●
+   (Graph)           (Audit)             (Dashboard)          (Reality)
 ```

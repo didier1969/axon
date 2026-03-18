@@ -1,54 +1,26 @@
-# Axon v2.0 (Immune & Autonomous)
+# Axon : La Source de Vérité Structurelle
 
-**Axon** est un moteur d'intelligence de code distribué haute performance. Il transforme n'importe quelle base de code en un graphe de connaissances structurelles exploitable par des agents IA et des développeurs.
+**Axon** est un moteur d'intelligence de code haute performance conçu pour fournir une vision complète, fiable et actionnable de n'importe quelle base de code. Il transforme le code source en un graphe de connaissances vivant, permettant aux développeurs et aux agents IA d'améliorer et de fiabiliser les systèmes avec une précision chirurgicale.
 
-## 🛡️ Système Immunitaire Autonome
+## 🎯 Vision : Fiabilisation & Transparence
+Axon ne se contente pas de chercher du texte ; il cartographie les **intentions** du code.
+- **Vision à 360° :** Visualisation instantanée des relations (appels, types, dépendances) à travers tous les langages.
+- **Fiabilité par la Preuve :** Chaque diagnostic est ancré dans la réalité physique du système.
+- **Amélioration Continue :** Identification proactive des zones non testées, des dérives architecturales et des failles de sécurité.
 
-Depuis la v2.0, Axon devient totalement autonome et proactif. Il n'est plus nécessaire de lancer manuellement les composants ; Axon surveille, indexe et se répare tout seul dès le démarrage de votre environnement WSL.
+## 🛡️ L'Infrastructure de Confiance (Nexus Grade)
+Axon repose sur des piliers technologiques garantissant une fiabilité absolue :
 
-### 🏗️ Architecture Triple-Pod v2
+1.  **Le Cerveau Graphe (LadybugDB) :** Intégration de KuzuDB et HydraDB pour stocker et interroger des relations sémantiques complexes avec une performance native.
+2.  **L'Armure de Rendu (LiveView.Witness) :** Une bibliothèque révolutionnaire qui garantit que ce qui est affiché sur le Dashboard correspond physiquement à la vérité du système (Vérification L1/L2/L3 incluant la visibilité réelle et l'absence d'erreurs console).
+3.  **Isolation & Coexistence :** 
+    - **Zéro Collision :** Utilisation de ports aléatoires (40000+) et d'identifiants uniques pour coexister avec vos autres projets.
+    - **Silence Opérationnel :** Consommation CPU/RAM strictement bridée (40%) pour rester totalement transparent pendant votre travail.
 
-1.  **Pod A : Axon Watcher (Orchestrateur - Elixir/OTP)**
-    - **Priority Streaming Scanner** : Scan disque asynchrone (Rust NIF) avec priorité sémantique.
-    - **Auto-Trigger** : Déclenche l'indexation dès le démarrage du service.
-    - Gère la résilience et le "back-pressure" entre les Pods.
-
-2.  **Pod B : Axon Parser (Analyseur - Rust/Python/Tree-sitter)**
-    - Analyseur hybride haute performance intégré au moteur Rust.
-    - Support natif de **TypeQL** et **Datalog** (via pont Python optimisé).
-    - Communication via Unix Domain Socket (`/tmp/axon-v2.sock`).
-
-3.  **Pod C : HydraDB (Persistence - Elixir/Rust/Dolt)**
-    - Persistence atomique et versionnage du graphe (Dolt).
-    - Moteur d'audit OWASP et analyses structurelles lourdes.
-
-## ⚡ Performance & Protocoles
-
-Axon v2.0 utilise une communication unifiée via UDS :
-- **Lien A ↔ B (Watcher ↔ Parser) :** Unix Domain Socket (UDS) via `/tmp/axon-v2.sock`.
-- **Lien Dashboard :** LiveView réactif sur le port `44921`.
-
-## 🚀 Activation Automatique (WSL)
-
-Pour qu'Axon surveille votre code en permanence dès le lancement de WSL, ajoutez cette ligne à votre `~/.bashrc` :
-
-```bash
-bash /home/dstadel/projects/axon/scripts/ensure-axon-running.sh
-```
-
-Le script de garde-fou vérifiera l'état de la stack à chaque ouverture de terminal et la ressuscitera si nécessaire.
-
-## 📊 Cockpit de Contrôle
-
-Accédez au dashboard live pour suivre l'indexation en temps réel :
-**[http://localhost:44921](http://localhost:44921)**
-
-## 🧠 Modèle MCP (Intelligence IA)
-
-Axon expose ses capacités via le **Model Context Protocol (MCP)**.
-- **`axon_query`** : Recherche hybride sémantique/structurelle.
-- **`axon_audit`** : Audit de sécurité OWASP automatisé.
-- **`axon_impact`** : Analyse de rayon d'impact des changements.
+## 🧠 Intelligence Agentique (MCP)
+Axon est nativement compatible avec le **Model Context Protocol (MCP)**. Il sert d'interface de connaissance entre le code et les agents IA :
+- **Mémoire Structurelle :** Fournit à l'IA le contexte qu'elle ne peut pas deviner, éliminant ainsi les hallucinations architecturales.
+- **TDD Sémantique :** L'IA peut désormais vérifier physiquement son travail via le pont de vérité Witness avant de certifier un changement.
 
 ---
-© 2025-2026 Nexus AI Agency - Didier Stadelmann
+© 2025-2026 Didier Stadelmann - L'excellence au service de l'architecture.
