@@ -17,7 +17,13 @@ defmodule LiveView.Witness.Oracle do
     # Broadcast the alert to the dashboard
     case Jason.decode(body) do
       {:ok, alert} ->
+        :telemetry.execute([:liveview_witness, :health_alert, :received], %{}, %{
+          type: Map.get(alert, "type"),
+          watchdog: Map.get(alert, "watchdog")
+        })
+
         Phoenix.PubSub.broadcast(pubsub, "witness_alerts", {:witness_alert, alert})
+
       _ ->
         Phoenix.PubSub.broadcast(pubsub, "witness_alerts", {:witness_alert, %{"message" => body}})
     end

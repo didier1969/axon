@@ -24,7 +24,8 @@ defmodule LiveView.Witness.MixProject do
     [
       {:phoenix_live_view, "~> 1.0"},
       {:jason, "~> 1.2"},
-      {:plug_cowboy, "~> 2.5"}
+      {:plug_cowboy, "~> 2.5"},
+      {:telemetry, "~> 1.0"}
     ]
   end
 end
