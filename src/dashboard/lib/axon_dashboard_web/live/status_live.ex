@@ -243,7 +243,7 @@ defmodule AxonDashboardWeb.StatusLive do
     assigns = assign(assigns, :uptime_str, uptime_str)
 
     ~H"""
-    <div id="witness-container" phx-hook="LiveViewWitness" class="min-h-screen bg-base-100 text-base-content font-sans antialiased selection:bg-primary/30">
+    <LiveView.Witness.HTML.witness_container id="witness-container" class="min-h-screen bg-base-100 text-base-content font-sans antialiased selection:bg-primary/30">
       
     <!-- Emergency Diagnostic Alert Overlay -->
       <%= if @witness_alert do %>
@@ -727,7 +727,7 @@ defmodule AxonDashboardWeb.StatusLive do
           Nexus MetaGPT++ // Strategic Multi-Project Intelligence Engine
         </p>
       </footer>
-    </div>
+    </LiveView.Witness.HTML.witness_container>
     """
   end
 end
