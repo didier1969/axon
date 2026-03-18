@@ -17,9 +17,8 @@
 - **Survival Watchdog :** Script de survie dans le layout racine pour détecter les Pages 500 et les crashs JS dès le bootstrap.
 
 ## Roadmap Immédiate
-1.  **Dynamic Backpressure :** Régulation en temps réel de l'indexation selon la charge machine.
-2.  **Cross-Language Taint :** Suivi sémantique des données entre composants multi-langages.
-3.  **Telemetry Dashboard :** Visualisation des erreurs sémantiques et de la santé du rendu.
+1.  **Cross-Language Taint :** Suivi sémantique des données entre composants multi-langages.
+2.  **Telemetry Dashboard :** Visualisation des erreurs sémantiques et de la santé du rendu.
 
 ## Loop Position
 ```
