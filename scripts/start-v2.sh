@@ -28,18 +28,23 @@ rm -f "$PROJECT_ROOT/.axon/graph_v2/lbug.db.lock"
 
 echo "🚀 Starting Axon v2 Architecture (Managed via TMUX)..."
 
+# Generate random ports to avoid collisions
+export PHX_PORT=$((40000 + RANDOM % 1000))
+export HYDRA_TCP_PORT=$((41000 + RANDOM % 1000))
+export TCP_PORT=$HYDRA_TCP_PORT
+
 # Kill existing axon session if any
 tmux kill-session -t axon 2>/dev/null || true
 
 # Create new session and start Pod C (HydraDB)
-tmux new-session -d -s axon -n "db" "nix develop --impure --command bash -c 'axon-db-start'"
+tmux new-session -d -s axon -n "db" "nix develop --impure --command bash -c \"TCP_PORT=$HYDRA_TCP_PORT axon-db-start\""
 
 # Start Pod B (Core / Parser) with OS-level Niceness (Idle Priority for CPU and I/O)
 tmux new-window -t axon:1 -n "core" "nix develop --impure --command bash -c 'exec nice -n 19 ionice -c 3 bin/axon-core'"
 
 # Start Pod A/Control (Nexus Monolith)
-tmux new-window -t axon:2 -n "nexus" "bash -c 'cd src/dashboard && nix develop --impure --command bash -c \"mix ecto.setup && PHX_PORT=44921 AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects mix phx.server\"'"
+tmux new-window -t axon:2 -n "nexus" "bash -c 'cd src/dashboard && nix develop --impure --command bash -c \"mix ecto.setup && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects mix phx.server\"'"
 
 echo "🛡️ Axon is rising in TMUX session 'axon'."
 echo "To view processes: 'tmux attach -t axon'"
-echo "Dashboard will be at http://localhost:44921"
+echo "Dashboard will be at http://localhost:$PHX_PORT (HydraDB on port $HYDRA_TCP_PORT)"

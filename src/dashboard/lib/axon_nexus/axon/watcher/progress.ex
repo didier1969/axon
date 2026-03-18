@@ -5,7 +5,7 @@ defmodule Axon.Watcher.Progress do
   require Logger
 
   @hydra_host {127, 0, 0, 1}
-  @hydra_port 6040
+  @hydra_port String.to_integer(System.get_env("HYDRA_TCP_PORT") || "6040")
   @api_key "dev_key"
 
   def update_status(repo_slug, status_map) do
