@@ -8,6 +8,22 @@ defmodule LiveView.Witness.Oracle do
   def init(opts), do: opts
 
   def call(%Plug.Conn{path_info: ["liveview_witness", "diagnose"]} = conn, opts) do
+    case get_req_header(conn, "x-witness-token") do
+      [token] ->
+        if LiveView.Witness.Token.verify?(token) do
+          process_diagnostic(conn, opts)
+        else
+          unauthorized(conn)
+        end
+
+      _ ->
+        unauthorized(conn)
+    end
+  end
+
+  def call(conn, _opts), do: conn
+
+  defp process_diagnostic(conn, opts) do
     {:ok, body, conn} = read_body(conn)
     pubsub = Keyword.get(opts, :pubsub, LiveView.Witness.pubsub())
     
@@ -35,5 +51,10 @@ defmodule LiveView.Witness.Oracle do
     |> halt()
   end
 
-  def call(conn, _opts), do: conn
+  defp unauthorized(conn) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(401, Jason.encode!(%{error: "unauthorized"}))
+    |> halt()
+  end
 end

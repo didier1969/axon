@@ -6,7 +6,8 @@ defmodule LiveView.Witness.Application do
   def start(_type, _args) do
     children = [
       {Registry, keys: :unique, name: LiveView.Witness.registry()},
-      {Phoenix.PubSub, name: LiveView.Witness.pubsub()}
+      {Phoenix.PubSub, name: LiveView.Witness.pubsub()},
+      {LiveView.Witness.Token, []}
     ]
 
     opts = [strategy: :one_for_one, name: LiveView.Witness.Supervisor]

@@ -17,17 +17,22 @@ defmodule LiveView.Witness.HTML do
   def watchdog_script(opts \\ []) do
     oracle_url = Keyword.get(opts, :oracle_url, "/liveview_witness/diagnose")
     timeout = Keyword.get(opts, :timeout, 5000)
+    token = LiveView.Witness.Token.get()
 
     raw("""
     <!-- LiveView.Witness - Survival Watchdog -->
     <script>
       (function() {
         const ORACLE_URL = "#{oracle_url}";
+        const WITNESS_TOKEN = "#{token}";
         const pingOracle = (data) => {
           console.warn("[Witness.Watchdog] Survival trigger:", data);
           fetch(ORACLE_URL, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+              "Content-Type": "application/json",
+              "X-Witness-Token": WITNESS_TOKEN
+            },
             body: JSON.stringify({ ...data, watchdog: true, url: window.location.href })
           }).catch(() => {});
         };
