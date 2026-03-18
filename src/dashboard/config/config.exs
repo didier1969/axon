@@ -27,9 +27,9 @@ config :axon_dashboard, Oban,
   ]
 
 config :axon_dashboard, Axon.BackpressureController,
-  cpu_hard_limit: 70.0,
-  ram_hard_limit: 70.0,
-  io_hard_limit: 20.0
+  cpu_hard_limit: 40.0,
+  ram_hard_limit: 40.0,
+  io_hard_limit: 10.0
 
 # Configure the endpoint
 config :axon_dashboard, AxonDashboardWeb.Endpoint,
