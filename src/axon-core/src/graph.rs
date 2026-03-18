@@ -126,9 +126,13 @@ impl GraphStore {
 
     fn init_schema(&self) -> Result<()> {
         self.execute("CREATE NODE TABLE IF NOT EXISTS File (path STRING, PRIMARY KEY (path))")?;
-        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
+        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, is_unsafe BOOLEAN, is_nif BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CONTAINS (FROM File TO Symbol)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CALLS (FROM Symbol TO Symbol)")?;
+        self.execute("CREATE REL TABLE IF NOT EXISTS CALLS_NIF (FROM Symbol TO Symbol)")?;
+        self.execute("CREATE REL TABLE IF NOT EXISTS IMPORTS (FROM Symbol TO Symbol)")?;
+        self.execute("CREATE REL TABLE IF NOT EXISTS IMPLEMENTS (FROM Symbol TO Symbol)")?;
+        self.execute("CREATE REL TABLE IF NOT EXISTS USES (FROM Symbol TO Symbol)")?;
         Ok(())
     }
 
@@ -143,17 +147,19 @@ impl GraphStore {
         for sym in &result.symbols {
             let safe_name = sym.name.replace("'", "''");
             let is_test = safe_name.contains("test_") || safe_path.contains("test");
+            let is_unsafe = sym.properties.get("unsafe").map(|s| s == "true").unwrap_or(false);
+            let is_nif = sym.properties.get("is_nif").map(|s| s == "true").unwrap_or(false);
 
             if let Some(emb) = &sym.embedding {
                 let vec_str = format!("{:?}", emb); // e.g., [0.1, 0.2, ...]
                 self.execute(&format!(
-                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}, is_public: {}, embedding: {}}})",
-                    safe_name, sym.kind, is_test, sym.is_public, vec_str
+                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}, is_public: {}, is_unsafe: {}, is_nif: {}, embedding: {}}})",
+                    safe_name, sym.kind, is_test, sym.is_public, is_unsafe, is_nif, vec_str
                 )).ok();
             } else {
                 self.execute(&format!(
-                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}, is_public: {}}})",
-                    safe_name, sym.kind, is_test, sym.is_public
+                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}, is_public: {}, is_unsafe: {}, is_nif: {}}})",
+                    safe_name, sym.kind, is_test, sym.is_public, is_unsafe, is_nif
                 )).ok();
             }
 
@@ -163,13 +169,31 @@ impl GraphStore {
             )).ok();
         }
 
+        let valid_rels = ["CALLS", "IMPORTS", "IMPLEMENTS", "CALLS_NIF", "USES"];
+
         for rel in &result.relations {
             let safe_to = rel.to.replace("'", "''");
-            for sym in &result.symbols {
-                let safe_from = sym.name.replace("'", "''");
+            let rel_type = rel.rel_type.to_uppercase();
+            let safe_rel_type = if valid_rels.contains(&rel_type.as_str()) {
+                rel_type
+            } else {
+                "CALLS".to_string()
+            };
+
+            if rel.from.is_empty() || rel.from == "file" || rel.from == "method" {
+                // Fallback: connect all symbols to 'to'
+                for sym in &result.symbols {
+                    let safe_from = sym.name.replace("'", "''");
+                    self.execute(&format!(
+                        "MATCH (a:Symbol {{name: '{}'}}), (b:Symbol {{name: '{}'}}) MERGE (a)-[:{}]->(b)",
+                        safe_from, safe_to, safe_rel_type
+                    )).ok();
+                }
+            } else {
+                let safe_from = rel.from.replace("'", "''");
                 self.execute(&format!(
-                    "MATCH (a:Symbol {{name: '{}'}}), (b:Symbol {{name: '{}'}}) MERGE (a)-[:CALLS]->(b)",
-                    safe_from, safe_to
+                    "MATCH (a:Symbol {{name: '{}'}}), (b:Symbol {{name: '{}'}}) MERGE (a)-[:{}]->(b)",
+                    safe_from, safe_to, safe_rel_type
                 )).ok();
             }
         }
@@ -181,8 +205,8 @@ impl GraphStore {
     pub fn get_security_audit(&self, project_name: &str) -> Result<(usize, String)> {
         // Taint analysis: Path from any symbol in the file to a dangerous sink, depth 1 to 4
         let count_query = format!(
-            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS*1..4]->(d:Symbol) 
-             WHERE f.path CONTAINS '{}' AND d.name IN ['eval', 'exec', 'system', 'pickle'] 
+            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS|CALLS_NIF*1..4]->(d:Symbol) 
+             WHERE f.path CONTAINS '{}' AND (d.name IN ['eval', 'exec', 'system', 'pickle'] OR d.is_unsafe = true) 
              RETURN count(DISTINCT s)",
             project_name
         );
@@ -195,8 +219,8 @@ impl GraphStore {
         };
 
         let paths_query = format!(
-            "MATCH path = (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS*1..4]->(d:Symbol) 
-             WHERE f.path CONTAINS '{}' AND d.name IN ['eval', 'exec', 'system', 'pickle'] 
+            "MATCH path = (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS|CALLS_NIF*1..4]->(d:Symbol) 
+             WHERE f.path CONTAINS '{}' AND (d.name IN ['eval', 'exec', 'system', 'pickle'] OR d.is_unsafe = true) 
              RETURN path LIMIT 5",
             project_name
         );

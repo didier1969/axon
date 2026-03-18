@@ -37,7 +37,8 @@ impl Parser for PythonParser {
         let mut cursor = QueryCursor::new();
         let mut symbols = Vec::new();
         
-        for m in cursor.matches(&query, tree.root_node(), content.as_bytes()) {
+        let source = content.as_bytes();
+        for m in cursor.matches(&query, tree.root_node(), source) {
             for capture in m.captures {
                 let node = capture.node;
                 let kind = query.capture_names()[capture.index as usize];

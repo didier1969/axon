@@ -27,16 +27,32 @@ declare -A GRAMMARS=(
     ["yaml"]="https://github.com/tree-sitter-grammars/tree-sitter-yaml"
 )
 
+# ABI 14 compatible tags
+declare -A TAGS=(
+    ["python"]="v0.21.0"
+    ["elixir"]="v0.3.0"
+    ["rust"]="v0.21.2"
+    ["typescript"]="v0.21.2"
+    ["javascript"]="v0.21.2"
+    ["go"]="v0.21.2"
+    ["java"]="v0.21.0"
+    ["html"]="v0.20.0"
+    ["css"]="v0.21.0"
+    ["markdown"]="v0.2.1"
+    ["yaml"]="v0.6.1"
+)
+
 echo "Building WASM parsers in $PARSERS_DIR..."
 
 cd "$TMP_DIR"
 
 for lang in "${!GRAMMARS[@]}"; do
     repo="${GRAMMARS[$lang]}"
-    echo "Processing $lang from $repo..."
+    tag="${TAGS[$lang]}"
+    echo "Processing $lang from $repo @ $tag..."
     
-    # Clone the grammar repository
-    git clone --depth 1 "$repo" "tree-sitter-$lang"
+    # Clone the grammar repository at the specific tag
+    git clone --depth 1 --branch "$tag" "$repo" "tree-sitter-$lang"
     
     if [ "$lang" == "typescript" ]; then
         # Build typescript and tsx

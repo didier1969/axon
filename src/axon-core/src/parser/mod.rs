@@ -13,17 +13,32 @@ pub fn parse_with_wasm_safe(
 ) -> Option<tree_sitter::Tree> {
     let content_string = content.to_string();
     let result = catch_unwind(|| {
-        let mut store = tree_sitter::WasmStore::new(&*WASM_ENGINE).ok()?;
-        let language = store.load_language(language_name, wasm_bytes).ok()?;
+        let mut store = match tree_sitter::WasmStore::new(&*WASM_ENGINE) {
+            Ok(s) => s,
+            Err(e) => { println!("WasmStore::new error: {:?}", e); return None; }
+        };
+        let language = match store.load_language(language_name, wasm_bytes) {
+            Ok(l) => l,
+            Err(e) => { println!("load_language error: {:?}", e); return None; }
+        };
         let mut parser = tree_sitter::Parser::new();
-        parser.set_wasm_store(store).ok()?;
-        parser.set_language(&language).ok()?;
-        parser.parse(&content_string, None)
+        if let Err(e) = parser.set_wasm_store(store) {
+            println!("set_wasm_store error: {:?}", e); return None;
+        }
+        if let Err(e) = parser.set_language(&language) {
+            println!("set_language error: {:?}", e); return None;
+        }
+        let tree = parser.parse(&content_string, None);
+        if tree.is_none() {
+            println!("parser.parse returned None");
+        }
+        tree
     });
 
     match result {
         Ok(Some(tree)) => Some(tree),
         Ok(None) => {
+            println!("WASM parsing failed to produce a tree for {}", language_name);
             log::warn!("WASM parsing failed to produce a tree for {}", language_name);
             None
         },
@@ -35,6 +50,7 @@ pub fn parse_with_wasm_safe(
             } else {
                 "Unknown panic".to_string()
             };
+            println!("WASM parsing Trap/Panic for {}: {}", language_name, msg);
             log::warn!("WASM parsing Trap/Panic for {}: {}", language_name, msg);
             None
         }
