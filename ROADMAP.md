@@ -71,10 +71,10 @@ Daemon central avec cache LRU, stockage ~/.axon/repos/.
 
 ---
 
-## 🚀 v2.2 - Resource-Aware Scaling (Dynamic Backpressure)
+## 🚀 v2.2 - Resource-Aware Scaling (Dynamic Backpressure) (COMPLETED)
 **Focus :** Intelligence d'infrastructure et respect absolu de l'environnement développeur.
 
-- [ ] **OS Telemetry Monitor :** Intégration de `:os_mon` (Erlang) pour lire la charge CPU et RAM en temps réel.
-- [ ] **Dynamic Worker Scaling :** Adaptation à la volée des limites d'Oban (`indexing_default` / `indexing_hot`).
-- [ ] **Dynamic Batching :** Réduction de la taille des lots (chunk size) envoyés au Data Plane Rust si la pression mémoire augmente.
-- [ ] **Hard Limit 40% :** Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 40% des ressources globales de la machine, se mettant en "pause" automatique si le système utilisateur exige la pleine puissance.
+- [x] **OS Telemetry Monitor :** Intégration de `:os_mon` (Erlang) pour lire la charge CPU et RAM en temps réel.
+- [x] **Dynamic Worker Scaling :** Adaptation à la volée des limites d'Oban (`indexing_default` / `indexing_hot`).
+- [x] **Dynamic Batching :** Réduction de la taille des lots (chunk size) envoyés au Data Plane Rust si la pression mémoire augmente.
+- [x] **Hard Limit 40% :** Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 40% des ressources globales de la machine, se mettant en "pause" automatique si le système utilisateur exige la pleine puissance.

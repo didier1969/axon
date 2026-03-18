@@ -5,8 +5,11 @@ defmodule Axon.Watcher.Progress do
   require Logger
 
   @hydra_host {127, 0, 0, 1}
-  @hydra_port 6040
   @api_key "dev_key"
+
+  defp hydra_port() do
+    String.to_integer(System.get_env("HYDRA_TCP_PORT") || "6040")
+  end
 
   def update_status(repo_slug, status_map) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
@@ -106,7 +109,7 @@ defmodule Axon.Watcher.Progress do
   end
 
   defp sync_send_to_hydradb(op, args) do
-    case :gen_tcp.connect(@hydra_host, @hydra_port, [:binary, packet: 4, active: false], 5000) do
+    case :gen_tcp.connect(@hydra_host, hydra_port(), [:binary, packet: 4, active: false], 5000) do
       {:ok, socket} ->
         :gen_tcp.send(socket, Msgpax.pack!(%{"auth" => @api_key}))
         case :gen_tcp.recv(socket, 0, 5000) do
@@ -126,7 +129,7 @@ defmodule Axon.Watcher.Progress do
   end
 
   defp send_to_hydradb(op, args) do
-    case :gen_tcp.connect(@hydra_host, @hydra_port, [:binary, packet: 4, active: false], 5000) do
+    case :gen_tcp.connect(@hydra_host, hydra_port(), [:binary, packet: 4, active: false], 5000) do
       {:ok, socket} ->
         :gen_tcp.send(socket, Msgpax.pack!(%{"auth" => @api_key}))
         case :gen_tcp.recv(socket, 0, 5000) do
@@ -141,7 +144,7 @@ defmodule Axon.Watcher.Progress do
         end
       {:error, reason} ->
         # Log only in debug to avoid pollution, as this is best-effort async reporting
-        Logger.debug("[Progress] HydraDB offline at #{@hydra_port}: #{inspect(reason)}")
+        Logger.debug("[Progress] HydraDB offline at #{hydra_port()}: #{inspect(reason)}")
     end
   end
 end

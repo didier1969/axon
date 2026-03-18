@@ -68,9 +68,10 @@ defmodule Axon.BackpressureController do
 
   def get_limits do
     config = Application.get_env(:axon_dashboard, Axon.BackpressureController, [])
-    cpu_limit = Keyword.get(config, :cpu_hard_limit, 70.0)
-    ram_limit = Keyword.get(config, :ram_hard_limit, 70.0)
-    io_limit = Keyword.get(config, :io_hard_limit, 20.0)
+    # Nexus Grade: Strict 40% cap to remain invisible to the user
+    cpu_limit = Keyword.get(config, :cpu_hard_limit, 40.0)
+    ram_limit = Keyword.get(config, :ram_hard_limit, 40.0)
+    io_limit = Keyword.get(config, :io_hard_limit, 10.0)
     {cpu_limit, ram_limit, io_limit}
   end
 
@@ -81,7 +82,15 @@ defmodule Axon.BackpressureController do
     ram_pressure = load.ram / max(ram_limit, 0.1)
     io_pressure = Map.get(load, :io, 0.0) / max(io_limit, 0.1)
     
-    max(cpu_pressure, max(ram_pressure, io_pressure))
+    pressure = max(cpu_pressure, max(ram_pressure, io_pressure))
+
+    :telemetry.execute([:axon, :backpressure, :pressure_computed], %{pressure: pressure}, %{
+      cpu: load.cpu,
+      ram: load.ram,
+      io: Map.get(load, :io, 0.0)
+    })
+
+    pressure
   end
 
   defp apply_backpressure(state) do
@@ -94,6 +103,7 @@ defmodule Axon.BackpressureController do
           Logger.warning(
             "System resources saturated (Pressure: #{Float.round(pressure * 100, 1)}%). Pausing indexing queues. (CPU: #{Float.round(load.cpu, 1)}%, RAM: #{Float.round(load.ram, 1)}%, IO Wait: #{Float.round(Map.get(load, :io, 0.0), 1)}%)"
           )
+          :telemetry.execute([:axon, :backpressure, :queues_paused], %{pressure: pressure})
           pause_queues(state.oban_mod)
         end
         %{state | paused: true, last_limit: 0}
@@ -103,6 +113,7 @@ defmodule Axon.BackpressureController do
           Logger.info(
             "System load recovered (Pressure: #{Float.round(pressure * 100, 1)}%). Resuming indexing queues."
           )
+          :telemetry.execute([:axon, :backpressure, :queues_resumed], %{pressure: pressure})
           resume_queues(state.oban_mod)
         end
 
@@ -112,6 +123,7 @@ defmodule Axon.BackpressureController do
           Logger.info(
             "Adjusting indexing_default limit to #{limit} (Pressure: #{Float.round(pressure * 100, 1)}%)"
           )
+          :telemetry.execute([:axon, :backpressure, :limit_adjusted], %{limit: limit}, %{pressure: pressure})
           scale_queues(state.oban_mod, limit)
         end
 

@@ -4,7 +4,7 @@ defmodule AxonDashboardWeb.StatusLiveTest do
 
   test "renders waiting status initially", %{conn: conn} do
     {:ok, _view, html} = live(conn, "/")
-    assert html =~ "Fleet Connection Offline"
+    assert html =~ "Multi-Project Control Plane"
   end
 
   test "updates stats on bridge event", %{conn: conn} do

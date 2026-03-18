@@ -91,9 +91,13 @@ in
 
     axon-db-start.exec = ''
       if [ ! -d "$HYDRADB_RUNTIME/deps" ]; then axon-db-setup; fi
-      CURRENT_PORT=''${TCP_PORT:-6040}
-      echo "🚀 Starting Isolated HydraDB (Pod C) on port $CURRENT_PORT..."
-      cd $HYDRADB_RUNTIME && export HYDRA_DB_API_KEY=dev_key && export TCP_PORT=$CURRENT_PORT && elixir --name hydra_axon@127.0.0.1 -S mix run --no-halt
+      export TCP_PORT=''${HYDRA_TCP_PORT:-6040}
+      export HTTP_PORT=''${HYDRA_HTTP_PORT:-4000}
+      export ODATA_PORT=''${HYDRA_ODATA_PORT:-5000}
+      export HTTP2_PORT=''${HYDRA_HTTP2_PORT:-50051}
+      export MCP_PORT=''${HYDRA_MCP_PORT:-7047}
+      echo "🚀 Starting Isolated HydraDB (Pod C) [TCP: $TCP_PORT, HTTP: $HTTP_PORT]..."
+      cd $HYDRADB_RUNTIME && export HYDRA_DB_API_KEY=dev_key && elixir --name hydra_axon@127.0.0.1 -S mix run --no-halt
     '';
   };
 

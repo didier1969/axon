@@ -347,6 +347,23 @@
   - `src/axon-core/src/parser/python_bridge/typeql_parser.py`
   - `src/axon-core/src/parser/python_bridge/datalog_parser.py`
 
+### Phase 22: Resource-Aware Scaling (Dynamic Backpressure)
+- **Status:** complete
+- Actions taken:
+  - Intégration de `:os_mon` (Erlang) pour lire la charge CPU et RAM en temps réel.
+  - Création de `Axon.BackpressureController` pour ajuster à la volée les limites d'Oban (`indexing_default` / `indexing_hot`).
+  - Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 40% des ressources globales.
+  - Test UI mis à jour pour s'adapter aux modifications.
+  - Tous les tests 100% PASS.
+- Files modified:
+  - `src/dashboard/lib/axon_nexus/axon/backpressure_controller.ex`
+  - `src/dashboard/lib/axon_nexus/axon/watcher/server.ex`
+  - `src/dashboard/lib/axon_nexus/axon/watcher/progress.ex`
+  - `src/dashboard/test/axon_dashboard_web/live/status_live_test.exs`
+  - `scripts/start-v2.sh`
+  - `ROADMAP.md`
+  - `task_plan.md`
+
 ## Test Results
 <!-- 
   WHAT: Table of tests you ran, what you expected, what actually happened.
