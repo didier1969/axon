@@ -68,10 +68,9 @@ defmodule Axon.BackpressureController do
 
   def get_limits do
     config = Application.get_env(:axon_dashboard, Axon.BackpressureController, [])
-    # Nexus Grade: Strict 40% cap to remain invisible to the user
-    cpu_limit = Keyword.get(config, :cpu_hard_limit, 40.0)
-    ram_limit = Keyword.get(config, :ram_hard_limit, 40.0)
-    io_limit = Keyword.get(config, :io_hard_limit, 10.0)
+    cpu_limit = Keyword.get(config, :cpu_hard_limit, 70.0)
+    ram_limit = Keyword.get(config, :ram_hard_limit, 70.0)
+    io_limit = Keyword.get(config, :io_hard_limit, 20.0)
     {cpu_limit, ram_limit, io_limit}
   end
 

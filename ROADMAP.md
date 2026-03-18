@@ -77,4 +77,4 @@ Daemon central avec cache LRU, stockage ~/.axon/repos/.
 - [x] **OS Telemetry Monitor :** Intégration de `:os_mon` (Erlang) pour lire la charge CPU et RAM en temps réel.
 - [x] **Dynamic Worker Scaling :** Adaptation à la volée des limites d'Oban (`indexing_default` / `indexing_hot`).
 - [x] **Dynamic Batching :** Réduction de la taille des lots (chunk size) envoyés au Data Plane Rust si la pression mémoire augmente.
-- [x] **Hard Limit 40% :** Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 40% des ressources globales de la machine, se mettant en "pause" automatique si le système utilisateur exige la pleine puissance.
+- [x] **Hard Limit 70% :** Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 70% des ressources globales de la machine, se mettant en "pause" automatique si le système utilisateur exige la pleine puissance.

@@ -352,7 +352,7 @@
 - Actions taken:
   - Intégration de `:os_mon` (Erlang) pour lire la charge CPU et RAM en temps réel.
   - Création de `Axon.BackpressureController` pour ajuster à la volée les limites d'Oban (`indexing_default` / `indexing_hot`).
-  - Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 40% des ressources globales.
+  - Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 70% des ressources globales.
   - Test UI mis à jour pour s'adapter aux modifications.
   - Tous les tests 100% PASS.
 - Files modified:
