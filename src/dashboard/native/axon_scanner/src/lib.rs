@@ -3,7 +3,6 @@ use ignore::WalkBuilder;
 use std::path::Path;
 use std::collections::HashSet;
 use std::thread;
-use walkdir::WalkDir;
 
 mod atoms {
     rustler::atoms! {
@@ -11,8 +10,17 @@ mod atoms {
     }
 }
 
+fn is_supported(path: &Path, extensions: &[String]) -> bool {
+    if let Some(ext) = path.extension() {
+        let ext_str = ext.to_string_lossy().to_lowercase();
+        extensions.iter().any(|e| e.to_lowercase() == ext_str)
+    } else {
+        false
+    }
+}
+
 #[rustler::nif]
-fn scan(path: String) -> NifResult<Vec<String>> {
+fn scan(path: String, extensions: Vec<String>) -> NifResult<Vec<String>> {
     let root_path = Path::new(&path);
     let mut files_set = HashSet::new();
     
@@ -23,7 +31,6 @@ fn scan(path: String) -> NifResult<Vec<String>> {
     builder.git_exclude(false);
     builder.add_custom_ignore_filename(".axonignore");
     
-    // Ajout des filtres globaux
     let agence_ignore = Path::new("/home/dstadel/projects/.axonignore");
     if agence_ignore.exists() { builder.add_ignore(agence_ignore); }
     let moteur_ignore = Path::new("/home/dstadel/projects/axon/.axonignore");
@@ -32,29 +39,13 @@ fn scan(path: String) -> NifResult<Vec<String>> {
     for result in builder.build() {
         if let Ok(entry) = result {
             if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-                files_set.insert(entry.path().to_string_lossy().into_owned());
+                if is_supported(entry.path(), &extensions) {
+                    files_set.insert(entry.path().to_string_lossy().into_owned());
+                }
             }
         }
     }
     
-    // 2. Règle d'Or : Scan forcé de TOUS les .md (même dans dossiers ignorés, mais en évitant les trous noirs)
-    let skip_dirs = vec![".git", ".axon", "_build", "deps", ".devenv", "node_modules", "target"];
-    let walker = WalkDir::new(root_path).into_iter().filter_entry(move |e| {
-        if e.file_type().is_dir() {
-            let name = e.file_name().to_string_lossy();
-            !skip_dirs.contains(&name.as_ref())
-        } else {
-            true
-        }
-    });
-
-    for entry in walker.filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() {
-            if entry.path().extension().map(|ext| ext == "md").unwrap_or(false) {
-                files_set.insert(entry.path().to_string_lossy().into_owned());
-            }
-        }
-    }    
     let mut final_list: Vec<String> = files_set.into_iter().collect();
     final_list.sort();
     
@@ -62,13 +53,13 @@ fn scan(path: String) -> NifResult<Vec<String>> {
 }
 
 #[rustler::nif]
-fn start_streaming(path: String, pid: LocalPid) -> NifResult<Atom> {
+fn start_streaming(path: String, pid: LocalPid, extensions: Vec<String>) -> NifResult<Atom> {
     thread::spawn(move || {
         let mut owned_env = OwnedEnv::new();
         let root_path = Path::new(&path);
         let mut sent_files = HashSet::new();
 
-        // 1. Scan standard respectant .axonignore
+        // Scan standard respectant .axonignore + Extension filtering
         let mut builder = WalkBuilder::new(root_path);
         builder.git_ignore(false);
         builder.git_global(false);
@@ -83,31 +74,7 @@ fn start_streaming(path: String, pid: LocalPid) -> NifResult<Atom> {
         for result in builder.build() {
             if let Ok(entry) = result {
                 if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-                    let file_path = entry.path().to_string_lossy().into_owned();
-                    if !sent_files.contains(&file_path) {
-                        let _ = owned_env.send_and_clear(&pid, |env| {
-                            (atoms::ok(), &file_path).encode(env)
-                        });
-                        sent_files.insert(file_path);
-                    }
-                }
-            }
-        }
-
-        // 2. Règle d'Or : Scan forcé de TOUS les .md (même dans dossiers ignorés, mais en évitant les trous noirs)
-        let skip_dirs = vec![".git", ".axon", "_build", "deps", ".devenv", "node_modules", "target"];
-        let walker = WalkDir::new(root_path).into_iter().filter_entry(move |e| {
-            if e.file_type().is_dir() {
-                let name = e.file_name().to_string_lossy();
-                !skip_dirs.contains(&name.as_ref())
-            } else {
-                true
-            }
-        });
-
-        for entry in walker.filter_map(|e| e.ok()) {
-                if entry.file_type().is_file() {
-                    if entry.path().extension().map(|ext| ext == "md").unwrap_or(false) {
+                    if is_supported(entry.path(), &extensions) {
                         let file_path = entry.path().to_string_lossy().into_owned();
                         if !sent_files.contains(&file_path) {
                             let _ = owned_env.send_and_clear(&pid, |env| {
@@ -118,6 +85,7 @@ fn start_streaming(path: String, pid: LocalPid) -> NifResult<Atom> {
                     }
                 }
             }
+        }
 
         // Send "done" message
         let _ = owned_env.send_and_clear(&pid, |env| {

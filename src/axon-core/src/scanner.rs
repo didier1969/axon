@@ -45,10 +45,8 @@ impl Scanner {
 
     fn is_supported(&self, path: &std::path::Path) -> bool {
         if let Some(ext) = path.extension() {
-            matches!(ext.to_str(),
-                Some("py") | Some("ex") | Some("exs") | Some("rs") | Some("ts") | Some("tsx") | 
-                Some("js") | Some("jsx") | Some("go") | Some("java") | Some("sql") | Some("yml") | Some("yaml") | Some("md") | Some("markdown") | Some("html") | Some("css")
-            )
+            let ext_str = ext.to_string_lossy().to_lowercase();
+            crate::config::CONFIG.indexing.supported_extensions.iter().any(|e| e.to_lowercase() == ext_str)
         } else {
             false
         }
@@ -65,10 +63,10 @@ mod tests {
     fn test_scanner_filters_files() {
         let dir = tempdir().unwrap();
         let py_file = dir.path().join("test.py");
-        let txt_file = dir.path().join("ignore.txt");
+        let bin_file = dir.path().join("ignore.exe");
         
         fs::write(&py_file, "print(1)").unwrap();
-        fs::write(&txt_file, "ignore me").unwrap();
+        fs::write(&bin_file, "ignore me").unwrap();
 
         let scanner = Scanner::new(dir.path().to_str().unwrap());
         let files = scanner.scan();

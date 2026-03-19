@@ -1,6 +1,7 @@
 mod parser;
 mod scanner;
 mod bridge;
+mod config;
 mod graph;
 mod mcp;
 mod embedder;
