@@ -70,7 +70,6 @@ impl PythonParser {
                         from: name.clone(),
                         to: base_name,
                         rel_type: "extends".to_string(),
-                        start_line: child.start_position().row + 1,
                         properties: HashMap::new(),
                     });
                 }
@@ -141,7 +140,6 @@ impl PythonParser {
                 from: full_name.clone(),
                 to: target,
                 rel_type: "tests".to_string(),
-                start_line: node.start_position().row + 1,
                 properties: HashMap::new(),
             });
         }
@@ -173,7 +171,6 @@ impl PythonParser {
                 from: scope.to_string(),
                 to: call_name,
                 rel_type: "calls".to_string(),
-                start_line: node.start_position().row + 1,
                 properties: HashMap::new(),
             });
         }
@@ -198,7 +195,6 @@ impl PythonParser {
                     from: "module".to_string(), // Python files are modules
                     to: import_name,
                     rel_type: "imports".to_string(),
-                    start_line: node.start_position().row + 1,
                     properties: HashMap::new(),
                 });
             }
@@ -226,22 +222,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_python_simple() {
+    fn test_parse_python_full() {
         let code = r#"
-class MyClass:
-    def my_method(self):
-        pass
+import os
+from sys import argv
 
-def my_function():
+class MyClass(BaseClass):
+    def my_method(self, data):
+        os.system(data)
+        eval(data)
+
+def test_my_method():
     pass
 "#;
         let parser = PythonParser::new();
         let result = parser.parse(code);
         
-        // We comment out these asserts since it's just scaffolding now.
-        // assert_eq!(result.symbols.len(), 3);
-        // assert!(result.symbols.iter().any(|s| s.name == "MyClass" && s.kind == "class"));
-        // assert!(result.symbols.iter().any(|s| s.name == "my_method" && s.kind == "function"));
-        // assert!(result.symbols.iter().any(|s| s.name == "my_function" && s.kind == "function"));
+        // Check symbols
+        assert!(result.symbols.iter().any(|s| s.name == "MyClass" && s.kind == "class"));
+        assert!(result.symbols.iter().any(|s| s.name == "MyClass.my_method" && s.kind == "method"));
+        assert!(result.symbols.iter().any(|s| s.name == "test_my_method" && s.kind == "function"));
+        
+        // Check relations
+        assert!(result.relations.iter().any(|r| r.from == "MyClass" && r.to == "BaseClass" && r.rel_type == "extends"));
+        assert!(result.relations.iter().any(|r| r.from == "MyClass.my_method" && r.to == "os.system" && r.rel_type == "calls"));
+        assert!(result.relations.iter().any(|r| r.from == "MyClass.my_method" && r.to == "eval" && r.rel_type == "calls"));
+        assert!(result.relations.iter().any(|r| r.from == "test_my_method" && r.to == "my_method" && r.rel_type == "tests"));
+        assert!(result.relations.iter().any(|r| r.to == "os" && r.rel_type == "imports"));
     }
 }
