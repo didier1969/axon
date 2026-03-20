@@ -40,8 +40,116 @@ impl PythonParser {
         None
     }
 
-    fn extract_class<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, _scope: &str) {}
-    fn extract_function<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, _scope: &str) {}
+    fn extract_class<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, _scope: &str) {
+        let name_node = self.find_child_by_type(node, "identifier");
+        let name = if let Some(n) = name_node {
+            n.utf8_text(source).unwrap_or("").to_string()
+        } else {
+            return;
+        };
+
+        result.symbols.push(Symbol {
+            name: name.clone(),
+            kind: "class".to_string(),
+            start_line: node.start_position().row + 1,
+            end_line: node.end_position().row + 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: !name.starts_with("_"),
+            properties: HashMap::new(),
+            embedding: None,
+        });
+
+        // Parse base classes (extends)
+        if let Some(args) = self.find_child_by_type(node, "argument_list") {
+            let mut cursor = args.walk();
+            for child in args.children(&mut cursor) {
+                if child.kind() == "identifier" || child.kind() == "attribute" {
+                    let base_name = child.utf8_text(source).unwrap_or("").to_string();
+                    result.relations.push(Relation {
+                        from: name.clone(),
+                        to: base_name,
+                        rel_type: "extends".to_string(),
+                        start_line: child.start_position().row + 1,
+                        properties: HashMap::new(),
+                    });
+                }
+            }
+        }
+
+        if let Some(body) = self.find_child_by_type(node, "block") {
+            self.walk(body, source, result, &name);
+        }
+    }
+
+    fn extract_function<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, scope: &str) {
+        let name_node = self.find_child_by_type(node, "identifier");
+        let func_name = if let Some(n) = name_node {
+            n.utf8_text(source).unwrap_or("").to_string()
+        } else {
+            return;
+        };
+
+        // If it's in a class, it's a method
+        let is_method = !scope.is_empty();
+        
+        let mut props = HashMap::new();
+        if is_method {
+            props.insert("parent_class".to_string(), scope.to_string());
+        }
+
+        let full_name = if is_method {
+            format!("{}.{}", scope, func_name)
+        } else {
+            func_name.clone()
+        };
+
+        // Determine if it's a test function
+        let is_test = func_name.starts_with("test_");
+        
+        // Find decorators
+        if let Some(parent) = node.parent() {
+            if parent.kind() == "decorated_definition" {
+                let mut cursor = parent.walk();
+                for child in parent.children(&mut cursor) {
+                    if child.kind() == "decorator" {
+                        if let Some(id) = self.find_child_by_type(child, "identifier") {
+                            let dec_name = id.utf8_text(source).unwrap_or("").to_string();
+                            props.insert(format!("decorator_{}", dec_name), "true".to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        result.symbols.push(Symbol {
+            name: full_name.clone(),
+            kind: if is_method { "method".to_string() } else { "function".to_string() },
+            start_line: node.start_position().row + 1,
+            end_line: node.end_position().row + 1,
+            docstring: None,
+            is_entry_point: func_name == "main",
+            is_public: !func_name.starts_with("_") || func_name == "__init__",
+            properties: props,
+            embedding: None,
+        });
+
+        // Link test function to original function if applicable
+        if is_test {
+            let target = func_name.trim_start_matches("test_").to_string();
+            result.relations.push(Relation {
+                from: full_name.clone(),
+                to: target,
+                rel_type: "tests".to_string(),
+                start_line: node.start_position().row + 1,
+                properties: HashMap::new(),
+            });
+        }
+
+        if let Some(body) = self.find_child_by_type(node, "block") {
+            self.walk(body, source, result, &full_name);
+        }
+    }
     fn extract_call<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, _scope: &str) {}
     fn extract_import<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {}
 }
