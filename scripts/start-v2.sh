@@ -91,6 +91,15 @@ for i in {1..60}; do
     fi
 done
 
+echo ""
+echo "⚙️ Running MCP End-to-End Verification..."
+if ! python3 scripts/e2e_mcp_test.py; then
+    echo "❌ FATAL: MCP Proxy failed End-to-End verification. The AI client will NOT be able to connect."
+    echo "Check 'python3 scripts/mcp-stdio-proxy.py' for import errors or dependencies."
+    exit 1
+fi
+echo ""
+
 echo "🛡️ Axon is rising in TMUX session 'axon'."
 echo "To view processes: 'tmux attach -t axon'"
 echo ""
