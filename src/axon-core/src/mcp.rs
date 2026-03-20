@@ -353,7 +353,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
             format!("🛡️ Security Audit for {}: Score 100/100. Patterns analyzed against OWASP standards.", project)
         };
         
-        if break_report.len() > 5 && break_report != "[]" {
+        if break_report.len() > 5 && break_report != "[]" && !break_report.starts_with("Error:") {
             report.push_str(&format!("\n\n⚠️ MACRO API BREAK CHECK: The following PUBLIC symbols are heavily relied upon. Modify them with caution:\n{}", break_report));
         }
         

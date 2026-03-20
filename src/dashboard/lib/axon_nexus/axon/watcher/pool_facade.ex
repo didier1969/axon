@@ -102,6 +102,19 @@ defmodule Axon.Watcher.PoolFacade do
               is_entry_point: entries > 0
             })
             
+            # Mettre à jour le cache en mémoire pour éviter la charge SQLite
+            project_id = Axon.Watcher.Tracking.get_project_id_for_file(path)
+            if project_id do
+               Axon.Watcher.StatsCache.increment_file_stats(project_id, %{
+                 completed: 1,
+                 symbols: syms,
+                 relations: rels,
+                 entries: entries,
+                 security: sec,
+                 coverage: cov
+               })
+            end
+            
             # Publier l'évènement pour le LiveView
             Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", {:file_indexed, path, :ok})
           rescue

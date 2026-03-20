@@ -34,11 +34,21 @@ def forward_uds_to_stdout(sock):
 
 def main():
     sock_path = "/tmp/axon-v2.sock"
-    try:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.connect(sock_path)
-    except Exception as e:
-        sys.stderr.write(f"Error connecting to UDS {sock_path}: {e}\n")
+    
+    # Retry loop to allow Axon Core to finish booting (FastEmbed takes ~5-10s)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connected = False
+    for i in range(30):
+        try:
+            client.connect(sock_path)
+            connected = True
+            break
+        except Exception:
+            import time
+            time.sleep(1)
+            
+    if not connected:
+        sys.stderr.write(f"Error connecting to UDS {sock_path} after 30 seconds. Is Axon running?\n")
         sys.exit(1)
 
     t1 = threading.Thread(target=forward_stdin_to_uds, args=(client,), daemon=True)

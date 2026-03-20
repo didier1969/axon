@@ -58,13 +58,22 @@ defmodule Axon.Watcher.Tracking do
 
       file ->
         attrs = Map.put(params, :status, status)
-        
+
         file
         |> IndexedFile.changeset(attrs)
         |> Repo.update!()
     end
   end
 
+  @doc """
+  Gets the project ID of a file.
+  """
+  def get_project_id_for_file(path) do
+    case Repo.get(IndexedFile, path) do
+      nil -> nil
+      file -> file.project_id
+    end
+  end
   @doc """
   Returns a map of projects and their file statistics, and the top 14 recently updated files.
   """

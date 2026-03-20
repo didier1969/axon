@@ -5,7 +5,7 @@ defmodule AxonDashboardWeb.StatusLive do
   def mount(_params, _session, socket) do
     socket =
       if connected?(socket) do
-        :timer.send_interval(1000, self(), :tick)
+        :timer.send_interval(1000, self(), :tick_time)
         Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
         Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "telemetry_events")
         Phoenix.PubSub.subscribe(LiveView.Witness.PubSub, "witness_alerts")
@@ -65,12 +65,12 @@ defmodule AxonDashboardWeb.StatusLive do
 
     stats =
       try do
-        Axon.Watcher.Tracking.get_dashboard_stats()
+        Axon.Watcher.StatsCache.get_stats()
       catch
-        :exit, _ -> %{directories: %{}, last_files: []}
-      end || %{directories: %{}, last_files: []}
+        :exit, _ -> %{projects: %{}, last_files: []}
+      end || %{projects: %{}, last_files: []}
 
-    dirs = Map.get(stats, :directories, %{})
+    dirs = Map.get(stats, :projects, %{})
     last_f = Map.get(stats, :last_files, [])
 
     projects =
@@ -128,11 +128,14 @@ defmodule AxonDashboardWeb.StatusLive do
     )
   end
 
-  def handle_info(:tick, socket) do
-    {:noreply,
-     socket
-     |> assign(sys_time: Time.utc_now() |> Time.truncate(:second))
-     |> fetch_and_assign_stats()}
+  def handle_info(:tick_time, socket) do
+    # Only update the clock every second, NO database hit.
+    {:noreply, assign(socket, sys_time: Time.utc_now() |> Time.truncate(:second))}
+  end
+  
+  def handle_info(:stats_updated, socket) do
+    # Triggered by PubSub only when an actual indexed file modifies the cache.
+    {:noreply, fetch_and_assign_stats(socket)}
   end
 
   def handle_info(:trigger_initial_scan, socket) do
