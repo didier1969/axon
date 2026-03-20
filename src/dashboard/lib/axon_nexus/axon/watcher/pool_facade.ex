@@ -79,6 +79,39 @@ defmodule Axon.Watcher.PoolFacade do
     # Here we could handle acknowledgments from Rust
     # But for the Priority Scanner, we primarily want to push data.
     Logger.debug("[Pod A] Received from Bridge: #{inspect(data)}")
+
+    data
+    |> String.split("\n", trim: true)
+    |> Enum.each(fn line ->
+      case Jason.decode(line) do
+        {:ok, %{"FileIndexed" => payload}} ->
+          path = payload["path"]
+          syms = payload["symbol_count"] || 0
+          rels = payload["relation_count"] || 0
+          sec = payload["security_score"] || 100
+          cov = payload["coverage_score"] || 0
+          entries = payload["entry_points"] || 0
+          
+          # Mettre à jour la base de données SQLite pour l'interface
+          try do
+            Axon.Watcher.Tracking.mark_file_status!(path, "indexed", %{
+              symbols_count: syms,
+              relations_count: rels,
+              security_score: sec,
+              coverage_score: cov,
+              is_entry_point: entries > 0
+            })
+            
+            # Publier l'évènement pour le LiveView
+            Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", {:file_indexed, path, :ok})
+          rescue
+            e -> Logger.warning("[Pod A] Failed to update tracking for #{path}: #{inspect(e)}")
+          end
+
+        _ -> :ok
+      end
+    end)
+
     {:noreply, state}
   end
 

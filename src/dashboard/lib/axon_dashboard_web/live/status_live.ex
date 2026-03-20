@@ -75,16 +75,13 @@ defmodule AxonDashboardWeb.StatusLive do
 
     projects =
       Enum.reduce(dirs, %{}, fn {dir, info}, acc ->
-        security = Map.get(state.security_scores, dir, 100)
-        coverage = Map.get(state, :coverage_scores, %{}) |> Map.get(dir, 0)
-        
         Map.put(acc, dir, %{
           symbols: info.symbols,
           relations: info.relations,
           files: info.completed + info.failed + info.ignored,
           entries: info.entries,
-          security: security,
-          coverage: coverage,
+          security: info.security,
+          coverage: info.coverage,
           total_files: info.total,
           failed_files: info.failed,
           ignored_files: info.ignored
@@ -429,69 +426,6 @@ defmodule AxonDashboardWeb.StatusLive do
             <p class="text-sm font-mono font-medium text-white">{@uptime_str}</p>
           </div>
           <div class="h-8 w-px bg-base-content/10"></div>
-
-          <div class="flex gap-2">
-            <button
-              phx-click="start_scan"
-              class="premium-btn premium-btn-primary h-11 px-6 group"
-              disabled={@status == :processing}
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                class={"w-5 h-5 #{if @status == :processing, do: "animate-spin"}"}
-              >
-                <path
-                  fill-rule="evenodd"
-                  d="M4.755 10.059a7.5 7.5 0 0 1 12.548-3.364l1.903 1.903h-3.183a.75.75 0 1 0 0 1.5h4.992a.75.75 0 0 0 .75-.75V4.356a.75.75 0 0 0-1.5 0v3.18l-1.9-1.9A9 9 0 0 0 3.306 9.67a.75.75 0 1 0 1.45.388Zm15.408 3.352a.75.75 0 0 0-.967.45 7.5 7.5 0 0 1-12.548 3.364l-1.902-1.903h3.183a.75.75 0 0 0 0-1.5H2.937a.75.75 0 0 0-.75.75v4.992a.75.75 0 0 0 1.5 0v-3.18l1.9 1.9a9 9 0 0 0 15.059-4.035.75.75 0 0 0-.45-.968Z"
-                  clip-rule="evenodd"
-                />
-              </svg>
-              Start
-            </button>
-
-            <button
-              phx-click="stop_scan"
-              class="btn btn-outline border-white/20 text-white hover:bg-white/10 h-11 px-4"
-              disabled={@status != :processing}
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                class="w-5 h-5 text-red-500"
-              >
-                <path
-                  fill-rule="evenodd"
-                  d="M4.5 7.5a3 3 0 0 1 3-3h9a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3h-9a3 3 0 0 1-3-3v-9Z"
-                  clip-rule="evenodd"
-                />
-              </svg>
-              Stop
-            </button>
-
-            <button
-              phx-click="reset_db"
-              class="btn btn-ghost hover:bg-red-500/20 hover:text-red-300 text-white/50 h-11 px-4"
-              data-confirm="Are you sure you want to completely erase the graph database?"
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke-width="1.5"
-                stroke="currentColor"
-                class="w-5 h-5"
-              >
-                <path
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"
-                />
-              </svg>
-            </button>
-          </div>
         </div>
       </nav>
 
@@ -722,7 +656,7 @@ defmodule AxonDashboardWeb.StatusLive do
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
-            <%= for {name, info} <- Enum.sort_by(@projects, fn {n, _} -> n end) do %>
+            <%= for {name, info} <- Enum.sort_by(@projects, fn {_, info} -> info.total_files end, :desc) do %>
               <div class="project-card premium-card p-0 overflow-hidden hover:scale-[1.02] transition-all duration-300 cursor-pointer group border-white/5 hover:border-primary/40 shadow-2xl">
                 <div class="p-8 space-y-6 bg-gradient-to-br from-white/5 to-transparent">
                   <!-- Project Title -->
@@ -760,34 +694,34 @@ defmodule AxonDashboardWeb.StatusLive do
                   
     <!-- Scores -->
                   <div class="grid grid-cols-2 gap-4">
-                    <div class="bg-black/20 rounded-lg p-4 border border-white/5 opacity-50 grayscale" title="Security Analysis will be enabled in Phase 3">
+                    <div class="bg-black/20 rounded-lg p-4 border border-white/5">
                       <p class="text-[9px] opacity-30 uppercase tracking-widest font-black mb-1">
-                        Security Score (P3)
+                        Security Score
                       </p>
                       <div class="flex items-center gap-2">
                         <div class="h-1.5 flex-grow bg-base-300 rounded-full overflow-hidden">
                           <div
-                            class="bg-base-content/20 h-full rounded-full"
-                            style="width: 0%"
+                            class="bg-accent h-full rounded-full shadow-[0_0_8px_rgba(var(--color-accent),0.5)]"
+                            style={"width: #{info.security}%"}
                           >
                           </div>
                         </div>
-                        <span class="text-xs font-mono font-bold text-base-content/30">N/A</span>
+                        <span class="text-xs font-mono font-bold text-accent">{info.security}%</span>
                       </div>
                     </div>
-                    <div class="bg-black/20 rounded-lg p-4 border border-white/5 opacity-50 grayscale" title="Test Coverage Analysis will be enabled in Phase 3">
+                    <div class="bg-black/20 rounded-lg p-4 border border-white/5">
                       <p class="text-[9px] opacity-30 uppercase tracking-widest font-black mb-1">
-                        Test Coverage (P3)
+                        Test Coverage
                       </p>
                       <div class="flex items-center gap-2">
                         <div class="h-1.5 flex-grow bg-base-300 rounded-full overflow-hidden">
                           <div
-                            class="bg-base-content/20 h-full rounded-full"
-                            style="width: 0%"
+                            class="bg-primary h-full rounded-full shadow-[0_0_8px_rgba(var(--color-primary),0.5)]"
+                            style={"width: #{info.coverage}%"}
                           >
                           </div>
                         </div>
-                        <span class="text-xs font-mono font-bold text-base-content/30">N/A</span>
+                        <span class="text-xs font-mono font-bold text-primary">{info.coverage}%</span>
                       </div>
                     </div>
                   </div>

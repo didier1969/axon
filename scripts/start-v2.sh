@@ -78,8 +78,24 @@ for i in {1..30}; do
     fi
 done
 
+echo "⏳ Waiting for Axon Dashboard (Elixir Control Plane) to boot (Database + Compilation)..."
+# Polling loop pour vérifier que Phoenix a fini sa compilation et lié son port
+for i in {1..60}; do
+    if nc -z localhost $PHX_PORT 2>/dev/null; then
+        echo "✅ Axon Dashboard is Ready."
+        break
+    fi
+    sleep 2
+    if [ "$i" -eq 60 ]; then
+        echo "⚠️ Timeout waiting for Axon Dashboard. Check 'tmux attach -t axon:nexus' for compilation errors."
+    fi
+done
+
 echo "🛡️ Axon is rising in TMUX session 'axon'."
 echo "To view processes: 'tmux attach -t axon'"
-echo "Dashboard: http://localhost:$PHX_PORT"
-echo "HydraDB TCP: $HYDRA_TCP_PORT"
-echo "HydraDB Services: TCP:$HYDRA_TCP_PORT, HTTP:$HYDRA_HTTP_PORT, MCP:$HYDRA_MCP_PORT"
+echo ""
+
+# Run the unified health check to show the state
+if [ -x "bin/axol" ]; then
+    ./bin/axol
+fi
