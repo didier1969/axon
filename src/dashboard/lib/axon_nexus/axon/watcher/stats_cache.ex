@@ -42,16 +42,33 @@ defmodule Axon.Watcher.StatsCache do
   def handle_cast({:increment, project_name, diff}, state) do
     # Update the project stats incrementally
     new_projects = Map.update(state.projects, project_name, default_project_stats(diff), fn current ->
+      new_completed = current.completed + Map.get(diff, :completed, 0)
+      
+      # Calculate new moving averages for security and coverage
+      new_sec = 
+        if new_completed > 0 do
+          Float.round(((current.security * current.completed) + (Map.get(diff, :security, 100) * Map.get(diff, :completed, 0))) / new_completed, 2)
+        else
+          current.security
+        end
+        
+      new_cov = 
+        if new_completed > 0 do
+          Float.round(((current.coverage * current.completed) + (Map.get(diff, :coverage, 0) * Map.get(diff, :completed, 0))) / new_completed, 2)
+        else
+          current.coverage
+        end
+
       %{
         total: current.total + Map.get(diff, :total, 0),
-        completed: current.completed + Map.get(diff, :completed, 0),
+        completed: new_completed,
         failed: current.failed + Map.get(diff, :failed, 0),
         ignored: current.ignored + Map.get(diff, :ignored, 0),
         symbols: current.symbols + Map.get(diff, :symbols, 0),
         relations: current.relations + Map.get(diff, :relations, 0),
         entries: current.entries + Map.get(diff, :entries, 0),
-        security: current.security,
-        coverage: current.coverage
+        security: new_sec,
+        coverage: new_cov
       }
     end)
 

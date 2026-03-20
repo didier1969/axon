@@ -36,7 +36,7 @@ defmodule AxonDashboardWeb.StatusLiveTest do
       {:bridge_event, %{"ScanComplete" => %{"total_files" => 10, "duration_ms" => 100}}}
     )
     
-    assert_receive _, 10 # small yield
+    # Wait for the re-render explicitly by asserting the rendered output directly
     assert render(view) =~ "Fleet Ingestion Complete"
   end
 end
