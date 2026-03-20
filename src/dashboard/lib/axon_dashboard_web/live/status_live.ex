@@ -208,6 +208,11 @@ defmodule AxonDashboardWeb.StatusLive do
     {:noreply, socket}
   end
 
+  def handle_info(msg, socket) do
+    Logger.debug("[LiveView] Unhandled message: #{inspect(msg)}")
+    {:noreply, socket}
+  end
+
   defp process_event(%{"SystemReady" => %{"start_time_utc" => start_time}}, socket) do
     case DateTime.from_iso8601(start_time) do
       {:ok, dt, _offset} ->
