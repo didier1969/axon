@@ -2,6 +2,7 @@
 import socket
 import sys
 import threading
+import json
 
 def forward_stdin_to_uds(sock):
     for line in sys.stdin:
@@ -23,12 +24,17 @@ def forward_uds_to_stdout(sock):
             buffer += data
             while b'\n' in buffer:
                 line, buffer = buffer.split(b'\n', 1)
-                # Ensure we only write valid JSON-RPC back to stdout to prevent MCP protocol violations
-                # We skip lines that don't look like JSON dicts (like Axon Bridge Ready)
                 decoded = line.decode('utf-8', errors='ignore').strip()
                 if decoded.startswith('{') and decoded.endswith('}'):
-                    sys.stdout.write(decoded + '\n')
-                    sys.stdout.flush()
+                    try:
+                        parsed = json.loads(decoded)
+                        # Only forward valid JSON-RPC messages to the MCP client.
+                        # Internal Axon telemetry (SystemReady, FileIndexed) must be hidden.
+                        if "jsonrpc" in parsed or "id" in parsed or "method" in parsed:
+                            sys.stdout.write(decoded + '\n')
+                            sys.stdout.flush()
+                    except json.JSONDecodeError:
+                        pass
         except Exception:
             break
 
