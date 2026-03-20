@@ -8,6 +8,12 @@ defmodule Axon.Watcher.Tracking do
   alias Axon.Watcher.IndexedProject
   alias Axon.Watcher.IndexedFile
 
+  def update_project_scores(project, security_score, coverage_score) do
+    project
+    |> Ecto.Changeset.change(%{security_score: security_score, coverage_score: coverage_score})
+    |> Repo.update()
+  end
+
   @doc """
   Inserts the project if it doesn't exist.
   """
@@ -68,12 +74,16 @@ defmodule Axon.Watcher.Tracking do
   @doc """
   Gets the project ID of a file.
   """
-  def get_project_id_for_file(path) do
-    case Repo.get(IndexedFile, path) do
-      nil -> nil
-      file -> file.project_id
-    end
+  def get_project_for_file(path) do
+    query = 
+      from f in IndexedFile,
+      join: p in IndexedProject, on: f.project_id == p.id,
+      where: f.path == ^path,
+      select: p
+
+    Repo.one(query)
   end
+
   @doc """
   Returns a map of projects and their file statistics, and the top 14 recently updated files.
   """

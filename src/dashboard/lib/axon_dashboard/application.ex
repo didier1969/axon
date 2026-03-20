@@ -15,6 +15,7 @@ defmodule AxonDashboard.Application do
       Axon.Watcher.Repo,
       {Oban, Application.fetch_env!(:axon_dashboard, Oban)},
       Axon.Watcher.StatsCache,
+      Axon.Watcher.Auditor,
       Axon.Watcher.PoolFacade,
       {Axon.Watcher.Server, []},
       Axon.ResourceMonitor,
