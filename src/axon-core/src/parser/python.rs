@@ -150,8 +150,60 @@ impl PythonParser {
             self.walk(body, source, result, &full_name);
         }
     }
-    fn extract_call<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, _scope: &str) {}
-    fn extract_import<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {}
+    fn extract_call<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, scope: &str) {
+        if scope.is_empty() {
+            // We only care about calls inside functions/methods for taint analysis
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                self.walk(child, source, result, scope);
+            }
+            return;
+        }
+
+        let func_node = self.find_child_by_type(node, "identifier")
+            .or_else(|| self.find_child_by_type(node, "attribute"));
+
+        if let Some(n) = func_node {
+            let call_name = n.utf8_text(source).unwrap_or("").to_string();
+            
+            // Extract the actual function name from an attribute (e.g. 'os.system' -> 'system' or keep 'os.system')
+            // For taint analysis, keeping the full string is often better to match 'system' or 'os.system'
+            
+            result.relations.push(Relation {
+                from: scope.to_string(),
+                to: call_name,
+                rel_type: "calls".to_string(),
+                start_line: node.start_position().row + 1,
+                properties: HashMap::new(),
+            });
+        }
+
+        // Walk arguments
+        if let Some(args) = self.find_child_by_type(node, "argument_list") {
+            let mut cursor = args.walk();
+            for child in args.children(&mut cursor) {
+                self.walk(child, source, result, scope);
+            }
+        }
+    }
+
+    fn extract_import<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {
+        // Find dotted_name or aliased_import
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "dotted_name" || child.kind() == "aliased_import" {
+                let import_name = child.utf8_text(source).unwrap_or("").to_string();
+                
+                result.relations.push(Relation {
+                    from: "module".to_string(), // Python files are modules
+                    to: import_name,
+                    rel_type: "imports".to_string(),
+                    start_line: node.start_position().row + 1,
+                    properties: HashMap::new(),
+                });
+            }
+        }
+    }
 }
 
 impl Parser for PythonParser {
