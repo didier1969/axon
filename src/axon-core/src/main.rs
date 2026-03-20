@@ -324,14 +324,25 @@ async fn main() -> anyhow::Result<()> {
                     let _ = tx.send(complete_msg).await;
                     
                 } else if command.starts_with('{') {
-                    // MCP Request
-                    let mcp_server = McpServer::new(store_clone.clone());
-                    if let Ok(request) = serde_json::from_str::<mcp::JsonRpcRequest>(command) {
-                        let response = mcp_server.handle_request(request);
-                        if let Ok(json_str) = serde_json::to_string(&response) {
-                            let _ = tx.send(format!("{}\n", json_str)).await;
+                    // MCP Request - Offload heavy graph queries from Tokio worker thread
+                    let store_for_mcp = store_clone.clone();
+                    let command_clone = command.to_string();
+                    let tx_clone = tx.clone();
+                    
+                    tokio::spawn(async move {
+                        let mcp_server = McpServer::new(store_for_mcp);
+                        if let Ok(request) = serde_json::from_str::<mcp::JsonRpcRequest>(&command_clone) {
+                            
+                            // Execute synchronous FFI graph query in blocking thread pool
+                            let response = tokio::task::spawn_blocking(move || {
+                                mcp_server.handle_request(request)
+                            }).await.expect("Blocking MCP task panicked");
+                            
+                            if let Ok(json_str) = serde_json::to_string(&response) {
+                                let _ = tx_clone.send(format!("{}\n", json_str)).await;
+                            }
                         }
-                    }
+                    });
                 }
                 
                 line.clear();
