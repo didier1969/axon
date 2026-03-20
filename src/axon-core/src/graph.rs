@@ -203,10 +203,10 @@ impl GraphStore {
         Ok(())
     }
     pub fn get_security_audit(&self, project_name: &str) -> Result<(usize, String)> {
-        // Taint analysis: Path from any symbol in the file to a dangerous sink, depth 1 to 4
+        // Taint analysis: Path from any dangerous sink BACKWARDS to a symbol in the file
         let count_query = format!(
-            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS|CALLS_NIF*1..4]->(d:Symbol) 
-             WHERE f.path CONTAINS '{}' AND (d.name IN ['eval', 'exec', 'system', 'pickle'] OR d.is_unsafe = true) 
+            "MATCH (d:Symbol)<-[:CALLS|CALLS_NIF*1..4]-(s:Symbol)<-[:CONTAINS]-(f:File) 
+             WHERE (d.name IN ['eval', 'exec', 'system', 'pickle'] OR d.is_unsafe = true) AND f.path CONTAINS '{}' 
              RETURN count(DISTINCT s)",
             project_name
         );
@@ -219,8 +219,8 @@ impl GraphStore {
         };
 
         let paths_query = format!(
-            "MATCH path = (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS|CALLS_NIF*1..4]->(d:Symbol) 
-             WHERE f.path CONTAINS '{}' AND (d.name IN ['eval', 'exec', 'system', 'pickle'] OR d.is_unsafe = true) 
+            "MATCH path = (d:Symbol)<-[:CALLS|CALLS_NIF*1..4]-(s:Symbol)<-[:CONTAINS]-(f:File) 
+             WHERE (d.name IN ['eval', 'exec', 'system', 'pickle'] OR d.is_unsafe = true) AND f.path CONTAINS '{}' 
              RETURN path LIMIT 5",
             project_name
         );
