@@ -103,9 +103,9 @@ defmodule Axon.Watcher.PoolFacade do
             })
             
             # Mettre à jour le cache en mémoire pour éviter la charge SQLite
-            project_id = Axon.Watcher.Tracking.get_project_id_for_file(path)
-            if project_id do
-               Axon.Watcher.StatsCache.increment_file_stats(project_id, %{
+            project = Axon.Watcher.Tracking.get_project_for_file(path)
+            if project do
+               Axon.Watcher.StatsCache.increment_file_stats(project.name, %{
                  completed: 1,
                  symbols: syms,
                  relations: rels,
