@@ -41,7 +41,8 @@ defmodule Axon.Watcher.Server do
       pending_files: MapSet.new(),
       timer: nil,
       monitoring_active: true,
-      pending_batches: %{100 => [], 80 => [], 50 => [], 10 => []}
+      pending_batches: %{100 => [], 80 => [], 50 => [], 10 => []},
+      idle_timer: start_idle_timer()
     }
 
     backend_args =
@@ -182,6 +183,7 @@ defmodule Axon.Watcher.Server do
 
   @impl true
   def handle_info({:file_event, _pid, {path, events}}, state) do
+    state = %{state | idle_timer: reset_idle_timer(state.idle_timer)}
     str_path = to_string(path)
 
     if state.monitoring_active and should_process?(str_path) do
@@ -202,6 +204,7 @@ defmodule Axon.Watcher.Server do
 
   @impl true
   def handle_info(:process_batch, state) do
+    state = %{state | idle_timer: reset_idle_timer(state.idle_timer)}
     files_to_process = MapSet.to_list(state.pending_files)
 
     if length(files_to_process) > 0 do
@@ -213,6 +216,17 @@ defmodule Axon.Watcher.Server do
     end
 
     {:noreply, %{state | pending_files: MapSet.new(), timer: nil}}
+  end
+
+  @impl true
+  def handle_info(:system_idle, state) do
+    Logger.info("[Pod A] System is idle. Triggering background audit.")
+    # Send message to the new Auditor (to be created)
+    if Process.whereis(Axon.Watcher.Auditor) do
+      send(Axon.Watcher.Auditor, :run_audit)
+    end
+    # Do NOT restart the timer here. It will restart on the next activity.
+    {:noreply, %{state | idle_timer: nil}}
   end
 
   defp should_process?(path) do
@@ -233,6 +247,16 @@ defmodule Axon.Watcher.Server do
   defp reset_timer(existing_timer) do
     if existing_timer, do: Process.cancel_timer(existing_timer)
     Process.send_after(self(), :process_batch, @batch_timeout)
+  end
+
+  defp start_idle_timer do
+    # 5 seconds of inactivity triggers the idle state
+    Process.send_after(self(), :system_idle, 5_000)
+  end
+
+  defp reset_idle_timer(timer) do
+    if timer, do: Process.cancel_timer(timer)
+    start_idle_timer()
   end
 
   defp dispatch_batch(paths, queue) do
