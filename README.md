@@ -14,8 +14,8 @@ Axon repose sur des piliers technologiques garantissant une fiabilité absolue :
 1.  **Le Cerveau Graphe (LadybugDB) :** Intégration de KuzuDB et HydraDB pour stocker et interroger des relations sémantiques complexes avec une performance native.
 2.  **L'Armure de Rendu (LiveView.Witness) :** Une bibliothèque révolutionnaire qui garantit que ce qui est affiché sur le Dashboard correspond physiquement à la vérité du système (Vérification L1/L2/L3 incluant la visibilité réelle et l'absence d'erreurs console).
 3.  **Isolation & Coexistence :** 
-    - **Zéro Collision :** Utilisation de ports aléatoires (40000+) et d'identifiants uniques pour coexister avec vos autres projets.
-    - **Silence Opérationnel :** Consommation CPU/RAM strictement bridée (40%) pour rester totalement transparent pendant votre travail.
+    - **Zéro Collision :** Utilisation de ports fixes non standards (44127+) et d'identifiants uniques pour coexister avec vos autres projets.
+    - **Silence Opérationnel :** Consommation CPU/RAM strictement bridée (70%) pour rester totalement transparent pendant votre travail.
 
 ## 🧠 Intelligence Agentique (MCP)
 Axon est nativement compatible avec le **Model Context Protocol (MCP)**. Il sert d'interface de connaissance entre le code et les agents IA :

@@ -14,7 +14,7 @@ async def diagnose():
 
         print("🌐 Navigating to Cockpit...")
         try:
-            await page.goto("http://localhost:6061/cockpit", timeout=10000)
+            await page.goto("http://localhost:44127/cockpit", timeout=10000)
             await page.wait_for_load_state("networkidle")
             
             # Attendre que LiveView soit monté

@@ -4,7 +4,7 @@ import sys
 
 def check_hydradb():
     host = '127.0.0.1'
-    port = 6040
+    port = 44128
     api_key = "dev_key"
     
     print(f"Connecting to HydraDB at {host}:{port}...")

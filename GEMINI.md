@@ -7,7 +7,7 @@ Votre communication est **strictement pragmatique, objective et froide**. Élimi
 ## 🏛️ Lois d'Architecture (Nexus Seal)
 1.  **Vérité Physique (Witness Rule) :** Ne jamais certifier qu'une interface est fonctionnelle sans avoir reçu un certificat de rendu positif de `LiveView.Witness`. Le serveur ne peut pas deviner la réalité du navigateur.
 2.  **Zéro Simplification :** Il est strictement interdit de simplifier une implémentation pour gagner du temps. Chaque module (distribué, sécurisé, synchronisé) doit être traité selon son standard industriel final.
-3.  **Isolation des Ressources :** Axon doit rester invisible. Consommation CPU/RAM limitée à 40%. Ports dynamiques (40000+) obligatoires pour éviter toute collision.
+3.  **Isolation des Ressources :** Axon doit rester invisible. Consommation CPU/RAM limitée à 70%. Ports statiques non standards (ex: 44127) obligatoires pour éviter toute collision.
 4.  **Agnosticisme de l'Infrastructure :** Tout code doit être cluster-ready (PubSub pour la communication inter-nœuds) et instrumenté via `:telemetry`.
 
 ## ⚙️ Lois d'Ingénierie

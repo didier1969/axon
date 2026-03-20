@@ -61,4 +61,4 @@ Pour ces fichiers, l'architecture v3.0 assumera une **voie lente hybride (Slow P
 ## 📈 Critères de Succès (Definition of Done)
 *   **Crash Test :** Un fichier C ou Python volontairement formaté pour déclencher un dépassement de tampon dans l'AST ne fait pas crasher le processus `axon-core`.
 *   **Temps de build :** Le temps de compilation du backend Rust passe de ~2 minutes (compilation C croisée) à < 10 secondes.
-*   **Silence maintenu :** Les performances I/O et CPU restent strictement bridées à 40% (conformément au patch précédent) car l'overhead WASM est négligeable (0.5% max de pénalité).
+*   **Silence maintenu :** Les performances I/O et CPU restent strictement bridées à 70% (conformément au patch précédent) car l'overhead WASM est négligeable (0.5% max de pénalité).

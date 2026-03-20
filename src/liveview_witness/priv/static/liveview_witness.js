@@ -77,10 +77,16 @@ const LiveViewWitness = {
   },
 
   _sendOracleDiagnostic(payload) {
+    // Determine the token if available globally
+    const token = window.WITNESS_TOKEN || document.querySelector("meta[name='witness-token']")?.getAttribute("content") || "dev_key";
+    
     // Send to Oracle OOB Endpoint (POST)
     fetch("/liveview_witness/diagnose", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { 
+        "Content-Type": "application/json",
+        "x-witness-token": token
+      },
       body: JSON.stringify(payload)
     }).catch(err => console.error("[LiveView.Witness] Oracle fallback failed", err));
   },
@@ -125,12 +131,13 @@ const LiveViewWitness = {
   },
 
   inspect(payload) {
-    const { selector, expectations } = payload;
+    const { id, selector, expectations } = payload;
     const elements = selector ? this._deepQuerySelectorAll(selector) : [this.el];
 
     // L1: Presence
     if (elements.length === 0) {
       return { 
+        id: id,
         status: "error", 
         level: "L1", 
         message: selector ? `No elements found for selector: ${selector}` : "Element not in DOM"
@@ -139,6 +146,7 @@ const LiveViewWitness = {
 
     if (expectations && expectations.min_items && elements.length < expectations.min_items) {
       return { 
+        id: id,
         status: "error", 
         level: "L1", 
         message: `Expected at least ${expectations.min_items} items, found ${elements.length}`
@@ -152,20 +160,20 @@ const LiveViewWitness = {
     const style = window.getComputedStyle(el);
     
     if (style.display === "none") {
-      return { status: "error", level: "L2", message: "display: none" };
+      return { id: id, status: "error", level: "L2", message: "display: none" };
     }
     
     if (style.visibility === "hidden") {
-      return { status: "error", level: "L2", message: "visibility: hidden" };
+      return { id: id, status: "error", level: "L2", message: "visibility: hidden" };
     }
     
     if (parseFloat(style.opacity) === 0) {
-      return { status: "error", level: "L2", message: "opacity: 0" };
+      return { id: id, status: "error", level: "L2", message: "opacity: 0" };
     }
 
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) {
-      return { status: "error", level: "L2", message: "Zero dimensions" };
+      return { id: id, status: "error", level: "L2", message: "Zero dimensions" };
     }
 
     // Occlusion check: is it physically visible to the user?
@@ -174,7 +182,7 @@ const LiveViewWitness = {
     
     // Skip if element is off-screen
     if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
-        return { status: "error", level: "L2", message: "Off-screen" };
+        return { id: id, status: "error", level: "L2", message: "Off-screen" };
     }
 
     let currentTop = document.elementFromPoint(x, y);
@@ -187,25 +195,27 @@ const LiveViewWitness = {
     
     const topEl = currentTop;
     if (!topEl) {
-        return { status: "error", level: "L2", message: "No element at point" };
+        return { id: id, status: "error", level: "L2", message: "No element at point" };
     }
 
     if (topEl !== el && !this._deepContains(el, topEl)) {
       const tag = topEl.tagName ? topEl.tagName.toLowerCase() : 'unknown';
-      const id = topEl.id ? `#${topEl.id}` : '';
+      const idStr = topEl.id ? `#${topEl.id}` : '';
       
       // Safety check: SVG elements have SVGAnimatedString instead of a plain string
       const rawClass = typeof topEl.className === 'string' ? topEl.className : '';
       const className = rawClass ? `.${rawClass.split(' ').join('.')}` : '';
       
       return { 
+        id: id,
         status: "error", 
         level: "L2", 
-        message: `Occluded by ${tag}${id}${className}`
+        message: `Occluded by ${tag}${idStr}${className}`
       };
     }
 
     return { 
+      id: id,
       status: "ok", 
       level: "L2", 
       message: `Reality confirmed for ${elements.length} elements`

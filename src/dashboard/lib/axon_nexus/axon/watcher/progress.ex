@@ -8,7 +8,7 @@ defmodule Axon.Watcher.Progress do
   @api_key "dev_key"
 
   defp hydra_port() do
-    String.to_integer(System.get_env("HYDRA_TCP_PORT") || "6040")
+    String.to_integer(System.get_env("HYDRA_TCP_PORT") || "44128")
   end
 
   def update_status(repo_slug, status_map) do

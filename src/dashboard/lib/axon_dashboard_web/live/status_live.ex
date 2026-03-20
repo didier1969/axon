@@ -293,9 +293,11 @@ defmodule AxonDashboardWeb.StatusLive do
   end
 
   def render(assigns) do
+    total_expected = Enum.reduce(assigns.projects, 0, fn {_, info}, acc -> acc + info.total_files end)
+    
     progress =
-      if assigns.total_projects > 0,
-        do: round(assigns.scanned_projects / assigns.total_projects * 100),
+      if total_expected > 0,
+        do: round(assigns.total_files_parsed / total_expected * 100),
         else: 0
 
     assigns = assign(assigns, :progress, progress)
@@ -544,7 +546,7 @@ defmodule AxonDashboardWeb.StatusLive do
             <div class="flex items-baseline gap-3">
               <span class="text-6xl font-light text-accent">{@total_symbols}</span>
               <span class="text-sm opacity-30 uppercase tracking-widest font-bold">
-                Validated Nodes
+                Extracted Symbols
               </span>
             </div>
           </div>
@@ -758,34 +760,34 @@ defmodule AxonDashboardWeb.StatusLive do
                   
     <!-- Scores -->
                   <div class="grid grid-cols-2 gap-4">
-                    <div class="bg-black/20 rounded-lg p-4 border border-white/5">
+                    <div class="bg-black/20 rounded-lg p-4 border border-white/5 opacity-50 grayscale" title="Security Analysis will be enabled in Phase 3">
                       <p class="text-[9px] opacity-30 uppercase tracking-widest font-black mb-1">
-                        Security Score
+                        Security Score (P3)
                       </p>
                       <div class="flex items-center gap-2">
                         <div class="h-1.5 flex-grow bg-base-300 rounded-full overflow-hidden">
                           <div
-                            class="bg-accent h-full rounded-full shadow-[0_0_8px_rgba(var(--color-accent),0.5)]"
-                            style={"width: #{info.security}%"}
+                            class="bg-base-content/20 h-full rounded-full"
+                            style="width: 0%"
                           >
                           </div>
                         </div>
-                        <span class="text-xs font-mono font-bold text-accent">{info.security}%</span>
+                        <span class="text-xs font-mono font-bold text-base-content/30">N/A</span>
                       </div>
                     </div>
-                    <div class="bg-black/20 rounded-lg p-4 border border-white/5">
+                    <div class="bg-black/20 rounded-lg p-4 border border-white/5 opacity-50 grayscale" title="Test Coverage Analysis will be enabled in Phase 3">
                       <p class="text-[9px] opacity-30 uppercase tracking-widest font-black mb-1">
-                        Test Coverage
+                        Test Coverage (P3)
                       </p>
                       <div class="flex items-center gap-2">
                         <div class="h-1.5 flex-grow bg-base-300 rounded-full overflow-hidden">
                           <div
-                            class="bg-primary h-full rounded-full shadow-[0_0_8px_rgba(var(--color-primary),0.5)]"
-                            style={"width: #{info.coverage}%"}
+                            class="bg-base-content/20 h-full rounded-full"
+                            style="width: 0%"
                           >
                           </div>
                         </div>
-                        <span class="text-xs font-mono font-bold text-primary">{info.coverage}%</span>
+                        <span class="text-xs font-mono font-bold text-base-content/30">N/A</span>
                       </div>
                     </div>
                   </div>
