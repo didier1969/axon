@@ -24,6 +24,10 @@ defmodule AxonDashboard.BridgeClient do
     GenServer.call(__MODULE__, :get_state)
   end
 
+  def trigger_async_audit(project_name) do
+    GenServer.cast(__MODULE__, {:async_audit, project_name})
+  end
+
   def init(_opts) do
     Process.send_after(self(), :connect, 500)
 
@@ -69,6 +73,28 @@ defmodule AxonDashboard.BridgeClient do
 
     {:noreply, %{state | engine_state: :idle}}
   end
+
+  def handle_cast({:async_audit, project_name}, %{socket: socket} = state) when not is_nil(socket) do
+    # Using a unique ID pattern that the Auditor can recognize (e.g., above 10000)
+    id = System.unique_integer([:positive]) + 10000
+
+    request = %{
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: %{
+        name: "axon_audit",
+        arguments: %{"project" => project_name}
+      },
+      id: id
+    }
+
+    json_payload = Jason.encode!(request) <> "\n"
+    :gen_tcp.send(socket, json_payload)
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:async_audit, _}, state), do: {:noreply, state}
 
   def handle_info(:connect, state) do
     case :gen_tcp.connect({:local, @socket_path}, 0, [:binary, active: true]) do
