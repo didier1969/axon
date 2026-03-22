@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
+    pub jsonrpc: String,
     pub method: String,
     pub params: Option<Value>,
     pub id: Option<Value>,
@@ -15,7 +16,9 @@ pub struct JsonRpcRequest {
 #[derive(Debug, Serialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Value>,
     pub id: Option<Value>,
 }
@@ -129,11 +132,18 @@ impl McpServer {
         output
     }
 
-    pub fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
+    pub fn handle_request(&self, req: JsonRpcRequest) -> Option<JsonRpcResponse> {
+        // Notifications do not have an ID and must not receive a response.
+        if req.id.is_none() {
+            return None;
+        }
+
         let result = match req.method.as_str() {
             "initialize" => Some(json!({
                 "protocolVersion": "2024-11-05",
-                "capabilities": {},
+                "capabilities": {
+                    "tools": {}
+                },
                 "serverInfo": { "name": "axon-core", "version": "2.2.0" }
             })),
             "tools/list" => Some(json!({
@@ -155,7 +165,7 @@ impl McpServer {
                         "description": "Vue 360° d'un symbole (code source, appelants/appelés, statistiques).",
                         "inputSchema": {
                             "type": "object",
-                            "properties": { 
+                            "properties": {
                                 "symbol": { "type": "string" },
                                 "project": { "type": "string" }
                             },
@@ -197,9 +207,7 @@ impl McpServer {
                         "description": "Analyse sémantique des changements (Git Diff -> Symboles touchés).",
                         "inputSchema": {
                             "type": "object",
-                            "properties": { 
-                                "diff_content": { "type": "string" }
-                            },
+                            "properties": { "diff_content": { "type": "string" } },
                             "required": ["diff_content"]
                         }
                     },
@@ -215,11 +223,11 @@ impl McpServer {
                                         "type": "object",
                                         "properties": {
                                             "tool": { "type": "string" },
-                                            "args": { "type": "object" }
+                                            "args": { "type": "object", "additionalProperties": true }
                                         },
                                         "required": ["tool", "args"]
                                     }
-                                }
+                                } 
                             },
                             "required": ["calls"]
                         }
@@ -229,7 +237,7 @@ impl McpServer {
                         "description": "Trouve des fonctions sémantiquement similaires (clones de logique) dans le projet.",
                         "inputSchema": {
                             "type": "object",
-                            "properties": { 
+                            "properties": {
                                 "symbol": { "type": "string", "description": "Nom du symbole source" }
                             },
                             "required": ["symbol"]
@@ -240,7 +248,7 @@ impl McpServer {
                         "description": "Vérifie les violations d'architecture entre deux couches (ex: 'ui' appelant directement 'db').",
                         "inputSchema": {
                             "type": "object",
-                            "properties": { 
+                            "properties": {
                                 "source_layer": { "type": "string", "description": "Couche source (ex: 'ui', 'frontend')" },
                                 "target_layer": { "type": "string", "description": "Couche interdite (ex: 'db', 'repository')" }
                             },
@@ -252,7 +260,7 @@ impl McpServer {
                         "description": "Trace bidirectionnelle: remonte aux Entry Points (haut) et liste les appels profonds (bas).",
                         "inputSchema": {
                             "type": "object",
-                            "properties": { 
+                            "properties": {
                                 "symbol": { "type": "string", "description": "Symbole de départ" },
                                 "depth": { "type": "integer", "description": "Profondeur maximale (défaut: sans limite pour être exhaustif, mais cappé par le moteur)" }
                             },
@@ -264,7 +272,7 @@ impl McpServer {
                         "description": "Vérifie si la modification d'un symbole public impacte des composants externes.",
                         "inputSchema": {
                             "type": "object",
-                            "properties": { 
+                            "properties": {
                                 "symbol": { "type": "string" }
                             },
                             "required": ["symbol"]
@@ -275,7 +283,7 @@ impl McpServer {
                         "description": "Dry-run : calcule le volume de l'impact d'une modification avant de coder.",
                         "inputSchema": {
                             "type": "object",
-                            "properties": { 
+                            "properties": {
                                 "symbol": { "type": "string" },
                                 "depth": { "type": "integer", "description": "Profondeur d'impact (optionnel)" }
                             },
@@ -297,12 +305,12 @@ impl McpServer {
             _ => None,
         };
 
-        JsonRpcResponse {
+        Some(JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
             result,
             error: None,
             id: req.id,
-        }
+        })
     }
 fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     let params = params?;
@@ -334,21 +342,27 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         let embedding = crate::embedder::batch_embed(vec![query_text.to_string()]).ok()
             .and_then(|v| v.into_iter().next());
 
-        let cypher = if let Some(emb) = embedding {
+        let (cypher, params) = if let Some(emb) = embedding {
             let vec_str = format!("{:?}", emb);
             // Hybrid query: exact match on name OR semantic similarity
-            format!(
-                "MATCH (s:Symbol) \
-                 WHERE s.name CONTAINS '{}' OR l2_distance(s.embedding, {}) < 1.0 \
-                 RETURN s.name, s.kind, l2_distance(s.embedding, {}) as score \
-                 ORDER BY score ASC LIMIT 10",
-                query_text, vec_str, vec_str
+            (
+                format!(
+                    "MATCH (s:Symbol) \
+                     WHERE s.name CONTAINS $q OR array_cosine_similarity(s.embedding, {}) > 0.5 \
+                     RETURN s.name, s.kind, array_cosine_similarity(s.embedding, {}) as score \
+                     ORDER BY score DESC LIMIT 10",
+                    vec_str, vec_str
+                ),
+                json!({"q": query_text})
             )
         } else {
-            format!("MATCH (s:Symbol) WHERE s.name CONTAINS '{}' RETURN s.name, s.kind LIMIT 10", query_text)
+            (
+                "MATCH (s:Symbol) WHERE s.name CONTAINS $q RETURN s.name, s.kind LIMIT 10".to_string(),
+                json!({"q": query_text})
+            )
         };
 
-        match self.graph_store.read().unwrap().query_json(&cypher) {
+        match self.graph_store.read().unwrap().query_json_param(&cypher, &params) {
             Ok(res) => {
                 let headers = if cypher.contains("score") {
                     vec!["Nom", "Type", "Distance Sémantique"]
@@ -372,14 +386,12 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_inspect(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
-        let query = format!(
-            "MATCH (s:Symbol {{name: '{}'}}) \
+        let query = "MATCH (s:Symbol {name: $sym}) \
              OPTIONAL MATCH (caller:Symbol)-[:CALLS]->(s) \
              OPTIONAL MATCH (s)-[:CALLS]->(callee:Symbol) \
-             RETURN s.name, s.kind, s.tested, count(caller) AS callers, count(callee) AS callees",
-            symbol
-        );
-        match self.graph_store.read().unwrap().query_json(&query) {
+             RETURN s.name, s.kind, s.tested, count(caller) AS callers, count(callee) AS callees";
+             
+        match self.graph_store.read().unwrap().query_json_param(query, &json!({"sym": symbol})) {
             Ok(res) => {
                 let table = self.format_kuzu_table(&res, &["Nom", "Type", "Testé", "Appelants", "Appelés"]);
                 Some(json!({ "content": [{ "type": "text", "text": format!("### 🔍 Inspection du Symbole : {}\n\n{}", symbol, table) }] }))
@@ -394,16 +406,17 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         let depth_str = format!("*1..{}", depth);
         
         let query = format!(
-            "MATCH (s:Symbol {{name: '{}'}})<-[:CALLS|CALLS_NIF{}]-(affected) \
+            "MATCH (s:Symbol {{name: $sym}})<-[:CALLS|CALLS_NIF{}]-(affected) \
              RETURN DISTINCT affected.name, affected.kind", 
-            symbol, depth_str
+            depth_str
         );
+        let params = json!({"sym": symbol});
         
-        match self.graph_store.read().unwrap().query_json(&query) {
+        match self.graph_store.read().unwrap().query_json_param(&query, &params) {
             Ok(res) => {
                 let table = self.format_kuzu_table(&res, &["Symbole Impacté", "Type"]);
-                let count_query = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS|CALLS_NIF{}]-(affected) RETURN count(DISTINCT affected)", symbol, depth_str);
-                let impact_radius = self.graph_store.read().unwrap().query_count(&count_query).unwrap_or(0);
+                let count_query = format!("MATCH (s:Symbol {{name: $sym}})<-[:CALLS|CALLS_NIF{}]-(affected) RETURN count(DISTINCT affected)", depth_str);
+                let impact_radius = self.graph_store.read().unwrap().query_count_param(&count_query, &params).unwrap_or(0);
                 
                 let mut report = format!("## 💥 Analyse d'Impact : {}\n\n", symbol);
                 report.push_str(&format!("**Rayon d'Impact (profondeur {}) :** {} composants affectés.\n\n", depth, impact_radius));
@@ -424,12 +437,25 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     fn axon_audit(&self, args: &Value) -> Option<Value> {
         let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         let store = self.graph_store.read().unwrap();
-        
+
+        // 🚨 FAIL-SAFE: Check if project is actually indexed
+        let count_query = if project == "*" {
+            "MATCH (f:File) RETURN count(f)".to_string()
+        } else {
+            "MATCH (f:File) WHERE f.path CONTAINS $proj RETURN count(f)".to_string()
+        };
+        let params = json!({"proj": project});
+
+        let file_count = store.query_count_param(&count_query, &params).unwrap_or(0);
+        if file_count < 2 {
+            let warning = format!("⚠️ Warning: Project '{}' seems unindexed or parser failed (Found {} files). Health metrics are invalid.", project, file_count);
+            return Some(json!({ "content": [{ "type": "text", "text": warning }] }));
+        }
+
         let (sec_score, paths) = store.get_security_audit(project).unwrap_or((100, "[]".to_string()));
         let cov_score = store.get_coverage_score(project).unwrap_or(0);
-        
-        let mut report = format!("## 🛡️ Rapport d'Audit : {}\n\n", if project == "*" { "Workspace Global" } else { project });
-        
+
+        let mut report = format!("## 🛡️ Rapport d'Audit : {}\n\n", if project == "*" { "Workspace Global" } else { project });        
         report.push_str(&format!("### 🔒 Sécurité : {}/100\n", sec_score));
         if sec_score < 100 {
             report.push_str("⚠️ **Vulnérabilités détectées (Taint Analysis) :**\n");
@@ -464,11 +490,26 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_health(&self, args: &Value) -> Option<Value> {
         let project = args.get("project")?.as_str().unwrap_or("unknown");
-        let coverage = self.graph_store.read().unwrap().get_coverage_score(project).unwrap_or(0);
-        let god_objects = self.graph_store.read().unwrap().get_god_objects(project).unwrap_or_default();
-        
-        let mut report = format!("🏥 Health Report for {}: Coverage {}%. Stability high.", project, coverage);
-        
+        let store = self.graph_store.read().unwrap();
+
+        // 🚨 FAIL-SAFE: Check if project is actually indexed
+        let count_query = if project == "*" {
+            "MATCH (f:File) RETURN count(f)".to_string()
+        } else {
+            "MATCH (f:File) WHERE f.path CONTAINS $proj RETURN count(f)".to_string()
+        };
+        let params = json!({"proj": project});
+
+        let file_count = store.query_count_param(&count_query, &params).unwrap_or(0);
+        if file_count < 2 {
+            let warning = format!("⚠️ Warning: Project '{}' seems unindexed or parser failed (Found {} files). Health metrics are invalid.", project, file_count);
+            return Some(json!({ "content": [{ "type": "text", "text": warning }] }));
+        }
+
+        let coverage = store.get_coverage_score(project).unwrap_or(0);
+        let god_objects = store.get_god_objects(project).unwrap_or_default();
+
+        let mut report = format!("🏥 Health Report for {}: Coverage {}%. Stability high.", project, coverage);        
         if !god_objects.is_empty() {
             report.push_str(&format!("\nGod Object detected: {}", god_objects.join(", ")));
         }
@@ -530,18 +571,20 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     fn axon_architectural_drift(&self, args: &Value) -> Option<Value> {
         let source_layer = args.get("source_layer")?.as_str()?;
         let target_layer = args.get("target_layer")?.as_str()?;
-        
-        let query = format!(
-            "MATCH (f1:File)-[:CONTAINS]->(s1:Symbol)-[:CALLS]->(s2:Symbol)<-[:CONTAINS]-(f2:File) \
-             WHERE f1.path CONTAINS '{}' AND f2.path CONTAINS '{}' \
-             RETURN f1.path AS Source, s1.name AS Caller, f2.path AS Target, s2.name AS Callee",
-            source_layer, target_layer
-        );
-        
-        match self.graph_store.read().unwrap().query_json(&query) {
+
+        let query = "MATCH (f1:File)-[:CONTAINS]->(s1:Symbol)-[:CALLS]->(s2:Symbol)<-[:CONTAINS]-(f2:File) \
+             WHERE f1.path CONTAINS $src AND f2.path CONTAINS $tgt \
+             RETURN f1.path AS Source, s1.name AS Caller, f2.path AS Target, s2.name AS Callee";
+
+        let params = json!({
+            "src": source_layer,
+            "tgt": target_layer
+        });
+
+        match self.graph_store.read().unwrap().query_json_param(query, &params) {
             Ok(res) => {
                 let report = if res.len() > 5 && res != "[]" {
-                    format!("🚨 Dérive Architecturale Détectée ! La couche '{}' appelle directement la couche '{}' :\n{}", source_layer, target_layer, res)
+                    format!("🚨 Dérive Architecturale Détectée ! La couche '{}' appelle directement la couche '{}' :\n{}", source_layer, target_layer, self.format_kuzu_table(&res, &["Source", "Appelant", "Cible", "Appelé"]))
                 } else {
                     format!("✅ Aucune dérive détectée entre '{}' et '{}'.", source_layer, target_layer)
                 };
@@ -550,18 +593,18 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur: {}", e) }] })),
         }
     }
-
     fn axon_bidi_trace(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
         let depth_str = format!("*1..{}", depth);
         
-        let query_up = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS|CALLS_NIF{}]-(entry:Symbol {{is_entry_point: true}}) RETURN DISTINCT entry.name, entry.kind", symbol, depth_str);
-        let query_down = format!("MATCH (s:Symbol {{name: '{}'}})-[:CALLS|CALLS_NIF{}]->(leaf:Symbol) RETURN DISTINCT leaf.name, leaf.kind LIMIT 20", symbol, depth_str);
+        let query_up = format!("MATCH (s:Symbol {{name: $sym}})<-[:CALLS|CALLS_NIF{}]-(entry:Symbol {{is_entry_point: true}}) RETURN DISTINCT entry.name, entry.kind", depth_str);
+        let query_down = format!("MATCH (s:Symbol {{name: $sym}})-[:CALLS|CALLS_NIF{}]->(leaf:Symbol) RETURN DISTINCT leaf.name, leaf.kind LIMIT 20", depth_str);
+        let params = json!({"sym": symbol});
         
         let store = self.graph_store.read().unwrap();
-        let up_res = store.query_json(&query_up).unwrap_or_else(|_| "[]".to_string());
-        let down_res = store.query_json(&query_down).unwrap_or_else(|_| "[]".to_string());
+        let up_res = store.query_json_param(&query_up, &params).unwrap_or_else(|_| "[]".to_string());
+        let down_res = store.query_json_param(&query_down, &params).unwrap_or_else(|_| "[]".to_string());
         
         let mut report = format!("## ↔️ Trace Bidirectionnelle : {}\n\n", symbol);
         
@@ -576,21 +619,19 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_api_break_check(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
-        
-        let query = format!(
-            "MATCH (s:Symbol {{name: '{}', is_public: true}})<-[:CALLS]-(caller:Symbol)<-[:CONTAINS]-(f:File) \
-             RETURN f.path AS Project, caller.name AS Function",
-            symbol
-        );
-        
-        match self.graph_store.read().unwrap().query_json(&query) {
+
+        let query = "MATCH (s:Symbol {name: $sym, is_public: true})<-[:CALLS]-(caller:Symbol)<-[:CONTAINS]-(f:File) \
+             RETURN f.path AS Project, caller.name AS Function";
+        let params = json!({"sym": symbol});
+
+        match self.graph_store.read().unwrap().query_json_param(query, &params) {
             Ok(res) => {
                 let report = if res.trim().len() > 5 && res != "[]" {
                     format!("⚠️ ATTENTION BREAKING CHANGE : Le symbole public '{}' est utilisé par les composants suivants. Si vous modifiez sa signature, vous devez aussi mettre à jour :\n{}", symbol, res)
                 } else {
                     // Check if it exists but is not public
-                    let check_exists = format!("MATCH (s:Symbol {{name: '{}'}}) RETURN s.is_public", symbol);
-                    match self.graph_store.read().unwrap().query_json(&check_exists) {
+                    let check_exists = "MATCH (s:Symbol {name: $sym}) RETURN s.is_public";
+                    match self.graph_store.read().unwrap().query_json_param(check_exists, &params) {
                         Ok(exists_res) if exists_res.contains("false") => {
                             format!("✅ SAFE TO MODIFY : Le symbole '{}' est PRIVÉ et ne devrait pas avoir d'impacts externes.", symbol)
                         },
@@ -602,22 +643,22 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
             Err(_) => None,
         }
     }
-
     fn axon_simulate_mutation(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
         let depth_str = match args.get("depth").and_then(|v| v.as_u64()) {
             Some(d) => format!("*1..{}", d),
             None => "*1..".to_string(), // Unbounded variable length
         };
-        
+
         // Calcule le rayon d'impact
         let query = format!(
-            "MATCH (s:Symbol {{name: '{}'}})<-[:CALLS{}]-(affected:Symbol) \
+            "MATCH (s:Symbol {{name: $sym}})<-[:CALLS{}]-(affected:Symbol) \
              RETURN count(DISTINCT affected) AS impact_score",
-            symbol, depth_str
+            depth_str
         );
-        
-        match self.graph_store.read().unwrap().query_json(&query) {
+        let params = json!({"sym": symbol});
+
+        match self.graph_store.read().unwrap().query_json_param(&query, &params) {
             Ok(res) => {
                 let report = format!("🔮 Dry-Run Mutation : Modifier '{}' va impacter en cascade ~{} composants dans l'architecture.", symbol, res);
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
@@ -625,7 +666,6 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
             Err(_) => None,
         }
     }
-
     fn axon_batch(&self, args: &Value) -> Option<Value> {
         let calls = args.get("calls")?.as_array()?;
         let mut results = Vec::new();

@@ -13,11 +13,18 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    // We clone the texts to slices as required by fastembed
-    let texts_ref: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+    
     let mut embedder = EMBEDDER.lock().unwrap();
-    let embeddings = embedder.embed(texts_ref, None)?;
-    Ok(embeddings)
+    let mut all_embeddings = Vec::with_capacity(texts.len());
+    
+    // Chunking to prevent ONNX memory explosions on files with thousands of symbols
+    for chunk in texts.chunks(64) {
+        let texts_ref: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+        let chunk_embeddings = embedder.embed(texts_ref, None)?;
+        all_embeddings.extend(chunk_embeddings);
+    }
+    
+    Ok(all_embeddings)
 }
 
 #[cfg(test)]

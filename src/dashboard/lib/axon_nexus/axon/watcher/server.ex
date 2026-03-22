@@ -144,21 +144,19 @@ defmodule Axon.Watcher.Server do
 
       case File.stat(str_path) do
         {:ok, %{mtime: mtime}} ->
-          last_mtime = Axon.Watcher.Progress.get_file_mtime(state.repo_slug, str_path)
+          last_mtime = Axon.Watcher.Tracking.get_file_hash(str_path)
           current_mtime = :erlang.phash2(mtime)
           
           # Optimization: Only mark as pending and enqueue if the file CHANGED 
           # or if it's not yet successfully indexed in the local DB.
           current_status = Axon.Watcher.Tracking.get_file_status(str_path)
 
-          if current_mtime != last_mtime or current_status not in ["indexed", "ignored_by_rule"] do
+          if last_mtime == nil or current_mtime != last_mtime or current_status not in ["indexed", "ignored_by_rule"] do
             try do
-              Axon.Watcher.Tracking.upsert_file!(project_name, str_path, to_string(current_mtime), "pending")
+              Axon.Watcher.Tracking.upsert_file!(project_name, str_path, current_mtime, "pending")
             rescue
               _ -> :ok
             end
-
-            Axon.Watcher.Progress.save_file_mtime(state.repo_slug, str_path, current_mtime)
 
             current_batch = state.pending_batches[priority]
             new_batch = [str_path | current_batch]

@@ -82,6 +82,16 @@ defmodule Axon.Watcher.Tracking do
   end
 
   @doc """
+  Gets the current file hash (mtime) of a file.
+  """
+  def get_file_hash(path) do
+    case Repo.get(IndexedFile, path) do
+      nil -> nil
+      file -> file.file_hash
+    end
+  end
+
+  @doc """
   Gets the project ID of a file.
   """
   def get_project_for_file(path) do

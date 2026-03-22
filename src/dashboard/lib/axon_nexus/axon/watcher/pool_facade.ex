@@ -7,7 +7,7 @@ defmodule Axon.Watcher.PoolFacade do
   use GenServer
   require Logger
 
-  @socket_path "/tmp/axon-v2.sock"
+  @socket_path "/tmp/axon-telemetry.sock"
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -16,8 +16,8 @@ defmodule Axon.Watcher.PoolFacade do
   @doc """
   Sends a single file to Axon Core for parsing and ingestion.
   """
-  def parse(path, content) do
-    GenServer.call(__MODULE__, {:parse, path, content}, 30_000)
+  def parse(path) do
+    GenServer.call(__MODULE__, {:parse, path}, 30_000)
   end
 
   @doc """
@@ -43,9 +43,9 @@ defmodule Axon.Watcher.PoolFacade do
     {:noreply, state}
   end
 
-  def handle_call({:parse, path, content}, _from, state) do
+  def handle_call({:parse, path}, _from, state) do
     if state.socket do
-      payload = Jason.encode!(%{"path" => path, "content" => content})
+      payload = Jason.encode!(%{"path" => path})
       # We use a protocol: "PARSE_FILE <json_payload>\n"
       case :gen_tcp.send(state.socket, "PARSE_FILE #{payload}\n") do
         :ok ->

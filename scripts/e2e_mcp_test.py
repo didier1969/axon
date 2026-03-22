@@ -5,7 +5,7 @@ import time
 import os
 
 def run_e2e_test():
-    proxy_script = os.path.join(os.path.dirname(__file__), "mcp-stdio-proxy.py")
+    proxy_script = os.path.join(os.path.dirname(__file__), "..", "bin", "axon-mcp-tunnel")
     
     print(f"🔍 Running End-to-End MCP Verification on: {proxy_script}")
     
@@ -16,7 +16,7 @@ def run_e2e_test():
     try:
         # Spawn the proxy exactly as the AI client (Claude/Gemini) would
         process = subprocess.Popen(
-            [sys.executable, proxy_script],
+            [proxy_script],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -38,7 +38,7 @@ def run_e2e_test():
         # Read response
         start_time = time.time()
         while True:
-            if time.time() - start_time > 5:
+            if time.time() - start_time > 10:
                 print("❌ Error: Timeout waiting for MCP proxy response")
                 process.terminate()
                 return False
@@ -54,6 +54,8 @@ def run_e2e_test():
                     return False
                 time.sleep(0.1)
                 continue
+            
+            print(f"DEBUG E2E RECEIVED: {line.strip()}")
                 
             try:
                 response = json.loads(line.strip())
