@@ -149,6 +149,15 @@ impl McpServer {
             "tools/list" => Some(json!({
                 "tools": [
                     {
+                        "name": "axon_refine_lattice",
+                        "description": "Lattice Refiner: Analyse le graphe post-ingestion pour lier les frontières inter-langages (ex: Elixir NIF -> Rust natif).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    },
+                    {
                         "name": "axon_query",
                         "description": "Recherche hybride (texte + vecteur) et similarité sémantique.",
                         "inputSchema": {
@@ -318,6 +327,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     let arguments = params.get("arguments")?;
 
     match name {
+        "axon_refine_lattice" => self.axon_refine_lattice(arguments),
         "axon_query" => self.axon_query(arguments),
         "axon_inspect" => self.axon_inspect(arguments),
         "axon_audit" => self.axon_audit(arguments),
@@ -334,6 +344,36 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         _ => Some(json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true })),
     }
 }
+
+    fn axon_refine_lattice(&self, _args: &Value) -> Option<Value> {
+        let store = self.graph_store.read().unwrap();
+        
+        let refine_query = "
+            MATCH (elixir:Symbol {is_nif: true})<-[:CONTAINS]-(e_file:File)
+            MATCH (rust:Symbol {is_nif: true})<-[:CONTAINS]-(r_file:File)
+            WHERE elixir.name = rust.name 
+              AND e_file.path CONTAINS '.ex' 
+              AND r_file.path CONTAINS '.rs'
+            MERGE (elixir)-[r:CALLS_NIF]->(rust)
+            RETURN elixir.name AS nif_name, e_file.path AS elixir_source, r_file.path AS rust_target
+        ";
+
+        match store.query_json(refine_query) {
+            Ok(res) => {
+                let parsed: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+                let count = parsed.len();
+                
+                let report = if count > 0 {
+                    format!("✨ **Lattice Refiner exécuté avec succès.**\n\nJ'ai découvert et lié **{} ponts FFI (Rustler NIFs)** entre Elixir et Rust.\n\n{}", count, self.format_kuzu_table(&res, &["Nom NIF", "Fichier Elixir", "Fichier Rust"]))
+                } else {
+                    "✅ **Lattice Refiner exécuté.**\nAucun nouveau pont FFI (Rustler NIF) non-lié n'a été détecté dans le graphe.".to_string()
+                };
+                
+                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+            },
+            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur Refiner: {}", e) }] })),
+        }
+    }
 
     fn axon_query(&self, args: &Value) -> Option<Value> {
         let query_text = args.get("query")?.as_str()?;

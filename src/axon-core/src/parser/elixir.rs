@@ -188,6 +188,9 @@ impl ElixirParser {
         if node_content.contains("load_nif") {
             properties.insert("nif_loader".to_string(), "true".to_string());
         }
+        if node_content.contains(":erlang.nif_error") || node_content.contains(":nif_not_loaded") {
+            properties.insert("is_nif".to_string(), "true".to_string());
+        }
 
         if node_content.contains(":erlang.nif_error(:nif_not_loaded)") {
             result.relations.push(Relation {
@@ -339,19 +342,36 @@ impl ElixirParser {
             }
 
             if !func_name.is_empty() {
+                let mut target_module = receiver.clone();
+                let mut rel_type = "CALLS".to_string();
+
                 let is_genserver = receiver == "GenServer" && (func_name == "call" || func_name == "cast");
                 if is_genserver {
+                    rel_type = "CALLS_OTP".to_string();
+                    // Attempt to extract the target module from the first argument
+                    if let Some(args_node) = Self::find_child_by_type(node, "arguments") {
+                        let mut arg_cursor = args_node.walk();
+                        for arg_child in args_node.named_children(&mut arg_cursor) {
+                            if arg_child.kind() == "alias" {
+                                target_module = arg_child.utf8_text(source_bytes).unwrap_or("").to_string();
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Skip generic calls to standard library unless it's an OTP boundary we want to track
+                if receiver != "Enum" && receiver != "String" && receiver != "Map" && receiver != "List" {
                     let mut props = HashMap::new();
-                    props.insert("genserver".to_string(), "true".to_string());
-                    
-                    // We can model this as a relation or a symbol property, but the prompt says:
-                    // 'mets "genserver": "true" dans les propriétés de la relation'
-                    // Wait, what's the `from` and `to` for this relation?
-                    // Let's create a generic call relation
+                    if is_genserver {
+                        props.insert("otp_boundary".to_string(), "true".to_string());
+                        props.insert("call_type".to_string(), func_name.clone());
+                    }
+
                     result.relations.push(Relation {
                         from: module_name.to_string(),
-                        to: receiver,
-                        rel_type: "calls".to_string(),
+                        to: target_module,
+                        rel_type,
                         properties: props,
                     });
                 }
