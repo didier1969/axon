@@ -59,7 +59,7 @@ sleep 2
 
 # Start Pod B (Core / Parser) with OS-level Niceness
 tmux new-window -t axon -n "core"
-tmux send-keys -t axon:core "nix develop --impure --command bash -c 'exec nice -n 19 ionice -c 3 bin/axon-core'" C-m
+tmux send-keys -t axon:core "nix develop --impure --command bash -c 'RUST_LOG=info exec nice -n 19 ionice -c 3 bin/axon-core'" C-m
 
 # Start Pod A/Control (Nexus Monolith)
 tmux new-window -t axon -n "nexus"

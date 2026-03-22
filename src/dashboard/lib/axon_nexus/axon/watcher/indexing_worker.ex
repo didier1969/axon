@@ -8,44 +8,57 @@ defmodule Axon.Watcher.IndexingWorker do
     Logger.info("[Oban] Processing batch of #{length(batch)} files (Job #{job_id})")
 
     Enum.each(batch, fn file ->
-      Axon.Watcher.Telemetry.report_start("oban:#{job_id}", file["path"])
+      path = file["path"]
+      Axon.Watcher.Telemetry.report_start("oban:#{job_id}", path)
 
-      case PoolFacade.parse(file["path"], file["content"]) do
-        %{"status" => "ok"} ->
-          Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", file["path"], :ok)
-          
-          try do
-            Axon.Watcher.Tracking.mark_file_status!(file["path"], "indexed")
-          rescue
-            _ -> :ok
+      case File.read(path) do
+        {:ok, content} ->
+          if String.printable?(content) do
+            case PoolFacade.parse(path, content) do
+              %{"status" => "ok"} ->
+                Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", path, :ok)
+                
+                try do
+                  Axon.Watcher.Tracking.mark_file_status!(path, "indexed")
+                rescue
+                  _ -> :ok
+                end
+
+                Phoenix.PubSub.broadcast(
+                  AxonDashboard.PubSub,
+                  "bridge_events",
+                  {:file_indexed, path, :ok}
+                )
+
+              error ->
+                Logger.error("[Oban] Failed to parse #{path}: #{inspect(error)}")
+                Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", path, {:error, error})
+                
+                try do
+                  Axon.Watcher.Tracking.mark_file_status!(path, "failed", %{error_reason: inspect(error)})
+                rescue
+                  _ -> :ok
+                end
+
+                Phoenix.PubSub.broadcast(
+                  AxonDashboard.PubSub,
+                  "bridge_events",
+                  {:file_indexed, path, :error}
+                )
+            end
+          else
+            Logger.debug("[Oban] Skipping binary file #{path}")
+            Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", path, :skipped_binary)
           end
-
-          Phoenix.PubSub.broadcast(
-            AxonDashboard.PubSub,
-            "bridge_events",
-            {:file_indexed, file["path"], :ok}
-          )
-
-        error ->
-          Logger.error("[Oban] Failed to parse #{file["path"]}: #{inspect(error)}")
-          Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", file["path"], {:error, error})
           
-          try do
-            Axon.Watcher.Tracking.mark_file_status!(file["path"], "failed", %{error_reason: inspect(error)})
-          rescue
-            _ -> :ok
-          end
-
-          Phoenix.PubSub.broadcast(
-            AxonDashboard.PubSub,
-            "bridge_events",
-            {:file_indexed, file["path"], :error}
-          )
+        {:error, reason} ->
+          Logger.error("[Oban] Could not read file #{path}: #{inspect(reason)}")
+          Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", path, {:error, reason})
       end
 
       # Cooperative Yielding: Micro-pause to let the OS scheduler breathe
-      # This ensures the CPU is never hogged 100% continuously by the background indexer.
-      Process.sleep(10)
+      # Reduced to 2ms to keep ingestion smooth but avoid artificially delaying huge batches.
+      Process.sleep(2)
     end)
 
     :ok

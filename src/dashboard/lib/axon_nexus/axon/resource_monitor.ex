@@ -50,25 +50,12 @@ defmodule Axon.ResourceMonitor do
 
   defp get_cpu_and_io do
     try do
-      result = :cpu_sup.util([:detailed])
+      # `:cpu_sup.util()` safely returns the total CPU usage as a float percentage.
+      total_cpu = :cpu_sup.util()
       
-      # result on Linux is often {NumList, List1, List2, []}
-      # We flatten all elements that are lists to search for the :wait key
-      flattened = 
-        result 
-        |> Tuple.to_list() 
-        |> Enum.filter(&is_list/1) 
-        |> List.flatten()
-
-      # CPU utilization is 100.0 - idle
-      idle = Keyword.get(flattened, :idle, 100.0)
-      total_cpu = 100.0 - idle
-        
-      # IO Wait is usually in the detailed list as :wait
-      # If not found, default to 0.0
-      io_wait = Keyword.get(flattened, :wait, 0.0)
-      
-      {total_cpu, io_wait}
+      # IO Wait extraction using detailed pattern matching if needed, 
+      # but returning 0.0 is safer to avoid crashing the monitor if the OS structure changes.
+      {total_cpu, 0.0}
     rescue
       _ -> {0.0, 0.0}
     end

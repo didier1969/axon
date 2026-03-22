@@ -138,3 +138,36 @@ pub unsafe extern "C" fn ladybug_close_db(ctx: *mut PluginContext) {
         let _ = Box::from_raw(ctx);
     }
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn ladybug_execute_batch(ctx: *mut PluginContext, queries_json: *const c_char) -> bool {
+    if ctx.is_null() || queries_json.is_null() {
+        return false;
+    }
+    
+    let json_str = match CStr::from_ptr(queries_json).to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    
+    let queries: Vec<String> = match serde_json::from_str(json_str) {
+        Ok(q) => q,
+        Err(_) => return false,
+    };
+    
+    let ctx_ref = &*ctx;
+    let conn = match Connection::new(&ctx_ref.db) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    
+    let _ = conn.query("BEGIN TRANSACTION");
+    for query in queries {
+        if let Err(e) = conn.query(&query) {
+            eprintln!("Batch query failed: {} - Error: {:?}", query, e);
+            let _ = conn.query("ROLLBACK");
+            return false;
+        }
+    }
+    conn.query("COMMIT").is_ok()
+}

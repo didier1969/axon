@@ -1,90 +1,36 @@
-# Roadmap: axon
+# Roadmap Axon : Objectif Apollo (v2.5 - v3.0)
 
-## 💎 v1.0 - The Intelligent Immune System (COMPLETED 2026-03-13)
-**Focus :** Intelligence de flux, Intégration HydraDB et Performance Native.
+## Aperçu
+Axon passe du statut d'outil d'indexation à celui de **Treillis de Connaissance Vivant**. La priorité n'est plus la simple couverture linguistique, mais la **Souveraineté Sémantique Totale** et l'**Ingestion Douce Omniprésente**.
 
-### 🛡️ Sécurité & Audit (The Taint Analysis Engine)
-- [x] **Analyse de Propagation (Taint Analysis) :** Passer d'une recherche par mots-clés à un suivi réel de la donnée (`Source` -> `Sanitizer` -> `Sink`).
-- [x] **Détection de Backdoors sémantiques :** Identifier les fonctions dont le nom cache la dangerosité réelle (ex: `run_task` qui appelle `eval`).
-- [x] **Clustering Auto-Adaptatif :** Remplacer les seuils fixes par une analyse de la densité locale du graphe.
-- [x] **Visualisation de Flux :** Exporter les chemins d'exposition critiques vers des diagrammes Mermaid/SVG.
+## Jalons Actuels
 
-### ⚡ Performance & Scalabilité (The Hydra Engine)
-- [x] **Intégration HydraDB :** Déportation de la persistence vers RocksDB/Dolt (Elixir/Rust).
-- [x] **Stratégie Lazy vs Eager :** Implémentation de la file d'attente de tâches de fond via OTP (supervision Elixir).
-- [x] **Embeddings Parallélisés :** Réduction radicale du temps d'indexation (Cible : < 10min pour 40k symboles).
+**v2.5 : L'Infrastucture de Vérité (Phase Apollo 1)**
+Status: 🚀 En cours d'exécution Maestria
 
-### 🧠 Intelligence & UX
-- [x] **Audit Proactif :** Alerte automatique dès qu'un changement dégrade le score de sécurité.
-- [x] **Traçage Polyglotte :** Traversée automatique des frontières (ex: Elixir ↔ Rust NIFs).
+| Phase | Nom | Statut | Cible |
+|-------|------|--------|-------|
+| 1 | Ingestion "Fantôme" Haute Performance | ✅ Validé | Zero-Bloat Oban / Rust Spawn Blocking |
+| 2 | Robustesse du Système Nerveux (MCP) | 🚧 En cours | Multiplexage / Synthèse Sémantique |
+| 3 | Fédération du Treillis (Global Graph) | 📅 Prochainement | Jointure multi-projets Cypher |
 
----
+### Phase 2 : Robustesse du Système Nerveux (MCP)
+- [x] Isolation des threads de calcul (`tokio::task::spawn_blocking`).
+- [x] Déduplication atomique des symboles (Protection KuzuDB).
+- [ ] **Synthèse Sémantique :** Remplacer les réponses JSON brutes par des rapports de décision structurés.
+- [ ] **Notifications Proactives :** Notifications de dérive architecturale via le canal MCP.
 
-## ✅ v1.0 - The Structural Copilot (COMPLETED 2026-03-07)
-**Focus :** Amélioration de la précision de l'audit architectural et de la performance globale.
+### Phase 3 : Fédération du Treillis (Global Graph)
+- **Objectif :** Supprimer la notion de "Project" isolée. Le graphe devient global.
+- **Support Cypher étendu :** Requêtes traversant les dépendances entre dépôts différents dans `/home/dstadel/projects`.
+- **Analyse d'Impact Prédictive :** `axon_impact` fonctionnel à 100% sur le graphe global.
 
-- [x] **Audit Clustering :** Réduction drastique du bruit dans les rapports d'audit (docs, tests).
-- [x] **Centrality-based Ejection :** Isolation automatique des hubs critiques pour la sécurité.
-- [x] **CLI DX :** Option `--verbose`, fix des boucles de récursion, commande `axon up`.
-- [x] **Fallback Parsers :** Support universel des fichiers texte/inconnus.
+## Jalons Futurs
 
----
-
-## 🏗️ Historique des Milestones Complétées
-
-<details>
-<summary>v0.8 Graph Intelligence — 2026-03-07</summary>
-Centralité PageRank, Hybrid Search, axon_path, axon_find_usages, axon_lint, axon_summarize.
-958 tests passants.
-</details>
-
-<details>
-<summary>v0.7 Quality & Security — 2026-03-04</summary>
-Sécurisation Cypher, byte offsets précis, axon_read_symbol.
-</details>
-
-<details>
-<summary>v0.6 Daemon & Centralisation — 2026-03-02</summary>
-Daemon central avec cache LRU, stockage ~/.axon/repos/.
-</details>
-
-## 🏗️ Consolidation MCP v1.2 (COMPLETED)
-
-**Objectif :** Réduire la charge cognitive de l'IA et optimiser l'économie du contexte en passant de 17 à 8 outils haute performance.
-
-### 📦 Spécification des Outils Consolidés
-1.  **`axon_query` :** Recherche hybride (texte + vecteur) et similarité sémantique.
-2.  **`axon_inspect` :** Vue 360° d'un symbole (code source, appelants/appelés, statistiques).
-3.  **`axon_audit` :** Vérification de conformité (Sécurité OWASP, Qualité, Anti-patterns).
-4.  **`axon_impact` :** Analyse prédictive (Rayon d'impact et chemins critiques).
-5.  **`axon_health` :** Rapport de santé global (Code mort, lacunes de tests, points d'entrée).
-6.  **`axon_diff` :** Analyse sémantique des changements (Git Diff -> Symboles touchés).
-7.  **`axon_batch` :** Orchestration d'appels multiples (Performance).
-8.  **`axon_cypher` :** Interface de bas niveau pour requêtes HydraDB brutes.
-
-### 🛠️ Protocole d'Exécution
-- [x] **Phase 1 (Tests) :** Écrire les tests E2E pour les 8 nouvelles signatures.
-- [x] **Phase 2 (Tronc) :** Refactoriser le serveur (Rust MCP) pour enregistrer la nouvelle liste.
-- [x] **Phase 3 (Feuilles) :** Fusionner la logique (diff, batch, cypher, inspect, etc.).
-- [x] **Phase 4 (Purge) :** Supprimer les anciens outils redondants.
-- [x] **Phase 5 (Qualité) :** Validation 100% PASS et Zéro Warning.
+**v3.0 : L'Oracle Omniscient (Phase Apollo 2)**
+- **Ingestion Temps Réel Native :** Intégration OS (Inotify/Fanotify) pour indexation à la microseconde.
+- **Certification Witness :** Preuves physiques de vérité sémantique pour chaque réponse fournie à l'IA.
+- **Clustering Nexus :** Support du clustering multi-nœuds pour l'analyse de graphes distribués.
 
 ---
-
-## 🚀 v2.2 - Resource-Aware Scaling (Dynamic Backpressure) (COMPLETED)
-**Focus :** Intelligence d'infrastructure et respect absolu de l'environnement développeur.
-
-- [x] **OS Telemetry Monitor :** Intégration de `:os_mon` (Erlang) pour lire la charge CPU et RAM en temps réel.
-- [x] **Dynamic Worker Scaling :** Adaptation à la volée des limites d'Oban (`indexing_default` / `indexing_hot`).
-- [x] **Dynamic Batching :** Réduction de la taille des lots (chunk size) envoyés au Data Plane Rust si la pression mémoire augmente.
-- [x] **Hard Limit 70% :** Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 70% des ressources globales de la machine, se mettant en "pause" automatique si le système utilisateur exige la pleine puissance.
-
----
-
-## 🛰️ v2.3 - Semantic Intelligence & Observability (COMPLETED)
-**Focus :** Profondeur d'analyse et visibilité en temps réel.
-
-- [x] **Cross-Language Taint Analysis :** Suivi sémantique des données entre Elixir et Rust NIFs. Identification des puits (`unsafe`) au travers du pont natif.
-- [x] **Telemetry Dashboard :** Intégration d'un moniteur de ressources temps réel dans le Phoenix Dashboard.
-- [x] **Witness Verification :** Certification physique du rendu des composants de télémétrie via `LiveView.Witness`.
-- [x] **Zero-Simplification Edge Mapping :** Le moteur de graphe respecte désormais la topologie exacte (`rel.from`) au lieu de liaisons globales par fichier.
+*Roadmap réalignée par le Nexus Lead Architect le 22 Mars 2026.*

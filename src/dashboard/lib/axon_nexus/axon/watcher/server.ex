@@ -146,14 +146,18 @@ defmodule Axon.Watcher.Server do
         {:ok, %{mtime: mtime}} ->
           last_mtime = Axon.Watcher.Progress.get_file_mtime(state.repo_slug, str_path)
           current_mtime = :erlang.phash2(mtime)
+          
+          # Optimization: Only mark as pending and enqueue if the file CHANGED 
+          # or if it's not yet successfully indexed in the local DB.
+          current_status = Axon.Watcher.Tracking.get_file_status(str_path)
 
-          try do
-            Axon.Watcher.Tracking.upsert_file!(project_name, str_path, to_string(current_mtime), "pending")
-          rescue
-            _ -> :ok
-          end
+          if current_mtime != last_mtime or current_status not in ["indexed", "ignored_by_rule"] do
+            try do
+              Axon.Watcher.Tracking.upsert_file!(project_name, str_path, to_string(current_mtime), "pending")
+            rescue
+              _ -> :ok
+            end
 
-          if current_mtime != last_mtime do
             Axon.Watcher.Progress.save_file_mtime(state.repo_slug, str_path, current_mtime)
 
             current_batch = state.pending_batches[priority]
@@ -170,6 +174,7 @@ defmodule Axon.Watcher.Server do
               {:noreply, put_in(state.pending_batches[priority], new_batch)}
             end
           else
+            # File is already indexed and hasn't changed on disk.
             {:noreply, state}
           end
 
@@ -260,20 +265,9 @@ defmodule Axon.Watcher.Server do
   end
 
   defp dispatch_batch(paths, queue) do
-    files_payload =
-      Enum.reduce(paths, [], fn path, acc ->
-        case File.read(path) do
-          {:ok, content} ->
-            if String.printable?(content) do
-              [%{"path" => path, "content" => content} | acc]
-            else
-              acc
-            end
-
-          _ ->
-            acc
-        end
-      end)
+    # Optimization: we don't read file content here to avoid blocking the GenServer
+    # and to prevent blowing up the Erlang RAM and Oban DB size.
+    files_payload = Enum.map(paths, fn path -> %{"path" => path} end)
 
     if length(files_payload) > 0 do
       try do

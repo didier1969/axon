@@ -28,13 +28,25 @@ def forward_uds_to_stdout(sock):
                 if decoded.startswith('{') and decoded.endswith('}'):
                     try:
                         parsed = json.loads(decoded)
-                        # Only forward valid JSON-RPC messages to the MCP client.
-                        # Internal Axon telemetry (SystemReady, FileIndexed) must be hidden.
-                        if "jsonrpc" in parsed or "id" in parsed or "method" in parsed:
+                        # Only forward valid JSON-RPC messages to the MCP client on stdout.
+                        # Internal Axon telemetry (SystemReady, FileIndexed) goes to stderr.
+                        if "jsonrpc" in parsed:
+                            if "id" not in parsed:
+                                # This is a notification
+                                sys.stderr.write(f"🔔 [Axon Notification] {parsed.get('method', 'unknown')}: {parsed.get('params', '')}\n")
+                                sys.stderr.flush()
+                            
                             sys.stdout.write(decoded + '\n')
                             sys.stdout.flush()
+                        else:
+                            sys.stderr.write(f"📊 [Axon Telemetry] {decoded}\n")
+                            sys.stderr.flush()
                     except json.JSONDecodeError:
-                        pass
+                        sys.stderr.write(f"⚠️ [Axon Bridge] {decoded}\n")
+                        sys.stderr.flush()
+                else:
+                    sys.stderr.write(f"[Axon Bridge] {decoded}\n")
+                    sys.stderr.flush()
         except Exception:
             break
 

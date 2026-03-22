@@ -191,17 +191,9 @@ defmodule Axon.Watcher.Server do
   end
 
   defp dispatch_batch(paths, queue) do
-    files_payload = Enum.reduce(paths, [], fn path, acc ->
-      case File.read(path) do
-        {:ok, content} -> 
-          if String.printable?(content) do
-            [%{"path" => path, "content" => content} | acc]
-          else
-            acc
-          end
-        _ -> acc
-      end
-    end)
+    # Optimization: we don't read file content here to avoid blocking the GenServer
+    # and to prevent blowing up the Erlang RAM and Oban DB size.
+    files_payload = Enum.map(paths, fn path -> %{"path" => path} end)
 
     if length(files_payload) > 0 do
       try do

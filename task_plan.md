@@ -1,17 +1,24 @@
-# Axon v2.2 - Resource-Aware Scaling (Dynamic Backpressure)
+# Plan: Stabilize MCP Server and Ingestion System
 
 ## Goal
-Intelligence d'infrastructure et respect absolu de l'environnement développeur. Mettre en place un backpressure dynamique basé sur la charge de l'OS.
+Ensure the Axon MCP server and its underlying ingestion pipeline are absolutely reliable and robust before adding new language parsers.
 
-## Tasks
+## Phases
 
-### Task 1: OS Telemetry Monitor (COMPLETED)
-- Intégration de `:os_mon` (Erlang) pour lire la charge CPU et RAM en temps réel.
-- Créer un `Axon.ResourceMonitor` (GenServer) qui poll régulièrement `:cpu_sup` et `:memsup`.
+### Phase 1: Investigation & Reproducing Errors (Systematic Debugging)
+- [x] Reproduce current MCP server failures (using test scripts or direct invocation).
+- [x] Analyze the ingestion pipeline's end-to-end reliability (Watcher -> Oban -> Rust Bridge -> Database).
+- [x] Identify root causes of unreliability or crashes.
 
-### Task 2: Dynamic Worker Scaling & Hard Limit 70% (COMPLETED)
-- Adaptation à la volée des limites d'Oban (`indexing_default` / `indexing_hot`) via le moniteur.
-- Implémentation d'un plafond strict (Circuit Breaker) garantissant qu'Axon ne consomme jamais plus de 70% des ressources globales de la machine, se mettant en "pause" automatique si le système utilisateur exige la pleine puissance.
+### Phase 2: Fix Ingestion Pipeline Reliability
+- [x] Implement defenses against identified ingestion failures (e.g., bridge disconnects, db locks, malformed messages).
+- [x] Verify ingestion stability under load.
 
-### Task 3: Dynamic Batching (COMPLETED)
-- Réduction de la taille des lots (chunk size) envoyés au Data Plane Rust si la pression mémoire augmente. (Cela nécessitera de modifier `Axon.Watcher.Server` pour ajuster la taille du batch avant de l'insérer dans Oban).
+### Phase 3: Fix MCP Server Reliability & Vision Alignment
+- [x] Resolve root causes of MCP server failing to respond or functioning incorrectly.
+- [x] Ensure MCP endpoints cleanly interact with the graph database without blocking or crashing.
+- [x] **Maestria Implementation:** Semantic Synthesis, Cross-Project Federation, and Proactive Notifications.
+
+### Phase 4: Final Validation
+- [x] Run comprehensive test suite for MCP.
+- [x] Verify long-running background ingestion doesn't impact MCP availability.

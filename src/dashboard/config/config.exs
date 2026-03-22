@@ -14,7 +14,9 @@ config :axon_dashboard,
 config :axon_dashboard, Axon.Watcher.Repo,
   adapter: Ecto.Adapters.SQLite3,
   database: "axon_nexus.db",
-  pool_size: 5
+  pool_size: 5,
+  journal_mode: :wal,
+  busy_timeout: 5000
 
 config :axon_dashboard, Oban,
   repo: Axon.Watcher.Repo,

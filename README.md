@@ -8,6 +8,12 @@ Axon ne se contente pas de chercher du texte ; il cartographie les **intentions*
 - **Fiabilité par la Preuve :** Chaque diagnostic est ancré dans la réalité physique du système.
 - **Amélioration Continue :** Identification proactive des zones non testées, des dérives architecturales et des failles de sécurité.
 
+## 🌐 Le Treillis de Connaissance Global (Phase Apollo)
+Axon évolue vers une infrastructure de **Souveraineté Sémantique**. Il ne traite plus vos projets comme des entités isolées, mais comme un **Treillis unique et vivant**.
+- **Fédération Cross-Projets :** Analysez les impacts d'une modification à travers l'intégralité de vos dépôts.
+- **Ingestion Fantôme :** Une indexation en temps réel à flux continu, avec un impact système quasi nul (<5% CPU).
+- **Omniscience Proactive :** Le serveur MCP ne se contente plus de répondre, il synthétise et alerte sur les dérives architecturales.
+
 ## 🛡️ L'Infrastructure de Confiance (Nexus Grade)
 Axon repose sur des piliers technologiques garantissant une fiabilité absolue :
 

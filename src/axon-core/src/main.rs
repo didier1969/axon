@@ -59,7 +59,19 @@ async fn main() -> anyhow::Result<()> {
         info!("Client connected to UDS");
         
         let ready_event = BridgeEvent::SystemReady { start_time_utc: boot_time.clone() };
-        let ready_msg = format!("Axon Bridge Ready\n{}\n", serde_json::to_string(&ready_event).unwrap());
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {
+                "message": "Axon Oracle is rising.",
+                "boot_time": boot_time
+            }
+        });
+        
+        let ready_msg = format!("Axon Bridge Ready\n{}\n{}\n", 
+            serde_json::to_string(&ready_event).unwrap(),
+            serde_json::to_string(&notification).unwrap()
+        );
         
         if let Err(e) = socket.write_all(ready_msg.as_bytes()).await {
             error!("Failed to write to socket: {}", e);
@@ -74,12 +86,14 @@ async fn main() -> anyhow::Result<()> {
             let mut line = String::new();
             
             // Setup a channel for sending messages back to the UI asynchronously
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(100);
+            // Increased capacity to 10,000 to handle massive ingestion spikes
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(10000);
             
             // Spawn writer loop
             tokio::spawn(async move {
                 while let Some(msg) = rx.recv().await {
                     if writer.write_all(msg.as_bytes()).await.is_err() {
+                        error!("Failed to write to socket, closing writer loop.");
                         break;
                     }
                 }
@@ -90,17 +104,25 @@ async fn main() -> anyhow::Result<()> {
 
             while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
                 if bytes_read == 0 {
-                    break; // EOF
+                    info!("Client disconnected (EOF)");
+                    break; 
                 }
                 
                 let command = line.trim();
+                info!("DEBUG: Read from socket ({} bytes): '{}'", bytes_read, command);
+                
+                if command.is_empty() {
+                    line.clear();
+                    continue;
+                }
                 
                 if command.starts_with("WATCHER_EVENT ") {
                     let payload = &command[14..];
                     if let Ok(event_data) = serde_json::from_str::<serde_json::Value>(payload) {
                         // Forward the event directly to connected dashboard clients
                         let forward_msg = serde_json::to_string(&event_data).unwrap() + "\n";
-                        let _ = tx.send(forward_msg).await;
+                        // Use non-blocking try_send to never stall the main reader loop
+                        let _ = tx.try_send(forward_msg);
                     }
                 } else if command.starts_with("PARSE_FILE ") {
                     let payload = &command[11..];
@@ -113,19 +135,24 @@ async fn main() -> anyhow::Result<()> {
                         let tx_clone = tx.clone();
                         
                         tokio::spawn(async move {
-                            let mut symbols_count = 0;
-                            let mut rels_count = 0;
+                            let path_for_task = path.clone();
                             
-                            let path_obj = std::path::Path::new(&path);
-                            if let Some(parser) = parser::get_parser_for_file(path_obj) {
-                                let extraction = parser.parse(&content);
-                                symbols_count = extraction.symbols.len();
-                                rels_count = extraction.relations.len();
+                            let (symbols_count, rels_count) = tokio::task::spawn_blocking(move || {
+                                let mut s_count = 0;
+                                let mut r_count = 0;
                                 
-                                if let Ok(store) = store_for_parse.read() {
-                                    let _ = store.insert_file_data(&path, &extraction);
+                                let path_obj = std::path::Path::new(&path_for_task);
+                                if let Some(parser) = parser::get_parser_for_file(path_obj) {
+                                    let extraction = parser.parse(&content);
+                                    s_count = extraction.symbols.len();
+                                    r_count = extraction.relations.len();
+                                    
+                                    if let Ok(store) = store_for_parse.read() {
+                                        let _ = store.insert_file_data(&path_for_task, &extraction);
+                                    }
                                 }
-                            }
+                                (s_count, r_count)
+                            }).await.unwrap_or((0, 0));
                             
                             let finish_msg = serde_json::to_string(&BridgeEvent::FileIndexed {
                                 path: path.clone(),
@@ -266,11 +293,18 @@ async fn main() -> anyhow::Result<()> {
                         if !token_clone.load(Ordering::Relaxed) {
                             let duration = start.elapsed();
                             info!("Fleet Ingestion Complete in {:?}", duration);
-                            let complete_msg = serde_json::to_string(&BridgeEvent::ScanComplete { 
+                            let complete_event = BridgeEvent::ScanComplete { 
                                 total_files: 0, 
                                 duration_ms: duration.as_millis() as u64 
-                            }).unwrap() + "\n";
-                            let _ = tx_clone.send(complete_msg).await;
+                            };
+                            let _ = tx_clone.send(serde_json::to_string(&complete_event).unwrap() + "\n").await;
+                            
+                            let notification = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/ingestion_complete",
+                                "params": { "duration_ms": duration.as_millis() as u64 }
+                            });
+                            let _ = tx_clone.send(serde_json::to_string(&notification).unwrap() + "\n").await;
                         } else {
                             info!("Fleet Ingestion STOPPED by user.");
                             let complete_msg = serde_json::to_string(&BridgeEvent::ScanComplete { 
@@ -324,6 +358,7 @@ async fn main() -> anyhow::Result<()> {
                     let _ = tx.send(complete_msg).await;
                     
                 } else if command.starts_with('{') {
+                    info!("Received potential MCP JSON request: {}", command);
                     // MCP Request - Offload heavy graph queries from Tokio worker thread
                     let store_for_mcp = store_clone.clone();
                     let command_clone = command.to_string();
@@ -331,15 +366,21 @@ async fn main() -> anyhow::Result<()> {
                     
                     tokio::spawn(async move {
                         let mcp_server = McpServer::new(store_for_mcp);
-                        if let Ok(request) = serde_json::from_str::<mcp::JsonRpcRequest>(&command_clone) {
-                            
-                            // Execute synchronous FFI graph query in blocking thread pool
-                            let response = tokio::task::spawn_blocking(move || {
-                                mcp_server.handle_request(request)
-                            }).await.expect("Blocking MCP task panicked");
-                            
-                            if let Ok(json_str) = serde_json::to_string(&response) {
-                                let _ = tx_clone.send(format!("{}\n", json_str)).await;
+                        match serde_json::from_str::<mcp::JsonRpcRequest>(&command_clone) {
+                            Ok(request) => {
+                                info!("Parsed MCP request: method={}", request.method);
+                                // Execute synchronous FFI graph query in blocking thread pool
+                                let response = tokio::task::spawn_blocking(move || {
+                                    mcp_server.handle_request(request)
+                                }).await.expect("Blocking MCP task panicked");
+                                
+                                if let Ok(json_str) = serde_json::to_string(&response) {
+                                    info!("Sending MCP response back to client");
+                                    let _ = tx_clone.send(format!("{}\n", json_str)).await;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to parse MCP request: {} - Error: {}", command_clone, e);
                             }
                         }
                     });

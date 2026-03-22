@@ -132,9 +132,9 @@ defmodule Axon.BackpressureController do
 
   defp calculate_limit(pressure) do
     cond do
-      pressure < 0.50 -> 10
-      pressure < 0.75 -> 5
-      true -> 1
+      pressure < 0.50 -> 16
+      pressure < 0.75 -> 8
+      true -> 2
     end
   end
 

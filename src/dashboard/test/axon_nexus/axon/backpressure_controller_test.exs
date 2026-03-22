@@ -33,7 +33,7 @@ defmodule Axon.BackpressureControllerTest do
     :ok
   end
 
-  test "scales to 10 when pressure is under 50% (e.g. IO=5/20=0.25)" do
+  test "scales to 16 when pressure is under 50% (e.g. IO=5/20=0.25)" do
     MockResourceMonitor.set_load(30.0, 30.0, 5.0)
 
     {:ok, pid} =
@@ -46,13 +46,13 @@ defmodule Axon.BackpressureControllerTest do
 
     GenServer.call(pid, :trigger_poll)
 
-    assert_receive {:oban_scale, :indexing_default, 10}
-    assert_receive {:oban_scale, :indexing_hot, 5}
+    assert_receive {:oban_scale, :indexing_default, 16}
+    assert_receive {:oban_scale, :indexing_hot, 8}
 
     GenServer.stop(pid)
   end
 
-  test "scales to 5 when pressure is between 50% and 75% (e.g. IO=12/20=0.60)" do
+  test "scales to 8 when pressure is between 50% and 75% (e.g. IO=12/20=0.60)" do
     MockResourceMonitor.set_load(30.0, 30.0, 12.0)
 
     {:ok, pid} =
@@ -65,13 +65,13 @@ defmodule Axon.BackpressureControllerTest do
 
     GenServer.call(pid, :trigger_poll)
 
-    assert_receive {:oban_scale, :indexing_default, 5}
-    assert_receive {:oban_scale, :indexing_hot, 2}
+    assert_receive {:oban_scale, :indexing_default, 8}
+    assert_receive {:oban_scale, :indexing_hot, 4}
 
     GenServer.stop(pid)
   end
 
-  test "scales to 1 when pressure is between 75% and 100% (e.g. CPU=60/70=0.85)" do
+  test "scales to 2 when pressure is between 75% and 100% (e.g. CPU=60/70=0.85)" do
     MockResourceMonitor.set_load(60.0, 10.0, 5.0)
 
     {:ok, pid} =
@@ -84,7 +84,7 @@ defmodule Axon.BackpressureControllerTest do
 
     GenServer.call(pid, :trigger_poll)
 
-    assert_receive {:oban_scale, :indexing_default, 1}
+    assert_receive {:oban_scale, :indexing_default, 2}
     assert_receive {:oban_scale, :indexing_hot, 1}
 
     GenServer.stop(pid)
@@ -108,35 +108,35 @@ defmodule Axon.BackpressureControllerTest do
 
     GenServer.stop(pid)
   end
+test "resumes queues when load recovers from >100% pressure to <100%" do
+  # Initial state: Paused due to RAM = 75/70
+  MockResourceMonitor.set_load(10.0, 75.0, 0.0)
 
-  test "resumes queues when load recovers from >100% pressure to <100%" do
-    # Initial state: Paused due to RAM = 75/70
-    MockResourceMonitor.set_load(10.0, 75.0, 0.0)
+  {:ok, pid} =
+    BackpressureController.start_link(
+      name: :test_controller_5,
+      poll_interval: 0,
+      monitor_mod: MockResourceMonitor,
+      oban_mod: MockOban
+    )
 
-    {:ok, pid} =
-      BackpressureController.start_link(
-        name: :test_controller_5,
-        poll_interval: 0,
-        monitor_mod: MockResourceMonitor,
-        oban_mod: MockOban
-      )
+  GenServer.call(pid, :trigger_poll)
 
-    GenServer.call(pid, :trigger_poll)
+  assert_receive {:oban_pause, :indexing_default}
+  assert_receive {:oban_pause, :indexing_hot}
 
-    assert_receive {:oban_pause, :indexing_default}
-    assert_receive {:oban_pause, :indexing_hot}
+  # Recover to CPU = 30/70 = 0.42 (< 0.50) -> should go to 16
+  MockResourceMonitor.set_load(30.0, 30.0, 5.0)
 
-    # Recover load: IO=5/20=0.25 (Pressure < 0.5)
-    MockResourceMonitor.set_load(10.0, 10.0, 5.0)
-    GenServer.call(pid, :trigger_poll)
+  GenServer.call(pid, :trigger_poll)
 
-    assert_receive {:oban_resume, :indexing_default}
-    assert_receive {:oban_resume, :indexing_hot}
-    assert_receive {:oban_scale, :indexing_default, 10}
+  assert_receive {:oban_resume, :indexing_default}
+  assert_receive {:oban_resume, :indexing_hot}
+  assert_receive {:oban_scale, :indexing_default, 16}
+  assert_receive {:oban_scale, :indexing_hot, 8}
 
-    GenServer.stop(pid)
-  end
-
+  GenServer.stop(pid)
+end
   test "get_chunk_size returns correct size based on pressure" do
     # Pressure 0.25 (< 0.50) -> 100
     MockResourceMonitor.set_load(10.0, 10.0, 5.0)

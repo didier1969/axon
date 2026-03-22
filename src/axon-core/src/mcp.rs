@@ -86,6 +86,49 @@ impl McpServer {
         }
     }
 
+    fn format_kuzu_table(&self, json_res: &str, headers: &[&str]) -> String {
+        let rows: Vec<Vec<String>> = match serde_json::from_str(json_res) {
+            Ok(r) => r,
+            Err(_) => return format!("Erreur de formatage : {}", json_res),
+        };
+
+        if rows.is_empty() {
+            return "Aucun résultat trouvé.".to_string();
+        }
+
+        let mut output = String::new();
+        
+        // Header
+        output.push('|');
+        for h in headers {
+            output.push_str(&format!(" {} |", h));
+        }
+        output.push('\n');
+
+        // Separator
+        output.push('|');
+        for _ in headers {
+            output.push_str(" --- |");
+        }
+        output.push('\n');
+
+        // Body
+        for row in rows {
+            output.push('|');
+            for val in row {
+                // Clean up string representation if it's like 'String("val")'
+                let clean_val = val.trim_start_matches("String(\"").trim_end_matches("\")")
+                                   .trim_start_matches("Int64(").trim_end_matches(")")
+                                   .trim_start_matches("Boolean(").trim_end_matches(")")
+                                   .replace("\\\"", "\"");
+                output.push_str(&format!(" {} |", clean_val));
+            }
+            output.push('\n');
+        }
+
+        output
+    }
+
     pub fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
         let result = match req.method.as_str() {
             "initialize" => Some(json!({
@@ -285,11 +328,36 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 }
 
     fn axon_query(&self, args: &Value) -> Option<Value> {
-        let query = args.get("query")?.as_str()?;
-        // Placeholder for hybrid search implementation
-        let cypher = format!("MATCH (s:Symbol) WHERE s.name CONTAINS '{}' RETURN s.name, s.kind LIMIT 10", query);
+        let query_text = args.get("query")?.as_str()?;
+        
+        // 1. Vector Embedding of the query
+        let embedding = crate::embedder::batch_embed(vec![query_text.to_string()]).ok()
+            .and_then(|v| v.into_iter().next());
+
+        let cypher = if let Some(emb) = embedding {
+            let vec_str = format!("{:?}", emb);
+            // Hybrid query: exact match on name OR semantic similarity
+            format!(
+                "MATCH (s:Symbol) \
+                 WHERE s.name CONTAINS '{}' OR l2_distance(s.embedding, {}) < 1.0 \
+                 RETURN s.name, s.kind, l2_distance(s.embedding, {}) as score \
+                 ORDER BY score ASC LIMIT 10",
+                query_text, vec_str, vec_str
+            )
+        } else {
+            format!("MATCH (s:Symbol) WHERE s.name CONTAINS '{}' RETURN s.name, s.kind LIMIT 10", query_text)
+        };
+
         match self.graph_store.read().unwrap().query_json(&cypher) {
-            Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
+            Ok(res) => {
+                let headers = if cypher.contains("score") {
+                    vec!["Nom", "Type", "Distance Sémantique"]
+                } else {
+                    vec!["Nom", "Type"]
+                };
+                let table = self.format_kuzu_table(&res, &headers);
+                Some(json!({ "content": [{ "type": "text", "text": format!("### 🔎 Résultats de Recherche Hybride : '{}'\n\n{}", query_text, table) }] }))
+            },
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Search Error: {}", e) }], "isError": true })),
         }
     }
@@ -312,49 +380,83 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
             symbol
         );
         match self.graph_store.read().unwrap().query_json(&query) {
-            Ok(res) => Some(json!({ "content": [{ "type": "text", "text": format!("Symbol Details:\n{}", res) }] })),
+            Ok(res) => {
+                let table = self.format_kuzu_table(&res, &["Nom", "Type", "Testé", "Appelants", "Appelés"]);
+                Some(json!({ "content": [{ "type": "text", "text": format!("### 🔍 Inspection du Symbole : {}\n\n{}", symbol, table) }] }))
+            },
             Err(_) => None,
         }
     }
 
     fn axon_impact(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
-        let depth_str = match args.get("depth").and_then(|v| v.as_u64()) {
-            Some(d) => format!("*1..{}", d),
-            None => "*1..".to_string(), // Unbounded variable length
-        };
-        let query = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS{}]-(affected) RETURN DISTINCT affected.name", symbol, depth_str);
+        let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
+        let depth_str = format!("*1..{}", depth);
+        
+        let query = format!(
+            "MATCH (s:Symbol {{name: '{}'}})<-[:CALLS|CALLS_NIF{}]-(affected) \
+             RETURN DISTINCT affected.name, affected.kind", 
+            symbol, depth_str
+        );
+        
         match self.graph_store.read().unwrap().query_json(&query) {
-            Ok(res) => Some(json!({ "content": [{ "type": "text", "text": format!("Affected Symbols: {}", res) }] })),
-            Err(_) => None,
+            Ok(res) => {
+                let table = self.format_kuzu_table(&res, &["Symbole Impacté", "Type"]);
+                let count_query = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS|CALLS_NIF{}]-(affected) RETURN count(DISTINCT affected)", symbol, depth_str);
+                let impact_radius = self.graph_store.read().unwrap().query_count(&count_query).unwrap_or(0);
+                
+                let mut report = format!("## 💥 Analyse d'Impact : {}\n\n", symbol);
+                report.push_str(&format!("**Rayon d'Impact (profondeur {}) :** {} composants affectés.\n\n", depth, impact_radius));
+                
+                if impact_radius > 0 {
+                    report.push_str("### Liste des composants à risque :\n");
+                    report.push_str(&table);
+                } else {
+                    report.push_str("✅ Cette modification semble isolée. Aucun composant dépendant trouvé dans le Treillis.");
+                }
+                
+                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+            },
+            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Impact Analysis Error: {}", e) }], "isError": true })),
         }
     }
 
     fn axon_audit(&self, args: &Value) -> Option<Value> {
-        let project = args.get("project")?.as_str().unwrap_or("unknown");
+        let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         let store = self.graph_store.read().unwrap();
-        let (score, paths) = store.get_security_audit(project).unwrap_or((100, "[]".to_string()));
         
-        let mermaid_diagram = crate::graph::GraphStore::generate_mermaid_flow(&paths);
+        let (sec_score, paths) = store.get_security_audit(project).unwrap_or((100, "[]".to_string()));
+        let cov_score = store.get_coverage_score(project).unwrap_or(0);
+        
+        let mut report = format!("## 🛡️ Rapport d'Audit : {}\n\n", if project == "*" { "Workspace Global" } else { project });
+        
+        report.push_str(&format!("### 🔒 Sécurité : {}/100\n", sec_score));
+        if sec_score < 100 {
+            report.push_str("⚠️ **Vulnérabilités détectées (Taint Analysis) :**\n");
+            report.push_str(&self.format_kuzu_table(&paths, &["Chemin de Propagation"]));
+            let mermaid_diagram = crate::graph::GraphStore::generate_mermaid_flow(&paths);
+            report.push_str(&format!("\n\n#### Visualisation des Chemins :\n```mermaid\n{}\n```\n", mermaid_diagram));
+        } else {
+            report.push_str("✅ Aucun chemin critique vers des fonctions dangereuses détecté.\n");
+        }
+
+        report.push_str(&format!("\n### 🧪 Qualité & Tests : {}%\n", cov_score));
         
         // Macro API Break Check: Are there highly connected public symbols in this project?
+        let filter = if project == "*" { "".to_string() } else { format!("WHERE f.path CONTAINS '{}'", project) };
         let break_query = format!(
             "MATCH (f:File)-[:CONTAINS]->(s:Symbol {{is_public: true}})<-[:CALLS]-(caller:Symbol) \
-             WHERE f.path CONTAINS '{}' \
+             {} \
              RETURN s.name, count(caller) AS external_callers \
              ORDER BY external_callers DESC LIMIT 3",
-            project
+            filter
         );
         let break_report = store.query_json(&break_query).unwrap_or_default();
         
-        let mut report = if score < 100 {
-            format!("🛡️ Security Audit for {}: Score {}/100.\nCritical Taint Paths found:\n{}\n\n{}", project, score, paths, mermaid_diagram)
-        } else {
-            format!("🛡️ Security Audit for {}: Score 100/100. Patterns analyzed against OWASP standards.", project)
-        };
-        
         if break_report.len() > 5 && break_report != "[]" && !break_report.starts_with("Error:") {
-            report.push_str(&format!("\n\n⚠️ MACRO API BREAK CHECK: The following PUBLIC symbols are heavily relied upon. Modify them with caution:\n{}", break_report));
+            report.push_str("\n### ⚠️ Points de Rupture Critique (API Reliability)\n");
+            report.push_str("Les symboles publics suivants sont massivement utilisés. Toute modification impactera l'architecture :\n");
+            report.push_str(&self.format_kuzu_table(&break_report, &["Symbole Public", "Nombre de Dépendants"]));
         }
         
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
@@ -451,22 +553,23 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_bidi_trace(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
-        let depth_str = match args.get("depth").and_then(|v| v.as_u64()) {
-            Some(d) => format!("*1..{}", d),
-            None => "*1..".to_string(), // Unbounded variable length
-        };
+        let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
+        let depth_str = format!("*1..{}", depth);
         
-        let query_up = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS{}]-(entry:Symbol {{is_entry_point: true}}) RETURN DISTINCT entry.name", symbol, depth_str);
-        let query_down = format!("MATCH (s:Symbol {{name: '{}'}})-[:CALLS{}]->(leaf:Symbol) RETURN DISTINCT leaf.name LIMIT 20", symbol, depth_str);
+        let query_up = format!("MATCH (s:Symbol {{name: '{}'}})<-[:CALLS|CALLS_NIF{}]-(entry:Symbol {{is_entry_point: true}}) RETURN DISTINCT entry.name, entry.kind", symbol, depth_str);
+        let query_down = format!("MATCH (s:Symbol {{name: '{}'}})-[:CALLS|CALLS_NIF{}]->(leaf:Symbol) RETURN DISTINCT leaf.name, leaf.kind LIMIT 20", symbol, depth_str);
         
         let store = self.graph_store.read().unwrap();
         let up_res = store.query_json(&query_up).unwrap_or_else(|_| "[]".to_string());
         let down_res = store.query_json(&query_down).unwrap_or_else(|_| "[]".to_string());
         
-        let report = format!(
-            "Trace Bidirectionnelle pour '{}'\n\n🔼 Appelé par ces Entry Points :\n{}\n\n🔽 Appelle ces composants critiques :\n{}",
-            symbol, up_res, down_res
-        );
+        let mut report = format!("## ↔️ Trace Bidirectionnelle : {}\n\n", symbol);
+        
+        report.push_str("### 🔼 Appelé par ces Points d'Entrée (Entry Points) :\n");
+        report.push_str(&self.format_kuzu_table(&up_res, &["Point d'Entrée", "Type"]));
+        
+        report.push_str("\n### 🔽 Appelle ces composants :\n");
+        report.push_str(&self.format_kuzu_table(&down_res, &["Composant Appelé", "Type"]));
         
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }

@@ -3,10 +3,11 @@ use std::ffi::{CString, c_void};
 use std::os::raw::c_char;
 use std::path::PathBuf;
 use anyhow::{anyhow, Result};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 type InitDbFunc = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 type ExecuteFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> bool;
+type ExecuteBatchFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> bool;
 type QueryCountFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> i64;
 type QueryJsonFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char;
 type FreeStringFunc = unsafe extern "C" fn(*mut c_char);
@@ -15,6 +16,7 @@ type CloseDbFunc = unsafe extern "C" fn(*mut c_void);
 pub struct GraphStore {
     lib: Arc<Library>,
     ctx: *mut c_void,
+    write_mutex: Mutex<()>,
 }
 
 unsafe impl Send for GraphStore {}
@@ -52,7 +54,7 @@ impl GraphStore {
             ctx
         };
 
-        let store = Self { lib, ctx };
+        let store = Self { lib, ctx, write_mutex: Mutex::new(()) };
         store.init_schema()?;
 
         Ok(store)
@@ -96,6 +98,15 @@ impl GraphStore {
         }
     }
 
+    pub fn execute_batch(&self, queries: &[String]) -> Result<bool> {
+        unsafe {
+            let exec_batch_fn: Symbol<ExecuteBatchFunc> = self.lib.get(b"ladybug_execute_batch\0")?;
+            let json_str = serde_json::to_string(queries)?;
+            let c_query = CString::new(json_str)?;
+            Ok(exec_batch_fn(self.ctx, c_query.as_ptr()))
+        }
+    }
+
     pub fn query_count(&self, query: &str) -> Result<i64> {
         unsafe {
             let count_fn: Symbol<QueryCountFunc> = self.lib.get(b"ladybug_query_count\0")?;
@@ -126,7 +137,7 @@ impl GraphStore {
 
     fn init_schema(&self) -> Result<()> {
         self.execute("CREATE NODE TABLE IF NOT EXISTS File (path STRING, PRIMARY KEY (path))")?;
-        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, is_unsafe BOOLEAN, is_nif BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
+        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, is_unsafe BOOLEAN, is_nif BOOLEAN, is_entry_point BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CONTAINS (FROM File TO Symbol)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CALLS (FROM Symbol TO Symbol)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CALLS_NIF (FROM Symbol TO Symbol)")?;
@@ -137,42 +148,52 @@ impl GraphStore {
     }
 
     pub fn insert_file_data(&self, path: &str, result: &crate::parser::ExtractionResult) -> Result<()> {
-        let safe_path = path.replace("'", "''");
+        // Serialize writes globally to prevent Kuzu DB lock errors
+        let _guard = self.write_mutex.lock().unwrap();
 
-        // Use transaction if possible, if not, ignore error and continue
-        let _ = self.execute("BEGIN TRANSACTION");
+        let safe_path = path.replace("'", "\\'");
+        let mut queries = Vec::new();
 
-        self.execute(&format!("MERGE (f:File {{path: '{}'}})", safe_path))?;
+        queries.push(format!("MERGE (f:File {{path: '{}'}})", safe_path));
+
+        let mut seen_symbols = std::collections::HashSet::new();
 
         for sym in &result.symbols {
-            let safe_name = sym.name.replace("'", "''");
+            let safe_name = sym.name.replace("'", "\\'");
+            
+            if seen_symbols.contains(&safe_name) {
+                continue;
+            }
+            seen_symbols.insert(safe_name.clone());
+
             let is_test = safe_name.contains("test_") || safe_path.contains("test");
             let is_unsafe = sym.properties.get("unsafe").map(|s| s == "true").unwrap_or(false);
             let is_nif = sym.properties.get("is_nif").map(|s| s == "true").unwrap_or(false);
 
             if let Some(emb) = &sym.embedding {
                 let vec_str = format!("{:?}", emb); // e.g., [0.1, 0.2, ...]
-                self.execute(&format!(
-                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}, is_public: {}, is_unsafe: {}, is_nif: {}, embedding: {}}})",
-                    safe_name, sym.kind, is_test, sym.is_public, is_unsafe, is_nif, vec_str
-                )).ok();
+                queries.push(format!(
+                    "MERGE (s:Symbol {{name: '{}'}}) SET s.kind = '{}', s.tested = {}, s.is_public = {}, s.is_unsafe = {}, s.is_nif = {}, s.is_entry_point = {}, s.embedding = {}",
+                    safe_name, sym.kind, is_test, sym.is_public, is_unsafe, is_nif, sym.is_entry_point, vec_str
+                ));
             } else {
-                self.execute(&format!(
-                    "MERGE (s:Symbol {{name: '{}', kind: '{}', tested: {}, is_public: {}, is_unsafe: {}, is_nif: {}}})",
-                    safe_name, sym.kind, is_test, sym.is_public, is_unsafe, is_nif
-                )).ok();
+                queries.push(format!(
+                    "MERGE (s:Symbol {{name: '{}'}}) SET s.kind = '{}', s.tested = {}, s.is_public = {}, s.is_unsafe = {}, s.is_nif = {}, s.is_entry_point = {}",
+                    safe_name, sym.kind, is_test, sym.is_public, is_unsafe, is_nif, sym.is_entry_point
+                ));
             }
 
-            self.execute(&format!(
+            queries.push(format!(
                 "MATCH (f:File {{path: '{}'}}), (s:Symbol {{name: '{}'}}) MERGE (f)-[:CONTAINS]->(s)",
                 safe_path, safe_name
-            )).ok();
+            ));
         }
 
         let valid_rels = ["CALLS", "IMPORTS", "IMPLEMENTS", "CALLS_NIF", "USES"];
+        let mut seen_rels = std::collections::HashSet::new();
 
         for rel in &result.relations {
-            let safe_to = rel.to.replace("'", "''");
+            let safe_to = rel.to.replace("'", "\\'");
             let rel_type = rel.rel_type.to_uppercase();
             let safe_rel_type = if valid_rels.contains(&rel_type.as_str()) {
                 rel_type
@@ -183,35 +204,51 @@ impl GraphStore {
             if rel.from.is_empty() || rel.from == "file" || rel.from == "method" {
                 // Fallback: connect all symbols to 'to'
                 for sym in &result.symbols {
-                    let safe_from = sym.name.replace("'", "''");
-                    self.execute(&format!(
-                        "MATCH (a:Symbol {{name: '{}'}}), (b:Symbol {{name: '{}'}}) MERGE (a)-[:{}]->(b)",
-                        safe_from, safe_to, safe_rel_type
-                    )).ok();
+                    let safe_from = sym.name.replace("'", "\\'");
+                    let rel_key = format!("{}->{}->{}", safe_from, safe_rel_type, safe_to);
+                    if !seen_rels.contains(&rel_key) {
+                        seen_rels.insert(rel_key);
+                        queries.push(format!(
+                            "MATCH (a:Symbol {{name: '{}'}}), (b:Symbol {{name: '{}'}}) MERGE (a)-[:{}]->(b)",
+                            safe_from, safe_to, safe_rel_type
+                        ));
+                    }
                 }
             } else {
-                let safe_from = rel.from.replace("'", "''");
-                self.execute(&format!(
-                    "MATCH (a:Symbol {{name: '{}'}}), (b:Symbol {{name: '{}'}}) MERGE (a)-[:{}]->(b)",
-                    safe_from, safe_to, safe_rel_type
-                )).ok();
+                let safe_from = rel.from.replace("'", "\\'");
+                let rel_key = format!("{}->{}->{}", safe_from, safe_rel_type, safe_to);
+                if !seen_rels.contains(&rel_key) {
+                    seen_rels.insert(rel_key);
+                    queries.push(format!(
+                        "MATCH (a:Symbol {{name: '{}'}}), (b:Symbol {{name: '{}'}}) MERGE (a)-[:{}]->(b)",
+                        safe_from, safe_to, safe_rel_type
+                    ));
+                }
             }
         }
 
-        let _ = self.execute("COMMIT");
+        if !queries.is_empty() {
+            let _ = self.execute_batch(&queries);
+        }
 
         Ok(())
     }
     pub fn get_security_audit(&self, project_name: &str) -> Result<(usize, String)> {
+        let filter = if project_name == "*" || project_name.is_empty() {
+            "".to_string()
+        } else {
+            format!("AND f.path CONTAINS '{}'", project_name)
+        };
+
         // Taint analysis: Path from any dangerous sink BACKWARDS to a symbol in the file
         let count_query = format!(
-            "MATCH (d:Symbol)<-[:CALLS|CALLS_NIF*1..4]-(s:Symbol)<-[:CONTAINS]-(f:File) 
-             WHERE (d.name IN ['eval', 'exec', 'system', 'pickle'] OR d.is_unsafe = true) AND f.path CONTAINS '{}' 
+            "MATCH (d:Symbol)<-[:CALLS|CALLS_NIF*1..4]-(s:Symbol)<-[:CONTAINS]-(f:File) \
+             WHERE (d.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR d.is_unsafe = true) {} \
              RETURN count(DISTINCT s)",
-            project_name
+            filter
         );
         let issues = self.query_count(&count_query)?;
-        
+
         let score = if issues > 0 {
             (100 - (issues * 15).min(100)) as usize
         } else {
@@ -219,20 +256,27 @@ impl GraphStore {
         };
 
         let paths_query = format!(
-            "MATCH path = (d:Symbol)<-[:CALLS|CALLS_NIF*1..4]-(s:Symbol)<-[:CONTAINS]-(f:File) 
-             WHERE (d.name IN ['eval', 'exec', 'system', 'pickle'] OR d.is_unsafe = true) AND f.path CONTAINS '{}' 
+            "MATCH path = (d:Symbol)<-[:CALLS|CALLS_NIF*1..4]-(s:Symbol)<-[:CONTAINS]-(f:File) \
+             WHERE (d.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR d.is_unsafe = true) {} \
              RETURN path LIMIT 5",
-            project_name
+            filter
         );
-        
+
         let paths_json = self.query_json(&paths_query).unwrap_or_else(|_| "[]".to_string());
-        
+
         Ok((score, paths_json))
     }
-
     pub fn get_coverage_score(&self, project_name: &str) -> Result<usize> {
-        let q_total = format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.kind = 'function' RETURN count(s)", project_name);
-        let q_tested = format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.kind = 'function' AND s.tested = true RETURN count(s)", project_name);
+        let filter = if project_name == "*" || project_name.is_empty() {
+            "".to_string()
+        } else {
+            format!("WHERE f.path CONTAINS '{}'", project_name)
+        };
+
+        let q_total = format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) {} {} s.kind = 'function' RETURN count(s)", 
+            filter, if filter.is_empty() { "WHERE" } else { "AND" });
+        let q_tested = format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) {} {} s.kind = 'function' AND s.tested = true RETURN count(s)", 
+            filter, if filter.is_empty() { "WHERE" } else { "AND" });
         
         let total = self.query_count(&q_total)?;
         let tested = self.query_count(&q_tested)?;

@@ -60,6 +60,11 @@ def run_e2e_test():
                 # Ignore Axon Bridge specific telemetry events
                 if "SystemReady" in response or "ScanComplete" in response or "FileIndexed" in response or "ProjectScanStarted" in response:
                     continue
+                
+                # Ignore MCP notifications (no ID)
+                if "jsonrpc" in response and "id" not in response:
+                    print(f"ℹ️ Received notification: {response.get('method')}")
+                    continue
                     
                 if "result" in response and "tools" in response["result"]:
                     tools = [t["name"] for t in response["result"]["tools"]]

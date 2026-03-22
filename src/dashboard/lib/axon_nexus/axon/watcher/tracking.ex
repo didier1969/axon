@@ -72,6 +72,16 @@ defmodule Axon.Watcher.Tracking do
   end
 
   @doc """
+  Gets the current status of a file.
+  """
+  def get_file_status(path) do
+    case Repo.get(IndexedFile, path) do
+      nil -> nil
+      file -> file.status
+    end
+  end
+
+  @doc """
   Gets the project ID of a file.
   """
   def get_project_for_file(path) do
