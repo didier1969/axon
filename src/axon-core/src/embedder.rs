@@ -18,8 +18,18 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
     let mut all_embeddings = Vec::with_capacity(texts.len());
     
     // Chunking to prevent ONNX memory explosions on files with thousands of symbols
+    // AND Truncating strings because ONNX Arena Allocator never shrinks
     for chunk in texts.chunks(64) {
-        let texts_ref: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+        let mut truncated_chunk = Vec::new();
+        for s in chunk {
+            if s.len() > 1000 {
+                truncated_chunk.push(s[..1000].to_string());
+            } else {
+                truncated_chunk.push(s.to_string());
+            }
+        }
+        
+        let texts_ref: Vec<&str> = truncated_chunk.iter().map(|s| s.as_str()).collect();
         let chunk_embeddings = embedder.embed(texts_ref, None)?;
         all_embeddings.extend(chunk_embeddings);
     }

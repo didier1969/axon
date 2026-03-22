@@ -3,8 +3,14 @@ use std::path::Path;
 use tree_sitter::wasmtime::Engine;
 use once_cell::sync::Lazy;
 use std::panic::catch_unwind;
+use std::collections::HashMap;
+use std::cell::RefCell;
 
 pub static WASM_ENGINE: Lazy<Engine> = Lazy::new(|| Engine::default());
+
+thread_local! {
+    static PARSER_CACHE: RefCell<HashMap<String, tree_sitter::Parser>> = RefCell::new(HashMap::new());
+}
 
 pub fn parse_with_wasm_safe(
     language_name: &str,
@@ -12,13 +18,31 @@ pub fn parse_with_wasm_safe(
     content: &str,
 ) -> Option<tree_sitter::Tree> {
     let content_string = content.to_string();
-    let result = catch_unwind(|| {
-        let mut store = tree_sitter::WasmStore::new(&*WASM_ENGINE).ok()?;
-        let language = store.load_language(language_name, wasm_bytes).ok()?;
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_wasm_store(store).ok()?;
-        parser.set_language(&language).ok()?;
-        parser.parse(&content_string, None)
+    let lang_name_str = language_name.to_string();
+    let wasm_bytes_vec = wasm_bytes.to_vec();
+
+    let result = catch_unwind(move || {
+        PARSER_CACHE.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+
+            if !cache.contains_key(&lang_name_str) {
+                if let Ok(mut store) = tree_sitter::WasmStore::new(&*WASM_ENGINE) {
+                    if let Ok(language) = store.load_language(&lang_name_str, &wasm_bytes_vec) {
+                        let mut parser = tree_sitter::Parser::new();
+                        if parser.set_wasm_store(store).is_ok() && parser.set_language(&language).is_ok() {
+                            cache.insert(lang_name_str.clone(), parser);
+                        }
+                    }
+                }
+            }
+
+            if let Some(parser) = cache.get_mut(&lang_name_str) {
+                // Parse returns Option<Tree>
+                parser.parse(&content_string, None)
+            } else {
+                None
+            }
+        })
     });
 
     match result {

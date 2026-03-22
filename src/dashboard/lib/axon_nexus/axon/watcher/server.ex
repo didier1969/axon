@@ -78,6 +78,32 @@ defmodule Axon.Watcher.Server do
     )
 
     send(self(), :initial_scan)
+    
+    # Schedule automated retry for failed files every 5 minutes
+    :timer.send_interval(300_000, self(), :retry_failed)
+    
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:retry_failed, state) do
+    failed_files = Axon.Watcher.Tracking.get_failed_files(100)
+    if length(failed_files) > 0 do
+      Logger.info("[Pod A] Retrying #{length(failed_files)} failed files...")
+      
+      # Group them back into batches based on Priority
+      Enum.each(failed_files, fn str_path ->
+        try do
+          # Mark back to pending so they don't get retried twice if Oban is slow
+          Axon.Watcher.Tracking.mark_file_status!(str_path, "pending")
+        rescue
+          _ -> :ok
+        end
+      end)
+      
+      # Dispatch to hot queue for immediate reprocessing
+      dispatch_batch(failed_files, :indexing_hot)
+    end
     {:noreply, state}
   end
 

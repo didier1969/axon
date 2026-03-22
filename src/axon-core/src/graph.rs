@@ -234,24 +234,27 @@ impl GraphStore {
                                  s.is_entry_point = row.is_entry_point, s.embedding = row.embedding \
                              WITH s, row \
                              MATCH (f:File {path: $path}) MERGE (f)-[:CONTAINS]->(s)";
-            
-            self.execute_param(sym_query, &serde_json::json!({
-                "batch": symbols_batch,
-                "path": path
-            }))?;
-        }
 
-        // 3. Batch Insert Relations using UNWIND
-        if !result.relations.is_empty() {
+            // Chunk execution to prevent KuzuDB transient memory bloat
+            for chunk in symbols_batch.chunks(250) {
+                self.execute_param(sym_query, &serde_json::json!({
+                    "batch": chunk,
+                    "path": path
+                }))?;
+            }
+            }
+
+            // 3. Batch Insert Relations using UNWIND
+            if !result.relations.is_empty() {
             let valid_rels = ["CALLS", "IMPORTS", "IMPLEMENTS", "CALLS_NIF", "USES"];
             let mut rels_by_type: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
 
             for rel in &result.relations {
                 let rel_type = rel.rel_type.to_uppercase();
                 let safe_rel_type = if valid_rels.contains(&rel_type.as_str()) { rel_type } else { "CALLS".to_string() };
-                
+
                 let entry = rels_by_type.entry(safe_rel_type).or_default();
-                
+
                 if rel.from.is_empty() || rel.from == "file" || rel.from == "method" {
                     for sym in &result.symbols {
                         entry.push(serde_json::json!({"from": sym.name, "to": rel.to}));
@@ -265,13 +268,15 @@ impl GraphStore {
                 let rel_query = format!(
                     "UNWIND $batch AS row \
                      MATCH (a:Symbol {{name: row.from}}), (b:Symbol {{name: row.to}}) \
-                     MERGE (a)-[:{}]->(b)", 
+                     MERGE (a)-[:{}]->(b)",
                     rel_type
                 );
-                self.execute_param(&rel_query, &serde_json::json!({"batch": batch}))?;
-            }
-        }
 
+                for chunk in batch.chunks(250) {
+                    self.execute_param(&rel_query, &serde_json::json!({"batch": chunk}))?;
+                }
+            }
+            }
         Ok(())
     }
     pub fn get_security_audit(&self, project_name: &str) -> Result<(usize, String)> {

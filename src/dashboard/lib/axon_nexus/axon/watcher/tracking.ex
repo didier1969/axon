@@ -99,9 +99,22 @@ defmodule Axon.Watcher.Tracking do
       from f in IndexedFile,
       join: p in IndexedProject, on: f.project_id == p.id,
       where: f.path == ^path,
-      select: p
+      select: p.id
 
     Repo.one(query)
+  end
+
+  @doc """
+  Gets up to `limit` files that are currently in 'failed' state.
+  """
+  def get_failed_files(limit \\ 100) do
+    query =
+      from f in IndexedFile,
+        where: f.status == "failed",
+        limit: ^limit,
+        select: f.path
+
+    Repo.all(query)
   end
 
   @doc """
