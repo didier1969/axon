@@ -176,7 +176,6 @@ async fn main() -> anyhow::Result<()> {
                     let payload = &command[11..];
                     if let Ok(file_data) = serde_json::from_str::<serde_json::Value>(payload) {
                         let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
-                        let content = file_data["content"].as_str().unwrap_or("").to_string();
                         
                         let store_for_parse = store_clone.clone();
                         let tx_clone = tx.clone();
@@ -196,26 +195,36 @@ async fn main() -> anyhow::Result<()> {
                                 let mut s_count = 0;
                                 let mut r_count = 0;
                                 let path_obj = std::path::Path::new(&path_for_task);
-                                if let Some(parser) = parser::get_parser_for_file(path_obj) {
-                                    let mut extraction = parser.parse(&content);
-                                    
-                                    // Generate Vector Embeddings
-                                    let texts_to_embed: Vec<String> = extraction.symbols.iter()
-                                        .map(|s| format!("Symbol: {} Kind: {}", s.name, s.kind))
-                                        .collect();
+                                
+                                // Defense in Depth: Double-check file size in Rust (5MB Limit)
+                                if let Ok(metadata) = std::fs::metadata(path_obj) {
+                                    if metadata.len() > 5_242_880 {
+                                        return (0, 0); // Ignore massive files
+                                    }
+                                }
+
+                                if let Ok(content) = std::fs::read_to_string(path_obj) {
+                                    if let Some(parser) = parser::get_parser_for_file(path_obj) {
+                                        let mut extraction = parser.parse(&content);
                                         
-                                    if !texts_to_embed.is_empty() {
-                                        if let Ok(embeddings) = crate::embedder::batch_embed(texts_to_embed) {
-                                            for (sym, emb) in extraction.symbols.iter_mut().zip(embeddings.into_iter()) {
-                                                sym.embedding = Some(emb);
+                                        // Generate Vector Embeddings
+                                        let texts_to_embed: Vec<String> = extraction.symbols.iter()
+                                            .map(|s| format!("Symbol: {} Kind: {}", s.name, s.kind))
+                                            .collect();
+                                            
+                                        if !texts_to_embed.is_empty() {
+                                            if let Ok(embeddings) = crate::embedder::batch_embed(texts_to_embed) {
+                                                for (sym, emb) in extraction.symbols.iter_mut().zip(embeddings.into_iter()) {
+                                                    sym.embedding = Some(emb);
+                                                }
                                             }
                                         }
-                                    }
 
-                                    s_count = extraction.symbols.len();
-                                    r_count = extraction.relations.len();
-                                    if let Ok(store) = store_for_parse.read() {
-                                        let _ = store.insert_file_data(&path_for_task, &extraction);
+                                        s_count = extraction.symbols.len();
+                                        r_count = extraction.relations.len();
+                                        if let Ok(store) = store_for_parse.read() {
+                                            let _ = store.insert_file_data(&path_for_task, &extraction);
+                                        }
                                     }
                                 }
                                 (s_count, r_count)

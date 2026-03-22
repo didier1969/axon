@@ -25,7 +25,7 @@ pub unsafe extern "C" fn ladybug_init_db(path: *const c_char) -> *mut PluginCont
         }
     }
     
-    let config = SystemConfig::default();
+    let config = SystemConfig::default().buffer_pool_size(1024 * 1024 * 1024); // Limit to 1GB RAM (Ghost Mode)
     match Database::new(path_str, config) {
         Ok(db) => {
             let ctx = Box::new(PluginContext { db });
