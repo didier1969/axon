@@ -13,12 +13,19 @@ Status: 🚀 En cours d'exécution Maestria
 | 1 | Ingestion "Fantôme" Haute Performance | ✅ Validé | Zero-Bloat Oban / Rust Spawn Blocking |
 | 2 | Robustesse du Système Nerveux (MCP) | 🚧 En cours | Multiplexage / Synthèse Sémantique |
 | 3 | Fédération du Treillis (Global Graph) | 📅 Prochainement | Jointure multi-projets Cypher |
+| 4 | Réconciliateur Sémantique (Lattice Refiner) | 🚧 En cours | Déduplication Fuzzy/Vectorielle Rust |
 
 ### Phase 2 : Robustesse du Système Nerveux (MCP)
 - [x] Isolation des threads de calcul (`tokio::task::spawn_blocking`).
 - [x] Déduplication atomique des symboles (Protection KuzuDB).
-- [ ] **Synthèse Sémantique :** Remplacer les réponses JSON brutes par des rapports de décision structurés.
-- [ ] **Notifications Proactives :** Notifications de dérive architecturale via le canal MCP.
+- [x] **Synthèse Sémantique :** Rapports de décision structurés en Markdown.
+- [x] **Notifications Proactives :** Système de notifications JSON-RPC fonctionnel.
+
+### Phase 4 : Réconciliateur Sémantique (Lattice Refiner) - Branched: `feat/lattice-refiner`
+- [ ] Moteur de similarité fuzzy native (RapidFuzz).
+- [ ] Algorithme de Blocking par kind/signature.
+- [ ] Création automatique des relations `[:SAME_AS]`.
+- [ ] Intégration dans l'outil `axon_inspect`.
 
 ### Phase 3 : Fédération du Treillis (Global Graph)
 - **Objectif :** Supprimer la notion de "Project" isolée. Le graphe devient global.

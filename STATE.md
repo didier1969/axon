@@ -11,11 +11,14 @@
 - **Réalisations :** Suppression du "Memory Bloat" Elixir (Paths only), isolation des écritures Rust (Batch Transactions), déduplication KuzuDB. L'ingestion est douce et ne bloque plus le CPU de manière persistante.
 
 ### 2. Système Nerveux (MCP)
-- **Status :** 🚧 EN RENFORCEMENT.
-- **Réalisations :** Isolation par threads (`spawn_blocking`) validée. Le socket UNIX est stable sous charge. Tous les tests MCP unitaires et E2E (13 outils) passent désormais au vert.
-- **En cours :** Implémentation de la Synthèse Sémantique pour transformer le JSON brut en rapports décisionnels.
+- **Status :** 🟢 OPÉRATIONNEL.
+- **Réalisations :** Isolation par threads (`spawn_blocking`) validée. Le socket UNIX est stable sous charge. Synthèse Sémantique Markdown implémentée pour tous les outils.
 
-### 3. Vérité Sémantique (Witness)
+### 3. Réconciliateur Sémantique (Lattice Refiner)
+- **Status :** 🚀 DÉVELOPPEMENT INITIAL (Branche `feat/lattice-refiner`).
+- **Objectif :** Unifier les concepts sémantiques entre projets via RapidFuzz et L2-Similarity.
+
+### 4. Vérité Sémantique (Witness)
 - **Status :** 🟢 CERTIFIÉ.
 - **Réalisations :** Boucle de vérité sémantique DOM/Shadow-DOM fonctionnelle. Certification physique du rendu.
 
