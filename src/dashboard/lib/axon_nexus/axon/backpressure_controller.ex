@@ -77,16 +77,20 @@ defmodule Axon.BackpressureController do
   def compute_pressure(load) do
     {cpu_limit, ram_limit, io_limit} = get_limits()
     
-    cpu_pressure = load.cpu / max(cpu_limit, 0.1)
-    ram_pressure = load.ram / max(ram_limit, 0.1)
-    io_pressure = Map.get(load, :io, 0.0) / max(io_limit, 0.1)
+    cpu_val = if is_number(load.cpu), do: load.cpu, else: 0.0
+    ram_val = if is_number(load.ram), do: load.ram, else: 0.0
+    io_val = if is_number(Map.get(load, :io, 0.0)), do: Map.get(load, :io, 0.0), else: 0.0
+
+    cpu_pressure = cpu_val / max(cpu_limit, 0.1)
+    ram_pressure = ram_val / max(ram_limit, 0.1)
+    io_pressure = io_val / max(io_limit, 0.1)
     
     pressure = max(cpu_pressure, max(ram_pressure, io_pressure))
 
     :telemetry.execute([:axon, :backpressure, :pressure_computed], %{pressure: pressure}, %{
-      cpu: load.cpu,
-      ram: load.ram,
-      io: Map.get(load, :io, 0.0)
+      cpu: cpu_val,
+      ram: ram_val,
+      io: io_val
     })
 
     pressure

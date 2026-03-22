@@ -7,7 +7,7 @@ defmodule Axon.Watcher.PoolFacade do
   use GenServer
   require Logger
 
-  @socket_path "/tmp/axon-v2.sock"
+  @socket_path "/tmp/axon-telemetry.sock"
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)

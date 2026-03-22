@@ -16,14 +16,14 @@ if ! nix store info >/dev/null 2>&1; then
     fi
 fi
 
-# Clean up socket if exists
-if [ -S "/tmp/axon-v2.sock" ]; then
-    rm -f "/tmp/axon-v2.sock"
-fi
+# Clean up sockets if they exist
+if [ -S "/tmp/axon-telemetry.sock" ]; then rm -f "/tmp/axon-telemetry.sock"; fi
+if [ -S "/tmp/axon-mcp.sock" ]; then rm -f "/tmp/axon-mcp.sock"; fi
 
 # Clean up dangling processes and database locks
 echo "🧹 Cleaning up legacy locks and orphan processes..."
 pkill -f "bin/axon-core" 2>/dev/null || true
+pkill -f "bin/axon-mcp-tunnel" 2>/dev/null || true
 pkill -f "mix phx.server" 2>/dev/null || true
 pkill -f "axon-db-start" 2>/dev/null || true
 pkill -f "beam.smp.*hydra_axon" 2>/dev/null || true
@@ -34,6 +34,12 @@ if [ -f "src/axon-core/target/release/axon-core" ]; then
     echo "🔄 Updating bin/axon-core from latest release build..."
     rm -f bin/axon-core
     cp src/axon-core/target/release/axon-core bin/axon-core
+fi
+
+if [ -f "src/axon-mcp-tunnel/target/release/axon-mcp-tunnel" ]; then
+    echo "🔄 Updating bin/axon-mcp-tunnel from latest release build..."
+    rm -f bin/axon-mcp-tunnel
+    cp src/axon-mcp-tunnel/target/release/axon-mcp-tunnel bin/axon-mcp-tunnel
 fi
 
 echo "🚀 Starting Axon v2 Architecture (Managed via TMUX)..."
@@ -61,15 +67,11 @@ sleep 2
 tmux new-window -t axon -n "core"
 tmux send-keys -t axon:core "nix develop --impure --command bash -c 'RUST_LOG=info exec nice -n 19 ionice -c 3 bin/axon-core'" C-m
 
-# Start Pod A/Control (Nexus Monolith)
-tmux new-window -t axon -n "nexus"
-tmux send-keys -t axon:nexus "cd src/dashboard && nix develop --impure --command bash -c \"mix ecto.setup && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects mix phx.server\"" C-m
-
-echo "⏳ Waiting for Axon Core (Rust Data Plane) to bind UDS socket (FastEmbed initialisation up to 10s)..."
+echo "⏳ Waiting for Axon Core (Rust Data Plane) to bind MCP socket (FastEmbed initialisation up to 10s)..."
 # Polling loop pour vérifier que le socket répond (Évite le MCP Disconnected pour les agents)
 for i in {1..30}; do
-    if [ -S "/tmp/axon-v2.sock" ] && python3 -c 'import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect("/tmp/axon-v2.sock"); s.close()' 2>/dev/null; then
-        echo "✅ Axon Bridge (UDS) is Ready."
+    if [ -S "/tmp/axon-mcp.sock" ] && python3 -c 'import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect("/tmp/axon-mcp.sock"); s.close()' 2>/dev/null; then
+        echo "✅ Axon MCP Bridge (UDS) is Ready."
         break
     fi
     sleep 1
@@ -77,6 +79,10 @@ for i in {1..30}; do
         echo "⚠️ Timeout waiting for Axon Bridge UDS. Check 'tmux attach -t axon' for errors."
     fi
 done
+
+# Start Pod A/Control (Nexus Monolith)
+tmux new-window -t axon -n "nexus"
+tmux send-keys -t axon:nexus "cd src/dashboard && nix develop --impure --command bash -c \"mix ecto.setup && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects mix phx.server\"" C-m
 
 echo "⏳ Waiting for Axon Dashboard (Elixir Control Plane) to boot (Database + Compilation)..."
 # Polling loop pour vérifier que Phoenix a fini sa compilation et lié son port
@@ -93,12 +99,24 @@ done
 
 echo ""
 echo "⚙️ Running MCP End-to-End Verification..."
-if ! python3 scripts/e2e_mcp_test.py; then
-    echo "❌ FATAL: MCP Proxy failed End-to-End verification. The AI client will NOT be able to connect."
-    echo "Check 'python3 scripts/mcp-stdio-proxy.py' for import errors or dependencies."
+# Now we use the Rust tunnel for the test
+if ! echo '{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}' | bin/axon-mcp-tunnel | grep -q "axon_query"; then
+    echo "❌ FATAL: MCP Tunnel failed End-to-End verification."
     exit 1
+else
+    echo "✅ E2E Verification Success! Rust Tunnel is active."
 fi
 echo ""
+
+echo "🛡️ Axon is rising in TMUX session 'axon'."
+echo "To view processes: 'tmux attach -t axon'"
+echo ""
+
+# Run the unified health check to show the state
+if [ -x "bin/axol" ]; then
+    ./bin/axol
+fi
+
 
 echo "🛡️ Axon is rising in TMUX session 'axon'."
 echo "To view processes: 'tmux attach -t axon'"

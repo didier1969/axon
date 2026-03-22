@@ -2,21 +2,26 @@ import socket
 import json
 import sys
 
-SOCK_PATH = "/tmp/axon-v2.sock"
+SOCK_PATH = "/tmp/axon-mcp.sock"
 
 def read_response(client):
     response_data = b""
     while True:
-        chunk = client.recv(8192)
-        if not chunk: break
-        response_data += chunk
-        if b"\n" in chunk: break
-    
-    responses = response_data.decode().strip().split("\n")
-    # Return the last valid JSON response (ignoring intermediate logging or ready states)
-    for resp in reversed(responses):
         try:
-            parsed = json.loads(resp)
+            chunk = client.recv(8192)
+            if not chunk: break
+            response_data += chunk
+            if b"\n" in chunk: break
+        except socket.timeout:
+            break
+    
+    if not response_data:
+        return None
+
+    lines = response_data.decode().strip().split("\n")
+    for line in reversed(lines):
+        try:
+            parsed = json.loads(line)
             if "jsonrpc" in parsed:
                 return parsed
         except json.JSONDecodeError:
@@ -40,7 +45,7 @@ def test_tool(client, method_id, tool_name, arguments):
     response = read_response(client)
     
     if not response:
-        print(f"❌ Failed to parse response.")
+        print(f"❌ Failed to parse response (Timeout or Invalid JSON).")
         return False
         
     if "error" in response and response["error"] is not None:
@@ -59,19 +64,14 @@ def test_tool(client, method_id, tool_name, arguments):
 def verify_all_mcp_commands():
     try:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(5.0)
         client.connect(SOCK_PATH)
-        client.settimeout(10.0)
     except Exception as e:
-        print(f"❌ Cannot connect to socket: {e}")
+        print(f"❌ Cannot connect to socket {SOCK_PATH}: {e}")
         return False
 
-    # Wait for ready signal
-    while True:
-        line = client.recv(1024).decode()
-        if "Axon Bridge Ready" in line:
-            break
-            
-    print("🔌 Socket connected. Commencing exhaustive test of all 13 tools.\n")
+    print(f"🔌 Connected to pure MCP socket: {SOCK_PATH}")
+    print("Commencing exhaustive test of all 13 tools.\n")
 
     tools_to_test = [
         ("axon_query", {"query": "Elixir Supervisor", "project": "axon"}),

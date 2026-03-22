@@ -126,6 +126,191 @@ pub unsafe extern "C" fn ladybug_query_json(ctx: *mut PluginContext, query: *con
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn ladybug_query_count_param(
+    ctx: *mut PluginContext,
+    query: *const c_char,
+    params_json: *const c_char,
+) -> i64 {
+    if ctx.is_null() || query.is_null() || params_json.is_null() {
+        return -1;
+    }
+    
+    let query_str = match CStr::from_ptr(query).to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    
+    let params_str = match CStr::from_ptr(params_json).to_str() {
+        Ok(s) => s,
+        Err(_) => "{}",
+    };
+    
+    let ctx_ref = &*ctx;
+    let conn = match Connection::new(&ctx_ref.db) {
+        Ok(c) => c,
+        Err(_) => return -1,
+    };
+
+    let mut stmt = match conn.prepare(query_str) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    let mut owned_params = Vec::new();
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(params_str) {
+        for (k, v) in map {
+            if let Some(lbug_v) = json_to_lbug_value(&v) {
+                owned_params.push((k, lbug_v));
+            }
+        }
+    }
+    
+    let kuzu_params: Vec<(&str, lbug::Value)> = owned_params.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+
+    let mut result = match conn.execute(&mut stmt, kuzu_params) {
+        Ok(r) => r,
+        Err(_) => return -1,
+    };
+    
+    if let Some(row) = result.next() {
+        match row[0] {
+            lbug::Value::Int64(v) => v,
+            _ => 0,
+        }
+    } else {
+        0
+    }
+}
+
+fn json_to_lbug_value(v: &serde_json::Value) -> Option<lbug::Value> {
+    match v {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(b) => Some(lbug::Value::Bool(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(lbug::Value::Int64(i))
+            } else if let Some(f) = n.as_f64() {
+                Some(lbug::Value::Double(f))
+            } else {
+                None
+            }
+        },
+        serde_json::Value::String(s) => Some(lbug::Value::String(s.clone())),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Some(lbug::Value::String(v.to_string()))
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ladybug_query_json_param(
+    ctx: *mut PluginContext,
+    query: *const c_char,
+    params_json: *const c_char,
+) -> *mut c_char {
+    if ctx.is_null() || query.is_null() || params_json.is_null() {
+        return CString::new("[]").unwrap().into_raw();
+    }
+    
+    let query_str = match CStr::from_ptr(query).to_str() {
+        Ok(s) => s,
+        Err(_) => return CString::new("[]").unwrap().into_raw(),
+    };
+    
+    let params_str = match CStr::from_ptr(params_json).to_str() {
+        Ok(s) => s,
+        Err(_) => "{}",
+    };
+    
+    let ctx_ref = &*ctx;
+    let conn = match Connection::new(&ctx_ref.db) {
+        Ok(c) => c,
+        Err(_) => return CString::new("[]").unwrap().into_raw(),
+    };
+
+    let mut stmt = match conn.prepare(query_str) {
+        Ok(s) => s,
+        Err(e) => return CString::new(format!("Error preparing: {}", e)).unwrap_or_else(|_| CString::new("[]").unwrap()).into_raw(),
+    };
+
+    let mut owned_params = Vec::new();
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(params_str) {
+        for (k, v) in map {
+            if let Some(lbug_v) = json_to_lbug_value(&v) {
+                owned_params.push((k, lbug_v));
+            }
+        }
+    }
+    
+    let kuzu_params: Vec<(&str, lbug::Value)> = owned_params.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+
+    let mut result = match conn.execute(&mut stmt, kuzu_params) {
+        Ok(r) => r,
+        Err(e) => return CString::new(format!("Error executing: {}", e)).unwrap_or_else(|_| CString::new("[]").unwrap()).into_raw(),
+    };
+    
+    let mut rows = Vec::new();
+    while let Some(row) = result.next() {
+        let mut row_vals = Vec::new();
+        for val in row {
+            row_vals.push(format!("{:?}", val));
+        }
+        rows.push(row_vals);
+    }
+    
+    let json_res = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
+    CString::new(json_res).unwrap_or_else(|_| CString::new("[]").unwrap()).into_raw()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ladybug_execute_param(
+    ctx: *mut PluginContext,
+    query: *const c_char,
+    params_json: *const c_char,
+) -> bool {
+    if ctx.is_null() || query.is_null() || params_json.is_null() {
+        return false;
+    }
+    
+    let query_str = match CStr::from_ptr(query).to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    
+    let params_str = match CStr::from_ptr(params_json).to_str() {
+        Ok(s) => s,
+        Err(_) => "{}",
+    };
+    
+    let ctx_ref = &*ctx;
+    let conn = match Connection::new(&ctx_ref.db) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let mut stmt = match conn.prepare(query_str) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error preparing batch: {} | Query: {}", e, query_str);
+            return false;
+        }
+    };
+
+    let mut owned_params = Vec::new();
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(params_str) {
+        for (k, v) in map {
+            if let Some(lbug_v) = json_to_lbug_value(&v) {
+                owned_params.push((k, lbug_v));
+            }
+        }
+    }
+    
+    let kuzu_params: Vec<(&str, lbug::Value)> = owned_params.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+
+    conn.execute(&mut stmt, kuzu_params).is_ok()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn ladybug_free_string(s: *mut c_char) {
     if !s.is_null() {
         let _ = CString::from_raw(s);

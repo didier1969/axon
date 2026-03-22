@@ -27,10 +27,6 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting Axon Core v2");
     info!("Engine Boot Time: {}", boot_time);
     
-    // We wrap GraphStore in an Arc to be accessible and also an Arc<Mutex> maybe?
-    // Wait, GraphStore itself provides thread-safe access (it's using Kuzu connection). 
-    // To implement RESET, we need to be able to recreate the GraphStore. 
-    // Using Arc<tokio::sync::RwLock<GraphStore>> is safer for RESET.
     let graph_store = match GraphStore::new(db_path) {
         Ok(store) => Arc::new(std::sync::RwLock::new(store)),
         Err(e) => {
@@ -39,63 +35,122 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let socket_path = "/tmp/axon-v2.sock";
+    let tel_socket_path = "/tmp/axon-telemetry.sock";
+    let mcp_socket_path = "/tmp/axon-mcp.sock";
     
-    if std::path::Path::new(socket_path).exists() {
-        std::fs::remove_file(socket_path)?;
-    }
+    if std::path::Path::new(tel_socket_path).exists() { let _ = fs::remove_file(tel_socket_path); }
+    if std::path::Path::new(mcp_socket_path).exists() { let _ = fs::remove_file(mcp_socket_path); }
 
-    let listener = UnixListener::bind(socket_path)?;
-    info!("UDS Server listening on {}", socket_path);
+    let tel_listener = UnixListener::bind(tel_socket_path)?;
+    let mcp_listener = UnixListener::bind(mcp_socket_path)?;
+    
+    info!("Telemetry Server listening on {}", tel_socket_path);
+    info!("MCP Server listening on {}", mcp_socket_path);
 
+    let mcp_store = graph_store.clone();
+    
+    // The "Diplomatic Priority" flag. True when MCP is processing a query.
+    let mcp_active_flag = Arc::new(AtomicBool::new(false));
+    let mcp_active_for_listener = mcp_active_flag.clone();
+
+    // --- MCP Listener Loop (Pure JSON-RPC) ---
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = mcp_listener.accept().await {
+            info!("IA Client connected to MCP Socket");
+            let store_clone = mcp_store.clone();
+            let mcp_flag_clone = mcp_active_for_listener.clone();
+            
+            tokio::spawn(async move {
+                let (reader, mut writer) = socket.into_split();
+                let mut buf_reader = BufReader::new(reader);
+                let mut line = String::new();
+                
+                while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
+                    if bytes_read == 0 { break; }
+                    let command = line.trim();
+                    if command.is_empty() { line.clear(); continue; }
+
+                    let store_for_mcp = store_clone.clone();
+                    let command_clone = command.to_string();
+                    let flag_for_task = mcp_flag_clone.clone();
+                    
+                    info!("MCP Processing start for command: {} bytes", command_clone.len());
+                    let mcp_server = McpServer::new(store_for_mcp);
+                    match serde_json::from_str::<mcp::JsonRpcRequest>(&command_clone) {
+                        Ok(request) => {
+                            info!("MCP Request Parsed: method={}", request.method);
+                            // Signal ingestion to pause
+                            flag_for_task.store(true, Ordering::SeqCst);
+                            
+                            let response_opt = tokio::task::spawn_blocking(move || {
+                                info!("MCP Executing in blocking thread...");
+                                let res = mcp_server.handle_request(request);
+                                // Release ingestion pause
+                                flag_for_task.store(false, Ordering::SeqCst);
+                                info!("MCP Execution complete.");
+                                res
+                            }).await.expect("Blocking MCP task panicked");
+                            
+                            if let Some(response) = response_opt {
+                                if let Ok(json_str) = serde_json::to_string(&response) {
+                                    info!("MCP Sending response ({} bytes)", json_str.len());
+                                    let _ = writer.write_all(format!("{}\n", json_str).as_bytes()).await;
+                                    let _ = writer.flush().await;
+                                    info!("MCP Response flushed.");
+                                }
+                            } else {
+                                info!("No response required (Notification)");
+                            }
+                        },
+                        Err(e) => {
+                            error!("MCP JSON Parse Error: {} | Raw: '{}'", e, command_clone);
+                        }
+                    }
+                    line.clear();
+                }
+                info!("IA Client disconnected from MCP");
+            });
+        }
+    });
+
+    let tel_mcp_flag = mcp_active_flag.clone();
+
+    // --- Telemetry Listener Loop (Elixir/Dashboard) ---
     loop {
-        let (mut socket, _) = match listener.accept().await {
+        let (mut socket, _) = match tel_listener.accept().await {
             Ok(s) => s,
             Err(e) => {
                 error!("Error accepting connection: {}", e);
                 continue;
             }
         };
-        info!("Client connected to UDS");
+        info!("Elixir Dashboard connected to Telemetry Socket");
         
         let ready_event = BridgeEvent::SystemReady { start_time_utc: boot_time.clone() };
-        let notification = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {
-                "message": "Axon Oracle is rising.",
-                "boot_time": boot_time
-            }
-        });
-        
-        let ready_msg = format!("Axon Bridge Ready\n{}\n{}\n", 
-            serde_json::to_string(&ready_event).unwrap(),
-            serde_json::to_string(&notification).unwrap()
-        );
+        let ready_msg = format!("Axon Telemetry Ready\n{}\n", serde_json::to_string(&ready_event).unwrap());
         
         if let Err(e) = socket.write_all(ready_msg.as_bytes()).await {
-            error!("Failed to write to socket: {}", e);
+            error!("Failed to write to telemetry socket: {}", e);
             continue;
         }
 
         let store_clone = graph_store.clone();
+        let projects_root_str = projects_root.to_string();
+        let telemetry_mcp_flag = tel_mcp_flag.clone();
+        
+        // Limit concurrent heavy parsing/embedding tasks to prevent OOM
+        let parse_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
         
         tokio::spawn(async move {
             let (reader, mut writer) = socket.into_split();
             let mut buf_reader = BufReader::new(reader);
             let mut line = String::new();
             
-            // Setup a channel for sending messages back to the UI asynchronously
-            // Increased capacity to 10,000 to handle massive ingestion spikes
             let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(10000);
             
-            // Spawn writer loop
             tokio::spawn(async move {
                 while let Some(msg) = rx.recv().await {
-                    if writer.write_all(msg.as_bytes()).await.is_err() {
-                        error!("Failed to write to socket, closing writer loop.");
-                        break;
-                    }
+                    if writer.write_all(msg.as_bytes()).await.is_err() { break; }
                 }
             });
 
@@ -103,50 +158,62 @@ async fn main() -> anyhow::Result<()> {
             let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
 
             while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
-                if bytes_read == 0 {
-                    info!("Client disconnected (EOF)");
-                    break; 
-                }
+                if bytes_read == 0 { break; }
                 
                 let command = line.trim();
-                info!("DEBUG: Read from socket ({} bytes): '{}'", bytes_read, command);
-                
-                if command.is_empty() {
-                    line.clear();
-                    continue;
-                }
+                if command.is_empty() { line.clear(); continue; }
                 
                 if command.starts_with("WATCHER_EVENT ") {
                     let payload = &command[14..];
                     if let Ok(event_data) = serde_json::from_str::<serde_json::Value>(payload) {
-                        // Forward the event directly to connected dashboard clients
                         let forward_msg = serde_json::to_string(&event_data).unwrap() + "\n";
-                        // Use non-blocking try_send to never stall the main reader loop
                         let _ = tx.try_send(forward_msg);
                     }
                 } else if command.starts_with("PARSE_FILE ") {
+                    // Backpressure: Wait for a slot BEFORE reading more from the socket and parsing JSON
+                    let permit = parse_semaphore.clone().acquire_owned().await.unwrap();
+                    
                     let payload = &command[11..];
                     if let Ok(file_data) = serde_json::from_str::<serde_json::Value>(payload) {
                         let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
                         let content = file_data["content"].as_str().unwrap_or("").to_string();
-                        info!("Received PARSE_FILE request for: {}", path);
                         
                         let store_for_parse = store_clone.clone();
                         let tx_clone = tx.clone();
+                        let mcp_check_flag = telemetry_mcp_flag.clone();
                         
                         tokio::spawn(async move {
-                            let path_for_task = path.clone();
+                            // Move permit into the task so it's held until the task completes
+                            let _held_permit = permit;
                             
+                            // Diplomatic Priority: Yield if MCP is processing
+                            while mcp_check_flag.load(Ordering::SeqCst) {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                            }
+                            
+                            let path_for_task = path.clone();
                             let (symbols_count, rels_count) = tokio::task::spawn_blocking(move || {
                                 let mut s_count = 0;
                                 let mut r_count = 0;
-                                
                                 let path_obj = std::path::Path::new(&path_for_task);
                                 if let Some(parser) = parser::get_parser_for_file(path_obj) {
-                                    let extraction = parser.parse(&content);
+                                    let mut extraction = parser.parse(&content);
+                                    
+                                    // Generate Vector Embeddings
+                                    let texts_to_embed: Vec<String> = extraction.symbols.iter()
+                                        .map(|s| format!("Symbol: {} Kind: {}", s.name, s.kind))
+                                        .collect();
+                                        
+                                    if !texts_to_embed.is_empty() {
+                                        if let Ok(embeddings) = crate::embedder::batch_embed(texts_to_embed) {
+                                            for (sym, emb) in extraction.symbols.iter_mut().zip(embeddings.into_iter()) {
+                                                sym.embedding = Some(emb);
+                                            }
+                                        }
+                                    }
+
                                     s_count = extraction.symbols.len();
                                     r_count = extraction.relations.len();
-                                    
                                     if let Ok(store) = store_for_parse.read() {
                                         let _ = store.insert_file_data(&path_for_task, &extraction);
                                     }
@@ -158,237 +225,71 @@ async fn main() -> anyhow::Result<()> {
                                 path: path.clone(),
                                 symbol_count: symbols_count,
                                 relation_count: rels_count,
-                                file_count: 1,
-                                entry_points: 0,
-                                security_score: 100,
-                                coverage_score: 0,
-                                taint_paths: String::new(),
+                                file_count: 1, entry_points: 0, security_score: 100, coverage_score: 0,
+                                taint_paths: "".to_string()
                             }).unwrap() + "\n";
                             let _ = tx_clone.send(finish_msg).await;
                         });
                     }
-                } else if command == "START" {
-                    info!("Received START command");
+                } else if command == "SCAN_ALL" {
+                    info!("Received SCAN_ALL command. Starting fleet ingestion...");
                     if let Some(task) = scan_task.take() {
                         cancel_token.store(true, Ordering::Relaxed);
-                        let _ = task.await; // Wait for old task to finish cleanly
+                        let _ = task.await; 
                     }
                     cancel_token = Arc::new(AtomicBool::new(false));
-                    
                     let token_clone = cancel_token.clone();
                     let tx_clone = tx.clone();
-                    let store_for_scan = store_clone.clone();
-                    let proj_root = projects_root.to_string();
-
+                    let projects_root_task = projects_root_str.clone();
+                    
                     scan_task = Some(tokio::spawn(async move {
                         let start = Instant::now();
-                        
-                        let project_dirs = fs::read_dir(&proj_root).unwrap()
-                            .filter_map(|entry| entry.ok())
-                            .filter(|entry| entry.path().is_dir())
-                            .filter(|entry| entry.path().join(".axon").exists())
-                            .collect::<Vec<_>>();
-
-                        let start_msg = serde_json::to_string(&BridgeEvent::ScanStarted { 
-                            total_files: project_dirs.len() 
-                        }).unwrap() + "\n";
-                        let _ = tx_clone.send(start_msg).await;
-
-                        for project in project_dirs {
-                            if token_clone.load(Ordering::Relaxed) { break; }
-                            
-                            let project_path = project.path();
-                            let project_name = project_path.file_name().unwrap().to_string_lossy().to_string();
-                            
-                            info!("Scanning project: {}", project_name);
-                            let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                            let files = scanner.scan();
-                            
-                            let proj_start_msg = serde_json::to_string(&BridgeEvent::ProjectScanStarted {
-                                project: project_name.clone(),
-                                total_files: files.len(),
-                            }).unwrap() + "\n";
-                            let _ = tx_clone.send(proj_start_msg).await;
-                            
-                            let chunk_size = 50;
-                            let mut _total_symbols_for_project = 0;
-                            let mut _total_files_for_project = 0;
-                            let mut _total_rels_for_project = 0;
-                            
-                            for chunk in files.chunks(chunk_size) {
+                        let mut total_files = 0;
+                        if let Ok(projects) = fs::read_dir(projects_root_task) {
+                            for project in projects.flatten() {
                                 if token_clone.load(Ordering::Relaxed) { break; }
+                                let project_path = project.path();
+                                let project_name = project_path.file_name().unwrap().to_string_lossy().to_string();
+                                let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
+                                let files = scanner.scan();
                                 
-                                let chunk_vec = chunk.to_vec();
-                                let store_for_thread = store_for_scan.clone();
-                                
-                                let (chunk_symbols, chunk_rels): (usize, usize) = tokio::task::spawn_blocking(move || {
-                                    let locked_store = store_for_thread.read().unwrap();
-                                    // Do heavy work
-                                    let mut local_syms = 0;
-                                    let mut local_rels = 0;
-                                    for path in chunk_vec {
-                                        if let Some(parser) = parser::get_parser_for_file(&path) {
-                                            if let Ok(content) = fs::read_to_string(&path) {
-                                                let mut result = parser.parse(&content);
-                                                let texts_to_embed: Vec<String> = result.symbols.iter()
-                                                    .map(|s| {
-                                                        let doc = s.docstring.as_deref().unwrap_or("");
-                                                        format!("Symbol: {} Kind: {} Doc: {}", s.name, s.kind, doc)
-                                                    })
-                                                    .collect();
-                                                if let Ok(embeddings) = crate::embedder::batch_embed(texts_to_embed) {
-                                                    for (sym, emb) in result.symbols.iter_mut().zip(embeddings.into_iter()) {
-                                                        sym.embedding = Some(emb);
-                                                    }
-                                                }
-                                                local_syms += result.symbols.len();
-                                                local_rels += result.relations.len();
-                                                let path_str = path.to_string_lossy().to_string();
-                                                let _ = locked_store.insert_file_data(&path_str, &result);
-                                            }
-                                        }
-                                    }
-                                    (local_syms, local_rels)
-                                }).await.unwrap_or((0, 0));
-                                
-                                _total_symbols_for_project += chunk_symbols;
-                                _total_files_for_project += chunk.len();
-                                _total_rels_for_project += chunk_rels;
-
-                                let file_msg = serde_json::to_string(&BridgeEvent::FileIndexed { 
-                                    path: project_name.clone(), 
-                                    symbol_count: chunk_symbols, 
-                                    relation_count: chunk_rels,
-                                    file_count: chunk.len(),
-                                    entry_points: 0, 
-                                    security_score: 100,
-                                    coverage_score: 0,
-                                    taint_paths: String::new(),
-                                    }).unwrap() + "\n";                                let _ = tx_clone.send(file_msg).await;
-                            }
-                            
-                            if !token_clone.load(Ordering::Relaxed) {
-                                let (sec_score, taint_paths, cov_score, entry_count) = {
-                                    let locked_store = store_for_scan.read().unwrap();
-                                    let (sec_score, paths) = locked_store.get_security_audit(&project_name).unwrap_or((100, "[]".to_string()));
-                                    let cov_score = locked_store.get_coverage_score(&project_name).unwrap_or(0);
-                                    let entry_count = locked_store.query_count(&format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.tested = true RETURN count(s)", project_name)).unwrap_or(0) as usize; 
-                                    (sec_score, paths, cov_score, entry_count)
-                                };
-
-                                let final_file_msg = serde_json::to_string(&BridgeEvent::FileIndexed { 
-                                    path: project_name.clone(), 
-                                    symbol_count: 0, 
-                                    relation_count: 0,
-                                    file_count: 0,
-                                    entry_points: entry_count,
-                                    security_score: sec_score,
-                                    coverage_score: cov_score,
-                                    taint_paths,
+                                let proj_start_msg = serde_json::to_string(&BridgeEvent::ProjectScanStarted {
+                                    project: project_name.clone(), total_files: files.len()
                                 }).unwrap() + "\n";
-                                let _ = tx_clone.send(final_file_msg).await;
-                            }
-                        }
+                                let _ = tx_clone.send(proj_start_msg).await;
 
-                        if !token_clone.load(Ordering::Relaxed) {
-                            let duration = start.elapsed();
-                            info!("Fleet Ingestion Complete in {:?}", duration);
-                            let complete_event = BridgeEvent::ScanComplete { 
-                                total_files: 0, 
-                                duration_ms: duration.as_millis() as u64 
-                            };
-                            let _ = tx_clone.send(serde_json::to_string(&complete_event).unwrap() + "\n").await;
-                            
-                            let notification = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "method": "notifications/ingestion_complete",
-                                "params": { "duration_ms": duration.as_millis() as u64 }
-                            });
-                            let _ = tx_clone.send(serde_json::to_string(&notification).unwrap() + "\n").await;
-                        } else {
-                            info!("Fleet Ingestion STOPPED by user.");
-                            let complete_msg = serde_json::to_string(&BridgeEvent::ScanComplete { 
-                                total_files: 0, 
-                                duration_ms: 0
-                            }).unwrap() + "\n";
-                            let _ = tx_clone.send(complete_msg).await;
-                        }
-                    }));
-                } else if command == "STOP" {
-                    info!("Received STOP command");
-                    cancel_token.store(true, Ordering::Relaxed);
-                    if let Some(task) = scan_task.take() {
-                        let _ = task.await; // Wait cleanly
-                    }
-                } else if command == "RESET" {
-                    info!("Received RESET command. Purging KuzuDB...");
-                    cancel_token.store(true, Ordering::Relaxed);
-                    if let Some(task) = scan_task.take() {
-                        let _ = task.await; // Ensure nothing is writing
-                    }
-                    
-                    // Drop the old graph_store instance explicitly inside a write lock block to free handles
-                    {
-                        let mut locked = store_clone.write().unwrap();
-                        if let Ok(temp_store) = GraphStore::new(":memory:") {
-                            *locked = temp_store;
-                        }
-                    }
-                    
-                    let db_path_str = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
-                    let _ = std::fs::remove_dir_all(db_path_str);
-                    
-                    // Recreate
-                    {
-                        let mut locked = store_clone.write().unwrap();
-                        match GraphStore::new(db_path_str) {
-                            Ok(new_store) => {
-                                *locked = new_store;
-                                info!("Database RESET complete.");
-                            },
-                            Err(e) => {
-                                error!("Failed to recreate database after reset: {}", e);
-                            }
-                        }
-                    }
-                    let complete_msg = serde_json::to_string(&BridgeEvent::ScanComplete { 
-                        total_files: 0, 
-                        duration_ms: 0
-                    }).unwrap() + "\n";
-                    let _ = tx.send(complete_msg).await;
-                    
-                } else if command.starts_with('{') {
-                    info!("Received potential MCP JSON request: {}", command);
-                    // MCP Request - Offload heavy graph queries from Tokio worker thread
-                    let store_for_mcp = store_clone.clone();
-                    let command_clone = command.to_string();
-                    let tx_clone = tx.clone();
-                    
-                    tokio::spawn(async move {
-                        let mcp_server = McpServer::new(store_for_mcp);
-                        match serde_json::from_str::<mcp::JsonRpcRequest>(&command_clone) {
-                            Ok(request) => {
-                                info!("Parsed MCP request: method={}", request.method);
-                                // Execute synchronous FFI graph query in blocking thread pool
-                                let response = tokio::task::spawn_blocking(move || {
-                                    mcp_server.handle_request(request)
-                                }).await.expect("Blocking MCP task panicked");
-                                
-                                if let Ok(json_str) = serde_json::to_string(&response) {
-                                    info!("Sending MCP response back to client");
-                                    let _ = tx_clone.send(format!("{}\n", json_str)).await;
+                                for file_path in files {
+                                    if token_clone.load(Ordering::Relaxed) { break; }
+                                    total_files += 1;
+                                    let final_file_msg = serde_json::to_string(&BridgeEvent::FileIndexed {
+                                        path: file_path.to_string_lossy().to_string(), symbol_count: 0, relation_count: 0,
+                                        file_count: total_files, entry_points: 0, security_score: 100, coverage_score: 0,
+                                        taint_paths: "".to_string(),
+                                    }).unwrap() + "\n";
+                                    let _ = tx_clone.send(final_file_msg).await;
                                 }
                             }
-                            Err(e) => {
-                                error!("Failed to parse MCP request: {} - Error: {}", command_clone, e);
-                            }
                         }
-                    });
+                        let duration = start.elapsed();
+                        let complete_event = BridgeEvent::ScanComplete { total_files: 0, duration_ms: duration.as_millis() as u64 };
+                        let _ = tx_clone.send(serde_json::to_string(&complete_event).unwrap() + "\n").await;
+                    }));
+                } else if command == "STOP" {
+                    cancel_token.store(true, Ordering::Relaxed);
+                } else if command == "RESET" {
+                    cancel_token.store(true, Ordering::Relaxed);
+                    let db_path_str = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
+                    {
+                        let mut locked = store_clone.write().unwrap();
+                        let _ = std::fs::remove_dir_all(db_path_str);
+                        if let Ok(new_store) = GraphStore::new(db_path_str) {
+                            *locked = new_store;
+                        }
+                    }
                 }
-                
                 line.clear();
             }
-            info!("Client disconnected");
+            info!("Elixir Dashboard disconnected from Telemetry");
         });
     }
 }

@@ -42,33 +42,25 @@ in
     emscripten
   ];
 
-  # Managed Processes (Triple-Pod Architecture)
-  processes = {
-    db.exec = "axon-db-start";
-    core.exec = "/home/dstadel/projects/axon/bin/axon-core";
-    
-    nexus.exec = ''
-      export PYTHONPATH="$PYTHONPATH:$PWD/src"
-      export ELIXIR_HOME="$PWD/.axon/elixir_home"
-      export MIX_HOME="$ELIXIR_HOME/mix"
-      export HEX_HOME="$ELIXIR_HOME/hex"
-      export PATH="$MIX_HOME/bin:$HEX_HOME/bin:$PATH"
-      cd src/dashboard && mix ecto.setup && PHX_PORT=44921 AXON_REPO_SLUG=axon AXON_WATCH_DIR="/home/dstadel/projects/axon" mix phx.server
-    '';
-  };
-
   env = {
     # Nix Sovereign Architect Rule 1: Zero Impurity
     CXXFLAGS = "-include cstdint -mavx2 -msse4.2 -mpclmul";
     LIBCLANG_PATH = "${pkgs.llvmPackages_18.libclang.lib}/lib";
     
     HYDRADB_SOURCE = inputs.hydradb-src.outPath;
+    HYDRADB_RUNTIME = "/home/dstadel/projects/axon/.axon/runtime/hydradb";
+    ELIXIR_HOME = "/home/dstadel/projects/axon/.axon/elixir_home";
+    MIX_HOME = "/home/dstadel/projects/axon/.axon/elixir_home/mix";
+    HEX_HOME = "/home/dstadel/projects/axon/.axon/elixir_home/hex";
     
     # Port Isolation for Axon (Series 6000)
     PORT = 6000;
-    PHX_PORT = 44921; # Force Dashboard Port
-    HYDRA_HTTP_PORT = 6000;
-    HYDRA_TCP_PORT = 6040;
+    PHX_PORT = 44127;
+    HYDRA_HTTP_PORT = 44129;
+    HYDRA_TCP_PORT = 44128;
+    HYDRA_ODATA_PORT = 44130;
+    HYDRA_HTTP2_PORT = 44131;
+    HYDRA_MCP_PORT = 44132;
     WATCHER_PORT = 6001;
 
     # devenv-nix-best-practices: Isolation Patterns
@@ -76,6 +68,18 @@ in
     CARGO_TARGET_DIR = "/home/dstadel/projects/axon/.axon/cargo-target";
     DATA_DIR = "/home/dstadel/projects/axon/.axon/data";
     ERL_AFLAGS = "-kernel shell_history enabled";
+    
+    PYTHONPATH = "/home/dstadel/projects/axon/src";
+  };
+
+  # Managed Processes (Triple-Pod Architecture)
+  processes = {
+    db.exec = "axon-db-start";
+    core.exec = "/home/dstadel/projects/axon/bin/axon-core";
+    
+    nexus.exec = ''
+      cd src/dashboard && mix ecto.setup && AXON_REPO_SLUG=axon AXON_WATCH_DIR="/home/dstadel/projects/axon" mix phx.server
+    '';
   };
 
   # Scripts to start the different Pods
@@ -102,16 +106,9 @@ in
   };
 
   enterShell = ''
-    # Dynamic variables requiring $PWD
-    export PYTHONPATH="$PYTHONPATH:$PWD/src"
-    export HYDRADB_RUNTIME="$PWD/.axon/runtime/hydradb"
-    export ELIXIR_HOME="$PWD/.axon/elixir_home"
-    export MIX_HOME="$ELIXIR_HOME/mix"
-    export HEX_HOME="$ELIXIR_HOME/hex"
-    export PATH="$MIX_HOME/bin:$HEX_HOME/bin:$PATH"
-    
     # Fix for native dependencies lookup
     export LD_LIBRARY_PATH="${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
+    export PATH="$MIX_HOME/bin:$HEX_HOME/bin:$PATH"
 
     # Elixir Isolation (Project Level for Service)
     mkdir -p $ELIXIR_HOME

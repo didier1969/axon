@@ -18,4 +18,4 @@ cd "$PROJECT_ROOT"
 # Launch the start script which creates the tmux session
 bash scripts/start-v2.sh > /dev/null 2>&1
 
-echo "✅ Axon resurrection triggered. Check http://localhost:44921"
+echo "✅ Axon resurrection triggered. Check http://localhost:44127"

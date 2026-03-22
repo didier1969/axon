@@ -7,9 +7,12 @@ use std::sync::{Arc, Mutex};
 
 type InitDbFunc = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 type ExecuteFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> bool;
+type ExecuteParamFunc = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> bool;
 type ExecuteBatchFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> bool;
 type QueryCountFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> i64;
+type QueryCountParamFunc = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> i64;
 type QueryJsonFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char;
+type QueryJsonParamFunc = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> *mut c_char;
 type FreeStringFunc = unsafe extern "C" fn(*mut c_char);
 type CloseDbFunc = unsafe extern "C" fn(*mut c_void);
 
@@ -98,6 +101,16 @@ impl GraphStore {
         }
     }
 
+    pub fn execute_param(&self, query: &str, params: &serde_json::Value) -> Result<bool> {
+        unsafe {
+            let exec_fn: Symbol<ExecuteParamFunc> = self.lib.get(b"ladybug_execute_param\0")?;
+            let c_query = CString::new(query)?;
+            let params_str = serde_json::to_string(params)?;
+            let c_params = CString::new(params_str)?;
+            Ok(exec_fn(self.ctx, c_query.as_ptr(), c_params.as_ptr()))
+        }
+    }
+
     pub fn execute_batch(&self, queries: &[String]) -> Result<bool> {
         unsafe {
             let exec_batch_fn: Symbol<ExecuteBatchFunc> = self.lib.get(b"ladybug_execute_batch\0")?;
@@ -112,6 +125,16 @@ impl GraphStore {
             let count_fn: Symbol<QueryCountFunc> = self.lib.get(b"ladybug_query_count\0")?;
             let c_query = CString::new(query)?;
             Ok(count_fn(self.ctx, c_query.as_ptr()))
+        }
+    }
+
+    pub fn query_count_param(&self, query: &str, params: &serde_json::Value) -> Result<i64> {
+        unsafe {
+            let count_fn: Symbol<QueryCountParamFunc> = self.lib.get(b"ladybug_query_count_param\0")?;
+            let c_query = CString::new(query)?;
+            let params_str = serde_json::to_string(params)?;
+            let c_params = CString::new(params_str)?;
+            Ok(count_fn(self.ctx, c_query.as_ptr(), c_params.as_ptr()))
         }
     }
 
@@ -135,6 +158,32 @@ impl GraphStore {
         }
     }
 
+    pub fn query_json_param(&self, query: &str, params: &serde_json::Value) -> Result<String> {
+        unsafe {
+            let query_fn: Symbol<QueryJsonParamFunc> = self.lib.get(b"ladybug_query_json_param\0")?;
+            let c_query = CString::new(query)?;
+            let params_str = serde_json::to_string(params)?;
+            let c_params = CString::new(params_str)?;
+            let result_ptr = query_fn(self.ctx, c_query.as_ptr(), c_params.as_ptr());
+            
+            if result_ptr.is_null() {
+                return Err(anyhow!("Query returned null pointer"));
+            }
+            
+            let result_str = std::ffi::CStr::from_ptr(result_ptr).to_string_lossy().into_owned();
+            
+            if let Ok(free_fn) = self.lib.get::<FreeStringFunc>(b"ladybug_free_string\0") {
+                free_fn(result_ptr);
+            }
+            
+            if result_str.starts_with("Error:") {
+                return Err(anyhow!("{}", result_str));
+            }
+            
+            Ok(result_str)
+        }
+    }
+
     fn init_schema(&self) -> Result<()> {
         self.execute("CREATE NODE TABLE IF NOT EXISTS File (path STRING, PRIMARY KEY (path))")?;
         self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, is_unsafe BOOLEAN, is_nif BOOLEAN, is_entry_point BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
@@ -148,87 +197,79 @@ impl GraphStore {
     }
 
     pub fn insert_file_data(&self, path: &str, result: &crate::parser::ExtractionResult) -> Result<()> {
-        // Serialize writes globally to prevent Kuzu DB lock errors
         let _guard = self.write_mutex.lock().unwrap();
 
-        let safe_path = path.replace("'", "\\'");
-        let mut queries = Vec::new();
+        // 1. Insert/Merge File node
+        self.execute_param("MERGE (f:File {path: $p})", &serde_json::json!({"p": path}))?;
 
-        queries.push(format!("MERGE (f:File {{path: '{}'}})", safe_path));
+        // 2. Batch Insert Symbols using UNWIND
+        if !result.symbols.is_empty() {
+            let mut symbols_batch = Vec::new();
+            let mut seen_symbols = std::collections::HashSet::new();
 
-        let mut seen_symbols = std::collections::HashSet::new();
+            for sym in &result.symbols {
+                if seen_symbols.contains(&sym.name) { continue; }
+                seen_symbols.insert(sym.name.clone());
 
-        for sym in &result.symbols {
-            let safe_name = sym.name.replace("'", "\\'");
+                let is_test = sym.name.contains("test_") || path.contains("test");
+                let is_unsafe = sym.properties.get("unsafe").map(|s| s == "true").unwrap_or(false);
+                let is_nif = sym.properties.get("is_nif").map(|s| s == "true").unwrap_or(false);
+
+                symbols_batch.push(serde_json::json!({
+                    "name": sym.name,
+                    "kind": sym.kind,
+                    "tested": is_test,
+                    "is_public": sym.is_public,
+                    "is_unsafe": is_unsafe,
+                    "is_nif": is_nif,
+                    "is_entry_point": sym.is_entry_point,
+                    "embedding": sym.embedding
+                }));
+            }
+
+            let sym_query = "UNWIND $batch AS row \
+                             MERGE (s:Symbol {name: row.name}) \
+                             SET s.kind = row.kind, s.tested = row.tested, s.is_public = row.is_public, \
+                                 s.is_unsafe = row.is_unsafe, s.is_nif = row.is_nif, \
+                                 s.is_entry_point = row.is_entry_point, s.embedding = row.embedding \
+                             WITH s, row \
+                             MATCH (f:File {path: $path}) MERGE (f)-[:CONTAINS]->(s)";
             
-            if seen_symbols.contains(&safe_name) {
-                continue;
-            }
-            seen_symbols.insert(safe_name.clone());
-
-            let is_test = safe_name.contains("test_") || safe_path.contains("test");
-            let is_unsafe = sym.properties.get("unsafe").map(|s| s == "true").unwrap_or(false);
-            let is_nif = sym.properties.get("is_nif").map(|s| s == "true").unwrap_or(false);
-
-            if let Some(emb) = &sym.embedding {
-                let vec_str = format!("{:?}", emb); // e.g., [0.1, 0.2, ...]
-                queries.push(format!(
-                    "MERGE (s:Symbol {{name: '{}'}}) SET s.kind = '{}', s.tested = {}, s.is_public = {}, s.is_unsafe = {}, s.is_nif = {}, s.is_entry_point = {}, s.embedding = {}",
-                    safe_name, sym.kind, is_test, sym.is_public, is_unsafe, is_nif, sym.is_entry_point, vec_str
-                ));
-            } else {
-                queries.push(format!(
-                    "MERGE (s:Symbol {{name: '{}'}}) SET s.kind = '{}', s.tested = {}, s.is_public = {}, s.is_unsafe = {}, s.is_nif = {}, s.is_entry_point = {}",
-                    safe_name, sym.kind, is_test, sym.is_public, is_unsafe, is_nif, sym.is_entry_point
-                ));
-            }
-
-            queries.push(format!(
-                "MATCH (f:File {{path: '{}'}}), (s:Symbol {{name: '{}'}}) MERGE (f)-[:CONTAINS]->(s)",
-                safe_path, safe_name
-            ));
+            self.execute_param(sym_query, &serde_json::json!({
+                "batch": symbols_batch,
+                "path": path
+            }))?;
         }
 
-        let valid_rels = ["CALLS", "IMPORTS", "IMPLEMENTS", "CALLS_NIF", "USES"];
-        let mut seen_rels = std::collections::HashSet::new();
+        // 3. Batch Insert Relations using UNWIND
+        if !result.relations.is_empty() {
+            let valid_rels = ["CALLS", "IMPORTS", "IMPLEMENTS", "CALLS_NIF", "USES"];
+            let mut rels_by_type: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
 
-        for rel in &result.relations {
-            let safe_to = rel.to.replace("'", "\\'");
-            let rel_type = rel.rel_type.to_uppercase();
-            let safe_rel_type = if valid_rels.contains(&rel_type.as_str()) {
-                rel_type
-            } else {
-                "CALLS".to_string()
-            };
-
-            if rel.from.is_empty() || rel.from == "file" || rel.from == "method" {
-                // Fallback: connect all symbols to 'to'
-                for sym in &result.symbols {
-                    let safe_from = sym.name.replace("'", "\\'");
-                    let rel_key = format!("{}->{}->{}", safe_from, safe_rel_type, safe_to);
-                    if !seen_rels.contains(&rel_key) {
-                        seen_rels.insert(rel_key);
-                        queries.push(format!(
-                            "MATCH (a:Symbol {{name: '{}'}}), (b:Symbol {{name: '{}'}}) MERGE (a)-[:{}]->(b)",
-                            safe_from, safe_to, safe_rel_type
-                        ));
+            for rel in &result.relations {
+                let rel_type = rel.rel_type.to_uppercase();
+                let safe_rel_type = if valid_rels.contains(&rel_type.as_str()) { rel_type } else { "CALLS".to_string() };
+                
+                let entry = rels_by_type.entry(safe_rel_type).or_default();
+                
+                if rel.from.is_empty() || rel.from == "file" || rel.from == "method" {
+                    for sym in &result.symbols {
+                        entry.push(serde_json::json!({"from": sym.name, "to": rel.to}));
                     }
-                }
-            } else {
-                let safe_from = rel.from.replace("'", "\\'");
-                let rel_key = format!("{}->{}->{}", safe_from, safe_rel_type, safe_to);
-                if !seen_rels.contains(&rel_key) {
-                    seen_rels.insert(rel_key);
-                    queries.push(format!(
-                        "MATCH (a:Symbol {{name: '{}'}}), (b:Symbol {{name: '{}'}}) MERGE (a)-[:{}]->(b)",
-                        safe_from, safe_to, safe_rel_type
-                    ));
+                } else {
+                    entry.push(serde_json::json!({"from": rel.from, "to": rel.to}));
                 }
             }
-        }
 
-        if !queries.is_empty() {
-            let _ = self.execute_batch(&queries);
+            for (rel_type, batch) in rels_by_type {
+                let rel_query = format!(
+                    "UNWIND $batch AS row \
+                     MATCH (a:Symbol {{name: row.from}}), (b:Symbol {{name: row.to}}) \
+                     MERGE (a)-[:{}]->(b)", 
+                    rel_type
+                );
+                self.execute_param(&rel_query, &serde_json::json!({"batch": batch}))?;
+            }
         }
 
         Ok(())
