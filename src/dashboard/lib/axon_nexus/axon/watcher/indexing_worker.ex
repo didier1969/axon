@@ -81,7 +81,6 @@ defmodule Axon.Watcher.IndexingWorker do
                     {:file_indexed, path, :error}
                   )
               end
-            end
 
           {:error, reason} ->
             Logger.error("[Oban] Could not stat file #{path}: #{inspect(reason)}")

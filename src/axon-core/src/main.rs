@@ -12,6 +12,7 @@ mod config;
 mod graph;
 mod mcp;
 mod embedder;
+mod worker;
 
 use bridge::BridgeEvent;
 use graph::GraphStore;
@@ -170,6 +171,10 @@ fn main() -> anyhow::Result<()> {
             let mut cancel_token = Arc::new(AtomicBool::new(false));
             let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
 
+            // THE 8 IMMORTALS: Explicit Worker Pool instantiation.
+            let worker_pool = crate::worker::WorkerPool::new(8, store_clone.clone(), tx.clone());
+            let worker_sender = worker_pool.get_sender();
+
             while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
                 if bytes_read == 0 { break; }
                 
@@ -192,84 +197,10 @@ fn main() -> anyhow::Result<()> {
                         let lane = file_data["lane"].as_str().unwrap_or("fast").to_string();
                         let is_titan = lane == "titan";
                         
-                        let store_for_parse = store_clone.clone();
-                        let tx_clone = tx.clone();
-                        let mcp_check_flag = telemetry_mcp_flag.clone();
-                        
-                        tokio::spawn(async move {
-                            // Move permit into the task so it's held until the task completes
-                            let _held_permit = permit;
-                            
-                            // Diplomatic Priority: Yield if MCP is processing
-                            while mcp_check_flag.load(Ordering::SeqCst) {
-                                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                            }
-                            
-                            let path_for_task = path.clone();
-                            let (symbols_count, rels_count) = tokio::task::spawn_blocking(move || {
-                                crate::parser::set_titan_mode(is_titan);
-                                
-                                let mut s_count = 0;
-                                let mut r_count = 0;
-                                let path_obj = std::path::Path::new(&path_for_task);
-                                
-                                // FORENSIC SHIELD: Death Rattle Logging
-                                use std::io::Write;
-                                if let Ok(mut log_file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/axon_forensic.log") {
-                                    let _ = writeln!(log_file, "START [{}]: {}", lane, path_for_task);
-                                    let _ = log_file.sync_all(); // Force physical disk write before RAM explodes
-                                }
-
-                                // Defense in Depth: If fast lane, drop files > 1MB. If titan lane, accept up to 50MB.
-                                if let Ok(metadata) = std::fs::metadata(path_obj) {
-                                    if !is_titan && metadata.len() > 1_048_576 {
-                                        return (0, 0); 
-                                    }
-                                    if is_titan && metadata.len() > 52_428_800 {
-                                        return (0, 0); // Absolute safety net for files > 50MB
-                                    }
-                                }
-
-                                if let Ok(content) = std::fs::read_to_string(path_obj) {
-                                    if let Some(parser) = parser::get_parser_for_file(path_obj) {
-                                        let mut extraction = parser.parse(&content);
-                                        
-                                        // FORENSIC SHIELD: Mark success
-                                        if let Ok(mut log_file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/axon_forensic.log") {
-                                            let _ = writeln!(log_file, "END:   {}", path_for_task);
-                                        }
-
-                                        // Generate Vector Embeddings
-                                        let texts_to_embed: Vec<String> = extraction.symbols.iter()
-                                            .map(|s| format!("Symbol: {} Kind: {}", s.name, s.kind))
-                                            .collect();
-                                            
-                                        if !texts_to_embed.is_empty() {
-                                            if let Ok(embeddings) = crate::embedder::batch_embed(texts_to_embed) {
-                                                for (sym, emb) in extraction.symbols.iter_mut().zip(embeddings.into_iter()) {
-                                                    sym.embedding = Some(emb);
-                                                }
-                                            }
-                                        }
-
-                                        s_count = extraction.symbols.len();
-                                        r_count = extraction.relations.len();
-                                        if let Ok(store) = store_for_parse.read() {
-                                            let _ = store.insert_file_data(&path_for_task, &extraction);
-                                        }
-                                    }
-                                }
-                                (s_count, r_count)
-                            }).await.unwrap_or((0, 0));
-                            
-                            let finish_msg = serde_json::to_string(&BridgeEvent::FileIndexed {
-                                path: path.clone(),
-                                symbol_count: symbols_count,
-                                relation_count: rels_count,
-                                file_count: 1, entry_points: 0, security_score: 100, coverage_score: 0,
-                                taint_paths: "".to_string()
-                            }).unwrap() + "\n";
-                            let _ = tx_clone.send(finish_msg).await;
+                        // Delegate to the immortals
+                        let _ = worker_sender.send(crate::worker::WorkerTask {
+                            path,
+                            is_titan,
                         });
                     }
                 } else if command == "SCAN_ALL" {

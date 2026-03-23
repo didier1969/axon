@@ -3,28 +3,29 @@ use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
 
 pub struct PluginContext {
-    db: Database,
+    pub db: Database,
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ladybug_init_db(path: *const c_char) -> *mut PluginContext {
+    // ... (keep existing path logic)
     if path.is_null() {
         return std::ptr::null_mut();
     }
-    
+
     let path_str = match CStr::from_ptr(path).to_str() {
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
     };
-    
-    if let Some(parent) = Path::new(path_str).parent() {
-        if !parent.exists() {
+
+    if !std::path::Path::new(path_str).exists() {
+        if let Some(parent) = std::path::Path::new(path_str).parent() {
             if let Err(_) = std::fs::create_dir_all(parent) {
                 return std::ptr::null_mut();
             }
         }
     }
-    
+
     let config = SystemConfig::default().buffer_pool_size(1024 * 1024 * 1024); // Limit to 1GB RAM (Ghost Mode)
     match Database::new(path_str, config) {
         Ok(db) => {
@@ -32,7 +33,7 @@ pub unsafe extern "C" fn ladybug_init_db(path: *const c_char) -> *mut PluginCont
             Box::into_raw(ctx)
         }
         Err(e) => {
-            eprintln!("Ladybug C-FFI Init Error: {:?}", e);
+            eprintln!("Ladybug C-FFI DB Init Error: {:?}", e);
             std::ptr::null_mut()
         }
     }
@@ -50,12 +51,22 @@ pub unsafe extern "C" fn ladybug_execute(ctx: *mut PluginContext, query: *const 
     };
     
     let ctx_ref = &*ctx;
+    
     let conn = match Connection::new(&ctx_ref.db) {
         Ok(c) => c,
         Err(_) => return false,
     };
     
-    conn.query(query_str).is_ok()
+    match conn.query(query_str) {
+        Ok(mut result) => {
+            while let Some(_) = result.next() {}
+            true
+        },
+        Err(e) => {
+            eprintln!("Error executing query: {} | {}", e, query_str);
+            false
+        }
+    }
 }
 
 #[no_mangle]
@@ -70,6 +81,7 @@ pub unsafe extern "C" fn ladybug_query_count(ctx: *mut PluginContext, query: *co
     };
     
     let ctx_ref = &*ctx;
+    
     let conn = match Connection::new(&ctx_ref.db) {
         Ok(c) => c,
         Err(_) => return -1,
@@ -102,9 +114,10 @@ pub unsafe extern "C" fn ladybug_query_json(ctx: *mut PluginContext, query: *con
     };
     
     let ctx_ref = &*ctx;
+    
     let conn = match Connection::new(&ctx_ref.db) {
         Ok(c) => c,
-        Err(_) => return CString::new("[]").unwrap().into_raw(),
+        Err(_) => return -1,
     };
     
     let mut result = match conn.query(query_str) {
@@ -148,7 +161,7 @@ pub unsafe extern "C" fn ladybug_query_count_param(
     let ctx_ref = &*ctx;
     let conn = match Connection::new(&ctx_ref.db) {
         Ok(c) => c,
-        Err(_) => return -1,
+        Err(_) => return CString::new("[]").unwrap().into_raw(),
     };
 
     let mut stmt = match conn.prepare(query_str) {
@@ -308,9 +321,12 @@ pub unsafe extern "C" fn ladybug_execute_param(
     let kuzu_params: Vec<(&str, lbug::Value)> = owned_params.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
 
     match conn.execute(&mut stmt, kuzu_params) {
-        Ok(_) => true,
+        Ok(mut result) => {
+            while let Some(_) = result.next() {}
+            true
+        },
         Err(e) => {
-            eprintln!("Error executing batch query: {} | Params: {}", e, params_str);
+            eprintln!("Error executing param query: {} | Params: {}", e, params_str);
             false
         }
     }
@@ -354,11 +370,22 @@ pub unsafe extern "C" fn ladybug_execute_batch(ctx: *mut PluginContext, queries_
     
     let _ = conn.query("BEGIN TRANSACTION");
     for query in queries {
-        if let Err(e) = conn.query(&query) {
-            eprintln!("Batch query failed: {} - Error: {:?}", query, e);
-            let _ = conn.query("ROLLBACK");
-            return false;
+        match conn.query(&query) {
+            Ok(mut result) => {
+                while let Some(_) = result.next() {}
+            },
+            Err(e) => {
+                eprintln!("Batch query failed: {} - Error: {:?}", query, e);
+                let _ = conn.query("ROLLBACK");
+                return false;
+            }
         }
     }
-    conn.query("COMMIT").is_ok()
+    match conn.query("COMMIT") {
+        Ok(mut result) => {
+            while let Some(_) = result.next() {}
+            true
+        },
+        Err(_) => false,
+    }
 }
