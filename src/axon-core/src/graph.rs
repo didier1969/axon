@@ -328,17 +328,21 @@ impl GraphStore {
     }
 
     pub fn get_god_objects(&self, project_name: &str) -> Result<Vec<String>> {
+        let filter = if project_name == "*" || project_name.is_empty() {
+            "".to_string()
+        } else {
+            format!("WHERE f.path CONTAINS '{}'", project_name)
+        };
         // Find symbols in the project that have a high in-degree (>= 10 dependents)
         let query = format!(
-            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)<-[:CALLS]-(caller:Symbol) 
-             WHERE f.path CONTAINS '{}' 
-             WITH s, count(caller) AS degree 
-             WHERE degree >= 10 
+            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)<-[:CALLS]-(caller:Symbol)
+             {}
+             WITH s, count(caller) AS degree
+             WHERE degree >= 10
              RETURN s.name",
-            project_name
+            filter
         );
-        let result_json = self.query_json(&query).unwrap_or_else(|_| "[]".to_string());
-        
+        let result_json = self.query_json(&query).unwrap_or_else(|_| "[]".to_string());        
         let mut god_objects = Vec::new();
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result_json) {
             if let Some(arr) = parsed.as_array() {

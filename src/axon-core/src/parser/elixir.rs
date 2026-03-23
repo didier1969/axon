@@ -547,8 +547,8 @@ mod tests {
         let use_rel = result.relations.iter().find(|r| r.rel_type == "uses").unwrap();
         assert_eq!(use_rel.to, "GenServer");
 
-        let genserver_rel = result.relations.iter().find(|r| r.rel_type == "calls").unwrap();
-        assert_eq!(genserver_rel.properties.get("genserver").map(|s| s.as_str()), Some("true"));
+        let genserver_rel = result.relations.iter().find(|r| r.rel_type == "CALLS_OTP").unwrap();
+        assert_eq!(genserver_rel.properties.get("otp_boundary").map(|s| s.as_str()), Some("true"));
         assert_eq!(genserver_rel.to, "GenServer");
     }
 

@@ -87,7 +87,7 @@ pub unsafe extern "C" fn ladybug_query_count(ctx: *mut PluginContext, query: *co
         Err(_) => return -1,
     };
     
-    let mut result = match conn.query(query_str) {
+    let mut result = match conn.execute(&mut stmt, kuzu_params) {
         Ok(r) => r,
         Err(_) => return -1,
     };
