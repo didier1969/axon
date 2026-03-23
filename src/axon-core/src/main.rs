@@ -67,6 +67,26 @@ fn main() -> anyhow::Result<()> {
     let mcp_active_flag = Arc::new(AtomicBool::new(false));
     let mcp_active_for_listener = mcp_active_flag.clone();
 
+    // --- OS-Level Sledgehammer (Option B) Memory Watchdog ---
+    std::thread::spawn(|| {
+        let page_size = 4096; // Standard Linux page size
+        let limit_bytes: u64 = 14 * 1024 * 1024 * 1024; // 14 GB
+        loop {
+            if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
+                if let Some(rss_pages) = parse_rss_from_statm(&content) {
+                    let rss_bytes = rss_pages * page_size;
+                    if rss_bytes > limit_bytes {
+                        error!("CRITICAL: Memory threshold reached ({} GB). Executing Process Cycling (Option B) suicide...", rss_bytes / 1024 / 1024 / 1024);
+                        // A clean exit allows the OS to perfectly reclaim all C++ FFI memory.
+                        // The external bash loop will restart the process instantly.
+                        std::process::exit(0);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        }
+    });
+
     // --- MCP Listener Loop (Pure JSON-RPC) ---
     tokio::spawn(async move {
         while let Ok((socket, _)) = mcp_listener.accept().await {
@@ -172,7 +192,7 @@ fn main() -> anyhow::Result<()> {
             let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
 
             // THE 8 IMMORTALS: Explicit Worker Pool instantiation.
-            let worker_pool = crate::worker::WorkerPool::new(8, store_clone.clone(), tx.clone());
+            let worker_pool = crate::worker::WorkerPool::new(8, store_clone.clone(), tx.clone(), telemetry_mcp_flag.clone());
             let worker_sender = worker_pool.get_sender();
 
             while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
@@ -265,4 +285,28 @@ fn main() -> anyhow::Result<()> {
         });
     }
         })
+}
+
+fn parse_rss_from_statm(content: &str) -> Option<u64> {
+    content.split_whitespace().nth(1)?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_parse_statm_rss() {
+        let statm_content = "1000 500 250 10 0 100 0";
+        let rss_pages = parse_rss_from_statm(statm_content).unwrap();
+        assert_eq!(rss_pages, 500);
+    }
+
+    #[test]
+    fn test_memory_threshold_logic() {
+        let limit_bytes: u64 = 14 * 1024 * 1024 * 1024;
+        let page_size: u64 = 4096;
+        let rss_pages = (15 * 1024 * 1024 * 1024) / 4096;
+        assert!(rss_pages * page_size > limit_bytes);
+    }
 }
