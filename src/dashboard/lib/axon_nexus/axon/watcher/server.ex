@@ -184,18 +184,25 @@ defmodule Axon.Watcher.Server do
               _ -> :ok
             end
 
-            current_batch = state.pending_batches[priority]
-            new_batch = [str_path | current_batch]
+            # TITAN PROTOCOL: Route massive files (>1MB) to the single-threaded queue immediately.
+            case File.stat(str_path) do
+              {:ok, %{size: size}} when size > 1_048_576 ->
+                dispatch_batch([str_path], :indexing_titan)
+                {:noreply, state}
+              _ ->
+                current_batch = state.pending_batches[priority]
+                new_batch = [str_path | current_batch]
 
-            chunk_size = Axon.BackpressureController.get_chunk_size()
-            threshold = if priority >= 80, do: min(10, chunk_size), else: chunk_size
+                chunk_size = Axon.BackpressureController.get_chunk_size()
+                threshold = if priority >= 80, do: min(10, chunk_size), else: chunk_size
 
-            if length(new_batch) >= threshold do
-              queue = if priority >= 80, do: :indexing_hot, else: :indexing_default
-              dispatch_batch(new_batch, queue)
-              {:noreply, put_in(state.pending_batches[priority], [])}
-            else
-              {:noreply, put_in(state.pending_batches[priority], new_batch)}
+                if length(new_batch) >= threshold do
+                  queue = if priority >= 80, do: :indexing_hot, else: :indexing_default
+                  dispatch_batch(new_batch, queue)
+                  {:noreply, put_in(state.pending_batches[priority], [])}
+                else
+                  {:noreply, put_in(state.pending_batches[priority], new_batch)}
+                end
             end
           else
             # File is already indexed and hasn't changed on disk.

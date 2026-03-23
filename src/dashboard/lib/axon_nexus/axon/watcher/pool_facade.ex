@@ -16,8 +16,8 @@ defmodule Axon.Watcher.PoolFacade do
   @doc """
   Sends a single file to Axon Core for parsing and ingestion.
   """
-  def parse(path) do
-    GenServer.call(__MODULE__, {:parse, path}, 30_000)
+  def parse(path, lane \\ "fast") do
+    GenServer.call(__MODULE__, {:parse, path, lane}, 30_000)
   end
 
   @doc """
@@ -43,9 +43,9 @@ defmodule Axon.Watcher.PoolFacade do
     {:noreply, state}
   end
 
-  def handle_call({:parse, path}, _from, state) do
+  def handle_call({:parse, path, lane}, _from, state) do
     if state.socket do
-      payload = Jason.encode!(%{"path" => path})
+      payload = Jason.encode!(%{"path" => path, "lane" => lane})
       # We use a protocol: "PARSE_FILE <json_payload>\n"
       case :gen_tcp.send(state.socket, "PARSE_FILE #{payload}\n") do
         :ok ->

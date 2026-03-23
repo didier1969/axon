@@ -2,11 +2,25 @@ use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
-pub static EMBEDDER: Lazy<Mutex<TextEmbedding>> = Lazy::new(|| {
-    Mutex::new(TextEmbedding::try_new(
-        InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-            .with_show_download_progress(false)
-    ).expect("Failed to initialize FastEmbed model"))
+pub struct EmbedderState {
+    model: TextEmbedding,
+    batch_count: usize,
+}
+
+impl EmbedderState {
+    fn new() -> Self {
+        Self {
+            model: TextEmbedding::try_new(
+                InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                    .with_show_download_progress(false)
+            ).expect("Failed to initialize FastEmbed model"),
+            batch_count: 0,
+        }
+    }
+}
+
+pub static EMBEDDER: Lazy<Mutex<EmbedderState>> = Lazy::new(|| {
+    Mutex::new(EmbedderState::new())
 });
 
 pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
@@ -14,6 +28,23 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         return Ok(Vec::new());
     }
     
+    // 1. Check if we need to reset the arena (lock acquired and released quickly)
+    let needs_reset = {
+        let mut state = EMBEDDER.lock().unwrap();
+        state.batch_count += 1;
+        state.batch_count % 1000 == 0
+    };
+
+    // 2. If needed, build the new model WITHOUT holding the global lock to prevent deadlocks
+    if needs_reset {
+        log::info!("Re-initializing FastEmbed ONNX session to clear Arena allocator (Deadlock-Free)");
+        let new_state = EmbedderState::new(); 
+        // 3. Re-acquire lock to swap the pointer instantly
+        let mut state = EMBEDDER.lock().unwrap();
+        *state = new_state;
+    }
+
+    // 4. Acquire lock for actual embedding
     let mut embedder = EMBEDDER.lock().unwrap();
     let mut all_embeddings = Vec::with_capacity(texts.len());
     
@@ -30,7 +61,7 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         }
         
         let texts_ref: Vec<&str> = truncated_chunk.iter().map(|s| s.as_str()).collect();
-        let chunk_embeddings = embedder.embed(texts_ref, None)?;
+        let chunk_embeddings = embedder.model.embed(texts_ref, None)?;
         all_embeddings.extend(chunk_embeddings);
     }
     

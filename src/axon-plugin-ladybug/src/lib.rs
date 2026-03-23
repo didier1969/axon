@@ -307,7 +307,13 @@ pub unsafe extern "C" fn ladybug_execute_param(
     
     let kuzu_params: Vec<(&str, lbug::Value)> = owned_params.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
 
-    conn.execute(&mut stmt, kuzu_params).is_ok()
+    match conn.execute(&mut stmt, kuzu_params) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("Error executing batch query: {} | Params: {}", e, params_str);
+            false
+        }
+    }
 }
 
 #[no_mangle]

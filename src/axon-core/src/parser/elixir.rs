@@ -485,6 +485,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_elixir_wasm_loads() {
+        let parser = ElixirParser::new();
+        let code = "defmodule Math do\n  def add(a, b), do: a + b\nend";
+        let result = parser.parse(code);
+        assert!(!result.symbols.is_empty(), "Parser failed to extract any symbols. WASM load likely failed.");
+    }
+
+    #[test]
     fn test_elixir_parser() {
         let code = r#"
         defmodule MyModule do

@@ -5,11 +5,17 @@ use once_cell::sync::Lazy;
 use std::panic::catch_unwind;
 use std::collections::HashMap;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub static WASM_ENGINE: Lazy<Engine> = Lazy::new(|| Engine::default());
 
 thread_local! {
     static PARSER_CACHE: RefCell<HashMap<String, tree_sitter::Parser>> = RefCell::new(HashMap::new());
+    pub static IS_TITAN_MODE: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
+pub fn set_titan_mode(is_titan: bool) {
+    IS_TITAN_MODE.with(|mode| mode.set(is_titan));
 }
 
 pub fn parse_with_wasm_safe(
@@ -21,7 +27,26 @@ pub fn parse_with_wasm_safe(
     let lang_name_str = language_name.to_string();
     let wasm_bytes_vec = wasm_bytes.to_vec();
 
+    let is_titan = IS_TITAN_MODE.with(|mode| mode.get());
+
     let result = catch_unwind(move || {
+        // TITAN PROTOCOL: Massive files bypass the cache entirely.
+        // This allows the WASM memory pool to expand to 6GB+ during parsing,
+        // and then be instantly and safely dropped/freed at the end of the function,
+        // guaranteeing it never stays in the thread_local cache to cause an OOM.
+        if is_titan {
+            log::info!("Titan Mode: Bypassing WASM parser cache for heavy file...");
+            if let Ok(mut store) = tree_sitter::WasmStore::new(&*WASM_ENGINE) {
+                if let Ok(language) = store.load_language(&lang_name_str, &wasm_bytes_vec) {
+                    let mut parser = tree_sitter::Parser::new();
+                    if parser.set_wasm_store(store).is_ok() && parser.set_language(&language).is_ok() {
+                        return parser.parse(&content_string, None);
+                    }
+                }
+            }
+            return None;
+        }
+
         PARSER_CACHE.with(|cache_cell| {
             let mut cache = cache_cell.borrow_mut();
 
@@ -37,8 +62,9 @@ pub fn parse_with_wasm_safe(
             }
 
             if let Some(parser) = cache.get_mut(&lang_name_str) {
-                // Parse returns Option<Tree>
-                parser.parse(&content_string, None)
+                let tree = parser.parse(&content_string, None);
+                parser.reset();
+                tree
             } else {
                 None
             }

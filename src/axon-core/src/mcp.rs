@@ -766,14 +766,14 @@ mod tests {
     #[test]
     fn test_mcp_tools_list() {
         let server = create_test_server();
-        let req = JsonRpcRequest {
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/list".to_string(),
             params: None,
             id: Some(json!(1)),
         };
 
         let response = server.handle_request(req);
-        let result = response.result.expect("Expected result");
+        let result = response.unwrap().result.expect("Expected result");
         let tools = result.get("tools").expect("Expected tools array").as_array().expect("tools is array");
         
         assert_eq!(tools.len(), 13);
@@ -810,7 +810,7 @@ mod tests {
         server.graph_store.read().unwrap().execute("MATCH (s1:Symbol {name: 'fetchData'}), (s2:Symbol {name: 'executeSQL'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
 
         // Architectural Drift
-        let req_drift = JsonRpcRequest {
+        let req_drift = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "axon_architectural_drift",
@@ -819,12 +819,12 @@ mod tests {
             id: Some(json!(10)),
         };
         let res_drift = server.handle_request(req_drift);
-        let text_drift = res_drift.result.unwrap().get("content").unwrap()[0].get("text").unwrap().as_str().unwrap().to_string();
+        let text_drift = res_drift.unwrap().result.unwrap().get("content").unwrap()[0].get("text").unwrap().as_str().unwrap().to_string();
         assert!(text_drift.contains("🚨 Dérive Architecturale Détectée"));
         assert!(text_drift.contains("fetchData"));
 
         // Simulate Mutation
-        let req_mut = JsonRpcRequest {
+        let req_mut = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "axon_simulate_mutation",
@@ -833,14 +833,14 @@ mod tests {
             id: Some(json!(11)),
         };
         let res_mut = server.handle_request(req_mut);
-        let text_mut = res_mut.result.unwrap().get("content").unwrap()[0].get("text").unwrap().as_str().unwrap().to_string();
+        let text_mut = res_mut.unwrap().result.unwrap().get("content").unwrap()[0].get("text").unwrap().as_str().unwrap().to_string();
         assert!(text_mut.contains("Dry-Run Mutation"));
     }
 
     #[test]
     fn test_axon_batch() {
         let server = create_test_server();
-        let req = JsonRpcRequest {
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "axon_batch",
@@ -855,7 +855,7 @@ mod tests {
         };
 
         let response = server.handle_request(req);
-        let result = response.result.expect("Expected result");
+        let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
         
         assert!(content.contains("axon_health"));
@@ -872,7 +872,7 @@ mod tests {
         server.graph_store.read().unwrap().execute("MERGE (s:Symbol {name: 'main', kind: 'function', tested: false})").unwrap();
         server.graph_store.read().unwrap().execute("MATCH (f:File {path: 'src/main.rs'}), (s:Symbol {name: 'main'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
 
-        let req = JsonRpcRequest {
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "axon_diff",
@@ -884,7 +884,7 @@ mod tests {
         };
 
         let response = server.handle_request(req);
-        let result = response.result.expect("Expected result");
+        let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
         
         assert!(content.contains("src/main.rs"));
@@ -896,7 +896,7 @@ mod tests {
         let server = create_test_server();
         server.graph_store.read().unwrap().execute("MERGE (f:File {path: 'test.py'})").unwrap();
         
-        let req = JsonRpcRequest {
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "axon_cypher",
@@ -908,7 +908,7 @@ mod tests {
         };
 
         let response = server.handle_request(req);
-        let result = response.result.expect("Expected result");
+        let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
         
         assert!(content.contains("test.py"));
@@ -921,7 +921,7 @@ mod tests {
         server.graph_store.read().unwrap().execute("MERGE (c:Symbol {name: 'caller_func'})").unwrap();
         server.graph_store.read().unwrap().execute("MATCH (c:Symbol {name: 'caller_func'}), (s:Symbol {name: 'core_func'}) MERGE (c)-[:CALLS]->(s)").unwrap();
 
-        let req = JsonRpcRequest {
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "axon_inspect",
@@ -934,7 +934,7 @@ mod tests {
         };
 
         let response = server.handle_request(req);
-        let result = response.result.expect("Expected result");
+        let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
         
         // Output format check based on query results
@@ -955,7 +955,7 @@ mod tests {
         server.graph_store.read().unwrap().execute("MATCH (s1:Symbol {name: 'user_input'}), (s2:Symbol {name: 'run_task'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
         server.graph_store.read().unwrap().execute("MATCH (s2:Symbol {name: 'run_task'}), (s3:Symbol {name: 'eval'}) MERGE (s2)-[:CALLS]->(s3)").unwrap();
 
-        let req = JsonRpcRequest {
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "axon_audit",
@@ -967,7 +967,7 @@ mod tests {
         };
 
         let response = server.handle_request(req);
-        let result = response.result.expect("Expected result");
+        let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
         
         // It should deduct points due to the indirect eval call (distance 2)
@@ -991,7 +991,7 @@ mod tests {
         server.graph_store.read().unwrap().execute("MATCH (s1:Symbol {name: 'elixir_func'}), (s2:Symbol {name: 'rust_nif'}) MERGE (s1)-[:CALLS_NIF]->(s2)").unwrap();
         server.graph_store.read().unwrap().execute("MATCH (s2:Symbol {name: 'rust_nif'}), (s3:Symbol {name: 'unsafe_block'}) MERGE (s2)-[:CALLS]->(s3)").unwrap();
 
-        let req = JsonRpcRequest {
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "axon_audit",
@@ -1003,7 +1003,7 @@ mod tests {
         };
 
         let response = server.handle_request(req);
-        let result = response.result.expect("Expected result");
+        let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
         
         // Should detect taint via CALLS_NIF and is_unsafe
@@ -1025,7 +1025,7 @@ mod tests {
             server.graph_store.read().unwrap().execute(&format!("MATCH (dep:Symbol {{name: 'dep{i}'}}), (god:Symbol {{name: 'GodClass'}}) MERGE (dep)-[:CALLS]->(god)")).unwrap();
         }
 
-        let req = JsonRpcRequest {
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
                 "name": "axon_health",
@@ -1037,7 +1037,7 @@ mod tests {
         };
 
         let response = server.handle_request(req);
-        let result = response.result.expect("Expected result");
+        let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
         
         assert!(content.contains("God Object detected: GodClass"));

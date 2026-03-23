@@ -1,3 +1,10 @@
+#[cfg(not(target_env = "msvc"))]
+use jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 mod parser;
 mod scanner;
 mod bridge;
@@ -16,25 +23,31 @@ use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use log::{info, error};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    env_logger::init();
-    let boot_time = chrono::Utc::now().to_rfc3339();
-    
-    let projects_root = "/home/dstadel/projects";
-    let db_path = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
-    
-    info!("Starting Axon Core v2");
-    info!("Engine Boot Time: {}", boot_time);
-    
-    let graph_store = match GraphStore::new(db_path) {
-        Ok(store) => Arc::new(std::sync::RwLock::new(store)),
-        Err(e) => {
-            error!("Fatal Error initializing LadybugDB: {:?}", e);
-            return Err(e);
-        }
-    };
+fn main() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        // MAESTRIA FIX: Cap blocking threads to prevent thread_local! / ONNX Arena explosion.
+        // 8 threads allows Goldorak to use up to 13-16GB of RAM securely without leaking.
+        .max_blocking_threads(8)
+        .build()
+        .unwrap()
+        .block_on(async {
+            env_logger::init();
+            let boot_time = chrono::Utc::now().to_rfc3339();
 
+            let projects_root = "/home/dstadel/projects";
+            let db_path = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
+
+            info!("Starting Axon Core v2");
+            info!("Engine Boot Time: {}", boot_time);
+
+            let graph_store = match GraphStore::new(db_path) {
+                Ok(store) => Arc::new(std::sync::RwLock::new(store)),
+                Err(e) => {
+                    error!("Fatal Error initializing LadybugDB: {:?}", e);
+                    return Err(e);
+                }
+            };
     let tel_socket_path = "/tmp/axon-telemetry.sock";
     let mcp_socket_path = "/tmp/axon-mcp.sock";
     
@@ -176,6 +189,8 @@ async fn main() -> anyhow::Result<()> {
                     let payload = &command[11..];
                     if let Ok(file_data) = serde_json::from_str::<serde_json::Value>(payload) {
                         let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
+                        let lane = file_data["lane"].as_str().unwrap_or("fast").to_string();
+                        let is_titan = lane == "titan";
                         
                         let store_for_parse = store_clone.clone();
                         let tx_clone = tx.clone();
@@ -192,14 +207,26 @@ async fn main() -> anyhow::Result<()> {
                             
                             let path_for_task = path.clone();
                             let (symbols_count, rels_count) = tokio::task::spawn_blocking(move || {
+                                crate::parser::set_titan_mode(is_titan);
+                                
                                 let mut s_count = 0;
                                 let mut r_count = 0;
                                 let path_obj = std::path::Path::new(&path_for_task);
                                 
-                                // Defense in Depth: Double-check file size in Rust (5MB Limit)
+                                // FORENSIC SHIELD: Death Rattle Logging
+                                use std::io::Write;
+                                if let Ok(mut log_file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/axon_forensic.log") {
+                                    let _ = writeln!(log_file, "START [{}]: {}", lane, path_for_task);
+                                    let _ = log_file.sync_all(); // Force physical disk write before RAM explodes
+                                }
+
+                                // Defense in Depth: If fast lane, drop files > 1MB. If titan lane, accept up to 50MB.
                                 if let Ok(metadata) = std::fs::metadata(path_obj) {
-                                    if metadata.len() > 5_242_880 {
-                                        return (0, 0); // Ignore massive files
+                                    if !is_titan && metadata.len() > 1_048_576 {
+                                        return (0, 0); 
+                                    }
+                                    if is_titan && metadata.len() > 52_428_800 {
+                                        return (0, 0); // Absolute safety net for files > 50MB
                                     }
                                 }
 
@@ -207,6 +234,11 @@ async fn main() -> anyhow::Result<()> {
                                     if let Some(parser) = parser::get_parser_for_file(path_obj) {
                                         let mut extraction = parser.parse(&content);
                                         
+                                        // FORENSIC SHIELD: Mark success
+                                        if let Ok(mut log_file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/axon_forensic.log") {
+                                            let _ = writeln!(log_file, "END:   {}", path_for_task);
+                                        }
+
                                         // Generate Vector Embeddings
                                         let texts_to_embed: Vec<String> = extraction.symbols.iter()
                                             .map(|s| format!("Symbol: {} Kind: {}", s.name, s.kind))
@@ -301,4 +333,5 @@ async fn main() -> anyhow::Result<()> {
             info!("Elixir Dashboard disconnected from Telemetry");
         });
     }
+        })
 }
