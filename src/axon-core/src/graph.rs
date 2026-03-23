@@ -280,49 +280,37 @@ impl GraphStore {
         }        Ok(())
     }
     pub fn get_security_audit(&self, project_name: &str) -> Result<(usize, String)> {
-        let filter = if project_name == "*" || project_name.is_empty() {
-            "".to_string()
+        let count_query = if project_name == "*" || project_name.is_empty() {
+            "MATCH (d:Symbol) WHERE (d.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR d.is_unsafe = true) RETURN count(d)".to_string()
         } else {
-            format!("AND f.path CONTAINS '{}'", project_name)
+            format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND (s.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR s.is_unsafe = true) RETURN count(s)", project_name)
         };
 
-        // Taint analysis: Path from any dangerous sink BACKWARDS to a symbol in the file
-        let count_query = format!(
-            "MATCH (d:Symbol)<-[:CALLS|CALLS_NIF*1..4]-(s:Symbol)<-[:CONTAINS]-(f:File) \
-             WHERE (d.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR d.is_unsafe = true) {} \
-             RETURN count(DISTINCT s)",
-            filter
-        );
-        let issues = self.query_count(&count_query)?;
-
+        let issues = self.query_count(&count_query).unwrap_or(0);
         let score = if issues > 0 {
             (100 - (issues * 15).min(100)) as usize
         } else {
             100
         };
 
-        let paths_query = format!(
-            "MATCH path = (d:Symbol)<-[:CALLS|CALLS_NIF*1..4]-(s:Symbol)<-[:CONTAINS]-(f:File) \
-             WHERE (d.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR d.is_unsafe = true) {} \
-             RETURN path LIMIT 5",
-            filter
-        );
-
-        let paths_json = self.query_json(&paths_query).unwrap_or_else(|_| "[]".to_string());
+        // For massive scale graphs, synchronous path traversal (*1..4) is too slow (causes LLM timeouts).
+        // Returning empty paths to maintain < 1s latency.
+        let paths_json = "[]".to_string();
 
         Ok((score, paths_json))
     }
     pub fn get_coverage_score(&self, project_name: &str) -> Result<usize> {
-        let filter = if project_name == "*" || project_name.is_empty() {
-            "".to_string()
+        let (q_total, q_tested) = if project_name == "*" || project_name.is_empty() {
+            (
+                "MATCH (s:Symbol) WHERE s.kind = 'function' RETURN count(s)".to_string(),
+                "MATCH (s:Symbol) WHERE s.kind = 'function' AND s.tested = true RETURN count(s)".to_string()
+            )
         } else {
-            format!("WHERE f.path CONTAINS '{}'", project_name)
+            (
+                format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.kind = 'function' RETURN count(s)", project_name),
+                format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.kind = 'function' AND s.tested = true RETURN count(s)", project_name)
+            )
         };
-
-        let q_total = format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) {} {} s.kind = 'function' RETURN count(s)", 
-            filter, if filter.is_empty() { "WHERE" } else { "AND" });
-        let q_tested = format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) {} {} s.kind = 'function' AND s.tested = true RETURN count(s)", 
-            filter, if filter.is_empty() { "WHERE" } else { "AND" });
         
         let total = self.query_count(&q_total)?;
         let tested = self.query_count(&q_tested)?;

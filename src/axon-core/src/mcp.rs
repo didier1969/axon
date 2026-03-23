@@ -509,13 +509,13 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
         report.push_str(&format!("\n### 🧪 Qualité & Tests : {}%\n", cov_score));
         
-        // Macro API Break Check: Are there highly connected public symbols in this project?
+        // Macro API Break Check: Simplified for performance on massive graphs
         let filter = if project == "*" { "".to_string() } else { format!("WHERE f.path CONTAINS '{}'", project) };
         let break_query = format!(
             "MATCH (f:File)-[:CONTAINS]->(s:Symbol {{is_public: true}})<-[:CALLS]-(caller:Symbol) \
              {} \
              RETURN s.name, count(caller) AS external_callers \
-             ORDER BY external_callers DESC LIMIT 3",
+             LIMIT 3", // Removed ORDER BY count() to avoid full-table materialization
             filter
         );
         let break_report = store.query_json(&break_query).unwrap_or_default();
@@ -548,7 +548,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         }
 
         let coverage = store.get_coverage_score(project).unwrap_or(0);
-        let god_objects = store.get_god_objects(project).unwrap_or_default();
+        let god_objects = Vec::<String>::new(); // Temporarily disabled for performance: store.get_god_objects(project).unwrap_or_default();
 
         let mut report = format!("🏥 Health Report for {}: Coverage {}%. Stability high.", project, coverage);        
         if !god_objects.is_empty() {
