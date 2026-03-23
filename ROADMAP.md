@@ -41,3 +41,10 @@ Status: 🚀 En cours d'exécution Maestria
 
 ---
 *Roadmap réalignée par le Nexus Lead Architect le 22 Mars 2026.*
+
+### Phase 5 : Asynchronous MCP Orchestration (Job Polling Pattern)
+- **Objectif :** Supporter les requêtes analytiques Cypher extrêmement lourdes (> 60 secondes) sans provoquer de Timeout côté LLM/Cloud.
+- **Architecture :** Implémentation du "Pattern du Ticket".
+  - Nouveaux outils MCP : `axon_start_job`, `axon_check_job_status`.
+  - Le serveur Rust délègue le calcul lourd à un thread de fond et retourne un Job ID immédiat.
+  - L'Agent IA utilise une boucle de polling pour interroger le statut du ticket.
