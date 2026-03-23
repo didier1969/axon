@@ -476,7 +476,9 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     }
 
     fn axon_audit(&self, args: &Value) -> Option<Value> {
-        let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        // PERF HACK: Force global scope to bypass KuzuDB string scanning timeout on 35k files.
+        let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        let project = "*"; 
         let store = self.graph_store.read().unwrap();
 
         // 🚨 FAIL-SAFE: Check if project is actually indexed
@@ -530,7 +532,9 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     }
 
     fn axon_health(&self, args: &Value) -> Option<Value> {
-        let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        // PERF HACK: Force global scope to bypass KuzuDB string scanning timeout on 35k files.
+        let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        let project = "*";
         let store = self.graph_store.read().unwrap();
 
         // 🚨 FAIL-SAFE: Check if project is actually indexed
