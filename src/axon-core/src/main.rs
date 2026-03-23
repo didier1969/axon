@@ -213,7 +213,8 @@ fn main() -> anyhow::Result<()> {
                     let token_clone = cancel_token.clone();
                     let tx_clone = tx.clone();
                     let projects_root_task = projects_root_str.clone();
-                    
+                    let scan_store = store_clone.clone();
+
                     scan_task = Some(tokio::spawn(async move {
                         let start = Instant::now();
                         let mut total_files = 0;
@@ -223,8 +224,7 @@ fn main() -> anyhow::Result<()> {
                                 let project_path = project.path();
                                 let project_name = project_path.file_name().unwrap().to_string_lossy().to_string();
                                 let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                                let files = scanner.scan();
-                                
+                                let files = scanner.scan(Some(scan_store.clone()));                                
                                 let proj_start_msg = serde_json::to_string(&BridgeEvent::ProjectScanStarted {
                                     project: project_name.clone(), total_files: files.len()
                                 }).unwrap() + "\n";

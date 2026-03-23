@@ -22,7 +22,7 @@ fastembed = "5.12.1"
 once_cell = "1.21.4"
 tempfile = "3.8"
 wasmtime = "24.0.0"
-toml = "1.0.7"
+toml = "0.8"
 jemallocator = "0.5.4"
 
 [dev-dependencies]
