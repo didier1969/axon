@@ -196,12 +196,16 @@ impl GraphStore {
     fn init_schema(&self) -> Result<()> {
         self.execute("CREATE NODE TABLE IF NOT EXISTS File (path STRING, PRIMARY KEY (path))")?;
         self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, is_unsafe BOOLEAN, is_nif BOOLEAN, is_entry_point BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
+        self.execute("CREATE NODE TABLE IF NOT EXISTS Project (name STRING, PRIMARY KEY (name))")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CONTAINS (FROM File TO Symbol)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CALLS (FROM Symbol TO Symbol)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CALLS_NIF (FROM Symbol TO Symbol)")?;
+        self.execute("CREATE REL TABLE IF NOT EXISTS CALLS_OTP (FROM Symbol TO Symbol, otp_boundary BOOLEAN)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS IMPORTS (FROM Symbol TO Symbol)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS IMPLEMENTS (FROM Symbol TO Symbol)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS USES (FROM Symbol TO Symbol)")?;
+        self.execute("CREATE REL TABLE IF NOT EXISTS DEPENDS_ON (FROM Project TO Project, path STRING)")?;
+        self.execute("CREATE REL TABLE IF NOT EXISTS BELONGS_TO (FROM File TO Project)")?;
         Ok(())
     }
 

@@ -5,6 +5,8 @@ use log::{info, error};
 use crate::graph::GraphStore;
 use crate::parser;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 // The payload sent to the workers
 pub struct WorkerTask {
     pub path: String,
@@ -19,13 +21,14 @@ impl WorkerPool {
     pub fn new(
         num_fast_workers: usize, 
         graph_store: Arc<RwLock<GraphStore>>,
-        result_sender: tokio::sync::mpsc::Sender<String>
+        result_sender: tokio::sync::mpsc::Sender<String>,
+        mcp_active: Arc<AtomicBool>
     ) -> Self {
         let (task_sender, task_receiver) = mpsc::channel::<WorkerTask>();
         let task_receiver = Arc::new(std::sync::Mutex::new(task_receiver));
 
         for id in 0..num_fast_workers {
-            Self::spawn_immortal(id, task_receiver.clone(), graph_store.clone(), result_sender.clone());
+            Self::spawn_immortal(id, task_receiver.clone(), graph_store.clone(), result_sender.clone(), mcp_active.clone());
         }
 
         Self { sender: task_sender }
@@ -41,6 +44,7 @@ impl WorkerPool {
         receiver: Arc<std::sync::Mutex<mpsc::Receiver<WorkerTask>>>,
         graph_store: Arc<RwLock<GraphStore>>,
         result_sender: tokio::sync::mpsc::Sender<String>,
+        mcp_active: Arc<AtomicBool>
     ) {
         thread::Builder::new().name(format!("axon-worker-{}", id)).spawn(move || {
             info!("Worker {} born. Initializing isolated AI/WASM engines...", id);
@@ -61,6 +65,11 @@ impl WorkerPool {
             let mut processed = 0;
 
             loop {
+                // DIPLOMATIC PRIORITY: Yield to MCP server to ensure 0ms latency for AI queries
+                while mcp_active.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+
                 let task = {
                     let rx = receiver.lock().unwrap();
                     match rx.recv() {
@@ -163,7 +172,7 @@ impl WorkerPool {
                 processed += 1;
                 if processed >= max_files_before_death {
                     info!("Worker {} reached end of life ({} files). Committing suicide for memory purity.", id, processed);
-                    Self::spawn_immortal(id, receiver.clone(), graph_store.clone(), result_sender.clone());
+                    Self::spawn_immortal(id, receiver.clone(), graph_store.clone(), result_sender.clone(), mcp_active.clone());
                     break;
                 }
             }

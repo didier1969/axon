@@ -446,26 +446,27 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         let depth_str = format!("*1..{}", depth);
         
         let query = format!(
-            "MATCH (s:Symbol {{name: $sym}})<-[:CALLS|CALLS_NIF{}]-(affected) \
-             RETURN DISTINCT affected.name, affected.kind", 
+            "MATCH (f:File)-[:CONTAINS]->(affected:Symbol)-[:CALLS|CALLS_NIF|CALLS_OTP{}]->(s:Symbol {{name: $sym}}) \
+             RETURN DISTINCT f.path, affected.name, affected.kind \
+             ORDER BY f.path", 
             depth_str
         );
         let params = json!({"sym": symbol});
         
         match self.graph_store.read().unwrap().query_json_param(&query, &params) {
             Ok(res) => {
-                let table = self.format_kuzu_table(&res, &["Symbole Impacté", "Type"]);
-                let count_query = format!("MATCH (s:Symbol {{name: $sym}})<-[:CALLS|CALLS_NIF{}]-(affected) RETURN count(DISTINCT affected)", depth_str);
+                let table = self.format_kuzu_table(&res, &["Fichier / Projet", "Symbole Impacté", "Type"]);
+                let count_query = format!("MATCH (s:Symbol {{name: $sym}})<-[:CALLS|CALLS_NIF|CALLS_OTP{}]-(affected) RETURN count(DISTINCT affected)", depth_str);
                 let impact_radius = self.graph_store.read().unwrap().query_count_param(&count_query, &params).unwrap_or(0);
                 
-                let mut report = format!("## 💥 Analyse d'Impact : {}\n\n", symbol);
-                report.push_str(&format!("**Rayon d'Impact (profondeur {}) :** {} composants affectés.\n\n", depth, impact_radius));
+                let mut report = format!("## 💥 Analyse d'Impact Transversale : {}\n\n", symbol);
+                report.push_str(&format!("**Rayon d'Impact (profondeur {}) :** {} composants affectés à travers le Treillis.\n\n", depth, impact_radius));
                 
                 if impact_radius > 0 {
-                    report.push_str("### Liste des composants à risque :\n");
+                    report.push_str("### Cartographie des Dépendances :\n");
                     report.push_str(&table);
                 } else {
-                    report.push_str("✅ Cette modification semble isolée. Aucun composant dépendant trouvé dans le Treillis.");
+                    report.push_str("✅ Cette modification semble isolée. Aucun composant dépendant trouvé dans le Treillis global.");
                 }
                 
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
@@ -1065,5 +1066,47 @@ mod tests {
         let response = server.handle_request(req);
         let result = response.unwrap().result.expect("Expected result");
         assert!(result.get("isError").is_none() || !result.get("isError").unwrap().as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn test_axon_impact_cross_project() {
+        let server = create_test_server();
+        // Project A has a core_func
+        server.graph_store.read().unwrap().execute("MERGE (pA:Project {name: 'ProjectA'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (fA:File {path: 'ProjectA/core.rs'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (sA:Symbol {name: 'core_func', kind: 'function'})").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (f:File {path: 'ProjectA/core.rs'}), (s:Symbol {name: 'core_func'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        
+        // Project B depends on Project A and calls core_func
+        server.graph_store.read().unwrap().execute("MERGE (pB:Project {name: 'ProjectB'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (fB:File {path: 'ProjectB/api.rs'})").unwrap();
+        server.graph_store.read().unwrap().execute("MERGE (sB:Symbol {name: 'api_handler', kind: 'function'})").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (f:File {path: 'ProjectB/api.rs'}), (s:Symbol {name: 'api_handler'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        
+        server.graph_store.read().unwrap().execute("MATCH (pA:Project {name: 'ProjectA'}), (pB:Project {name: 'ProjectB'}) MERGE (pB)-[:DEPENDS_ON]->(pA)").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (sA:Symbol {name: 'core_func'}), (sB:Symbol {name: 'api_handler'}) MERGE (sB)-[:CALLS]->(sA)").unwrap();
+        
+        // In KuzuDB, files need to belong to projects. Let's add that relation for the test to work if we rely on it.
+        server.graph_store.read().unwrap().execute("MATCH (p:Project {name: 'ProjectB'}), (f:File {path: 'ProjectB/api.rs'}) MERGE (f)-[:BELONGS_TO]->(p)").unwrap();
+        server.graph_store.read().unwrap().execute("MATCH (p:Project {name: 'ProjectA'}), (f:File {path: 'ProjectA/core.rs'}) MERGE (f)-[:BELONGS_TO]->(p)").unwrap();
+
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_impact",
+                "arguments": {
+                    "symbol": "core_func"
+                }
+            })),
+            id: Some(json!(9)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.unwrap().result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        println!("CONTENT OUTPUT:\n{}", content);
+        
+        // The report should explicitly mention the impacted Project B
+        assert!(content.contains("ProjectB"));
     }
 }
