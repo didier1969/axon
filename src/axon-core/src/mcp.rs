@@ -158,6 +158,19 @@ impl McpServer {
                         }
                     },
                     {
+                        "name": "axon_fs_read",
+                        "description": "Agent DX L2 (Detail) : Lit le contenu physique complet d'un fichier source. À n'utiliser qu'après avoir identifié une URI (chemin) précise via axon_query ou axon_inspect.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "uri": { "type": "string", "description": "Le chemin complet vers le fichier (ex: 'src/main.rs')" },
+                                "start_line": { "type": "integer", "description": "Ligne de début optionnelle" },
+                                "end_line": { "type": "integer", "description": "Ligne de fin optionnelle" }
+                            },
+                            "required": ["uri"]
+                        }
+                    },
+                    {
                         "name": "axon_query",
                         "description": "Recherche hybride (texte + vecteur) et similarité sémantique.",
                         "inputSchema": {
@@ -339,6 +352,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     match name {
         "axon_refine_lattice" => self.axon_refine_lattice(arguments),
+        "axon_fs_read" => self.axon_fs_read(arguments),
         "axon_query" => self.axon_query(arguments),
         "axon_inspect" => self.axon_inspect(arguments),
         "axon_audit" => self.axon_audit(arguments),
@@ -384,6 +398,35 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur Refiner: {}", e) }] })),
+        }
+    }
+
+    fn axon_fs_read(&self, args: &Value) -> Option<Value> {
+        let uri = args.get("uri")?.as_str()?;
+        let start_line = args.get("start_line").and_then(|v| v.as_u64());
+        let end_line = args.get("end_line").and_then(|v| v.as_u64());
+        
+        let file_path = std::path::Path::new(uri);
+        if !file_path.exists() || !file_path.is_file() {
+            return Some(json!({ "content": [{ "type": "text", "text": format!("Erreur: Le fichier '{}' n'existe pas ou n'est pas lisible.", uri) }], "isError": true }));
+        }
+
+        match std::fs::read_to_string(file_path) {
+            Ok(content) => {
+                let lines: Vec<&str> = content.lines().collect();
+                let total_lines = lines.len();
+                
+                let start = start_line.unwrap_or(1).saturating_sub(1) as usize;
+                let end = end_line.unwrap_or(total_lines as u64) as usize;
+                
+                let start = start.min(total_lines);
+                let end = end.min(total_lines).max(start);
+                
+                let sliced_content = lines[start..end].join("\n");
+                let report = format!("📄 L2 Detail : {}\n(Lignes {} à {} sur {})\n\n```\n{}\n```", uri, start + 1, end, total_lines, sliced_content);
+                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+            },
+            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur de lecture: {}", e) }], "isError": true })),
         }
     }
 
