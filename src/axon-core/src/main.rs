@@ -88,63 +88,16 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    // --- MCP Listener Loop (Pure JSON-RPC) ---
+    let mcp_store_for_axum = mcp_store.clone();
+    // --- MCP Listener Loop (HTTP/SSE via Axum) ---
     tokio::spawn(async move {
-        while let Ok((socket, _)) = mcp_listener.accept().await {
-            info!("IA Client connected to MCP Socket");
-            let store_clone = mcp_store.clone();
-            let mcp_flag_clone = mcp_active_for_listener.clone();
-            
-            tokio::spawn(async move {
-                let (reader, mut writer) = socket.into_split();
-                let mut buf_reader = BufReader::new(reader);
-                let mut line = String::new();
-                
-                while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
-                    if bytes_read == 0 { break; }
-                    let command = line.trim();
-                    if command.is_empty() { line.clear(); continue; }
-
-                    let store_for_mcp = store_clone.clone();
-                    let command_clone = command.to_string();
-                    let flag_for_task = mcp_flag_clone.clone();
-                    
-                    info!("MCP Processing start for command: {} bytes", command_clone.len());
-                    let mcp_server = McpServer::new(store_for_mcp);
-                    match serde_json::from_str::<mcp::JsonRpcRequest>(&command_clone) {
-                        Ok(request) => {
-                            info!("MCP Request Parsed: method={}", request.method);
-                            // Signal ingestion to pause
-                            flag_for_task.store(true, Ordering::SeqCst);
-                            
-                            let response_opt = tokio::task::spawn_blocking(move || {
-                                info!("MCP Executing in blocking thread...");
-                                let res = mcp_server.handle_request(request);
-                                // Release ingestion pause
-                                flag_for_task.store(false, Ordering::SeqCst);
-                                info!("MCP Execution complete.");
-                                res
-                            }).await.expect("Blocking MCP task panicked");
-                            
-                            if let Some(response) = response_opt {
-                                if let Ok(json_str) = serde_json::to_string(&response) {
-                                    info!("MCP Sending response ({} bytes)", json_str.len());
-                                    let _ = writer.write_all(format!("{}\n", json_str).as_bytes()).await;
-                                    let _ = writer.flush().await;
-                                    info!("MCP Response flushed.");
-                                }
-                            } else {
-                                info!("No response required (Notification)");
-                            }
-                        },
-                        Err(e) => {
-                            error!("MCP JSON Parse Error: {} | Raw: '{}'", e, command_clone);
-                        }
-                    }
-                    line.clear();
-                }
-                info!("IA Client disconnected from MCP");
-            });
+        info!("Starting MCP HTTP/SSE Server on port 44127...");
+        let mcp_server = Arc::new(McpServer::new(mcp_store_for_axum));
+        let app = crate::mcp_http::app_router(mcp_server);
+        
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:44127").await.expect("Failed to bind to port 44127");
+        if let Err(e) = axum::serve(listener, app).await {
+            error!("MCP HTTP Server error: {}", e);
         }
     });
 
