@@ -11,6 +11,7 @@ mod bridge;
 mod config;
 mod graph;
 mod mcp;
+mod mcp_http;
 mod embedder;
 mod worker;
 
