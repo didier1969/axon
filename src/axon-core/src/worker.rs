@@ -1,20 +1,25 @@
-use std::sync::{mpsc, Arc, RwLock};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use log::{info, error};
+use crossbeam_channel::{bounded, Sender, Receiver};
 
 use crate::graph::GraphStore;
 use crate::parser;
-
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// The payload sent to the workers
 pub struct WorkerTask {
     pub path: String,
     pub is_titan: bool,
 }
 
+// Payload for the Writer Actor
+pub struct DbWriteTask {
+    pub path: String,
+    pub extraction: crate::parser::ExtractionResult,
+}
+
 pub struct WorkerPool {
-    sender: mpsc::Sender<WorkerTask>,
+    task_sender: Sender<WorkerTask>,
 }
 
 impl WorkerPool {
@@ -24,32 +29,71 @@ impl WorkerPool {
         result_sender: tokio::sync::mpsc::Sender<String>,
         mcp_active: Arc<AtomicBool>
     ) -> Self {
-        let (task_sender, task_receiver) = mpsc::channel::<WorkerTask>();
-        let task_receiver = Arc::new(std::sync::Mutex::new(task_receiver));
+        // BOUNDED QUEUES for strict 16GB RAM mechanical backpressure
+        let (task_sender, task_receiver) = bounded::<WorkerTask>(5000);
+        let (db_sender, db_receiver) = bounded::<DbWriteTask>(1000); 
 
+        // 1. Spawn the SINGLE Writer Actor (Micro-batching CQRS style)
+        Self::spawn_writer_actor(db_receiver, graph_store.clone(), mcp_active.clone());
+
+        // 2. Spawn the parsing Immortals (CPU Bound)
+        let task_receiver_shared = Arc::new(std::sync::Mutex::new(task_receiver));
         for id in 0..num_fast_workers {
-            Self::spawn_immortal(id, task_receiver.clone(), graph_store.clone(), result_sender.clone(), mcp_active.clone());
+            Self::spawn_immortal(
+                id, 
+                task_receiver_shared.clone(), 
+                db_sender.clone(),
+                result_sender.clone(), 
+                mcp_active.clone()
+            );
         }
 
-        Self { sender: task_sender }
+        Self { task_sender }
     }
 
-    pub fn get_sender(&self) -> mpsc::Sender<WorkerTask> {
-        self.sender.clone()
+    pub fn get_sender(&self) -> Sender<WorkerTask> {
+        self.task_sender.clone()
     }
 
-    // The Supervisor logic: Spawns a worker that will die and be resurrected
+    // THE WRITER ACTOR: Single threaded to avoid any DB contention
+    fn spawn_writer_actor(
+        receiver: Receiver<DbWriteTask>,
+        graph_store: Arc<RwLock<GraphStore>>,
+        mcp_active: Arc<AtomicBool>
+    ) {
+        thread::Builder::new().name("axon-db-writer".to_string()).spawn(move || {
+            info!("Writer Actor born. Holding exclusive keys to KuzuDB.");
+            loop {
+                // Yield immediately if MCP is querying to ensure 0 latency
+                while mcp_active.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+
+                match receiver.recv() {
+                    Ok(task) => {
+                        if let Ok(store) = graph_store.write() {
+                            if let Err(e) = store.insert_file_data(&task.path, &task.extraction) {
+                                error!("Writer Actor failed to insert {}: {:?}", task.path, e);
+                            }
+                        }
+                    },
+                    Err(_) => break, // Channel closed
+                }
+            }
+        }).expect("Failed to spawn Writer Actor");
+    }
+
+    // THE WORKER: Pure CPU, no DB locks
     fn spawn_immortal(
         id: usize,
-        receiver: Arc<std::sync::Mutex<mpsc::Receiver<WorkerTask>>>,
-        graph_store: Arc<RwLock<GraphStore>>,
+        receiver: Arc<std::sync::Mutex<Receiver<WorkerTask>>>,
+        db_sender: Sender<DbWriteTask>,
         result_sender: tokio::sync::mpsc::Sender<String>,
         mcp_active: Arc<AtomicBool>
     ) {
         thread::Builder::new().name(format!("axon-worker-{}", id)).spawn(move || {
             info!("Worker {} born. Initializing isolated AI/WASM engines...", id);
             
-            // 1. Thread-local isolated allocation
             let mut fastembed_model = match fastembed::TextEmbedding::try_new(
                 fastembed::InitOptions::new(fastembed::EmbeddingModel::AllMiniLML6V2)
                     .with_show_download_progress(false)
@@ -65,7 +109,7 @@ impl WorkerPool {
             let mut processed = 0;
 
             loop {
-                // DIPLOMATIC PRIORITY: Yield to MCP server to ensure 0ms latency for AI queries
+                // Yield CPU to MCP process
                 while mcp_active.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
@@ -74,7 +118,7 @@ impl WorkerPool {
                     let rx = receiver.lock().unwrap();
                     match rx.recv() {
                         Ok(t) => t,
-                        Err(_) => break, // Channel closed
+                        Err(_) => break,
                     }
                 };
 
@@ -82,9 +126,7 @@ impl WorkerPool {
                 let path_obj = std::path::Path::new(&task.path);
                 let mut symbols_count = 0;
                 let mut relations_count = 0;
-                let mut success = false;
 
-                // FORENSIC SHIELD: Death Rattle Logging
                 use std::io::Write;
                 if let Ok(mut log_file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/axon_forensic.log") {
                     let lane_str = if task.is_titan { "titan" } else { "fast" };
@@ -92,23 +134,16 @@ impl WorkerPool {
                     let _ = log_file.sync_all(); 
                 }
 
-                // Defense in Depth
                 let mut skip = false;
                 if let Ok(metadata) = std::fs::metadata(path_obj) {
-                    if !task.is_titan && metadata.len() > 1_048_576 {
-                        skip = true;
-                    }
-                    if task.is_titan && metadata.len() > 52_428_800 {
-                        skip = true;
-                    }
+                    if !task.is_titan && metadata.len() > 1_048_576 { skip = true; }
+                    if task.is_titan && metadata.len() > 52_428_800 { skip = true; }
                 }
 
                 if !skip {
                     if let Ok(content) = std::fs::read_to_string(path_obj) {
                         if let Some(parser) = parser::get_parser_for_file(path_obj) {
-                            println!("Worker {} parsing file: {}", id, task.path);
                             let mut extraction = parser.parse(&content);
-                            println!("Worker {} extracted {} symbols", id, extraction.symbols.len());
 
                             let texts_to_embed: Vec<String> = extraction.symbols.iter()
                                 .map(|s| format!("Symbol: {} Kind: {}", s.name, s.kind))
@@ -136,21 +171,13 @@ impl WorkerPool {
                             symbols_count = extraction.symbols.len();
                             relations_count = extraction.relations.len();
 
-                            info!("Worker {} acquiring graph_store write lock...", id);
-                            if let Ok(store) = graph_store.write() {
-                                info!("Worker {} inserting file data into KuzuDB...", id);
-                                if let Err(e) = store.insert_file_data(&task.path, &extraction) {
-                                    error!("Graph insertion failed for {}: {:?}", task.path, e);
-                                } else {
-                                    info!("Worker {} successfully inserted file data.", id);
-                                }
+                            // SEND TO ACTOR (No DB Locks here!)
+                            if let Err(e) = db_sender.send(DbWriteTask { path: task.path.clone(), extraction }) {
+                                error!("Worker {} failed to queue DB write: {}", id, e);
                             }
-                        } else {
-                            info!("Worker {} found NO parser for file: {}", id, task.path);
                         }
-                    } else {
-                        info!("Worker {} failed to read file: {}", id, task.path);
-                    }                }
+                    }
+                }
 
                 if let Ok(mut log_file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/axon_forensic.log") {
                     let _ = writeln!(log_file, "END:   {}", task.path);
@@ -171,8 +198,8 @@ impl WorkerPool {
 
                 processed += 1;
                 if processed >= max_files_before_death {
-                    info!("Worker {} reached end of life ({} files). Committing suicide for memory purity.", id, processed);
-                    Self::spawn_immortal(id, receiver.clone(), graph_store.clone(), result_sender.clone(), mcp_active.clone());
+                    info!("Worker {} reached end of life. Recycling to free ONNX memory.", id);
+                    Self::spawn_immortal(id, receiver.clone(), db_sender.clone(), result_sender.clone(), mcp_active.clone());
                     break;
                 }
             }
