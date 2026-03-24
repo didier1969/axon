@@ -19,7 +19,6 @@ type CloseDbFunc = unsafe extern "C" fn(*mut c_void);
 pub struct GraphStore {
     lib: Arc<Library>,
     ctx: *mut c_void,
-    write_mutex: Mutex<()>,
 }
 
 unsafe impl Send for GraphStore {}
@@ -57,7 +56,7 @@ impl GraphStore {
             ctx
         };
 
-        let store = Self { lib, ctx, write_mutex: Mutex::new(()) };
+        let store = Self { lib, ctx };
         store.init_schema()?;
 
         Ok(store)
@@ -210,7 +209,6 @@ impl GraphStore {
     }
 
     pub fn insert_project_dependency(&self, from_project: &str, to_project: &str, path: &str) -> Result<()> {
-        let _guard = self.write_mutex.lock().unwrap();
         let query = "MERGE (p1:Project {name: $from}) MERGE (p2:Project {name: $to}) MERGE (p1)-[:DEPENDS_ON {path: $path}]->(p2)";
         let params = serde_json::json!({
             "from": from_project,
@@ -221,8 +219,6 @@ impl GraphStore {
     }
 
     pub fn insert_file_data(&self, path: &str, result: &crate::parser::ExtractionResult) -> Result<()> {
-        let _guard = self.write_mutex.lock().unwrap();
-
         // 1. Insert/Merge File node
         self.execute_param("MERGE (f:File {path: $p})", &serde_json::json!({"p": path}))?;
 

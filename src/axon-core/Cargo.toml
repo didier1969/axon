@@ -24,6 +24,11 @@ tempfile = "3.8"
 wasmtime = "24.0.0"
 toml = "0.8"
 jemallocator = "0.5.4"
+axum = "0.8.8"
+tokio-stream = "0.1.18"
+futures-util = "0.3.32"
+crossbeam-channel = "0.5.15"
 
 [dev-dependencies]
 tempfile = "3.8"
+tower = { version = "0.5.3", features = ["util"] }

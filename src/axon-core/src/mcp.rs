@@ -399,9 +399,9 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
             // Hybrid query: exact match on name OR semantic similarity
             (
                 format!(
-                    "MATCH (s:Symbol) \
+                    "MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
                      WHERE s.name CONTAINS $q OR array_cosine_similarity(s.embedding, {}) > 0.5 \
-                     RETURN s.name, s.kind, array_cosine_similarity(s.embedding, {}) as score \
+                     RETURN s.name, s.kind, f.path AS uri, array_cosine_similarity(s.embedding, {}) as score \
                      ORDER BY score DESC LIMIT 10",
                     vec_str, vec_str
                 ),
@@ -409,7 +409,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
             )
         } else {
             (
-                "MATCH (s:Symbol) WHERE s.name CONTAINS $q RETURN s.name, s.kind LIMIT 10".to_string(),
+                "MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE s.name CONTAINS $q RETURN s.name, s.kind, f.path AS uri LIMIT 10".to_string(),
                 json!({"q": query_text})
             )
         };
@@ -417,9 +417,9 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         match self.graph_store.read().unwrap().query_json_param(&cypher, &params) {
             Ok(res) => {
                 let headers = if cypher.contains("score") {
-                    vec!["Nom", "Type", "Distance Sémantique"]
+                    vec!["Nom", "Type", "URI (Chemin)", "Distance Sémantique"]
                 } else {
-                    vec!["Nom", "Type"]
+                    vec!["Nom", "Type", "URI (Chemin)"]
                 };
                 let table = self.format_kuzu_table(&res, &headers);
                 Some(json!({ "content": [{ "type": "text", "text": format!("### 🔎 Résultats de Recherche Hybride : '{}'\n\n{}", query_text, table) }] }))
