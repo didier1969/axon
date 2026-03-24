@@ -48,3 +48,10 @@ Status: 🚀 En cours d'exécution Maestria
   - Nouveaux outils MCP : `axon_start_job`, `axon_check_job_status`.
   - Le serveur Rust délègue le calcul lourd à un thread de fond et retourne un Job ID immédiat.
   - L'Agent IA utilise une boucle de polling pour interroger le statut du ticket.
+
+### Phase 6 : Isolation & Sandboxing Sécurisé (Instance Agent vs Instance Admin)
+- **Objectif :** Résoudre l'anti-pattern de la "Lethal Trifecta" en séparant les droits d'accès au graphe.
+- **Architecture :** 
+  - Déploiement d'un mode `axon-core --read-only` pour l'Agent IA (Sandbox).
+  - L'Agent IA ne peut que requêter le graphe (pas d'altération de schéma ni de forçage de réindexation).
+  - Le développeur (Admin) conserve l'instance maître avec droits complets.

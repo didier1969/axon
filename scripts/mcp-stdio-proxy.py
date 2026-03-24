@@ -51,7 +51,7 @@ def forward_uds_to_stdout(sock):
             break
 
 def main():
-    sock_path = "/tmp/axon-v2.sock"
+    sock_path = "/tmp/axon-mcp.sock"
     
     # Retry loop to allow Axon Core to finish booting (FastEmbed takes ~5-10s)
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

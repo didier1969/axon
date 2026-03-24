@@ -9,10 +9,8 @@
   },
   "mcpServers": {
     "axon": {
-      "command": "/home/dstadel/.local/bin/axon",
-      "args": [
-        "serve"
-      ]
+      "command": "/home/dstadel/projects/axon/scripts/mcp-stdio-proxy.py",
+      "args": []
     }
   }
 }
