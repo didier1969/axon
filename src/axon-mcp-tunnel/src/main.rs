@@ -1,44 +1,49 @@
-use tokio::net::UnixStream;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use std::process;
+use std::io::{self, BufRead, Write};
+use reqwest::blocking::Client;
+use serde_json::Value;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let socket_path = "/tmp/axon-mcp.sock";
-    
-    let stream = match UnixStream::connect(socket_path).await {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("Error: Could not connect to Axon MCP socket at {}. Is Axon Core running?", socket_path);
-            process::exit(1);
+fn main() {
+    let client = Client::new();
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    for line in stdin.lock().lines() {
+        match line {
+            Ok(req_str) => {
+                if req_str.trim().is_empty() {
+                    continue;
+                }
+                
+                match serde_json::from_str::<Value>(&req_str) {
+                    Ok(json_payload) => {
+                        match client.post("http://127.0.0.1:44127/mcp")
+                            .json(&json_payload)
+                            .send() 
+                        {
+                            Ok(res) => {
+                                if let Ok(res_text) = res.text() {
+                                    let formatted_res = if res_text.ends_with('\n') {
+                                        res_text
+                                    } else {
+                                        format!("{}\n", res_text)
+                                    };
+                                    if let Err(_) = stdout.write_all(formatted_res.as_bytes()) {
+                                        break; 
+                                    }
+                                    let _ = stdout.flush();
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Error communicating with Axon Core HTTP: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Invalid JSON received on stdin: {}", e);
+                    }
+                }
+            }
+            Err(_) => break, 
         }
-    };
-
-    let (mut sock_reader, mut sock_writer) = stream.into_split();
-    
-    // stdin -> socket
-    tokio::spawn(async move {
-        let stdin = io::stdin();
-        let mut reader = BufReader::new(stdin);
-        let mut line = String::new();
-        while let Ok(n) = reader.read_line(&mut line).await {
-            if n == 0 { break; }
-            if sock_writer.write_all(line.as_bytes()).await.is_err() { break; }
-            line.clear();
-        }
-    });
-
-    // socket -> stdout
-    let stdout = io::stdout();
-    let mut writer = io::BufWriter::new(stdout);
-    let mut reader = BufReader::new(sock_reader);
-    let mut line = String::new();
-    while let Ok(n) = reader.read_line(&mut line).await {
-        if n == 0 { break; }
-        writer.write_all(line.as_bytes()).await?;
-        writer.flush().await?;
-        line.clear();
     }
-
-    Ok(())
 }
