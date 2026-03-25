@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, State},
+    extract::Extension,
     response::sse::{Event, Sse},
     routing::{get, post},
     Json, Router,
@@ -9,8 +9,6 @@ use tokio_stream::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpServer};
 
 pub fn app_router(mcp_server: Arc<McpServer>, mcp_active_flag: Arc<AtomicBool>) -> Router {
@@ -26,25 +24,39 @@ async fn handle_mcp_post(
     Extension(mcp_active_flag): Extension<Arc<AtomicBool>>,
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<Option<JsonRpcResponse>> {
-    // Signal the ingestion pipeline to pause
+    // 1. Signal priority to pause ingestion
     mcp_active_flag.store(true, Ordering::SeqCst);
     
-    // Execute potentially blocking DB query in a dedicated blocking thread
-    let response = tokio::task::spawn_blocking(move || {
-        let res = server.handle_request(payload);
-        res
-    }).await.expect("MCP task panicked");
+    // 2. Offload C-FFI / DB work to a blocking thread pool safely
+    let response = match tokio::task::spawn_blocking(move || {
+        server.handle_request(payload)
+    }).await {
+        Ok(res) => res,
+        Err(e) => {
+            log::error!("MCP Blocking Task Panicked: {:?}", e);
+            None
+        }
+    };
     
-    // Resume ingestion
+    // 3. Resume ingestion
     mcp_active_flag.store(false, Ordering::SeqCst);
     
     Json(response)
 }
 
+/// Compliant MCP SSE Endpoint
 async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let (_tx, rx) = mpsc::channel(100);
-    // TODO: Setup proper SSE endpoint logic mapping to MCP SSE specification
-    let stream = ReceiverStream::new(rx).map(|msg: String| Ok(Event::default().data(msg)));
+    // 1. Send the initial endpoint event as per MCP spec
+    let endpoint_event = stream::once(async {
+        Ok(Event::default().event("endpoint").data("/mcp"))
+    });
+
+    // 2. Keep-alive heartbeat every 15 seconds to prevent proxy timeouts
+    let heartbeat = tokio_stream::wrappers::IntervalStream::new(
+        tokio::time::interval(std::time::Duration::from_secs(15))
+    ).map(|_| Ok(Event::default().comment("heartbeat")));
+
+    let stream = endpoint_event.chain(heartbeat);
     Sse::new(stream)
 }
 
@@ -53,7 +65,6 @@ mod tests {
     use axum::{
         body::Body,
         http::{Request, StatusCode},
-        Router,
     };
     use tower::ServiceExt; 
     use serde_json::{json, Value};

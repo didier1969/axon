@@ -115,7 +115,13 @@ impl WorkerPool {
                 }
 
                 let task = {
-                    let rx = receiver.lock().unwrap();
+                    let rx = match receiver.lock() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            error!("Worker {} receiver mutex poisoned: {:?}", id, e);
+                            break;
+                        }
+                    };
                     match rx.recv() {
                         Ok(t) => t,
                         Err(_) => break,
@@ -183,7 +189,7 @@ impl WorkerPool {
                     let _ = writeln!(log_file, "END:   {}", task.path);
                 }
 
-                let finish_msg = serde_json::to_string(&crate::bridge::BridgeEvent::FileIndexed {
+                let finish_msg = match serde_json::to_string(&crate::bridge::BridgeEvent::FileIndexed {
                     path: task.path,
                     symbol_count: symbols_count,
                     relation_count: relations_count,
@@ -192,7 +198,13 @@ impl WorkerPool {
                     security_score: 100,
                     coverage_score: 0,
                     taint_paths: "".to_string(),
-                }).unwrap() + "\n";
+                }) {
+                    Ok(msg) => msg + "\n",
+                    Err(e) => {
+                        error!("Worker {} failed to serialize telemetry: {:?}", id, e);
+                        continue;
+                    }
+                };
 
                 let _ = result_sender.blocking_send(finish_msg);
 
