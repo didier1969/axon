@@ -189,6 +189,7 @@ fn main() -> anyhow::Result<()> {
                     let tx_clone = tx.clone();
                     let projects_root_task = projects_root_str.clone();
                     let scan_store = store_clone.clone();
+                    let worker_sender_clone = worker_sender.clone();
 
                     scan_task = Some(tokio::spawn(async move {
                         let start = Instant::now();
@@ -199,7 +200,7 @@ fn main() -> anyhow::Result<()> {
                                 let project_path = project.path();
                                 let project_name = project_path.file_name().unwrap().to_string_lossy().to_string();
                                 let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                                let files = scanner.scan(Some(scan_store.clone()));                                
+                                let files = scanner.scan(Some(scan_store.clone()));
                                 let proj_start_msg = serde_json::to_string(&BridgeEvent::ProjectScanStarted {
                                     project: project_name.clone(), total_files: files.len()
                                 }).unwrap() + "\n";
@@ -208,20 +209,19 @@ fn main() -> anyhow::Result<()> {
                                 for file_path in files {
                                     if token_clone.load(Ordering::Relaxed) { break; }
                                     total_files += 1;
-                                    let final_file_msg = serde_json::to_string(&BridgeEvent::FileIndexed {
-                                        path: file_path.to_string_lossy().to_string(), symbol_count: 0, relation_count: 0,
-                                        file_count: total_files, entry_points: 0, security_score: 100, coverage_score: 0,
-                                        taint_paths: "".to_string(),
-                                    }).unwrap() + "\n";
-                                    let _ = tx_clone.send(final_file_msg).await;
+
+                                    // Actually index the file
+                                    let _ = worker_sender_clone.send(crate::worker::WorkerTask {
+                                        path: file_path.to_string_lossy().to_string(),
+                                        is_titan: false, // Default to fast lane for bulk scan
+                                    });
                                 }
                             }
                         }
                         let duration = start.elapsed();
-                        let complete_event = BridgeEvent::ScanComplete { total_files: 0, duration_ms: duration.as_millis() as u64 };
+                        let complete_event = BridgeEvent::ScanComplete { total_files, duration_ms: duration.as_millis() as u64 };
                         let _ = tx_clone.send(serde_json::to_string(&complete_event).unwrap() + "\n").await;
-                    }));
-                } else if command == "STOP" {
+                    }));                } else if command == "STOP" {
                     cancel_token.store(true, Ordering::Relaxed);
                 } else if command == "RESET" {
                     cancel_token.store(true, Ordering::Relaxed);
