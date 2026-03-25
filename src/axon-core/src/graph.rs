@@ -295,6 +295,36 @@ impl GraphStore {
 
         Ok((score, paths_json))
     }
+    pub fn get_technical_debt(&self, project_name: &str) -> Result<Vec<(String, String)>> {
+        let query = if project_name == "*" || project_name.is_empty() {
+            "MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
+             OPTIONAL MATCH (s)-[:CALLS]->(debt) \
+             WHERE debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME'] \
+             WITH f, COALESCE(debt.name, s.kind + ': ' + s.name) as issue \
+             RETURN DISTINCT f.path, issue LIMIT 50".to_string()
+        } else {
+            format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
+                     OPTIONAL MATCH (s)-[:CALLS]->(debt) \
+                     WHERE f.path CONTAINS '{}' AND (debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME']) \
+                     WITH f, COALESCE(debt.name, s.kind + ': ' + s.name) as issue \
+                     RETURN DISTINCT f.path, issue LIMIT 50", project_name)
+        };
+
+        match self.query_json(&query) {
+            Ok(res) => {
+                let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+                Ok(rows.into_iter().filter_map(|r| {
+                    if r.len() >= 2 {
+                        Some((r[0].clone(), r[1].clone()))
+                    } else {
+                        None
+                    }
+                }).collect())
+            },
+            Err(_) => Ok(vec![]),
+        }
+    }
+
     pub fn get_coverage_score(&self, project_name: &str) -> Result<usize> {
         let (q_total, q_tested) = if project_name == "*" || project_name.is_empty() {
             (

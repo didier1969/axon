@@ -148,7 +148,7 @@ impl McpServer {
                 "tools": [
                     {
                         "name": "axon_refine_lattice",
-                        "description": "Lattice Refiner: Analyse le graphe post-ingestion pour lier les frontières inter-langages (ex: Elixir NIF -> Rust natif).",
+                        "description": "[SYSTEM] Lattice Refiner: Analyse le graphe post-ingestion pour lier les frontières inter-langages (ex: Elixir NIF -> Rust natif).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {},
@@ -157,7 +157,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_fs_read",
-                        "description": "Agent DX L2 (Detail) : Lit le contenu physique complet d'un fichier source. À n'utiliser qu'après avoir identifié une URI (chemin) précise via axon_query ou axon_inspect.",
+                        "description": "[DX] Agent DX L2 (Detail) : Lit le contenu physique complet d'un fichier source. À n'utiliser qu'après avoir identifié une URI (chemin) précise via axon_query ou axon_inspect.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -170,7 +170,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_query",
-                        "description": "Recherche hybride (texte + vecteur) et similarité sémantique.",
+                        "description": "[DX] Recherche hybride (texte + vecteur) et similarité sémantique.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -182,7 +182,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_inspect",
-                        "description": "Vue 360° d'un symbole (code source, appelants/appelés, statistiques).",
+                        "description": "[DX] Vue 360° d'un symbole (code source, appelants/appelés, statistiques).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -194,7 +194,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_audit",
-                        "description": "Vérification de conformité (Sécurité OWASP, Qualité, Anti-patterns).",
+                        "description": "[GOVERNANCE] Vérification de conformité (Sécurité OWASP, Qualité, Anti-patterns, Dette Technique).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -205,7 +205,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_impact",
-                        "description": "Analyse prédictive (Rayon d'impact et chemins critiques).",
+                        "description": "[RISK] Analyse prédictive (Rayon d'impact et chemins critiques).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -217,7 +217,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_health",
-                        "description": "Rapport de santé global (Code mort, lacunes de tests, points d'entrée).",
+                        "description": "[GOVERNANCE] Rapport de santé global (Code mort, lacunes de tests, points d'entrée).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -228,7 +228,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_diff",
-                        "description": "Analyse sémantique des changements (Git Diff -> Symboles touchés).",
+                        "description": "[RISK] Analyse sémantique des changements (Git Diff -> Symboles touchés).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -239,7 +239,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_batch",
-                        "description": "Orchestration d'appels multiples pour optimiser la performance.",
+                        "description": "[SYSTEM] Orchestration d'appels multiples pour optimiser la performance.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -260,7 +260,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_semantic_clones",
-                        "description": "Trouve des fonctions sémantiquement similaires (clones de logique) dans le projet.",
+                        "description": "[GOVERNANCE] Trouve des fonctions sémantiquement similaires (clones de logique) dans le projet.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -271,7 +271,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_architectural_drift",
-                        "description": "Vérifie les violations d'architecture entre deux couches (ex: 'ui' appelant directement 'db').",
+                        "description": "[GOVERNANCE] Vérifie les violations d'architecture entre deux couches (ex: 'ui' appelant directement 'db').",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -283,7 +283,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_bidi_trace",
-                        "description": "Trace bidirectionnelle: remonte aux Entry Points (haut) et liste les appels profonds (bas).",
+                        "description": "[DX] Trace bidirectionnelle: remonte aux Entry Points (haut) et liste les appels profonds (bas).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -295,7 +295,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_api_break_check",
-                        "description": "Vérifie si la modification d'un symbole public impacte des composants externes.",
+                        "description": "[RISK] Vérifie si la modification d'un symbole public impacte des composants externes.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -306,7 +306,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_simulate_mutation",
-                        "description": "Dry-run : calcule le volume de l'impact d'une modification avant de coder.",
+                        "description": "[RISK] Dry-run : calcule le volume de l'impact d'une modification avant de coder.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -318,7 +318,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_cypher",
-                        "description": "Interface de bas niveau pour requêtes HydraDB brutes.",
+                        "description": "[SYSTEM] Interface de bas niveau pour requêtes HydraDB brutes.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -329,7 +329,7 @@ impl McpServer {
                     },
                     json!({
                         "name": "axon_debug",
-                        "description": "Diagnostic système bas niveau : Affiche l'état interne du moteur Axon V2 (RAM, DB, architecture, statut d'indexation) pour éviter les hallucinations sur l'infrastructure.",
+                        "description": "[SYSTEM] Diagnostic système bas niveau : Affiche l'état interne du moteur Axon V2 (RAM, DB, architecture, statut d'indexation) pour éviter les hallucinations sur l'infrastructure.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {},
@@ -624,6 +624,7 @@ impl McpServer {
 
                 let (sec_score, paths) = store.get_security_audit(project).unwrap_or((100, "[]".to_string()));
                 let cov_score = store.get_coverage_score(project).unwrap_or(0);
+                let tech_debt = store.get_technical_debt(project).unwrap_or_default();
 
                 let mut report = format!("## 🛡️ Audit de Conformité : {}\n\n", project);
                 report.push_str(&format!("### 🔒 Sécurité : {}/100\n", sec_score));
@@ -633,6 +634,17 @@ impl McpServer {
                     report.push_str(&format!("Chemins critiques trouvés : {}\n", paths));
                 } else {
                     report.push_str("✅ Aucun chemin critique vers des fonctions dangereuses détecté.\n");
+                }
+
+                if !tech_debt.is_empty() {
+                    report.push_str("\n### ⚠️ Dette Technique & Panic Points\n");
+                    report.push_str("Les points suivants présentent des risques de crash (panic) ou une mauvaise gestion d'erreur :\n\n");
+                    for (file, issue) in tech_debt.iter().take(10) {
+                        report.push_str(&format!("*   `{}` dans `{}`\n", issue, file));
+                    }
+                    if tech_debt.len() > 10 {
+                        report.push_str(&format!("*... et {} autres points détectés.*\n", tech_debt.len() - 10));
+                    }
                 }
 
                 report.push_str(&format!("\n### 🧪 Qualité & Tests : {}%\n", cov_score));
@@ -1037,6 +1049,63 @@ mod tests {
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
         assert!(!content.contains("Score 100/100"));
+    }
+
+    #[test]
+    fn test_axon_audit_technical_debt() {
+        let server = create_test_server();
+        // Insert a file with a symbol calling 'unwrap'
+        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/danger.rs'})").unwrap();
+        server.graph_store.write().unwrap().execute("MERGE (s:Symbol {name: 'risky_func', kind: 'function'})").unwrap();
+        server.graph_store.write().unwrap().execute("MERGE (d:Symbol {name: 'unwrap', kind: 'method'})").unwrap();
+        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'src/danger.rs'}), (s:Symbol {name: 'risky_func'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.write().unwrap().execute("MATCH (s:Symbol {name: 'risky_func'}), (d:Symbol {name: 'unwrap'}) MERGE (s)-[:CALLS]->(d)").unwrap();
+
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_audit",
+                "arguments": {
+                    "project": "*"
+                }
+            })),
+            id: Some(json!(10)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.unwrap().result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        assert!(content.contains("Dette Technique"));
+        assert!(content.contains("unwrap"));
+        assert!(content.contains("src/danger.rs"));
+    }
+
+    #[test]
+    fn test_axon_audit_technical_debt_comments() {
+        let server = create_test_server();
+        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/todo.rs'})").unwrap();
+        server.graph_store.write().unwrap().execute("MERGE (s:Symbol {name: '// TODO: Fix this', kind: 'TODO'})").unwrap();
+        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'src/todo.rs'}), (s:Symbol {name: '// TODO: Fix this'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_audit",
+                "arguments": {
+                    "project": "*"
+                }
+            })),
+            id: Some(json!(11)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.unwrap().result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        assert!(content.contains("Dette Technique"));
+        assert!(content.contains("TODO"));
+        assert!(content.contains("Fix this"));
     }
 
     #[test]

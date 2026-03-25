@@ -45,7 +45,27 @@ impl RustParser {
                 "call_expression" => self.extract_call_expression(child, source, result),
                 "method_call_expression" => self.extract_method_call(child, source, result),
                 "macro_invocation" => self.extract_macro_invocation(child, source, result),
+                "line_comment" | "block_comment" => self.extract_comment(child, source, result),
                 _ => self.walk(child, source, result, class_name),
+            }
+        }
+    }
+
+    fn extract_comment<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {
+        if let Ok(text) = node.utf8_text(source) {
+            if text.contains("TODO") || text.contains("FIXME") {
+                let kind = if text.contains("TODO") { "TODO" } else { "FIXME" };
+                result.symbols.push(Symbol {
+                    name: text.trim().to_string(),
+                    kind: kind.to_string(),
+                    start_line: node.start_position().row + 1,
+                    end_line: node.end_position().row + 1,
+                    docstring: None,
+                    is_public: false,
+                    is_entry_point: false,
+                    properties: HashMap::new(),
+                    embedding: None,
+                });
             }
         }
     }
