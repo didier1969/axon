@@ -221,7 +221,49 @@ fn main() -> anyhow::Result<()> {
                         let duration = start.elapsed();
                         let complete_event = BridgeEvent::ScanComplete { total_files, duration_ms: duration.as_millis() as u64 };
                         let _ = tx_clone.send(serde_json::to_string(&complete_event).unwrap() + "\n").await;
-                    }));                } else if command == "STOP" {
+                        }));
+                        } else if command.starts_with("SCAN_PROJECT ") {
+                        let project_name = command[13..].trim().to_string();
+                        info!("Received SCAN_PROJECT command for: {}. Starting sector ingestion...", project_name);
+                        if let Some(task) = scan_task.take() {
+                        cancel_token.store(true, Ordering::Relaxed);
+                        let _ = task.await; 
+                        }
+                        cancel_token = Arc::new(AtomicBool::new(false));
+                        let token_clone = cancel_token.clone();
+                        let tx_clone = tx.clone();
+                        let projects_root_task = projects_root_str.clone();
+                        let scan_store = store_clone.clone();
+                        let worker_sender_clone = worker_sender.clone();
+
+                        scan_task = Some(tokio::spawn(async move {
+                        let start = Instant::now();
+                        let mut project_path = std::path::PathBuf::from(projects_root_task);
+                        project_path.push(&project_name);
+
+                        let mut total_files = 0;
+                        if project_path.exists() {
+                            let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
+                            let files = scanner.scan(Some(scan_store.clone()));
+                            let proj_start_msg = serde_json::to_string(&BridgeEvent::ProjectScanStarted {
+                                project: project_name.clone(), total_files: files.len()
+                            }).unwrap() + "\n";
+                            let _ = tx_clone.send(proj_start_msg).await;
+
+                            for file_path in files {
+                                if token_clone.load(Ordering::Relaxed) { break; }
+                                total_files += 1;
+                                let _ = worker_sender_clone.send(crate::worker::WorkerTask {
+                                    path: file_path.to_string_lossy().to_string(),
+                                    is_titan: false,
+                                });
+                            }
+                        }
+                        let duration = start.elapsed();
+                        let complete_event = BridgeEvent::ScanComplete { total_files, duration_ms: duration.as_millis() as u64 };
+                        let _ = tx_clone.send(serde_json::to_string(&complete_event).unwrap() + "\n").await;
+                        }));
+                        } else if command == "STOP" {
                     cancel_token.store(true, Ordering::Relaxed);
                 } else if command == "RESET" {
                     cancel_token.store(true, Ordering::Relaxed);

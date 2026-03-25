@@ -12,6 +12,10 @@ defmodule AxonDashboard.BridgeClient do
     GenServer.cast(__MODULE__, :trigger_scan)
   end
 
+  def trigger_scan(project_name) do
+    GenServer.cast(__MODULE__, {:trigger_scan, project_name})
+  end
+
   def stop_scan do
     GenServer.cast(__MODULE__, :stop_scan)
   end
@@ -49,8 +53,17 @@ defmodule AxonDashboard.BridgeClient do
 
   def handle_cast(:trigger_scan, state) do
     if state.socket != nil do
-      Logger.info("[BRIDGE] Sending START command")
-      :gen_tcp.send(state.socket, "START\n")
+      Logger.info("[BRIDGE] Sending SCAN_ALL command")
+      :gen_tcp.send(state.socket, "SCAN_ALL\n")
+    end
+
+    {:noreply, %{state | engine_state: :indexing}}
+  end
+
+  def handle_cast({:trigger_scan, project_name}, state) do
+    if state.socket != nil do
+      Logger.info("[BRIDGE] Sending SCAN_PROJECT #{project_name} command")
+      :gen_tcp.send(state.socket, "SCAN_PROJECT #{project_name}\n")
     end
 
     {:noreply, %{state | engine_state: :indexing}}
@@ -109,10 +122,6 @@ defmodule AxonDashboard.BridgeClient do
   end
 
   def handle_info({:tcp, socket, data}, state) do
-    # When Rust replies with Bridge Ready, we DO NOT automatically start index.
-    # The LiveView will request it via user button, OR we could do it on first boot.
-    # We will let it be manual to respect the user's "Job Interne" control logic.
-
     lines = String.split(data, "\n", trim: true)
 
     new_state =

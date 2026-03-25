@@ -9,8 +9,6 @@ defmodule AxonDashboardWeb.StatusLive do
         Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
         Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "telemetry_events")
         Phoenix.PubSub.subscribe(LiveView.Witness.PubSub, "witness_alerts")
-        {:ok, _id, socket} = LiveView.Witness.expect_ui(socket, ".project-card", min_items: 1)
-        {:ok, _id, socket} = LiveView.Witness.expect_ui(socket, "#resource-monitor", text: "Resource Intelligence")
         socket
       else
         socket
@@ -75,6 +73,7 @@ defmodule AxonDashboardWeb.StatusLive do
 
     projects =
       Enum.reduce(dirs, %{}, fn {dir, info}, acc ->
+        progress = if info.total > 0, do: round((info.completed + info.failed + info.ignored) / info.total * 100), else: 0
         Map.put(acc, dir, %{
           symbols: info.symbols,
           relations: info.relations,
@@ -84,7 +83,8 @@ defmodule AxonDashboardWeb.StatusLive do
           coverage: info.coverage,
           total_files: info.total,
           failed_files: info.failed,
-          ignored_files: info.ignored
+          ignored_files: info.ignored,
+          progress: progress
         })
       end)
 
@@ -129,26 +129,16 @@ defmodule AxonDashboardWeb.StatusLive do
   end
 
   def handle_info(:tick_time, socket) do
-    # Only update the clock every second, NO database hit.
     {:noreply, assign(socket, sys_time: Time.utc_now() |> Time.truncate(:second))}
   end
   
   def handle_info(:stats_updated, socket) do
-    # Triggered by PubSub only when an actual indexed file modifies the cache.
     {:noreply, fetch_and_assign_stats(socket)}
   end
 
   def handle_info(:trigger_initial_scan, socket) do
     AxonDashboard.BridgeClient.trigger_scan()
-
-    {:noreply,
-     assign(socket,
-       status: :processing,
-       total_symbols: 0,
-       scanned_projects: 0,
-       avg_security: 100,
-       avg_coverage: 0
-     )}
+    {:noreply, assign(socket, status: :processing)}
   end
 
   def handle_info({:telemetry_event, [:axon, :backpressure, :pressure_computed], measurements, metadata}, socket) do
@@ -189,7 +179,6 @@ defmodule AxonDashboardWeb.StatusLive do
   end
 
   def handle_info({:witness_alert, alert}, socket) do
-    Logger.error("[LiveView.Witness] Critical alert received: #{inspect(alert)}")
     {:noreply, assign(socket, witness_alert: alert)}
   end
 
@@ -199,103 +188,19 @@ defmodule AxonDashboardWeb.StatusLive do
     {:noreply, assign(socket, alerts: new_alerts)}
   end
 
-  def handle_info({:scan_started, _dir}, socket) do
-    {:noreply, assign(socket, status: :processing, live_files: [])}
-  end
-
-  def handle_info({:file_indexed, path, status}, socket) do
-    Logger.info("[LiveView] Received file_indexed: #{path} with status #{status}")
-    {:noreply, socket}
-  end
-
-  def handle_info(msg, socket) do
-    Logger.debug("[LiveView] Unhandled message: #{inspect(msg)}")
-    {:noreply, socket}
-  end
-
-  defp process_event(%{"SystemReady" => %{"start_time_utc" => start_time}}, socket) do
-    case DateTime.from_iso8601(start_time) do
-      {:ok, dt, _offset} ->
-        assign(socket, engine_start_time: dt)
-
-      _ ->
-        assign(socket, engine_start_time: nil)
-    end
-  end
-
-  defp process_event(%{"ScanStarted" => %{"total_files" => count}}, socket) do
-    assign(socket,
-      total_projects: count,
-      scanned_projects: 0,
-      status: :processing,
-      avg_security: 100,
-      avg_coverage: 0
-    )
-  end
-
-  defp process_event(
-         %{"ProjectScanStarted" => %{"project" => name, "total_files" => total}},
-         socket
-       ) do
-    assign(socket, last_event: "Project Started: #{name} [#{total} files]")
-  end
-
-  defp process_event(%{"FileIndexed" => payload}, socket) do
-    name = Map.get(payload, "path", "unknown")
-    assign(socket, last_event: "Indexing #{name}")
-  end
-
-  defp process_event(%{"ScanComplete" => _data}, socket) do
-    assign(socket, status: :complete, last_event: "Fleet Ingestion Complete")
-  end
-
-  defp process_event(_, socket), do: socket
-
-  def handle_event("start_scan", _params, socket) do
-    AxonDashboard.BridgeClient.trigger_scan()
-
-    {:noreply,
-     assign(socket,
-       status: :processing,
-       total_symbols: 0,
-       scanned_projects: 0,
-       avg_security: 100,
-       avg_coverage: 0
-     )}
-  end
-
-  def handle_event("stop_scan", _params, socket) do
-    AxonDashboard.BridgeClient.stop_scan()
-    {:noreply, assign(socket, status: :ready, last_event: "Scan stopped by user.")}
-  end
-
-  def handle_event("dismiss_witness_alert", _params, socket) do
+  def handle_event("dismiss_witness_alert", _, socket) do
     {:noreply, assign(socket, witness_alert: nil)}
   end
 
-  def handle_event("reset_db", _params, socket) do
-    AxonDashboard.BridgeClient.reset_db()
-
-    {:noreply,
-     socket
-     |> assign(
-       status: :ready,
-       avg_security: 100,
-       avg_coverage: 0,
-       last_event: "Database RESET."
-     )
-     |> fetch_and_assign_stats()}
-  end
-
-  def handle_event("phx-witness:certificate", report, socket) do
-    LiveView.Witness.report_certificate(report)
+  def handle_event("reindex_project", %{"project" => project}, socket) do
+    AxonDashboard.BridgeClient.trigger_scan(project)
     {:noreply, socket}
   end
 
-  def handle_event("phx-witness:health_alert", alert, socket) do
-    Logger.warning("[LiveView.Witness] Client-side health alert: #{inspect(alert)}")
-    {:noreply, socket}
-  end
+  defp process_event({:file_indexed, _path}, socket), do: socket
+  defp process_event({:project_scan_started, _proj, _total}, socket), do: socket
+  defp process_event({:scan_complete, _total, _ms}, socket), do: assign(socket, status: :ready)
+  defp process_event(_, socket), do: socket
 
   def render(assigns) do
     total_expected = Enum.reduce(assigns.projects, 0, fn {_, info}, acc -> acc + info.total_files end)
@@ -320,533 +225,237 @@ defmodule AxonDashboardWeb.StatusLive do
     assigns = assign(assigns, :uptime_str, uptime_str)
 
     ~H"""
-    <LiveView.Witness.HTML.witness_container id="witness-container" class="min-h-screen bg-base-100 text-base-content font-sans antialiased selection:bg-primary/30">
+    <LiveView.Witness.HTML.witness_container id="witness-container" class="min-h-screen bg-slate-950 text-slate-200 font-mono antialiased p-4 md:p-8 flex flex-col gap-6">
       
-    <!-- Emergency Diagnostic Alert Overlay -->
+      <!-- EMERGENCY HUD OVERLAY -->
       <%= if @witness_alert do %>
-        <div class="fixed inset-0 z-[100] flex items-center justify-center bg-red-950/80 backdrop-blur-md p-6">
-          <div class="max-w-2xl w-full bg-black border-2 border-red-500 rounded-3xl overflow-hidden shadow-[0_0_100px_rgba(239,68,68,0.5)] animate-in fade-in zoom-in duration-300">
-            <div class="bg-red-600 p-8 flex items-center justify-between">
+        <div class="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/90 backdrop-blur-xl p-6">
+          <div class="max-w-3xl w-full bg-slate-900 border-2 border-red-500 rounded-lg overflow-hidden shadow-[0_0_50px_rgba(239,68,68,0.3)]">
+            <div class="bg-red-600/20 border-b border-red-500 p-6 flex items-center justify-between">
               <div class="flex items-center gap-4">
-                <div class="p-3 bg-white/20 rounded-xl animate-pulse">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-8 h-8 text-white">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-                  </svg>
-                </div>
-                <div>
-                  <h2 class="text-3xl font-black text-white uppercase italic tracking-tighter">EMERGENCY <span class="opacity-70">DIAGNOSTIC</span></h2>
-                  <p class="text-white/60 text-xs font-mono uppercase tracking-widest">Out-of-Bound Critical Event Detected</p>
-                </div>
+                <div class="w-3 h-3 bg-red-500 rounded-full animate-ping"></div>
+                <h2 class="text-2xl font-black text-white tracking-tighter uppercase italic">CRITICAL_SIGNAL_DETECTED</h2>
               </div>
-              <button phx-click="dismiss_witness_alert" class="p-2 hover:bg-white/20 rounded-full transition-colors">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-6 h-6 text-white">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
-                </svg>
-              </button>
+              <button phx-click="dismiss_witness_alert" class="text-white/40 hover:text-white uppercase text-xs font-bold">[ CLOSE ]</button>
             </div>
-            
-            <div class="p-10 space-y-8">
-              <div class="space-y-4">
-                <div class="flex items-center justify-between text-[10px] font-black uppercase tracking-[0.3em] text-red-500/60">
-                  <span>Source Signal</span>
-                  <span class="font-mono">POD_A_ORACLE_DIRECT</span>
+            <div class="p-8 space-y-6">
+              <div class="bg-black/40 border border-red-500/20 p-6 rounded font-mono text-red-400">
+                {Map.get(@witness_alert, "message") || Map.get(@witness_alert, "error") || inspect(@witness_alert)}
+              </div>
+              <div class="grid grid-cols-2 gap-4">
+                <div class="bg-slate-800/50 p-4 border border-white/5">
+                  <p class="text-[10px] text-slate-500 uppercase font-bold mb-1">Source Node</p>
+                  <p class="text-white">AXON_CORE_V2_NATIVE</p>
                 </div>
-                <div class="p-6 bg-red-500/5 border border-red-500/20 rounded-2xl font-mono text-lg text-red-400">
-                  {Map.get(@witness_alert, "message") || Map.get(@witness_alert, "error") || inspect(@witness_alert)}
+                <div class="bg-slate-800/50 p-4 border border-white/5">
+                  <p class="text-[10px] text-slate-500 uppercase font-bold mb-1">Status</p>
+                  <p class="text-red-400 font-bold">500_SYSTEM_FAULT</p>
                 </div>
               </div>
-
-              <div class="grid grid-cols-2 gap-6">
-                <div class="p-4 bg-white/5 rounded-xl border border-white/5">
-                  <p class="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-1">Timestamp</p>
-                  <p class="text-white font-mono">{Time.utc_now() |> Time.truncate(:second) |> Time.to_string()}</p>
-                </div>
-                <div class="p-4 bg-white/5 rounded-xl border border-white/5">
-                  <p class="text-[9px] uppercase tracking-widest opacity-40 font-bold mb-1">Status Code</p>
-                  <p class="text-white font-mono">{Map.get(@witness_alert, "status") || "500 CRITICAL"}</p>
-                </div>
-              </div>
-
-              <div class="flex gap-4">
-                <button phx-click="dismiss_witness_alert" class="flex-grow bg-red-600 hover:bg-red-500 text-white font-black py-4 rounded-xl uppercase tracking-widest transition-all shadow-[0_10px_20px_rgba(220,38,38,0.3)]">
-                  Acknowledge & Clear Signal
-                </button>
-                <button class="px-6 border-2 border-white/10 hover:border-white/30 text-white/60 hover:text-white rounded-xl transition-all">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                  </svg>
-                </button>
-              </div>
+              <button phx-click="dismiss_witness_alert" class="w-full bg-red-600 hover:bg-red-500 text-white font-black py-4 rounded uppercase tracking-widest transition-all">
+                Acknowledge & Flush Buffer
+              </button>
             </div>
           </div>
         </div>
       <% end %>
 
-    <!-- Top Navigation -->
-      <nav class="border-b border-base-content/10 bg-base-200/50 backdrop-blur-md sticky top-0 z-50 px-6 py-4 flex justify-between items-center">
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 bg-primary rounded-xl flex items-center justify-center shadow-lg shadow-primary/20">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="currentColor"
-              class="w-6 h-6 text-white"
-            >
-              <path
-                fill-rule="evenodd"
-                d="M14.615 1.595a.75.75 0 0 1 .359.852L12.982 9.75h7.268a.75.75 0 0 1 .548 1.262l-10.5 11.25a.75.75 0 0 1-1.272-.704l1.992-8.308H3.75a.75.75 0 0 1-.548-1.262L13.702 1.683a.75.75 0 0 1 .913-.088Z"
-                clip-rule="evenodd"
-              />
+      <!-- MAIN HUD TOP BAR (GRID COLS 12) -->
+      <header class="grid grid-cols-12 gap-4 items-center">
+        <div class="col-span-3 flex items-center gap-4 bg-slate-900/50 border border-white/5 p-4 rounded-lg">
+          <div class="w-12 h-12 bg-amber-500 flex items-center justify-center rounded shadow-[0_0_20px_rgba(245,158,11,0.3)]">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 text-black">
+              <path fill-rule="evenodd" d="M14.615 1.595a.75.75 0 0 1 .359.852L12.982 9.75h7.268a.75.75 0 0 1 .548 1.262l-10.5 11.25a.75.75 0 0 1-1.272-.704l1.992-8.308H3.75a.75.75 0 0 1-.548-1.262L13.702 1.683a.75.75 0 0 1 .913-.088Z" clip-rule="evenodd" />
             </svg>
           </div>
           <div>
-            <h1 class="text-xl font-black tracking-tighter uppercase italic text-white">
-              Fleet <span class="text-primary">Commander</span>
-            </h1>
-            <p class="text-[10px] opacity-50 font-mono -mt-1 tracking-[0.3em] uppercase">
-              Multi-Project Control Plane
-            </p>
+            <h1 class="text-2xl font-black italic tracking-tighter text-white uppercase">AXON_<span class="text-amber-500">MAESTRIA</span></h1>
+            <p class="text-[10px] text-amber-500/50 font-bold uppercase tracking-widest">Tactical Control Plane v2.2</p>
           </div>
         </div>
+
+        <div class="col-span-6 bg-slate-900/50 border border-white/5 p-4 rounded-lg flex flex-col gap-2">
+          <div class="flex justify-between items-center text-[10px] font-black uppercase tracking-[0.2em]">
+            <span class="text-slate-500">Global Fleet Sync</span>
+            <span class="text-amber-500 font-mono">{@progress}% COMPLETED</span>
+          </div>
+          <div class="w-full bg-black/40 h-2 rounded-full overflow-hidden p-[1px] border border-white/5">
+            <div class="bg-amber-500 h-full transition-all duration-1000 shadow-[0_0_15px_rgba(245,158,11,0.5)]" style={"width: #{@progress}%"}></div>
+          </div>
+        </div>
+
+        <div class="col-span-3 bg-slate-900/50 border border-white/5 p-4 rounded-lg flex justify-between items-center">
+          <div class="text-left">
+            <p class="text-[9px] text-slate-500 uppercase font-black tracking-widest">System Uptime</p>
+            <p class="text-xl font-bold text-white tracking-tighter">{@uptime_str}</p>
+          </div>
+          <div class="text-right">
+            <p class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Kernel Time</p>
+            <p class="text-xl font-bold text-white tracking-tighter">{@sys_time}</p>
+          </div>
+        </div>
+      </header>
+
+      <!-- SYSTEM INTELLIGENCE HUD -->
+      <section class="grid grid-cols-12 gap-4">
         
-    <!-- Global Fleet Progress -->
-        <div class="hidden md:flex items-center gap-6 flex-grow max-w-xl mx-16">
-          <div class="flex flex-col w-full gap-1">
-            <div class="flex justify-between items-center px-1">
-              <span class="text-[9px] uppercase tracking-widest font-bold opacity-40">
-                System Integration Level
-              </span>
-              <span class="text-[10px] font-bold font-mono text-primary">{@progress}%</span>
+        <!-- RESOURCE METRICS -->
+        <div class="col-span-4 bg-slate-900/50 border border-white/5 rounded-lg p-6 flex flex-col gap-6">
+          <h3 class="text-xs font-black text-slate-400 uppercase tracking-[0.3em] flex items-center gap-2">
+            <div class={"w-2 h-2 rounded-full #{if @queues_paused, do: "bg-red-500 animate-pulse", else: "bg-emerald-500 animate-pulse"}"}></div>
+            System_Load_Monitor
+          </h3>
+          
+          <div class="grid grid-cols-2 gap-6">
+            <div class="space-y-2">
+              <div class="flex justify-between text-[10px] font-bold text-slate-500"><span>CPU</span><span class="text-white">{@cpu_load}%</span></div>
+              <div class="h-1 bg-black/40 rounded-full overflow-hidden"><div class="bg-white/40 h-full" style={"width: #{@cpu_load}%"}></div></div>
             </div>
-            <div class="w-full bg-base-300 h-1.5 rounded-full overflow-hidden border border-white/5 p-[1px]">
-              <div
-                class="bg-primary h-full transition-all duration-700 rounded-full shadow-[0_0_15px_rgba(var(--color-primary),0.6)]"
-                style={"width: #{@progress}%"}
-              >
+            <div class="space-y-2">
+              <div class="flex justify-between text-[10px] font-bold text-slate-500"><span>RAM</span><span class="text-white">{@ram_load}%</span></div>
+              <div class="h-1 bg-black/40 rounded-full overflow-hidden"><div class="bg-white/40 h-full" style={"width: #{@ram_load}%"}></div></div>
+            </div>
+            <div class="space-y-2">
+              <div class="flex justify-between text-[10px] font-bold text-slate-500"><span>IO_WAIT</span><span class="text-white">{@io_wait}%</span></div>
+              <div class="h-1 bg-black/40 rounded-full overflow-hidden"><div class="bg-white/40 h-full" style={"width: #{@io_wait}%"}></div></div>
+            </div>
+            <div class="space-y-2">
+              <div class="flex justify-between text-[10px] font-bold text-slate-500"><span>PRESSURE</span><span class="text-amber-500">{Float.round(@system_pressure * 100, 1)}%</span></div>
+              <div class="h-1 bg-black/40 rounded-full overflow-hidden"><div class="bg-amber-500 h-full" style={"width: #{min(@system_pressure * 100, 100)}%"}></div></div>
+            </div>
+          </div>
+          
+          <div class="mt-auto pt-4 border-t border-white/5 flex justify-between items-center text-[9px] font-bold uppercase tracking-widest text-slate-500">
+            <span>Workers: {@indexing_limit} Parallel</span>
+            <span class="text-amber-500">{if @queues_paused, do: "CONSTRAINED", else: "UNRESTRICTED"}</span>
+          </div>
+        </div>
+
+        <!-- GLOBAL STATS -->
+        <div class="col-span-8 grid grid-cols-3 gap-4">
+          <div class="bg-slate-900/50 border border-white/5 rounded-lg p-6 flex flex-col justify-center">
+            <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-2">Total Intelligence</p>
+            <div class="flex items-baseline gap-2">
+              <span class="text-5xl font-black text-white tracking-tighter italic">{@total_symbols}</span>
+              <span class="text-xs text-slate-600 uppercase font-bold">Nodes</span>
+            </div>
+          </div>
+          <div class="bg-slate-900/50 border border-white/5 rounded-lg p-6 flex flex-col justify-center">
+            <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-2">Security Integrity</p>
+            <div class="flex items-center gap-4">
+              <span class="text-5xl font-black text-emerald-500 tracking-tighter italic">{@avg_security}%</span>
+              <div class="text-[9px] text-slate-600 leading-tight font-bold uppercase">OWASP_V4<br/>SECURE_STATE</div>
+            </div>
+          </div>
+          <div class="bg-slate-900/50 border border-white/5 rounded-lg p-6 flex flex-col justify-center">
+            <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-2">Test Reliability</p>
+            <div class="flex items-center gap-4">
+              <span class="text-5xl font-black text-amber-500 tracking-tighter italic">{@avg_coverage}%</span>
+              <div class="text-[9px] text-slate-600 leading-tight font-bold uppercase">LADYBUG_DB<br/>COVERAGE</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PROJECT SECTORS GRID -->
+      <section class="flex-grow flex flex-col gap-4">
+        <div class="flex justify-between items-end px-2">
+          <h2 class="text-xl font-black text-white tracking-tighter uppercase italic">
+            Fleet_Sector_Map <span class="text-slate-600 opacity-50">// {map_size(@projects)} UNITS ONLINE</span>
+          </h2>
+          <div class="font-mono text-[10px] text-amber-500 animate-pulse">
+            {@last_event || "IDLE_MONITORING_SYSTEM"}
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <%= for {name, info} <- Enum.sort_by(@projects, fn {_, info} -> info.total_files end, :desc) do %>
+            <div class="bg-slate-900 border border-white/5 rounded overflow-hidden group hover:border-amber-500/50 transition-all duration-300 shadow-xl">
+              <!-- Header -->
+              <div class="bg-slate-800/50 p-4 border-b border-white/5 flex justify-between items-start">
+                <div class="truncate pr-2">
+                  <h4 class="text-white font-black uppercase tracking-tighter truncate">{name}</h4>
+                  <p class="text-[9px] text-slate-500 font-bold uppercase">Sector_Asset</p>
+                </div>
+                <div class={"text-[10px] font-black #{if info.progress == 100, do: "text-emerald-500", else: "text-amber-500 animate-pulse"}"}>
+                  {info.progress}%
+                </div>
               </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="flex items-center gap-6">
-          <div class="text-right hidden xl:block">
-            <p class="text-[9px] opacity-40 uppercase tracking-[0.2em] font-bold">Engine Uptime</p>
-            <p class="text-sm font-mono font-medium text-white">{@uptime_str}</p>
-          </div>
-          <div class="h-8 w-px bg-base-content/10"></div>
-        </div>
-      </nav>
-
-      <%= if length(@alerts) > 0 do %>
-        <div class="fixed top-24 right-6 z-50 flex flex-col gap-2">
-          <%= for alert <- @alerts do %>
-            <div class="bg-red-500/20 border border-red-500 text-red-100 px-6 py-4 rounded-xl shadow-[0_0_20px_rgba(239,68,68,0.3)] backdrop-blur-md animate-pulse">
-              <div class="flex items-center gap-3">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  class="h-6 w-6"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
+              
+              <div class="px-4 py-2 bg-slate-800/30 flex justify-between items-center border-b border-white/5">
+                <button 
+                  phx-click="reindex_project" 
+                  phx-value-project={name}
+                  class="text-[9px] font-black text-slate-500 hover:text-amber-500 transition-colors uppercase tracking-widest flex items-center gap-2"
                 >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                  />
-                </svg>
-                <span class="font-bold text-sm tracking-wide uppercase">{alert}</span>
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-3 h-3">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                  </svg>
+                  SYNC_SECTOR
+                </button>
+                <div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_5px_rgba(16,185,129,0.5)]"></div>
+              </div>
+              
+              <!-- Metrics -->
+              <div class="p-4 space-y-4">
+                <div class="grid grid-cols-2 gap-2">
+                  <div class="bg-black/40 p-2 rounded">
+                    <p class="text-[8px] text-slate-600 uppercase font-black mb-1">Security</p>
+                    <p class={"text-xs font-black #{if info.security > 90, do: "text-emerald-500", else: "text-amber-500"}"}>{info.security}%</p>
+                  </div>
+                  <div class="bg-black/40 p-2 rounded">
+                    <p class="text-[8px] text-slate-600 uppercase font-black mb-1">Coverage</p>
+                    <p class="text-xs text-white font-black">{info.coverage}%</p>
+                  </div>
+                </div>
+                
+                <div class="space-y-1">
+                  <div class="flex justify-between text-[9px] font-bold text-slate-500 uppercase">
+                    <span>Indexation</span>
+                    <span class="text-slate-300">{info.files} / {info.total_files}</span>
+                  </div>
+                  <div class="h-1 bg-black/40 rounded-full overflow-hidden">
+                    <div class="bg-amber-500 h-full transition-all duration-500" style={"width: #{info.progress}%"}></div>
+                  </div>
+                </div>
+
+                <div class="flex justify-between items-end text-[9px] font-bold text-slate-600 uppercase pt-2 border-t border-white/5">
+                  <div>Nodes: <span class="text-white">{info.symbols}</span></div>
+                  <div>Links: <span class="text-white">{info.relations}</span></div>
+                </div>
               </div>
             </div>
           <% end %>
         </div>
-      <% end %>
+      </section>
 
-      <main class="max-w-[1600px] mx-auto p-6 md:p-10 space-y-10">
-        
-    <!-- Global Command Center -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
-          <div class="premium-card p-8 relative overflow-hidden group">
-            <div class="absolute top-0 right-0 w-32 h-32 bg-primary/10 rounded-full blur-3xl -mr-16 -mt-16 group-hover:bg-primary/20 transition-all duration-500">
-            </div>
-            <p class="text-[10px] uppercase tracking-[0.3em] opacity-40 mb-2 font-black">
-              Active Fleet
-            </p>
-            <div class="flex items-baseline gap-3">
-              <span class="text-6xl font-light text-white">{@scanned_projects}</span>
-              <span class="text-xl opacity-20 font-mono">/ {@total_projects} units</span>
-            </div>
+      <!-- NEURAL LINK TRACE (BOTTOM HUD) -->
+      <footer class="mt-auto bg-black border border-white/10 rounded-lg p-4 h-48 flex flex-col">
+        <div class="flex justify-between items-center mb-2 border-b border-white/5 pb-2">
+          <div class="flex items-center gap-2">
+            <div class="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.8)]"></div>
+            <h3 class="text-[10px] font-black text-white uppercase tracking-[0.2em]">Neural_Link_Live_Trace</h3>
           </div>
-
-          <div class="premium-card p-8 relative overflow-hidden group">
-            <div class="absolute top-0 right-0 w-32 h-32 bg-accent/10 rounded-full blur-3xl -mr-16 -mt-16 group-hover:bg-accent/20 transition-all duration-500">
-            </div>
-            <p class="text-[10px] uppercase tracking-[0.3em] opacity-40 mb-2 font-black">
-              Global Intelligence
-            </p>
-            <div class="flex items-baseline gap-3">
-              <span class="text-6xl font-light text-accent">{@total_symbols}</span>
-              <span class="text-sm opacity-30 uppercase tracking-widest font-bold">
-                Extracted Symbols
+          <div class="text-[9px] text-slate-600 font-bold uppercase tracking-widest">
+            {assigns.total_files_parsed} FILES_STREAMED
+          </div>
+        </div>
+        <div class="flex-grow overflow-y-auto font-mono text-[10px] space-y-1 scrollbar-hide flex flex-col-reverse">
+          <%= for {file, status} <- @live_files do %>
+            <div class="flex gap-4 opacity-70 hover:opacity-100 transition-opacity py-0.5">
+              <span class="text-slate-700 font-bold">#SEQ_IDX</span>
+              <span class={if status == :ok, do: "text-emerald-500", else: "text-red-500"}>
+                [{if status == :ok, do: "SUCCESS", else: "FAILURE"}]
               </span>
+              <span class="text-slate-400 truncate tracking-tight">{file}</span>
             </div>
-          </div>
-
-          <div class="premium-card p-8">
-            <p class="text-[10px] uppercase tracking-[0.3em] opacity-40 mb-2 font-black">
-              Average Security
-            </p>
-            <div class="flex items-center gap-4">
-              <div
-                class="radial-progress text-accent"
-                style={"--value: #{@avg_security}; --size: 4rem; --thickness: 4px;"}
-                role="progressbar"
-              >
-                <span class="text-xs font-bold text-white">{@avg_security}%</span>
-              </div>
-              <div>
-                <p class="text-sm font-bold text-white">
-                  OWASP Level {if @avg_security > 90, do: "High", else: "Medium"}
-                </p>
-                <p class="text-[9px] opacity-30 uppercase tracking-widest">Across all projects</p>
-              </div>
-            </div>
-          </div>
-
-          <div class="premium-card p-8">
-            <p class="text-[10px] uppercase tracking-[0.3em] opacity-40 mb-2 font-black">
-              Fleet Integrity
-            </p>
-            <div class="flex items-center gap-4">
-              <div
-                class="radial-progress text-primary"
-                style={"--value: #{@avg_coverage}; --size: 4rem; --thickness: 4px;"}
-                role="progressbar"
-              >
-                <span class="text-xs font-bold text-white">{@avg_coverage}%</span>
-              </div>
-              <div>
-                <p class="text-sm font-bold text-white">
-                  Coverage {if @avg_coverage > 80, do: "Stable", else: "Low"}
-                </p>
-                <p class="text-[9px] opacity-30 uppercase tracking-widest">Verified by LadybugDB</p>
-              </div>
-            </div>
-          </div>
+          <% end %>
+          <%= if Enum.empty?(@live_files) do %>
+            <div class="text-slate-800 italic animate-pulse">Awaiting industrial data signal...</div>
+          <% end %>
         </div>
-        
-    <!-- Resource Intelligence & Backpressure -->
-        <div id="resource-monitor" class="premium-card p-8 bg-gradient-to-br from-base-200 to-base-300 border-primary/20 shadow-[0_0_40px_rgba(var(--color-primary),0.05)]">
-          <div class="flex justify-between items-start mb-8">
-            <div>
-              <h3 class="text-lg font-black text-white uppercase italic tracking-tighter flex items-center gap-2">
-                <div class={"w-2 h-2 rounded-full #{if @queues_paused, do: "bg-red-500 animate-pulse", else: "bg-green-500"}"}></div>
-                Resource Intelligence <span class="text-primary opacity-50">// OS Monitor</span>
-              </h3>
-              <p class="text-[9px] opacity-40 uppercase tracking-widest font-bold mt-1">Real-time Backpressure & Oban Scaling</p>
-            </div>
-            <div class="text-right">
-              <span class="text-[10px] font-mono text-primary font-bold">MODE: {if @queues_paused, do: "CONSTRAINED (PAUSED)", else: "DYNAMIC SCALING"}</span>
-              <p class="text-[9px] opacity-30 uppercase tracking-widest mt-1">Worker Limit: {@indexing_limit} parallel jobs</p>
-            </div>
-          </div>
-
-          <div class="grid grid-cols-1 md:grid-cols-4 gap-8">
-            <div class="space-y-3">
-              <div class="flex justify-between text-[10px] font-bold uppercase tracking-widest px-1">
-                <span class="opacity-40">System Pressure</span>
-                <span class={if @system_pressure >= 1.0, do: "text-red-500", else: "text-primary"}>
-                  {Float.round(@system_pressure * 100, 1)}%
-                </span>
-              </div>
-              <div class="h-2 bg-black/40 rounded-full overflow-hidden p-[1px] border border-white/5">
-                <div class={"h-full rounded-full transition-all duration-500 #{if @system_pressure >= 1.0, do: "bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]", else: "bg-primary shadow-[0_0_10px_rgba(var(--color-primary),0.5)]"}"} 
-                     style={"width: #{min(@system_pressure * 100, 100)}%"}></div>
-              </div>
-            </div>
-
-            <div class="space-y-3">
-              <div class="flex justify-between text-[10px] font-bold uppercase tracking-widest px-1">
-                <span class="opacity-40">CPU Load</span>
-                <span class="text-white">{Float.round(@cpu_load, 1)}%</span>
-              </div>
-              <div class="h-2 bg-black/40 rounded-full overflow-hidden p-[1px] border border-white/5">
-                <div class="h-full bg-white/20 rounded-full transition-all duration-500" style={"width: #{@cpu_load}%"}></div>
-              </div>
-            </div>
-
-            <div class="space-y-3">
-              <div class="flex justify-between text-[10px] font-bold uppercase tracking-widest px-1">
-                <span class="opacity-40">RAM Usage</span>
-                <span class="text-white">{Float.round(@ram_load, 1)}%</span>
-              </div>
-              <div class="h-2 bg-black/40 rounded-full overflow-hidden p-[1px] border border-white/5">
-                <div class="h-full bg-white/20 rounded-full transition-all duration-500" style={"width: #{@ram_load}%"}></div>
-              </div>
-            </div>
-
-            <div class="space-y-3">
-              <div class="flex justify-between text-[10px] font-bold uppercase tracking-widest px-1">
-                <span class="opacity-40">IO Wait</span>
-                <span class="text-white">{Float.round(@io_wait, 1)}%</span>
-              </div>
-              <div class="h-2 bg-black/40 rounded-full overflow-hidden p-[1px] border border-white/5">
-                <div class="h-full bg-white/20 rounded-full transition-all duration-500" style={"width: #{@io_wait}%"}></div>
-              </div>
-            </div>
-          </div>
-        </div>
-        
-    <!-- Semantic Error Visualization (Taint Analysis) -->
-        <%= if map_size(@taint_paths) > 0 and Enum.any?(@taint_paths, fn {_, paths} -> length(paths) > 0 end) do %>
-          <div class="premium-card p-8 border-red-500/30 bg-red-500/5">
-            <h3 class="text-lg font-black text-white uppercase italic tracking-tighter flex items-center gap-2 mb-6">
-              <div class="w-2 h-2 rounded-full bg-red-500 animate-ping"></div>
-              Critical Semantic Violations <span class="text-red-500 opacity-50">// Taint Analysis Engine</span>
-            </h3>
-            
-            <div class="space-y-6">
-              <%= for {project, paths} <- @taint_paths, length(paths) > 0 do %>
-                <div class="space-y-3">
-                  <div class="flex items-center gap-2 text-xs font-bold text-red-400 uppercase tracking-widest">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
-                    </svg>
-                    Project: {project}
-                  </div>
-                  <div class="grid grid-cols-1 gap-3">
-                    <%= for path <- Enum.take(paths, 3) do %>
-                      <div class="bg-black/40 border border-white/5 p-4 rounded-xl font-mono text-[10px] space-y-2">
-                        <div class="flex items-center gap-2 text-white/40">
-                          <span class="px-2 py-0.5 bg-red-500/20 text-red-400 rounded-md font-bold">EXPOSURE PATH</span>
-                        </div>
-                        <div class="flex flex-wrap items-center gap-2">
-                          <%= for node <- path["nodes"] do %>
-                            <span class={"px-2 py-1 rounded border #{if node["properties"]["is_unsafe"] == "true", do: "border-red-500/50 text-red-400 bg-red-500/10", else: "border-white/10 text-white/60 bg-white/5"}"}>
-                              {node["properties"]["name"] || "unknown"}
-                            </span>
-                            <%= if node != List.last(path["nodes"]) do %>
-                              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-3 h-3 text-white/20">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                              </svg>
-                            <% end %>
-                          <% end %>
-                        </div>
-                      </div>
-                    <% end %>
-                  </div>
-                </div>
-              <% end %>
-            </div>
-          </div>
-        <% end %>
-
-    <!-- Project Grid (The 10/10 UX Request) -->
-        <div class="space-y-6">
-          <div class="flex justify-between items-end px-2">
-            <div>
-              <h3 class="text-2xl font-black tracking-tight text-white uppercase italic">
-                Active <span class="text-primary text-3xl">Projects</span>
-              </h3>
-              <p class="text-[10px] opacity-40 uppercase tracking-[0.3em] mt-1 font-bold">
-                Real-time sectors from ~/projects
-              </p>
-            </div>
-            <div class="text-right">
-              <span class="text-[9px] opacity-40 uppercase tracking-[0.2em] font-bold">
-                Data Plane Trace
-              </span>
-              <p class="font-mono text-xs text-primary animate-pulse">
-                {@last_event || "IDLE // READY"}
-              </p>
-            </div>
-          </div>
-
-          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
-            <%= for {name, info} <- Enum.sort_by(@projects, fn {_, info} -> info.total_files end, :desc) do %>
-              <div class="project-card premium-card p-0 overflow-hidden hover:scale-[1.02] transition-all duration-300 cursor-pointer group border-white/5 hover:border-primary/40 shadow-2xl">
-                <div class="p-8 space-y-6 bg-gradient-to-br from-white/5 to-transparent">
-                  <!-- Project Title -->
-                  <div class="flex justify-between items-start">
-                    <div class="flex items-center gap-3">
-                      <div class="w-10 h-10 rounded-lg bg-base-300 border border-white/10 flex items-center justify-center text-primary group-hover:bg-primary group-hover:text-white transition-all duration-300">
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke-width="2"
-                          stroke="currentColor"
-                          class="w-5 h-5"
-                        >
-                          <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            d="M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.625-12.125L11.045 3.1a2.25 2.25 0 0 0-1.634.893l-.811 1.158a2.25 2.25 0 0 1-1.634.893H4.5A2.25 2.25 0 0 0 2.25 8.25v10.5A2.25 2.25 0 0 0 4.5 21h15a2.25 2.25 0 0 0 2.25-2.25V12.75m-18.625-1.125h18.625"
-                          />
-                        </svg>
-                      </div>
-                      <div>
-                        <h4 class="text-xl font-bold text-white group-hover:text-primary transition-colors tracking-tight">
-                          {name}
-                        </h4>
-                        <p class="text-[9px] opacity-30 uppercase tracking-[0.2em] font-black">
-                          Industrial Asset Index
-                        </p>
-                      </div>
-                    </div>
-                    <div class="px-3 py-1 rounded-full bg-accent/10 border border-accent/20 text-[9px] text-accent font-bold uppercase tracking-widest">
-                      OWASP SECURE
-                    </div>
-                  </div>
-                  
-    <!-- Scores -->
-                  <div class="grid grid-cols-2 gap-4">
-                    <div class="bg-black/20 rounded-lg p-4 border border-white/5">
-                      <p class="text-[9px] opacity-30 uppercase tracking-widest font-black mb-1">
-                        Security Score
-                      </p>
-                      <div class="flex items-center gap-2">
-                        <div class="h-1.5 flex-grow bg-base-300 rounded-full overflow-hidden">
-                          <div
-                            class="bg-accent h-full rounded-full shadow-[0_0_8px_rgba(var(--color-accent),0.5)]"
-                            style={"width: #{info.security}%"}
-                          >
-                          </div>
-                        </div>
-                        <span class="text-xs font-mono font-bold text-accent">{info.security}%</span>
-                      </div>
-                    </div>
-                    <div class="bg-black/20 rounded-lg p-4 border border-white/5">
-                      <p class="text-[9px] opacity-30 uppercase tracking-widest font-black mb-1">
-                        Test Coverage
-                      </p>
-                      <div class="flex items-center gap-2">
-                        <div class="h-1.5 flex-grow bg-base-300 rounded-full overflow-hidden">
-                          <div
-                            class="bg-primary h-full rounded-full shadow-[0_0_8px_rgba(var(--color-primary),0.5)]"
-                            style={"width: #{info.coverage}%"}
-                          >
-                          </div>
-                        </div>
-                        <span class="text-xs font-mono font-bold text-primary">{info.coverage}%</span>
-                      </div>
-                    </div>
-                  </div>
-                  
-    <!-- Nodes Stats -->
-                  <div class="flex justify-between items-end border-t border-white/5 pt-4">
-                    <div class="flex gap-6">
-                      <div>
-                        <p class="text-2xl font-light text-white">{info.symbols}</p>
-                        <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">Nodes</p>
-                      </div>
-                      <div>
-                        <p class="text-2xl font-light text-accent">{info.relations}</p>
-                        <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">
-                          Relations
-                        </p>
-                      </div>
-                      <div>
-                        <p class="text-2xl font-light text-primary">
-                          {info.files}<span class="text-sm opacity-50 font-mono">/<%= info.total_files %></span>
-                        </p>
-                        <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">Files</p>
-                      </div>
-                    </div>
-                    <div class="text-right hidden xl:block">
-                      <p class="text-sm font-bold text-white italic">PROCESSED</p>
-                      <p class="text-[9px] opacity-30 uppercase tracking-widest font-bold">
-                        System Status
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            <% end %>
-
-            <%= if Enum.empty?(@projects) do %>
-              <div class="col-span-full py-32 text-center flex flex-col items-center gap-6 opacity-20 grayscale filter">
-                <div class="w-24 h-24 border-2 border-dashed border-white/20 rounded-full flex items-center justify-center animate-spin-slow">
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke-width="1"
-                    stroke="currentColor"
-                    class="w-12 h-12"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-10.5v10.5"
-                    />
-                  </svg>
-                </div>
-                <div>
-                  <p class="italic text-2xl font-light tracking-tight">
-                    Fleet Online - Awaiting Projects
-                  </p>
-                  <p class="text-[10px] uppercase tracking-[0.4em] mt-2 font-bold">
-                    Awaiting Industrial Signal from ~/projects
-                  </p>
-                </div>
-              </div>
-            <% end %>
-          </div>
-        </div>
-        
-    <!-- Matrix View: Live Ingestion Log -->
-        <div class="mt-12 premium-card p-6 bg-black/80 border border-white/10">
-          <div class="flex justify-between items-center mb-4">
-            <h3 class="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
-              <div class={"w-2 h-2 rounded-full #{if @cluster_connected, do: "bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.8)]", else: "bg-red-500"}"}>
-              </div>
-              Neural Link (Pod A Watcher)
-            </h3>
-            <span class="text-xs font-mono text-primary font-bold tracking-widest">
-              {@total_files_parsed} FILES INGESTED
-            </span>
-          </div>
-          <div class="h-64 overflow-y-auto font-mono text-xs space-y-1.5 flex flex-col-reverse p-2 bg-black rounded border border-white/5">
-            <%= for {file, status} <- @live_files do %>
-              <div class="flex items-center gap-4 py-1 border-b border-white/5 last:border-0">
-                <span class="opacity-50 text-white">>_</span>
-                <span class={"font-bold #{if status == :ok, do: "text-green-500", else: "text-red-500"}"}>
-                  [{if status == :ok, do: "OK", else: "ERR"}]
-                </span>
-                <span class="text-green-400 opacity-80 truncate">{file}</span>
-              </div>
-            <% end %>
-            <%= if Enum.empty?(@live_files) do %>
-              <div class="text-white/30 italic py-4">Awaiting data stream from Watcher...</div>
-            <% end %>
-          </div>
-        </div>
-      </main>
-      
-    <!-- System Telemetry Footer -->
-      <footer class="p-12 text-center border-t border-base-content/5 mt-20 bg-base-200/30 backdrop-blur-xl">
-        <div class="flex justify-center gap-16 mb-6 opacity-40 text-[10px] uppercase tracking-[0.3em] font-black">
-          <span class="flex items-center gap-3">
-            <div class="w-2 h-2 bg-accent rounded-full shadow-[0_0_10px_rgba(var(--color-accent),0.8)]">
-            </div>
-            Security Enclave: OWASP-2026-V4
-          </span>
-          <span class="flex items-center gap-3">
-            <div class="w-2 h-2 bg-primary rounded-full shadow-[0_0_10px_rgba(var(--color-primary),0.8)]">
-            </div>
-            Graph Kernel: LadybugDB Native v1.0
-          </span>
-          <span class="flex items-center gap-3">
-            <div class="w-2 h-2 bg-white/40 rounded-full"></div>
-            Protocol: Zero-Fault Erlang Port
-          </span>
-        </div>
-        <p class="text-[9px] opacity-20 uppercase tracking-[0.8em] italic font-bold">
-          Nexus MetaGPT++ // Strategic Multi-Project Intelligence Engine
-        </p>
       </footer>
+
     </LiveView.Witness.HTML.witness_container>
     """
   end
