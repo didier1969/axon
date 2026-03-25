@@ -432,6 +432,7 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
 
     fn axon_query(&self, args: &Value) -> Option<Value> {
         let query_text = args.get("query")?.as_str()?;
+        let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         
         // 1. Vector Embedding of the query
         let embedding = crate::embedder::batch_embed(vec![query_text.to_string()]).ok()
@@ -440,21 +441,41 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         let (cypher, params) = if let Some(emb) = embedding {
             let vec_str = format!("{:?}", emb);
             // Hybrid query: exact match on name OR semantic similarity
-            (
-                format!(
-                    "MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
-                     WHERE s.name CONTAINS $q OR array_cosine_similarity(s.embedding, {}) > 0.5 \
-                     RETURN s.name, s.kind, f.path AS uri, array_cosine_similarity(s.embedding, {}) as score \
-                     ORDER BY score DESC LIMIT 10",
-                    vec_str, vec_str
-                ),
-                json!({"q": query_text})
-            )
+            if project == "*" {
+                (
+                    format!(
+                        "MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
+                         WHERE s.name CONTAINS $q OR array_cosine_similarity(s.embedding, {}) > 0.5 \
+                         RETURN s.name, s.kind, f.path AS uri, array_cosine_similarity(s.embedding, {}) as score \
+                         ORDER BY score DESC LIMIT 10",
+                        vec_str, vec_str
+                    ),
+                    json!({"q": query_text})
+                )
+            } else {
+                (
+                    format!(
+                        "MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
+                         WHERE f.path CONTAINS $proj AND (s.name CONTAINS $q OR array_cosine_similarity(s.embedding, {}) > 0.5) \
+                         RETURN s.name, s.kind, f.path AS uri, array_cosine_similarity(s.embedding, {}) as score \
+                         ORDER BY score DESC LIMIT 10",
+                        vec_str, vec_str
+                    ),
+                    json!({"q": query_text, "proj": project})
+                )
+            }
         } else {
-            (
-                "MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE s.name CONTAINS $q RETURN s.name, s.kind, f.path AS uri LIMIT 10".to_string(),
-                json!({"q": query_text})
-            )
+            if project == "*" {
+                (
+                    "MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE s.name CONTAINS $q RETURN s.name, s.kind, f.path AS uri LIMIT 10".to_string(),
+                    json!({"q": query_text})
+                )
+            } else {
+                (
+                    "MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS $proj AND s.name CONTAINS $q RETURN s.name, s.kind, f.path AS uri LIMIT 10".to_string(),
+                    json!({"q": query_text, "proj": project})
+                )
+            }
         };
 
         match self.graph_store.read().unwrap().query_json_param(&cypher, &params) {
@@ -565,9 +586,8 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     }
 
     fn axon_audit(&self, args: &Value) -> Option<Value> {
-        // PERF HACK: Force global scope to bypass KuzuDB string scanning timeout on 35k files.
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
-        let project = "*"; 
+        let project = requested_project; 
         let store = self.graph_store.read().unwrap();
 
         // 🚨 FAIL-SAFE: Check if project is actually indexed
@@ -607,9 +627,8 @@ fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
     }
 
     fn axon_health(&self, args: &Value) -> Option<Value> {
-        // PERF HACK: Force global scope to bypass KuzuDB string scanning timeout on 35k files.
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
-        let project = "*";
+        let project = requested_project;
         let store = self.graph_store.read().unwrap();
 
         // 🚨 FAIL-SAFE: Check if project is actually indexed
