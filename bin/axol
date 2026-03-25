@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# Axol - Unified Health & Status CLI for Axon
+
+echo "================================================="
+echo "      AXON (V2) - STATUS & HEALTH CHECK          "
+echo "================================================="
+
+# 1. Check Processes
+echo -n "1. Axon Data Plane (Rust)      : "
+if pgrep -f "bin/axon-core" > /dev/null; then
+    echo "✅ Running"
+else
+    echo "❌ Stopped"
+fi
+
+echo -n "2. Axon Control Plane (Elixir) : "
+if pgrep -f "mix phx.server" > /dev/null || pgrep -f "beam.smp.*hydra_axon" > /dev/null; then
+    echo "✅ Running"
+else
+    echo "❌ Stopped"
+fi
+
+# 2. Check Static Ports
+PHX_PORT=44127
+AXON_HTTP_PORT=44129
+
+echo -n "3. Dashboard Port ($PHX_PORT)       : "
+if nc -z localhost $PHX_PORT 2>/dev/null; then
+    echo "✅ Listening (http://localhost:$PHX_PORT)"
+else
+    echo "❌ Offline"
+fi
+
+echo -n "4. Axon HTTP API ($AXON_HTTP_PORT)       : "
+if nc -z localhost $AXON_HTTP_PORT 2>/dev/null; then
+    echo "✅ Listening"
+else
+    echo "❌ Offline"
+fi
+
+# 3. Check System
+echo -n "5. MCP Tunnel (UDS -> HTTP)    : "
+if /home/dstadel/projects/axon/scripts/mcp_verify_360.py >/dev/null 2>&1; then
+    echo "✅ Active & Responding (Audit 360° passed)"
+else
+    echo "❌ Offline or Deadlocked"
+fi
+
+echo -n "6. Telemetry Socket Bridge     : "
+SOCK_TEL="/tmp/axon-telemetry.sock"
+if [ -S "$SOCK_TEL" ]; then
+    if timeout 1 python3 -c 'import socket, sys; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect("'$SOCK_TEL'"); s.close(); sys.exit(0)' 2>/dev/null; then
+        echo "✅ Active & Responding ($SOCK_TEL)"
+    else
+        echo "⚠️ Connection refused"
+    fi
+else
+    echo "❌ Missing"
+fi
+
+echo "================================================="
+echo "To restart the infrastructure, run: ./scripts/start-v2.sh"
+echo "================================================="
