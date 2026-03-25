@@ -1109,6 +1109,33 @@ mod tests {
     }
 
     #[test]
+    fn test_axon_audit_secrets_detection() {
+        let server = create_test_server();
+        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/config.rs'})").unwrap();
+        server.graph_store.write().unwrap().execute("MERGE (s:Symbol {name: 'SECRET_API_KEY: Found potential hardcoded credential', kind: 'SECRET_API_KEY'})").unwrap();
+        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'src/config.rs'}), (s:Symbol {name: 'SECRET_API_KEY: Found potential hardcoded credential'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_audit",
+                "arguments": {
+                    "project": "*"
+                }
+            })),
+            id: Some(json!(12)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.unwrap().result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        assert!(content.contains("Dette Technique"));
+        assert!(content.contains("SECRET_API_KEY"));
+        assert!(content.contains("hardcoded credential"));
+    }
+
+    #[test]
     fn test_axon_health_god_objects() {
         let server = create_test_server();
         server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/god.rs'})").unwrap();

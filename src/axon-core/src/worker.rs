@@ -150,6 +150,7 @@ impl WorkerPool {
                     if let Ok(content) = std::fs::read_to_string(path_obj) {
                         if let Some(parser) = parser::get_parser_for_file(path_obj) {
                             let mut extraction = parser.parse(&content);
+                            parser::scan_secrets(&content, &mut extraction);
 
                             let texts_to_embed: Vec<String> = extraction.symbols.iter()
                                 .map(|s| format!("Symbol: {} Kind: {}", s.name, s.kind))

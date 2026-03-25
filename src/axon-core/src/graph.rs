@@ -299,13 +299,13 @@ impl GraphStore {
         let query = if project_name == "*" || project_name.is_empty() {
             "MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
              OPTIONAL MATCH (s)-[:CALLS]->(debt) \
-             WHERE debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME'] \
+             WHERE debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME'] OR s.kind STARTS WITH 'SECRET_' \
              WITH f, COALESCE(debt.name, s.kind + ': ' + s.name) as issue \
              RETURN DISTINCT f.path, issue LIMIT 50".to_string()
         } else {
             format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
                      OPTIONAL MATCH (s)-[:CALLS]->(debt) \
-                     WHERE f.path CONTAINS '{}' AND (debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME']) \
+                     WHERE f.path CONTAINS '{}' AND (debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME'] OR s.kind STARTS WITH 'SECRET_') \
                      WITH f, COALESCE(debt.name, s.kind + ': ' + s.name) as issue \
                      RETURN DISTINCT f.path, issue LIMIT 50", project_name)
         };

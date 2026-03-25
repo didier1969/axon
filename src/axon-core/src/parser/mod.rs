@@ -128,6 +128,36 @@ pub trait Parser: Send + Sync {
     fn parse(&self, content: &str) -> ExtractionResult;
 }
 
+pub fn scan_secrets(content: &str, result: &mut ExtractionResult) {
+    use regex::Regex;
+    
+    let patterns = [
+        ("SECRET_API_KEY", r#"(?i)(?:key|api|token|secret|password|passwd|auth)[\s:='\"\[\{]+[a-z0-9\/+]{32,45}"#),
+        ("SECRET_AWS_KEY", r#"AKIA[0-9A-Z]{16}"#),
+        ("SECRET_PRIVATE_KEY", r#"-----BEGIN [A-Z ]+ PRIVATE KEY-----"#),
+        ("SECRET_DB_URL", r#"[a-zA-Z]+://[^:]+:[^@]+@[^/]+/[^?]+"#),
+    ];
+
+    for (kind, pattern) in patterns {
+        if let Ok(re) = Regex::new(pattern) {
+            for mat in re.find_iter(content) {
+                let line = content[..mat.start()].lines().count() + 1;
+                result.symbols.push(Symbol {
+                    name: format!("{}: Found potential hardcoded credential", kind),
+                    kind: kind.to_string(),
+                    start_line: line,
+                    end_line: line,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: false,
+                    properties: HashMap::new(),
+                    embedding: None,
+                });
+            }
+        }
+    }
+}
+
 pub mod python;
 pub mod elixir;
 pub mod rust;
