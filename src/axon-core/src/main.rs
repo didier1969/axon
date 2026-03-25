@@ -89,13 +89,14 @@ fn main() -> anyhow::Result<()> {
     });
 
     let mcp_store_for_axum = mcp_store.clone();
+    let mcp_flag_for_axum = mcp_active_flag.clone();
     // --- MCP Listener Loop (HTTP/SSE via Axum) ---
     tokio::spawn(async move {
-        info!("Starting MCP HTTP/SSE Server on port 44127...");
+        info!("Starting MCP HTTP/SSE Server on port 44129...");
         let mcp_server = Arc::new(McpServer::new(mcp_store_for_axum));
-        let app = crate::mcp_http::app_router(mcp_server);
+        let app = crate::mcp_http::app_router(mcp_server, mcp_flag_for_axum);
         
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:44127").await.expect("Failed to bind to port 44127");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:44129").await.expect("Failed to bind to port 44129");
         if let Err(e) = axum::serve(listener, app).await {
             error!("MCP HTTP Server error: {}", e);
         }
