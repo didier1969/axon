@@ -1138,6 +1138,41 @@ mod tests {
     }
 
     #[test]
+    fn test_axon_audit_cross_language_taint() {
+        let server = create_test_server();
+        // Setup a multi-hop path: elixir_func -[:CALLS_NIF]-> rust_nif -[:CALLS]-> unsafe_call
+        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/api.ex'})").unwrap();
+        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/api_dummy.ex'})").unwrap();
+        server.graph_store.write().unwrap().execute("MERGE (s1:Symbol {name: 'elixir_func', kind: 'function', tested: false})").unwrap();
+        server.graph_store.write().unwrap().execute("MERGE (s2:Symbol {name: 'rust_nif', kind: 'function', tested: false, is_nif: true})").unwrap();
+        server.graph_store.write().unwrap().execute("MERGE (s3:Symbol {name: 'unsafe_block', kind: 'function', tested: false, is_unsafe: true})").unwrap();
+        
+        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'src/api.ex'}), (s1:Symbol {name: 'elixir_func'}) MERGE (f)-[:CONTAINS]->(s1)").unwrap();
+        server.graph_store.write().unwrap().execute("MATCH (s1:Symbol {name: 'elixir_func'}), (s2:Symbol {name: 'rust_nif'}) MERGE (s1)-[:CALLS_NIF]->(s2)").unwrap();
+        server.graph_store.write().unwrap().execute("MATCH (s2:Symbol {name: 'rust_nif'}), (s3:Symbol {name: 'unsafe_block'}) MERGE (s2)-[:CALLS]->(s3)").unwrap();
+
+        let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_audit",
+                "arguments": {
+                    "project": "*"
+                }
+            })),
+            id: Some(json!(13)),
+        };
+
+        let response = server.handle_request(req);
+        let result = response.unwrap().result.expect("Expected result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        // Should detect taint via CALLS_NIF and is_unsafe
+        assert!(!content.contains("Score 100/100"));
+        assert!(content.contains("elixir_func"));
+        assert!(content.contains("unsafe_block"));
+    }
+
+    #[test]
     fn test_axon_health_god_objects() {
         let server = create_test_server();
         server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/god.rs'})").unwrap();
