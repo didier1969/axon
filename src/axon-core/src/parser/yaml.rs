@@ -94,7 +94,7 @@ impl Parser for YamlParser {
             traverse(root_node, source_bytes, &mut symbols, "", 0);
         }
 
-        ExtractionResult { symbols, relations }
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }
 

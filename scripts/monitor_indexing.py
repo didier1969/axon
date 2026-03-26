@@ -37,13 +37,13 @@ i = 0
 try:
     while True:
         i += 1
-        time.sleep(20)
+        time.sleep(10)
         current_time = time.time()
         
         total, indexed = get_stats()
         
-        # Calcul de la vitesse sur les 20 dernières secondes
-        speed_last_20s = (indexed - last_indexed) / 20.0
+        # Calcul de la vitesse sur les 10 dernières secondes
+        speed_last_10s = (indexed - last_indexed) / 10.0
         
         # Calcul de la vitesse moyenne depuis le début
         elapsed_total = current_time - start_time
@@ -60,15 +60,15 @@ try:
         filled = int(percent / 100 * bar_len)
         bar = "█" * filled + "-" * (bar_len - filled)
         
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] T+{i*20}s | Progression: {percent:05.1f}% [{bar}]")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] T+{i*10}s | Progression: {percent:05.1f}% [{bar}]")
         print(f"   => Fichiers : {indexed} indexés / {total} découverts")
-        print(f"   => Vitesse instantanée : {speed_last_20s:04.1f} f/s | Vitesse moyenne : {avg_speed:04.1f} f/s | ETA : {eta_str}")
+        print(f"   => Vitesse instantanée : {speed_last_10s:04.1f} f/s | Vitesse moyenne : {avg_speed:04.1f} f/s | ETA : {eta_str}")
         print("-" * 80)
         
         last_indexed = indexed
         sys.stdout.flush()
 
-        if total > 0 and indexed >= total and speed_last_20s == 0:
+        if total > 0 and indexed >= total and speed_last_10s == 0:
              print(f"[{datetime.now().strftime('%H:%M:%S')}] Indexation terminée ou en veille prolongée.")
              break
 

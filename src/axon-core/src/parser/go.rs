@@ -305,6 +305,7 @@ impl GoParser {
 impl Parser for GoParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut result = ExtractionResult {
+            project_slug: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };

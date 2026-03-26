@@ -120,6 +120,8 @@ pub struct Relation {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExtractionResult {
+    #[serde(default)]
+    pub project_slug: Option<String>,
     pub symbols: Vec<Symbol>,
     pub relations: Vec<Relation>,
 }

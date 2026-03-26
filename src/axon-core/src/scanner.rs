@@ -108,7 +108,7 @@ impl Scanner {
                     if let Some(ref q) = queue {
                         let path_str = path.to_string_lossy().to_string();
                         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).map(|sys_time| sys_time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64).unwrap_or(0);
-                        if let Err(e) = q.push(&path_str, mtime) {
+                        if let Err(e) = q.push(&path_str, mtime, "none", 0, 0) {
                             tracing::error!("Failed to enqueue file {}: {:?}", path_str, e);
                         } else {
                             files_queued += 1;

@@ -22,9 +22,10 @@ defmodule AxonDashboardWeb.StatusLiveTest do
          }
        }}
     )
-    
+
     # Retry assertion for race condition resilience
-    assert_receive _, 10 # small yield
+    # small yield
+    assert_receive _, 10
     assert render(view) =~ "lib/core.ex"
   end
 
@@ -35,7 +36,7 @@ defmodule AxonDashboardWeb.StatusLiveTest do
       view.pid,
       {:bridge_event, %{"ScanComplete" => %{"total_files" => 10, "duration_ms" => 100}}}
     )
-    
+
     # Wait for the re-render explicitly by asserting the rendered output directly
     assert render(view) =~ "Fleet Ingestion Complete"
   end

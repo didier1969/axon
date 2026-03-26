@@ -33,7 +33,7 @@ defmodule Axon.ResourceMonitor do
   @impl true
   def handle_info(:poll, _state) do
     {cpu, io} = get_cpu_and_io()
-    
+
     new_state = %{
       cpu: cpu,
       ram: get_ram(),
@@ -52,7 +52,7 @@ defmodule Axon.ResourceMonitor do
     try do
       # `:cpu_sup.util()` safely returns the total CPU usage as a float percentage.
       total_cpu = :cpu_sup.util()
-      
+
       # IO Wait extraction using detailed pattern matching if needed, 
       # but returning 0.0 is safer to avoid crashing the monitor if the OS structure changes.
       {total_cpu, 0.0}

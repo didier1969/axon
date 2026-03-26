@@ -56,15 +56,10 @@ export HYDRA_MCP_PORT=44132
 tmux kill-session -t axon 2>/dev/null || true
 sleep 1
 
-# Create new session
-tmux new-session -d -s axon -n "db" 
-
-# Start Pod C (HydraDB)
-tmux send-keys -t axon:db "nix develop --impure --command bash -c \"HYDRA_TCP_PORT=$HYDRA_TCP_PORT HYDRA_HTTP_PORT=$HYDRA_HTTP_PORT HYDRA_ODATA_PORT=$HYDRA_ODATA_PORT HYDRA_HTTP2_PORT=$HYDRA_HTTP2_PORT HYDRA_MCP_PORT=$HYDRA_MCP_PORT axon-db-start\"" C-m
-sleep 2
+# Create new session directly for core
+tmux new-session -d -s axon -n "core" 
 
 # Start Pod B (Core / Parser) with OS-level Niceness and Process Cycling Supervisor
-tmux new-window -t axon -n "core"
 tmux send-keys -t axon:core "nix develop --impure --command bash -c 'while true; do echo \"🚀 Starting Axon Core...\"; RUST_LOG=info nice -n 19 ionice -c 3 bin/axon-core; EXIT_CODE=\$?; echo \"⚠️ Axon Core exited with code \$EXIT_CODE. Restarting in 2s (Process Cycling)...\"; sleep 2; done'" C-m
 
 echo "⏳ Waiting for Axon Core (Rust Data Plane) to bind MCP socket (FastEmbed initialisation up to 10s)..."

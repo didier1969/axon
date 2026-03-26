@@ -16,8 +16,8 @@ defmodule Axon.Watcher.PoolFacade do
   @doc """
   Sends a single file to Axon Core for parsing and ingestion.
   """
-  def parse(path, lane \\ "fast") do
-    GenServer.call(__MODULE__, {:parse, path, lane}, 30_000)
+  def parse(path, lane \\ "fast", trace_id \\ "none", t0 \\ 0, t1 \\ 0) do
+    GenServer.call(__MODULE__, {:parse, path, lane, trace_id, t0, t1}, 30_000)
   end
 
   @doc """
@@ -43,9 +43,17 @@ defmodule Axon.Watcher.PoolFacade do
     {:noreply, state}
   end
 
-  def handle_call({:parse, path, lane}, _from, state) do
+  def handle_call({:parse, path, lane, trace_id, t0, t1}, _from, state) do
     if state.socket do
-      payload = Jason.encode!(%{"path" => path, "lane" => lane})
+      payload =
+        Jason.encode!(%{
+          "path" => path,
+          "lane" => lane,
+          "trace_id" => trace_id,
+          "t0" => t0,
+          "t1" => t1
+        })
+
       # We use a protocol: "PARSE_FILE <json_payload>\n"
       case :gen_tcp.send(state.socket, "PARSE_FILE #{payload}\n") do
         :ok ->
@@ -91,7 +99,19 @@ defmodule Axon.Watcher.PoolFacade do
           sec = payload["security_score"] || 100
           cov = payload["coverage_score"] || 0
           entries = payload["entry_points"] || 0
-          
+
+          # Telemetry Tracer Checkpoint T4 (Return to Elixir)
+          t0 = payload["t0"] || 0
+          t1 = payload["t1"] || 0
+          t2 = payload["t2"] || 0
+          t3 = payload["t3"] || 0
+          t4 = payload["t4"] || 0
+          trace_id = payload["trace_id"] || "none"
+
+          if t0 > 0 and trace_id != "none" do
+            Axon.Watcher.Tracer.record_trace(trace_id, path, t0, t1, t2, t3, t4)
+          end
+
           # Mettre à jour la base de données SQLite pour l'interface
           try do
             Axon.Watcher.Tracking.mark_file_status!(path, "indexed", %{
@@ -101,27 +121,33 @@ defmodule Axon.Watcher.PoolFacade do
               coverage_score: cov,
               is_entry_point: entries > 0
             })
-            
+
             # Mettre à jour le cache en mémoire pour éviter la charge SQLite
             project = Axon.Watcher.Tracking.get_project_for_file(path)
+
             if project do
-               Axon.Watcher.StatsCache.increment_file_stats(project.name, %{
-                 completed: 1,
-                 symbols: syms,
-                 relations: rels,
-                 entries: entries,
-                 security: sec,
-                 coverage: cov
-               })
+              Axon.Watcher.StatsCache.increment_file_stats(project.name, %{
+                completed: 1,
+                symbols: syms,
+                relations: rels,
+                entries: entries,
+                security: sec,
+                coverage: cov
+              })
             end
-            
+
             # Publier l'évènement pour le LiveView
-            Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", {:file_indexed, path, :ok})
+            Phoenix.PubSub.broadcast(
+              AxonDashboard.PubSub,
+              "bridge_events",
+              {:file_indexed, path, :ok}
+            )
           rescue
             e -> Logger.warning("[Pod A] Failed to update tracking for #{path}: #{inspect(e)}")
           end
 
-        _ -> :ok
+        _ ->
+          :ok
       end
     end)
 

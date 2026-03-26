@@ -213,7 +213,7 @@ impl Parser for JavaParser {
             );
         }
 
-        ExtractionResult { symbols, relations }
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }
 

@@ -6,6 +6,10 @@ use tracing::{info, error, info_span};
 #[derive(Debug, Clone)]
 pub struct Task {
     pub path: String,
+    pub trace_id: String,
+    pub t0: i64,
+    pub t1: i64,
+    pub t2: i64,
 }
 
 pub struct QueueStore {
@@ -20,11 +24,17 @@ impl QueueStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         
+        // Drop table to ensure new schema is applied (ephemeral queue anyway)
+        let _ = conn.execute("DROP TABLE IF EXISTS queue", []);
+
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS queue (
+            "CREATE TABLE queue (
                 path TEXT PRIMARY KEY,
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 mtime INTEGER NOT NULL DEFAULT 0,
+                trace_id TEXT NOT NULL,
+                t0 INTEGER NOT NULL,
+                t1 INTEGER NOT NULL,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )",
             [],
@@ -41,18 +51,21 @@ impl QueueStore {
         })
     }
 
-    pub fn push(&self, path: &str, mtime: i64) -> Result<()> {
+    pub fn push(&self, path: &str, mtime: i64, trace_id: &str, t0: i64, t1: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         // Insert or Update if mtime has changed (file modified)
         conn.execute(
-            "INSERT INTO queue (path, status, mtime) 
-             VALUES (?1, 'PENDING', ?2)
+            "INSERT INTO queue (path, status, mtime, trace_id, t0, t1) 
+             VALUES (?1, 'PENDING', ?2, ?3, ?4, ?5)
              ON CONFLICT(path) DO UPDATE SET 
              status = 'PENDING',
              mtime = excluded.mtime,
+             trace_id = excluded.trace_id,
+             t0 = excluded.t0,
+             t1 = excluded.t1,
              updated_at = CURRENT_TIMESTAMP
              WHERE queue.mtime != excluded.mtime",
-            params![path, mtime],
+            params![path, mtime, trace_id, t0, t1],
         )?;
         Ok(())
     }
@@ -72,14 +85,14 @@ impl QueueStore {
             }
         };
 
-        let row: Result<String> = tx.query_row(
-            "SELECT path FROM queue WHERE status = 'PENDING' LIMIT 1",
+        let row: Result<(String, String, i64, i64)> = tx.query_row(
+            "SELECT path, trace_id, t0, t1 FROM queue WHERE status = 'PENDING' LIMIT 1",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         );
 
         match row {
-            Ok(path) => {
+            Ok((path, trace_id, t0, t1)) => {
                 if let Err(e) = tx.execute("UPDATE queue SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP WHERE path = ?1", params![&path]) {
                     error!("Failed to mark task as PROCESSING: {}", e);
                     let _ = tx.rollback();
@@ -89,7 +102,8 @@ impl QueueStore {
                     error!("Failed to commit task pop: {}", e);
                     return None;
                 }
-                Some(Task { path })
+                let t2 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+                Some(Task { path, trace_id, t0, t1, t2 })
             }
             Err(_) => {
                 let _ = tx.rollback();
@@ -105,14 +119,5 @@ impl QueueStore {
             params![path],
         )?;
         Ok(())
-    }
-
-    pub fn count_pending(&self) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT count(*) FROM queue WHERE status = 'PENDING'",
-            [],
-            |row| row.get(0),
-        )
     }
 }

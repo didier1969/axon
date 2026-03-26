@@ -27,13 +27,13 @@ impl Parser for DatalogParser {
             Ok(f) => f,
             Err(e) => {
                 error!("Failed to create temp file for Datalog parser: {}", e);
-                return ExtractionResult { symbols, relations };
+                return ExtractionResult { project_slug: None, symbols, relations };
             }
         };
 
         if let Err(e) = temp_file.write_all(content.as_bytes()) {
             error!("Failed to write content to temp file for Datalog parser: {}", e);
-            return ExtractionResult { symbols, relations };
+            return ExtractionResult { project_slug: None, symbols, relations };
         }
 
         let current_dir = std::env::current_dir().unwrap_or_default();
@@ -64,7 +64,7 @@ impl Parser for DatalogParser {
             }
         }
 
-        ExtractionResult { symbols, relations }
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }
 

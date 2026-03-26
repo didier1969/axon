@@ -41,36 +41,45 @@ defmodule Axon.Watcher.StatsCache do
   @impl true
   def handle_cast({:increment, project_name, diff}, state) do
     # Update the project stats incrementally
-    new_projects = Map.update(state.projects, project_name, default_project_stats(diff), fn current ->
-      new_completed = current.completed + Map.get(diff, :completed, 0)
-      
-      # Calculate new moving averages for security and coverage
-      new_sec = 
-        if new_completed > 0 do
-          Float.round(((current.security * current.completed) + (Map.get(diff, :security, 100) * Map.get(diff, :completed, 0))) / new_completed, 2)
-        else
-          current.security
-        end
-        
-      new_cov = 
-        if new_completed > 0 do
-          Float.round(((current.coverage * current.completed) + (Map.get(diff, :coverage, 0) * Map.get(diff, :completed, 0))) / new_completed, 2)
-        else
-          current.coverage
-        end
+    new_projects =
+      Map.update(state.projects, project_name, default_project_stats(diff), fn current ->
+        new_completed = current.completed + Map.get(diff, :completed, 0)
 
-      %{
-        total: current.total + Map.get(diff, :total, 0),
-        completed: new_completed,
-        failed: current.failed + Map.get(diff, :failed, 0),
-        ignored: current.ignored + Map.get(diff, :ignored, 0),
-        symbols: current.symbols + Map.get(diff, :symbols, 0),
-        relations: current.relations + Map.get(diff, :relations, 0),
-        entries: current.entries + Map.get(diff, :entries, 0),
-        security: new_sec,
-        coverage: new_cov
-      }
-    end)
+        # Calculate new moving averages for security and coverage
+        new_sec =
+          if new_completed > 0 do
+            Float.round(
+              (current.security * current.completed +
+                 Map.get(diff, :security, 100) * Map.get(diff, :completed, 0)) / new_completed,
+              2
+            )
+          else
+            current.security
+          end
+
+        new_cov =
+          if new_completed > 0 do
+            Float.round(
+              (current.coverage * current.completed +
+                 Map.get(diff, :coverage, 0) * Map.get(diff, :completed, 0)) / new_completed,
+              2
+            )
+          else
+            current.coverage
+          end
+
+        %{
+          total: current.total + Map.get(diff, :total, 0),
+          completed: new_completed,
+          failed: current.failed + Map.get(diff, :failed, 0),
+          ignored: current.ignored + Map.get(diff, :ignored, 0),
+          symbols: current.symbols + Map.get(diff, :symbols, 0),
+          relations: current.relations + Map.get(diff, :relations, 0),
+          entries: current.entries + Map.get(diff, :entries, 0),
+          security: new_sec,
+          coverage: new_cov
+        }
+      end)
 
     # Broadcast to LiveView that stats have changed, allowing event-driven UI updates!
     Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", :stats_updated)
@@ -81,18 +90,19 @@ defmodule Axon.Watcher.StatsCache do
   @impl true
   def handle_info(:sync_from_db, state) do
     Logger.debug("[StatsCache] Performing full DB synchronization...")
+
     try do
       # Load heavy stats from DB once
       stats = Axon.Watcher.Tracking.get_dashboard_stats()
-      
+
       # Schedule next sync
       Process.send_after(self(), :sync_from_db, @sync_interval)
-      
+
       Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", :stats_updated)
-      
+
       {:noreply, %{state | projects: stats.directories, last_files: stats.last_files}}
     catch
-      :exit, _ -> 
+      :exit, _ ->
         Process.send_after(self(), :sync_from_db, @sync_interval)
         {:noreply, state}
     end

@@ -26,7 +26,8 @@ config :axon_dashboard, Oban,
     indexing_critical: [limit: 10],
     indexing_hot: [limit: 5],
     indexing_default: [limit: 10],
-    indexing_titan: [limit: 1] # Strict single-thread isolation for massive >1MB files
+    # Strict single-thread isolation for massive >1MB files
+    indexing_titan: [limit: 1]
   ]
 
 config :axon_dashboard, Axon.BackpressureController,

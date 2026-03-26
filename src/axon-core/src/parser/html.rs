@@ -207,7 +207,7 @@ impl Parser for HtmlParser {
             self.walk(tree.root_node(), content.as_bytes(), &mut symbols, &mut relations);
         }
 
-        ExtractionResult { symbols, relations }
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }
 

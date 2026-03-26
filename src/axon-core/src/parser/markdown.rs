@@ -240,7 +240,7 @@ impl Parser for MarkdownParser {
         self.extract_tables(&lines, &mut symbols);
         self.extract_links_and_fences(&lines, &mut symbols, &mut relations);
 
-        ExtractionResult { symbols, relations }
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }
 

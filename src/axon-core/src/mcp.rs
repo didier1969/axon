@@ -961,13 +961,13 @@ mod tests {
     #[test]
     fn test_axon_architectural_drift() {
         let server = create_test_server();
-        server.graph_store.write().execute("MERGE (f:File {path: 'ui/app.js'})").unwrap();
-        server.graph_store.write().execute("MERGE (s1:Symbol {name: 'fetchData'})").unwrap();
-        server.graph_store.write().execute("MERGE (f2:File {path: 'db/repo.rs'})").unwrap();
-        server.graph_store.write().execute("MERGE (s2:Symbol {name: 'executeSQL'})").unwrap();
-        server.graph_store.write().execute("MATCH (f:File {path: 'ui/app.js'}), (s:Symbol {name: 'fetchData'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
-        server.graph_store.write().execute("MATCH (f:File {path: 'db/repo.rs'}), (s:Symbol {name: 'executeSQL'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
-        server.graph_store.write().execute("MATCH (s1:Symbol {name: 'fetchData'}), (s2:Symbol {name: 'executeSQL'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'ui/app.js', project_slug: 'global'})").unwrap();
+        server.graph_store.write().execute("MERGE (s1:Symbol {id: 'global::fetchData', name: 'fetchData', project_slug: 'global'})").unwrap();
+        server.graph_store.write().execute("MERGE (f2:File {path: 'db/repo.rs', project_slug: 'global'})").unwrap();
+        server.graph_store.write().execute("MERGE (s2:Symbol {id: 'global::executeSQL', name: 'executeSQL', project_slug: 'global'})").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'ui/app.js'}), (s:Symbol {id: 'global::fetchData'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'db/repo.rs'}), (s:Symbol {id: 'global::executeSQL'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.write().execute("MATCH (s1:Symbol {id: 'global::fetchData'}), (s2:Symbol {id: 'global::executeSQL'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
@@ -989,7 +989,7 @@ mod tests {
         let server = create_test_server();
         server.graph_store.write().execute("MERGE (f:File {path: 'test_proj/f1.rs'})").unwrap();
         server.graph_store.write().execute("MERGE (f:File {path: 'test_proj/f2.rs'})").unwrap();
-        server.graph_store.write().execute("MERGE (s:Symbol {name: 'auth_func'})").unwrap();
+        server.graph_store.write().execute("MERGE (s:Symbol {id: 'global::', name: 'auth_func'})").unwrap();
         server.graph_store.write().execute("MATCH (f:File {path: 'test_proj/f1.rs'}), (s:Symbol {name: 'auth_func'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
@@ -1040,8 +1040,8 @@ mod tests {
     #[test]
     fn test_axon_inspect() {
         let server = create_test_server();
-        server.graph_store.write().execute("MERGE (s:Symbol {name: 'core_func', kind: 'function', tested: true})").unwrap();
-        server.graph_store.write().execute("MERGE (c:Symbol {name: 'caller_func'})").unwrap();
+        server.graph_store.write().execute("MERGE (s:Symbol {id: 'global::', name: 'core_func', kind: 'function', tested: true})").unwrap();
+        server.graph_store.write().execute("MERGE (c:Symbol {id: 'global::caller_func', name: 'caller_func'})").unwrap();
         server.graph_store.write().execute("MATCH (c:Symbol {name: 'caller_func'}), (s:Symbol {name: 'core_func'}) MERGE (c)-[:CALLS]->(s)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
@@ -1068,9 +1068,9 @@ mod tests {
         let server = create_test_server();
         server.graph_store.write().execute("MERGE (f:File {path: 'src/api.rs'})").unwrap();
         server.graph_store.write().execute("MERGE (f:File {path: 'src/api_dummy.rs'})").unwrap();
-        server.graph_store.write().execute("MERGE (s1:Symbol {name: 'user_input', kind: 'function', tested: false})").unwrap();
-        server.graph_store.write().execute("MERGE (s2:Symbol {name: 'run_task', kind: 'function', tested: false})").unwrap();
-        server.graph_store.write().execute("MERGE (s3:Symbol {name: 'eval', kind: 'function', tested: false})").unwrap();
+        server.graph_store.write().execute("MERGE (s1:Symbol {id: 'global::', name: 'user_input', kind: 'function', tested: false})").unwrap();
+        server.graph_store.write().execute("MERGE (s2:Symbol {id: 'global::run_task', name: 'run_task', kind: 'function', tested: false})").unwrap();
+        server.graph_store.write().execute("MERGE (s3:Symbol {id: 'global::eval', name: 'eval', kind: 'function', tested: false})").unwrap();
         
         server.graph_store.write().execute("MATCH (f:File {path: 'src/api.rs'}), (s1:Symbol {name: 'user_input'}) MERGE (f)-[:CONTAINS]->(s1)").unwrap();
         server.graph_store.write().execute("MATCH (s1:Symbol {name: 'user_input'}), (s2:Symbol {name: 'run_task'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
@@ -1100,8 +1100,8 @@ mod tests {
         let server = create_test_server();
         // Insert a file with a symbol calling 'unwrap'
         server.graph_store.write().execute("MERGE (f:File {path: 'src/danger.rs'})").unwrap();
-        server.graph_store.write().execute("MERGE (s:Symbol {name: 'risky_func', kind: 'function'})").unwrap();
-        server.graph_store.write().execute("MERGE (d:Symbol {name: 'unwrap', kind: 'method'})").unwrap();
+        server.graph_store.write().execute("MERGE (s:Symbol {id: 'global::', name: 'risky_func', kind: 'function'})").unwrap();
+        server.graph_store.write().execute("MERGE (d:Symbol {id: 'global::unwrap', name: 'unwrap', kind: 'method'})").unwrap();
         server.graph_store.write().execute("MATCH (f:File {path: 'src/danger.rs'}), (s:Symbol {name: 'risky_func'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
         server.graph_store.write().execute("MATCH (s:Symbol {name: 'risky_func'}), (d:Symbol {name: 'unwrap'}) MERGE (s)-[:CALLS]->(d)").unwrap();
 
@@ -1129,7 +1129,7 @@ mod tests {
     fn test_axon_audit_technical_debt_comments() {
         let server = create_test_server();
         server.graph_store.write().execute("MERGE (f:File {path: 'src/todo.rs'})").unwrap();
-        server.graph_store.write().execute("MERGE (s:Symbol {name: '// TODO: Fix this', kind: 'TODO'})").unwrap();
+        server.graph_store.write().execute("MERGE (s:Symbol {id: 'global::', name: '// TODO: Fix this', kind: 'TODO'})").unwrap();
         server.graph_store.write().execute("MATCH (f:File {path: 'src/todo.rs'}), (s:Symbol {name: '// TODO: Fix this'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
@@ -1156,7 +1156,7 @@ mod tests {
     fn test_axon_audit_secrets_detection() {
         let server = create_test_server();
         server.graph_store.write().execute("MERGE (f:File {path: 'src/config.rs'})").unwrap();
-        server.graph_store.write().execute("MERGE (s:Symbol {name: 'SECRET_API_KEY: Found potential hardcoded credential', kind: 'SECRET_API_KEY'})").unwrap();
+        server.graph_store.write().execute("MERGE (s:Symbol {id: 'global::', name: 'SECRET_API_KEY: Found potential hardcoded credential', kind: 'SECRET_API_KEY'})").unwrap();
         server.graph_store.write().execute("MATCH (f:File {path: 'src/config.rs'}), (s:Symbol {name: 'SECRET_API_KEY: Found potential hardcoded credential'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
@@ -1185,9 +1185,9 @@ mod tests {
         // Setup a multi-hop path: elixir_func -[:CALLS_NIF]-> rust_nif -[:CALLS]-> unsafe_call
         server.graph_store.write().execute("MERGE (f:File {path: 'src/api.ex'})").unwrap();
         server.graph_store.write().execute("MERGE (f:File {path: 'src/api_dummy.ex'})").unwrap();
-        server.graph_store.write().execute("MERGE (s1:Symbol {name: 'elixir_func', kind: 'function', tested: false})").unwrap();
-        server.graph_store.write().execute("MERGE (s2:Symbol {name: 'rust_nif', kind: 'function', tested: false, is_nif: true})").unwrap();
-        server.graph_store.write().execute("MERGE (s3:Symbol {name: 'unsafe_block', kind: 'function', tested: false, is_unsafe: true})").unwrap();
+        server.graph_store.write().execute("MERGE (s1:Symbol {id: 'global::', name: 'elixir_func', kind: 'function', tested: false})").unwrap();
+        server.graph_store.write().execute("MERGE (s2:Symbol {id: 'global::rust_nif', name: 'rust_nif', kind: 'function', tested: false, is_nif: true})").unwrap();
+        server.graph_store.write().execute("MERGE (s3:Symbol {id: 'global::unsafe_block', name: 'unsafe_block', kind: 'function', tested: false, is_unsafe: true})").unwrap();
         
         server.graph_store.write().execute("MATCH (f:File {path: 'src/api.ex'}), (s1:Symbol {name: 'elixir_func'}) MERGE (f)-[:CONTAINS]->(s1)").unwrap();
         server.graph_store.write().execute("MATCH (s1:Symbol {name: 'elixir_func'}), (s2:Symbol {name: 'rust_nif'}) MERGE (s1)-[:CALLS_NIF]->(s2)").unwrap();
@@ -1219,12 +1219,12 @@ mod tests {
         let server = create_test_server();
         server.graph_store.write().execute("MERGE (f:File {path: 'src/god.rs'})").unwrap();
         server.graph_store.write().execute("MERGE (f:File {path: 'src/god_dummy.rs'})").unwrap();
-        server.graph_store.write().execute("MERGE (god:Symbol {name: 'GodClass', kind: 'class', tested: false})").unwrap();
+        server.graph_store.write().execute("MERGE (god:Symbol {id: 'global::', name: 'GodClass', kind: 'class', tested: false})").unwrap();
         server.graph_store.write().execute("MATCH (f:File {path: 'src/god.rs'}), (s:Symbol {name: 'GodClass'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
         
         for i in 0..10 {
-            server.graph_store.write().execute(&format!("MERGE (dep{i}:Symbol {{name: 'dep{i}'}})")).unwrap();
-            server.graph_store.write().execute(&format!("MATCH (dep:Symbol {{name: 'dep{i}'}}), (god:Symbol {{name: 'GodClass'}}) MERGE (dep)-[:CALLS]->(god)")).unwrap();
+            server.graph_store.write().execute(&format!("MERGE (dep{i}:Symbol {{id: 'global::dep{i}', name: 'dep{i}', project_slug: 'global'}})")).unwrap();
+            server.graph_store.write().execute(&format!("MATCH (dep:Symbol {{id: 'global::dep{i}'}}), (god:Symbol {{id: 'global::'}}) MERGE (dep)-[:CALLS]->(god)")).unwrap();
         }
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),

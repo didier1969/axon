@@ -458,10 +458,11 @@ impl Parser for ElixirParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let tree = match parse_with_wasm_safe("elixir", self.wasm_bytes, content) {
             Some(t) => t,
-            None => return ExtractionResult { symbols: Vec::new(), relations: Vec::new() },
+            None => return ExtractionResult { project_slug: None, symbols: Vec::new(), relations: Vec::new() },
         };
 
         let mut result = ExtractionResult {
+            project_slug: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };

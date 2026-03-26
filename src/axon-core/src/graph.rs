@@ -193,8 +193,8 @@ impl GraphStore {
     }
 
     fn init_schema(&self) -> Result<()> {
-        self.execute("CREATE NODE TABLE IF NOT EXISTS File (path STRING, PRIMARY KEY (path))")?;
-        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, is_unsafe BOOLEAN, is_nif BOOLEAN, is_entry_point BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
+        self.execute("CREATE NODE TABLE IF NOT EXISTS File (path STRING, project_slug STRING, PRIMARY KEY (path))")?;
+        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (id STRING, name STRING, project_slug STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, is_unsafe BOOLEAN, is_nif BOOLEAN, is_entry_point BOOLEAN, embedding FLOAT[384], PRIMARY KEY (id))")?;
         self.execute("CREATE NODE TABLE IF NOT EXISTS Project (name STRING, PRIMARY KEY (name))")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CONTAINS (FROM File TO Symbol)")?;
         self.execute("CREATE REL TABLE IF NOT EXISTS CALLS (FROM Symbol TO Symbol)")?;
@@ -219,8 +219,10 @@ impl GraphStore {
     }
 
     pub fn insert_file_data(&self, path: &str, result: &crate::parser::ExtractionResult) -> Result<()> {
+        let slug = result.project_slug.clone().unwrap_or_else(|| "global".to_string());
+
         // 1. Insert/Merge File node
-        self.execute_param("MERGE (f:File {path: $p})", &serde_json::json!({"p": path}))?;
+        self.execute_param("MERGE (f:File {path: $p}) SET f.project_slug = $slug", &serde_json::json!({"p": path, "slug": slug}))?;
 
         // 2. Insert Symbols
         let mut seen_symbols = std::collections::HashSet::new();
@@ -232,16 +234,21 @@ impl GraphStore {
             let is_unsafe = sym.properties.get("unsafe").map(|s| s == "true").unwrap_or(false);
             let is_nif = sym.properties.get("is_nif").map(|s| s == "true").unwrap_or(false);
 
+            let fqn = format!("{}::{}", slug, sym.name);
+
             let sym_query = "MATCH (f:File {path: $path}) \
-                             MERGE (s:Symbol {name: $name}) \
-                             SET s.kind = $kind, s.tested = $tested, s.is_public = $is_public, \
+                             MERGE (s:Symbol {id: $fqn}) \
+                             SET s.name = $name, s.project_slug = $slug, \
+                                 s.kind = $kind, s.tested = $tested, s.is_public = $is_public, \
                                  s.is_unsafe = $is_unsafe, s.is_nif = $is_nif, \
                                  s.is_entry_point = $is_ep \
                              MERGE (f)-[:CONTAINS]->(s)";
 
-            let mut params = serde_json::json!({
+            let params = serde_json::json!({
                 "path": path,
+                "fqn": fqn,
                 "name": sym.name,
+                "slug": slug,
                 "kind": sym.kind,
                 "tested": is_test,
                 "is_public": sym.is_public,
@@ -266,20 +273,25 @@ impl GraphStore {
 
             if rel.from.is_empty() || rel.from == "file" || rel.from == "method" {
                 for sym in &result.symbols {
-                    let rel_query = format!("MATCH (a:Symbol {{name: $from}}), (b:Symbol {{name: $to}}) MERGE (a)-[:{}]->(b)", safe_rel_type);
-                    self.execute_param(&rel_query, &serde_json::json!({"from": sym.name, "to": rel.to}))?;
+                    let from_fqn = format!("{}::{}", slug, sym.name);
+                    let to_fqn = format!("{}::{}", slug, rel.to);
+                    let rel_query = format!("MATCH (a:Symbol {{id: $from}}), (b:Symbol {{id: $to}}) MERGE (a)-[:{}]->(b)", safe_rel_type);
+                    self.execute_param(&rel_query, &serde_json::json!({"from": from_fqn, "to": to_fqn}))?;
                 }
             } else {
-                let rel_query = format!("MATCH (a:Symbol {{name: $from}}), (b:Symbol {{name: $to}}) MERGE (a)-[:{}]->(b)", safe_rel_type);
-                self.execute_param(&rel_query, &serde_json::json!({"from": rel.from, "to": rel.to}))?;
+                let from_fqn = format!("{}::{}", slug, rel.from);
+                let to_fqn = format!("{}::{}", slug, rel.to);
+                let rel_query = format!("MATCH (a:Symbol {{id: $from}}), (b:Symbol {{id: $to}}) MERGE (a)-[:{}]->(b)", safe_rel_type);
+                self.execute_param(&rel_query, &serde_json::json!({"from": from_fqn, "to": to_fqn}))?;
             }
-        }        Ok(())
+        }
+        Ok(())
     }
     pub fn get_security_audit(&self, project_name: &str) -> Result<(usize, String)> {
         let count_query = if project_name == "*" || project_name.is_empty() {
             "MATCH (d:Symbol) WHERE (d.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR d.is_unsafe = true) RETURN count(d)".to_string()
         } else {
-            format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND (s.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR s.is_unsafe = true) RETURN count(s)", project_name)
+            format!("MATCH (s:Symbol {{project_slug: '{}'}}) WHERE (s.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR s.is_unsafe = true) RETURN count(s)", project_name)
         };
 
         let issues = self.query_count(&count_query).unwrap_or(0);
@@ -295,9 +307,9 @@ impl GraphStore {
                  WHERE danger.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR danger.is_unsafe = true \
                  RETURN f.path + ' -> ' + s.name + ' calls ' + danger.name AS path LIMIT 5".to_string()
             } else {
-                format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS|CALLS_NIF|CALLS_OTP*1..3]->(danger:Symbol) \
-                         WHERE f.path CONTAINS '{}' AND (danger.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR danger.is_unsafe = true) \
-                         RETURN f.path + ' -> ' + s.name + ' calls ' + danger.name AS path LIMIT 5", project_name)
+                format!("MATCH (f:File {{project_slug: '{}'}})-[:CONTAINS]->(s:Symbol {{project_slug: '{}'}})-[:CALLS|CALLS_NIF|CALLS_OTP*1..3]->(danger:Symbol {{project_slug: '{}'}}) \
+                         WHERE (danger.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR danger.is_unsafe = true) \
+                         RETURN f.path + ' -> ' + s.name + ' calls ' + danger.name AS path LIMIT 5", project_name, project_name, project_name)
             };
             self.query_json(&path_query).unwrap_or_else(|_| "[]".to_string())
         } else {
@@ -314,11 +326,11 @@ impl GraphStore {
              WITH f, COALESCE(debt.name, s.kind + ': ' + s.name) as issue \
              RETURN DISTINCT f.path, issue LIMIT 50".to_string()
         } else {
-            format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
-                     OPTIONAL MATCH (s)-[:CALLS]->(debt) \
-                     WHERE f.path CONTAINS '{}' AND (debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME'] OR s.kind STARTS WITH 'SECRET_') \
+            format!("MATCH (f:File {{project_slug: '{}'}})-[:CONTAINS]->(s:Symbol {{project_slug: '{}'}}) \
+                     OPTIONAL MATCH (s)-[:CALLS]->(debt:Symbol {{project_slug: '{}'}}) \
+                     WHERE (debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME'] OR s.kind STARTS WITH 'SECRET_') \
                      WITH f, COALESCE(debt.name, s.kind + ': ' + s.name) as issue \
-                     RETURN DISTINCT f.path, issue LIMIT 50", project_name)
+                     RETURN DISTINCT f.path, issue LIMIT 50", project_name, project_name, project_name)
         };
 
         match self.query_json(&query) {
@@ -344,8 +356,8 @@ impl GraphStore {
             )
         } else {
             (
-                format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.kind = 'function' RETURN count(s)", project_name),
-                format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.kind = 'function' AND s.tested = true RETURN count(s)", project_name)
+                format!("MATCH (s:Symbol {{project_slug: '{}'}}) WHERE s.kind = 'function' RETURN count(s)", project_name),
+                format!("MATCH (s:Symbol {{project_slug: '{}'}}) WHERE s.kind = 'function' AND s.tested = true RETURN count(s)", project_name)
             )
         };
         
@@ -357,20 +369,19 @@ impl GraphStore {
     }
 
     pub fn get_god_objects(&self, project_name: &str) -> Result<Vec<String>> {
-        let filter = if project_name == "*" || project_name.is_empty() {
-            "".to_string()
-        } else {
-            format!("WHERE f.path CONTAINS '{}'", project_name)
-        };
-        // Find symbols in the project that have a high in-degree (>= 10 dependents)
-        let query = format!(
+        let query = if project_name == "*" || project_name.is_empty() {
             "MATCH (f:File)-[:CONTAINS]->(s:Symbol)<-[:CALLS]-(caller:Symbol)
-             {}
              WITH s, count(caller) AS degree
              WHERE degree >= 10
-             RETURN s.name",
-            filter
-        );
+             RETURN s.name".to_string()
+        } else {
+            format!("MATCH (s:Symbol {{project_slug: '{}'}})<-[:CALLS]-(caller:Symbol {{project_slug: '{}'}})
+             WITH s, count(caller) AS degree
+             WHERE degree >= 10
+             RETURN s.name", project_name, project_name)
+        };
+        // Find symbols in the project that have a high in-degree (>= 10 dependents)
+
         let result_json = self.query_json(&query).unwrap_or_else(|_| "[]".to_string());        
         let mut god_objects = Vec::new();
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result_json) {
@@ -464,6 +475,7 @@ mod tests {
         let store = GraphStore::new(":memory:").unwrap();
 
         let mut result = crate::parser::ExtractionResult {
+            project_slug: None,
             symbols: vec![
                 crate::parser::Symbol {
                     name: "DummyFunc".to_string(),

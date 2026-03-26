@@ -29,9 +29,30 @@ defmodule Axon.Scanner do
 
   defp default_extensions do
     [
-      "py", "ex", "exs", "rs", "go", "java", "c", "cpp", "h",
-      "js", "jsx", "ts", "tsx", "sql", "md", "markdown",
-      "txt", "json", "yml", "yaml", "toml", "conf", "html", "css"
+      "py",
+      "ex",
+      "exs",
+      "rs",
+      "go",
+      "java",
+      "c",
+      "cpp",
+      "h",
+      "js",
+      "jsx",
+      "ts",
+      "tsx",
+      "sql",
+      "md",
+      "markdown",
+      "txt",
+      "json",
+      "yml",
+      "yaml",
+      "toml",
+      "conf",
+      "html",
+      "css"
     ]
   end
 end

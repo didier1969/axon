@@ -73,7 +73,11 @@ defmodule AxonDashboardWeb.StatusLive do
 
     projects =
       Enum.reduce(dirs, %{}, fn {dir, info}, acc ->
-        progress = if info.total > 0, do: round((info.completed + info.failed + info.ignored) / info.total * 100), else: 0
+        progress =
+          if info.total > 0,
+            do: round((info.completed + info.failed + info.ignored) / info.total * 100),
+            else: 0
+
         Map.put(acc, dir, %{
           symbols: info.symbols,
           relations: info.relations,
@@ -131,7 +135,7 @@ defmodule AxonDashboardWeb.StatusLive do
   def handle_info(:tick_time, socket) do
     {:noreply, assign(socket, sys_time: Time.utc_now() |> Time.truncate(:second))}
   end
-  
+
   def handle_info(:stats_updated, socket) do
     {:noreply, fetch_and_assign_stats(socket)}
   end
@@ -141,33 +145,52 @@ defmodule AxonDashboardWeb.StatusLive do
     {:noreply, assign(socket, status: :processing)}
   end
 
-  def handle_info({:telemetry_event, [:axon, :backpressure, :pressure_computed], measurements, metadata}, socket) do
-    {:noreply, assign(socket, 
-      system_pressure: measurements.pressure,
-      cpu_load: metadata.cpu,
-      ram_load: metadata.ram,
-      io_wait: metadata.io
-    )}
+  def handle_info(
+        {:telemetry_event, [:axon, :backpressure, :pressure_computed], measurements, metadata},
+        socket
+      ) do
+    {:noreply,
+     assign(socket,
+       system_pressure: measurements.pressure,
+       cpu_load: metadata.cpu,
+       ram_load: metadata.ram,
+       io_wait: metadata.io
+     )}
   end
 
-  def handle_info({:telemetry_event, [:axon, :backpressure, :queues_paused], _measurements, _metadata}, socket) do
+  def handle_info(
+        {:telemetry_event, [:axon, :backpressure, :queues_paused], _measurements, _metadata},
+        socket
+      ) do
     {:noreply, assign(socket, queues_paused: true, indexing_limit: 0)}
   end
 
-  def handle_info({:telemetry_event, [:axon, :backpressure, :queues_resumed], _measurements, _metadata}, socket) do
+  def handle_info(
+        {:telemetry_event, [:axon, :backpressure, :queues_resumed], _measurements, _metadata},
+        socket
+      ) do
     {:noreply, assign(socket, queues_paused: false)}
   end
 
-  def handle_info({:telemetry_event, [:axon, :backpressure, :limit_adjusted], measurements, _metadata}, socket) do
+  def handle_info(
+        {:telemetry_event, [:axon, :backpressure, :limit_adjusted], measurements, _metadata},
+        socket
+      ) do
     {:noreply, assign(socket, indexing_limit: measurements.limit)}
   end
 
-  def handle_info({:telemetry_event, [:axon, :watcher, :batch_enqueued], measurements, metadata}, socket) do
+  def handle_info(
+        {:telemetry_event, [:axon, :watcher, :batch_enqueued], measurements, metadata},
+        socket
+      ) do
     msg = "[Watcher] Enqueued batch of #{measurements.count} files to #{metadata.queue}"
     {:noreply, assign(socket, last_event: msg)}
   end
 
-  def handle_info({:telemetry_event, [:axon, :watcher, :batch_failed], _measurements, metadata}, socket) do
+  def handle_info(
+        {:telemetry_event, [:axon, :watcher, :batch_failed], _measurements, metadata},
+        socket
+      ) do
     alert = "ERROR: Failed to enqueue batch: #{metadata.error}"
     new_alerts = [alert | socket.assigns.alerts] |> Enum.take(3)
     {:noreply, assign(socket, alerts: new_alerts)}
@@ -203,8 +226,9 @@ defmodule AxonDashboardWeb.StatusLive do
   defp process_event(_, socket), do: socket
 
   def render(assigns) do
-    total_expected = Enum.reduce(assigns.projects, 0, fn {_, info}, acc -> acc + info.total_files end)
-    
+    total_expected =
+      Enum.reduce(assigns.projects, 0, fn {_, info}, acc -> acc + info.total_files end)
+
     progress =
       if total_expected > 0,
         do: round(assigns.total_files_parsed / total_expected * 100),
@@ -225,22 +249,33 @@ defmodule AxonDashboardWeb.StatusLive do
     assigns = assign(assigns, :uptime_str, uptime_str)
 
     ~H"""
-    <LiveView.Witness.HTML.witness_container id="witness-container" class="min-h-screen bg-slate-950 text-slate-200 font-mono antialiased p-4 md:p-8 flex flex-col gap-6">
+    <LiveView.Witness.HTML.witness_container
+      id="witness-container"
+      class="min-h-screen bg-slate-950 text-slate-200 font-mono antialiased p-4 md:p-8 flex flex-col gap-6"
+    >
       
-      <!-- EMERGENCY HUD OVERLAY -->
+    <!-- EMERGENCY HUD OVERLAY -->
       <%= if @witness_alert do %>
         <div class="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/90 backdrop-blur-xl p-6">
           <div class="max-w-3xl w-full bg-slate-900 border-2 border-red-500 rounded-lg overflow-hidden shadow-[0_0_50px_rgba(239,68,68,0.3)]">
             <div class="bg-red-600/20 border-b border-red-500 p-6 flex items-center justify-between">
               <div class="flex items-center gap-4">
                 <div class="w-3 h-3 bg-red-500 rounded-full animate-ping"></div>
-                <h2 class="text-2xl font-black text-white tracking-tighter uppercase italic">CRITICAL_SIGNAL_DETECTED</h2>
+                <h2 class="text-2xl font-black text-white tracking-tighter uppercase italic">
+                  CRITICAL_SIGNAL_DETECTED
+                </h2>
               </div>
-              <button phx-click="dismiss_witness_alert" class="text-white/40 hover:text-white uppercase text-xs font-bold">[ CLOSE ]</button>
+              <button
+                phx-click="dismiss_witness_alert"
+                class="text-white/40 hover:text-white uppercase text-xs font-bold"
+              >
+                [ CLOSE ]
+              </button>
             </div>
             <div class="p-8 space-y-6">
               <div class="bg-black/40 border border-red-500/20 p-6 rounded font-mono text-red-400">
-                {Map.get(@witness_alert, "message") || Map.get(@witness_alert, "error") || inspect(@witness_alert)}
+                {Map.get(@witness_alert, "message") || Map.get(@witness_alert, "error") ||
+                  inspect(@witness_alert)}
               </div>
               <div class="grid grid-cols-2 gap-4">
                 <div class="bg-slate-800/50 p-4 border border-white/5">
@@ -252,25 +287,41 @@ defmodule AxonDashboardWeb.StatusLive do
                   <p class="text-red-400 font-bold">500_SYSTEM_FAULT</p>
                 </div>
               </div>
-              <button phx-click="dismiss_witness_alert" class="w-full bg-red-600 hover:bg-red-500 text-white font-black py-4 rounded uppercase tracking-widest transition-all">
+              <button
+                phx-click="dismiss_witness_alert"
+                class="w-full bg-red-600 hover:bg-red-500 text-white font-black py-4 rounded uppercase tracking-widest transition-all"
+              >
                 Acknowledge & Flush Buffer
               </button>
             </div>
           </div>
         </div>
       <% end %>
-
-      <!-- MAIN HUD TOP BAR (GRID COLS 12) -->
+      
+    <!-- MAIN HUD TOP BAR (GRID COLS 12) -->
       <header class="grid grid-cols-12 gap-4 items-center">
         <div class="col-span-3 flex items-center gap-4 bg-slate-900/50 border border-white/5 p-4 rounded-lg">
           <div class="w-12 h-12 bg-amber-500 flex items-center justify-center rounded shadow-[0_0_20px_rgba(245,158,11,0.3)]">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-8 h-8 text-black">
-              <path fill-rule="evenodd" d="M14.615 1.595a.75.75 0 0 1 .359.852L12.982 9.75h7.268a.75.75 0 0 1 .548 1.262l-10.5 11.25a.75.75 0 0 1-1.272-.704l1.992-8.308H3.75a.75.75 0 0 1-.548-1.262L13.702 1.683a.75.75 0 0 1 .913-.088Z" clip-rule="evenodd" />
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              class="w-8 h-8 text-black"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M14.615 1.595a.75.75 0 0 1 .359.852L12.982 9.75h7.268a.75.75 0 0 1 .548 1.262l-10.5 11.25a.75.75 0 0 1-1.272-.704l1.992-8.308H3.75a.75.75 0 0 1-.548-1.262L13.702 1.683a.75.75 0 0 1 .913-.088Z"
+                clip-rule="evenodd"
+              />
             </svg>
           </div>
           <div>
-            <h1 class="text-2xl font-black italic tracking-tighter text-white uppercase">AXON_<span class="text-amber-500">MAESTRIA</span></h1>
-            <p class="text-[10px] text-amber-500/50 font-bold uppercase tracking-widest">Tactical Control Plane v2.2</p>
+            <h1 class="text-2xl font-black italic tracking-tighter text-white uppercase">
+              AXON_<span class="text-amber-500">MAESTRIA</span>
+            </h1>
+            <p class="text-[10px] text-amber-500/50 font-bold uppercase tracking-widest">
+              Tactical Control Plane v2.2
+            </p>
           </div>
         </div>
 
@@ -280,13 +331,19 @@ defmodule AxonDashboardWeb.StatusLive do
             <span class="text-amber-500 font-mono">{@progress}% COMPLETED</span>
           </div>
           <div class="w-full bg-black/40 h-2 rounded-full overflow-hidden p-[1px] border border-white/5">
-            <div class="bg-amber-500 h-full transition-all duration-1000 shadow-[0_0_15px_rgba(245,158,11,0.5)]" style={"width: #{@progress}%"}></div>
+            <div
+              class="bg-amber-500 h-full transition-all duration-1000 shadow-[0_0_15px_rgba(245,158,11,0.5)]"
+              style={"width: #{@progress}%"}
+            >
+            </div>
           </div>
         </div>
 
         <div class="col-span-3 bg-slate-900/50 border border-white/5 p-4 rounded-lg flex justify-between items-center">
           <div class="text-left">
-            <p class="text-[9px] text-slate-500 uppercase font-black tracking-widest">System Uptime</p>
+            <p class="text-[9px] text-slate-500 uppercase font-black tracking-widest">
+              System Uptime
+            </p>
             <p class="text-xl font-bold text-white tracking-tighter">{@uptime_str}</p>
           </div>
           <div class="text-right">
@@ -295,73 +352,110 @@ defmodule AxonDashboardWeb.StatusLive do
           </div>
         </div>
       </header>
-
-      <!-- SYSTEM INTELLIGENCE HUD -->
+      
+    <!-- SYSTEM INTELLIGENCE HUD -->
       <section class="grid grid-cols-12 gap-4">
         
-        <!-- RESOURCE METRICS -->
+    <!-- RESOURCE METRICS -->
         <div class="col-span-4 bg-slate-900/50 border border-white/5 rounded-lg p-6 flex flex-col gap-6">
           <h3 class="text-xs font-black text-slate-400 uppercase tracking-[0.3em] flex items-center gap-2">
-            <div class={"w-2 h-2 rounded-full #{if @queues_paused, do: "bg-red-500 animate-pulse", else: "bg-emerald-500 animate-pulse"}"}></div>
+            <div class={"w-2 h-2 rounded-full #{if @queues_paused, do: "bg-red-500 animate-pulse", else: "bg-emerald-500 animate-pulse"}"}>
+            </div>
             System_Load_Monitor
           </h3>
-          
+
           <div class="grid grid-cols-2 gap-6">
             <div class="space-y-2">
-              <div class="flex justify-between text-[10px] font-bold text-slate-500"><span>CPU</span><span class="text-white">{@cpu_load}%</span></div>
-              <div class="h-1 bg-black/40 rounded-full overflow-hidden"><div class="bg-white/40 h-full" style={"width: #{@cpu_load}%"}></div></div>
+              <div class="flex justify-between text-[10px] font-bold text-slate-500">
+                <span>CPU</span><span class="text-white">{@cpu_load}%</span>
+              </div>
+              <div class="h-1 bg-black/40 rounded-full overflow-hidden">
+                <div class="bg-white/40 h-full" style={"width: #{@cpu_load}%"}></div>
+              </div>
             </div>
             <div class="space-y-2">
-              <div class="flex justify-between text-[10px] font-bold text-slate-500"><span>RAM</span><span class="text-white">{@ram_load}%</span></div>
-              <div class="h-1 bg-black/40 rounded-full overflow-hidden"><div class="bg-white/40 h-full" style={"width: #{@ram_load}%"}></div></div>
+              <div class="flex justify-between text-[10px] font-bold text-slate-500">
+                <span>RAM</span><span class="text-white">{@ram_load}%</span>
+              </div>
+              <div class="h-1 bg-black/40 rounded-full overflow-hidden">
+                <div class="bg-white/40 h-full" style={"width: #{@ram_load}%"}></div>
+              </div>
             </div>
             <div class="space-y-2">
-              <div class="flex justify-between text-[10px] font-bold text-slate-500"><span>IO_WAIT</span><span class="text-white">{@io_wait}%</span></div>
-              <div class="h-1 bg-black/40 rounded-full overflow-hidden"><div class="bg-white/40 h-full" style={"width: #{@io_wait}%"}></div></div>
+              <div class="flex justify-between text-[10px] font-bold text-slate-500">
+                <span>IO_WAIT</span><span class="text-white">{@io_wait}%</span>
+              </div>
+              <div class="h-1 bg-black/40 rounded-full overflow-hidden">
+                <div class="bg-white/40 h-full" style={"width: #{@io_wait}%"}></div>
+              </div>
             </div>
             <div class="space-y-2">
-              <div class="flex justify-between text-[10px] font-bold text-slate-500"><span>PRESSURE</span><span class="text-amber-500">{Float.round(@system_pressure * 100, 1)}%</span></div>
-              <div class="h-1 bg-black/40 rounded-full overflow-hidden"><div class="bg-amber-500 h-full" style={"width: #{min(@system_pressure * 100, 100)}%"}></div></div>
+              <div class="flex justify-between text-[10px] font-bold text-slate-500">
+                <span>PRESSURE</span><span class="text-amber-500">{Float.round(@system_pressure * 100, 1)}%</span>
+              </div>
+              <div class="h-1 bg-black/40 rounded-full overflow-hidden">
+                <div class="bg-amber-500 h-full" style={"width: #{min(@system_pressure * 100, 100)}%"}>
+                </div>
+              </div>
             </div>
           </div>
-          
+
           <div class="mt-auto pt-4 border-t border-white/5 flex justify-between items-center text-[9px] font-bold uppercase tracking-widest text-slate-500">
             <span>Workers: {@indexing_limit} Parallel</span>
-            <span class="text-amber-500">{if @queues_paused, do: "CONSTRAINED", else: "UNRESTRICTED"}</span>
+            <span class="text-amber-500">
+              {if @queues_paused, do: "CONSTRAINED", else: "UNRESTRICTED"}
+            </span>
           </div>
         </div>
-
-        <!-- GLOBAL STATS -->
+        
+    <!-- GLOBAL STATS -->
         <div class="col-span-8 grid grid-cols-3 gap-4">
           <div class="bg-slate-900/50 border border-white/5 rounded-lg p-6 flex flex-col justify-center">
-            <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-2">Total Intelligence</p>
+            <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-2">
+              Total Intelligence
+            </p>
             <div class="flex items-baseline gap-2">
-              <span class="text-5xl font-black text-white tracking-tighter italic">{@total_symbols}</span>
+              <span class="text-5xl font-black text-white tracking-tighter italic">
+                {@total_symbols}
+              </span>
               <span class="text-xs text-slate-600 uppercase font-bold">Nodes</span>
             </div>
           </div>
           <div class="bg-slate-900/50 border border-white/5 rounded-lg p-6 flex flex-col justify-center">
-            <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-2">Security Integrity</p>
+            <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-2">
+              Security Integrity
+            </p>
             <div class="flex items-center gap-4">
-              <span class="text-5xl font-black text-emerald-500 tracking-tighter italic">{@avg_security}%</span>
-              <div class="text-[9px] text-slate-600 leading-tight font-bold uppercase">OWASP_V4<br/>SECURE_STATE</div>
+              <span class="text-5xl font-black text-emerald-500 tracking-tighter italic">
+                {@avg_security}%
+              </span>
+              <div class="text-[9px] text-slate-600 leading-tight font-bold uppercase">
+                OWASP_V4<br />SECURE_STATE
+              </div>
             </div>
           </div>
           <div class="bg-slate-900/50 border border-white/5 rounded-lg p-6 flex flex-col justify-center">
-            <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-2">Test Reliability</p>
+            <p class="text-[10px] text-slate-500 uppercase font-black tracking-widest mb-2">
+              Test Reliability
+            </p>
             <div class="flex items-center gap-4">
-              <span class="text-5xl font-black text-amber-500 tracking-tighter italic">{@avg_coverage}%</span>
-              <div class="text-[9px] text-slate-600 leading-tight font-bold uppercase">LADYBUG_DB<br/>COVERAGE</div>
+              <span class="text-5xl font-black text-amber-500 tracking-tighter italic">
+                {@avg_coverage}%
+              </span>
+              <div class="text-[9px] text-slate-600 leading-tight font-bold uppercase">
+                LADYBUG_DB<br />COVERAGE
+              </div>
             </div>
           </div>
         </div>
       </section>
-
-      <!-- PROJECT SECTORS GRID -->
+      
+    <!-- PROJECT SECTORS GRID -->
       <section class="flex-grow flex flex-col gap-4">
         <div class="flex justify-between items-end px-2">
           <h2 class="text-xl font-black text-white tracking-tighter uppercase italic">
-            Fleet_Sector_Map <span class="text-slate-600 opacity-50">// {map_size(@projects)} UNITS ONLINE</span>
+            Fleet_Sector_Map
+            <span class="text-slate-600 opacity-50">// {map_size(@projects)} UNITS ONLINE</span>
           </h2>
           <div class="font-mono text-[10px] text-amber-500 animate-pulse">
             {@last_event || "IDLE_MONITORING_SYSTEM"}
@@ -381,41 +475,59 @@ defmodule AxonDashboardWeb.StatusLive do
                   {info.progress}%
                 </div>
               </div>
-              
+
               <div class="px-4 py-2 bg-slate-800/30 flex justify-between items-center border-b border-white/5">
-                <button 
-                  phx-click="reindex_project" 
+                <button
+                  phx-click="reindex_project"
                   phx-value-project={name}
                   class="text-[9px] font-black text-slate-500 hover:text-amber-500 transition-colors uppercase tracking-widest flex items-center gap-2"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-3 h-3">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke-width="2.5"
+                    stroke="currentColor"
+                    class="w-3 h-3"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"
+                    />
                   </svg>
                   SYNC_SECTOR
                 </button>
-                <div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_5px_rgba(16,185,129,0.5)]"></div>
+                <div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_5px_rgba(16,185,129,0.5)]">
+                </div>
               </div>
               
-              <!-- Metrics -->
+    <!-- Metrics -->
               <div class="p-4 space-y-4">
                 <div class="grid grid-cols-2 gap-2">
                   <div class="bg-black/40 p-2 rounded">
                     <p class="text-[8px] text-slate-600 uppercase font-black mb-1">Security</p>
-                    <p class={"text-xs font-black #{if info.security > 90, do: "text-emerald-500", else: "text-amber-500"}"}>{info.security}%</p>
+                    <p class={"text-xs font-black #{if info.security > 90, do: "text-emerald-500", else: "text-amber-500"}"}>
+                      {info.security}%
+                    </p>
                   </div>
                   <div class="bg-black/40 p-2 rounded">
                     <p class="text-[8px] text-slate-600 uppercase font-black mb-1">Coverage</p>
                     <p class="text-xs text-white font-black">{info.coverage}%</p>
                   </div>
                 </div>
-                
+
                 <div class="space-y-1">
                   <div class="flex justify-between text-[9px] font-bold text-slate-500 uppercase">
                     <span>Indexation</span>
                     <span class="text-slate-300">{info.files} / {info.total_files}</span>
                   </div>
                   <div class="h-1 bg-black/40 rounded-full overflow-hidden">
-                    <div class="bg-amber-500 h-full transition-all duration-500" style={"width: #{info.progress}%"}></div>
+                    <div
+                      class="bg-amber-500 h-full transition-all duration-500"
+                      style={"width: #{info.progress}%"}
+                    >
+                    </div>
                   </div>
                 </div>
 
@@ -428,13 +540,16 @@ defmodule AxonDashboardWeb.StatusLive do
           <% end %>
         </div>
       </section>
-
-      <!-- NEURAL LINK TRACE (BOTTOM HUD) -->
+      
+    <!-- NEURAL LINK TRACE (BOTTOM HUD) -->
       <footer class="mt-auto bg-black border border-white/10 rounded-lg p-4 h-48 flex flex-col">
         <div class="flex justify-between items-center mb-2 border-b border-white/5 pb-2">
           <div class="flex items-center gap-2">
-            <div class="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.8)]"></div>
-            <h3 class="text-[10px] font-black text-white uppercase tracking-[0.2em]">Neural_Link_Live_Trace</h3>
+            <div class="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.8)]">
+            </div>
+            <h3 class="text-[10px] font-black text-white uppercase tracking-[0.2em]">
+              Neural_Link_Live_Trace
+            </h3>
           </div>
           <div class="text-[9px] text-slate-600 font-bold uppercase tracking-widest">
             {assigns.total_files_parsed} FILES_STREAMED
@@ -455,7 +570,6 @@ defmodule AxonDashboardWeb.StatusLive do
           <% end %>
         </div>
       </footer>
-
     </LiveView.Witness.HTML.witness_container>
     """
   end

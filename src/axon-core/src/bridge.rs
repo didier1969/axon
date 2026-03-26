@@ -15,6 +15,12 @@ pub enum BridgeEvent {
         coverage_score: usize,
         #[serde(default)]
         taint_paths: String,
+        trace_id: String,
+        t0: i64,
+        t1: i64,
+        t2: i64,
+        t3: i64,
+        t4: i64,
     },
     ScanComplete { total_files: usize, duration_ms: u64 },
     Heartbeat,

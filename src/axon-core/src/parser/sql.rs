@@ -47,7 +47,7 @@ impl Parser for SqlParser {
         let mut relations = Vec::new();
         
         if content.is_empty() {
-            return ExtractionResult { symbols, relations };
+            return ExtractionResult { project_slug: None, symbols, relations };
         }
 
         let lines: Vec<&str> = content.lines().collect();
@@ -190,7 +190,7 @@ impl Parser for SqlParser {
             }
         }
 
-        ExtractionResult { symbols, relations }
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }
 

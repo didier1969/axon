@@ -78,19 +78,20 @@ defmodule Axon.Watcher.Server do
     )
 
     send(self(), :initial_scan)
-    
+
     # Schedule automated retry for failed files every 5 minutes
     :timer.send_interval(300_000, self(), :retry_failed)
-    
+
     {:noreply, state}
   end
 
   @impl true
   def handle_info(:retry_failed, state) do
     failed_files = Axon.Watcher.Tracking.get_failed_files(100)
+
     if length(failed_files) > 0 do
       Logger.info("[Pod A] Retrying #{length(failed_files)} failed files...")
-      
+
       # Group them back into batches based on Priority
       Enum.each(failed_files, fn str_path ->
         try do
@@ -100,10 +101,11 @@ defmodule Axon.Watcher.Server do
           _ -> :ok
         end
       end)
-      
+
       # Dispatch to hot queue for immediate reprocessing
       dispatch_batch(failed_files, :indexing_hot)
     end
+
     {:noreply, state}
   end
 
@@ -172,12 +174,13 @@ defmodule Axon.Watcher.Server do
         {:ok, %{mtime: mtime}} ->
           last_mtime = Axon.Watcher.Tracking.get_file_hash(str_path)
           current_mtime = :erlang.phash2(mtime)
-          
+
           # Optimization: Only mark as pending and enqueue if the file CHANGED 
           # or if it's not yet successfully indexed in the local DB.
           current_status = Axon.Watcher.Tracking.get_file_status(str_path)
 
-          if last_mtime == nil or current_mtime != last_mtime or current_status not in ["indexed", "ignored_by_rule"] do
+          if last_mtime == nil or current_mtime != last_mtime or
+               current_status not in ["indexed", "ignored_by_rule"] do
             try do
               Axon.Watcher.Tracking.upsert_file!(project_name, str_path, current_mtime, "pending")
             rescue
@@ -189,6 +192,7 @@ defmodule Axon.Watcher.Server do
               {:ok, %{size: size}} when size > 1_048_576 ->
                 dispatch_batch([str_path], :indexing_titan)
                 {:noreply, state}
+
               _ ->
                 current_batch = state.pending_batches[priority]
                 new_batch = [str_path | current_batch]
@@ -261,6 +265,7 @@ defmodule Axon.Watcher.Server do
     if Process.whereis(Axon.Watcher.Auditor) do
       send(Axon.Watcher.Auditor, :run_audit)
     end
+
     # Do NOT restart the timer here. It will restart on the next activity.
     {:noreply, %{state | idle_timer: nil}}
   end
@@ -269,15 +274,13 @@ defmodule Axon.Watcher.Server do
     # BARE MINIMUM "ANTI-AVALANCHE" SHIELD
     # This prevents the Erlang VM from being flooded by 10,000+ Inotify events during builds/deps installs.
     # All other domain filtering (extensions, specific ignore rules) should be handled dynamically via .axonignore logic.
-    not (
-      String.contains?(path, "/.git/") or
-      String.contains?(path, "/.axon/") or
-      String.contains?(path, "/_build/") or
-      String.contains?(path, "/deps/") or
-      String.contains?(path, "/.devenv/") or
-      String.contains?(path, "/node_modules/") or
-      String.contains?(path, "/target/")
-    )
+    not (String.contains?(path, "/.git/") or
+           String.contains?(path, "/.axon/") or
+           String.contains?(path, "/_build/") or
+           String.contains?(path, "/deps/") or
+           String.contains?(path, "/.devenv/") or
+           String.contains?(path, "/node_modules/") or
+           String.contains?(path, "/target/"))
   end
 
   defp reset_timer(existing_timer) do
@@ -298,7 +301,13 @@ defmodule Axon.Watcher.Server do
   defp dispatch_batch(paths, queue) do
     # Optimization: we don't read file content here to avoid blocking the GenServer
     # and to prevent blowing up the Erlang RAM and Oban DB size.
-    files_payload = Enum.map(paths, fn path -> %{"path" => path} end)
+    files_payload =
+      Enum.map(paths, fn path ->
+        %{
+          "path" => path,
+          "trace_id" => Ecto.UUID.generate(),
+          "t0" => :os.system_time(:microsecond)
+        }      end)
 
     if length(files_payload) > 0 do
       try do
@@ -308,11 +317,18 @@ defmodule Axon.Watcher.Server do
         Axon.Watcher.IndexingWorker.new(job_args, queue: queue)
         |> Oban.insert!()
 
-        :telemetry.execute([:axon, :watcher, :batch_enqueued], %{count: length(files_payload)}, %{queue: queue})
+        :telemetry.execute([:axon, :watcher, :batch_enqueued], %{count: length(files_payload)}, %{
+          queue: queue
+        })
+
         Logger.info("[Pod A] Enqueued batch of #{length(files_payload)} files to #{queue}.")
       rescue
-        e -> 
-          :telemetry.execute([:axon, :watcher, :batch_failed], %{count: length(files_payload)}, %{queue: queue, error: inspect(e)})
+        e ->
+          :telemetry.execute([:axon, :watcher, :batch_failed], %{count: length(files_payload)}, %{
+            queue: queue,
+            error: inspect(e)
+          })
+
           Logger.error("[Pod A] FAILED to enqueue batch: #{inspect(e)}")
       end
     end

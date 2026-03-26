@@ -112,7 +112,7 @@ impl Parser for TypeScriptParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let tree = match parse_with_wasm_safe("tsx", self.wasm_bytes, content) {
             Some(t) => t,
-            None => return ExtractionResult { symbols: Vec::new(), relations: Vec::new() },
+            None => return ExtractionResult { project_slug: None, symbols: Vec::new(), relations: Vec::new() },
         };
         let language = tree.language();
 
@@ -166,7 +166,7 @@ impl Parser for TypeScriptParser {
             Ok(q) => q,
             Err(e) => {
                 log::warn!("Failed to create TSX query: {}", e);
-                return ExtractionResult { symbols: Vec::new(), relations: Vec::new() };
+                return ExtractionResult { project_slug: None, symbols: Vec::new(), relations: Vec::new() };
             }
         };
         let mut cursor = QueryCursor::new();
@@ -331,7 +331,7 @@ impl Parser for TypeScriptParser {
             }
         }
         
-        ExtractionResult { symbols, relations }
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }
 

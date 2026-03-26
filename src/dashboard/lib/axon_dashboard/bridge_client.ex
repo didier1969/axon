@@ -87,7 +87,8 @@ defmodule AxonDashboard.BridgeClient do
     {:noreply, %{state | engine_state: :idle}}
   end
 
-  def handle_cast({:async_audit, project_name}, %{socket: socket} = state) when not is_nil(socket) do
+  def handle_cast({:async_audit, project_name}, %{socket: socket} = state)
+      when not is_nil(socket) do
     # Using a unique ID pattern that the Auditor can recognize (e.g., above 10000)
     id = System.unique_integer([:positive]) + 10000
 
@@ -190,12 +191,13 @@ defmodule AxonDashboard.BridgeClient do
         )
       end
 
-      state = %{state | 
-        security_scores: Map.put(state.security_scores, project, new_score),
-        coverage_scores: Map.put(state.coverage_scores, project, cov_score)
+      state = %{
+        state
+        | security_scores: Map.put(state.security_scores, project, new_score),
+          coverage_scores: Map.put(state.coverage_scores, project, cov_score)
       }
-      
-      paths = 
+
+      paths =
         case Jason.decode(paths_json) do
           {:ok, p} -> p
           _ -> []
