@@ -41,9 +41,8 @@ fn main() -> anyhow::Result<()> {
 
             let projects_root = "/home/dstadel/projects";
             let db_path = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
-            let queue_db_path = "/home/dstadel/projects/axon/.axon/run/tasks.db";
 
-            info!("Starting Axon Core v2 (SQLite Queue Edition)");
+            info!("Starting Axon Core v2.1 (Native Backpressure Edition)");
             info!("Engine Boot Time: {}", boot_time);
 
             // Initialize KuzuDB
@@ -55,23 +54,8 @@ fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // Initialize SQLite Queue
-            if !std::path::Path::new("/home/dstadel/projects/axon/.axon/run").exists() {
-                std::fs::create_dir_all("/home/dstadel/projects/axon/.axon/run").unwrap();
-            }
-            let queue_store = match QueueStore::new(queue_db_path) {
-                Ok(store) => Arc::new(store),
-                Err(e) => {
-                    error!("Fatal Error initializing SQLite Queue: {:?}", e);
-                    return Err(anyhow::anyhow!(e));
-                }
-            };
-            
-            // Clean up left-over PROCESSING tasks from a previous crash
-            if let Ok(conn) = queue_store.conn.lock() {
-                let _ = conn.execute("UPDATE queue SET status = 'PENDING' WHERE status = 'PROCESSING'", rusqlite::params![]);
-            }
-
+            // Initialize In-Memory Bounded Queue (Max 500 tasks to block Elixir via UDS)
+            let queue_store = Arc::new(QueueStore::new(500));
             let tel_socket_path = "/tmp/axon-telemetry.sock";
             let mcp_socket_path = "/tmp/axon-mcp.sock";
             
@@ -185,6 +169,7 @@ fn main() -> anyhow::Result<()> {
                                 cancel_token.store(true, Ordering::Relaxed);
                                 let _ = task.await; 
                             }
+                            let _ = queue_clone.purge_all(); // Purge old SQLite queue to prevent zombie processing
                             cancel_token = Arc::new(AtomicBool::new(false));
                             let token_clone = cancel_token.clone();
                             let scan_store = store_clone.clone();
