@@ -6,3 +6,6 @@ deps
 **/*.log
 _build/
 deps/
+target/
+src/dashboard/priv/static/
+node_modules/
