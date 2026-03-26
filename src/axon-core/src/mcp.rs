@@ -389,7 +389,7 @@ impl McpServer {
     }
 
     fn axon_refine_lattice(&self, _args: &Value) -> Option<Value> {
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => {
                 let refine_query = "
                     MATCH (elixir:Symbol {is_nif: true})<-[:CONTAINS]-(e_file:File)
@@ -491,7 +491,7 @@ impl McpServer {
             }
         };
 
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => match store.query_json_param(&cypher, &params) {
                 Ok(res) => {
                     let headers = if cypher.contains("score") {
@@ -512,7 +512,7 @@ impl McpServer {
     }
 
     fn axon_debug(&self) -> Option<Value> {
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => {
                 let file_count = store.query_count("MATCH (f:File) RETURN count(f)").unwrap_or(0);
                 let symbol_count = store.query_count("MATCH (s:Symbol) RETURN count(s)").unwrap_or(0);
@@ -552,7 +552,7 @@ impl McpServer {
 
     fn axon_cypher(&self, args: &Value) -> Option<Value> {
         let cypher = args.get("cypher")?.as_str()?;
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => match store.query_json(cypher) {
                 Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
                 Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Cypher Error: {}", e) }], "isError": true })),
@@ -571,7 +571,7 @@ impl McpServer {
              OPTIONAL MATCH (s)-[:CALLS]->(callee:Symbol) \
              RETURN s.name, s.kind, s.tested, count(caller) AS callers, count(callee) AS callees";
              
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => match store.query_json_param(query, &json!({"sym": symbol})) {
                 Ok(res) => {
                     let table = self.format_kuzu_table(&res, &["Nom", "Type", "Testé", "Appelants", "Appelés"]);
@@ -599,7 +599,7 @@ impl McpServer {
         );
         let params = json!({"sym": symbol});
 
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => match store.query_json_param(&query, &params) {
                 Ok(res) => {
                     let table = self.format_kuzu_table(&res, &["Fichier / Projet", "Symbole Impacté", "Type"]);
@@ -625,7 +625,7 @@ impl McpServer {
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         let project = requested_project; 
         
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => {
                 let count_query = if project == "*" {
                     "MATCH (f:File) RETURN count(f)".to_string()
@@ -679,7 +679,7 @@ impl McpServer {
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         let project = requested_project;
         
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => {
                 let count_query = if project == "*" {
                     "MATCH (f:File) RETURN count(f)".to_string()
@@ -725,7 +725,7 @@ impl McpServer {
         }
         
         let mut all_results = Vec::new();
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => {
                 for file in files {
                     let query = format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' RETURN s.name, s.kind", file);
@@ -777,7 +777,7 @@ impl McpServer {
              ORDER BY score DESC LIMIT 5",
             symbol
         );
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => match store.query_json(&query) {
                 Ok(res) => {
                     let report = if res.len() > 5 && res != "[]" {
@@ -811,7 +811,7 @@ impl McpServer {
             "t_layer": target_layer
         });
 
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => match store.query_json_param(&query, &params) {
                 Ok(res) => {
                     let report = if res.len() > 5 && res != "[]" {
@@ -836,7 +836,7 @@ impl McpServer {
         let query_down = "MATCH (s:Symbol {name: $sym})-[:CALLS*1..5]->(callee) RETURN DISTINCT callee.name, callee.kind";
         let params = json!({"sym": symbol});
 
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => {
                 let up_res = store.query_json_param(&query_up, &params).unwrap_or_else(|_| "[]".to_string());
                 let down_res = store.query_json_param(&query_down, &params).unwrap_or_else(|_| "[]".to_string());
@@ -863,7 +863,7 @@ impl McpServer {
              RETURN DISTINCT COALESCE(f.path, 'External') AS consumer, caller.name, caller.kind";
         let params = json!({"sym": symbol});
 
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => match store.query_json_param(&query, &params) {
                 Ok(res) => {
                     let report = if res.trim().len() > 5 && res != "[]" {
@@ -894,7 +894,7 @@ impl McpServer {
         let query = format!("MATCH (s:Symbol {{name: $sym}})<-[:CALLS|CALLS_NIF|CALLS_OTP*1..{}]-(affected) RETURN count(DISTINCT affected)", depth);
         let params = json!({"sym": symbol});
 
-        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+        match self.graph_store.try_read_for(std::time::Duration::from_millis(100)) {
             Some(store) => match store.query_json_param(&query, &params) {
                 Ok(res) => {
                     let report = format!("🔮 Dry-Run Mutation : Modifier '{}' va impacter en cascade ~{} composants dans l'architecture.", symbol, res);

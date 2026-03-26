@@ -21,7 +21,7 @@ use graph::GraphStore;
 use mcp::McpServer;
 use std::time::Instant;
 use std::fs;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{info, error};
@@ -84,7 +84,7 @@ fn main() -> anyhow::Result<()> {
             info!("Telemetry Server listening on {}", tel_socket_path);
             info!("MCP Server listening on {}", mcp_socket_path);
 
-            let mcp_active_flag = Arc::new(AtomicBool::new(false));
+            let mcp_active_flag = Arc::new(AtomicUsize::new(0));
 
             // --- OS-Level Sledgehammer (Option B) Memory Watchdog ---
             std::thread::spawn(|| {

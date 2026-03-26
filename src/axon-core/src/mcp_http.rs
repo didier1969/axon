@@ -8,12 +8,12 @@ use futures_util::stream::{self, Stream};
 use tokio_stream::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpServer};
 
 use tracing::Instrument;
 
-pub fn app_router(mcp_server: Arc<McpServer>, mcp_active_flag: Arc<AtomicBool>) -> Router {
+pub fn app_router(mcp_server: Arc<McpServer>, mcp_active_flag: Arc<AtomicUsize>) -> Router {
     Router::new()
         .route("/mcp", post(handle_mcp_post))
         .route("/mcp/sse", get(handle_mcp_sse))
@@ -23,14 +23,14 @@ pub fn app_router(mcp_server: Arc<McpServer>, mcp_active_flag: Arc<AtomicBool>) 
 
 async fn handle_mcp_post(
     Extension(server): Extension<Arc<McpServer>>,
-    Extension(mcp_active_flag): Extension<Arc<AtomicBool>>,
+    Extension(mcp_active_flag): Extension<Arc<AtomicUsize>>,
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<Option<JsonRpcResponse>> {
     let span = tracing::info_span!("mcp_request", method = %payload.method);
     
     async move {
         // 1. Signal priority to pause ingestion
-        mcp_active_flag.store(true, Ordering::SeqCst);
+        mcp_active_flag.fetch_add(1, Ordering::SeqCst);
         
         // 2. Offload C-FFI / DB work to a blocking thread pool safely
         let response = match tokio::task::spawn_blocking(move || {
@@ -44,7 +44,7 @@ async fn handle_mcp_post(
         };
         
         // 3. Resume ingestion
-        mcp_active_flag.store(false, Ordering::SeqCst);
+        mcp_active_flag.fetch_sub(1, Ordering::SeqCst);
         
         Json(response)
     }.instrument(span).await
@@ -78,13 +78,13 @@ mod tests {
     use crate::graph::GraphStore;
     use crate::mcp::McpServer;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     #[tokio::test]
     async fn test_mcp_http_endpoint_tools_list() {
         let store = Arc::new(parking_lot::RwLock::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db_http").unwrap())));
         let mcp_server = Arc::new(McpServer::new(store));
-        let flag = Arc::new(AtomicBool::new(false));
+        let flag = Arc::new(AtomicUsize::new(0));
         let app = app_router(mcp_server, flag);
 
         let request_body = json!({

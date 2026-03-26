@@ -7,7 +7,7 @@ use crossbeam_channel::{bounded, Sender, Receiver};
 use crate::graph::GraphStore;
 use crate::parser;
 use crate::queue::QueueStore;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // Payload for the Writer Actor
 pub struct DbWriteTask {
@@ -23,7 +23,7 @@ impl WorkerPool {
         graph_store: Arc<RwLock<GraphStore>>,
         queue: Arc<QueueStore>,
         result_sender: tokio::sync::broadcast::Sender<String>,
-        mcp_active: Arc<AtomicBool>
+        mcp_active: Arc<AtomicUsize>
     ) -> Self {
         // BOUNDED QUEUES for strict 16GB RAM mechanical backpressure
         // We only keep the DbWriteTask bounded queue. The big list is in SQLite.
@@ -50,19 +50,24 @@ impl WorkerPool {
     fn spawn_writer_actor(
         receiver: Receiver<DbWriteTask>,
         graph_store: Arc<RwLock<GraphStore>>,
-        mcp_active: Arc<AtomicBool>,
+        mcp_active: Arc<AtomicUsize>,
         queue: Arc<QueueStore>
     ) {
         thread::Builder::new().name("axon-db-writer".to_string()).spawn(move || {
             info!("Writer Actor born. Holding exclusive keys to KuzuDB.");
             loop {
                 // Yield immediately if MCP is querying to ensure 0 latency
-                while mcp_active.load(Ordering::Relaxed) {
+                while mcp_active.load(Ordering::Relaxed) > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
 
-                match receiver.recv() {
+                match receiver.recv_timeout(std::time::Duration::from_millis(50)) {
                     Ok(task) => {
+                        // Strict double-check before locking
+                        while mcp_active.load(Ordering::Relaxed) > 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        
                         let _span = tracing::info_span!("db_writer_task", path = %task.path).entered();
                         let mut store = graph_store.write();
                         if let Err(e) = store.insert_file_data(&task.path, &task.extraction) {
@@ -71,7 +76,8 @@ impl WorkerPool {
                             let _ = queue.mark_done(&task.path);
                         }
                     },
-                    Err(_) => break, // Channel closed
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
             }
         }).expect("Failed to spawn Writer Actor");
@@ -83,7 +89,7 @@ impl WorkerPool {
         queue: Arc<QueueStore>,
         db_sender: Sender<DbWriteTask>,
         result_sender: tokio::sync::broadcast::Sender<String>,
-        mcp_active: Arc<AtomicBool>
+        mcp_active: Arc<AtomicUsize>
     ) {
         thread::Builder::new().name(format!("axon-worker-{}", id)).spawn(move || {
             info!("Worker {} born. Initializing isolated AI/WASM engines...", id);
@@ -104,7 +110,7 @@ impl WorkerPool {
 
             loop {
                 // Yield CPU to MCP process
-                while mcp_active.load(Ordering::Relaxed) {
+                while mcp_active.load(Ordering::Relaxed) > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
 

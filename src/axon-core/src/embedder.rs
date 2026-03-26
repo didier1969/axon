@@ -19,7 +19,6 @@ impl EmbedderState {
     }
 }
 
-// We use a double-option pattern to handle initialization errors without panicking at boot
 pub static EMBEDDER: Lazy<Mutex<Option<EmbedderState>>> = Lazy::new(|| {
     Mutex::new(EmbedderState::try_new().ok())
 });
@@ -28,16 +27,10 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    
-    // 1. Get or initialize the embedder state safely
+
     let mut lock = match EMBEDDER.lock() {
         Ok(guard) => guard,
-        Err(poisoned) => {
-            log::error!("Embedder lock poisoned, attempting to recover...");
-            let mut guard = poisoned.into_inner();
-            *guard = EmbedderState::try_new().ok();
-            guard
-        }
+        Err(poisoned) => poisoned.into_inner(),
     };
 
     if lock.is_none() {
@@ -47,7 +40,6 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
     let embedder = lock.as_mut().ok_or_else(|| anyhow::anyhow!("AI Embedder unavailable"))?;
     embedder.batch_count += 1;
 
-    // 2. Check if we need to reset the arena to prevent memory leaks (Option B cycling)
     if embedder.batch_count % 1000 == 0 {
         log::info!("Re-initializing FastEmbed ONNX session to clear Arena allocator...");
         if let Ok(new_state) = EmbedderState::try_new() {
@@ -57,7 +49,6 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
 
     let mut all_embeddings = Vec::with_capacity(texts.len());
     
-    // Chunking to prevent ONNX memory explosions
     for chunk in texts.chunks(64) {
         let mut truncated_chunk = Vec::new();
         for s in chunk {
