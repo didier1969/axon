@@ -69,26 +69,43 @@ impl WorkerPool {
 
                 match receiver.recv_timeout(std::time::Duration::from_millis(50)) {
                     Ok(task) => {
-                        // Strict double-check before locking
-                        while mcp_active.load(Ordering::Relaxed) > 0 {
-                            std::thread::sleep(std::time::Duration::from_millis(5));
-                        }
-                        
                         let _span = tracing::info_span!("db_writer_task", path = %task.path).entered();
                         let symbols_count = task.extraction.symbols.len();
                         let relations_count = task.extraction.relations.len();
 
-                        let mut store = graph_store.write();
-                        if let Err(e) = store.insert_file_data(&task.path, &task.extraction) {
-                            error!("Writer Actor failed to insert {}: {:?}", task.path, e);
+                        let mut status = "ok".to_string();
+                        let mut error_reason = "".to_string();
+
+                        // THE TOC YIELD: If an Agent is reading, we yield instantly.
+                        if mcp_active.load(Ordering::Relaxed) > 0 {
+                            status = "busy".to_string();
+                            error_reason = "System Contention (Agent Reading)".to_string();
                         } else {
-                            let _ = queue.mark_done(&task.path);
+                            // Try to get write lock for 100ms. If we can't, it's a contention.
+                            match graph_store.try_write_for(std::time::Duration::from_millis(100)) {
+                                Some(store) => {
+                                    if let Err(e) = store.insert_file_data(&task.path, &task.extraction) {
+                                        error!("Writer Actor failed to insert {}: {:?}", task.path, e);
+                                        status = "error".to_string();
+                                        error_reason = format!("{:?}", e);
+                                    }
+                                },
+                                None => {
+                                    error!("Writer Actor timeout (100ms) waiting for KuzuDB lock on {}", task.path);
+                                    status = "busy".to_string();
+                                    error_reason = "KuzuDB Write Lock Timeout".to_string();
+                                }
+                            }
                         }
+                        
+                        let _ = queue.mark_done(&task.path);
                         
                         let t4 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
                         
                         let finish_msg = match serde_json::to_string(&crate::bridge::BridgeEvent::FileIndexed {
                             path: task.path.clone(),
+                            status,
+                            error_reason,
                             symbol_count: symbols_count,
                             relation_count: relations_count,
                             file_count: 1,

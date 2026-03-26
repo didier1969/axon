@@ -6,7 +6,9 @@ pub enum BridgeEvent {
     ScanStarted { total_files: usize },
     ProjectScanStarted { project: String, total_files: usize },
     FileIndexed { 
-        path: String, 
+        path: String,
+        status: String,
+        error_reason: String,
         symbol_count: usize,
         relation_count: usize,
         file_count: usize,
