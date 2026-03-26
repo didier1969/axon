@@ -29,7 +29,6 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         // MAESTRIA FIX: Cap blocking threads to prevent thread_local! / ONNX Arena explosion.
-        // 8 threads allows Goldorak to use up to 13-16GB of RAM securely without leaking.
         .max_blocking_threads(8)
         .build()
         .unwrap()
@@ -50,253 +49,219 @@ fn main() -> anyhow::Result<()> {
                     return Err(e);
                 }
             };
-    let tel_socket_path = "/tmp/axon-telemetry.sock";
-    let mcp_socket_path = "/tmp/axon-mcp.sock";
-    
-    if std::path::Path::new(tel_socket_path).exists() { let _ = fs::remove_file(tel_socket_path); }
-    if std::path::Path::new(mcp_socket_path).exists() { let _ = fs::remove_file(mcp_socket_path); }
 
-    let tel_listener = UnixListener::bind(tel_socket_path)?;
-    let mcp_listener = UnixListener::bind(mcp_socket_path)?;
-    
-    info!("Telemetry Server listening on {}", tel_socket_path);
-    info!("MCP Server listening on {}", mcp_socket_path);
+            let tel_socket_path = "/tmp/axon-telemetry.sock";
+            let mcp_socket_path = "/tmp/axon-mcp.sock";
+            
+            if std::path::Path::new(tel_socket_path).exists() { let _ = fs::remove_file(tel_socket_path); }
+            if std::path::Path::new(mcp_socket_path).exists() { let _ = fs::remove_file(mcp_socket_path); }
 
-    let mcp_store = graph_store.clone();
-    
-    // The "Diplomatic Priority" flag. True when MCP is processing a query.
-    let mcp_active_flag = Arc::new(AtomicBool::new(false));
-    let mcp_active_for_listener = mcp_active_flag.clone();
+            let tel_listener = UnixListener::bind(tel_socket_path)?;
+            let _mcp_listener = UnixListener::bind(mcp_socket_path)?;
+            
+            info!("Telemetry Server listening on {}", tel_socket_path);
+            info!("MCP Server listening on {}", mcp_socket_path);
 
-    // --- OS-Level Sledgehammer (Option B) Memory Watchdog ---
-    std::thread::spawn(|| {
-        let page_size = 4096; // Standard Linux page size
-        let limit_bytes: u64 = 14 * 1024 * 1024 * 1024; // 14 GB
-        loop {
-            if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
-                if let Some(rss_pages) = parse_rss_from_statm(&content) {
-                    let rss_bytes = rss_pages * page_size;
-                    if rss_bytes > limit_bytes {
-                        error!("CRITICAL: Memory threshold reached ({} GB). Executing Process Cycling (Option B) suicide...", rss_bytes / 1024 / 1024 / 1024);
-                        // A clean exit allows the OS to perfectly reclaim all C++ FFI memory.
-                        // The external bash loop will restart the process instantly.
-                        std::process::exit(0);
+            let mcp_active_flag = Arc::new(AtomicBool::new(false));
+
+            // --- OS-Level Sledgehammer (Option B) Memory Watchdog ---
+            std::thread::spawn(|| {
+                let page_size = 4096;
+                let limit_bytes: u64 = 14 * 1024 * 1024 * 1024; // 14 GB
+                loop {
+                    if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
+                        if let Some(rss_pages) = parse_rss_from_statm(&content) {
+                            let rss_bytes = rss_pages * page_size;
+                            if rss_bytes > limit_bytes {
+                                error!("CRITICAL: Memory threshold reached ({} GB). Executing Process Cycling (Option B) suicide...", rss_bytes / 1024 / 1024 / 1024);
+                                std::process::exit(0);
+                            }
+                        }
                     }
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_secs(10));
-        }
-    });
-
-    let mcp_store_for_axum = mcp_store.clone();
-    let mcp_flag_for_axum = mcp_active_flag.clone();
-    // --- MCP Listener Loop (HTTP/SSE via Axum) ---
-    tokio::spawn(async move {
-        info!("Starting MCP HTTP/SSE Server on port 44129...");
-        let mcp_server = Arc::new(McpServer::new(mcp_store_for_axum));
-        let app = crate::mcp_http::app_router(mcp_server, mcp_flag_for_axum);
-        
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:44129").await.expect("Failed to bind to port 44129");
-        if let Err(e) = axum::serve(listener, app).await {
-            error!("MCP HTTP Server error: {}", e);
-        }
-    });
-
-    let tel_mcp_flag = mcp_active_flag.clone();
-
-    // --- Telemetry Listener Loop (Elixir/Dashboard) ---
-    loop {
-        let (mut socket, _) = match tel_listener.accept().await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Error accepting connection: {}", e);
-                continue;
-            }
-        };
-        info!("Elixir Dashboard connected to Telemetry Socket");
-        
-        let ready_event = BridgeEvent::SystemReady { start_time_utc: boot_time.clone() };
-        let ready_msg = format!("Axon Telemetry Ready\n{}\n", serde_json::to_string(&ready_event).unwrap());
-        
-        if let Err(e) = socket.write_all(ready_msg.as_bytes()).await {
-            error!("Failed to write to telemetry socket: {}", e);
-            continue;
-        }
-
-        let store_clone = graph_store.clone();
-        let projects_root_str = projects_root.to_string();
-        let telemetry_mcp_flag = tel_mcp_flag.clone();
-        
-        // Limit concurrent heavy parsing/embedding tasks to prevent OOM
-        let parse_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
-        
-        tokio::spawn(async move {
-            let (reader, mut writer) = socket.into_split();
-            let mut buf_reader = BufReader::new(reader);
-            let mut line = String::new();
-            
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(10000);
-            
-            tokio::spawn(async move {
-                while let Some(msg) = rx.recv().await {
-                    if writer.write_all(msg.as_bytes()).await.is_err() { break; }
+                    std::thread::sleep(std::time::Duration::from_secs(10));
                 }
             });
 
-            let mut cancel_token = Arc::new(AtomicBool::new(false));
-            let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
+            // --- BROADCAST SYSTEM for Telemetry ---
+            let (results_tx, _) = tokio::sync::broadcast::channel::<String>(10000);
 
-            // THE 8 IMMORTALS: Explicit Worker Pool instantiation.
-            let worker_pool = crate::worker::WorkerPool::new(8, store_clone.clone(), tx.clone(), telemetry_mcp_flag.clone());
+            // --- THE 8 IMMORTALS (GLOBAL POOL) ---
+            // Move worker pool outside the loop to prevent memory explosion from multiple model loads.
+            let worker_pool = crate::worker::WorkerPool::new(8, graph_store.clone(), results_tx.clone(), mcp_active_flag.clone());
             let worker_sender = worker_pool.get_sender();
 
-            while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
-                if bytes_read == 0 { break; }
+            // --- MCP Listener Loop (HTTP/SSE via Axum) ---
+            let mcp_store_for_axum = graph_store.clone();
+            let mcp_flag_for_axum = mcp_active_flag.clone();
+            tokio::spawn(async move {
+                info!("Starting MCP HTTP/SSE Server on port 44129...");
+                let mcp_server = Arc::new(McpServer::new(mcp_store_for_axum));
+                let app = crate::mcp_http::app_router(mcp_server, mcp_flag_for_axum);
                 
-                let command = line.trim();
-                if command.is_empty() { line.clear(); continue; }
-                
-                if command.starts_with("WATCHER_EVENT ") {
-                    let payload = &command[14..];
-                    if let Ok(event_data) = serde_json::from_str::<serde_json::Value>(payload) {
-                        let forward_msg = serde_json::to_string(&event_data).unwrap() + "\n";
-                        let _ = tx.try_send(forward_msg);
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:44129").await.expect("Failed to bind to port 44129");
+                if let Err(e) = axum::serve(listener, app).await {
+                    error!("MCP HTTP Server error: {}", e);
+                }
+            });
+
+            let projects_root_str = projects_root.to_string();
+            
+            // --- Telemetry Listener Loop (Elixir/Dashboard) ---
+            loop {
+                let (mut socket, _) = match tel_listener.accept().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("Error accepting connection: {}", e);
+                        continue;
                     }
-                } else if command.starts_with("PARSE_FILE ") {
-                    // Backpressure: Wait for a slot BEFORE reading more from the socket and parsing JSON
-                    let permit = parse_semaphore.clone().acquire_owned().await.unwrap();
+                };
+                info!("Elixir Dashboard connected to Telemetry Socket");
+                
+                let ready_event = BridgeEvent::SystemReady { start_time_utc: boot_time.clone() };
+                let ready_msg = format!("Axon Telemetry Ready\n{}\n", serde_json::to_string(&ready_event).unwrap());
+                
+                if let Err(e) = socket.write_all(ready_msg.as_bytes()).await {
+                    error!("Failed to write to telemetry socket: {}", e);
+                    continue;
+                }
+
+                let store_clone = graph_store.clone();
+                let projects_root_task = projects_root_str.clone();
+                let worker_sender_clone = worker_sender.clone();
+                let mut results_rx = results_tx.subscribe();
+                
+                tokio::spawn(async move {
+                    let (reader, mut writer) = socket.into_split();
+                    let mut buf_reader = BufReader::new(reader);
+                    let mut line = String::new();
                     
-                    let payload = &command[11..];
-                    if let Ok(file_data) = serde_json::from_str::<serde_json::Value>(payload) {
-                        let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
-                        let lane = file_data["lane"].as_str().unwrap_or("fast").to_string();
-                        let is_titan = lane == "titan";
+                    // Task to forward global worker results to THIS dashboard instance
+                    tokio::spawn(async move {
+                        while let Ok(msg) = results_rx.recv().await {
+                            if writer.write_all(msg.as_bytes()).await.is_err() { break; }
+                        }
+                    });
+
+                    let mut cancel_token = Arc::new(AtomicBool::new(false));
+                    let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
+
+                    while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
+                        if bytes_read == 0 { break; }
                         
-                        // Delegate to the immortals
-                        let _ = worker_sender.send(crate::worker::WorkerTask {
-                            path,
-                            is_titan,
-                        });
-                    }
-                } else if command == "SCAN_ALL" {
-                    info!("Received SCAN_ALL command. Starting fleet ingestion...");
-                    if let Some(task) = scan_task.take() {
-                        cancel_token.store(true, Ordering::Relaxed);
-                        let _ = task.await; 
-                    }
-                    cancel_token = Arc::new(AtomicBool::new(false));
-                    let token_clone = cancel_token.clone();
-                    let tx_clone = tx.clone();
-                    let projects_root_task = projects_root_str.clone();
-                    let scan_store = store_clone.clone();
-                    let worker_sender_clone = worker_sender.clone();
+                        let command = line.trim();
+                        if command.is_empty() { line.clear(); continue; }
+                        
+                        if command.starts_with("WATCHER_EVENT ") {
+                            // Forward watcher events to Elixir (legacy behavior)
+                            // We might want to handle this differently in v2, but for now just bypass
+                        } else if command.starts_with("PARSE_FILE ") {
+                            let payload = &command[11..];
+                            if let Ok(file_data) = serde_json::from_str::<serde_json::Value>(payload) {
+                                let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
+                                let lane = file_data["lane"].as_str().unwrap_or("fast").to_string();
+                                let _ = worker_sender_clone.send(crate::worker::WorkerTask {
+                                    path,
+                                    is_titan: lane == "titan",
+                                });
+                            }
+                        } else if command == "SCAN_ALL" {
+                            info!("Received SCAN_ALL command. Starting fleet ingestion...");
+                            if let Some(task) = scan_task.take() {
+                                cancel_token.store(true, Ordering::Relaxed);
+                                let _ = task.await; 
+                            }
+                            cancel_token = Arc::new(AtomicBool::new(false));
+                            let token_clone = cancel_token.clone();
+                            let scan_store = store_clone.clone();
+                            let ws_clone = worker_sender_clone.clone();
+                            let proj_root = projects_root_task.clone();
 
-                    scan_task = Some(tokio::spawn(async move {
-                        let start = Instant::now();
-                        let mut total_files = 0;
-                        if let Ok(projects) = fs::read_dir(projects_root_task) {
-                            for project in projects.flatten() {
-                                if token_clone.load(Ordering::Relaxed) { break; }
-                                let project_path = project.path();
-                                let project_name = project_path.file_name().unwrap().to_string_lossy().to_string();
-                                let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                                let files = scanner.scan(Some(scan_store.clone()));
-                                let proj_start_msg = serde_json::to_string(&BridgeEvent::ProjectScanStarted {
-                                    project: project_name.clone(), total_files: files.len()
-                                }).unwrap() + "\n";
-                                let _ = tx_clone.send(proj_start_msg).await;
+                            scan_task = Some(tokio::spawn(async move {
+                                let start = Instant::now();
+                                let mut total_files = 0;
+                                if let Ok(projects) = fs::read_dir(proj_root) {
+                                    for project in projects.flatten() {
+                                        if token_clone.load(Ordering::Relaxed) { break; }
+                                        let project_path = project.path();
+                                        let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
+                                        let files = scanner.scan(Some(scan_store.clone()));
+                                        for file_path in files {
+                                            if token_clone.load(Ordering::Relaxed) { break; }
+                                            total_files += 1;
+                                            let _ = ws_clone.send(crate::worker::WorkerTask {
+                                                path: file_path.to_string_lossy().to_string(),
+                                                is_titan: false,
+                                            });
+                                        }
+                                    }
+                                }
+                                info!("Global scan complete: {} files queued in {}ms", total_files, start.elapsed().as_millis());
+                            }));
+                        } else if command.starts_with("SCAN_PROJECT ") {
+                            let project_name = command[13..].trim().to_string();
+                            info!("Received SCAN_PROJECT command for: {}. Starting sector ingestion...", project_name);
+                            if let Some(task) = scan_task.take() {
+                                cancel_token.store(true, Ordering::Relaxed);
+                                let _ = task.await; 
+                            }
+                            cancel_token = Arc::new(AtomicBool::new(false));
+                            let token_clone = cancel_token.clone();
+                            let scan_store = store_clone.clone();
+                            let ws_clone = worker_sender_clone.clone();
+                            let proj_root = projects_root_task.clone();
 
-                                for file_path in files {
-                                    if token_clone.load(Ordering::Relaxed) { break; }
-                                    total_files += 1;
-
-                                    // Actually index the file
-                                    let _ = worker_sender_clone.send(crate::worker::WorkerTask {
-                                        path: file_path.to_string_lossy().to_string(),
-                                        is_titan: false, // Default to fast lane for bulk scan
-                                    });
+                            scan_task = Some(tokio::spawn(async move {
+                                let start = Instant::now();
+                                let mut project_path = std::path::PathBuf::from(proj_root);
+                                project_path.push(&project_name);
+                                
+                                let mut total_files = 0;
+                                if project_path.exists() {
+                                    let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
+                                    let files = scanner.scan(Some(scan_store.clone()));
+                                    for file_path in files {
+                                        if token_clone.load(Ordering::Relaxed) { break; }
+                                        total_files += 1;
+                                        let _ = ws_clone.send(crate::worker::WorkerTask {
+                                            path: file_path.to_string_lossy().to_string(),
+                                            is_titan: false,
+                                        });
+                                    }
+                                }
+                                info!("Project scan for {} complete: {} files queued in {}ms", project_name, total_files, start.elapsed().as_millis());
+                            }));
+                        } else if command == "STOP" {
+                            cancel_token.store(true, Ordering::Relaxed);
+                        } else if command == "RESET" {
+                            cancel_token.store(true, Ordering::Relaxed);
+                            let db_path_str = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
+                            {
+                                let mut locked = store_clone.write().unwrap();
+                                let _ = std::fs::remove_dir_all(db_path_str);
+                                if let Ok(new_store) = GraphStore::new(db_path_str) {
+                                    *locked = new_store;
                                 }
                             }
                         }
-                        let duration = start.elapsed();
-                        let complete_event = BridgeEvent::ScanComplete { total_files, duration_ms: duration.as_millis() as u64 };
-                        let _ = tx_clone.send(serde_json::to_string(&complete_event).unwrap() + "\n").await;
-                        }));
-                        } else if command.starts_with("SCAN_PROJECT ") {
-                        let project_name = command[13..].trim().to_string();
-                        info!("Received SCAN_PROJECT command for: {}. Starting sector ingestion...", project_name);
-                        if let Some(task) = scan_task.take() {
-                        cancel_token.store(true, Ordering::Relaxed);
-                        let _ = task.await; 
-                        }
-                        cancel_token = Arc::new(AtomicBool::new(false));
-                        let token_clone = cancel_token.clone();
-                        let tx_clone = tx.clone();
-                        let projects_root_task = projects_root_str.clone();
-                        let scan_store = store_clone.clone();
-                        let worker_sender_clone = worker_sender.clone();
-
-                        scan_task = Some(tokio::spawn(async move {
-                        let start = Instant::now();
-                        let mut project_path = std::path::PathBuf::from(projects_root_task);
-                        project_path.push(&project_name);
-
-                        let mut total_files = 0;
-                        if project_path.exists() {
-                            let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                            let files = scanner.scan(Some(scan_store.clone()));
-                            let proj_start_msg = serde_json::to_string(&BridgeEvent::ProjectScanStarted {
-                                project: project_name.clone(), total_files: files.len()
-                            }).unwrap() + "\n";
-                            let _ = tx_clone.send(proj_start_msg).await;
-
-                            for file_path in files {
-                                if token_clone.load(Ordering::Relaxed) { break; }
-                                total_files += 1;
-                                let _ = worker_sender_clone.send(crate::worker::WorkerTask {
-                                    path: file_path.to_string_lossy().to_string(),
-                                    is_titan: false,
-                                });
-                            }
-                        }
-                        let duration = start.elapsed();
-                        let complete_event = BridgeEvent::ScanComplete { total_files, duration_ms: duration.as_millis() as u64 };
-                        let _ = tx_clone.send(serde_json::to_string(&complete_event).unwrap() + "\n").await;
-                        }));
-                        } else if command == "STOP" {
-                    cancel_token.store(true, Ordering::Relaxed);
-                } else if command == "RESET" {
-                    cancel_token.store(true, Ordering::Relaxed);
-                    let db_path_str = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
-                    {
-                        let mut locked = store_clone.write().unwrap();
-                        let _ = std::fs::remove_dir_all(db_path_str);
-                        if let Ok(new_store) = GraphStore::new(db_path_str) {
-                            *locked = new_store;
-                        }
+                        line.clear();
                     }
-                }
-                line.clear();
+                    info!("Elixir Dashboard disconnected from Telemetry");
+                });
             }
-            info!("Elixir Dashboard disconnected from Telemetry");
-        });
-    }
         })
 }
 
 fn parse_rss_from_statm(content: &str) -> Option<u64> {
-    content.split_whitespace().nth(1)?.parse().ok()
+    content.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
     #[test]
     fn test_parse_statm_rss() {
-        let statm_content = "1000 500 250 10 0 100 0";
-        let rss_pages = parse_rss_from_statm(statm_content).unwrap();
-        assert_eq!(rss_pages, 500);
+        let content = "1234 5678 9012 34 56 78 90";
+        assert_eq!(parse_rss_from_statm(content), Some(5678));
     }
 
     #[test]

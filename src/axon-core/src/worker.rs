@@ -26,7 +26,7 @@ impl WorkerPool {
     pub fn new(
         num_fast_workers: usize, 
         graph_store: Arc<RwLock<GraphStore>>,
-        result_sender: tokio::sync::mpsc::Sender<String>,
+        result_sender: tokio::sync::broadcast::Sender<String>,
         mcp_active: Arc<AtomicBool>
     ) -> Self {
         // BOUNDED QUEUES for strict 16GB RAM mechanical backpressure
@@ -88,7 +88,7 @@ impl WorkerPool {
         id: usize,
         receiver: Arc<std::sync::Mutex<Receiver<WorkerTask>>>,
         db_sender: Sender<DbWriteTask>,
-        result_sender: tokio::sync::mpsc::Sender<String>,
+        result_sender: tokio::sync::broadcast::Sender<String>,
         mcp_active: Arc<AtomicBool>
     ) {
         thread::Builder::new().name(format!("axon-worker-{}", id)).spawn(move || {
@@ -207,7 +207,7 @@ impl WorkerPool {
                     }
                 };
 
-                let _ = result_sender.blocking_send(finish_msg);
+                let _ = result_sender.send(finish_msg);
 
                 processed += 1;
                 if processed >= max_files_before_death {
