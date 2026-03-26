@@ -6,12 +6,8 @@ use crossbeam_channel::{bounded, Sender, Receiver};
 
 use crate::graph::GraphStore;
 use crate::parser;
+use crate::queue::QueueStore;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-pub struct WorkerTask {
-    pub path: String,
-    pub is_titan: bool,
-}
 
 // Payload for the Writer Actor
 pub struct DbWriteTask {
@@ -19,48 +15,43 @@ pub struct DbWriteTask {
     pub extraction: crate::parser::ExtractionResult,
 }
 
-pub struct WorkerPool {
-    task_sender: Sender<WorkerTask>,
-}
+pub struct WorkerPool {}
 
 impl WorkerPool {
     pub fn new(
         num_fast_workers: usize, 
         graph_store: Arc<RwLock<GraphStore>>,
+        queue: Arc<QueueStore>,
         result_sender: tokio::sync::broadcast::Sender<String>,
         mcp_active: Arc<AtomicBool>
     ) -> Self {
         // BOUNDED QUEUES for strict 16GB RAM mechanical backpressure
-        let (task_sender, task_receiver) = bounded::<WorkerTask>(5000);
+        // We only keep the DbWriteTask bounded queue. The big list is in SQLite.
         let (db_sender, db_receiver) = bounded::<DbWriteTask>(1000); 
 
         // 1. Spawn the SINGLE Writer Actor (Micro-batching CQRS style)
-        Self::spawn_writer_actor(db_receiver, graph_store.clone(), mcp_active.clone());
+        Self::spawn_writer_actor(db_receiver, graph_store.clone(), mcp_active.clone(), queue.clone());
 
         // 2. Spawn the parsing Immortals (CPU Bound)
-        let task_receiver_shared = Arc::new(std::sync::Mutex::new(task_receiver));
         for id in 0..num_fast_workers {
             Self::spawn_immortal(
                 id, 
-                task_receiver_shared.clone(), 
+                queue.clone(),
                 db_sender.clone(),
                 result_sender.clone(), 
                 mcp_active.clone()
             );
         }
 
-        Self { task_sender }
-    }
-
-    pub fn get_sender(&self) -> Sender<WorkerTask> {
-        self.task_sender.clone()
+        Self {}
     }
 
     // THE WRITER ACTOR: Single threaded to avoid any DB contention
     fn spawn_writer_actor(
         receiver: Receiver<DbWriteTask>,
         graph_store: Arc<RwLock<GraphStore>>,
-        mcp_active: Arc<AtomicBool>
+        mcp_active: Arc<AtomicBool>,
+        queue: Arc<QueueStore>
     ) {
         thread::Builder::new().name("axon-db-writer".to_string()).spawn(move || {
             info!("Writer Actor born. Holding exclusive keys to KuzuDB.");
@@ -76,6 +67,8 @@ impl WorkerPool {
                         let mut store = graph_store.write();
                         if let Err(e) = store.insert_file_data(&task.path, &task.extraction) {
                             error!("Writer Actor failed to insert {}: {:?}", task.path, e);
+                        } else {
+                            let _ = queue.mark_done(&task.path);
                         }
                     },
                     Err(_) => break, // Channel closed
@@ -87,7 +80,7 @@ impl WorkerPool {
     // THE WORKER: Pure CPU, no DB locks
     fn spawn_immortal(
         id: usize,
-        receiver: Arc<std::sync::Mutex<Receiver<WorkerTask>>>,
+        queue: Arc<QueueStore>,
         db_sender: Sender<DbWriteTask>,
         result_sender: tokio::sync::broadcast::Sender<String>,
         mcp_active: Arc<AtomicBool>
@@ -115,41 +108,30 @@ impl WorkerPool {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
 
-                let task = {
-                    let rx = match receiver.lock() {
-                        Ok(r) => r,
-                        Err(e) => {
-                            error!("Worker {} receiver mutex poisoned: {:?}", id, e);
-                            break;
-                        }
-                    };
-                    match rx.recv() {
-                        Ok(t) => t,
-                        Err(_) => break,
+                let task = match queue.pop() {
+                    Some(t) => t,
+                    None => {
+                        std::thread::sleep(std::time::Duration::from_millis(100)); // Polling delay
+                        continue;
                     }
                 };
 
-                crate::parser::set_titan_mode(task.is_titan);
                 let path_obj = std::path::Path::new(&task.path);
                 let mut symbols_count = 0;
                 let mut relations_count = 0;
 
-                use std::io::Write;
-                if let Ok(mut log_file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/axon_forensic.log") {
-                    let lane_str = if task.is_titan { "titan" } else { "fast" };
-                    let _ = writeln!(log_file, "START [{}]: {}", lane_str, task.path);
-                    let _ = log_file.sync_all(); 
-                }
-
                 let mut skip = false;
+                let mut auto_titan = false;
                 if let Ok(metadata) = std::fs::metadata(path_obj) {
-                    if !task.is_titan && metadata.len() > 1_048_576 { skip = true; }
-                    if task.is_titan && metadata.len() > 52_428_800 { skip = true; }
+                    let size = metadata.len();
+                    if size > 104_857_600 { skip = true; } // Skip if > 100MB
+                    else if size > 1_048_576 { auto_titan = true; } // Auto-Titan if > 1MB
                 }
 
                 if !skip {
                     if let Ok(content) = std::fs::read_to_string(path_obj) {
                         if let Some(parser) = parser::get_parser_for_file(path_obj) {
+                            crate::parser::set_titan_mode(auto_titan);
                             let mut extraction = parser.parse(&content);
                             parser::scan_secrets(&content, &mut extraction);
 
@@ -183,12 +165,14 @@ impl WorkerPool {
                             if let Err(e) = db_sender.send(DbWriteTask { path: task.path.clone(), extraction }) {
                                 error!("Worker {} failed to queue DB write: {}", id, e);
                             }
+                        } else {
+                           let _ = queue.mark_done(&task.path); // Mark done if no parser
                         }
+                    } else {
+                       let _ = queue.mark_done(&task.path); // Mark done if unreadable
                     }
-                }
-
-                if let Ok(mut log_file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/axon_forensic.log") {
-                    let _ = writeln!(log_file, "END:   {}", task.path);
+                } else {
+                    let _ = queue.mark_done(&task.path); // Mark done if skipped
                 }
 
                 let finish_msg = match serde_json::to_string(&crate::bridge::BridgeEvent::FileIndexed {
@@ -213,7 +197,7 @@ impl WorkerPool {
                 processed += 1;
                 if processed >= max_files_before_death {
                     info!("Worker {} reached end of life. Recycling to free ONNX memory.", id);
-                    Self::spawn_immortal(id, receiver.clone(), db_sender.clone(), result_sender.clone(), mcp_active.clone());
+                    Self::spawn_immortal(id, queue.clone(), db_sender.clone(), result_sender.clone(), mcp_active.clone());
                     break;
                 }
             }

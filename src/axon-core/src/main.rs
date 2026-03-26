@@ -14,6 +14,7 @@ mod mcp;
 mod mcp_http;
 mod embedder;
 mod worker;
+mod queue;
 
 use bridge::BridgeEvent;
 use graph::GraphStore;
@@ -24,6 +25,8 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{info, error};
+use parking_lot::RwLock;
+use queue::QueueStore;
 
 fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
@@ -38,17 +41,36 @@ fn main() -> anyhow::Result<()> {
 
             let projects_root = "/home/dstadel/projects";
             let db_path = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
+            let queue_db_path = "/home/dstadel/projects/axon/.axon/run/tasks.db";
 
-            info!("Starting Axon Core v2");
+            info!("Starting Axon Core v2 (SQLite Queue Edition)");
             info!("Engine Boot Time: {}", boot_time);
 
+            // Initialize KuzuDB
             let graph_store = match GraphStore::new(db_path) {
-                Ok(store) => Arc::new(parking_lot::RwLock::new(store)),
+                Ok(store) => Arc::new(RwLock::new(store)),
                 Err(e) => {
                     error!("Fatal Error initializing LadybugDB: {:?}", e);
                     return Err(e);
                 }
             };
+
+            // Initialize SQLite Queue
+            if !std::path::Path::new("/home/dstadel/projects/axon/.axon/run").exists() {
+                std::fs::create_dir_all("/home/dstadel/projects/axon/.axon/run").unwrap();
+            }
+            let queue_store = match QueueStore::new(queue_db_path) {
+                Ok(store) => Arc::new(store),
+                Err(e) => {
+                    error!("Fatal Error initializing SQLite Queue: {:?}", e);
+                    return Err(anyhow::anyhow!(e));
+                }
+            };
+            
+            // Clean up left-over PROCESSING tasks from a previous crash
+            if let Ok(conn) = queue_store.conn.lock() {
+                let _ = conn.execute("UPDATE queue SET status = 'PENDING' WHERE status = 'PROCESSING'", rusqlite::params![]);
+            }
 
             let tel_socket_path = "/tmp/axon-telemetry.sock";
             let mcp_socket_path = "/tmp/axon-mcp.sock";
@@ -83,25 +105,31 @@ fn main() -> anyhow::Result<()> {
             });
 
             // --- BROADCAST SYSTEM for Telemetry ---
-            let (results_tx, _) = tokio::sync::broadcast::channel::<String>(10000);
+            let (results_tx, _) = tokio::sync::broadcast::channel::<String>(100000);
 
-            // --- THE 8 IMMORTALS (GLOBAL POOL) ---
+            // --- HARDWARE-AWARE SCALING ---
+            // Detect available CPU cores to size the worker pool dynamically
+            let available_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            let num_fast_workers = if available_cores > 2 { available_cores - 2 } else { 1 };
+            info!("Hardware-Aware Scaling: Detected {} cores. Sizing worker pool to {} threads.", available_cores, num_fast_workers);
+
             // Move worker pool outside the loop to prevent memory explosion from multiple model loads.
-            let worker_pool = crate::worker::WorkerPool::new(8, graph_store.clone(), results_tx.clone(), mcp_active_flag.clone());
-            let worker_sender = worker_pool.get_sender();
+            let _worker_pool = crate::worker::WorkerPool::new(
+                num_fast_workers, 
+                graph_store.clone(), 
+                queue_store.clone(),
+                results_tx.clone(), 
+                mcp_active_flag.clone()
+            );
 
             // --- MCP Listener Loop (HTTP/SSE via Axum) ---
             let mcp_store_for_axum = graph_store.clone();
             let mcp_flag_for_axum = mcp_active_flag.clone();
             tokio::spawn(async move {
-                info!("Starting MCP HTTP/SSE Server on port 44129...");
                 let mcp_server = Arc::new(McpServer::new(mcp_store_for_axum));
                 let app = crate::mcp_http::app_router(mcp_server, mcp_flag_for_axum);
-                
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:44129").await.expect("Failed to bind to port 44129");
-                if let Err(e) = axum::serve(listener, app).await {
-                    error!("MCP HTTP Server error: {}", e);
-                }
+                let _ = axum::serve(listener, app).await;
             });
 
             let projects_root_str = projects_root.to_string();
@@ -110,24 +138,16 @@ fn main() -> anyhow::Result<()> {
             loop {
                 let (mut socket, _) = match tel_listener.accept().await {
                     Ok(s) => s,
-                    Err(e) => {
-                        error!("Error accepting connection: {}", e);
-                        continue;
-                    }
+                    Err(_) => continue,
                 };
-                info!("Elixir Dashboard connected to Telemetry Socket");
                 
                 let ready_event = BridgeEvent::SystemReady { start_time_utc: boot_time.clone() };
                 let ready_msg = format!("Axon Telemetry Ready\n{}\n", serde_json::to_string(&ready_event).unwrap());
-                
-                if let Err(e) = socket.write_all(ready_msg.as_bytes()).await {
-                    error!("Failed to write to telemetry socket: {}", e);
-                    continue;
-                }
+                let _ = socket.write_all(ready_msg.as_bytes()).await;
 
                 let store_clone = graph_store.clone();
+                let queue_clone = queue_store.clone();
                 let projects_root_task = projects_root_str.clone();
-                let worker_sender_clone = worker_sender.clone();
                 let mut results_rx = results_tx.subscribe();
                 
                 tokio::spawn(async move {
@@ -135,7 +155,6 @@ fn main() -> anyhow::Result<()> {
                     let mut buf_reader = BufReader::new(reader);
                     let mut line = String::new();
                     
-                    // Task to forward global worker results to THIS dashboard instance
                     tokio::spawn(async move {
                         while let Ok(msg) = results_rx.recv().await {
                             if writer.write_all(msg.as_bytes()).await.is_err() { break; }
@@ -147,25 +166,18 @@ fn main() -> anyhow::Result<()> {
 
                     while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
                         if bytes_read == 0 { break; }
-                        
                         let command = line.trim();
                         if command.is_empty() { line.clear(); continue; }
                         
-                        if command.starts_with("WATCHER_EVENT ") {
-                            // Forward watcher events to Elixir (legacy behavior)
-                            // We might want to handle this differently in v2, but for now just bypass
-                        } else if command.starts_with("PARSE_FILE ") {
+                        if command.starts_with("PARSE_FILE ") {
                             let payload = &command[11..];
                             if let Ok(file_data) = serde_json::from_str::<serde_json::Value>(payload) {
                                 let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
-                                let lane = file_data["lane"].as_str().unwrap_or("fast").to_string();
-                                let _ = worker_sender_clone.send(crate::worker::WorkerTask {
-                                    path,
-                                    is_titan: lane == "titan",
-                                });
+                                let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).map(|sys_time| sys_time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64).unwrap_or(0);
+                                let _ = queue_clone.push(&path, mtime);
                             }
                         } else if command == "SCAN_ALL" {
-                            info!("Received SCAN_ALL command. Starting fleet ingestion...");
+                            info!("🚀 SCAN_ALL: Indexing EVERY project in workspace...");
                             if let Some(task) = scan_task.take() {
                                 cancel_token.store(true, Ordering::Relaxed);
                                 let _ = task.await; 
@@ -173,33 +185,24 @@ fn main() -> anyhow::Result<()> {
                             cancel_token = Arc::new(AtomicBool::new(false));
                             let token_clone = cancel_token.clone();
                             let scan_store = store_clone.clone();
-                            let ws_clone = worker_sender_clone.clone();
+                            let scan_queue = queue_clone.clone();
                             let proj_root = projects_root_task.clone();
 
                             scan_task = Some(tokio::spawn(async move {
                                 let start = Instant::now();
-                                let mut total_files = 0;
                                 if let Ok(projects) = fs::read_dir(proj_root) {
                                     for project in projects.flatten() {
                                         if token_clone.load(Ordering::Relaxed) { break; }
                                         let project_path = project.path();
                                         let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                                        let files = scanner.scan(Some(scan_store.clone()));
-                                        for file_path in files {
-                                            if token_clone.load(Ordering::Relaxed) { break; }
-                                            total_files += 1;
-                                            let _ = ws_clone.send(crate::worker::WorkerTask {
-                                                path: file_path.to_string_lossy().to_string(),
-                                                is_titan: false,
-                                            });
-                                        }
+                                        scanner.scan(Some(scan_store.clone()), Some(scan_queue.clone()));
                                     }
                                 }
-                                info!("Global scan complete: {} files queued in {}ms", total_files, start.elapsed().as_millis());
+                                info!("🏁 Global scan complete in {}ms", start.elapsed().as_millis());
                             }));
                         } else if command.starts_with("SCAN_PROJECT ") {
                             let project_name = command[13..].trim().to_string();
-                            info!("Received SCAN_PROJECT command for: {}. Starting sector ingestion...", project_name);
+                            info!("🚀 SCAN_PROJECT: Indexing sector {}...", project_name);
                             if let Some(task) = scan_task.take() {
                                 cancel_token.store(true, Ordering::Relaxed);
                                 let _ = task.await; 
@@ -207,7 +210,7 @@ fn main() -> anyhow::Result<()> {
                             cancel_token = Arc::new(AtomicBool::new(false));
                             let token_clone = cancel_token.clone();
                             let scan_store = store_clone.clone();
-                            let ws_clone = worker_sender_clone.clone();
+                            let scan_queue = queue_clone.clone();
                             let proj_root = projects_root_task.clone();
 
                             scan_task = Some(tokio::spawn(async move {
@@ -215,20 +218,11 @@ fn main() -> anyhow::Result<()> {
                                 let mut project_path = std::path::PathBuf::from(proj_root);
                                 project_path.push(&project_name);
                                 
-                                let mut total_files = 0;
                                 if project_path.exists() {
                                     let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                                    let files = scanner.scan(Some(scan_store.clone()));
-                                    for file_path in files {
-                                        if token_clone.load(Ordering::Relaxed) { break; }
-                                        total_files += 1;
-                                        let _ = ws_clone.send(crate::worker::WorkerTask {
-                                            path: file_path.to_string_lossy().to_string(),
-                                            is_titan: false,
-                                        });
-                                    }
+                                    scanner.scan(Some(scan_store.clone()), Some(scan_queue.clone()));
                                 }
-                                info!("Project scan for {} complete: {} files queued in {}ms", project_name, total_files, start.elapsed().as_millis());
+                                info!("🏁 Project scan for {} complete in {}ms", project_name, start.elapsed().as_millis());
                             }));
                         } else if command == "STOP" {
                             cancel_token.store(true, Ordering::Relaxed);
@@ -245,7 +239,6 @@ fn main() -> anyhow::Result<()> {
                         }
                         line.clear();
                     }
-                    info!("Elixir Dashboard disconnected from Telemetry");
                 });
             }
         })
@@ -262,13 +255,5 @@ mod tests {
     fn test_parse_statm_rss() {
         let content = "1234 5678 9012 34 56 78 90";
         assert_eq!(parse_rss_from_statm(content), Some(5678));
-    }
-
-    #[test]
-    fn test_memory_threshold_logic() {
-        let limit_bytes: u64 = 14 * 1024 * 1024 * 1024;
-        let page_size: u64 = 4096;
-        let rss_pages = (15 * 1024 * 1024 * 1024) / 4096;
-        assert!(rss_pages * page_size > limit_bytes);
     }
 }
