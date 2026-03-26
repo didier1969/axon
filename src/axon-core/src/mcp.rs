@@ -1049,6 +1049,8 @@ mod tests {
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
         assert!(!content.contains("Score 100/100"));
+        assert!(content.contains("user_input"));
+        assert!(content.contains("eval"));
     }
 
     #[test]

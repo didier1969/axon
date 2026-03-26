@@ -289,9 +289,20 @@ impl GraphStore {
             100
         };
 
-        // For massive scale graphs, synchronous path traversal (*1..4) is too slow (causes LLM timeouts).
-        // Returning empty paths to maintain < 1s latency.
-        let paths_json = "[]".to_string();
+        let paths_json = if issues > 0 {
+            let path_query = if project_name == "*" || project_name.is_empty() {
+                "MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS|CALLS_NIF|CALLS_OTP*1..3]->(danger:Symbol) \
+                 WHERE danger.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR danger.is_unsafe = true \
+                 RETURN f.path + ' -> ' + s.name + ' calls ' + danger.name AS path LIMIT 5".to_string()
+            } else {
+                format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS|CALLS_NIF|CALLS_OTP*1..3]->(danger:Symbol) \
+                         WHERE f.path CONTAINS '{}' AND (danger.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR danger.is_unsafe = true) \
+                         RETURN f.path + ' -> ' + s.name + ' calls ' + danger.name AS path LIMIT 5", project_name)
+            };
+            self.query_json(&path_query).unwrap_or_else(|_| "[]".to_string())
+        } else {
+            "[]".to_string()
+        };
 
         Ok((score, paths_json))
     }
