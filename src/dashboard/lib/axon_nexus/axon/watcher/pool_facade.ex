@@ -43,7 +43,7 @@ defmodule Axon.Watcher.PoolFacade do
     {:noreply, state}
   end
 
-  def handle_call({:parse, path, lane, trace_id, t0, t1}, _from, state) do
+  def handle_call({:parse, path, lane, trace_id, t0, t1}, from, state) do
     if state.socket do
       payload =
         Jason.encode!(%{
@@ -57,11 +57,9 @@ defmodule Axon.Watcher.PoolFacade do
       # We use a protocol: "PARSE_FILE <json_payload>\n"
       case :gen_tcp.send(state.socket, "PARSE_FILE #{payload}\n") do
         :ok ->
-          # We store the 'from' to reply when the bridge confirms indexing
-          # In v2, confirmations are async, but we can simplify the wait here 
-          # or return :ok immediately if we trust the buffer.
-          # For consistency with IndexingWorker, we return immediately.
-          {:reply, %{"status" => "ok"}, state}
+          # Store the caller to reply when Rust confirms via TCP
+          new_requests = Map.put(state.requests, path, from)
+          {:noreply, %{state | requests: new_requests}}
 
         {:error, reason} ->
           {:reply, {:error, reason}, state}
@@ -88,70 +86,58 @@ defmodule Axon.Watcher.PoolFacade do
     # But for the Priority Scanner, we primarily want to push data.
     Logger.debug("[Pod A] Received from Bridge: #{inspect(data)}")
 
-    data
-    |> String.split("\n", trim: true)
-    |> Enum.each(fn line ->
-      case Jason.decode(line) do
-        {:ok, %{"FileIndexed" => payload}} ->
-          path = payload["path"]
-          syms = payload["symbol_count"] || 0
-          rels = payload["relation_count"] || 0
-          sec = payload["security_score"] || 100
-          cov = payload["coverage_score"] || 0
-          entries = payload["entry_points"] || 0
+    new_requests =
+      data
+      |> String.split("\n", trim: true)
+      |> Enum.reduce(state.requests, fn line, acc_requests ->
+        case Jason.decode(line) do
+          {:ok, %{"FileIndexed" => payload}} ->
+            path = payload["path"]
+            status = payload["status"] || "ok"
+            error_reason = payload["error_reason"] || ""
+            syms = payload["symbol_count"] || 0
+            rels = payload["relation_count"] || 0
+            sec = payload["security_score"] || 100
+            cov = payload["coverage_score"] || 0
+            entries = payload["entry_points"] || 0
 
-          # Telemetry Tracer Checkpoint T4 (Return to Elixir)
-          t0 = payload["t0"] || 0
-          t1 = payload["t1"] || 0
-          t2 = payload["t2"] || 0
-          t3 = payload["t3"] || 0
-          t4 = payload["t4"] || 0
-          trace_id = payload["trace_id"] || "none"
+            # Telemetry Tracer Checkpoint T4 (Return to Elixir)
+            t0 = payload["t0"] || 0
+            t1 = payload["t1"] || 0
+            t2 = payload["t2"] || 0
+            t3 = payload["t3"] || 0
+            t4 = payload["t4"] || 0
+            trace_id = payload["trace_id"] || "none"
 
-          if t0 > 0 and trace_id != "none" do
-            Axon.Watcher.Tracer.record_trace(trace_id, path, t0, t1, t2, t3, t4)
-          end
-
-          # Mettre à jour la base de données SQLite pour l'interface
-          try do
-            Axon.Watcher.Tracking.mark_file_status!(path, "indexed", %{
-              symbols_count: syms,
-              relations_count: rels,
-              security_score: sec,
-              coverage_score: cov,
-              is_entry_point: entries > 0
-            })
-
-            # Mettre à jour le cache en mémoire pour éviter la charge SQLite
-            project = Axon.Watcher.Tracking.get_project_for_file(path)
-
-            if project do
-              Axon.Watcher.StatsCache.increment_file_stats(project.name, %{
-                completed: 1,
-                symbols: syms,
-                relations: rels,
-                entries: entries,
-                security: sec,
-                coverage: cov
-              })
+            if t0 > 0 and trace_id != "none" do
+              Axon.Watcher.Tracer.record_trace(trace_id, path, t0, t1, t2, t3, t4)
             end
 
-            # Publier l'évènement pour le LiveView
-            Phoenix.PubSub.broadcast(
-              AxonDashboard.PubSub,
-              "bridge_events",
-              {:file_indexed, path, :ok}
-            )
-          rescue
-            e -> Logger.warning("[Pod A] Failed to update tracking for #{path}: #{inspect(e)}")
-          end
+            # Reply to the caller
+            case acc_requests[path] do
+              from when not is_nil(from) ->
+                GenServer.reply(from, %{
+                  "status" => status,
+                  "error_reason" => error_reason,
+                  "symbols" => syms,
+                  "relations" => rels,
+                  "entries" => entries,
+                  "sec" => sec,
+                  "cov" => cov
+                })
 
-        _ ->
-          :ok
-      end
-    end)
+              _ ->
+                :ok
+            end
 
-    {:noreply, state}
+            Map.delete(acc_requests, path)
+
+          _ ->
+            acc_requests
+        end
+      end)
+
+    {:noreply, %{state | requests: new_requests}}
   end
 
   def handle_info({:tcp_closed, _socket}, state) do

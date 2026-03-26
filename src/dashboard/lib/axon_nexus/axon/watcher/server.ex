@@ -135,6 +135,9 @@ defmodule Axon.Watcher.Server do
   def handle_info(:initial_scan, state) do
     Logger.info("[Pod A] Triggering Reactive Streaming Scan on: #{state.watch_dir}")
 
+    # Mark all existing files as stale. True orphan files will remain stale and can be cleaned up later.
+    Axon.Watcher.Repo.query!("UPDATE indexed_files SET status = 'stale'")
+
     Axon.Watcher.Progress.update_status(state.repo_slug, %{
       status: "indexing",
       total: 0,
@@ -307,7 +310,8 @@ defmodule Axon.Watcher.Server do
           "path" => path,
           "trace_id" => Ecto.UUID.generate(),
           "t0" => :os.system_time(:microsecond)
-        }      end)
+        }
+      end)
 
     if length(files_payload) > 0 do
       try do
