@@ -1,7 +1,8 @@
 use ignore::WalkBuilder;
 use std::path::PathBuf;
 use std::fs;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use crate::graph::GraphStore;
 
 pub struct ProjectDependency {
@@ -89,10 +90,9 @@ impl Scanner {
                         if let Some(g) = &graph {
                             if let Ok(content) = fs::read_to_string(&path) {
                                 let deps = extract_toml_dependencies(&content);
-                                if let Ok(store) = g.read() {
-                                    for dep in deps {
-                                        let _ = store.insert_project_dependency(&project_name, &dep.to, &dep.path);
-                                    }
+                                let store = g.read();
+                                for dep in deps {
+                                    let _ = store.insert_project_dependency(&project_name, &dep.to, &dep.path);
                                 }
                             }
                         }

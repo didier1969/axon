@@ -2,7 +2,7 @@ use super::{ExtractionResult, Parser};
 use std::process::Command;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use log::error;
+use tracing::error;
 
 pub struct DatalogParser;
 

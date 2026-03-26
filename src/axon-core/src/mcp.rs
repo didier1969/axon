@@ -32,11 +32,11 @@ pub struct JsonRpcNotification {
 }
 
 pub struct McpServer {
-    graph_store: Arc<std::sync::RwLock<GraphStore>>,
+    graph_store: Arc<parking_lot::RwLock<GraphStore>>,
 }
 
 impl McpServer {
-    pub fn new(graph_store: Arc<std::sync::RwLock<GraphStore>>) -> Self {
+    pub fn new(graph_store: Arc<parking_lot::RwLock<GraphStore>>) -> Self {
         Self { graph_store }
     }
 
@@ -389,8 +389,8 @@ impl McpServer {
     }
 
     fn axon_refine_lattice(&self, _args: &Value) -> Option<Value> {
-        match self.graph_store.read() {
-            Ok(store) => {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => {
                 let refine_query = "
                     MATCH (elixir:Symbol {is_nif: true})<-[:CONTAINS]-(e_file:File)
                     MATCH (rust:Symbol {is_nif: true})<-[:CONTAINS]-(r_file:File)
@@ -412,7 +412,10 @@ impl McpServer {
                     Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Refiner Error: {}", e) }], "isError": true })),
                 }
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Le verrou de la base de données est empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -488,8 +491,8 @@ impl McpServer {
             }
         };
 
-        match self.graph_store.read() {
-            Ok(store) => match store.query_json_param(&cypher, &params) {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => match store.query_json_param(&cypher, &params) {
                 Ok(res) => {
                     let headers = if cypher.contains("score") {
                         vec!["Nom", "Type", "URI (Chemin)", "Distance Sémantique"]
@@ -501,13 +504,16 @@ impl McpServer {
                 },
                 Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Search Error: {}", e) }], "isError": true })),
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Le verrou de la base de données est empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
     fn axon_debug(&self) -> Option<Value> {
-        match self.graph_store.read() {
-            Ok(store) => {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => {
                 let file_count = store.query_count("MATCH (f:File) RETURN count(f)").unwrap_or(0);
                 let symbol_count = store.query_count("MATCH (s:Symbol) RETURN count(s)").unwrap_or(0);
                 let edge_count = store.query_count("MATCH ()-[r]->() RETURN count(r)").unwrap_or(0);
@@ -537,18 +543,24 @@ impl McpServer {
                 );
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Le verrou de la base de données est empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
     fn axon_cypher(&self, args: &Value) -> Option<Value> {
         let cypher = args.get("cypher")?.as_str()?;
-        match self.graph_store.read() {
-            Ok(store) => match store.query_json(cypher) {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => match store.query_json(cypher) {
                 Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
                 Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Cypher Error: {}", e) }], "isError": true })),
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Verrou empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -559,15 +571,18 @@ impl McpServer {
              OPTIONAL MATCH (s)-[:CALLS]->(callee:Symbol) \
              RETURN s.name, s.kind, s.tested, count(caller) AS callers, count(callee) AS callees";
              
-        match self.graph_store.read() {
-            Ok(store) => match store.query_json_param(query, &json!({"sym": symbol})) {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => match store.query_json_param(query, &json!({"sym": symbol})) {
                 Ok(res) => {
                     let table = self.format_kuzu_table(&res, &["Nom", "Type", "Testé", "Appelants", "Appelés"]);
                     Some(json!({ "content": [{ "type": "text", "text": format!("### 🔍 Inspection du Symbole : {}\n\n{}", symbol, table) }] }))
                 },
                 Err(_) => None,
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Verrou empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -584,8 +599,8 @@ impl McpServer {
         );
         let params = json!({"sym": symbol});
 
-        match self.graph_store.read() {
-            Ok(store) => match store.query_json_param(&query, &params) {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => match store.query_json_param(&query, &params) {
                 Ok(res) => {
                     let table = self.format_kuzu_table(&res, &["Fichier / Projet", "Symbole Impacté", "Type"]);
                     let count_query = format!("MATCH (s:Symbol {{name: $sym}})<-[:CALLS|CALLS_NIF|CALLS_OTP{}]-(affected) RETURN count(DISTINCT affected)", depth_str);
@@ -599,7 +614,10 @@ impl McpServer {
                 },
                 Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Impact Analysis Error: {}", e) }], "isError": true })),
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Verrou empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -607,8 +625,8 @@ impl McpServer {
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         let project = requested_project; 
         
-        match self.graph_store.read() {
-            Ok(store) => {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => {
                 let count_query = if project == "*" {
                     "MATCH (f:File) RETURN count(f)".to_string()
                 } else {
@@ -650,7 +668,10 @@ impl McpServer {
                 report.push_str(&format!("\n### 🧪 Qualité & Tests : {}%\n", cov_score));
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Verrou empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -658,8 +679,8 @@ impl McpServer {
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         let project = requested_project;
         
-        match self.graph_store.read() {
-            Ok(store) => {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => {
                 let count_query = if project == "*" {
                     "MATCH (f:File) RETURN count(f)".to_string()
                 } else {
@@ -683,7 +704,10 @@ impl McpServer {
                 
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Verrou empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -701,8 +725,8 @@ impl McpServer {
         }
         
         let mut all_results = Vec::new();
-        match self.graph_store.read() {
-            Ok(store) => {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => {
                 for file in files {
                     let query = format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' RETURN s.name, s.kind", file);
                     if let Ok(res) = store.query_json(&query) {
@@ -711,7 +735,10 @@ impl McpServer {
                 }
                 Some(json!({ "content": [{ "type": "text", "text": all_results.join("\n\n") }] }))
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Verrou empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -750,8 +777,8 @@ impl McpServer {
              ORDER BY score DESC LIMIT 5",
             symbol
         );
-        match self.graph_store.read() {
-            Ok(store) => match store.query_json(&query) {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => match store.query_json(&query) {
                 Ok(res) => {
                     let report = if res.len() > 5 && res != "[]" {
                         format!("### 👯 Clones Sémantiques détectés pour '{}'\n\n{}", symbol, self.format_kuzu_table(&res, &["Nom", "Type", "Similitude"]))
@@ -762,7 +789,10 @@ impl McpServer {
                 },
                 Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Cloning Error: {}", e) }], "isError": true })),
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Le verrou de la base de données est empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -781,8 +811,8 @@ impl McpServer {
             "t_layer": target_layer
         });
 
-        match self.graph_store.read() {
-            Ok(store) => match store.query_json_param(&query, &params) {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => match store.query_json_param(&query, &params) {
                 Ok(res) => {
                     let report = if res.len() > 5 && res != "[]" {
                         format!("⚠️ **VIOLATION D'ARCHITECTURE DÉTECTÉE**\n\nLa couche '{}' appelle directement '{}' :\n\n{}", source_layer, target_layer, self.format_kuzu_table(&res, &["Source", "Symbole", "Cible", "Appelé"]))
@@ -793,7 +823,10 @@ impl McpServer {
                 },
                 Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Drift Analysis Error: {}", e) }], "isError": true })),
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Le verrou de la base de données est empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -803,8 +836,8 @@ impl McpServer {
         let query_down = "MATCH (s:Symbol {name: $sym})-[:CALLS*1..5]->(callee) RETURN DISTINCT callee.name, callee.kind";
         let params = json!({"sym": symbol});
 
-        match self.graph_store.read() {
-            Ok(store) => {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => {
                 let up_res = store.query_json_param(&query_up, &params).unwrap_or_else(|_| "[]".to_string());
                 let down_res = store.query_json_param(&query_down, &params).unwrap_or_else(|_| "[]".to_string());
                 
@@ -816,7 +849,10 @@ impl McpServer {
                 
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Le verrou de la base de données est empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -827,8 +863,8 @@ impl McpServer {
              RETURN DISTINCT COALESCE(f.path, 'External') AS consumer, caller.name, caller.kind";
         let params = json!({"sym": symbol});
 
-        match self.graph_store.read() {
-            Ok(store) => match store.query_json_param(&query, &params) {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => match store.query_json_param(&query, &params) {
                 Ok(res) => {
                     let report = if res.trim().len() > 5 && res != "[]" {
                         format!("⚠️ **RISQUE DE RUPTURE D'API**\n\nModifier '{}' impactera directement les consommateurs suivants :\n\n{}", symbol, self.format_kuzu_table(&res, &["Consommateur", "Symbole", "Type"]))
@@ -845,7 +881,10 @@ impl McpServer {
                 },
                 Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("API Check Error: {}", e) }], "isError": true })),
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Le verrou de la base de données est empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 
@@ -855,15 +894,18 @@ impl McpServer {
         let query = format!("MATCH (s:Symbol {{name: $sym}})<-[:CALLS|CALLS_NIF|CALLS_OTP*1..{}]-(affected) RETURN count(DISTINCT affected)", depth);
         let params = json!({"sym": symbol});
 
-        match self.graph_store.read() {
-            Ok(store) => match store.query_json_param(&query, &params) {
+        match self.graph_store.try_read_for(std::time::Duration::from_secs(5)) {
+            Some(store) => match store.query_json_param(&query, &params) {
                 Ok(res) => {
                     let report = format!("🔮 Dry-Run Mutation : Modifier '{}' va impacter en cascade ~{} composants dans l'architecture.", symbol, res);
                     Some(json!({ "content": [{ "type": "text", "text": report }] }))
                 },
                 Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Simulation Error: {}", e) }], "isError": true })),
             },
-            Err(_) => Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Le verrou de la base de données est empoisonné." }], "isError": true })),
+            None => {
+                tracing::error!("Timeout (5s) acquiring graph_store read lock");
+                Some(json!({ "content": [{ "type": "text", "text": "❌ Erreur Critique : Timeout d'accès à la base de données (Deadlock évité)." }], "isError": true }))
+            },
         }
     }
 }
@@ -875,7 +917,7 @@ mod tests {
     use crate::graph::GraphStore;
 
     fn create_test_server() -> McpServer {
-        let store = Arc::new(std::sync::RwLock::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap())));
+        let store = Arc::new(parking_lot::RwLock::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap())));
         McpServer::new(store)
     }
 
@@ -919,13 +961,13 @@ mod tests {
     #[test]
     fn test_axon_architectural_drift() {
         let server = create_test_server();
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'ui/app.js'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s1:Symbol {name: 'fetchData'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (f2:File {path: 'db/repo.rs'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s2:Symbol {name: 'executeSQL'})").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'ui/app.js'}), (s:Symbol {name: 'fetchData'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'db/repo.rs'}), (s:Symbol {name: 'executeSQL'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (s1:Symbol {name: 'fetchData'}), (s2:Symbol {name: 'executeSQL'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'ui/app.js'})").unwrap();
+        server.graph_store.write().execute("MERGE (s1:Symbol {name: 'fetchData'})").unwrap();
+        server.graph_store.write().execute("MERGE (f2:File {path: 'db/repo.rs'})").unwrap();
+        server.graph_store.write().execute("MERGE (s2:Symbol {name: 'executeSQL'})").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'ui/app.js'}), (s:Symbol {name: 'fetchData'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'db/repo.rs'}), (s:Symbol {name: 'executeSQL'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.write().execute("MATCH (s1:Symbol {name: 'fetchData'}), (s2:Symbol {name: 'executeSQL'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
@@ -945,10 +987,10 @@ mod tests {
     #[test]
     fn test_axon_query_with_project() {
         let server = create_test_server();
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'test_proj/f1.rs'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'test_proj/f2.rs'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s:Symbol {name: 'auth_func'})").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'test_proj/f1.rs'}), (s:Symbol {name: 'auth_func'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'test_proj/f1.rs'})").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'test_proj/f2.rs'})").unwrap();
+        server.graph_store.write().execute("MERGE (s:Symbol {name: 'auth_func'})").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'test_proj/f1.rs'}), (s:Symbol {name: 'auth_func'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
@@ -985,7 +1027,7 @@ mod tests {
 
     #[test]
     fn test_send_notification() {
-        let store = Arc::new(std::sync::RwLock::new(GraphStore::new(":memory:").unwrap()));
+        let store = Arc::new(parking_lot::RwLock::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db_notif").unwrap())));
         let server = McpServer::new(store);
         let notif = server.send_notification("notifications/tools/list_changed", None);
         assert_eq!(notif.method, "notifications/tools/list_changed");
@@ -998,9 +1040,9 @@ mod tests {
     #[test]
     fn test_axon_inspect() {
         let server = create_test_server();
-        server.graph_store.write().unwrap().execute("MERGE (s:Symbol {name: 'core_func', kind: 'function', tested: true})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (c:Symbol {name: 'caller_func'})").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (c:Symbol {name: 'caller_func'}), (s:Symbol {name: 'core_func'}) MERGE (c)-[:CALLS]->(s)").unwrap();
+        server.graph_store.write().execute("MERGE (s:Symbol {name: 'core_func', kind: 'function', tested: true})").unwrap();
+        server.graph_store.write().execute("MERGE (c:Symbol {name: 'caller_func'})").unwrap();
+        server.graph_store.write().execute("MATCH (c:Symbol {name: 'caller_func'}), (s:Symbol {name: 'core_func'}) MERGE (c)-[:CALLS]->(s)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
@@ -1024,15 +1066,15 @@ mod tests {
     #[test]
     fn test_axon_audit_taint_analysis() {
         let server = create_test_server();
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/api.rs'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/api_dummy.rs'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s1:Symbol {name: 'user_input', kind: 'function', tested: false})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s2:Symbol {name: 'run_task', kind: 'function', tested: false})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s3:Symbol {name: 'eval', kind: 'function', tested: false})").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'src/api.rs'})").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'src/api_dummy.rs'})").unwrap();
+        server.graph_store.write().execute("MERGE (s1:Symbol {name: 'user_input', kind: 'function', tested: false})").unwrap();
+        server.graph_store.write().execute("MERGE (s2:Symbol {name: 'run_task', kind: 'function', tested: false})").unwrap();
+        server.graph_store.write().execute("MERGE (s3:Symbol {name: 'eval', kind: 'function', tested: false})").unwrap();
         
-        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'src/api.rs'}), (s1:Symbol {name: 'user_input'}) MERGE (f)-[:CONTAINS]->(s1)").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (s1:Symbol {name: 'user_input'}), (s2:Symbol {name: 'run_task'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (s2:Symbol {name: 'run_task'}), (s3:Symbol {name: 'eval'}) MERGE (s2)-[:CALLS]->(s3)").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'src/api.rs'}), (s1:Symbol {name: 'user_input'}) MERGE (f)-[:CONTAINS]->(s1)").unwrap();
+        server.graph_store.write().execute("MATCH (s1:Symbol {name: 'user_input'}), (s2:Symbol {name: 'run_task'}) MERGE (s1)-[:CALLS]->(s2)").unwrap();
+        server.graph_store.write().execute("MATCH (s2:Symbol {name: 'run_task'}), (s3:Symbol {name: 'eval'}) MERGE (s2)-[:CALLS]->(s3)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
@@ -1057,11 +1099,11 @@ mod tests {
     fn test_axon_audit_technical_debt() {
         let server = create_test_server();
         // Insert a file with a symbol calling 'unwrap'
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/danger.rs'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s:Symbol {name: 'risky_func', kind: 'function'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (d:Symbol {name: 'unwrap', kind: 'method'})").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'src/danger.rs'}), (s:Symbol {name: 'risky_func'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (s:Symbol {name: 'risky_func'}), (d:Symbol {name: 'unwrap'}) MERGE (s)-[:CALLS]->(d)").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'src/danger.rs'})").unwrap();
+        server.graph_store.write().execute("MERGE (s:Symbol {name: 'risky_func', kind: 'function'})").unwrap();
+        server.graph_store.write().execute("MERGE (d:Symbol {name: 'unwrap', kind: 'method'})").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'src/danger.rs'}), (s:Symbol {name: 'risky_func'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.write().execute("MATCH (s:Symbol {name: 'risky_func'}), (d:Symbol {name: 'unwrap'}) MERGE (s)-[:CALLS]->(d)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
@@ -1086,9 +1128,9 @@ mod tests {
     #[test]
     fn test_axon_audit_technical_debt_comments() {
         let server = create_test_server();
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/todo.rs'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s:Symbol {name: '// TODO: Fix this', kind: 'TODO'})").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'src/todo.rs'}), (s:Symbol {name: '// TODO: Fix this'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'src/todo.rs'})").unwrap();
+        server.graph_store.write().execute("MERGE (s:Symbol {name: '// TODO: Fix this', kind: 'TODO'})").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'src/todo.rs'}), (s:Symbol {name: '// TODO: Fix this'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
@@ -1113,9 +1155,9 @@ mod tests {
     #[test]
     fn test_axon_audit_secrets_detection() {
         let server = create_test_server();
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/config.rs'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s:Symbol {name: 'SECRET_API_KEY: Found potential hardcoded credential', kind: 'SECRET_API_KEY'})").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'src/config.rs'}), (s:Symbol {name: 'SECRET_API_KEY: Found potential hardcoded credential'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'src/config.rs'})").unwrap();
+        server.graph_store.write().execute("MERGE (s:Symbol {name: 'SECRET_API_KEY: Found potential hardcoded credential', kind: 'SECRET_API_KEY'})").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'src/config.rs'}), (s:Symbol {name: 'SECRET_API_KEY: Found potential hardcoded credential'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
@@ -1141,15 +1183,15 @@ mod tests {
     fn test_axon_audit_cross_language_taint() {
         let server = create_test_server();
         // Setup a multi-hop path: elixir_func -[:CALLS_NIF]-> rust_nif -[:CALLS]-> unsafe_call
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/api.ex'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/api_dummy.ex'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s1:Symbol {name: 'elixir_func', kind: 'function', tested: false})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s2:Symbol {name: 'rust_nif', kind: 'function', tested: false, is_nif: true})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (s3:Symbol {name: 'unsafe_block', kind: 'function', tested: false, is_unsafe: true})").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'src/api.ex'})").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'src/api_dummy.ex'})").unwrap();
+        server.graph_store.write().execute("MERGE (s1:Symbol {name: 'elixir_func', kind: 'function', tested: false})").unwrap();
+        server.graph_store.write().execute("MERGE (s2:Symbol {name: 'rust_nif', kind: 'function', tested: false, is_nif: true})").unwrap();
+        server.graph_store.write().execute("MERGE (s3:Symbol {name: 'unsafe_block', kind: 'function', tested: false, is_unsafe: true})").unwrap();
         
-        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'src/api.ex'}), (s1:Symbol {name: 'elixir_func'}) MERGE (f)-[:CONTAINS]->(s1)").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (s1:Symbol {name: 'elixir_func'}), (s2:Symbol {name: 'rust_nif'}) MERGE (s1)-[:CALLS_NIF]->(s2)").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (s2:Symbol {name: 'rust_nif'}), (s3:Symbol {name: 'unsafe_block'}) MERGE (s2)-[:CALLS]->(s3)").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'src/api.ex'}), (s1:Symbol {name: 'elixir_func'}) MERGE (f)-[:CONTAINS]->(s1)").unwrap();
+        server.graph_store.write().execute("MATCH (s1:Symbol {name: 'elixir_func'}), (s2:Symbol {name: 'rust_nif'}) MERGE (s1)-[:CALLS_NIF]->(s2)").unwrap();
+        server.graph_store.write().execute("MATCH (s2:Symbol {name: 'rust_nif'}), (s3:Symbol {name: 'unsafe_block'}) MERGE (s2)-[:CALLS]->(s3)").unwrap();
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
@@ -1175,14 +1217,14 @@ mod tests {
     #[test]
     fn test_axon_health_god_objects() {
         let server = create_test_server();
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/god.rs'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (f:File {path: 'src/god_dummy.rs'})").unwrap();
-        server.graph_store.write().unwrap().execute("MERGE (god:Symbol {name: 'GodClass', kind: 'class', tested: false})").unwrap();
-        server.graph_store.write().unwrap().execute("MATCH (f:File {path: 'src/god.rs'}), (s:Symbol {name: 'GodClass'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'src/god.rs'})").unwrap();
+        server.graph_store.write().execute("MERGE (f:File {path: 'src/god_dummy.rs'})").unwrap();
+        server.graph_store.write().execute("MERGE (god:Symbol {name: 'GodClass', kind: 'class', tested: false})").unwrap();
+        server.graph_store.write().execute("MATCH (f:File {path: 'src/god.rs'}), (s:Symbol {name: 'GodClass'}) MERGE (f)-[:CONTAINS]->(s)").unwrap();
         
         for i in 0..10 {
-            server.graph_store.write().unwrap().execute(&format!("MERGE (dep{i}:Symbol {{name: 'dep{i}'}})")).unwrap();
-            server.graph_store.write().unwrap().execute(&format!("MATCH (dep:Symbol {{name: 'dep{i}'}}), (god:Symbol {{name: 'GodClass'}}) MERGE (dep)-[:CALLS]->(god)")).unwrap();
+            server.graph_store.write().execute(&format!("MERGE (dep{i}:Symbol {{name: 'dep{i}'}})")).unwrap();
+            server.graph_store.write().execute(&format!("MATCH (dep:Symbol {{name: 'dep{i}'}}), (god:Symbol {{name: 'GodClass'}}) MERGE (dep)-[:CALLS]->(god)")).unwrap();
         }
 
         let req = JsonRpcRequest { jsonrpc: "2.0".to_string(),

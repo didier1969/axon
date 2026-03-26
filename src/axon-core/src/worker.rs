@@ -1,6 +1,7 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::thread;
-use log::{info, error};
+use tracing::{info, error, instrument};
 use crossbeam_channel::{bounded, Sender, Receiver};
 
 use crate::graph::GraphStore;
@@ -71,10 +72,10 @@ impl WorkerPool {
 
                 match receiver.recv() {
                     Ok(task) => {
-                        if let Ok(store) = graph_store.write() {
-                            if let Err(e) = store.insert_file_data(&task.path, &task.extraction) {
-                                error!("Writer Actor failed to insert {}: {:?}", task.path, e);
-                            }
+                        let _span = tracing::info_span!("db_writer_task", path = %task.path).entered();
+                        let mut store = graph_store.write();
+                        if let Err(e) = store.insert_file_data(&task.path, &task.extraction) {
+                            error!("Writer Actor failed to insert {}: {:?}", task.path, e);
                         }
                     },
                     Err(_) => break, // Channel closed

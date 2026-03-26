@@ -23,7 +23,7 @@ use std::fs;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use log::{info, error};
+use tracing::{info, error};
 
 fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
@@ -33,7 +33,7 @@ fn main() -> anyhow::Result<()> {
         .build()
         .unwrap()
         .block_on(async {
-            env_logger::init();
+            tracing_subscriber::fmt::init();
             let boot_time = chrono::Utc::now().to_rfc3339();
 
             let projects_root = "/home/dstadel/projects";
@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
             info!("Engine Boot Time: {}", boot_time);
 
             let graph_store = match GraphStore::new(db_path) {
-                Ok(store) => Arc::new(std::sync::RwLock::new(store)),
+                Ok(store) => Arc::new(parking_lot::RwLock::new(store)),
                 Err(e) => {
                     error!("Fatal Error initializing LadybugDB: {:?}", e);
                     return Err(e);
@@ -236,7 +236,7 @@ fn main() -> anyhow::Result<()> {
                             cancel_token.store(true, Ordering::Relaxed);
                             let db_path_str = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
                             {
-                                let mut locked = store_clone.write().unwrap();
+                                let mut locked = store_clone.write();
                                 let _ = std::fs::remove_dir_all(db_path_str);
                                 if let Ok(new_store) = GraphStore::new(db_path_str) {
                                     *locked = new_store;
