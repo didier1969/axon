@@ -69,10 +69,10 @@ defmodule Axon.Watcher.Tracking do
   Inserts or updates multiple files with full metrics in a single transaction.
   """
   def upsert_files_full_batch!(project_id, file_data_list) do
-    # file_data_list: [{path, hash, status, symbols, relations, sec, cov, duration, ram_b, ram_a}, ...]
+    # file_data_list: [{path, hash, status, symbols, relations, sec, cov, duration, ram_b, ram_a, error_reason}, ...]
     now = DateTime.utc_now() |> DateTime.truncate(:second)
     
-    entries = Enum.map(file_data_list, fn {path, hash, status, syms, rels, sec, cov, dur, rb, ra} ->
+    entries = Enum.map(file_data_list, fn {path, hash, status, syms, rels, sec, cov, dur, rb, ra, err} ->
       %{
         id: path,
         project_id: project_id,
@@ -86,13 +86,14 @@ defmodule Axon.Watcher.Tracking do
         ingestion_duration_ms: dur,
         ram_before_mb: rb,
         ram_after_mb: ra,
+        error_reason: err,
         inserted_at: now,
         updated_at: now
       }
     end)
 
     Repo.insert_all(IndexedFile, entries, 
-      on_conflict: {:replace, [:file_hash, :status, :symbols_count, :relations_count, :security_score, :coverage_score, :ingestion_duration_ms, :ram_before_mb, :ram_after_mb, :updated_at]},
+      on_conflict: {:replace, [:file_hash, :status, :symbols_count, :relations_count, :security_score, :coverage_score, :ingestion_duration_ms, :ram_before_mb, :ram_after_mb, :error_reason, :updated_at]},
       conflict_target: :id
     )
   end
