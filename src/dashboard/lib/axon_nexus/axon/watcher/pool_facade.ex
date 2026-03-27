@@ -30,14 +30,18 @@ defmodule Axon.Watcher.PoolFacade do
   # --- Callbacks ---
 
   def init(_opts) do
+    # Generate a unique session ID for this Elixir instance
+    boot_id = Ecto.UUID.generate()
     Process.send_after(self(), :connect, 500)
-    {:ok, %{socket: nil, requests: %{}}}
+    {:ok, %{socket: nil, requests: %{}, boot_id: boot_id}}
   end
 
   def handle_cast({:broadcast, type, payload}, state) do
     if state.socket do
       event_json = Jason.encode!(%{type: type, payload: payload})
-      :gen_tcp.send(state.socket, "WATCHER_EVENT #{event_json}\n")
+      # Async send to avoid blocking the GenServer
+      socket = state.socket
+      Task.start(fn -> :gen_tcp.send(socket, "WATCHER_EVENT #{event_json}\n") end)
     end
 
     {:noreply, state}
@@ -72,6 +76,11 @@ defmodule Axon.Watcher.PoolFacade do
     case :gen_tcp.connect({:local, @socket_path}, 0, [:binary, active: true]) do
       {:ok, socket} ->
         Logger.info("[Pod A] Connected to Axon Core Bridge (v2)")
+        
+        # HANDSHAKE: Inform Rust about our new session
+        # This allows Rust to purge old tasks from previous crashed sessions.
+        :gen_tcp.send(socket, "SESSION_INIT {\"boot_id\": \"#{state.boot_id}\"}\n")
+        
         {:noreply, %{state | socket: socket}}
 
       {:error, _reason} ->
@@ -81,62 +90,74 @@ defmodule Axon.Watcher.PoolFacade do
   end
 
   def handle_info({:tcp, _socket, data}, state) do
-    # Here we could handle acknowledgments from Rust
-    # But for the Priority Scanner, we primarily want to push data.
-    Logger.debug("[Pod A] Received from Bridge: #{inspect(data)}")
+    # Here we handle acknowledgments from Rust.
+    # We batch them to avoid unit SQLite transactions.
+    Logger.debug("[Pod A] Received from Bridge: #{byte_size(data)} bytes")
 
-    new_requests =
-      data
-      |> String.split("\n", trim: true)
-      |> Enum.reduce(state.requests, fn line, acc_requests ->
-        case Jason.decode(line) do
-          {:ok, %{"FileIndexed" => payload}} ->
-            path = payload["path"]
-            status = payload["status"] || "ok"
-            error_reason = payload["error_reason"] || ""
-            syms = payload["symbol_count"] || 0
-            rels = payload["relation_count"] || 0
-            sec = payload["security_score"] || 100
-            cov = payload["coverage_score"] || 0
-            entries = payload["entry_points"] || 0
+    lines = String.split(data, "\n", trim: true)
+    
+    # First, decode all events
+    events = Enum.map(lines, fn line ->
+      case Jason.decode(line) do
+        {:ok, %{"FileIndexed" => payload}} -> payload
+        _ -> nil
+      end
+    end) |> Enum.filter(& &1)
 
-            # Telemetry Tracer Checkpoint T4 (Return to Elixir)
-            t0 = payload["t0"] || 0
-            t1 = payload["t1"] || 0
-            t2 = payload["t2"] || 0
-            t3 = payload["t3"] || 0
-            t4 = payload["t4"] || 0
-            trace_id = payload["trace_id"] || "none"
-
-            if t0 > 0 and trace_id != "none" do
-              Axon.Watcher.Tracer.record_trace(trace_id, path, t0, t1, t2, t3, t4)
-            end
-
-            # Reply to the caller
-            case acc_requests[path] do
-              from when not is_nil(from) ->
-                GenServer.reply(from, %{
-                  "status" => status,
-                  "error_reason" => error_reason,
-                  "symbols" => syms,
-                  "relations" => rels,
-                  "entries" => entries,
-                  "sec" => sec,
-                  "cov" => cov
-                })
-
-              _ ->
-                :ok
-            end
-
-            Map.delete(acc_requests, path)
-
-          _ ->
-            acc_requests
-        end
+    if events != [] do
+      # Prepare batch status update for Tracking
+      status_updates = Enum.reduce(events, %{}, fn payload, acc ->
+        path = payload["path"]
+        params = %{
+          status: payload["status"] || "ok",
+          symbols_count: payload["symbol_count"] || 0,
+          relations_count: payload["relation_count"] || 0,
+          security_score: payload["security_score"] || 100,
+          coverage_score: payload["coverage_score"] || 0,
+          is_entry_point: payload["entry_points"] || 0,
+          error_reason: payload["error_reason"] || ""
+        }
+        Map.put(acc, path, params)
       end)
 
-    {:noreply, %{state | requests: new_requests}}
+      # EXECUTE BATCH UPDATE (The performance key)
+      try do
+        Axon.Watcher.Tracking.mark_files_status_batch!(status_updates)
+      rescue
+        e -> Logger.error("[PoolFacade] Batch Tracking update failed: #{inspect(e)}")
+      end
+
+      # Reply to GenServer.callers and record traces
+      new_requests = Enum.reduce(events, state.requests, fn payload, acc_requests ->
+        path = payload["path"]
+        
+        # Telemetry Tracer Checkpoint T4 (Return to Elixir)
+        t0 = payload["t0"] || 0
+        t1 = payload["t1"] || 0
+        t2 = payload["t2"] || 0
+        t3 = payload["t3"] || 0
+        t4 = payload["t4"] || 0
+        trace_id = payload["trace_id"] || "none"
+
+        if t0 > 0 and trace_id != "none" do
+          Axon.Watcher.Tracer.record_trace(trace_id, path, t0, t1, t2, t3, t4)
+        end
+
+        # Reply to the caller (Oban worker waiting)
+        case acc_requests[path] do
+          from when not is_nil(from) ->
+            GenServer.reply(from, %{"status" => payload["status"] || "ok"})
+          _ ->
+            :ok
+        end
+
+        Map.delete(acc_requests, path)
+      end)
+
+      {:noreply, %{state | requests: new_requests}}
+    else
+      {:noreply, state}
+    end
   end
 
   def handle_info({:tcp_closed, _socket}, state) do

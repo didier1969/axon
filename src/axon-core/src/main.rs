@@ -109,14 +109,17 @@ fn main() -> anyhow::Result<()> {
             });
 
             let projects_root_str = projects_root.to_string();
+            let current_boot_id = Arc::new(tokio::sync::Mutex::new(String::new()));
             
             // --- Telemetry Listener Loop (Elixir/Dashboard) ---
             loop {
-                let (mut socket, _) = match tel_listener.accept().await {
+                let (mut socket, addr) = match tel_listener.accept().await {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
                 
+                info!("New Telemetry connection from {:?}", addr);
+
                 let ready_event = BridgeEvent::SystemReady { start_time_utc: boot_time.clone() };
                 let ready_msg = format!("Axon Telemetry Ready\n{}\n", serde_json::to_string(&ready_event).unwrap());
                 let _ = socket.write_all(ready_msg.as_bytes()).await;
@@ -124,6 +127,7 @@ fn main() -> anyhow::Result<()> {
                 let store_clone = graph_store.clone();
                 let queue_clone = queue_store.clone();
                 let projects_root_task = projects_root_str.clone();
+                let boot_id_lock = current_boot_id.clone();
                 let mut results_rx = results_tx.subscribe();
                 
                 tokio::spawn(async move {
@@ -145,7 +149,18 @@ fn main() -> anyhow::Result<()> {
                         let command = line.trim();
                         if command.is_empty() { line.clear(); continue; }
                         
-                        if command.starts_with("PARSE_FILE ") {
+                        if command.starts_with("SESSION_INIT ") {
+                            let payload = &command[13..];
+                            if let Ok(data) = serde_json::from_str::<serde_json::Value>(payload) {
+                                let new_id = data["boot_id"].as_str().unwrap_or("unknown").to_string();
+                                let mut active_id = boot_id_lock.lock().await;
+                                if new_id != *active_id {
+                                    info!("🔄 New Elixir Session detected: {}. Purging stale tasks...", new_id);
+                                    let _ = queue_clone.purge_all();
+                                    *active_id = new_id;
+                                }
+                            }
+                        } else if command.starts_with("PARSE_FILE ") {
                             let payload = &command[11..];
                             if let Ok(file_data) = serde_json::from_str::<serde_json::Value>(payload) {
                                 let path = file_data["path"].as_str().unwrap_or("unknown").to_string();

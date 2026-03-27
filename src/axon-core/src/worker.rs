@@ -79,23 +79,31 @@ impl WorkerPool {
                 }
 
                 // 3. EXECUTION PHASE (Micro-batching)
+                let mut feedback_buffer = String::new();
                 for task in batch.drain(..) {
                     let _span = tracing::info_span!("db_writer_task", path = %task.path).entered();
-                    if let Err(e) = graph_store.insert_file_data(&task.path, &task.extraction) {
+                    let (status, reason) = if let Err(e) = graph_store.insert_file_data(&task.path, &task.extraction) {
                         error!("Writer Actor failed to insert {}: {:?}", task.path, e);
-                        Self::send_feedback(&result_sender, &task.path, "error", &format!("{:?}", e), task.extraction.symbols.len(), task.extraction.relations.len(), &task.trace_id, task.t0, task.t1, task.t2, task.t3);
+                        ("error", format!("{:?}", e))
                     } else {
                         let _ = queue.mark_done(&task.path);
-                        Self::send_feedback(&result_sender, &task.path, "ok", "", task.extraction.symbols.len(), task.extraction.relations.len(), &task.trace_id, task.t0, task.t1, task.t2, task.t3);
+                        ("ok", "".to_string())
+                    };
+
+                    if let Some(msg) = Self::format_feedback(&task.path, status, &reason, task.extraction.symbols.len(), task.extraction.relations.len(), &task.trace_id, task.t0, task.t1, task.t2, task.t3) {
+                        feedback_buffer.push_str(&msg);
                     }
+                }
+                
+                if !feedback_buffer.is_empty() {
+                    let _ = result_sender.send(feedback_buffer);
                 }
             }
         }).expect("Failed to spawn Writer Actor");
     }
 
-    // Helper function for telemetry
-    fn send_feedback(
-        result_sender: &tokio::sync::broadcast::Sender<String>, 
+    // Helper function for telemetry formatting
+    fn format_feedback(
         path: &str,
         status: &str, 
         error_reason: &str,
@@ -103,9 +111,9 @@ impl WorkerPool {
         relation_count: usize,
         trace_id: &str,
         t0: i64, t1: i64, t2: i64, t3: i64
-    ) {
+    ) -> Option<String> {
         let t4 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
-        let msg = match serde_json::to_string(&crate::bridge::BridgeEvent::FileIndexed {
+        match serde_json::to_string(&crate::bridge::BridgeEvent::FileIndexed {
             path: path.to_string(),
             status: status.to_string(),
             error_reason: error_reason.to_string(),
@@ -119,10 +127,25 @@ impl WorkerPool {
             trace_id: trace_id.to_string(),
             t0, t1, t2, t3, t4,
         }) {
-            Ok(m) => m + "\n",
-            Err(_) => return,
-        };
-        let _ = result_sender.send(msg);
+            Ok(m) => Some(m + "\n"),
+            Err(_) => None,
+        }
+    }
+
+    // Helper function for immediate telemetry
+    fn send_feedback(
+        result_sender: &tokio::sync::broadcast::Sender<String>, 
+        path: &str,
+        status: &str, 
+        error_reason: &str,
+        symbol_count: usize,
+        relation_count: usize,
+        trace_id: &str,
+        t0: i64, t1: i64, t2: i64, t3: i64
+    ) {
+        if let Some(msg) = Self::format_feedback(path, status, error_reason, symbol_count, relation_count, trace_id, t0, t1, t2, t3) {
+            let _ = result_sender.send(msg);
+        }
     }
 
     // THE WORKER: Pure CPU, no DB locks

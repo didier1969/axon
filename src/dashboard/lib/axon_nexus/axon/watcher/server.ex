@@ -41,7 +41,6 @@ defmodule Axon.Watcher.Server do
       pending_files: MapSet.new(),
       timer: nil,
       monitoring_active: true,
-      pending_batches: %{100 => [], 80 => [], 50 => [], 10 => []},
       idle_timer: start_idle_timer()
     }
 
@@ -152,9 +151,8 @@ defmodule Axon.Watcher.Server do
   @impl true
   def handle_info({:ok, "done"}, state) do
     Logger.info("[Pod A] Reactive Scan Completed.")
-    flush_all_batches(state.pending_batches)
     Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", progress: 100})
-    {:noreply, %{state | pending_batches: %{100 => [], 80 => [], 50 => [], 10 => []}}}
+    {:noreply, state}
   end
 
   @impl true
@@ -184,32 +182,20 @@ defmodule Axon.Watcher.Server do
 
           if last_mtime == nil or current_mtime != last_mtime or
                current_status not in ["indexed", "ignored_by_rule"] do
-            try do
-              Axon.Watcher.Tracking.upsert_file!(project_name, str_path, current_mtime, "pending")
-            rescue
-              _ -> :ok
-            end
-
+            
             # TITAN PROTOCOL: Route massive files (>1MB) to the single-threaded queue immediately.
             case File.stat(str_path) do
               {:ok, %{size: size}} when size > 1_048_576 ->
+                # Titan stays synchronous for now as they are rare
+                # We still need to upsert here if we bypass staging
+                Axon.Watcher.Tracking.upsert_file!(project_name, str_path, current_mtime, "pending")
                 dispatch_batch([str_path], :indexing_titan)
                 {:noreply, state}
 
               _ ->
-                current_batch = state.pending_batches[priority]
-                new_batch = [str_path | current_batch]
-
-                chunk_size = Axon.BackpressureController.get_chunk_size()
-                threshold = if priority >= 80, do: min(10, chunk_size), else: chunk_size
-
-                if length(new_batch) >= threshold do
-                  queue = if priority >= 80, do: :indexing_hot, else: :indexing_default
-                  dispatch_batch(new_batch, queue)
-                  {:noreply, put_in(state.pending_batches[priority], [])}
-                else
-                  {:noreply, put_in(state.pending_batches[priority], new_batch)}
-                end
+                # NEXUS PRODUCTION: All other files go to ETS for batched insertion
+                Axon.Watcher.Staging.stage_file(project_name, str_path, current_mtime, priority)
+                {:noreply, state}
             end
           else
             # File is already indexed and hasn't changed on disk.
@@ -251,11 +237,14 @@ defmodule Axon.Watcher.Server do
     files_to_process = MapSet.to_list(state.pending_files)
 
     if length(files_to_process) > 0 do
-      chunk_size = Axon.BackpressureController.get_chunk_size()
-
-      files_to_process
-      |> Enum.chunk_every(chunk_size)
-      |> Enum.each(&dispatch_batch(&1, :indexing_hot))
+      Enum.each(files_to_process, fn path ->
+        priority = calculate_priority(path)
+        mtime = case File.stat(path) do
+          {:ok, %{mtime: t}} -> :erlang.phash2(t)
+          _ -> 0
+        end
+        Axon.Watcher.Staging.stage_file("event", path, mtime, priority)
+      end)
     end
 
     {:noreply, %{state | pending_files: MapSet.new(), timer: nil}}
@@ -347,15 +336,6 @@ defmodule Axon.Watcher.Server do
       ext in [".md", ".txt", ".json", ".yml", ".yaml", ".toml", ".conf"] -> 50
       true -> 10
     end
-  end
-
-  defp flush_all_batches(batches) do
-    Enum.each(batches, fn {priority, paths} ->
-      if length(paths) > 0 do
-        queue = if priority >= 80, do: :indexing_hot, else: :indexing_default
-        dispatch_batch(paths, queue)
-      end
-    end)
   end
 
   defp get_top_dir(path, watch_dir) do

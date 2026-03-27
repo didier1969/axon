@@ -14,14 +14,16 @@ config :axon_dashboard,
 config :axon_dashboard, Axon.Watcher.Repo,
   adapter: Ecto.Adapters.SQLite3,
   database: "axon_nexus.db",
-  pool_size: 5,
+  pool_size: 1, # SERIALIZED WRITES to avoid 'Database busy'
   journal_mode: :wal,
-  busy_timeout: 5000
+  busy_timeout: 5000,
+  synchronous: :normal # High performance mode for WAL
 
 config :axon_dashboard, Oban,
   repo: Axon.Watcher.Repo,
   engine: Oban.Engines.Lite,
-  plugins: [Oban.Plugins.Pruner],
+  # Prune less frequently to avoid lock contention during massive ingestion
+  plugins: [{Oban.Plugins.Pruner, interval: 300_000}], 
   queues: [
     indexing_critical: [limit: 10],
     indexing_hot: [limit: 5],

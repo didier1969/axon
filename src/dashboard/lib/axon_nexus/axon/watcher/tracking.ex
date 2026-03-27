@@ -35,23 +35,48 @@ defmodule Axon.Watcher.Tracking do
   end
 
   @doc """
-  Inserts or updates the file.
+  Inserts or updates the file. (Unit wrapper for compatibility)
   """
   def upsert_file!(project_id, path, file_hash, status \\ "pending") do
-    id = path
-    attrs = %{id: id, project_id: project_id, path: path, file_hash: file_hash, status: status}
+    upsert_files_batch!(project_id, [{path, file_hash, status}])
+  end
 
-    case Repo.get(IndexedFile, id) do
-      nil ->
-        %IndexedFile{}
-        |> IndexedFile.changeset(attrs)
-        |> Repo.insert!()
+  @doc """
+  Inserts or updates multiple files in a single transaction.
+  """
+  def upsert_files_batch!(project_id, file_data_list) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    
+    placeholders = %{now: now}
+    
+    entries = Enum.map(file_data_list, fn {path, file_hash, status} ->
+      %{
+        id: path,
+        project_id: project_id,
+        path: path,
+        file_hash: file_hash,
+        status: status,
+        inserted_at: now,
+        updated_at: now
+      }
+    end)
 
-      file ->
-        file
-        |> IndexedFile.changeset(attrs)
-        |> Repo.update!()
-    end
+    Repo.insert_all(IndexedFile, entries, 
+      on_conflict: {:replace, [:file_hash, :status, :updated_at]},
+      conflict_target: :id
+    )
+  end
+
+  @doc """
+  Updates status for multiple files in a single transaction.
+  """
+  def mark_files_status_batch!(status_map) do
+    # status_map: %{path => %{status: "ok", symbols_count: 10, ...}}
+    Repo.transaction(fn ->
+      Enum.each(status_map, fn {path, params} ->
+        mark_file_status!(path, params.status, Map.delete(params, :status))
+      end)
+    end)
   end
 
   @doc """
