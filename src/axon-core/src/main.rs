@@ -53,8 +53,8 @@ fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // Initialize In-Memory Bounded Queue (Max 500 tasks to block Elixir via UDS backpressure)
-            let queue_store = Arc::new(QueueStore::new(500));
+            // Initialize In-Memory Bounded Queue (Max 50,000 tasks to buffer ingestion)
+            let queue_store = Arc::new(QueueStore::new(50000));
             let tel_socket_path = "/tmp/axon-telemetry.sock";
             let mcp_socket_path = "/tmp/axon-mcp.sock";
             

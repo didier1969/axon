@@ -54,16 +54,15 @@ defmodule Axon.Watcher.PoolFacade do
           "t1" => t1
         })
 
-      # We use a protocol: "PARSE_FILE <json_payload>\n"
-      case :gen_tcp.send(state.socket, "PARSE_FILE #{payload}\n") do
-        :ok ->
-          # Store the caller to reply when Rust confirms via TCP
-          new_requests = Map.put(state.requests, path, from)
-          {:noreply, %{state | requests: new_requests}}
+      # Protocol: "PARSE_FILE <json_payload>\n"
+      # DECOUPLING: We send in a separate Task to avoid blocking the GenServer loop
+      # if the socket buffer is full. This prevents deadlocks between send and receive.
+      socket = state.socket
+      Task.start(fn -> :gen_tcp.send(socket, "PARSE_FILE #{payload}\n") end)
 
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
-      end
+      # Store the caller to reply when Rust confirms via TCP
+      new_requests = Map.put(state.requests, path, from)
+      {:noreply, %{state | requests: new_requests}}
     else
       {:reply, {:error, :not_connected}, state}
     end
