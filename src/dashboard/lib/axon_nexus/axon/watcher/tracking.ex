@@ -42,12 +42,10 @@ defmodule Axon.Watcher.Tracking do
   end
 
   @doc """
-  Inserts or updates multiple files in a single transaction.
+  Inserts or updates multiple files in a single transaction (Standard version).
   """
   def upsert_files_batch!(project_id, file_data_list) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
-    
-    placeholders = %{now: now}
     
     entries = Enum.map(file_data_list, fn {path, file_hash, status} ->
       %{
@@ -63,6 +61,38 @@ defmodule Axon.Watcher.Tracking do
 
     Repo.insert_all(IndexedFile, entries, 
       on_conflict: {:replace, [:file_hash, :status, :updated_at]},
+      conflict_target: :id
+    )
+  end
+
+  @doc """
+  Inserts or updates multiple files with full metrics in a single transaction.
+  """
+  def upsert_files_full_batch!(project_id, file_data_list) do
+    # file_data_list: [{path, hash, status, symbols, relations, sec, cov, duration, ram_b, ram_a}, ...]
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+    
+    entries = Enum.map(file_data_list, fn {path, hash, status, syms, rels, sec, cov, dur, rb, ra} ->
+      %{
+        id: path,
+        project_id: project_id,
+        path: path,
+        file_hash: hash,
+        status: status,
+        symbols_count: syms,
+        relations_count: rels,
+        security_score: sec,
+        coverage_score: cov,
+        ingestion_duration_ms: dur,
+        ram_before_mb: rb,
+        ram_after_mb: ra,
+        inserted_at: now,
+        updated_at: now
+      }
+    end)
+
+    Repo.insert_all(IndexedFile, entries, 
+      on_conflict: {:replace, [:file_hash, :status, :symbols_count, :relations_count, :security_score, :coverage_score, :ingestion_duration_ms, :ram_before_mb, :ram_after_mb, :updated_at]},
       conflict_target: :id
     )
   end
@@ -113,6 +143,17 @@ defmodule Axon.Watcher.Tracking do
     case Repo.get(IndexedFile, path) do
       nil -> nil
       file -> file.file_hash
+    end
+  end
+
+  @doc """
+  Guesses the project ID (top-level dir name) from a file path.
+  """
+  def extract_project_from_path(path) do
+    # Assuming standard structure /home/dstadel/projects/PROJECT_NAME/...
+    case Path.split(path) do
+      [_, _, _, _, project | _] -> project
+      _ -> "global"
     end
   end
 

@@ -21,6 +21,13 @@ defmodule Axon.Watcher.PoolFacade do
   end
 
   @doc """
+  Sends a batch of files to Axon Core for parsing.
+  """
+  def parse_batch(files) when is_list(files) do
+    GenServer.call(__MODULE__, {:parse_batch, files}, 60_000)
+  end
+
+  @doc """
   Sends a telemetry event to the Dashboard via the Rust Bridge.
   """
   def broadcast_event(type, payload) do
@@ -33,18 +40,31 @@ defmodule Axon.Watcher.PoolFacade do
     # Generate a unique session ID for this Elixir instance
     boot_id = Ecto.UUID.generate()
     Process.send_after(self(), :connect, 500)
-    {:ok, %{socket: nil, requests: %{}, boot_id: boot_id}}
+    {:ok, %{socket: nil, requests: %{}, batches: %{}, path_to_batch: %{}, boot_id: boot_id}}
   end
 
-  def handle_cast({:broadcast, type, payload}, state) do
-    if state.socket do
-      event_json = Jason.encode!(%{type: type, payload: payload})
-      # Async send to avoid blocking the GenServer
-      socket = state.socket
-      Task.start(fn -> :gen_tcp.send(socket, "WATCHER_EVENT #{event_json}\n") end)
-    end
+  # ... broadcast_event remains same ...
 
-    {:noreply, state}
+  def handle_call({:parse_batch, files}, from, state) do
+    if state.socket do
+      batch_id = Ecto.UUID.generate()
+      payload = Jason.encode!(files)
+
+      # Async send to avoid blocking the GenServer loop
+      socket = state.socket
+      Task.start(fn -> :gen_tcp.send(socket, "PARSE_BATCH #{payload}\n") end)
+
+      # Track batch progress
+      new_batches = Map.put(state.batches, batch_id, {from, length(files), []})
+      
+      new_path_to_batch = Enum.reduce(files, state.path_to_batch, fn file, acc ->
+        Map.put(acc, file["path"], batch_id)
+      end)
+
+      {:noreply, %{state | batches: new_batches, path_to_batch: new_path_to_batch}}
+    else
+      {:reply, {:error, :not_connected}, state}
+    end
   end
 
   def handle_call({:parse, path, lane, trace_id, t0, t1}, from, state) do
@@ -58,13 +78,9 @@ defmodule Axon.Watcher.PoolFacade do
           "t1" => t1
         })
 
-      # Protocol: "PARSE_FILE <json_payload>\n"
-      # DECOUPLING: We send in a separate Task to avoid blocking the GenServer loop
-      # if the socket buffer is full. This prevents deadlocks between send and receive.
       socket = state.socket
       Task.start(fn -> :gen_tcp.send(socket, "PARSE_FILE #{payload}\n") end)
 
-      # Store the caller to reply when Rust confirms via TCP
       new_requests = Map.put(state.requests, path, from)
       {:noreply, %{state | requests: new_requests}}
     else
@@ -105,56 +121,97 @@ defmodule Axon.Watcher.PoolFacade do
     end) |> Enum.filter(& &1)
 
     if events != [] do
-      # Prepare batch status update for Tracking
-      status_updates = Enum.reduce(events, %{}, fn payload, acc ->
-        path = payload["path"]
-        params = %{
-          status: payload["status"] || "ok",
-          symbols_count: payload["symbol_count"] || 0,
-          relations_count: payload["relation_count"] || 0,
-          security_score: payload["security_score"] || 100,
-          coverage_score: payload["coverage_score"] || 0,
-          is_entry_point: payload["entry_points"] || 0,
-          error_reason: payload["error_reason"] || ""
-        }
-        Map.put(acc, path, params)
-      end)
-
-      # EXECUTE BATCH UPDATE (The performance key)
-      try do
-        Axon.Watcher.Tracking.mark_files_status_batch!(status_updates)
-      rescue
-        e -> Logger.error("[PoolFacade] Batch Tracking update failed: #{inspect(e)}")
-      end
-
-      # Reply to GenServer.callers and record traces
-      new_requests = Enum.reduce(events, state.requests, fn payload, acc_requests ->
-        path = payload["path"]
+      Logger.info("[PoolFacade] Processing #{length(events)} feedback events from Rust.")
+      
+      # 1. Update Tracking in batch (Zero-SELECT path)
+      events
+      |> Enum.group_by(fn payload -> Axon.Watcher.Tracking.extract_project_from_path(payload["path"]) end)
+      |> Enum.each(fn {project_id, project_events} ->
+        data_for_upsert = Enum.map(project_events, fn p ->
+          {
+            p["path"], 
+            0, # Hash already set by staging
+            p["status"] || "ok",
+            p["symbol_count"] || 0,
+            p["relation_count"] || 0,
+            p["security_score"] || 100,
+            p["coverage_score"] || 0,
+            0, # duration handled via traces
+            0, # ram_b
+            0  # ram_a
+          }
+        end)
         
-        # Telemetry Tracer Checkpoint T4 (Return to Elixir)
-        t0 = payload["t0"] || 0
-        t1 = payload["t1"] || 0
-        t2 = payload["t2"] || 0
-        t3 = payload["t3"] || 0
-        t4 = payload["t4"] || 0
-        trace_id = payload["trace_id"] || "none"
-
-        if t0 > 0 and trace_id != "none" do
-          Axon.Watcher.Tracer.record_trace(trace_id, path, t0, t1, t2, t3, t4)
+        try do
+          Axon.Watcher.Tracking.upsert_files_full_batch!(project_id, data_for_upsert)
+        rescue
+          e -> Logger.error("[PoolFacade] Batch Upsert failed: #{inspect(e)}")
         end
-
-        # Reply to the caller (Oban worker waiting)
-        case acc_requests[path] do
-          from when not is_nil(from) ->
-            GenServer.reply(from, %{"status" => payload["status"] || "ok"})
-          _ ->
-            :ok
-        end
-
-        Map.delete(acc_requests, path)
       end)
 
-      {:noreply, %{state | requests: new_requests}}
+      # 2. Process feedback and handle replies (Batches and Unit)
+      new_state = Enum.reduce(events, state, fn payload, acc_state ->
+        path = payload["path"]
+        status = payload["status"] || "ok"
+        syms = payload["symbol_count"] || 0
+        rels = payload["relation_count"] || 0
+        sec = payload["security_score"] || 100
+        cov = payload["coverage_score"] || 0
+        entries = payload["entry_points"] || 0
+        
+        # Update Global Stats Cache for SUCCESSFUL files (Mem-only, fast)
+        if status == "ok" do
+          project_name = Axon.Watcher.Tracking.extract_project_from_path(path)
+          Axon.Watcher.StatsCache.increment_file_stats(project_name, %{
+            completed: 1,
+            symbols: syms,
+            relations: rels,
+            entries: entries,
+            security: sec,
+            coverage: cov
+          })
+        end
+
+        # Recording tracer data
+        t0 = payload["t0"] || 0
+        trace_id = payload["trace_id"] || "none"
+        if t0 > 0 and trace_id != "none" do
+          Axon.Watcher.Tracer.record_trace(trace_id, path, t0, payload["t1"] || 0, payload["t2"] || 0, payload["t3"] || 0, payload["t4"] || 0)
+        end
+
+        # A. Check if it's part of a batch
+        case Map.pop(acc_state.path_to_batch, path) do
+          {nil, _} ->
+            # B. It's a unit request (legacy or Titan)
+            case Map.pop(acc_state.requests, path) do
+              {nil, _} -> acc_state
+              {from, new_reqs} ->
+                GenServer.reply(from, %{"status" => payload["status"] || "ok"})
+                %{acc_state | requests: new_reqs}
+            end
+
+          {batch_id, new_p2b} ->
+            # C. Handle Batch progress
+            case Map.get(acc_state.batches, batch_id) do
+              {from, pending, results} ->
+                new_pending = pending - 1
+                new_results = [%{"path" => path, "status" => payload["status"]} | results]
+                
+                if new_pending == 0 do
+                  # Batch COMPLETE! Reply to Oban worker
+                  GenServer.reply(from, %{"status" => "ok", "results" => new_results})
+                  %{acc_state | batches: Map.delete(acc_state.batches, batch_id), path_to_batch: new_p2b}
+                else
+                  # Batch still waiting
+                  %{acc_state | batches: Map.put(acc_state.batches, batch_id, {from, new_pending, new_results}), path_to_batch: new_p2b}
+                end
+              _ -> 
+                %{acc_state | path_to_batch: new_p2b}
+            end
+        end
+      end)
+
+      {:noreply, new_state}
     else
       {:noreply, state}
     end

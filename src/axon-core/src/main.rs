@@ -160,6 +160,20 @@ fn main() -> anyhow::Result<()> {
                                     *active_id = new_id;
                                 }
                             }
+                        } else if command.starts_with("PARSE_BATCH ") {
+                            let payload = &command[12..];
+                            if let Ok(batch_data) = serde_json::from_str::<serde_json::Value>(payload) {
+                                if let Some(files) = batch_data.as_array() {
+                                    for file_data in files {
+                                        let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
+                                        let trace_id = file_data["trace_id"].as_str().unwrap_or("unknown").to_string();
+                                        let t0 = file_data["t0"].as_i64().unwrap_or(0);
+                                        let t1 = file_data["t1"].as_i64().unwrap_or(0);
+                                        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).map(|sys_time| sys_time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64).unwrap_or(0);
+                                        let _ = queue_clone.push(&path, mtime, &trace_id, t0, t1);
+                                    }
+                                }
+                            }
                         } else if command.starts_with("PARSE_FILE ") {
                             let payload = &command[11..];
                             if let Ok(file_data) = serde_json::from_str::<serde_json::Value>(payload) {
