@@ -152,15 +152,20 @@ defmodule Axon.BackpressureController do
   defp pause_queues(oban_mod) do
     oban_mod.pause_queue(queue: :indexing_default)
     oban_mod.pause_queue(queue: :indexing_hot)
+    oban_mod.pause_queue(queue: :indexing_titan)
   end
 
   defp resume_queues(oban_mod) do
     oban_mod.resume_queue(queue: :indexing_default)
     oban_mod.resume_queue(queue: :indexing_hot)
+    oban_mod.resume_queue(queue: :indexing_titan)
   end
 
   defp scale_queues(oban_mod, limit) do
+    # Main dynamic scaling
     oban_mod.scale_queue(queue: :indexing_default, limit: limit)
-    oban_mod.scale_queue(queue: :indexing_hot, limit: max(1, div(limit, 2)))
+    # User-priority queue always gets at least half the capacity
+    oban_mod.scale_queue(queue: :indexing_hot, limit: max(2, div(limit, 2)))
+    # Titan queue remains unit-concurrency but follows the pause/resume signal
   end
 end

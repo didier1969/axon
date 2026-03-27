@@ -118,7 +118,7 @@ pub struct Relation {
     pub properties: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ExtractionResult {
     #[serde(default)]
     pub project_slug: Option<String>,

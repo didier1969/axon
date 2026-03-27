@@ -21,11 +21,10 @@ use graph::GraphStore;
 use mcp::McpServer;
 use std::time::Instant;
 use std::fs;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{info, error};
-use parking_lot::RwLock;
 use queue::QueueStore;
 
 fn main() -> anyhow::Result<()> {
@@ -42,19 +41,19 @@ fn main() -> anyhow::Result<()> {
             let projects_root = "/home/dstadel/projects";
             let db_path = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
 
-            info!("Starting Axon Core v2.1 (Native Backpressure Edition)");
+            info!("Starting Axon Core v2.2 (Nexus Seal - Zero-Sleep Edition)");
             info!("Engine Boot Time: {}", boot_time);
 
-            // Initialize KuzuDB
+            // Initialize KuzuDB (No RwLock needed: MVCC Snapshot Isolation handles concurrency)
             let graph_store = match GraphStore::new(db_path) {
-                Ok(store) => Arc::new(RwLock::new(store)),
+                Ok(store) => Arc::new(store),
                 Err(e) => {
                     error!("Fatal Error initializing LadybugDB: {:?}", e);
                     return Err(e);
                 }
             };
 
-            // Initialize In-Memory Bounded Queue (Max 500 tasks to block Elixir via UDS)
+            // Initialize In-Memory Bounded Queue (Max 500 tasks to block Elixir via UDS backpressure)
             let queue_store = Arc::new(QueueStore::new(500));
             let tel_socket_path = "/tmp/axon-telemetry.sock";
             let mcp_socket_path = "/tmp/axon-mcp.sock";
@@ -63,14 +62,11 @@ fn main() -> anyhow::Result<()> {
             if std::path::Path::new(mcp_socket_path).exists() { let _ = fs::remove_file(mcp_socket_path); }
 
             let tel_listener = UnixListener::bind(tel_socket_path)?;
-            let _mcp_listener = UnixListener::bind(mcp_socket_path)?;
             
             info!("Telemetry Server listening on {}", tel_socket_path);
-            info!("MCP Server listening on {}", mcp_socket_path);
+            info!("MCP HTTP/SSE Server listening on 127.0.0.1:44129");
 
-            let mcp_active_flag = Arc::new(AtomicUsize::new(0));
-
-            // --- OS-Level Sledgehammer (Option B) Memory Watchdog ---
+            // --- OS-Level Memory Watchdog ---
             std::thread::spawn(|| {
                 let page_size = 4096;
                 let limit_bytes: u64 = 14 * 1024 * 1024 * 1024; // 14 GB
@@ -79,7 +75,7 @@ fn main() -> anyhow::Result<()> {
                         if let Some(rss_pages) = parse_rss_from_statm(&content) {
                             let rss_bytes = rss_pages * page_size;
                             if rss_bytes > limit_bytes {
-                                error!("CRITICAL: Memory threshold reached ({} GB). Executing Process Cycling (Option B) suicide...", rss_bytes / 1024 / 1024 / 1024);
+                                error!("CRITICAL: Memory threshold reached ({} GB). Suicide for recycling...", rss_bytes / 1024 / 1024 / 1024);
                                 std::process::exit(0);
                             }
                         }
@@ -92,26 +88,22 @@ fn main() -> anyhow::Result<()> {
             let (results_tx, _) = tokio::sync::broadcast::channel::<String>(100000);
 
             // --- HARDWARE-AWARE SCALING ---
-            // Detect available CPU cores to size the worker pool dynamically
             let available_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
             let num_fast_workers = if available_cores > 2 { available_cores - 2 } else { 1 };
-            info!("Hardware-Aware Scaling: Detected {} cores. Sizing worker pool to {} threads.", available_cores, num_fast_workers);
+            info!("Hardware-Aware Scaling: Sizing worker pool to {} threads.", num_fast_workers);
 
-            // Move worker pool outside the loop to prevent memory explosion from multiple model loads.
             let _worker_pool = crate::worker::WorkerPool::new(
                 num_fast_workers, 
                 graph_store.clone(), 
                 queue_store.clone(),
                 results_tx.clone(), 
-                mcp_active_flag.clone()
             );
 
             // --- MCP Listener Loop (HTTP/SSE via Axum) ---
             let mcp_store_for_axum = graph_store.clone();
-            let mcp_flag_for_axum = mcp_active_flag.clone();
             tokio::spawn(async move {
                 let mcp_server = Arc::new(McpServer::new(mcp_store_for_axum));
-                let app = crate::mcp_http::app_router(mcp_server, mcp_flag_for_axum);
+                let app = crate::mcp_http::app_router(mcp_server);
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:44129").await.expect("Failed to bind to port 44129");
                 let _ = axum::serve(listener, app).await;
             });
@@ -169,7 +161,7 @@ fn main() -> anyhow::Result<()> {
                                 cancel_token.store(true, Ordering::Relaxed);
                                 let _ = task.await; 
                             }
-                            let _ = queue_clone.purge_all(); // Purge old SQLite queue to prevent zombie processing
+                            let _ = queue_clone.purge_all();
                             cancel_token = Arc::new(AtomicBool::new(false));
                             let token_clone = cancel_token.clone();
                             let scan_store = store_clone.clone();
@@ -215,15 +207,10 @@ fn main() -> anyhow::Result<()> {
                         } else if command == "STOP" {
                             cancel_token.store(true, Ordering::Relaxed);
                         } else if command == "RESET" {
-                            cancel_token.store(true, Ordering::Relaxed);
+                            info!("☢️ RESET: Deleting database and exiting for clean restart...");
                             let db_path_str = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
-                            {
-                                let mut locked = store_clone.write();
-                                let _ = std::fs::remove_dir_all(db_path_str);
-                                if let Ok(new_store) = GraphStore::new(db_path_str) {
-                                    *locked = new_store;
-                                }
-                            }
+                            let _ = std::fs::remove_dir_all(db_path_str);
+                            std::process::exit(0); // Watcher will restart us
                         }
                         line.clear();
                     }
@@ -234,14 +221,4 @@ fn main() -> anyhow::Result<()> {
 
 fn parse_rss_from_statm(content: &str) -> Option<u64> {
     content.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_parse_statm_rss() {
-        let content = "1234 5678 9012 34 56 78 90";
-        assert_eq!(parse_rss_from_statm(content), Some(5678));
-    }
 }

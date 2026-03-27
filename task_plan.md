@@ -22,3 +22,9 @@ Ensure the Axon MCP server and its underlying ingestion pipeline are absolutely 
 ### Phase 4: Final Validation
 - [x] Run comprehensive test suite for MCP.
 - [x] Verify long-running background ingestion doesn't impact MCP availability.
+
+### Phase 5: Zero-Sleep & MVCC Implementation (Maestria)
+- [ ] Task 5.1: Refactor Rust `GraphStore` and `main.rs` to remove `RwLock` and use native MVCC connections.
+- [ ] Task 5.2: Purge all `sleep` and `mcp_active` logic from `worker.rs`.
+- [ ] Task 5.3: Optimize Elixir `PoolFacade` and Oban config for hardware-aware backpressure.
+- [ ] Task 5.4: Validate Zero-Latency MCP under 36k file load.

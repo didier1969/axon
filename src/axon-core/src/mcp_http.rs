@@ -8,31 +8,26 @@ use futures_util::stream::{self, Stream};
 use tokio_stream::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpServer};
 
 use tracing::Instrument;
 
-pub fn app_router(mcp_server: Arc<McpServer>, mcp_active_flag: Arc<AtomicUsize>) -> Router {
+pub fn app_router(mcp_server: Arc<McpServer>) -> Router {
     Router::new()
         .route("/mcp", post(handle_mcp_post))
         .route("/mcp/sse", get(handle_mcp_sse))
         .layer(Extension(mcp_server))
-        .layer(Extension(mcp_active_flag))
 }
 
 async fn handle_mcp_post(
     Extension(server): Extension<Arc<McpServer>>,
-    Extension(mcp_active_flag): Extension<Arc<AtomicUsize>>,
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<Option<JsonRpcResponse>> {
     let span = tracing::info_span!("mcp_request", method = %payload.method);
     
     async move {
-        // 1. Signal priority to pause ingestion
-        mcp_active_flag.fetch_add(1, Ordering::SeqCst);
-        
-        // 2. Offload C-FFI / DB work to a blocking thread pool safely
+        // Offload C-FFI / DB work to a blocking thread pool safely
+        // No more mcp_active_flag: Zero-Sleep MVCC architecture handles concurrency.
         let response = match tokio::task::spawn_blocking(move || {
             server.handle_request(payload)
         }).await {
@@ -42,9 +37,6 @@ async fn handle_mcp_post(
                 None
             }
         };
-        
-        // 3. Resume ingestion
-        mcp_active_flag.fetch_sub(1, Ordering::SeqCst);
         
         Json(response)
     }.instrument(span).await
@@ -78,14 +70,13 @@ mod tests {
     use crate::graph::GraphStore;
     use crate::mcp::McpServer;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     #[tokio::test]
     async fn test_mcp_http_endpoint_tools_list() {
-        let store = Arc::new(parking_lot::RwLock::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db_http").unwrap())));
+        // Updated test server creation to use direct Arc (Zéro-Sleep)
+        let store = Arc::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db_http").unwrap()));
         let mcp_server = Arc::new(McpServer::new(store));
-        let flag = Arc::new(AtomicUsize::new(0));
-        let app = app_router(mcp_server, flag);
+        let app = app_router(mcp_server);
 
         let request_body = json!({
             "jsonrpc": "2.0",

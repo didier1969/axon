@@ -59,7 +59,7 @@ impl Scanner {
         }
     }
 
-    pub fn scan(&self, graph: Option<Arc<RwLock<GraphStore>>>, queue: Option<Arc<crate::queue::QueueStore>>) {
+    pub fn scan(&self, graph: Option<Arc<GraphStore>>, queue: Option<Arc<crate::queue::QueueStore>>) {
         let project_name = self.root.file_name().unwrap_or_default().to_string_lossy().to_string();
         
         tracing::info!("🚀 Starting deep scan of sector: {}", self.root.display());
@@ -95,9 +95,8 @@ impl Scanner {
                         if let Some(g) = &graph {
                             if let Ok(content) = fs::read_to_string(&path) {
                                 let deps = extract_toml_dependencies(&content);
-                                let store = g.read();
                                 for dep in deps {
-                                    let _ = store.insert_project_dependency(&project_name, &dep.to, &dep.path);
+                                    let _ = g.insert_project_dependency(&project_name, &dep.to, &dep.path);
                                 }
                             }
                         }
