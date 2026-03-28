@@ -26,14 +26,18 @@ Identifiers are system-assigned by the DuckDB `soll.Registry` table. Do NOT inve
 ## 2. Mandatory Workflow
 
 1. **Alignment:** Check the `Pillar` nodes first via `axon_export_soll` or `axon_query`. If a task doesn't fit a pillar, discuss with the architect.
-2. **Nominal Sync:** Update the graph at every step. Use factual titles. **Do not write raw SQL/Cypher to mutate SOLL.** Use the strict MCP tools (`axon_add_concept`, `axon_update_concept`).
+2. **Nominal Sync:** Update the graph at every step. Use factual titles. **Do not write raw SQL/Cypher to mutate SOLL.** Use the strict MCP tools (`axon_soll_manager`).
 3. **Traceability:** Link physical symbols (`IST`) to `Concept` nodes. The Rust Data Plane manages the `SUBSTANTIATES` mappings.
 4. **Safety:** The `soll.db` is a physical Sanctuary. It is read-only by default for SQL queries. Mutations MUST go through the typed MCP tools.
 
-## 3. Available MCP Tools for SOLL
+## 3. Style & Tone: Strict Architectural Concreteness
+*   **Interdiction du Marketing :** Bannissez les adjectifs enthousiastes, les promesses vagues et le langage "visionnaire".
+*   **Contenu Physique :** Chaque titre et description doit décrire une contrainte technique, une structure de donnée ou une mécanique d'implémentation.
+*   **Pragmatisme Froid :** Nous sommes des architectes système. Le texte doit porter une information structurelle pure. Si une phrase n'apporte pas de preuve ou de contrainte, supprimez-la.
+
+## 4. Available MCP Tools for SOLL
 *   `axon_export_soll`: Extracts the entire SOLL intentional graph into a timestamped Markdown document for human review.
-*   `axon_add_concept`: Creates a new Concept, auto-increments the registry, and assigns the correct ID.
-*   `axon_update_concept`: (WIP) Updates the explanation or rationale of an existing concept.
+*   `axon_soll_manager`: Command center for SOLL. Actions: `create`, `update`, `link`. Manages Registry auto-IDs.
 
 ---
 © 2026 Axon Intelligence Framework
