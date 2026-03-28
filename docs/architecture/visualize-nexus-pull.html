@@ -202,21 +202,26 @@
                     R[Requirement]
                     C[Concept]
                     
+                    V -- "CONTRIBUTES_TO" --> V
                     P -- "EPITOMIZES" --> V
                     R -- "BELONGS_TO" --> P
+                    R -- "REFINES" --> R
                     C -- "EXPLAINS" --> R
                     C2[New Concept] -- "SUPERSEDES" --> C
                 end
 
                 subgraph IST [La Forge : ist.db]
+                    Proj[Project]
                     S[Symbol / AST]
+                    
+                    Proj -- "HAS_SUBPROJECT" --> Proj
                 end
 
                 S -- "SUBSTANTIATES" --> C
                 
                 style V fill:#f1f5f9,stroke:#475569,stroke-width:4px
                 style P,R,C,C2 fill:#f1f5f9,stroke:#475569
-                style S fill:#eff6ff,stroke:#0284c7
+                style S,Proj fill:#eff6ff,stroke:#0284c7
             </div>
         </section>
 

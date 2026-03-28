@@ -279,6 +279,15 @@ impl GraphStore {
             self.execute("CREATE TABLE IF NOT EXISTS soll.SUPERSEDES (source_id VARCHAR, target_id VARCHAR, reason VARCHAR)")?;
             self.execute("CREATE INDEX IF NOT EXISTS idx_soll_supersedes_src ON soll.SUPERSEDES (source_id)")?;
             self.execute("CREATE INDEX IF NOT EXISTS idx_soll_supersedes_tgt ON soll.SUPERSEDES (target_id)")?;
+
+            // --- RECURSIVE HIERARCHIES ---
+            self.execute("CREATE TABLE IF NOT EXISTS soll.CONTRIBUTES_TO (source_id VARCHAR, target_id VARCHAR)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_contrib_src ON soll.CONTRIBUTES_TO (source_id)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_contrib_tgt ON soll.CONTRIBUTES_TO (target_id)")?;
+
+            self.execute("CREATE TABLE IF NOT EXISTS soll.REFINES (source_id VARCHAR, target_id VARCHAR)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_refines_src ON soll.REFINES (source_id)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_refines_tgt ON soll.REFINES (target_id)")?;
         }
 
         // --- RELATIONS (IST) ---
