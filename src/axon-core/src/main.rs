@@ -14,7 +14,7 @@ use std::fs;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{info, error};
+use tracing::{info, error, debug};
 
 fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
@@ -128,6 +128,7 @@ fn main() -> anyhow::Result<()> {
                     let mut buf_reader = BufReader::new(reader);
                     let mut line = String::new();
                     
+                    // Outgoing Feedback Loop
                     tokio::spawn(async move {
                         loop {
                             match results_rx.recv().await {
@@ -135,7 +136,7 @@ fn main() -> anyhow::Result<()> {
                                     if writer.write_all(msg.as_bytes()).await.is_err() { break; }
                                 },
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                                    error!("⚠️ Telemetry Lagged: skipped {} messages. Performance bottleneck detected.", count);
+                                    error!("⚠️ Telemetry Lagged: skipped {} messages.", count);
                                     continue;
                                 },
                                 Err(_) => break,
@@ -143,6 +144,7 @@ fn main() -> anyhow::Result<()> {
                         }
                     });
 
+                    // Incoming Command Loop
                     let cancel_token: Option<Arc<AtomicBool>> = None;
 
                     while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {

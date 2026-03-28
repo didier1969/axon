@@ -213,18 +213,47 @@ impl GraphStore {
     }
 
     pub fn insert_file_data_batch(&self, tasks: &[crate::worker::DbWriteTask]) -> Result<()> {
+        if tasks.is_empty() { return Ok(()); }
+
         let mut queries = Vec::new();
+        let mut indexed_paths = Vec::new();
+        let mut symbol_values = Vec::new();
+
         for task in tasks {
             if let crate::worker::DbWriteTask::FileExtraction { path, extraction, .. } = task {
-                let slug = extraction.project_slug.clone().unwrap_or_else(|| "global".to_string());
-                queries.push(format!("UPDATE File SET status = 'indexed' WHERE path = '{}';", path.replace("'", "''")));
+                indexed_paths.push(format!("'{}'", path.replace("'", "''")));
+                let slug = extraction.project_slug.as_deref().unwrap_or("global");
+                
                 for sym in &extraction.symbols {
-                    queries.push(format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES ('{}::{}', '{}', '{}', {}, {}, {}, {}, '{}') ON CONFLICT DO NOTHING;", 
-                        slug.replace("'", "''"), sym.name.replace("'", "''"), sym.name.replace("'", "''"), sym.kind, sym.tested, sym.is_public, sym.is_nif, sym.is_unsafe, slug.replace("'", "''")));
+                    symbol_values.push(format!("('{}::{}', '{}', '{}', {}, {}, {}, {}, '{}')",
+                        slug.replace("'", "''"), sym.name.replace("'", "''"), 
+                        sym.name.replace("'", "''"), sym.kind, 
+                        sym.tested, sym.is_public, sym.is_nif, sym.is_unsafe, 
+                        slug.replace("'", "''")
+                    ));
                 }
             }
         }
-        self.execute_batch(&queries)
+
+        // 1. Batch Update File Status
+        if !indexed_paths.is_empty() {
+            let update_q = format!("UPDATE File SET status = 'indexed' WHERE path IN ({});", indexed_paths.join(","));
+            queries.push(update_q);
+        }
+
+        // 2. Batch Insert Symbols (by chunks of 500 to avoid SQL length limits)
+        for chunk in symbol_values.chunks(500) {
+            queries.push(format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES {} ON CONFLICT DO NOTHING;", 
+                chunk.join(",")));
+        }
+
+        let res = self.execute_batch(&queries);
+        if res.is_ok() && !indexed_paths.is_empty() {
+            // Verification check: did the update actually change anything?
+            // In DuckDB, we can check rows_affected if we use a different API, but here we just log success.
+            debug!("GraphStore: Committed batch for {} files.", indexed_paths.len());
+        }
+        res
     }
 
     pub fn insert_project_dependency(&self, from: &str, to: &str, _path: &str) -> Result<()> {

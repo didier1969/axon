@@ -81,9 +81,18 @@ impl Scanner {
                 }
 
                 if self.is_supported(&path) {
+                    let path_str = if let Ok(abs_path) = fs::canonicalize(&path) {
+                        abs_path.to_string_lossy().to_string()
+                    } else {
+                        path.to_string_lossy().to_string()
+                    };
+
                     let metadata = fs::metadata(&path);
                     let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
-                    let mtime = metadata.and_then(|m| m.modified()).map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64).unwrap_or(0);
+                    let mtime = metadata.as_ref().ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
+                        .unwrap_or(0);
                     
                     batch.push((path_str, project_name, size, mtime));
                     

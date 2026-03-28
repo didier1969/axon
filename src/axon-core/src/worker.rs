@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::thread;
-use tracing::{info, error};
+use tracing::{info, error, debug};
 use crossbeam_channel::{bounded, Sender, Receiver};
 
 use crate::graph::GraphStore;
@@ -70,8 +70,8 @@ impl WorkerPool {
                     Err(_) => break,
                 }
 
-                // Fill batch up to 50
-                while batch.len() < 50 {
+                // Fill batch up to 2000
+                while batch.len() < 2000 {
                     match db_receiver.try_recv() {
                         Ok(DbWriteTask::FileExtraction { path, extraction, trace_id, t0, t1, t2, t3 }) => {
                             batch.push(crate::worker::DbWriteTask::FileExtraction { path, extraction, trace_id, t0, t1, t2, t3 });
@@ -81,44 +81,54 @@ impl WorkerPool {
                                 error!("Writer Actor failed to execute SOLL query: {} | {:?}", query, e);
                             }
                         },
-                        Err(crossbeam_channel::TryRecvError::Empty) => break,
+                        Err(crossbeam_channel::TryRecvError::Empty) => {
+                            // Micro-pause only if batch is very small to avoid starvation
+                            if batch.len() < 500 {
+                                std::thread::sleep(std::time::Duration::from_micros(500));
+                                continue;
+                            }
+                            break;
+                        },
                         Err(crossbeam_channel::TryRecvError::Disconnected) => break,
                     }
                 }
 
                 // 2. EXECUTION PHASE
-                let mut feedback_buffer = String::new();
-                
                 if !batch.is_empty() {
-                    info!("Writer Actor: Processing batch of {} extractions...", batch.len());
-                }
+                    let batch_size = batch.len();
+                    debug!("Writer Actor: Committing batch of {} files...", batch_size);
 
-                // Transactional Batch Insert
-                let result = if !batch.is_empty() {
-                    graph_store.insert_file_data_batch(&batch)
-                } else {
-                    Ok(())
-                };
+                    // Transactional Batch Insert
+                    let result = graph_store.insert_file_data_batch(&batch);
 
-                if let Err(e) = &result {
-                    error!("Writer Actor: Transactional Commit FAILED: {:?}", e);
-                } else if !batch.is_empty() {
-                    info!("Writer Actor: Transactional Commit SUCCESS.");
-                }
+                    let mut combined_feedback = String::with_capacity(batch_size * 256);
+                    
+                    for task in batch.drain(..) {
+                        if let DbWriteTask::FileExtraction { path, extraction, trace_id, t0, t1, t2, t3 } = task {
+                            let (status, reason) = match &result {
+                                Ok(_) => {
+                                    let _ = queue.mark_done(&path);
+                                    ("ok", "".to_string())
+                                },
+                                Err(e) => ("error", format!("{:?}", e))
+                            };
 
-                for task in batch.drain(..) {
-                    if let DbWriteTask::FileExtraction { path, extraction, trace_id, t0, t1, t2, t3 } = task {
-                        let (status, reason) = match &result {
-                            Ok(_) => {
-                                let _ = queue.mark_done(&path);
-                                ("ok", "".to_string())
-                            },
-                            Err(e) => ("error", format!("{:?}", e))
-                        };
-
-                        if let Some(msg) = Self::format_feedback(&path, status, &reason, extraction.symbols.len(), extraction.relations.len(), &trace_id, t0, t1, t2, t3) {
-                            let _ = result_sender.send(msg);
+                            // Only send individual feedback if it's an error or if we want high-fidelity tracing
+                            // For v4.2, we send all but we concatenate them in ONE message
+                            if let Some(msg) = Self::format_feedback(&path, status, &reason, extraction.symbols.len(), extraction.relations.len(), &trace_id, t0, t1, t2, t3) {
+                                combined_feedback.push_str(&msg);
+                            }
                         }
+                    }
+                    
+                    if !combined_feedback.is_empty() {
+                        let _ = result_sender.send(combined_feedback);
+                    }
+                    
+                    if result.is_ok() {
+                        debug!("Writer Actor: Batch of {} files committed successfully.", batch_size);
+                    } else {
+                        error!("Writer Actor: Batch commit FAILED.");
                     }
                 }
             }

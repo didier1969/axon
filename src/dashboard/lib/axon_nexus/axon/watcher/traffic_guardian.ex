@@ -27,11 +27,11 @@ defmodule Axon.Watcher.TrafficGuardian do
     )
 
     # Start periodic check
-    :timer.send_interval(100, :check_pressure)
+    :timer.send_interval(1000, :check_pressure)
     :timer.send_interval(1000, :calculate_flux)
 
     {:ok, %{
-      target_pressure: 200,
+      target_pressure: 100,
       current_load: 0,
       t4_ema: 0.0,
       processed_this_sec: 0,
