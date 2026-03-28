@@ -4,6 +4,7 @@ use std::os::raw::c_char;
 use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use std::sync::{Arc, Mutex};
+use tracing::{info, error};
 
 type InitDbFunc = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 type ExecuteFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> bool;
@@ -28,7 +29,7 @@ impl Drop for GraphStore {
     fn drop(&mut self) {
         if !self.ctx.is_null() {
             unsafe {
-                if let Ok(close_fn) = self.lib.get::<CloseDbFunc>(b"ladybug_close_db\0") {
+                if let Ok(close_fn) = self.lib.get::<CloseDbFunc>(b"duckdb_close_db\0") {
                     close_fn(self.ctx);
                 }
             }
@@ -37,7 +38,7 @@ impl Drop for GraphStore {
 }
 
 impl GraphStore {
-    pub fn new(db_path: &str) -> Result<Self> {
+    pub fn new(db_root: &str) -> Result<Self> {
         let plugin_path = Self::find_plugin_path()?;
         let lib = unsafe { 
             Library::new(&plugin_path)
@@ -45,42 +46,96 @@ impl GraphStore {
         };
         let lib = Arc::new(lib);
 
+        let db_root_path = std::path::Path::new(db_root);
+        let ist_path = db_root_path.join("ist.db");
+        let soll_path = db_root_path.join("soll.db");
+
+        // --- STEP 1: Bootstrap SOLL Sanctuary if it doesn't exist ---
+        // DuckDB ATTACH fails if the target directory is not a valid database.
+        if db_root != ":memory:" {
+            unsafe {
+                let init_fn: Symbol<InitDbFunc> = lib.get(b"duckdb_init_db\0")?;
+                let close_fn: Symbol<CloseDbFunc> = lib.get(b"duckdb_close_db\0")?;
+                let exec_fn: Symbol<ExecuteFunc> = lib.get(b"duckdb_execute\0")?;
+                
+                let c_soll_path = CString::new(soll_path.to_string_lossy().to_string())?;
+                let tmp_ctx = init_fn(c_soll_path.as_ptr());
+                if !tmp_ctx.is_null() {
+                    let q = "CREATE TABLE IF NOT EXISTS Vision (title VARCHAR PRIMARY KEY, description VARCHAR, goal VARCHAR);
+                             CREATE TABLE IF NOT EXISTS Pillar (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR);
+                             CREATE TABLE IF NOT EXISTS Requirement (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, justification VARCHAR, priority VARCHAR);
+                             CREATE TABLE IF NOT EXISTS Concept (name VARCHAR PRIMARY KEY, explanation VARCHAR, rationale VARCHAR);
+                             CREATE TABLE IF NOT EXISTS Registry (id VARCHAR PRIMARY KEY, last_req BIGINT, last_cpt BIGINT, last_dec BIGINT);
+                             CREATE TABLE IF NOT EXISTS EPITOMIZES (source_id VARCHAR, target_id VARCHAR);
+                             CREATE TABLE IF NOT EXISTS BELONGS_TO (source_id VARCHAR, target_id VARCHAR);
+                             CREATE TABLE IF NOT EXISTS EXPLAINS (source_id VARCHAR, target_id VARCHAR);
+                             CREATE TABLE IF NOT EXISTS SUPERSEDES (source_id VARCHAR, target_id VARCHAR, reason VARCHAR);";
+                    let c_q = CString::new(q)?;
+                    exec_fn(tmp_ctx, c_q.as_ptr());
+                    close_fn(tmp_ctx);
+                }
+            }
+        }
+
+        // --- STEP 2: Initialize IST Forge as Primary ---
         let ctx = unsafe {
-            let init_fn: Symbol<InitDbFunc> = lib.get(b"ladybug_init_db\0")
-                .map_err(|e| anyhow!("Failed to load symbol ladybug_init_db: {}", e))?;
-            let c_path = CString::new(db_path)?;
+            let init_fn: Symbol<InitDbFunc> = lib.get(b"duckdb_init_db\0")
+                .map_err(|e| anyhow!("Failed to load symbol duckdb_init_db: {}", e))?;
+            
+            let c_path = if db_root == ":memory:" {
+                CString::new(":memory:")?
+            } else {
+                CString::new(ist_path.to_string_lossy().to_string())?
+            };
+            
             let ctx = init_fn(c_path.as_ptr());
             if ctx.is_null() {
-                return Err(anyhow!("Failed to initialize Ladybug database at {}", db_path));
+                return Err(anyhow!("Failed to initialize DuckDB database"));
             }
             ctx
         };
 
         let store = Self { lib, ctx };
-        store.init_schema()?;
+        
+        // --- STEP 3: Attach the SOLL Sanctuary (DuckDB Lifecycle) ---
+        
+        // Load the vss extension for vector similarity search
+        if let Err(e) = store.execute("INSTALL vss; LOAD vss;") {
+            error!("Warning: Failed to load vss extension: {}", e);
+        }
+
+        if db_root != ":memory:" {
+            let attach_query = format!("ATTACH '{}' AS soll (READ_ONLY);", soll_path.to_string_lossy().replace("'", "\\'"));
+            if let Err(e) = store.execute(&attach_query) {
+                error!("CRITICAL: Failed to attach SOLL sanctuary: {}", e);
+                return Err(e);
+            }
+        }
+        
+        store.init_schema(db_root == ":memory:")?;
 
         Ok(store)
     }
 
     fn find_plugin_path() -> Result<PathBuf> {
         let plugin_name = if cfg!(target_os = "macos") {
-            "libaxon_plugin_ladybug.dylib"
+            "libaxon_plugin_duckdb.dylib"
         } else if cfg!(target_os = "windows") {
-            "axon_plugin_ladybug.dll"
+            "axon_plugin_duckdb.dll"
         } else {
-            "libaxon_plugin_ladybug.so"
+            "libaxon_plugin_duckdb.so"
         };
 
         let current_dir = std::env::current_dir()?;
         let search_paths = vec![
             current_dir.join(plugin_name),
-            current_dir.join(format!("../axon-plugin-ladybug/target/release/{}", plugin_name)),
-            current_dir.join(format!("../axon-plugin-ladybug/target/debug/{}", plugin_name)),
+            current_dir.join(format!("../axon-plugin-duckdb/target/release/{}", plugin_name)),
+            current_dir.join(format!("../axon-plugin-duckdb/target/debug/{}", plugin_name)),
             current_dir.join(format!("../../target/release/{}", plugin_name)),
             current_dir.join(format!("../../target/debug/{}", plugin_name)),
             // If running from root of workspace
-            current_dir.join(format!("src/axon-plugin-ladybug/target/release/{}", plugin_name)),
-            current_dir.join(format!("src/axon-plugin-ladybug/target/debug/{}", plugin_name)),
+            current_dir.join(format!("src/axon-plugin-duckdb/target/release/{}", plugin_name)),
+            current_dir.join(format!("src/axon-plugin-duckdb/target/debug/{}", plugin_name)),
         ];
 
         for path in search_paths {
@@ -89,12 +144,12 @@ impl GraphStore {
             }
         }
 
-        Err(anyhow!("Could not find plugin {}. Expected it to be compiled in axon-plugin-ladybug/target. You might need to run: cd src/axon-plugin-ladybug && cargo build", plugin_name))
+        Err(anyhow!("Could not find plugin {}. Expected it to be compiled in axon-plugin-duckdb/target. You might need to run: cd src/axon-plugin-duckdb && cargo build", plugin_name))
     }
 
     pub fn execute(&self, query: &str) -> Result<()> {
         unsafe {
-            let exec_fn: Symbol<ExecuteFunc> = self.lib.get(b"ladybug_execute\0")?;
+            let exec_fn: Symbol<ExecuteFunc> = self.lib.get(b"duckdb_execute\0")?;
             let c_query = CString::new(query)?;
             if !exec_fn(self.ctx, c_query.as_ptr()) {
                 return Err(anyhow!("Execution failed for query: {}", query));
@@ -105,7 +160,7 @@ impl GraphStore {
 
     pub fn execute_param(&self, query: &str, params: &serde_json::Value) -> Result<()> {
         unsafe {
-            let exec_fn: Symbol<ExecuteParamFunc> = self.lib.get(b"ladybug_execute_param\0")?;
+            let exec_fn: Symbol<ExecuteParamFunc> = self.lib.get(b"duckdb_execute_param\0")?;
             let c_query = CString::new(query)?;
             let params_str = serde_json::to_string(params)?;
             let c_params = CString::new(params_str)?;
@@ -118,7 +173,7 @@ impl GraphStore {
 
     pub fn execute_batch(&self, queries: &[String]) -> Result<()> {
         unsafe {
-            let exec_batch_fn: Symbol<ExecuteBatchFunc> = self.lib.get(b"ladybug_execute_batch\0")?;
+            let exec_batch_fn: Symbol<ExecuteBatchFunc> = self.lib.get(b"duckdb_execute_batch\0")?;
             let json_str = serde_json::to_string(queries)?;
             let c_query = CString::new(json_str)?;
             if !exec_batch_fn(self.ctx, c_query.as_ptr()) {
@@ -130,7 +185,7 @@ impl GraphStore {
 
     pub fn query_count(&self, query: &str) -> Result<i64> {
         unsafe {
-            let count_fn: Symbol<QueryCountFunc> = self.lib.get(b"ladybug_query_count\0")?;
+            let count_fn: Symbol<QueryCountFunc> = self.lib.get(b"duckdb_query_count\0")?;
             let c_query = CString::new(query)?;
             Ok(count_fn(self.ctx, c_query.as_ptr()))
         }
@@ -138,7 +193,7 @@ impl GraphStore {
 
     pub fn query_count_param(&self, query: &str, params: &serde_json::Value) -> Result<i64> {
         unsafe {
-            let count_fn: Symbol<QueryCountParamFunc> = self.lib.get(b"ladybug_query_count_param\0")?;
+            let count_fn: Symbol<QueryCountParamFunc> = self.lib.get(b"duckdb_query_count_param\0")?;
             let c_query = CString::new(query)?;
             let params_str = serde_json::to_string(params)?;
             let c_params = CString::new(params_str)?;
@@ -148,7 +203,7 @@ impl GraphStore {
 
     pub fn query_json(&self, query: &str) -> Result<String> {
         unsafe {
-            let query_fn: Symbol<QueryJsonFunc> = self.lib.get(b"ladybug_query_json\0")?;
+            let query_fn: Symbol<QueryJsonFunc> = self.lib.get(b"duckdb_query_json\0")?;
             let c_query = CString::new(query)?;
             let result_ptr = query_fn(self.ctx, c_query.as_ptr());
             
@@ -158,7 +213,7 @@ impl GraphStore {
             
             let result_str = std::ffi::CStr::from_ptr(result_ptr).to_string_lossy().into_owned();
             
-            if let Ok(free_fn) = self.lib.get::<FreeStringFunc>(b"ladybug_free_string\0") {
+            if let Ok(free_fn) = self.lib.get::<FreeStringFunc>(b"duckdb_free_string\0") {
                 free_fn(result_ptr);
             }
             
@@ -168,7 +223,7 @@ impl GraphStore {
 
     pub fn query_json_param(&self, query: &str, params: &serde_json::Value) -> Result<String> {
         unsafe {
-            let query_fn: Symbol<QueryJsonParamFunc> = self.lib.get(b"ladybug_query_json_param\0")?;
+            let query_fn: Symbol<QueryJsonParamFunc> = self.lib.get(b"duckdb_query_json_param\0")?;
             let c_query = CString::new(query)?;
             let params_str = serde_json::to_string(params)?;
             let c_params = CString::new(params_str)?;
@@ -180,7 +235,7 @@ impl GraphStore {
             
             let result_str = std::ffi::CStr::from_ptr(result_ptr).to_string_lossy().into_owned();
             
-            if let Ok(free_fn) = self.lib.get::<FreeStringFunc>(b"ladybug_free_string\0") {
+            if let Ok(free_fn) = self.lib.get::<FreeStringFunc>(b"duckdb_free_string\0") {
                 free_fn(result_ptr);
             }
             
@@ -192,37 +247,164 @@ impl GraphStore {
         }
     }
 
-    fn init_schema(&self) -> Result<()> {
-        self.execute("CREATE NODE TABLE IF NOT EXISTS File (path STRING, project_slug STRING, PRIMARY KEY (path))")?;
-        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (id STRING, name STRING, project_slug STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, is_unsafe BOOLEAN, is_nif BOOLEAN, is_entry_point BOOLEAN, embedding FLOAT[384], PRIMARY KEY (id))")?;
-        self.execute("CREATE NODE TABLE IF NOT EXISTS Project (name STRING, PRIMARY KEY (name))")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS CONTAINS (FROM File TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS CALLS (FROM Symbol TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS CALLS_NIF (FROM Symbol TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS CALLS_OTP (FROM Symbol TO Symbol, otp_boundary BOOLEAN)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS IMPORTS (FROM Symbol TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS IMPLEMENTS (FROM Symbol TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS USES (FROM Symbol TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS DEPENDS_ON (FROM Project TO Project, path STRING)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS BELONGS_TO (FROM File TO Project)")?;
-        Ok(())
-    }
+    fn init_schema(&self, is_memory: bool) -> Result<()> {
+        // --- IST LAYER (Physical Reality) ---
+        self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, embedding FLOAT[384], project_slug VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS Project (name VARCHAR PRIMARY KEY)")?;
+        
+        // --- SOLL LAYER (Intention & Factual Pillars) ---
+        if is_memory {
+            self.execute("CREATE SCHEMA IF NOT EXISTS soll")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.Vision (title VARCHAR PRIMARY KEY, description VARCHAR, goal VARCHAR)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.Pillar (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.Requirement (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, justification VARCHAR, priority VARCHAR)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.Concept (name VARCHAR PRIMARY KEY, explanation VARCHAR, rationale VARCHAR)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (id VARCHAR PRIMARY KEY, last_req BIGINT, last_cpt BIGINT, last_dec BIGINT)")?;
+
+            // --- RELATIONS (SOLL) ---
+            self.execute("CREATE TABLE IF NOT EXISTS soll.EPITOMIZES (source_id VARCHAR, target_id VARCHAR)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.BELONGS_TO (source_id VARCHAR, target_id VARCHAR)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.EXPLAINS (source_id VARCHAR, target_id VARCHAR)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.SUPERSEDES (source_id VARCHAR, target_id VARCHAR, reason VARCHAR)")?;
+        }
+
+        // --- RELATIONS (IST) ---
+        self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS CALLS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS CALLS_NIF (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS BELONGS_TO (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS HAS_SUBPROJECT (source_id VARCHAR, target_id VARCHAR)")?;
+
+        // --- DIGITAL THREAD (SOLL <-> IST) ---
+        // Note: Cross-database relations are stored in the primary database (IST)
+        self.execute("CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR)")?;
+
+        Ok(())    }
 
     pub fn insert_project_dependency(&self, from_project: &str, to_project: &str, path: &str) -> Result<()> {
-        let query = "MERGE (p1:Project {name: $from}) MERGE (p2:Project {name: $to}) MERGE (p1)-[:DEPENDS_ON {path: $path}]->(p2)";
-        let params = serde_json::json!({
-            "from": from_project,
-            "to": to_project,
-            "path": path,
-        });
+        let query = "INSERT INTO Project (name) VALUES (?) ON CONFLICT (name) DO NOTHING;
+                     INSERT INTO Project (name) VALUES (?) ON CONFLICT (name) DO NOTHING;
+                     INSERT INTO HAS_SUBPROJECT (source_id, target_id) VALUES (?, ?);";
+        let params = serde_json::json!([
+            from_project,
+            to_project,
+            from_project,
+            to_project
+        ]);
         self.execute_param(query, &params)
     }
 
+    pub fn bulk_insert_files(&self, file_paths: &[(String, String, i64, i64)]) -> Result<()> {
+        let mut queries = Vec::new();
+        for (path, project, size, mtime) in file_paths {
+            let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
+            let priority = match ext {
+                "ex" | "exs" | "rs" | "py" | "go" => 100,
+                "ts" | "js" | "c" | "cpp" => 80,
+                "md" | "json" | "yml" | "yaml" | "toml" => 50,
+                _ => 10,
+            };
+
+            queries.push(format!(
+                "INSERT INTO File (path, project_slug, size, mtime, status, priority) 
+                 VALUES ('{}', '{}', {}, {}, 'pending', {}) 
+                 ON CONFLICT (path) DO UPDATE SET project_slug=EXCLUDED.project_slug, size=EXCLUDED.size, mtime=EXCLUDED.mtime, status='pending', priority=EXCLUDED.priority;",
+                path.replace("'", "''"),
+                project.replace("'", "''"),
+                size,
+                mtime,
+                priority
+            ));
+        }
+
+        if !queries.is_empty() {
+            self.execute_batch(&queries)?;        }
+        Ok(())
+    }
+
+    pub fn insert_file_data_batch(&self, tasks: &[crate::worker::DbWriteTask]) -> Result<()> {
+        let mut queries = Vec::new();
+
+        for task in tasks {
+            if let crate::worker::DbWriteTask::FileExtraction { path, extraction, .. } = task {
+                let slug = extraction.project_slug.clone().unwrap_or_else(|| "global".to_string());
+
+                // 1. File node
+                queries.push(format!(
+                    "INSERT INTO File (path, project_slug) VALUES ('{}', '{}') ON CONFLICT (path) DO UPDATE SET project_slug=EXCLUDED.project_slug;",
+                    path.replace("'", "''"), slug.replace("'", "''")
+                ));
+
+                // 2. Symbols (Batching symbols per file)
+                let mut seen_symbols = std::collections::HashSet::new();
+                for sym in &extraction.symbols {
+                    if seen_symbols.contains(&sym.name) { continue; }
+                    seen_symbols.insert(sym.name.clone());
+
+                    let is_test = sym.name.contains("test_") || path.contains("test");
+                    let is_unsafe = sym.properties.get("unsafe").map(|s| s == "true").unwrap_or(false);
+                    let is_nif = sym.properties.get("is_nif").map(|s| s == "true").unwrap_or(false);
+                    let fqn = format!("{}::{}", slug, sym.name);
+
+                    queries.push(format!(
+                        "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe) VALUES ('{}', '{}', '{}', {}, {}, {}, {}) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe",
+                        fqn.replace("'", "''"),
+                        sym.name.replace("'", "''"),
+                        sym.kind.replace("'", "''"),
+                        is_test,
+                        sym.is_public,
+                        is_nif,
+                        is_unsafe
+                    ));
+                    queries.push(format!(
+                        "INSERT INTO CONTAINS (source_id, target_id) VALUES ('{}', '{}')",
+                        path.replace("'", "''"),
+                        fqn.replace("'", "''")
+                    ));
+                }
+
+                // 3. Relations
+                let valid_rels = ["CALLS", "IMPORTS", "IMPLEMENTS", "CALLS_NIF", "USES"];
+                for rel in &extraction.relations {
+                    let rel_type = rel.rel_type.to_uppercase();
+                    let safe_rel_type = if valid_rels.contains(&rel_type.as_str()) { rel_type } else { "CALLS".to_string() };
+
+                    if rel.from.is_empty() || rel.from == "file" || rel.from == "method" {
+                        for sym in &extraction.symbols {
+                            let from_fqn = format!("{}::{}", slug, sym.name);
+                            let to_fqn = format!("{}::{}", slug, rel.to);
+                            queries.push(format!(
+                                "INSERT INTO {} (source_id, target_id) VALUES ('{}', '{}');",
+                                safe_rel_type,
+                                from_fqn.replace("'", "''"),
+                                to_fqn.replace("'", "''")
+                            ));
+                        }
+                    } else {
+                        let from_fqn = format!("{}::{}", slug, rel.from);
+                        let to_fqn = format!("{}::{}", slug, rel.to);
+                        queries.push(format!(
+                            "INSERT INTO {} (source_id, target_id) VALUES ('{}', '{}');",
+                            safe_rel_type,
+                            from_fqn.replace("'", "''"),
+                            to_fqn.replace("'", "''")
+                        ));
+                    }
+                }
+            }
+        }
+
+        if !queries.is_empty() {
+            self.execute_batch(&queries)?;
+        }
+        Ok(())
+    }
     pub fn insert_file_data(&self, path: &str, result: &crate::parser::ExtractionResult) -> Result<()> {
         let slug = result.project_slug.clone().unwrap_or_else(|| "global".to_string());
 
         // 1. Insert/Merge File node
-        self.execute_param("MERGE (f:File {path: $p}) SET f.project_slug = $slug", &serde_json::json!({"p": path, "slug": slug}))?;
+        self.execute_param("INSERT INTO File (path, project_slug) VALUES (?, ?) ON CONFLICT (path) DO UPDATE SET project_slug=EXCLUDED.project_slug;", &serde_json::json!([path, slug]))?;
 
         // 2. Insert Symbols
         let mut seen_symbols = std::collections::HashSet::new();
@@ -236,33 +418,22 @@ impl GraphStore {
 
             let fqn = format!("{}::{}", slug, sym.name);
 
-            let sym_query = "MATCH (f:File {path: $path}) \
-                             MERGE (s:Symbol {id: $fqn}) \
-                             SET s.name = $name, s.project_slug = $slug, \
-                                 s.kind = $kind, s.tested = $tested, s.is_public = $is_public, \
-                                 s.is_unsafe = $is_unsafe, s.is_nif = $is_nif, \
-                                 s.is_entry_point = $is_ep \
-                             MERGE (f)-[:CONTAINS]->(s)";
+            let sym_query = "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe";
+            let contains_query = "INSERT INTO CONTAINS (source_id, target_id) VALUES (?, ?)";
 
-            let params = serde_json::json!({
-                "path": path,
-                "fqn": fqn,
-                "name": sym.name,
-                "slug": slug,
-                "kind": sym.kind,
-                "tested": is_test,
-                "is_public": sym.is_public,
-                "is_unsafe": is_unsafe,
-                "is_nif": is_nif,
-                "is_ep": sym.is_entry_point
-            });
+            let sym_params = serde_json::json!([
+                fqn,
+                sym.name,
+                sym.kind,
+                is_test,
+                sym.is_public,
+                is_nif,
+                is_unsafe
+            ]);
+            let contains_params = serde_json::json!([path, fqn]);
 
-            // Embedding is handled separately due to type complexity in C-FFI, but we will pass it as a JSON string for now 
-            // since KuzuDB handles vectors. Wait, if json_to_lbug_value turns arrays to strings, passing vector embeddings 
-            // as parameters is also broken! I'll skip embeddings in this specific pass to fix the core AST first, or just omit it.
-            // For now, omit embedding to guarantee AST insertion works.
-
-            self.execute_param(sym_query, &params)?;
+            self.execute_param(sym_query, &sym_params)?;
+            self.execute_param(contains_query, &contains_params)?;
         }
 
         // 3. Insert Relations
@@ -275,23 +446,23 @@ impl GraphStore {
                 for sym in &result.symbols {
                     let from_fqn = format!("{}::{}", slug, sym.name);
                     let to_fqn = format!("{}::{}", slug, rel.to);
-                    let rel_query = format!("MATCH (a:Symbol {{id: $from}}), (b:Symbol {{id: $to}}) MERGE (a)-[:{}]->(b)", safe_rel_type);
-                    self.execute_param(&rel_query, &serde_json::json!({"from": from_fqn, "to": to_fqn}))?;
+                    let rel_query = format!("INSERT INTO {} (source_id, target_id) VALUES (?, ?);", safe_rel_type);
+                    self.execute_param(&rel_query, &serde_json::json!([from_fqn, to_fqn]))?;
                 }
             } else {
                 let from_fqn = format!("{}::{}", slug, rel.from);
                 let to_fqn = format!("{}::{}", slug, rel.to);
-                let rel_query = format!("MATCH (a:Symbol {{id: $from}}), (b:Symbol {{id: $to}}) MERGE (a)-[:{}]->(b)", safe_rel_type);
-                self.execute_param(&rel_query, &serde_json::json!({"from": from_fqn, "to": to_fqn}))?;
+                let rel_query = format!("INSERT INTO {} (source_id, target_id) VALUES (?, ?);", safe_rel_type);
+                self.execute_param(&rel_query, &serde_json::json!([from_fqn, to_fqn]))?;
             }
         }
         Ok(())
     }
     pub fn get_security_audit(&self, project_name: &str) -> Result<(usize, String)> {
         let count_query = if project_name == "*" || project_name.is_empty() {
-            "MATCH (d:Symbol) WHERE (d.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR d.is_unsafe = true) RETURN count(d)".to_string()
+            "SELECT count(*) FROM Symbol WHERE name IN ('eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run') OR is_unsafe = true".to_string()
         } else {
-            format!("MATCH (s:Symbol {{project_slug: '{}'}}) WHERE (s.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR s.is_unsafe = true) RETURN count(s)", project_name)
+            format!("SELECT count(*) FROM Symbol WHERE project_slug = '{}' AND (name IN ('eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run') OR is_unsafe = true)", project_name.replace("'", "''"))
         };
 
         let issues = self.query_count(&count_query).unwrap_or(0);
@@ -303,13 +474,46 @@ impl GraphStore {
 
         let paths_json = if issues > 0 {
             let path_query = if project_name == "*" || project_name.is_empty() {
-                "MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS|CALLS_NIF|CALLS_OTP*1..3]->(danger:Symbol) \
-                 WHERE danger.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR danger.is_unsafe = true \
-                 RETURN f.path + ' -> ' + s.name + ' calls ' + danger.name AS path LIMIT 5".to_string()
+                "WITH RECURSIVE all_calls AS ( \
+                    SELECT source_id, target_id FROM CALLS \
+                    UNION ALL SELECT source_id, target_id FROM CALLS_NIF \
+                 ), \
+                 traverse(root_caller, callee, depth) AS ( \
+                    SELECT source_id as root_caller, target_id as callee, 1 as depth FROM all_calls \
+                    UNION ALL \
+                    SELECT t.root_caller, c.target_id, t.depth + 1 \
+                    FROM all_calls c JOIN traverse t ON c.source_id = t.callee \
+                    WHERE t.depth < 3 \
+                 ) \
+                 SELECT f.path || ' -> ' || s.name || ' calls ' || danger.name AS path \
+                 FROM traverse t \
+                 JOIN Symbol s ON t.root_caller = s.id \
+                 JOIN CONTAINS c ON s.id = c.target_id \
+                 JOIN File f ON f.path = c.source_id \
+                 JOIN Symbol danger ON t.callee = danger.id \
+                 WHERE danger.name IN ('eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run') OR danger.is_unsafe = true \
+                 LIMIT 5".to_string()
             } else {
-                format!("MATCH (f:File {{project_slug: '{}'}})-[:CONTAINS]->(s:Symbol {{project_slug: '{}'}})-[:CALLS|CALLS_NIF|CALLS_OTP*1..3]->(danger:Symbol {{project_slug: '{}'}}) \
-                         WHERE (danger.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR danger.is_unsafe = true) \
-                         RETURN f.path + ' -> ' + s.name + ' calls ' + danger.name AS path LIMIT 5", project_name, project_name, project_name)
+                format!("WITH RECURSIVE all_calls AS ( \
+                    SELECT source_id, target_id FROM CALLS \
+                    UNION ALL SELECT source_id, target_id FROM CALLS_NIF \
+                 ), \
+                 traverse(root_caller, callee, depth) AS ( \
+                    SELECT source_id as root_caller, target_id as callee, 1 as depth FROM all_calls \
+                    UNION ALL \
+                    SELECT t.root_caller, c.target_id, t.depth + 1 \
+                    FROM all_calls c JOIN traverse t ON c.source_id = t.callee \
+                    WHERE t.depth < 3 \
+                 ) \
+                 SELECT f.path || ' -> ' || s.name || ' calls ' || danger.name AS path \
+                 FROM traverse t \
+                 JOIN Symbol s ON t.root_caller = s.id \
+                 JOIN CONTAINS c ON s.id = c.target_id \
+                 JOIN File f ON f.path = c.source_id \
+                 JOIN Symbol danger ON t.callee = danger.id \
+                 WHERE f.project_slug = '{0}' AND s.project_slug = '{0}' AND \
+                 (danger.name IN ('eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run') OR danger.is_unsafe = true) \
+                 LIMIT 5", project_name.replace("'", "''"))
             };
             self.query_json(&path_query).unwrap_or_else(|_| "[]".to_string())
         } else {
@@ -320,22 +524,33 @@ impl GraphStore {
     }
     pub fn get_technical_debt(&self, project_name: &str) -> Result<Vec<(String, String)>> {
         let query = if project_name == "*" || project_name.is_empty() {
-            "MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
-             OPTIONAL MATCH (s)-[:CALLS]->(debt) \
-             WHERE debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME'] OR s.kind STARTS WITH 'SECRET_' \
-             WITH f, COALESCE(debt.name, s.kind + ': ' + s.name) as issue \
-             RETURN DISTINCT f.path, issue LIMIT 50".to_string()
+            "SELECT DISTINCT f.path, COALESCE(debt.name, s.kind || ': ' || s.name) as issue \
+             FROM Symbol s \
+             JOIN CONTAINS c ON s.id = c.target_id \
+             JOIN File f ON f.path = c.source_id \
+             LEFT JOIN CALLS call ON s.id = call.source_id \
+             LEFT JOIN Symbol debt ON call.target_id = debt.id \
+             WHERE (debt.name IN ('unwrap', 'expect', 'panic!') OR s.kind IN ('TODO', 'FIXME') OR s.kind LIKE 'SECRET_%') \
+             LIMIT 50".to_string()
         } else {
-            format!("MATCH (f:File {{project_slug: '{}'}})-[:CONTAINS]->(s:Symbol {{project_slug: '{}'}}) \
-                     OPTIONAL MATCH (s)-[:CALLS]->(debt:Symbol {{project_slug: '{}'}}) \
-                     WHERE (debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME'] OR s.kind STARTS WITH 'SECRET_') \
-                     WITH f, COALESCE(debt.name, s.kind + ': ' + s.name) as issue \
-                     RETURN DISTINCT f.path, issue LIMIT 50", project_name, project_name, project_name)
+            format!("SELECT DISTINCT f.path, COALESCE(debt.name, s.kind || ': ' || s.name) as issue \
+                     FROM Symbol s \
+                     JOIN CONTAINS c ON s.id = c.target_id \
+                     JOIN File f ON f.path = c.source_id \
+                     LEFT JOIN CALLS call ON s.id = call.source_id \
+                     LEFT JOIN Symbol debt ON call.target_id = debt.id \
+                     WHERE f.project_slug = '{0}' AND s.project_slug = '{0}' AND \
+                     (debt.name IN ('unwrap', 'expect', 'panic!') OR s.kind IN ('TODO', 'FIXME') OR s.kind LIKE 'SECRET_%') \
+                     LIMIT 50", project_name.replace("'", "''"))
         };
 
         match self.query_json(&query) {
             Ok(res) => {
-                let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+                println!("DEBUG get_technical_debt res: {}", res);
+                let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_else(|e| {
+                    println!("DEBUG get_technical_debt JSON Parse Error: {}", e);
+                    vec![]
+                });
                 Ok(rows.into_iter().filter_map(|r| {
                     if r.len() >= 2 {
                         Some((r[0].clone(), r[1].clone()))
@@ -344,20 +559,23 @@ impl GraphStore {
                     }
                 }).collect())
             },
-            Err(_) => Ok(vec![]),
+            Err(e) => {
+                println!("DEBUG get_technical_debt SQL Error: {}", e);
+                Ok(vec![])
+            }
         }
     }
 
     pub fn get_coverage_score(&self, project_name: &str) -> Result<usize> {
         let (q_total, q_tested) = if project_name == "*" || project_name.is_empty() {
             (
-                "MATCH (s:Symbol) WHERE s.kind = 'function' RETURN count(s)".to_string(),
-                "MATCH (s:Symbol) WHERE s.kind = 'function' AND s.tested = true RETURN count(s)".to_string()
+                "SELECT count(*) FROM Symbol WHERE kind = 'function'".to_string(),
+                "SELECT count(*) FROM Symbol WHERE kind = 'function' AND tested = true".to_string()
             )
         } else {
             (
-                format!("MATCH (s:Symbol {{project_slug: '{}'}}) WHERE s.kind = 'function' RETURN count(s)", project_name),
-                format!("MATCH (s:Symbol {{project_slug: '{}'}}) WHERE s.kind = 'function' AND s.tested = true RETURN count(s)", project_name)
+                format!("SELECT count(*) FROM Symbol WHERE project_slug = '{}' AND kind = 'function'", project_name.replace("'", "''")),
+                format!("SELECT count(*) FROM Symbol WHERE project_slug = '{}' AND kind = 'function' AND tested = true", project_name.replace("'", "''"))
             )
         };
         
@@ -370,19 +588,23 @@ impl GraphStore {
 
     pub fn get_god_objects(&self, project_name: &str) -> Result<Vec<String>> {
         let query = if project_name == "*" || project_name.is_empty() {
-            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)<-[:CALLS]-(caller:Symbol)
-             WITH s, count(caller) AS degree
-             WHERE degree >= 10
-             RETURN s.name".to_string()
+            "SELECT s.name \
+             FROM Symbol s \
+             JOIN CALLS c ON s.id = c.target_id \
+             GROUP BY s.name \
+             HAVING count(c.source_id) >= 10".to_string()
         } else {
-            format!("MATCH (s:Symbol {{project_slug: '{}'}})<-[:CALLS]-(caller:Symbol {{project_slug: '{}'}})
-             WITH s, count(caller) AS degree
-             WHERE degree >= 10
-             RETURN s.name", project_name, project_name)
+            format!("SELECT s.name \
+             FROM Symbol s \
+             JOIN CALLS c ON s.id = c.target_id \
+             WHERE s.project_slug = '{0}' \
+             GROUP BY s.name \
+             HAVING count(c.source_id) >= 10", project_name.replace("'", "''"))
         };
         // Find symbols in the project that have a high in-degree (>= 10 dependents)
 
-        let result_json = self.query_json(&query).unwrap_or_else(|_| "[]".to_string());        
+        let result_json = self.query_json(&query).unwrap_or_else(|_| "[]".to_string());
+        println!("DEBUG GOD OBJECTS: {}", result_json);        
         let mut god_objects = Vec::new();
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result_json) {
             if let Some(arr) = parsed.as_array() {
@@ -390,10 +612,7 @@ impl GraphStore {
                     if let Some(inner_arr) = item.as_array() {
                         for inner_item in inner_arr {
                             if let Some(val_str) = inner_item.as_str() {
-                                if val_str.starts_with("String(\"") && val_str.ends_with("\")") {
-                                    let name = val_str[8..val_str.len()-2].to_string();
-                                    god_objects.push(name);
-                                }
+                                god_objects.push(val_str.to_string());
                             }
                         }
                     } else if let Some(obj) = item.as_object() {
@@ -451,21 +670,32 @@ mod tests {
     }
 
     #[test]
-    fn test_kuzu_vector_support() {
+    fn test_debug_technical_debt() {
         let store = GraphStore::new(":memory:").unwrap();
-        let res = store.execute("CREATE NODE TABLE VectorNode (id INT64, vec FLOAT[3], PRIMARY KEY(id))");
+        store.execute("INSERT INTO File (path, project_slug) VALUES ('src/config.rs', 'global')").unwrap();
+        store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::secret1', 'SECRET_API_KEY: Found potential hardcoded credential', 'SECRET_API_KEY', false, true, false, 'global')").unwrap();
+        store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/config.rs', 'global::secret1')").unwrap();
+        
+        let res = store.get_technical_debt("*").unwrap();
+        println!("RES: {:?}", res);
+        assert!(!res.is_empty());
+    }
+    #[test]
+    fn test_duckdb_vector_support() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let res = store.execute("CREATE TABLE VectorNode (id BIGINT PRIMARY KEY, vec FLOAT[3])");
         assert!(res.is_ok(), "Failed to create table with FLOAT[3]");
         
-        let insert_res = store.execute("CREATE (n:VectorNode {id: 1, vec: [1.0, 2.0, 3.0]})");
+        let insert_res = store.execute("INSERT INTO VectorNode VALUES (1, [1.0, 2.0, 3.0])");
         assert!(insert_res.is_ok(), "Failed to insert vector");
         
-        let insert_res2 = store.execute("CREATE (n:VectorNode {id: 3})");
+        let insert_res2 = store.execute("INSERT INTO VectorNode(id) VALUES (3)");
         println!("Insert missing vector: {:?}", insert_res2);
 
-        // Try array_cosine_similarity
-        let _ = store.execute("CREATE (n:VectorNode {id: 2, vec: [1.0, 2.0, 3.1]})");
-        let query_res = store.query_json("MATCH (a:VectorNode {id: 1}), (b:VectorNode {id: 2}) RETURN array_cosine_similarity(a.vec, b.vec) AS sim");
-        assert!(query_res.is_ok(), "array_cosine_similarity failed");
+        // Try list_cosine_similarity
+        let _ = store.execute("INSERT INTO VectorNode VALUES (2, [1.0, 2.0, 3.1])");
+        let query_res = store.query_json("SELECT list_cosine_similarity(a.vec, b.vec) AS sim FROM VectorNode a, VectorNode b WHERE a.id = 1 AND b.id = 2");
+        assert!(query_res.is_ok(), "list_cosine_similarity failed");
         let json_str = query_res.unwrap();
         println!("Similarity: {}", json_str);
     }
@@ -490,7 +720,7 @@ mod tests {
         let path = "/test/path.ex";
         store.insert_file_data(path, &result).unwrap();
 
-        let query = format!("MATCH (f:File {{path: '{}'}})-[:CONTAINS]->(s:Symbol) RETURN count(s)", path);
+        let query = format!("SELECT count(*) FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id WHERE c.source_id = '{}'", path);
         let count = store.query_count(&query).unwrap();
         assert_eq!(count, 1, "Graph insertion failed: 0 symbols found for file");
     }
