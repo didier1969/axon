@@ -182,6 +182,15 @@ impl McpServer {
                         }
                     },
                     {
+                        "name": "axon_export_soll",
+                        "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Requirements, Concepts) dans un document Markdown horodaté.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }
+                    },
+                    {
                         "name": "axon_query",
                         "description": "[DX] Recherche hybride (texte + vecteur) et similarité sémantique.",
                         "inputSchema": {
@@ -385,6 +394,7 @@ impl McpServer {
             "axon_fs_read" => self.axon_fs_read(arguments),
             "axon_query" => self.axon_query(arguments),
             "axon_add_concept" => self.axon_add_concept(arguments),
+            "axon_export_soll" => self.axon_export_soll(),
             "axon_inspect" => self.axon_inspect(arguments),
             "axon_audit" => self.axon_audit(arguments),
             "axon_impact" => self.axon_impact(arguments),
@@ -479,6 +489,53 @@ impl McpServer {
                 }
             },
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }))
+        }
+    }
+
+    fn axon_export_soll(&self) -> Option<Value> {
+        let mut markdown = String::from("# SOLL Extraction\n\n## Vision\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT title, description, goal FROM soll.Vision") {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            for r in rows {
+                markdown.push_str(&format!("### {}\n*Description:* {}\n*Goal:* {}\n\n", r[0], r[1], r[2]));
+            }
+        }
+        
+        markdown.push_str("## Pillars\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description FROM soll.Pillar") {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            for r in rows {
+                markdown.push_str(&format!("* **{}** ({}): {}\n", r[0], r[1], r[2]));
+            }
+        }
+
+        markdown.push_str("\n## Requirements\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description, justification, priority FROM soll.Requirement") {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            for r in rows {
+                markdown.push_str(&format!("### {} - {}\n*Priority:* {}\n*Description:* {}\n*Justification:* {}\n\n", r[0], r[1], r[4], r[2], r[3]));
+            }
+        }
+
+        markdown.push_str("## Concepts\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT name, explanation, rationale FROM soll.Concept") {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            for r in rows {
+                markdown.push_str(&format!("### {}\n*Explanation:* {}\n*Rationale:* {}\n\n", r[0], r[1], r[2]));
+            }
+        }
+
+        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let file_name = format!("SOLL_EXPORT_{}.md", timestamp);
+        let file_path = format!("docs/vision/{}", file_name);
+        
+        let _ = std::fs::create_dir_all("docs/vision");
+        match std::fs::write(&file_path, &markdown) {
+            Ok(_) => {
+                let report = format!("✅ Exported to {}\n\n{}", file_path, markdown.chars().take(200).collect::<String>());
+                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+            },
+            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture fichier: {}", e) }], "isError": true }))
         }
     }
 
@@ -1313,5 +1370,31 @@ mod tests {
         // Verify in DB
         let count = server.graph_store.query_count("SELECT count(*) FROM soll.Concept WHERE name LIKE 'CPT-AXO-011%'").unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_axon_export_soll() {
+        let server = create_test_server();
+        server.graph_store.execute("INSERT INTO soll.Vision (title, description, goal) VALUES ('Test Vision', 'Desc', 'Goal')").unwrap();
+        server.graph_store.execute("INSERT INTO soll.Concept (name, explanation, rationale) VALUES ('CPT-AXO-001: My Concept', 'Expl', 'Rat')").unwrap();
+        
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_export_soll",
+                "arguments": {}
+            })),
+            id: Some(json!(2)),
+        };
+        
+        let response = server.handle_request(req);
+        let result = response.unwrap().result.unwrap();
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        
+        assert!(content.contains("# SOLL Extraction"));
+        assert!(content.contains("Test Vision"));
+        assert!(content.contains("CPT-AXO-001"));
+        assert!(content.contains("Exported to"));
     }
 }
