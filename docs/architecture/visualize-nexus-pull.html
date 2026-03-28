@@ -214,7 +214,7 @@
             <div class="mermaid">
             graph LR
                 subgraph Elixir_Plane [Control Plane : Elixir/OTP]
-                    Guardian[DuckDB Guardian]
+                    Guardian[Traffic Guardian]
                     subgraph Pool [Pool d'Agents 1..14]
                         Agent1[Agent Core 1]
                         AgentN[Agent Core N]
@@ -226,9 +226,11 @@
                         Worker1[Worker 1]
                         WorkerN[Worker N]
                     end
-                    Writer[DuckDB Writer Actor]
-                    MCP[Serveur MCP]
                     Scanner[Scanner Engine]
+                    MCP[Serveur MCP]
+                    
+                    Channel(((MPSC Channel<br/>The Choke Point)))
+                    Writer[DB Writer Actor]
                 end
 
                 subgraph Unified_Storage [Architecture Sanctuary]
@@ -237,11 +239,14 @@
                     IST -- "ATTACH" --> SOLL
                 end
 
-                Scanner -- "1. Map Paths" --> Writer
+                Scanner -- "1. Map Paths" --> Channel
+                Worker1 -- "5. Results" --> Channel
+                MCP -- "Write Commands" --> Channel
+                Channel -- "Batch DbWriteTask" --> Writer
+                
                 Guardian -- "2. Poll Pending" --> IST
                 Guardian -- "3. Assign" --> Agent1
                 Agent1 -- "4. Pull Command" --> Worker1
-                Worker1 -- "5. Results" --> Writer
                 Writer -- "6. Commit IST" --> IST
                 Writer -- "6b. Commit SOLL" --> SOLL
                 Worker1 -- "7. ACK / Free Signal" --> Agent1
@@ -254,6 +259,7 @@
                 style SOLL fill:#fef3c7,stroke:#d97706,stroke-width:3px
                 style MCP fill:#ecfdf5,stroke:#059669,stroke-width:2px
                 style Writer fill:#dbeafe,stroke:#2563eb,stroke-width:2px
+                style Channel fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,stroke-dasharray: 5 5
             </div>
         </section>
 
@@ -287,7 +293,7 @@
             <div class="mermaid">
             sequenceDiagram
                 autonumber
-                participant G as DuckDB Guardian (Elixir)
+                participant G as Traffic Guardian (Elixir)
                 participant A as Agent Core X (Elixir)
                 participant W as Worker Core X (Rust)
                 participant WR as Writer Actor (Rust)
@@ -562,7 +568,7 @@
             </div>
             <div class="mermaid">
             graph TD
-                T[Tracer] -- "Débit réel" --> G[DuckDB Guardian]
+                T[Tracer] -- "Débit réel" --> G[Traffic Guardian]
                 G -- "Ajuste" --> B[Taille Buffer ETS]
                 B -- "Lent (2 f/s)" --> S[Buffer: 20]
                 B -- "Rapide (100 f/s)" --> F[Buffer: 1000]
