@@ -45,6 +45,17 @@ defmodule Axon.Watcher.CockpitLive do
   end
 
   @impl true
+  def handle_info({:telemetry_event, [:axon, :watcher, :file_indexed], _measurements, _metadata}, socket) do
+    live = Map.update!(socket.assigns.live, :total_ingested, &(&1 + 1))
+    {:noreply, assign(socket, live: live)}
+  end
+
+  @impl true
+  def handle_info({:telemetry_event, _event, _measurements, _metadata}, socket) do
+    {:noreply, socket}
+  end
+
+  @impl true
   def handle_event("start_scan", _params, socket) do
     require Logger
     Logger.info("[Cockpit] User triggered START_SCAN")

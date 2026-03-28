@@ -16,7 +16,20 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:last_files, []})
     # {dir_name => %{total, completed, failed, last_update}}
     :ets.insert(:axon_telemetry, {:directories, %{}})
+    :ets.insert(:axon_telemetry, {:target_pressure, 100})
+    :ets.insert(:axon_telemetry, {:t4_ema, 0.0})
+    :ets.insert(:axon_telemetry, {:flux_reel, 0.0})
+    :ets.insert(:axon_telemetry, {:total_ingested, 0})
     {:ok, %{}}
+  end
+
+  def update_backpressure(pressure, ema) do
+    :ets.insert(:axon_telemetry, {:target_pressure, pressure})
+    :ets.insert(:axon_telemetry, {:t4_ema, ema})
+  end
+
+  def update_flux(flux) do
+    :ets.insert(:axon_telemetry, {:flux_reel, flux})
   end
 
   def init_directories(files) do
@@ -76,7 +89,11 @@ defmodule Axon.Watcher.Telemetry do
     %{
       active_workers: get_val(:active_workers),
       last_files: get_val(:last_files),
-      directories: get_val(:directories)
+      directories: get_val(:directories),
+      target_pressure: get_val(:target_pressure),
+      t4_ema: get_val(:t4_ema),
+      flux_reel: get_val(:flux_reel),
+      total_ingested: get_val(:total_ingested)
     }
   end
 
