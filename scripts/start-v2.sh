@@ -31,6 +31,10 @@ fi
 
 echo "🚀 Starting Axon v2 Architecture (Managed via TMUX)..."
 
+# 3. Clean environment (Safety Protocol)
+rm -f /tmp/axon-*.sock
+rm -f .axon/graph_v2/*.db.wal 2>/dev/null || true
+
 # Configuration
 export PHX_PORT=44127
 export HYDRA_TCP_PORT=44128
