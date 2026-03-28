@@ -176,40 +176,48 @@
     </header>
 
     <div class="container">
-        <!-- 0. GOUVERNANCE INTENTIONNELLE & TRAÇABILITÉ (MBSE) -->
+        <!-- 0. GOUVERNANCE INTENTIONNELLE & REGISTRE DES DÉCISIONS (MBSE) -->
         <section id="soll-governance">
-            <h2>Gouvernance Intentionnelle & Traçabilité (MBSE)</h2>
-            <p>Axon implémente l'ingénierie basée sur les modèles (<strong>Model-Based Systems Engineering</strong>) pour assurer un "Digital Thread" entre l'intention humaine (SOLL) et la réalité technique (IST).</p>
+            <h2>Gouvernance Intentionnelle & Registre des Décisions (MBSE)</h2>
+            <p>Axon implémente l'ingénierie basée sur les modèles (<strong>Model-Based Systems Engineering</strong>). Le graphe n'est pas un simple index, c'est le <strong>Modèle Central</strong> assurant un "Digital Thread" entre l'intention et le code.</p>
             <div class="grid">
                 <div class="info-card">
-                    <h3>Strate Macro (Vision & Piliers)</h3>
-                    <p>La <code>Vision</code> définit l'objectif stratégique. Elle est soutenue par des <code>Pillars</code> (Piliers) qui représentent les domaines de contraintes physiques et logiques du système.</p>
+                    <h3>Strate Stratégique (Milestones)</h3>
+                    <p>Les <code>Milestones</code> (Jalons) regroupent les objectifs par phase (ex: Phase Apollo). Ils pilotent la roadmap en ciblant des exigences spécifiques.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Strate Meso (Requirements & DNA)</h3>
-                    <p>Les <code>Requirements</code> (Exigences) décomposent les piliers en objectifs fonctionnels vérifiables. Le Registre génère des identifiants uniques (DNA) pour garantir la traçabilité (ex: <code>REQ-PROJ-001</code>).</p>
+                    <h3>Strate Tactique (Decisions ADR)</h3>
+                    <p>Chaque choix technique majeur est une <code>Decision</code>. Elle résout un Requirement et impacte directement des Symboles de code physiques.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Strate Micro (Concepts & Généalogie)</h3>
-                    <p>Les <code>Concepts</code> expliquent le "Comment" technique. La relation <code>SUPERSEDES</code> permet l'évolution du système sans perte de la mémoire historique des décisions.</p>
+                    <h3>Traçabilité DNA & Registre</h3>
+                    <p>Le système génère des identifiants uniques séquentiels (ex: <code>DEC-AXO-001</code>). Cette autorité garantit l'unicité du fil numérique sans hallucination IA.</p>
                 </div>
                 <div class="info-card">
                     <h3>Calcul d'Avancement Réel</h3>
-                    <p>L'état "Terminé" est une preuve physique. Un <code>Requirement</code> n'est validé que s'il est relié à un <code>Symbol</code> (Code) via un <code>Concept</code>. Sinon, il est marqué en <strong>Dette d'Intention</strong>.</p>
+                    <p>L'état "Terminé" est une preuve physique. Un <code>Requirement</code> n'est validé que s'il est couvert par une <code>Decision</code> dont l'impact est vérifié dans le code (IST).</p>
                 </div>
             </div>
             <div class="mermaid">
             graph TD
                 subgraph SOLL [Couche Intentionnelle : soll.db]
                     V[Vision]
+                    M[Milestone]
                     P[Pillar]
                     R[Requirement]
+                    D[Decision ADR]
                     C[Concept]
+                    H[Stakeholder]
+                    Val[Validation / Proof]
                     
                     V -- "CONTRIBUTES_TO" --> V
+                    H -- "ORIGINATES" --> R
+                    M -- "TARGETS" --> R
                     P -- "EPITOMIZES" --> V
                     R -- "BELONGS_TO" --> P
                     R -- "REFINES" --> R
+                    D -- "SOLVES" --> R
+                    Val -- "VERIFIES" --> R
                     C -- "EXPLAINS" --> R
                     C2[New Concept] -- "SUPERSEDES" --> C
                 end
@@ -220,11 +228,12 @@
                     Proj -- "HAS_SUBPROJECT" --> Proj
                 end
 
+                D -- "IMPACTS" --> S
                 S -- "SUBSTANTIATES" --> C
                 S -- "BELONGS_TO" --> Proj
                 
                 style V fill:#f1f5f9,stroke:#475569,stroke-width:4px
-                style P,R,C,C2 fill:#f1f5f9,stroke:#475569
+                style M,P,R,D,C,C2,H,Val fill:#f1f5f9,stroke:#475569
                 style S,Proj fill:#eff6ff,stroke:#0284c7
             </div>
         </section>
@@ -435,38 +444,7 @@
 
 
 
-        <!-- 6. HIÉRARCHIE DES PROJETS & DÉCISIONS -->
-        <section id="hierarchy-decisions">
-            <h2>Hiérarchie et Registre des Décisions</h2>
-            <p>Axon supporte la structuration de "Super Projets" et conserve la mémoire des choix techniques (Inspiré de la méthode .paul).</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Super-Projets & Pods</h3>
-                    <p>Un projet peut contenir des sous-projets (ex: HydraDB, Pods Elixir). Le graphe maintient la relation <code>HAS_SUBPROJECT</code>, permettant au LLM de naviguer dans une galaxie de dépôts liés.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Registre des Décisions (ADR)</h3>
-                    <p>Chaque choix technique majeur est stocké comme un nœud <code>Decision</code>. Il est relié au <code>Requirement</code> qu'il adresse et au <code>Symbol</code> de code qu'il impacte.</p>
-                </div>
-                <div class="info-card">
-                    <h3>État de Santé Dynamique</h3>
-                    <p>La progression n'est plus un pourcentage manuel, mais une requête en temps réel sur le ratio <code>indexed / pending</code> au sein du graphe.</p>
-                </div>
-            </div>
-            <div class="mermaid">
-            graph TD
-                Super[Super Projet : Ecosystem] -- "HAS_SUBPROJECT" --> P1[HydraDB]
-                Super -- "HAS_SUBPROJECT" --> P2[Elixir Pods]
-                
-                P1 -- "TARGETS" --> M[Milestone : v1.0]
-                M -- "HAS" --> R[Requirement : MVCC]
-                R -- "SOLVED_BY" --> D[Decision : Snapshot Isolation]
-                D -- "IMPACTS" --> Code[src/kuzu_backend.cpp]
-                
-                style Super fill:#eff6ff,stroke:#0284c7,stroke-width:3px
-                style D fill:#fef3c7,stroke:#d97706
-            </div>
-        </section>
+
 
         <!-- 7. ÉCOSYSTÈME TECHNIQUE -->
         <section id="tech-ecosystem">
@@ -606,6 +584,68 @@
                     <p>Chaque fichier est traité comme une transaction atomique. Pas d'état "partiellement indexé".</p>
                 </div>
             </div>
+        </section>
+
+        <!-- ANNEXE TECHNIQUE : SCHÉMA DUCKDB -->
+        <section id="technical-appendix">
+            <h2>Annexe Technique : Schéma du Treillis (DuckDB)</h2>
+            <p>Spécification des tables et types pour la Base Intentionnelle (SOLL) et la Base Technique (IST).</p>
+            
+            <h3>Couche SOLL (soll.db)</h3>
+            <table style="width:100%; border-collapse: collapse; margin-bottom: 30px;">
+                <tr style="background: #f1f5f9; text-align: left;">
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Table</th>
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Colonnes (Primary Key soulignée)</th>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Vision</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>title</u> VARCHAR, description VARCHAR, goal VARCHAR</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Pillar</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, description VARCHAR</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Milestone</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, status VARCHAR, deadline VARCHAR</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Requirement</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, description VARCHAR, justification VARCHAR, priority VARCHAR</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Decision</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, context VARCHAR, alternative VARCHAR, rationale VARCHAR, status VARCHAR</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Stakeholder</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>name</u> VARCHAR, role VARCHAR</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Validation</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, method VARCHAR, result VARCHAR, timestamp BIGINT</td>
+                </tr>
+            </table>
+
+            <h3>Couche IST (ist.db)</h3>
+            <table style="width:100%; border-collapse: collapse;">
+                <tr style="background: #f1f5f9; text-align: left;">
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Table</th>
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Colonnes</th>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">File</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>path</u> VARCHAR, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Symbol</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384]</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Project</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>name</u> VARCHAR</td>
+                </tr>
+            </table>
         </section>
 
         <footer>

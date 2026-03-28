@@ -175,10 +175,10 @@ impl McpServer {
                             "type": "object",
                             "properties": {
                                 "action": { "type": "string", "enum": ["create", "update", "link"], "description": "L'opération à effectuer." },
-                                "entity": { "type": "string", "enum": ["pillar", "requirement", "concept"], "description": "Le type d'objet concerné." },
+                                "entity": { "type": "string", "enum": ["pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation"], "description": "Le type d'objet concerné." },
                                 "data": { 
                                     "type": "object", 
-                                    "description": "Données JSON. Create (pillar: title,desc; requirement: title,desc,priority; concept: name,explanation,rationale). Link: source_id, target_id." 
+                                    "description": "Données JSON. \n- create (pillar: title, desc; requirement: title, desc, priority; concept: name, explanation, rationale; decision: title, context, rationale, status; milestone: title, status; stakeholder: name, role; validation: method, result).\n- update (id, status/desc/etc).\n- link (source_id, target_id)." 
                                 }
                             },
                             "required": ["action", "entity", "data"]
@@ -473,27 +473,43 @@ impl McpServer {
         match action {
             "create" => {
                 let reg_col = match entity {
-                    "pillar" => "last_req", // Reuse or add last_pil if needed, currently req
+                    "pillar" => "last_req", 
                     "requirement" => "last_req",
                     "concept" => "last_cpt",
+                    "decision" => "last_dec",
+                    "milestone" => "last_mil",
+                    "validation" => "last_val",
+                    "stakeholder" => "id", // Not incremented, name is PK
                     _ => return None,
                 };
                 let prefix = match entity {
                     "pillar" => "PIL",
                     "requirement" => "REQ",
                     "concept" => "CPT",
+                    "decision" => "DEC",
+                    "milestone" => "MIL",
+                    "validation" => "VAL",
                     _ => "OBJ",
                 };
 
-                let update_query = format!("UPDATE soll.Registry SET {0} = {0} + 1 WHERE id = 'AXON_GLOBAL' RETURNING {0}", reg_col);
+                let update_query = if entity == "stakeholder" {
+                    "SELECT 0".to_string() // Dummy
+                } else {
+                    format!("UPDATE soll.Registry SET {0} = {0} + 1 WHERE id = 'AXON_GLOBAL' RETURNING {0}", reg_col)
+                };
+
                 match self.graph_store.query_json(&update_query) {
                     Ok(res) => {
                         let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-                        if rows.is_empty() || rows[0].is_empty() {
-                            return Some(json!({ "content": [{ "type": "text", "text": "Erreur: Registre SOLL non initialisé." }], "isError": true }));
-                        }
-                        let next_num: u64 = rows[0][0].parse().unwrap_or(0);
-                        let formatted_id = format!("{}-AXO-{:03}", prefix, next_num);
+                        let formatted_id = if entity == "stakeholder" {
+                            data.get("name")?.as_str()?.to_string()
+                        } else {
+                            if rows.is_empty() || rows[0].is_empty() {
+                                return Some(json!({ "content": [{ "type": "text", "text": "Erreur: Registre SOLL non initialisé." }], "isError": true }));
+                            }
+                            let next_num: u64 = rows[0][0].parse().unwrap_or(0);
+                            format!("{}-AXO-{:03}", prefix, next_num)
+                        };
                         
                         let insert_res = match entity {
                             "pillar" => {
@@ -516,6 +532,33 @@ impl McpServer {
                                 let final_name = format!("{}: {}", formatted_id, name);
                                 let q = "INSERT INTO soll.Concept (name, explanation, rationale) VALUES (?, ?, ?)";
                                 self.graph_store.execute_param(q, &json!([final_name, expl, rat]))
+                            },
+                            "decision" => {
+                                let title = data.get("title")?.as_str()?;
+                                let ctx = data.get("context")?.as_str()?;
+                                let rat = data.get("rationale")?.as_str()?;
+                                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("accepted");
+                                let q = "INSERT INTO soll.Decision (id, title, context, rationale, status) VALUES (?, ?, ?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([formatted_id, title, ctx, rat, status]))
+                            },
+                            "milestone" => {
+                                let title = data.get("title")?.as_str()?;
+                                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("planned");
+                                let q = "INSERT INTO soll.Milestone (id, title, status) VALUES (?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([formatted_id, title, status]))
+                            },
+                            "stakeholder" => {
+                                let name = data.get("name")?.as_str()?;
+                                let role = data.get("role")?.as_str()?;
+                                let q = "INSERT INTO soll.Stakeholder (name, role) VALUES (?, ?)";
+                                self.graph_store.execute_param(q, &json!([name, role]))
+                            },
+                            "validation" => {
+                                let method = data.get("method")?.as_str()?;
+                                let result = data.get("result")?.as_str()?;
+                                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                                let q = "INSERT INTO soll.Validation (id, method, result, timestamp) VALUES (?, ?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([formatted_id, method, result, ts]))
                             },
                             _ => Err(anyhow::anyhow!("Unknown entity")),
                         };
@@ -552,6 +595,22 @@ impl McpServer {
                         let q = "UPDATE soll.Concept SET explanation = ?, rationale = ? WHERE name LIKE ?";
                         self.graph_store.execute_param(q, &json!([expl, rat, format!("{}%", id)]))
                     },
+                    "decision" => {
+                        let status = data.get("status")?.as_str()?;
+                        let q = "UPDATE soll.Decision SET status = ? WHERE id = ?";
+                        self.graph_store.execute_param(q, &json!([status, id]))
+                    },
+                    "stakeholder" => {
+                        let role = data.get("role")?.as_str()?;
+                        let q = "UPDATE soll.Stakeholder SET role = ? WHERE name = ?";
+                        self.graph_store.execute_param(q, &json!([role, id]))
+                    },
+                    "validation" => {
+                        let result = data.get("result")?.as_str()?;
+                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                        let q = "UPDATE soll.Validation SET result = ?, timestamp = ? WHERE id = ?";
+                        self.graph_store.execute_param(q, &json!([result, ts, id]))
+                    },
                     _ => Err(anyhow::anyhow!("Unknown entity")),
                 };
                 match update_res {
@@ -566,7 +625,12 @@ impl McpServer {
                     ("PIL", "REQ") | ("REQ", "PIL") => "soll.BELONGS_TO",
                     ("CPT", "REQ") | ("REQ", "CPT") => "soll.EXPLAINS",
                     ("PIL", "AXO") | ("AXO", "PIL") => "soll.EPITOMIZES",
-                    _ => "SUBSTANTIATES", // Default to Digital Thread bridge if unknown
+                    ("DEC", "REQ") | ("REQ", "DEC") => "soll.SOLVES",
+                    ("MIL", "REQ") | ("REQ", "MIL") => "soll.TARGETS",
+                    ("VAL", "REQ") | ("REQ", "VAL") => "soll.VERIFIES",
+                    ("STK", "REQ") | ("REQ", "STK") => "soll.ORIGINATES",
+                    ("DEC", _) => "IMPACTS", // Link decision to a physical symbol (IST)
+                    _ => "SUBSTANTIATES", 
                 };
                 // Note: DuckDB links are simple source/target VARCHARs
                 let q = format!("INSERT INTO {} (source_id, target_id) VALUES (?, ?)", rel_table);
