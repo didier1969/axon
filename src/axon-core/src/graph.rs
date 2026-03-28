@@ -271,8 +271,14 @@ impl GraphStore {
 
         // --- RELATIONS (IST) ---
         self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS idx_contains_source ON CONTAINS (source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS idx_contains_target ON CONTAINS (target_id)")?;
         self.execute("CREATE TABLE IF NOT EXISTS CALLS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS idx_calls_source ON CALLS (source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS idx_calls_target ON CALLS (target_id)")?;
         self.execute("CREATE TABLE IF NOT EXISTS CALLS_NIF (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS idx_calls_nif_source ON CALLS_NIF (source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS idx_calls_nif_target ON CALLS_NIF (target_id)")?;
         self.execute("CREATE TABLE IF NOT EXISTS BELONGS_TO (source_id VARCHAR, target_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS HAS_SUBPROJECT (source_id VARCHAR, target_id VARCHAR)")?;
 
@@ -698,6 +704,13 @@ mod tests {
         assert!(query_res.is_ok(), "list_cosine_similarity failed");
         let json_str = query_res.unwrap();
         println!("Similarity: {}", json_str);
+    }
+
+    #[test]
+    fn test_duckdb_indices_exist() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let index_count = store.query_count("SELECT count(*) FROM duckdb_indexes() WHERE index_name LIKE 'idx_%'").unwrap_or(0);
+        assert!(index_count >= 6, "Expected at least 6 indices to be created");
     }
 
     #[test]
