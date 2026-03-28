@@ -50,12 +50,12 @@ tmux new-session -d -s axon -n "core"
 # Start Pod B (Data Plane)
 # We use 'nix develop' to ensure all WASM/AI dependencies are in path
 # Optimization: Parallel start, no blocking wait for Elixir.
-tmux send-keys -t axon:core "nix develop --impure --command bash -c 'while true; do echo \"🚀 Starting Axon Core...\"; RUST_LOG=info nice -n 19 ionice -c 3 bin/axon-core; EXIT_CODE=\$?; echo \"⚠️ Axon Core exited with code \$EXIT_CODE. Restarting in 2s...\"; sleep 2; done'" C-m
+tmux send-keys -t axon:core "nix develop --impure --command bash -c 'while true; do echo \"🚀 Starting Axon Core...\"; AXON_DISABLE_ML=1 RUST_LOG=info bin/axon-core; EXIT_CODE=\$?; echo \"⚠️ Axon Core exited with code \$EXIT_CODE. Restarting in 2s...\"; sleep 2; done'" C-m
 
 # Start Pod A (Control Plane)
 tmux new-window -t axon -n "nexus"
 # PROTECTION: Rétablissement de hex, rebar et ecto.setup (indispensables pour la stabilité post-reset)
-tmux send-keys -t axon:nexus "cd src/dashboard && nix develop --impure --command bash -c \"mix local.hex --force && mix local.rebar --force && mix ecto.setup && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+tmux send-keys -t axon:nexus "cd src/dashboard && nix develop --impure --command bash -c \"mix local.hex --force && mix local.rebar --force && mix compile && mix ecto.setup && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 
 echo "⏳ Waiting for Axon Infrastructure to rise..."
 

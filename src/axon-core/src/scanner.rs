@@ -2,6 +2,8 @@ use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
 use std::fs;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 use crate::graph::GraphStore;
 
 pub struct ProjectDependency {
@@ -38,7 +40,7 @@ impl Scanner {
 
     /// MBSE CERTIFICATION: REQ-AXO-002, REQ-AXO-003
     /// Deep scan of the filesystem using .axonignore sovereignty.
-    /// Maps the IST layer (Physical Reality) into KuzuDB.
+    /// Maps the IST layer (Physical Reality) into DuckDB.
     pub fn scan(&self, graph: Arc<GraphStore>) {
         tracing::info!("🚀 Starting Nexus Deep Scan of sector: {}", self.root.display());
 
@@ -85,24 +87,28 @@ impl Scanner {
                     
                     batch.push((path_str, project_name, size, mtime));
                     
-                    if batch.len() >= 500 {
+                    if batch.len() >= 1000 {
                         total_files += batch.len();
                         if let Err(e) = graph.bulk_insert_files(&batch) {
                             tracing::error!("Bulk insert failed: {:?}", e);
                         }
                         batch.clear();
                         tracing::info!("... {} files mapped", total_files);
+                        
+                        // NEXUS HARMONY: Release DuckDB lock and let Elixir pull data.
+                        std::thread::sleep(std::time::Duration::from_millis(100));
                     }
                 }
             }
         }
 
+        // Final batch
         if !batch.is_empty() {
             total_files += batch.len();
             let _ = graph.bulk_insert_files(&batch);
         }
 
-        tracing::info!("🏁 Nexus Scan Complete: {} files mapped to KuzuDB (status: pending).", total_files);
+        tracing::info!("🏁 Nexus Scan Complete: {} files mapped to DuckDB (status: pending).", total_files);
     }
 
     fn extract_project_slug(&self, path: &Path) -> String {

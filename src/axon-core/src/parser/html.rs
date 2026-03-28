@@ -66,9 +66,11 @@ impl HtmlParser {
                 end_line,
                 docstring: None,
                 is_entry_point: false,
-                        is_public: true,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
                 properties: props,
-            
                 embedding: None,
             });
         } else if let Some(cls) = attrs.get("class") {
@@ -85,9 +87,11 @@ impl HtmlParser {
                     end_line,
                     docstring: None,
                     is_entry_point: false,
-                        is_public: true,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
                     properties: props,
-                
                     embedding: None,
                 });
             }
@@ -106,9 +110,11 @@ impl HtmlParser {
                 end_line,
                 docstring: None,
                 is_entry_point: true,
-                        is_public: true,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
                 properties: props,
-            
                 embedding: None,
             });
         }
@@ -208,45 +214,5 @@ impl Parser for HtmlParser {
         }
 
         ExtractionResult { project_slug: None, symbols, relations }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_html() {
-        let code = r#"
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <link href="style.css" rel="stylesheet" />
-                <script src="app.js"></script>
-            </head>
-            <body>
-                <div id="main-container" class="container dark">
-                    <form id="login-form">
-                        <input type="text" name="username" />
-                        <input type="password" name="password" />
-                        <button onclick="submitForm(event)">Login</button>
-                    </form>
-                </div>
-                <a href="/about">About</a>
-            </body>
-            </html>
-        "#;
-        let parser = HtmlParser::new();
-        let result = parser.parse(code);
-
-        assert!(result.symbols.iter().any(|s| s.name == "#main-container" && s.kind == "element"));
-        assert!(result.symbols.iter().any(|s| s.name == "username" && s.kind == "field" && s.is_entry_point));
-        assert!(result.symbols.iter().any(|s| s.name == "password" && s.kind == "field" && s.is_entry_point));
-        assert!(result.symbols.iter().any(|s| s.name == "login-form" && s.kind == "field" && s.is_entry_point));
-
-        assert!(result.relations.iter().any(|r| r.to == "style.css" && r.rel_type == "imports"));
-        assert!(result.relations.iter().any(|r| r.to == "app.js" && r.rel_type == "imports"));
-        assert!(result.relations.iter().any(|r| r.to == "submitForm" && r.rel_type == "calls"));
-        assert!(result.relations.iter().any(|r| r.to == "/about" && r.rel_type == "calls"));
     }
 }

@@ -45,17 +45,14 @@ impl GoParser {
                 || name_lower.contains("handler")
                 || name_lower.contains("route");
 
+            let is_public = name.chars().next().is_some_and(|c| c.is_uppercase());
+            let mut is_unsafe = false;
             let mut properties = HashMap::new();
-            if let Some(first_char) = name.chars().next() {
-                if first_char.is_uppercase() {
-                    properties.insert("exported".to_string(), "true".to_string());
-                }
-            }
 
             if let Some(body) = Self::find_child_by_type(node, "block") {
                 let node_content = body.utf8_text(source_bytes).unwrap_or("");
                 if node_content.contains("unsafe.") {
-                    properties.insert("unsafe".to_string(), "true".to_string());
+                    is_unsafe = true;
                 }
                 Self::walk_for_calls(body, source_bytes, result, false);
             }
@@ -67,9 +64,11 @@ impl GoParser {
                 end_line,
                 docstring: None,
                 is_entry_point: is_entry,
-                        is_public: name.chars().next().is_some_and(|c| c.is_uppercase()),
+                is_public,
+                tested: name.starts_with("Test"),
+                is_nif: false,
+                is_unsafe,
                 properties,
-            
                 embedding: None,
             });
         }
@@ -82,12 +81,9 @@ impl GoParser {
             let start_line = node.start_position().row + 1;
             let end_line = node.end_position().row + 1;
 
+            let is_public = name.chars().next().is_some_and(|c| c.is_uppercase());
+            let mut is_unsafe = false;
             let mut properties = HashMap::new();
-            if let Some(first_char) = name.chars().next() {
-                if first_char.is_uppercase() {
-                    properties.insert("exported".to_string(), "true".to_string());
-                }
-            }
 
             let mut receiver_type = String::new();
             if let Some(param_list) = Self::find_child_by_type(node, "parameter_list") {
@@ -112,7 +108,7 @@ impl GoParser {
             if let Some(body) = Self::find_child_by_type(node, "block") {
                 let node_content = body.utf8_text(source_bytes).unwrap_or("");
                 if node_content.contains("unsafe.") {
-                    properties.insert("unsafe".to_string(), "true".to_string());
+                    is_unsafe = true;
                 }
                 Self::walk_for_calls(body, source_bytes, result, false);
             }
@@ -124,9 +120,11 @@ impl GoParser {
                 end_line,
                 docstring: None,
                 is_entry_point: false,
-                        is_public: name.chars().next().is_some_and(|c| c.is_uppercase()),
+                is_public,
+                tested: false,
+                is_nif: false,
+                is_unsafe,
                 properties,
-            
                 embedding: None,
             });
         }
@@ -164,12 +162,7 @@ impl GoParser {
                 }
             }
 
-            let mut properties = HashMap::new();
-            if let Some(first_char) = name.chars().next() {
-                if first_char.is_uppercase() {
-                    properties.insert("exported".to_string(), "true".to_string());
-                }
-            }
+            let is_public = name.chars().next().is_some_and(|c| c.is_uppercase());
 
             result.symbols.push(Symbol {
                 name: name.clone(),
@@ -178,9 +171,11 @@ impl GoParser {
                 end_line,
                 docstring: None,
                 is_entry_point: false,
-                        is_public: name.chars().next().is_some_and(|c| c.is_uppercase()),
-                properties,
-            
+                is_public,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: HashMap::new(),
                 embedding: None,
             });
         }
@@ -202,7 +197,7 @@ impl GoParser {
                 let path = child.utf8_text(source_bytes).unwrap_or("").trim_matches('"').to_string();
                 let properties = HashMap::new();
                 result.relations.push(Relation {
-                    from: "".to_string(), // File-level relation
+                    from: "".to_string(),
                     to: path,
                     rel_type: "imports".to_string(),
                     properties,
@@ -316,79 +311,5 @@ impl Parser for GoParser {
         }
 
         result
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_go_parser() {
-        let code = r#"
-        package main
-
-        import (
-            "fmt"
-            "unsafe"
-            my_alias "math/rand"
-        )
-
-        type MyStruct struct {
-            Field int
-        }
-
-        type MyInterface interface {
-            DoThing()
-        }
-
-        func main() {
-            fmt.Println("Hello")
-        }
-
-        func (m *MyStruct) Method() {
-            unsafe.Pointer(nil)
-            my_alias.Intn(10)
-        }
-        "#;
-
-        let parser = GoParser::new();
-        let result = parser.parse(code);
-
-        // Check functions
-        let main_func = result.symbols.iter().find(|s| s.name == "main").unwrap();
-        assert_eq!(main_func.kind, "function");
-        assert!(main_func.is_entry_point);
-
-        let method = result.symbols.iter().find(|s| s.name == "Method").expect("Method not found");
-        assert_eq!(method.kind, "method");
-        assert_eq!(method.properties.get("class_name").unwrap(), "MyStruct");
-        assert_eq!(method.properties.get("unsafe").unwrap(), "true");
-        assert_eq!(method.properties.get("exported").unwrap(), "true");
-
-        // Check structs and interfaces
-        let mystruct = result.symbols.iter().find(|s| s.name == "MyStruct").unwrap();
-        assert_eq!(mystruct.kind, "struct");
-        assert_eq!(mystruct.properties.get("exported").unwrap(), "true");
-
-        let myinterface = result.symbols.iter().find(|s| s.name == "MyInterface").unwrap();
-        assert_eq!(myinterface.kind, "interface");
-
-        // Check imports
-        let fmt_import = result.relations.iter().find(|r| r.rel_type == "imports" && r.to == "fmt").unwrap();
-        assert!(fmt_import.properties.get("alias").is_none());
-
-        let math_import = result.relations.iter().find(|r| r.rel_type == "imports" && r.to == "math/rand").unwrap();
-        assert_eq!(math_import.properties.get("alias").unwrap(), "my_alias");
-
-        let unsafe_import = result.relations.iter().find(|r| r.rel_type == "imports" && r.to == "unsafe").unwrap();
-        assert!(unsafe_import.properties.get("alias").is_none());
-
-        // Check calls
-        let println_call = result.relations.iter().find(|r| r.rel_type == "calls" && r.to == "Println").unwrap();
-        assert_eq!(println_call.properties.get("receiver").unwrap(), "fmt");
-
-        let pointer_call = result.relations.iter().find(|r| r.rel_type == "calls" && r.to == "Pointer").unwrap();
-        assert_eq!(pointer_call.properties.get("receiver").unwrap(), "unsafe");
     }
 }

@@ -41,6 +41,13 @@ defmodule Axon.Watcher.PoolFacade do
     GenServer.cast(__MODULE__, {:broadcast, type, payload})
   end
 
+  @doc """
+  Pulls pending files from the Rust side hopper.
+  """
+  def pull_pending(count) do
+    GenServer.cast(__MODULE__, {:pull_pending, count})
+  end
+
   # --- Callbacks ---
 
   def init(_opts) do
@@ -52,7 +59,7 @@ defmodule Axon.Watcher.PoolFacade do
 
   def handle_cast(:trigger_global_scan, state) do
     if state.socket do
-      Task.start(fn -> :gen_tcp.send(state.socket, "SCAN_ALL\n") end)
+      :gen_tcp.send(state.socket, "SCAN_ALL\n")
     end
     {:noreply, state}
   end
@@ -60,9 +67,18 @@ defmodule Axon.Watcher.PoolFacade do
   def handle_cast({:broadcast, type, payload}, state) do
     if state.socket do
       event_json = Jason.encode!(%{type: type, payload: payload})
-      # Async send to avoid blocking the GenServer loop
-      socket = state.socket
-      Task.start(fn -> :gen_tcp.send(socket, "WATCHER_EVENT #{event_json}\n") end)
+      :gen_tcp.send(state.socket, "WATCHER_EVENT #{event_json}\n")
+    end
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:pull_pending, count}, state) do
+    if state.socket do
+      case :gen_tcp.send(state.socket, "PULL_PENDING #{count}\n") do
+        :ok -> :ok
+        {:error, reason} -> Logger.error("[PoolFacade] Failed to send PULL_PENDING: #{inspect(reason)}")
+      end
     end
 
     {:noreply, state}
@@ -84,7 +100,8 @@ defmodule Axon.Watcher.PoolFacade do
         Map.put(acc, file["path"], batch_id)
       end)
 
-      {:noreply, %{state | batches: new_batches, path_to_batch: new_path_to_batch}}
+      # REPLY IMMEDIATELY TO OBAN: The actual status update will come via TCP events
+      {:reply, %{"status" => "ok", "batch_id" => batch_id}, %{state | batches: new_batches, path_to_batch: new_path_to_batch}}
     else
       {:reply, {:error, :not_connected}, state}
     end
@@ -141,15 +158,47 @@ defmodule Axon.Watcher.PoolFacade do
     # 2. DECODE ALL COMPLETE EVENTS
     events = Enum.map(lines, fn line ->
       case Jason.decode(line) do
-        {:ok, %{"FileIndexed" => payload}} -> payload
+        {:ok, %{"FileIndexed" => payload}} -> {:indexed, payload}
+        {:ok, %{"event" => "PENDING_BATCH_READY", "files" => files}} -> {:pending_batch, files}
         _ -> nil
       end
     end) |> Enum.filter(& &1)
 
-    if events != [] do
-      # 3. TRUE ZERO-SELECT FEEDBACK LOOP
-      # Group by project ID guessed from path to avoid DB lookups
-      events
+    indexed_events = events |> Enum.filter(fn {type, _} -> type == :indexed end) |> Enum.map(fn {_, p} -> p end)
+    pending_batches = events |> Enum.filter(fn {type, _} -> type == :pending_batch end) |> Enum.map(fn {_, f} -> f end)
+
+    # 3. Handle Pending Batches (Nexus Pull Implementation)
+    Enum.each(pending_batches, fn batch_files ->
+      # Convert Rust PendingFile to Elixir map format expected by IndexingWorker
+      files_to_index = Enum.map(batch_files, fn f -> 
+        %{
+          "path" => f["path"],
+          "trace_id" => f["trace_id"],
+          "priority" => f["priority"] || 100
+        }
+      end)
+      
+      # IMPORTANT: Register files in Tracking (SQLite) as 'pending' for UI visibility
+      batch_files
+      |> Enum.group_by(fn f -> Axon.Watcher.Tracking.extract_project_from_path(f["path"]) end)
+      |> Enum.each(fn {project_id, files} ->
+        # Create project if needed
+        Axon.Watcher.Tracking.upsert_project!(project_id, "workspace")
+        
+        # Batch upsert files as pending
+        data_for_tracking = Enum.map(files, fn f -> {f["path"], 0, "pending"} end)
+        Axon.Watcher.Tracking.upsert_files_batch!(project_id, data_for_tracking)
+      end)
+      
+      # Dispatch to Oban
+      %{"batch" => files_to_index}
+      |> Axon.Watcher.IndexingWorker.new()
+      |> Oban.insert()
+    end)
+
+    if indexed_events != [] do
+      # 4. TRUE ZERO-SELECT FEEDBACK LOOP
+      indexed_events
       |> Enum.group_by(fn payload -> Axon.Watcher.Tracking.extract_project_from_path(payload["path"]) end)
       |> Enum.each(fn {project_id, project_events} ->
         data_for_upsert = Enum.map(project_events, fn p ->

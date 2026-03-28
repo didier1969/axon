@@ -28,6 +28,11 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
         return Ok(Vec::new());
     }
 
+    // --- NEXUS BYPASS: Disable ML if requested ---
+    if std::env::var("AXON_DISABLE_ML").is_ok() {
+        return Ok(vec![vec![0.0; 384]; texts.len()]);
+    }
+
     let mut lock = match EMBEDDER.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),

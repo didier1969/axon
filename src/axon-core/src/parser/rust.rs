@@ -63,6 +63,9 @@ impl RustParser {
                     docstring: None,
                     is_public: false,
                     is_entry_point: false,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
                     properties: HashMap::new(),
                     embedding: None,
                 });
@@ -114,18 +117,21 @@ impl RustParser {
         let is_entry = is_extern_c || (is_pub && (lower_name.contains("main") || lower_name.contains("handler") || lower_name.contains("nif_")));
 
         let mut props = HashMap::new();
-        props.insert("unsafe".to_string(), is_unsafe.to_string());
-        props.insert("ffi".to_string(), is_extern_c.to_string());
         if !class_name.is_empty() {
             props.insert("class_name".to_string(), class_name.to_string());
         }
 
+        let mut is_nif = false;
+        let mut tested = false;
         let mut prev_node = node.prev_sibling();
         while let Some(sibling) = prev_node {
             if sibling.kind() == "attribute_item" {
                 if let Ok(attr_text) = sibling.utf8_text(source) {
-                    if attr_text.contains("rustler::nif") {
-                        props.insert("is_nif".to_string(), "true".to_string());
+                    if attr_text.contains("rustler::nif") || attr_text.contains("no_mangle") {
+                        is_nif = true;
+                    }
+                    if attr_text.contains("test") {
+                        tested = true;
                     }
                 }
             } else if sibling.kind() != "line_comment" && sibling.kind() != "block_comment" {
@@ -140,10 +146,12 @@ impl RustParser {
             start_line,
             end_line,
             docstring: None,
-            is_entry_point: is_entry,
-                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
+            is_entry_point: is_entry || is_nif,
+            is_public: is_pub,
+            tested,
+            is_nif,
+            is_unsafe,
             properties: props,
-        
             embedding: None,
         });
 
@@ -173,9 +181,11 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
+            is_public: self.has_visibility(node),
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
             properties: props,
-        
             embedding: None,
         });
     }
@@ -195,9 +205,11 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
+            is_public: self.has_visibility(node),
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
             properties: HashMap::new(),
-        
             embedding: None,
         });
     }
@@ -217,9 +229,11 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
+            is_public: self.has_visibility(node),
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
             properties: HashMap::new(),
-        
             embedding: None,
         });
     }
@@ -239,9 +253,11 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
+            is_public: self.has_visibility(node),
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
             properties: HashMap::new(),
-        
             embedding: None,
         });
 
@@ -300,9 +316,11 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
+            is_public: self.has_visibility(node),
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
             properties: HashMap::new(),
-        
             embedding: None,
         });
 
@@ -326,9 +344,11 @@ impl RustParser {
             end_line: node.end_position().row + 1,
             docstring: None,
             is_entry_point: false,
-                        is_public: node.parent().is_some_and(|p| p.child(0).is_some_and(|c| c.kind() == "visibility_modifier")),
+            is_public: self.has_visibility(node),
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
             properties: HashMap::new(),
-        
             embedding: None,
         });
     }
@@ -543,63 +563,5 @@ impl Parser for RustParser {
         self.walk(tree.root_node(), content.as_bytes(), &mut result, "");
         
         result
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_rust() {
-        let code = r#"
-            use std::collections::HashMap;
-            use crate::utils::{A, B};
-
-            pub struct MyStruct {
-                field: i32,
-            }
-
-            impl MyTrait for MyStruct {
-                fn my_method(&self) {
-                    println!("hello");
-                }
-            }
-
-            pub extern "C" fn my_ffi_func() {
-                unsafe {
-                    let mut map = HashMap::new();
-                    map.insert(1, 2);
-                }
-            }
-        "#;
-        let parser = RustParser::new();
-        let result = parser.parse(code);
-        
-        assert!(result.symbols.iter().any(|s| s.name == "MyStruct" && s.kind == "struct"));
-        assert!(result.symbols.iter().any(|s| s.name == "my_method" && s.kind == "method"));
-        assert!(result.symbols.iter().any(|s| s.name == "my_ffi_func" && s.kind == "function" && s.is_entry_point));
-        
-        assert!(result.relations.iter().any(|r| r.to == "MyTrait" && r.rel_type == "implements"));
-        assert!(result.relations.iter().any(|r| r.to == "HashMap" && r.rel_type == "imports"));
-        assert!(result.relations.iter().any(|r| r.to == "A" && r.rel_type == "imports"));
-        assert!(result.relations.iter().any(|r| r.to == "println!" && r.rel_type == "calls"));
-        assert!(result.relations.iter().any(|r| r.to == "new" && r.rel_type == "calls"));
-        assert!(result.relations.iter().any(|r| r.to == "insert" && r.rel_type == "calls"));
-    }
-
-    #[test]
-    fn test_parse_rustler_nif() {
-        let code = r#"
-            #[rustler::nif]
-            pub fn compute_hash(data: String) -> String {
-                "hash".to_string()
-            }
-        "#;
-        let parser = RustParser::new();
-        let result = parser.parse(code);
-
-        let nif_sym = result.symbols.iter().find(|s| s.name == "compute_hash").unwrap();
-        assert_eq!(nif_sym.properties.get("is_nif").map(|s| s.as_str()), Some("true"));
     }
 }

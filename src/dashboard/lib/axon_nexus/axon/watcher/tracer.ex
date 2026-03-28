@@ -54,12 +54,15 @@ defmodule Axon.Watcher.Tracer do
     GenServer.cast(__MODULE__, {:record, trace_id, path, t0, t1, t2, t3, t4})
   end
 
-  def handle_cast({:record, _trace_id, _path, t0, t1, t2, t3, t4}, state) do
+  def handle_cast({:record, _trace_id, path, t0, t1, t2, t3, t4}, state) do
     # Convert microseconds to milliseconds for easier reading
     lat_t1 = max(0, (t1 - t0) / 1000.0)
     lat_t2 = max(0, (t2 - t1) / 1000.0)
     lat_t3 = max(0, (t3 - t2) / 1000.0)
     lat_t4 = max(0, (t4 - t3) / 1000.0)
+
+    # Emit telemetry event for TrafficGuardian and other observers
+    :telemetry.execute([:axon, :watcher, :file_indexed], %{t4: lat_t4}, %{path: path})
 
     t5 = :os.system_time(:microsecond)
     total_lat = max(0, (t5 - t0) / 1000.0)

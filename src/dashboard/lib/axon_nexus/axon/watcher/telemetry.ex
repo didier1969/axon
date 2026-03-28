@@ -83,6 +83,8 @@ defmodule Axon.Watcher.Telemetry do
 
       :ets.insert(:axon_telemetry, {:directories, Map.put(dirs, dir, updated_dir)})
     end
+
+    :ets.insert(:axon_telemetry, {:total_ingested, get_val(:total_ingested) + 1})
   end
 
   def get_stats do

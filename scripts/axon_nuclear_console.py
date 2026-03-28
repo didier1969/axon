@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
-import sqlite3
+import socket
 import time
 import os
 import sys
 import datetime
 import json
 
-# Axon v3.3.1 - Nuclear Command Center (DuckDB Edition)
-# This console monitors the Unified Lattice (SOLL + IST)
+# Axon v3.4.1 - Nuclear Radar (Stream Reconstructor Edition)
+# Queries Truth directly from the Rust Data Plane via RAW_QUERY with line-buffering.
 
-IST_DB = "/home/dstadel/projects/axon/.axon/graph_v2/ist.db"
-SOLL_DB = "/home/dstadel/projects/axon/.axon/graph_v2/soll.db"
-NEXUS_SQLITE = "/home/dstadel/projects/axon/src/dashboard/axon_nexus.db"
+SOCKET_PATH = "/tmp/axon-telemetry.sock"
 
 # ANSI Colors
 RED = "\033[91m"
@@ -27,122 +25,100 @@ RESET = "\033[0m"
 def clear_screen():
     print("\033[2J\033[H", end="")
 
-def get_duckdb_stats():
-    """
-    Récupère les statistiques depuis la forge technique DuckDB (IST + SOLL via ATTACH)
-    Note: Comme DuckDB est utilisé en mode exclusif par Axon Core, 
-    cette console tente une lecture via le MCP ou directement si le verrou le permet.
-    Ici, on simule la lecture via Python sqlite3 (compatible DuckDB format de base) 
-    OU on utilise les fichiers s'ils sont lisibles.
-    """
-    stats = {
-        'ist_files': 0,
-        'ist_symbols': 0,
-        'soll_reqs': 0,
-        'soll_decisions': 0,
-        'soll_concepts': 0,
-        'impact_radius_avg': 0.0
-    }
-    
-    # NOTE: En environnement de production, on interroge via le socket ou une base répliquée.
-    # Ici, nous allons lire les métadonnées de progression depuis le Control Plane (SQLite).
-    return stats
-
-def get_control_plane_stats():
-    """
-    Récupère l'état depuis le Control Plane Elixir (SQLite)
-    """
-    stats = {
-        'total': 0,
-        'indexed': 0,
-        'failed': 0,
-        'ignored': 0,
-        'pending': 0,
-        'oban_available': 0,
-        'oban_executing': 0
-    }
-    
+def send_raw_query(sql):
     try:
-        conn = sqlite3.connect(NEXUS_SQLITE, timeout=1.0)
-        c = conn.cursor()
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(2.0)
+        client.connect(SOCKET_PATH)
         
-        # Files status
-        c.execute("SELECT status, count(*) FROM indexed_files GROUP BY status")
-        for row in c.fetchall():
-            status, count = row[0], row[1]
-            if status == 'indexed': stats['indexed'] = count
-            elif status == 'failed': stats['failed'] = count
-            elif status == 'pending': stats['pending'] = count
-            elif status == 'ignored_by_rule': stats['ignored'] = count
+        # Consommer le message de bienvenue
+        initial = ""
+        while True:
+            chunk = client.recv(4096).decode('utf-8')
+            initial += chunk
+            if "SystemReady" in initial:
+                break
         
-        stats['total'] = stats['indexed'] + stats['failed'] + stats['pending'] + stats['ignored']
+        # Envoyer la requête
+        client.sendall(f"RAW_QUERY {sql}\n".encode())
         
-        # Oban status
-        c.execute("SELECT state, count(*) FROM oban_jobs GROUP BY state")
-        for row in c.fetchall():
-            state, count = row[0], row[1]
-            if state == 'available': stats['oban_available'] = count
-            elif state == 'executing': stats['oban_executing'] = count
+        # Reconstituer la réponse JSON complète
+        response = ""
+        while True:
+            chunk = client.recv(4096).decode('utf-8')
+            if not chunk: break
+            response += chunk
+            if "\n" in chunk: break
             
-        conn.close()
-    except:
-        pass
+        client.close()
         
-    return stats
+        # Nettoyer et parser
+        for line in response.split('\n'):
+            line = line.strip()
+            if line.startswith('[['):
+                return json.loads(line)
+        return []
+    except Exception as e:
+        return None
 
 def render_bar(value, maximum, width=40, color=GREEN):
-    if maximum == 0:
-        return "[" + " " * width + "]"
-    
+    if maximum <= 0: return "[" + " " * width + "]"
     filled = int((value / maximum) * width)
-    filled = min(filled, width)
+    filled = max(0, min(filled, width))
     empty = width - filled
     return f"[{color}{'█' * filled}{RESET}{' ' * empty}]"
 
 def main():
+    print("🛰️ Initializing Deep Space Radar...")
     while True:
+        # Fetching IST & SOLL in parallel pulses
+        ist_stats = send_raw_query("SELECT status, count(*) FROM File GROUP BY status")
+        symbol_count_raw = send_raw_query("SELECT count(*) FROM Symbol")
+        soll_count_raw = send_raw_query("SELECT count(*) FROM soll.Requirement")
+        
         clear_screen()
         now = datetime.datetime.now().strftime("%H:%M:%S")
         
-        cp = get_control_plane_stats()
-        
         print(f"{BOLD}{CYAN}======================================================================{RESET}")
-        print(f"{BOLD}{CYAN}          ☢️  AXON NUCLEAR COMMAND CENTER - V3.3 (APOLLO) ☢️          {RESET}")
+        print(f"{BOLD}{CYAN}          ☢️  AXON NUCLEAR RADAR - V3.4 (DEEP SPACE) ☢️          {RESET}")
         print(f"{BOLD}{CYAN}======================================================================{RESET}")
-        print(f"{BOLD}SYS_TIME:{RESET} {now}    {BOLD}MODE:{RESET} {MAGENTA}NEXUS PULL (ADAPTIVE){RESET}    {BOLD}STATUS:{RESET} {GREEN}ONLINE{RESET}")
+        print(f"{BOLD}SYS_TIME:{RESET} {now}    {BOLD}LATTICE:{RESET} {MAGENTA}ACTIVE{RESET}    {BOLD}BRIDGE:{RESET} {GREEN if ist_stats is not None else RED}{'LINKED' if ist_stats is not None else 'LOST'}{RESET}")
         print("")
         
-        print(f"{BOLD}{YELLOW}--- [ CONTROL PLANE : TRAFFIC GUARDIAN ] ---{RESET}")
-        q_total = cp['oban_available'] + cp['oban_executing']
-        print(f"  {BOLD}BUFFER PRESSURE (Oban):{RESET} {cp['oban_available']:>6} jobs pending")
-        print(f"  {BOLD}ACTIVE WORKERS (Rust): {RESET} {cp['oban_executing']:>6} threads engaged")
-        print(f"  {render_bar(cp['oban_executing'], max(14, cp['oban_executing']), width=50, color=BLUE)} {min(100, cp['oban_executing']/14*100):.1f}% CPU Usage")
-        print("")
-        
-        print(f"{BOLD}{BLUE}--- [ DATA PLANE : UNIFIED LATTICE (IST) ] ---{RESET}")
-        print(f"  {BOLD}TOTAL DISCOVERED:{RESET} {cp['total']:>8}")
-        print(f"  {BOLD}INDEXED (Truth): {RESET} {GREEN}{cp['indexed']:>8}{RESET}")
-        print(f"  {BOLD}PENDING (Pull):  {RESET} {YELLOW}{cp['pending']:>8}{RESET}")
-        print(f"  {BOLD}FAILED (Poison): {RESET} {RED}{cp['failed']:>8}{RESET}")
-        print("")
-        
-        # Ingestion Progress
-        if cp['total'] > 0:
-            prog = (cp['indexed'] + cp['ignored']) / cp['total'] * 100
+        if ist_stats is None:
+            print(f"  {RED}>> CRITICAL: DATA PLANE CONNECTION LOST <<{RESET}")
+            print(f"  Attempting to re-establish bridge...")
         else:
-            prog = 0
+            # IST Analytics
+            stats_dict = {row[0]: int(row[1]) for row in ist_stats if len(row) >= 2}
+            total = sum(stats_dict.values())
+            indexed = stats_dict.get('indexed', 0)
+            pending = stats_dict.get('pending', 0)
+            proc = stats_dict.get('processing', 0)
             
-        print(f"{BOLD}GLOBAL INGESTION PROGRESS:{RESET} {prog:.2f}%")
-        print(f"{render_bar(cp['indexed'] + cp['ignored'], max(1, cp['total']), width=68, color=GREEN)}")
-        
+            sym_count = int(symbol_count_raw[0][0]) if symbol_count_raw and len(symbol_count_raw[0]) > 0 else 0
+            req_count = int(soll_count_raw[0][0]) if soll_count_raw and len(soll_count_raw[0]) > 0 else 0
+            
+            print(f"{BOLD}{BLUE}--- [ IST PLANE : PHYSICAL FORGE ] ---{RESET}")
+            print(f"  {BOLD}FILES DISCOVERED:{RESET} {total:>8}")
+            print(f"  {BOLD}STATUS PENDING:  {RESET} {YELLOW}{pending:>8}{RESET}")
+            print(f"  {BOLD}STATUS IN-FLIGHT:{RESET} {MAGENTA}{proc:>8}{RESET}")
+            print(f"  {BOLD}TRUTH INDEXED:   {RESET} {GREEN}{indexed:>8}{RESET} ({sym_count} symbols extracted)")
+            print("")
+            
+            # Global Progress
+            prog = (indexed / total * 100) if total > 0 else 0
+            print(f"{BOLD}GLOBAL TRUTH ALIGNMENT:{RESET} {prog:.2f}%")
+            print(f"{render_bar(indexed, total, width=68, color=GREEN)}")
+            
+            print("")
+            print(f"{BOLD}{WHITE}--- [ SOLL PLANE : INTENTIONAL SANCTUARY ] ---{RESET}")
+            print(f"  {BOLD}REQUIREMENTS:{RESET} {req_count:>6} active objectives")
+            print(f"  {BOLD}COMPLIANCE:  {RESET} Digital Thread Synchronized")
+
         print("")
-        print(f"{BOLD}{WHITE}--- [ INTENTIONAL SANCTUARY (SOLL) ] ---{RESET}")
-        print(f"  {BOLD}STATUS:{RESET} {GREEN}LOCKED & SYNCED{RESET} | {BOLD}METAMODEL:{RESET} Apollo v3.3")
-        print(f"  {BOLD}COMPLIANCE:{RESET} Digital Thread 100% Active")
-        print("")
-        
         print(f"{BOLD}{CYAN}======================================================================{RESET}")
-        print(" Commands: [start_scan] [axon_query] [export_soll] | Press Ctrl+C to exit")
+        print(" [RADAR ACTIVE] Use './scripts/axon_scan.py' to resume mapping | Ctrl+C to exit")
         
         time.sleep(2)
 
@@ -150,5 +126,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nExiting Command Center.")
+        print("\nRadar shut down.")
         sys.exit(0)

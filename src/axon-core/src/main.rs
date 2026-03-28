@@ -5,27 +5,16 @@ use jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-mod parser;
-mod scanner;
-mod bridge;
-mod config;
-mod graph;
-mod mcp;
-mod mcp_http;
-mod embedder;
-mod worker;
-mod queue;
-
-use bridge::BridgeEvent;
-use graph::GraphStore;
-use mcp::McpServer;
-use std::time::Instant;
+use axon_core::bridge::BridgeEvent;
+use axon_core::graph::GraphStore;
+use axon_core::mcp::McpServer;
+use axon_core::queue::QueueStore;
+use axon_core::scanner;
 use std::fs;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{info, error};
-use queue::QueueStore;
 
 fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
@@ -53,8 +42,8 @@ fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // Initialize In-Memory Bounded Queue (Max 50,000 tasks to buffer ingestion)
-            let queue_store = Arc::new(QueueStore::new(50000));
+            // Initialize In-Memory Bounded Queue (Max 200,000 tasks to buffer ingestion)
+            let queue_store = Arc::new(QueueStore::new(200000));
             let tel_socket_path = "/tmp/axon-telemetry.sock";
             let mcp_socket_path = "/tmp/axon-mcp.sock";
             
@@ -92,7 +81,7 @@ fn main() -> anyhow::Result<()> {
             let num_fast_workers = if available_cores > 2 { available_cores - 2 } else { 1 };
             info!("Hardware-Aware Scaling: Sizing worker pool to {} threads.", num_fast_workers);
 
-            let worker_pool = crate::worker::WorkerPool::new(
+            let worker_pool = axon_core::worker::WorkerPool::new(
                 num_fast_workers, 
                 graph_store.clone(), 
                 queue_store.clone(),
@@ -105,7 +94,7 @@ fn main() -> anyhow::Result<()> {
             let mcp_store_for_axum = graph_store.clone();
             tokio::spawn(async move {
                 let mcp_server = Arc::new(McpServer::new(mcp_store_for_axum));
-                let app = crate::mcp_http::app_router(mcp_server);
+                let app = axon_core::mcp_http::app_router(mcp_server);
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:44129").await.expect("Failed to bind to port 44129");
                 let _ = axum::serve(listener, app).await;
             });
@@ -132,6 +121,7 @@ fn main() -> anyhow::Result<()> {
                 let boot_id_lock = current_boot_id.clone();
                 let db_sender_task = db_sender.clone();
                 let mut results_rx = results_tx.subscribe();
+                let results_tx_for_conn = results_tx.clone();
                 
                 tokio::spawn(async move {
                     let (reader, mut writer) = socket.into_split();
@@ -139,8 +129,17 @@ fn main() -> anyhow::Result<()> {
                     let mut line = String::new();
                     
                     tokio::spawn(async move {
-                        while let Ok(msg) = results_rx.recv().await {
-                            if writer.write_all(msg.as_bytes()).await.is_err() { break; }
+                        loop {
+                            match results_rx.recv().await {
+                                Ok(msg) => {
+                                    if writer.write_all(msg.as_bytes()).await.is_err() { break; }
+                                },
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                                    error!("⚠️ Telemetry Lagged: skipped {} messages. Performance bottleneck detected.", count);
+                                    continue;
+                                },
+                                Err(_) => break,
+                            }
                         }
                     });
 
@@ -155,9 +154,19 @@ fn main() -> anyhow::Result<()> {
                         
                         if command.starts_with("EXECUTE_CYPHER ") {
                             let query = command[15..].trim().to_string();
-                            if let Err(_) = db_sender_task.send(crate::worker::DbWriteTask::ExecuteCypher { query }) {
+                            if let Err(_) = db_sender_task.send(axon_core::worker::DbWriteTask::ExecuteCypher { query }) {
                                 error!("Failed to send Cypher task to Writer Actor");
                             }
+                        } else if command.starts_with("RAW_QUERY ") {
+                            let query = command[10..].trim().to_string();
+                            let store = store_clone.clone();
+                            let result_tx = results_tx_for_conn.clone();
+                            tokio::spawn(async move {
+                                match store.query_json(&query) {
+                                    Ok(res) => { let _ = result_tx.send(res + "\n"); },
+                                    Err(e) => { let _ = result_tx.send(format!("{{\"error\": \"{:?}\"}}\n", e)); }
+                                }
+                            });
                         } else if command.starts_with("SESSION_INIT ") {
                             let payload = &command[13..];
                             if let Ok(data) = serde_json::from_str::<serde_json::Value>(payload) {
@@ -173,13 +182,16 @@ fn main() -> anyhow::Result<()> {
                             let payload = &command[12..];
                             if let Ok(batch_data) = serde_json::from_str::<serde_json::Value>(payload) {
                                 if let Some(files) = batch_data.as_array() {
+                                    info!("📦 Received PARSE_BATCH with {} files", files.len());
                                     for file_data in files {
                                         let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
                                         let trace_id = file_data["trace_id"].as_str().unwrap_or("unknown").to_string();
                                         let t0 = file_data["t0"].as_i64().unwrap_or(0);
                                         let t1 = file_data["t1"].as_i64().unwrap_or(0);
                                         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).map(|sys_time| sys_time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64).unwrap_or(0);
-                                        let _ = queue_clone.push(&path, mtime, &trace_id, t0, t1);
+                                        if let Err(e) = queue_clone.push(&path, mtime, &trace_id, t0, t1, false) {
+                                            error!("❌ QUEUE_PUSH_FAILED for {}: {:?}", path, e);
+                                        }
                                     }
                                 }
                             }
@@ -191,16 +203,43 @@ fn main() -> anyhow::Result<()> {
                                 let t0 = file_data["t0"].as_i64().unwrap_or(0);
                                 let t1 = file_data["t1"].as_i64().unwrap_or(0);
                                 let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).map(|sys_time| sys_time.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64).unwrap_or(0);
-                                let _ = queue_clone.push(&path, mtime, &trace_id, t0, t1);
+                                if let Err(e) = queue_clone.push(&path, mtime, &trace_id, t0, t1, true) {
+                                    error!("❌ QUEUE_PUSH_FAILED for {}: {:?}", path, e);
+                                }
                             }
+                        } else if command.starts_with("PULL_PENDING ") {
+                            let count_str = command[13..].trim();
+                            let count = count_str.parse::<usize>().unwrap_or(10);
+                            info!("📥 PULL_PENDING: Fetching {} prioritized files...", count);
+                            
+                            let store = store_clone.clone();
+                            let result_tx = results_tx_for_conn.clone();
+                            
+                            tokio::spawn(async move {
+                                match store.fetch_pending_batch(count) {
+                                    Ok(files) => {
+                                        info!("📤 Sending {} files to Elixir", files.len());
+                                        let response = serde_json::json!({
+                                            "event": "PENDING_BATCH_READY",
+                                            "files": files
+                                        });
+                                        if let Ok(msg) = serde_json::to_string(&response) {
+                                            let _ = result_tx.send(msg + "\n");
+                                        }
+                                    },
+                                    Err(e) => {
+                                        error!("Failed to fetch pending batch: {:?}", e);
+                                    }
+                                }
+                            });
                         } else if command == "SCAN_ALL" {
                             info!("🚀 SCAN_ALL: Mapping every project into the Living Lattice...");
                             let scan_store = store_clone.clone();
                             let proj_root = projects_root_task.clone();
 
                             tokio::spawn(async move {
-                                let scanner = scanner::Scanner::new(&proj_root);
-                                scanner.scan(scan_store);
+                                let scanner_obj = scanner::Scanner::new(&proj_root);
+                                scanner_obj.scan(scan_store);
                             });
                         } else if command.starts_with("SCAN_PROJECT ") {
                             let project_name = command[13..].trim().to_string();
@@ -213,8 +252,8 @@ fn main() -> anyhow::Result<()> {
                                 project_path.push(&project_name);
                                 
                                 if project_path.exists() {
-                                    let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                                    scanner.scan(scan_store);
+                                    let scanner_obj = scanner::Scanner::new(&project_path.to_string_lossy());
+                                    scanner_obj.scan(scan_store);
                                 }
                             });
                         } else if command == "STOP" {

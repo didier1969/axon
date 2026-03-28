@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use tracing::{info, warn, error, debug};
+
 pub static WASM_ENGINE: Lazy<Engine> = Lazy::new(|| Engine::default());
 
 thread_local! {
@@ -27,16 +29,14 @@ pub fn parse_with_wasm_safe(
     let lang_name_str = language_name.to_string();
     let wasm_bytes_vec = wasm_bytes.to_vec();
 
+    debug!("[WASM] Starting parse for {}", lang_name_str);
+
     let is_titan = IS_TITAN_MODE.with(|mode| mode.get());
 
     let result = catch_unwind(move || {
-        // TITAN PROTOCOL: Massive files bypass the cache entirely.
-        // This allows the WASM memory pool to expand to 6GB+ during parsing,
-        // and then be instantly and safely dropped/freed at the end of the function,
-        // guaranteeing it never stays in the thread_local cache to cause an OOM.
+        let engine = &*WASM_ENGINE;
         if is_titan {
-            log::info!("Titan Mode: Bypassing WASM parser cache for heavy file...");
-            if let Ok(mut store) = tree_sitter::WasmStore::new(&*WASM_ENGINE) {
+            if let Ok(mut store) = tree_sitter::WasmStore::new(engine) {
                 if let Ok(language) = store.load_language(&lang_name_str, &wasm_bytes_vec) {
                     let mut parser = tree_sitter::Parser::new();
                     if parser.set_wasm_store(store).is_ok() && parser.set_language(&language).is_ok() {
@@ -51,7 +51,7 @@ pub fn parse_with_wasm_safe(
             let mut cache = cache_cell.borrow_mut();
 
             if !cache.contains_key(&lang_name_str) {
-                if let Ok(mut store) = tree_sitter::WasmStore::new(&*WASM_ENGINE) {
+                if let Ok(mut store) = tree_sitter::WasmStore::new(engine) {
                     if let Ok(language) = store.load_language(&lang_name_str, &wasm_bytes_vec) {
                         let mut parser = tree_sitter::Parser::new();
                         if parser.set_wasm_store(store).is_ok() && parser.set_language(&language).is_ok() {
@@ -74,24 +74,22 @@ pub fn parse_with_wasm_safe(
     match result {
         Ok(Some(tree)) => Some(tree),
         Ok(None) => {
-            log::warn!("WASM parsing failed to produce a tree for {}", language_name);
+            warn!("WASM parsing failed to produce a tree for {}", language_name);
             None
         },
         Err(e) => {
             let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                (*s).to_string()
+                s.to_string()
             } else if let Some(s) = e.downcast_ref::<String>() {
                 s.clone()
             } else {
                 "Unknown panic".to_string()
             };
-            log::warn!("WASM parsing Trap/Panic for {}: {}", language_name, msg);
+            warn!("WASM parsing Trap/Panic for {}: {}", language_name, msg);
             None
         }
     }
 }
-
-fn default_is_public() -> bool { true }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Symbol {
@@ -102,8 +100,14 @@ pub struct Symbol {
     pub docstring: Option<String>,
     #[serde(default)]
     pub is_entry_point: bool,
-    #[serde(default = "default_is_public")]
+    #[serde(default)]
     pub is_public: bool,
+    #[serde(default)]
+    pub tested: bool,
+    #[serde(default)]
+    pub is_nif: bool,
+    #[serde(default)]
+    pub is_unsafe: bool,
     #[serde(default)]
     pub properties: std::collections::HashMap<String, String>,
     pub embedding: Option<Vec<f32>>,
@@ -152,6 +156,9 @@ pub fn scan_secrets(content: &str, result: &mut ExtractionResult) {
                     docstring: None,
                     is_entry_point: false,
                     is_public: false,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: true,
                     properties: HashMap::new(),
                     embedding: None,
                 });

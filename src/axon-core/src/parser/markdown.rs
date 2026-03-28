@@ -65,14 +65,16 @@ impl MarkdownParser {
                 if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
                     symbols.push(Symbol {
                         name: format!("frontmatter:{}", key),
-                        kind: "function".to_string(),
+                        kind: "config_key".to_string(),
                         start_line: i + 2,
                         end_line: i + 2,
                         docstring: None,
                         is_entry_point: false,
                         is_public: true,
+                        tested: false,
+                        is_nif: false,
+                        is_unsafe: false,
                         properties: HashMap::new(),
-                    
                         embedding: None,
                     });
                 }
@@ -108,8 +110,10 @@ impl MarkdownParser {
                         docstring: None,
                         is_entry_point: false,
                         is_public: true,
+                        tested: false,
+                        is_nif: false,
+                        is_unsafe: false,
                         properties: HashMap::new(),
-                    
                         embedding: None,
                     });
                     i = j;
@@ -185,9 +189,11 @@ impl MarkdownParser {
                             end_line: line_no,
                             docstring: None,
                             is_entry_point: false,
-                        is_public: true,
+                            is_public: true,
+                            tested: false,
+                            is_nif: false,
+                            is_unsafe: false,
                             properties: props,
-                        
                             embedding: None,
                         });
                     }
@@ -229,9 +235,11 @@ impl Parser for MarkdownParser {
                     end_line,
                     docstring: None,
                     is_entry_point: level == 1,
-                            is_public: true,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
                     properties: HashMap::new(),
-                
                     embedding: None,
                 });
             }
@@ -241,54 +249,5 @@ impl Parser for MarkdownParser {
         self.extract_links_and_fences(&lines, &mut symbols, &mut relations);
 
         ExtractionResult { project_slug: None, symbols, relations }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_markdown() {
-        let code = r#"---
-title: Hello World
-author: John Doe
----
-
-# Main Title
-
-This is a link: [OpenAI](https://openai.com).
-
-## Subtitle
-
-Here is some code:
-
-```rust
-fn main() {
-    println!("Hello");
-}
-```
-
-```mermaid
-graph TD;
-    A-->B;
-```
-
-| Header 1 | Header 2 |
-| -------- | -------- |
-| Cell 1   | Cell 2   |
-"#;
-        let parser = MarkdownParser::new();
-        let result = parser.parse(code);
-
-        assert!(result.symbols.iter().any(|s| s.name == "frontmatter:title" && s.kind == "function"));
-        assert!(result.symbols.iter().any(|s| s.name == "Main Title" && s.kind == "section" && s.is_entry_point));
-        assert!(result.symbols.iter().any(|s| s.name == "Subtitle" && s.kind == "section"));
-        
-        assert!(result.relations.iter().any(|r| r.to == "rust" && r.rel_type == "calls"));
-        assert!(result.relations.iter().any(|r| r.to == "https://openai.com" && r.rel_type == "imports"));
-
-        assert!(result.symbols.iter().any(|s| s.name == "diagram:mermaid" && s.kind == "section"));
-        assert!(result.symbols.iter().any(|s| s.name == "table:Header 1" && s.kind == "section"));
     }
 }

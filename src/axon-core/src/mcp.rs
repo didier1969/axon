@@ -472,14 +472,14 @@ impl McpServer {
 
         match action {
             "create" => {
+                let project_slug = data.get("project_slug").and_then(|v| v.as_str()).unwrap_or("GLOBAL");
                 let reg_col = match entity {
-                    "pillar" => "last_req", 
-                    "requirement" => "last_req",
+                    "pillar" | "requirement" => "last_req",
                     "concept" => "last_cpt",
                     "decision" => "last_dec",
                     "milestone" => "last_mil",
                     "validation" => "last_val",
-                    "stakeholder" => "id", // Not incremented, name is PK
+                    "stakeholder" => "id",
                     _ => return None,
                 };
                 let prefix = match entity {
@@ -493,9 +493,12 @@ impl McpServer {
                 };
 
                 let update_query = if entity == "stakeholder" {
-                    "SELECT 0".to_string() // Dummy
+                    "SELECT 0".to_string()
                 } else {
-                    format!("UPDATE soll.Registry SET {0} = {0} + 1 WHERE id = 'AXON_GLOBAL' RETURNING {0}", reg_col)
+                    format!("INSERT INTO soll.Registry (project_slug, last_req, last_cpt, last_dec, last_mil, last_val) \
+                             VALUES ('{0}', 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING; \
+                             UPDATE soll.Registry SET {1} = {1} + 1 WHERE project_slug = '{0}' RETURNING {1}", 
+                             project_slug.replace("'", "''"), reg_col)
                 };
 
                 match self.graph_store.query_json(&update_query) {
@@ -504,11 +507,8 @@ impl McpServer {
                         let formatted_id = if entity == "stakeholder" {
                             data.get("name")?.as_str()?.to_string()
                         } else {
-                            if rows.is_empty() || rows[0].is_empty() {
-                                return Some(json!({ "content": [{ "type": "text", "text": "Erreur: Registre SOLL non initialisé." }], "isError": true }));
-                            }
                             let next_num: u64 = rows[0][0].parse().unwrap_or(0);
-                            format!("{}-AXO-{:03}", prefix, next_num)
+                            format!("{}-{}-{:03}", prefix, project_slug, next_num)
                         };
                         
                         let insert_res = match entity {
@@ -533,7 +533,7 @@ impl McpServer {
                                 let rat = data.get("rationale")?.as_str()?;
                                 let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                                 let final_name = format!("{}: {}", formatted_id, name);
-                                let q = "INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES (?, ?, ?, ?)";
+                                let q = "INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES (?, ?, ?)";
                                 self.graph_store.execute_param(q, &json!([final_name, expl, rat, meta.to_string()]))
                             },
                             "decision" => {
@@ -628,21 +628,41 @@ impl McpServer {
             "link" => {
                 let src = data.get("source_id")?.as_str()?;
                 let tgt = data.get("target_id")?.as_str()?;
-                let rel_table = match (src.split('-').next().unwrap_or(""), tgt.split('-').next().unwrap_or("")) {
-                    ("PIL", "REQ") | ("REQ", "PIL") => "soll.BELONGS_TO",
-                    ("CPT", "REQ") | ("REQ", "CPT") => "soll.EXPLAINS",
-                    ("PIL", "AXO") | ("AXO", "PIL") => "soll.EPITOMIZES",
-                    ("DEC", "REQ") | ("REQ", "DEC") => "soll.SOLVES",
-                    ("MIL", "REQ") | ("REQ", "MIL") => "soll.TARGETS",
-                    ("VAL", "REQ") | ("REQ", "VAL") => "soll.VERIFIES",
-                    ("STK", "REQ") | ("REQ", "STK") => "soll.ORIGINATES",
-                    ("DEC", _) => "IMPACTS", // Link decision to a physical symbol (IST)
-                    _ => "SUBSTANTIATES", 
+                let explicit_rel = data.get("relation_type").and_then(|v| v.as_str());
+                
+                let rel_table = if let Some(r) = explicit_rel {
+                    match r.to_uppercase().as_str() {
+                        "EPITOMIZES" => "soll.EPITOMIZES",
+                        "BELONGS_TO" => "soll.BELONGS_TO",
+                        "EXPLAINS" => "soll.EXPLAINS",
+                        "SOLVES" => "soll.SOLVES",
+                        "TARGETS" => "soll.TARGETS",
+                        "VERIFIES" => "soll.VERIFIES",
+                        "ORIGINATES" => "soll.ORIGINATES",
+                        "SUPERSEDES" => "soll.SUPERSEDES",
+                        "CONTRIBUTES_TO" => "soll.CONTRIBUTES_TO",
+                        "REFINES" => "soll.REFINES",
+                        "IMPACTS" => "IMPACTS",
+                        "SUBSTANTIATES" => "SUBSTANTIATES",
+                        _ => return Some(json!({ "content": [{ "type": "text", "text": format!("Erreur: Type de relation inconnu '{}'", r) }], "isError": true })),
+                    }
+                } else {
+                    match (src.split('-').next().unwrap_or(""), tgt.split('-').next().unwrap_or("")) {
+                        ("PIL", "REQ") | ("REQ", "PIL") => "soll.BELONGS_TO",
+                        ("CPT", "REQ") | ("REQ", "CPT") => "soll.EXPLAINS",
+                        ("PIL", "AXO") | ("AXO", "PIL") => "soll.EPITOMIZES",
+                        ("DEC", "REQ") | ("REQ", "DEC") => "soll.SOLVES",
+                        ("MIL", "REQ") | ("REQ", "MIL") => "soll.TARGETS",
+                        ("VAL", "REQ") | ("REQ", "VAL") => "soll.VERIFIES",
+                        ("STK", "REQ") | ("REQ", "STK") => "soll.ORIGINATES",
+                        ("DEC", _) => "IMPACTS",
+                        _ => "SUBSTANTIATES", 
+                    }
                 };
-                // Note: DuckDB links are simple source/target VARCHARs
+                
                 let q = format!("INSERT INTO {} (source_id, target_id) VALUES (?, ?)", rel_table);
                 match self.graph_store.execute_param(&q, &json!([src, tgt])) {
-                    Ok(_) => Some(json!({ "content": [{ "type": "text", "text": format!("✅ Liaison établie : `{}` -> `{}`", src, tgt) }] })),
+                    Ok(_) => Some(json!({ "content": [{ "type": "text", "text": format!("✅ Liaison établie : `{}` -> `{}` (via {})", src, tgt, rel_table) }] })),
                     Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }], "isError": true }))
                 }
             }
@@ -651,73 +671,75 @@ impl McpServer {
     }
 
     fn axon_export_soll(&self) -> Option<Value> {
-        let mut markdown = String::from("# Axon Lattice - SOLL Extraction\n\n## 1. Vision\n");
+        let mut markdown = String::from("# Axon Lattice - SOLL Extraction\n\n");
+        
+        let now = std::time::SystemTime::now();
+        let datetime: chrono::DateTime<chrono::Local> = now.into();
+        let timestamp_str = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+        markdown.push_str(&format!("*Généré le : {}*\n\n", timestamp_str));
+
+        markdown.push_str("## 1. Vision & Objectifs Stratégiques\n");
         if let Ok(res) = self.graph_store.query_json("SELECT title, description, goal, metadata FROM soll.Vision") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {}\n*Description:* {}\n*Goal:* {}\n*Metadata:* {}\n\n", r[0], r[1], r[2], r[3]));
+                markdown.push_str(&format!("### {}\n**Description:** {}\n**Goal:** {}\n**Meta:** `{}`\n\n", r[0], r[1], r[2], r[3]));
             }
         }
         
-        markdown.push_str("## 2. Pillars\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description, metadata FROM soll.Pillar") {
+        markdown.push_str("## 2. Piliers d'Architecture\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description FROM soll.Pillar") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("* **{}** ({}): {} | Meta: {}\n", r[0], r[1], r[2], r[3]));
+                markdown.push_str(&format!("* **{}** : {} ({})\n", r[0], r[1], r[2]));
             }
         }
 
-        markdown.push_str("\n## 3. Milestones\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status, deadline, metadata FROM soll.Milestone") {
+        markdown.push_str("\n## 3. Jalons & Roadmap (Milestones)\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status, deadline FROM soll.Milestone") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {} - {}\n*Status:* {} | *Deadline:* {}\n*Metadata:* {}\n\n", r[0], r[1], r[2], r[3], r[4]));
+                markdown.push_str(&format!("### {} : {}\n*Statut :* `{}` | *Échéance :* {}\n\n", r[0], r[1], r[2], r[3]));
             }
         }
 
-        markdown.push_str("## 4. Requirements\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description, justification, priority, metadata FROM soll.Requirement") {
+        markdown.push_str("## 4. Exigences & Rayon d'Impact (Requirements)\n");
+        let req_query = "SELECT r.id, r.title, r.priority, COALESCE(ir.symbols_count, 0) as blast_radius, r.description \
+                         FROM soll.Requirement r \
+                         LEFT JOIN soll.ImpactRadius ir ON r.id = ir.requirement_id \
+                         ORDER BY blast_radius DESC";
+        if let Ok(res) = self.graph_store.query_json(req_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {} - {}\n*Priority:* {}\n*Description:* {}\n*Justification:* {}\n*Metadata:* {}\n\n", r[0], r[1], r[4], r[2], r[3], r[5]));
+                markdown.push_str(&format!("### {} - {}\n*Priorité :* `{}` | **Blast Radius :** `{} symboles` \n*Description :* {}\n\n", r[0], r[1], r[2], r[3], r[4]));
             }
         }
 
-        markdown.push_str("## 5. Decisions (ADR)\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, context, rationale, status, metadata FROM soll.Decision") {
+        markdown.push_str("## 5. Registre des Décisions (ADR)\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status, rationale FROM soll.Decision") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {} - {}\n*Status:* {}\n*Context:* {}\n*Rationale:* {}\n*Metadata:* {}\n\n", r[0], r[1], r[4], r[2], r[3], r[5]));
+                markdown.push_str(&format!("### {}\n**Titre :** {}\n**Statut :** `{}`\n**Rationnel :** {}\n\n", r[0], r[1], r[2], r[3]));
             }
         }
 
-        markdown.push_str("## 6. Concepts\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT name, explanation, rationale, metadata FROM soll.Concept") {
+        markdown.push_str("## 6. Preuves de Validation & Witness\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, method, result, timestamp FROM soll.Validation") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {}\n*Explanation:* {}\n*Rationale:* {}\n*Metadata:* {}\n\n", r[0], r[1], r[2], r[3]));
+                markdown.push_str(&format!("*   `{}` : **{}** via `{}` (Certifié le {})\n", r[0], r[2], r[1], r[3]));
             }
         }
 
-        markdown.push_str("## 7. Stakeholders & Validations\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT name, role FROM soll.Stakeholder") {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-            for r in rows {
-                markdown.push_str(&format!("* **{}** : {}\n", r[0], r[1]));
-            }
-        }
-
-        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let file_name = format!("SOLL_EXPORT_{}.md", timestamp);
+        let file_name = format!("SOLL_EXPORT_{}.md", datetime.format("%Y-%m-%d_%H%M%S"));
         let file_path = format!("docs/vision/{}", file_name);
         
         let _ = std::fs::create_dir_all("docs/vision");
         match std::fs::write(&file_path, &markdown) {
             Ok(_) => {
-                let report = format!("✅ Exported to {}\n\n{}", file_path, markdown.chars().take(250).collect::<String>());
+                let report = format!("✅ Exportation réussie dans {}\n\n---\n\n{}", file_path, markdown.chars().take(300).collect::<String>());
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },
-            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture fichier: {}", e) }], "isError": true }))
+            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture: {}", e) }], "isError": true }))
         }
     }
 
@@ -953,7 +975,8 @@ impl McpServer {
         
         let mut report = format!("🏥 Health Report for {}: Coverage {}%. Stability high.", project, coverage);        
         if !god_objects.is_empty() {
-            report.push_str(&format!("\nGod Object detected: {}", god_objects.join(", ")));
+            let god_list: Vec<String> = god_objects.iter().map(|(name, count)| format!("{} ({} lines)", name, count)).collect();
+            report.push_str(&format!("\nGod Objects detected: {}", god_list.join(", ")));
         }
         
         Some(json!({ "content": [{ "type": "text", "text": report }] }))

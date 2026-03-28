@@ -89,12 +89,22 @@ impl WorkerPool {
                 // 2. EXECUTION PHASE
                 let mut feedback_buffer = String::new();
                 
+                if !batch.is_empty() {
+                    info!("Writer Actor: Processing batch of {} extractions...", batch.len());
+                }
+
                 // Transactional Batch Insert
                 let result = if !batch.is_empty() {
                     graph_store.insert_file_data_batch(&batch)
                 } else {
                     Ok(())
                 };
+
+                if let Err(e) = &result {
+                    error!("Writer Actor: Transactional Commit FAILED: {:?}", e);
+                } else if !batch.is_empty() {
+                    info!("Writer Actor: Transactional Commit SUCCESS.");
+                }
 
                 for task in batch.drain(..) {
                     if let DbWriteTask::FileExtraction { path, extraction, trace_id, t0, t1, t2, t3 } = task {
@@ -103,20 +113,13 @@ impl WorkerPool {
                                 let _ = queue.mark_done(&path);
                                 ("ok", "".to_string())
                             },
-                            Err(e) => {
-                                error!("Batch Writer failed for {}: {:?}", path, e);
-                                ("error", format!("{:?}", e))
-                            }
+                            Err(e) => ("error", format!("{:?}", e))
                         };
 
                         if let Some(msg) = Self::format_feedback(&path, status, &reason, extraction.symbols.len(), extraction.relations.len(), &trace_id, t0, t1, t2, t3) {
-                            feedback_buffer.push_str(&msg);
+                            let _ = result_sender.send(msg);
                         }
                     }
-                }
-                
-                if !feedback_buffer.is_empty() {
-                    let _ = result_sender.send(feedback_buffer);
                 }
             }
         }).expect("Failed to spawn Writer Actor");
@@ -177,52 +180,64 @@ impl WorkerPool {
             
             loop {
                 if let Some(task) = queue.pop() {
-                    let _span = tracing::info_span!("worker_task", path = %task.path).entered();
-                    let t2 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
-
-                    match std::fs::read_to_string(&task.path) {
-                        Ok(content) => {
-                            if content.len() > 1024 * 1024 {
-                                error!("Skipping heavy parse/embed for file > 1MB: {}", task.path);
-                                Self::send_feedback(&result_sender, &task.path, "skipped", "File size > 1MB", 0, 0, &task.trace_id, task.t0, task.t1, t2, t2);
-                                continue;
-                            }
-
-                            if let Some(parser) = parser::get_parser_for_file(std::path::Path::new(&task.path)) {
-                                let mut extraction = parser.parse(&content);
-                                let t3 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
-                                
-                                // Batch Embed all symbols
-                                let sym_names: Vec<String> = extraction.symbols.iter().map(|s| s.name.clone()).collect();
-                                if let Ok(embeddings) = crate::embedder::batch_embed(sym_names) {
-                                    for (i, vec) in embeddings.into_iter().enumerate() {
-                                        if i < extraction.symbols.len() {
-                                            extraction.symbols[i].embedding = Some(vec);
-                                        }
-                                    }
-                                }
-
-                                let write_task = DbWriteTask::FileExtraction {
-                                    path: task.path.clone(),
-                                    extraction,
-                                    trace_id: task.trace_id.clone(),
-                                    t0: task.t0, t1: task.t1, t2, t3
-                                };
-                                
-                                if let Err(_) = db_sender.send(write_task) { break; }
-                            } else {
-                                Self::send_feedback(&result_sender, &task.path, "skipped", "No parser found", 0, 0, &task.trace_id, task.t0, task.t1, t2, t2);
-                            }
-                        },
-                        Err(e) => {
-                            error!("Failed to read file {}: {:?}", task.path, e);
-                            Self::send_feedback(&result_sender, &task.path, "error", &format!("{:?}", e), 0, 0, &task.trace_id, task.t0, task.t1, t2, t2);
-                        }
-                    }
+                    Self::process_one_task(id, task, &db_sender, &result_sender);
                 } else {
                     thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
         }).expect("Failed to spawn worker thread");
+    }
+
+    pub fn process_one_task(
+        worker_id: usize,
+        task: crate::queue::Task,
+        db_sender: &Sender<DbWriteTask>,
+        result_sender: &tokio::sync::broadcast::Sender<String>,
+    ) {
+        info!("Worker {}: Processing file: {}", worker_id, task.path);
+        let _span = tracing::info_span!("worker_task", path = %task.path).entered();
+        let t2 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+
+        match std::fs::read_to_string(&task.path) {
+            Ok(content) => {
+                if content.len() > 1024 * 1024 {
+                    error!("Skipping heavy parse/embed for file > 1MB: {}", task.path);
+                    Self::send_feedback(result_sender, &task.path, "skipped", "File size > 1MB", 0, 0, &task.trace_id, task.t0, task.t1, t2, t2);
+                    return;
+                }
+
+                if let Some(parser) = parser::get_parser_for_file(std::path::Path::new(&task.path)) {
+                    let mut extraction = parser.parse(&content);
+                    let t3 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+                    
+                    // Batch Embed all symbols
+                    let sym_names: Vec<String> = extraction.symbols.iter().map(|s| s.name.clone()).collect();
+                    if let Ok(embeddings) = crate::embedder::batch_embed(sym_names) {
+                        for (i, vec) in embeddings.into_iter().enumerate() {
+                            if i < extraction.symbols.len() {
+                                extraction.symbols[i].embedding = Some(vec);
+                            }
+                        }
+                    }
+
+                    let write_task = DbWriteTask::FileExtraction {
+                        path: task.path.clone(),
+                        extraction,
+                        trace_id: task.trace_id.clone(),
+                        t0: task.t0, t1: task.t1, t2, t3
+                    };
+                    
+                    if let Err(e) = db_sender.send(write_task) { 
+                        error!("Worker {}: Failed to send write task: {:?}", worker_id, e);
+                    }
+                } else {
+                    Self::send_feedback(result_sender, &task.path, "skipped", "No parser found", 0, 0, &task.trace_id, task.t0, task.t1, t2, t2);
+                }
+            },
+            Err(e) => {
+                error!("Failed to read file {}: {:?}", task.path, e);
+                Self::send_feedback(result_sender, &task.path, "error", &format!("{:?}", e), 0, 0, &task.trace_id, task.t0, task.t1, t2, t2);
+            }
+        }
     }
 }

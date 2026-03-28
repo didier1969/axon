@@ -14,7 +14,9 @@ defmodule Axon.Watcher.Application do
       Axon.Watcher.Repo,
       Axon.Watcher.Telemetry,
       Axon.Watcher.Staging, # BUFFER ETS pour les insertions massives
+      Axon.Watcher.Tracer,
       Axon.Watcher.PoolFacade,
+      Axon.Watcher.TrafficGuardian,
       {Phoenix.PubSub, name: Axon.PubSub},
       {Oban, Application.fetch_env!(:axon_watcher, Oban)},
       {Axon.Watcher.Server, []},
