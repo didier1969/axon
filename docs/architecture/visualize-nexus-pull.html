@@ -176,44 +176,47 @@
     </header>
 
     <div class="container">
-        <!-- 0. STRUCTURE SOLL EXHAUSTIVE (THE GRAND LATTICE) -->
+        <!-- 0. STRUCTURE SOLL GÉNÉRIQUE (MÉTADONNÉES D'INTENTION) -->
         <section id="soll-structure">
-            <h2>Structure SOLL : Le Grand Treillis</h2>
-            <p>La couche intentionnelle (SOLL) est l'Autorité Sémantique d'Axon. Elle est sanctuarisée dans <code>soll.db</code> et gère la hiérarchie Vision -> Piliers -> Requirements -> Concepts.</p>
+            <h2>Structure SOLL : Schéma des Relations</h2>
+            <p>La couche intentionnelle (SOLL) définit l'ontologie du projet. Elle est isolée dans <code>soll.db</code> et structure la connaissance selon une hiérarchie stricte certifiée par le Registre.</p>
             <div class="grid">
                 <div class="info-card">
-                    <h3>Vision & Piliers (Macro)</h3>
-                    <p>La <strong>Souveraineté Sémantique Totale</strong> s'appuie sur 5 piliers fondamentaux : Ingestion Fantôme, Nexus Pull, Lattice Refiner, Witness Protocol et Architecture Sanctuaire.</p>
+                    <h3>Strate Macro (Vision & Piliers)</h3>
+                    <p>La <code>Vision</code> définit l'objectif ultime. Elle est soutenue par des <code>Pillars</code> (Piliers) qui représentent les domaines de contraintes majeures du système.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Exigences & DNA (Meso)</h3>
-                    <p>Chaque intention humaine est codée sous forme de <code>Requirement</code> (ex: <code>REQ-AXO-001</code>). Cette traçabilité MBSE garantit le lien indéfectible entre l'idée et le code.</p>
+                    <h3>Strate Meso (Requirements)</h3>
+                    <p>Les <code>Requirements</code> (Exigences) décomposent les piliers en objectifs fonctionnels vérifiables, identifiés par un DNA unique (ex: <code>REQ-PROJ-001</code>).</p>
                 </div>
                 <div class="info-card">
-                    <h3>Concepts & Observabilité (Micro)</h3>
-                    <p>Les concepts techniques comme le <strong>Tracer T0-T4</strong>, les <strong>CTE Récursives</strong> et le <strong>Nexus Seal</strong> certifient la réalité physique de l'implémentation.</p>
+                    <h3>Strate Micro (Concepts)</h3>
+                    <p>Les <code>Concepts</code> fournissent le "Comment" technique. Ils expliquent les exigences et sont physiquement liés au code source (IST).</p>
                 </div>
             </div>
             <div class="mermaid">
             graph TD
-                V[Vision : Souveraineté Totale] --> P1[PIL-AXO-001 : Ingestion Fantôme]
-                V --> P2[PIL-AXO-002 : Nexus Pull]
-                V --> P3[PIL-AXO-003 : Witness Protocol]
-                V --> P4[PIL-AXO-004 : Zero-Sleep Resiliency]
-                V --> P5[PIL-AXO-005 : Architecture Sanctuaire]
+                subgraph SOLL [Le Sanctuaire : soll.db]
+                    V[Vision]
+                    P[Pillar]
+                    R[Requirement]
+                    C[Concept]
+                    
+                    P -- "EPITOMIZES" --> V
+                    R -- "BELONGS_TO" --> P
+                    C -- "EXPLAINS" --> R
+                    C2[New Concept] -- "SUPERSEDES" --> C
+                end
 
-                P1 --> R1[REQ-AXO-001 : Pilotage Déterministe]
-                P1 --> R3[REQ-AXO-003 : Protection Titan]
-                P2 --> R6[REQ-AXO-006 : Backpressure Adaptative]
-                P3 --> R5[REQ-AXO-005 : Audit Proactif]
-                P5 --> R4[REQ-AXO-004 : Isolation Sanctuaire]
+                subgraph IST [La Forge : ist.db]
+                    S[Symbol / AST]
+                end
 
-                R1 --> C1[CPT-AXO-001 : Tracer T0-T4]
-                R6 --> C3[CPT-AXO-003 : CTE USING KEY]
-                R4 --> C4[CPT-AXO-004 : Registry Authority]
+                S -- "SUBSTANTIATES" --> C
                 
-                style V fill:#fef3c7,stroke:#d97706,stroke-width:4px
-                style P1,P2,P3,P4,P5 fill:#fef3c7,stroke:#d97706
+                style V fill:#f1f5f9,stroke:#475569,stroke-width:4px
+                style P,R,C,C2 fill:#f1f5f9,stroke:#475569
+                style S fill:#eff6ff,stroke:#0284c7
             </div>
         </section>
 
@@ -431,39 +434,32 @@
                     <p>Chaque ligne de code est reliée à un Concept (SOLL). Le LLM peut justifier chaque fonction par rapport à un Requirement original de la Roadmap.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Autorité Sémantique</h3>
-                    <p>Le système génère automatiquement les identifiants (ex: <code>REQ-AXO-004</code>). Cette centralisation garantit l'unicité et la lisibilité du Digital Thread sur 3 niveaux (Type-Projet-Numéro).</p>
-                </div>
-
-                <div class="info-card">
-                    <h3>Génération par le Modèle</h3>
-                    <p>La documentation (<code>ROADMAP.md</code>) n'est plus la source, mais une projection. DuckDB est le maître, garantissant zéro désynchronisation.</p>
+                    <h3>Généalogie & Historique</h3>
+                    <p>La relation <code>SUPERSEDES</code> permet de faire évoluer le système sans perdre la mémoire. Un nouveau concept "écrase" l'ancien mais conserve un lien vers lui pour expliquer le pivot.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Zéro Hallucination</h3>
-                    <p>Le LLM travaille sur une carte physique de la vérité. S'il tente de modifier un requirement sans adapter le code lié, le graphe signale une violation.</p>
+                    <h3>Calcul d'Avancement Réel</h3>
+                    <p>L'état "Terminé" est une preuve physique. Si un <code>Requirement</code> n'est pas relié à un <code>Symbol</code> (Code) via un <code>Concept</code>, il est marqué comme <strong>En attente</strong>.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Généalogie du Concept</h3>
-                    <p>Toute évolution technique est historisée via la relation <code>SUPERSEDES</code>. Axon conserve la trace du "Pourquoi" original, même après une refonte majeure.</p>
+                    <h3>Souveraineté des IDs</h3>
+                    <p>Le système génère les identifiants (ex: <code>REQ-AXO-004</code>). Cette autorité centrale garantit l'unicité du Digital Thread à travers tout le graphe.</p>
                 </div>
             </div>
             <div class="mermaid">
             graph BT
-                subgraph "Physical_Layer [Réalité Physique]"
-                    Code[Fonctions / Symboles] -- "VERIFIED_BY" --> Test[Unit Tests]
+                subgraph "Physical_Layer [IST : La Forge]"
+                    Code[Symboles / Code] -- "SUBSTANTIATES" --> Concept
                 end
-                subgraph "Technical_Layer [Espace Solution]"
-                    Spec[Technical Specs] -- "IMPLEMENTS" --> Code
-                end
-                subgraph "Conceptual_Layer [Espace Problème / SOLL]"
-                    Req[Requirements] -- "REFINES" --> Spec
-                    Concept[Vision / Concept] -- "ORIGINATES" --> Req
+                subgraph "Conceptual_Layer [SOLL : Le Sanctuaire]"
+                    Concept[Concept Technique] -- "EXPLAINS" --> Req
+                    Req[Requirement] -- "BELONGS_TO" --> Pillar[Pillar]
+                    NewConcept[Nouveau Concept] -- "SUPERSEDES (Raison)" --> Concept
                 end
                 
                 style Concept fill:#fef3c7,stroke:#d97706
+                style NewConcept fill:#fef3c7,stroke:#d97706,stroke-dasharray: 5 5
                 style Code fill:#f0f9ff,stroke:#0284c7
-                style Test fill:#ecfdf5,stroke:#059669
             </div>
         </section>
 
