@@ -186,12 +186,12 @@
                     <p>Les <code>Milestones</code> (Jalons) regroupent les objectifs par phase (ex: Phase Apollo). Ils pilotent la roadmap en ciblant des exigences spécifiques.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Strate Tactique (Decisions ADR)</h3>
-                    <p>Chaque choix technique majeur est une <code>Decision</code>. Elle résout un Requirement et impacte directement des Symboles de code physiques.</p>
+                    <h3>Simulation de Rayon d'Impact</h3>
+                    <p>Grâce à la vue <code>ImpactRadius</code>, Axon calcule le <strong>Blast Radius</strong> physique de chaque exigence. On sait exactement combien de symboles de code sont affectés par un changement d'intention.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Traçabilité DNA & Registre</h3>
-                    <p>Le système génère des identifiants uniques séquentiels (ex: <code>DEC-AXO-001</code>). Cette autorité garantit l'unicité du fil numérique sans hallucination IA.</p>
+                    <h3>Flexibilité "Notion-Like"</h3>
+                    <p>Chaque entité SOLL dispose d'un champ <code>metadata JSON</code>. Cela permet d'ajouter des propriétés dynamiques (coûts, risques, tags) sans altérer le schéma physique de la base.</p>
                 </div>
                 <div class="info-card">
                     <h3>Calcul d'Avancement Réel</h3>
@@ -594,36 +594,40 @@
             <h3>Couche SOLL (soll.db)</h3>
             <table style="width:100%; border-collapse: collapse; margin-bottom: 30px;">
                 <tr style="background: #f1f5f9; text-align: left;">
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Table</th>
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Table / Vue</th>
                     <th style="padding: 12px; border: 1px solid #e2e8f0;">Colonnes (Primary Key soulignée)</th>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Vision</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>title</u> VARCHAR, description VARCHAR, goal VARCHAR</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>title</u> VARCHAR, description VARCHAR, goal VARCHAR, metadata JSON</td>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Pillar</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, description VARCHAR</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, description VARCHAR, metadata JSON</td>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Milestone</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, status VARCHAR, deadline VARCHAR</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, status VARCHAR, deadline VARCHAR, metadata JSON</td>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Requirement</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, description VARCHAR, justification VARCHAR, priority VARCHAR</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, description VARCHAR, justification VARCHAR, priority VARCHAR, metadata JSON</td>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Decision</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, context VARCHAR, alternative VARCHAR, rationale VARCHAR, status VARCHAR</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, context VARCHAR, alternative VARCHAR, rationale VARCHAR, status VARCHAR, metadata JSON</td>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Stakeholder</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>name</u> VARCHAR, role VARCHAR</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>name</u> VARCHAR, role VARCHAR, metadata JSON</td>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Validation</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, method VARCHAR, result VARCHAR, timestamp BIGINT</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, method VARCHAR, result VARCHAR, timestamp BIGINT, metadata JSON</td>
+                </tr>
+                <tr style="background: #fdf2f2;">
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><strong>ImpactRadius (Vue)</strong></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">requirement_id, symbols_count (Calculé via récursion IST)</td>
                 </tr>
             </table>
 
