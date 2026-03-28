@@ -101,7 +101,7 @@ pub unsafe extern "C" fn duckdb_query_json(ctx: *mut PluginContext, query: *cons
     let query_str = match CStr::from_ptr(query).to_str() { Ok(s) => s, Err(_) => return CString::new("[]").unwrap().into_raw() };
     let ctx_ref = &*ctx;
     
-    let is_select = query_str.trim().to_lowercase().starts_with("select") || query_str.trim().to_lowercase().starts_with("with") || query_str.trim().to_lowercase().starts_with("show") || query_str.trim().to_lowercase().starts_with("describe");
+    let is_select = query_str.trim().to_lowercase().starts_with("select") || query_str.trim().to_lowercase().starts_with("with") || query_str.trim().to_lowercase().starts_with("show") || query_str.trim().to_lowercase().starts_with("describe") || query_str.to_lowercase().contains("returning");
     
     if !is_select {
         match ctx_ref.conn.execute(query_str, []) {
@@ -199,7 +199,7 @@ pub unsafe extern "C" fn duckdb_query_json_param(ctx: *mut PluginContext, query:
 
     let mut stmt = match ctx_ref.conn.prepare(query_str) { Ok(s) => s, Err(e) => return CString::new(format!("Error: {}", e)).unwrap().into_raw() };
     
-    let is_select = query_str.trim().to_lowercase().starts_with("select") || query_str.trim().to_lowercase().starts_with("with") || query_str.trim().to_lowercase().starts_with("show") || query_str.trim().to_lowercase().starts_with("describe");
+    let is_select = query_str.trim().to_lowercase().starts_with("select") || query_str.trim().to_lowercase().starts_with("with") || query_str.trim().to_lowercase().starts_with("show") || query_str.trim().to_lowercase().starts_with("describe") || query_str.to_lowercase().contains("returning");
     
     if !is_select {
         match stmt.execute(params_refs.as_slice()) {

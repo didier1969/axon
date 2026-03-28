@@ -169,6 +169,19 @@ impl McpServer {
                         }
                     },
                     {
+                        "name": "axon_add_concept",
+                        "description": "[SOLL] Ajoute un nouveau Concept Sémantique au graphe SOLL avec un ID auto-incrémenté.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "description": "Titre du concept" },
+                                "explanation": { "type": "string", "description": "Description technique" },
+                                "rationale": { "type": "string", "description": "Raison d'être architecturale" }
+                            },
+                            "required": ["name", "explanation", "rationale"]
+                        }
+                    },
+                    {
                         "name": "axon_query",
                         "description": "[DX] Recherche hybride (texte + vecteur) et similarité sémantique.",
                         "inputSchema": {
@@ -371,6 +384,7 @@ impl McpServer {
             "axon_refine_lattice" => self.axon_refine_lattice(arguments),
             "axon_fs_read" => self.axon_fs_read(arguments),
             "axon_query" => self.axon_query(arguments),
+            "axon_add_concept" => self.axon_add_concept(arguments),
             "axon_inspect" => self.axon_inspect(arguments),
             "axon_audit" => self.axon_audit(arguments),
             "axon_impact" => self.axon_impact(arguments),
@@ -435,6 +449,36 @@ impl McpServer {
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur de lecture: {}", e) }], "isError": true })),
+        }
+    }
+
+    fn axon_add_concept(&self, args: &Value) -> Option<Value> {
+        let name = args.get("name")?.as_str()?;
+        let explanation = args.get("explanation")?.as_str()?;
+        let rationale = args.get("rationale")?.as_str()?;
+        
+        let update_query = "UPDATE soll.Registry SET last_cpt = last_cpt + 1 WHERE id = 'AXON_GLOBAL' RETURNING last_cpt";
+        match self.graph_store.query_json(update_query) {
+            Ok(res) => {
+                println!("DEBUG UPDATE RES: {}", res);
+                let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+                if rows.is_empty() || rows[0].is_empty() {
+                    return Some(json!({ "content": [{ "type": "text", "text": "Erreur: Registre SOLL non initialisé." }], "isError": true }));
+                }
+                let next_id: u64 = rows[0][0].parse().unwrap_or(0);
+                let concept_id = format!("CPT-AXO-{:03}: {}", next_id, name);
+                
+                let insert_query = "INSERT INTO soll.Concept (name, explanation, rationale) VALUES (?, ?, ?)";
+                let params = json!([concept_id, explanation, rationale]);
+                match self.graph_store.execute_param(insert_query, &params) {
+                    Ok(_) => {
+                        let report = format!("✅ Concept Sanctuarisé avec succès.\n\n**ID :** `{}`\n**Rationnel :** {}", concept_id, rationale);
+                        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                    },
+                    Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'insertion: {}", e) }], "isError": true }))
+                }
+            },
+            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }))
         }
     }
 
@@ -1237,5 +1281,37 @@ mod tests {
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
         assert!(content.contains("Résultats de Recherche Hybride"));
+    }
+
+    #[test]
+    fn test_axon_add_concept_auto_id() {
+        let server = create_test_server();
+        // Initialize registry
+        server.graph_store.execute("INSERT INTO soll.Registry (id, last_req, last_cpt, last_dec) VALUES ('AXON_GLOBAL', 0, 10, 0)").unwrap();
+        
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_add_concept",
+                "arguments": {
+                    "name": "Test Concept",
+                    "explanation": "To test auto id",
+                    "rationale": "Because testing is good"
+                }
+            })),
+            id: Some(json!(1)),
+        };
+        
+        let response = server.handle_request(req);
+        let result = response.unwrap().result.unwrap();
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        println!("DEBUG CONTENT: {}", content);
+        
+        assert!(content.contains("CPT-AXO-011"));
+        
+        // Verify in DB
+        let count = server.graph_store.query_count("SELECT count(*) FROM soll.Concept WHERE name LIKE 'CPT-AXO-011%'").unwrap();
+        assert_eq!(count, 1);
     }
 }
