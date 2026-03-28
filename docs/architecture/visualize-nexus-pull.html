@@ -625,6 +625,10 @@
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Validation</td>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, method VARCHAR, result VARCHAR, timestamp BIGINT, metadata JSON</td>
                 </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Registry</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>project_slug</u> VARCHAR, last_req BIGINT, last_cpt BIGINT, last_dec BIGINT, last_mil BIGINT, last_val BIGINT</td>
+                </tr>
                 <tr style="background: #fdf2f2;">
                     <td style="padding: 12px; border: 1px solid #e2e8f0;"><strong>ImpactRadius (Vue)</strong></td>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">requirement_id, symbols_count (Calculé via récursion IST)</td>
@@ -639,11 +643,15 @@
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">File</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>path</u> VARCHAR, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>path</u> VARCHAR, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR</td>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Symbol</td>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384]</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Relations AST</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">CALLS, IMPORTS, IMPLEMENTS, EXTENDS, TESTS, USES, CALLS_NIF (source_id, target_id)</td>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Project</td>
