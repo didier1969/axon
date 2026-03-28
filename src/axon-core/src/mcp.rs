@@ -186,7 +186,7 @@ impl McpServer {
                     },
                     {
                         "name": "axon_export_soll",
-                        "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Requirements, Concepts) dans un document Markdown horodaté.",
+                        "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Milestones, Requirements, Decisions, Concepts) dans un document Markdown horodaté.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {},
@@ -515,50 +515,57 @@ impl McpServer {
                             "pillar" => {
                                 let title = data.get("title")?.as_str()?;
                                 let desc = data.get("description")?.as_str()?;
-                                let q = "INSERT INTO soll.Pillar (id, title, description) VALUES (?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([formatted_id, title, desc]))
+                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                                let q = "INSERT INTO soll.Pillar (id, title, description, metadata) VALUES (?, ?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([formatted_id, title, desc, meta.to_string()]))
                             },
                             "requirement" => {
                                 let title = data.get("title")?.as_str()?;
                                 let desc = data.get("description")?.as_str()?;
                                 let prio = data.get("priority").and_then(|v| v.as_str()).unwrap_or("P2");
-                                let q = "INSERT INTO soll.Requirement (id, title, description, priority) VALUES (?, ?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([formatted_id, title, desc, prio]))
+                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                                let q = "INSERT INTO soll.Requirement (id, title, description, priority, metadata) VALUES (?, ?, ?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([formatted_id, title, desc, prio, meta.to_string()]))
                             },
                             "concept" => {
                                 let name = data.get("name")?.as_str()?;
                                 let expl = data.get("explanation")?.as_str()?;
                                 let rat = data.get("rationale")?.as_str()?;
+                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                                 let final_name = format!("{}: {}", formatted_id, name);
-                                let q = "INSERT INTO soll.Concept (name, explanation, rationale) VALUES (?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([final_name, expl, rat]))
+                                let q = "INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES (?, ?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([final_name, expl, rat, meta.to_string()]))
                             },
                             "decision" => {
                                 let title = data.get("title")?.as_str()?;
                                 let ctx = data.get("context")?.as_str()?;
                                 let rat = data.get("rationale")?.as_str()?;
                                 let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("accepted");
-                                let q = "INSERT INTO soll.Decision (id, title, context, rationale, status) VALUES (?, ?, ?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([formatted_id, title, ctx, rat, status]))
+                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                                let q = "INSERT INTO soll.Decision (id, title, context, rationale, status, metadata) VALUES (?, ?, ?, ?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([formatted_id, title, ctx, rat, status, meta.to_string()]))
                             },
                             "milestone" => {
                                 let title = data.get("title")?.as_str()?;
                                 let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("planned");
-                                let q = "INSERT INTO soll.Milestone (id, title, status) VALUES (?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([formatted_id, title, status]))
+                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                                let q = "INSERT INTO soll.Milestone (id, title, status, metadata) VALUES (?, ?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([formatted_id, title, status, meta.to_string()]))
                             },
                             "stakeholder" => {
                                 let name = data.get("name")?.as_str()?;
                                 let role = data.get("role")?.as_str()?;
-                                let q = "INSERT INTO soll.Stakeholder (name, role) VALUES (?, ?)";
-                                self.graph_store.execute_param(q, &json!([name, role]))
+                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                                let q = "INSERT INTO soll.Stakeholder (name, role, metadata) VALUES (?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([name, role, meta.to_string()]))
                             },
                             "validation" => {
                                 let method = data.get("method")?.as_str()?;
                                 let result = data.get("result")?.as_str()?;
+                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-                                let q = "INSERT INTO soll.Validation (id, method, result, timestamp) VALUES (?, ?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([formatted_id, method, result, ts]))
+                                let q = "INSERT INTO soll.Validation (id, method, result, timestamp, metadata) VALUES (?, ?, ?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([formatted_id, method, result, ts, meta.to_string()]))
                             },
                             _ => Err(anyhow::anyhow!("Unknown entity")),
                         };
@@ -644,35 +651,59 @@ impl McpServer {
     }
 
     fn axon_export_soll(&self) -> Option<Value> {
-        let mut markdown = String::from("# SOLL Extraction\n\n## Vision\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT title, description, goal FROM soll.Vision") {
+        let mut markdown = String::from("# Axon Lattice - SOLL Extraction\n\n## 1. Vision\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT title, description, goal, metadata FROM soll.Vision") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {}\n*Description:* {}\n*Goal:* {}\n\n", r[0], r[1], r[2]));
+                markdown.push_str(&format!("### {}\n*Description:* {}\n*Goal:* {}\n*Metadata:* {}\n\n", r[0], r[1], r[2], r[3]));
             }
         }
         
-        markdown.push_str("## Pillars\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description FROM soll.Pillar") {
+        markdown.push_str("## 2. Pillars\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description, metadata FROM soll.Pillar") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("* **{}** ({}): {}\n", r[0], r[1], r[2]));
+                markdown.push_str(&format!("* **{}** ({}): {} | Meta: {}\n", r[0], r[1], r[2], r[3]));
             }
         }
 
-        markdown.push_str("\n## Requirements\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description, justification, priority FROM soll.Requirement") {
+        markdown.push_str("\n## 3. Milestones\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status, deadline, metadata FROM soll.Milestone") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {} - {}\n*Priority:* {}\n*Description:* {}\n*Justification:* {}\n\n", r[0], r[1], r[4], r[2], r[3]));
+                markdown.push_str(&format!("### {} - {}\n*Status:* {} | *Deadline:* {}\n*Metadata:* {}\n\n", r[0], r[1], r[2], r[3], r[4]));
             }
         }
 
-        markdown.push_str("## Concepts\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT name, explanation, rationale FROM soll.Concept") {
+        markdown.push_str("## 4. Requirements\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description, justification, priority, metadata FROM soll.Requirement") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {}\n*Explanation:* {}\n*Rationale:* {}\n\n", r[0], r[1], r[2]));
+                markdown.push_str(&format!("### {} - {}\n*Priority:* {}\n*Description:* {}\n*Justification:* {}\n*Metadata:* {}\n\n", r[0], r[1], r[4], r[2], r[3], r[5]));
+            }
+        }
+
+        markdown.push_str("## 5. Decisions (ADR)\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, context, rationale, status, metadata FROM soll.Decision") {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            for r in rows {
+                markdown.push_str(&format!("### {} - {}\n*Status:* {}\n*Context:* {}\n*Rationale:* {}\n*Metadata:* {}\n\n", r[0], r[1], r[4], r[2], r[3], r[5]));
+            }
+        }
+
+        markdown.push_str("## 6. Concepts\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT name, explanation, rationale, metadata FROM soll.Concept") {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            for r in rows {
+                markdown.push_str(&format!("### {}\n*Explanation:* {}\n*Rationale:* {}\n*Metadata:* {}\n\n", r[0], r[1], r[2], r[3]));
+            }
+        }
+
+        markdown.push_str("## 7. Stakeholders & Validations\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT name, role FROM soll.Stakeholder") {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            for r in rows {
+                markdown.push_str(&format!("* **{}** : {}\n", r[0], r[1]));
             }
         }
 
@@ -683,7 +714,7 @@ impl McpServer {
         let _ = std::fs::create_dir_all("docs/vision");
         match std::fs::write(&file_path, &markdown) {
             Ok(_) => {
-                let report = format!("✅ Exported to {}\n\n{}", file_path, markdown.chars().take(200).collect::<String>());
+                let report = format!("✅ Exported to {}\n\n{}", file_path, markdown.chars().take(250).collect::<String>());
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture fichier: {}", e) }], "isError": true }))
