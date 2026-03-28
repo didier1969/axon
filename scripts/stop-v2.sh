@@ -33,9 +33,13 @@ if tmux has-session -t axon 2>/dev/null; then
 fi
 
 # 4. Clean up sockets and locks
+echo "Cleaning up sockets, ports and locks..."
+fuser -k 44127/tcp 44129/tcp 44132/tcp 2>/dev/null || true
+fuser -k /tmp/axon-telemetry.sock /tmp/axon-mcp.sock 2>/dev/null || true
 rm -f "/tmp/axon-mcp.sock"
 rm -f "/tmp/axon-telemetry.sock"
 rm -f "/tmp/axon-v2.sock"
-rm -f "$PROJECT_ROOT/.axon/graph_v2/lbug.db.lock"
+rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.wal
+rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.lock
 
 echo "✅ Axon stopped (Other projects preserved)."

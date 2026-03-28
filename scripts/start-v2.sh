@@ -32,6 +32,7 @@ fi
 echo "🚀 Starting Axon v2 Architecture (Managed via TMUX)..."
 
 # 3. Clean environment (Safety Protocol)
+tmux kill-session -t axon 2>/dev/null || true
 rm -f /tmp/axon-*.sock
 rm -f .axon/graph_v2/*.db.wal 2>/dev/null || true
 
