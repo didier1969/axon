@@ -1,1 +1,0 @@
-/home/dstadel/projects/axon/src/axon-plugin-ladybug/target/release/libaxon_plugin_ladybug.so: /home/dstadel/projects/axon/src/axon-plugin-ladybug/build.rs /home/dstadel/projects/axon/src/axon-plugin-ladybug/src/lib.rs
