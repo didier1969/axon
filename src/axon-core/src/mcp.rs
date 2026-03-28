@@ -169,16 +169,19 @@ impl McpServer {
                         }
                     },
                     {
-                        "name": "axon_add_concept",
-                        "description": "[SOLL] Ajoute un nouveau Concept Sémantique au graphe SOLL avec un ID auto-incrémenté.",
+                        "name": "axon_soll_manager",
+                        "description": "[SOLL] Centre de commande pour le graphe intentionnel. Gère la création (avec IDs auto), la mise à jour et les liaisons hiérarchiques.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "name": { "type": "string", "description": "Titre du concept" },
-                                "explanation": { "type": "string", "description": "Description technique" },
-                                "rationale": { "type": "string", "description": "Raison d'être architecturale" }
+                                "action": { "type": "string", "enum": ["create", "update", "link"], "description": "L'opération à effectuer." },
+                                "entity": { "type": "string", "enum": ["pillar", "requirement", "concept"], "description": "Le type d'objet concerné." },
+                                "data": { 
+                                    "type": "object", 
+                                    "description": "Données JSON. Create (pillar: title,desc; requirement: title,desc,priority; concept: name,explanation,rationale). Link: source_id, target_id." 
+                                }
                             },
-                            "required": ["name", "explanation", "rationale"]
+                            "required": ["action", "entity", "data"]
                         }
                     },
                     {
@@ -393,7 +396,7 @@ impl McpServer {
             "axon_refine_lattice" => self.axon_refine_lattice(arguments),
             "axon_fs_read" => self.axon_fs_read(arguments),
             "axon_query" => self.axon_query(arguments),
-            "axon_add_concept" => self.axon_add_concept(arguments),
+            "axon_soll_manager" => self.axon_soll_manager(arguments),
             "axon_export_soll" => self.axon_export_soll(),
             "axon_inspect" => self.axon_inspect(arguments),
             "axon_audit" => self.axon_audit(arguments),
@@ -462,33 +465,117 @@ impl McpServer {
         }
     }
 
-    fn axon_add_concept(&self, args: &Value) -> Option<Value> {
-        let name = args.get("name")?.as_str()?;
-        let explanation = args.get("explanation")?.as_str()?;
-        let rationale = args.get("rationale")?.as_str()?;
-        
-        let update_query = "UPDATE soll.Registry SET last_cpt = last_cpt + 1 WHERE id = 'AXON_GLOBAL' RETURNING last_cpt";
-        match self.graph_store.query_json(update_query) {
-            Ok(res) => {
-                println!("DEBUG UPDATE RES: {}", res);
-                let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-                if rows.is_empty() || rows[0].is_empty() {
-                    return Some(json!({ "content": [{ "type": "text", "text": "Erreur: Registre SOLL non initialisé." }], "isError": true }));
-                }
-                let next_id: u64 = rows[0][0].parse().unwrap_or(0);
-                let concept_id = format!("CPT-AXO-{:03}: {}", next_id, name);
-                
-                let insert_query = "INSERT INTO soll.Concept (name, explanation, rationale) VALUES (?, ?, ?)";
-                let params = json!([concept_id, explanation, rationale]);
-                match self.graph_store.execute_param(insert_query, &params) {
-                    Ok(_) => {
-                        let report = format!("✅ Concept Sanctuarisé avec succès.\n\n**ID :** `{}`\n**Rationnel :** {}", concept_id, rationale);
-                        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+    fn axon_soll_manager(&self, args: &Value) -> Option<Value> {
+        let action = args.get("action")?.as_str()?;
+        let entity = args.get("entity")?.as_str()?;
+        let data = args.get("data")?;
+
+        match action {
+            "create" => {
+                let reg_col = match entity {
+                    "pillar" => "last_req", // Reuse or add last_pil if needed, currently req
+                    "requirement" => "last_req",
+                    "concept" => "last_cpt",
+                    _ => return None,
+                };
+                let prefix = match entity {
+                    "pillar" => "PIL",
+                    "requirement" => "REQ",
+                    "concept" => "CPT",
+                    _ => "OBJ",
+                };
+
+                let update_query = format!("UPDATE soll.Registry SET {0} = {0} + 1 WHERE id = 'AXON_GLOBAL' RETURNING {0}", reg_col);
+                match self.graph_store.query_json(&update_query) {
+                    Ok(res) => {
+                        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+                        if rows.is_empty() || rows[0].is_empty() {
+                            return Some(json!({ "content": [{ "type": "text", "text": "Erreur: Registre SOLL non initialisé." }], "isError": true }));
+                        }
+                        let next_num: u64 = rows[0][0].parse().unwrap_or(0);
+                        let formatted_id = format!("{}-AXO-{:03}", prefix, next_num);
+                        
+                        let insert_res = match entity {
+                            "pillar" => {
+                                let title = data.get("title")?.as_str()?;
+                                let desc = data.get("description")?.as_str()?;
+                                let q = "INSERT INTO soll.Pillar (id, title, description) VALUES (?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([formatted_id, title, desc]))
+                            },
+                            "requirement" => {
+                                let title = data.get("title")?.as_str()?;
+                                let desc = data.get("description")?.as_str()?;
+                                let prio = data.get("priority").and_then(|v| v.as_str()).unwrap_or("P2");
+                                let q = "INSERT INTO soll.Requirement (id, title, description, priority) VALUES (?, ?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([formatted_id, title, desc, prio]))
+                            },
+                            "concept" => {
+                                let name = data.get("name")?.as_str()?;
+                                let expl = data.get("explanation")?.as_str()?;
+                                let rat = data.get("rationale")?.as_str()?;
+                                let final_name = format!("{}: {}", formatted_id, name);
+                                let q = "INSERT INTO soll.Concept (name, explanation, rationale) VALUES (?, ?, ?)";
+                                self.graph_store.execute_param(q, &json!([final_name, expl, rat]))
+                            },
+                            _ => Err(anyhow::anyhow!("Unknown entity")),
+                        };
+
+                        match insert_res {
+                            Ok(_) => {
+                                let report = format!("✅ Entité SOLL créée : `{}`", formatted_id);
+                                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                            },
+                            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'insertion: {}", e) }], "isError": true }))
+                        }
                     },
-                    Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'insertion: {}", e) }], "isError": true }))
+                    Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }))
                 }
             },
-            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }))
+            "update" => {
+                let id = data.get("id")?.as_str()?;
+                let update_res = match entity {
+                    "pillar" => {
+                        let title = data.get("title")?.as_str()?;
+                        let desc = data.get("description")?.as_str()?;
+                        let q = "UPDATE soll.Pillar SET title = ?, description = ? WHERE id = ?";
+                        self.graph_store.execute_param(q, &json!([title, desc, id]))
+                    },
+                    "requirement" => {
+                        let title = data.get("title")?.as_str()?;
+                        let desc = data.get("description")?.as_str()?;
+                        let q = "UPDATE soll.Requirement SET title = ?, description = ? WHERE id = ?";
+                        self.graph_store.execute_param(q, &json!([title, desc, id]))
+                    },
+                    "concept" => {
+                        let expl = data.get("explanation")?.as_str()?;
+                        let rat = data.get("rationale")?.as_str()?;
+                        let q = "UPDATE soll.Concept SET explanation = ?, rationale = ? WHERE name LIKE ?";
+                        self.graph_store.execute_param(q, &json!([expl, rat, format!("{}%", id)]))
+                    },
+                    _ => Err(anyhow::anyhow!("Unknown entity")),
+                };
+                match update_res {
+                    Ok(_) => Some(json!({ "content": [{ "type": "text", "text": format!("✅ Mise à jour réussie pour `{}`", id) }] })),
+                    Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur update: {}", e) }], "isError": true }))
+                }
+            },
+            "link" => {
+                let src = data.get("source_id")?.as_str()?;
+                let tgt = data.get("target_id")?.as_str()?;
+                let rel_table = match (src.split('-').next().unwrap_or(""), tgt.split('-').next().unwrap_or("")) {
+                    ("PIL", "REQ") | ("REQ", "PIL") => "soll.BELONGS_TO",
+                    ("CPT", "REQ") | ("REQ", "CPT") => "soll.EXPLAINS",
+                    ("PIL", "AXO") | ("AXO", "PIL") => "soll.EPITOMIZES",
+                    _ => "SUBSTANTIATES", // Default to Digital Thread bridge if unknown
+                };
+                // Note: DuckDB links are simple source/target VARCHARs
+                let q = format!("INSERT INTO {} (source_id, target_id) VALUES (?, ?)", rel_table);
+                match self.graph_store.execute_param(&q, &json!([src, tgt])) {
+                    Ok(_) => Some(json!({ "content": [{ "type": "text", "text": format!("✅ Liaison établie : `{}` -> `{}`", src, tgt) }] })),
+                    Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }], "isError": true }))
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1001,7 +1088,7 @@ mod tests {
         let result = response.unwrap().result.expect("Expected result");
         let tools = result.get("tools").expect("Expected tools array").as_array().expect("tools is array");
 
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 18);
 
         let tool_names: Vec<&str> = tools.iter()
             .map(|t| t.get("name").unwrap().as_str().unwrap())
@@ -1048,7 +1135,6 @@ mod tests {
         let response = server.handle_request(req);
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-        println!("DEBUG CONTENT: {}", content);
 
         assert!(content.contains("VIOLATION") || content.contains("Détectée") ||
             content.contains("détectée"));
@@ -1074,7 +1160,7 @@ mod tests {
         let response = server.handle_request(req);
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-        println!("DEBUG CONTENT: {}", content);
+
         assert!(content.contains("auth_func"));
     }
 
@@ -1130,7 +1216,6 @@ mod tests {
         let response = server.handle_request(req);
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-        println!("DEBUG CONTENT: {}", content);
         assert!(content.contains("Inspection du Symbole"));
         assert!(content.contains("core_func"));
     }
@@ -1162,7 +1247,6 @@ mod tests {
         let response = server.handle_request(req);
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-        println!("DEBUG CONTENT: {}", content);
         assert!(content.contains("user_input"));
         assert!(content.contains("user_input"));
         assert!(content.contains("eval"));
@@ -1192,7 +1276,6 @@ mod tests {
         let response = server.handle_request(req);
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-        println!("DEBUG CONTENT: {}", content);
 
         assert!(content.contains("Dette Technique"));
         assert!(content.contains("unwrap"));
@@ -1220,7 +1303,6 @@ mod tests {
         let response = server.handle_request(req);
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-        println!("DEBUG CONTENT: {}", content);
 
         assert!(content.contains("Dette Technique"));
         assert!(content.contains("TODO"));
@@ -1248,7 +1330,6 @@ mod tests {
         let response = server.handle_request(req);
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-        println!("DEBUG CONTENT: {}", content);
 
         assert!(content.contains("Dette Technique"));
         assert!(content.contains("SECRET_API_KEY"));
@@ -1317,7 +1398,7 @@ mod tests {
         let response = server.handle_request(req);
         let result = response.unwrap().result.expect("Expected result");
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-        println!("DEBUG CONTENT: {}", content);
+
         assert!(content.contains("God Object detected") || content.contains("GodClass"));
     }
 
@@ -1341,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn test_axon_add_concept_auto_id() {
+    fn test_axon_soll_manager_auto_id() {
         let server = create_test_server();
         // Initialize registry
         server.graph_store.execute("INSERT INTO soll.Registry (id, last_req, last_cpt, last_dec) VALUES ('AXON_GLOBAL', 0, 10, 0)").unwrap();
@@ -1350,11 +1431,15 @@ mod tests {
             jsonrpc: "2.0".to_string(),
             method: "tools/call".to_string(),
             params: Some(json!({
-                "name": "axon_add_concept",
+                "name": "axon_soll_manager",
                 "arguments": {
-                    "name": "Test Concept",
-                    "explanation": "To test auto id",
-                    "rationale": "Because testing is good"
+                    "action": "create",
+                    "entity": "concept",
+                    "data": {
+                        "name": "Test Concept",
+                        "explanation": "To test auto id",
+                        "rationale": "Because testing is good"
+                    }
                 }
             })),
             id: Some(json!(1)),
@@ -1363,7 +1448,6 @@ mod tests {
         let response = server.handle_request(req);
         let result = response.unwrap().result.unwrap();
         let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-        println!("DEBUG CONTENT: {}", content);
         
         assert!(content.contains("CPT-AXO-011"));
         

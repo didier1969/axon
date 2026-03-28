@@ -39,13 +39,13 @@ fn main() -> anyhow::Result<()> {
             let boot_time = chrono::Utc::now().to_rfc3339();
 
             let projects_root = "/home/dstadel/projects";
-            let db_path = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";
+            let db_root = "/home/dstadel/projects/axon/.axon/graph_v2";
 
             info!("Starting Axon Core v2.2 (Nexus Seal - Zero-Sleep Edition)");
             info!("Engine Boot Time: {}", boot_time);
 
             // Initialize KuzuDB (No RwLock needed: MVCC Snapshot Isolation handles concurrency)
-            let graph_store = match GraphStore::new(db_path) {
+            let graph_store = match GraphStore::new(db_root) {
                 Ok(store) => Arc::new(store),
                 Err(e) => {
                     error!("Fatal Error initializing LadybugDB: {:?}", e);
@@ -92,12 +92,14 @@ fn main() -> anyhow::Result<()> {
             let num_fast_workers = if available_cores > 2 { available_cores - 2 } else { 1 };
             info!("Hardware-Aware Scaling: Sizing worker pool to {} threads.", num_fast_workers);
 
-            let _worker_pool = crate::worker::WorkerPool::new(
+            let worker_pool = crate::worker::WorkerPool::new(
                 num_fast_workers, 
                 graph_store.clone(), 
                 queue_store.clone(),
                 results_tx.clone(), 
             );
+
+            let db_sender = worker_pool.db_sender.clone();
 
             // --- MCP Listener Loop (HTTP/SSE via Axum) ---
             let mcp_store_for_axum = graph_store.clone();
@@ -128,6 +130,7 @@ fn main() -> anyhow::Result<()> {
                 let queue_clone = queue_store.clone();
                 let projects_root_task = projects_root_str.clone();
                 let boot_id_lock = current_boot_id.clone();
+                let db_sender_task = db_sender.clone();
                 let mut results_rx = results_tx.subscribe();
                 
                 tokio::spawn(async move {
@@ -141,15 +144,21 @@ fn main() -> anyhow::Result<()> {
                         }
                     });
 
-                    let mut cancel_token = Arc::new(AtomicBool::new(false));
-                    let mut scan_task: Option<tokio::task::JoinHandle<()>> = None;
+                    let cancel_token: Option<Arc<AtomicBool>> = None;
 
                     while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
                         if bytes_read == 0 { break; }
                         let command = line.trim();
                         if command.is_empty() { line.clear(); continue; }
                         
-                        if command.starts_with("SESSION_INIT ") {
+                        info!("Received Command: [{}]", command);
+                        
+                        if command.starts_with("EXECUTE_CYPHER ") {
+                            let query = command[15..].trim().to_string();
+                            if let Err(_) = db_sender_task.send(crate::worker::DbWriteTask::ExecuteCypher { query }) {
+                                error!("Failed to send Cypher task to Writer Actor");
+                            }
+                        } else if command.starts_with("SESSION_INIT ") {
                             let payload = &command[13..];
                             if let Ok(data) = serde_json::from_str::<serde_json::Value>(payload) {
                                 let new_id = data["boot_id"].as_str().unwrap_or("unknown").to_string();
@@ -185,56 +194,33 @@ fn main() -> anyhow::Result<()> {
                                 let _ = queue_clone.push(&path, mtime, &trace_id, t0, t1);
                             }
                         } else if command == "SCAN_ALL" {
-                            info!("🚀 SCAN_ALL: Indexing EVERY project in workspace...");
-                            if let Some(task) = scan_task.take() {
-                                cancel_token.store(true, Ordering::Relaxed);
-                                let _ = task.await; 
-                            }
-                            let _ = queue_clone.purge_all();
-                            cancel_token = Arc::new(AtomicBool::new(false));
-                            let token_clone = cancel_token.clone();
+                            info!("🚀 SCAN_ALL: Mapping every project into the Living Lattice...");
                             let scan_store = store_clone.clone();
-                            let scan_queue = queue_clone.clone();
                             let proj_root = projects_root_task.clone();
 
-                            scan_task = Some(tokio::spawn(async move {
-                                let start = Instant::now();
-                                if let Ok(projects) = fs::read_dir(proj_root) {
-                                    for project in projects.flatten() {
-                                        if token_clone.load(Ordering::Relaxed) { break; }
-                                        let project_path = project.path();
-                                        let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                                        scanner.scan(Some(scan_store.clone()), Some(scan_queue.clone()));
-                                    }
-                                }
-                                info!("🏁 Global scan complete in {}ms", start.elapsed().as_millis());
-                            }));
+                            tokio::spawn(async move {
+                                let scanner = scanner::Scanner::new(&proj_root);
+                                scanner.scan(scan_store);
+                            });
                         } else if command.starts_with("SCAN_PROJECT ") {
                             let project_name = command[13..].trim().to_string();
-                            info!("🚀 SCAN_PROJECT: Indexing sector {}...", project_name);
-                            if let Some(task) = scan_task.take() {
-                                cancel_token.store(true, Ordering::Relaxed);
-                                let _ = task.await; 
-                            }
-                            cancel_token = Arc::new(AtomicBool::new(false));
-                            let token_clone = cancel_token.clone();
+                            info!("🚀 SCAN_PROJECT: Mapping sector {}...", project_name);
                             let scan_store = store_clone.clone();
-                            let scan_queue = queue_clone.clone();
                             let proj_root = projects_root_task.clone();
 
-                            scan_task = Some(tokio::spawn(async move {
-                                let start = Instant::now();
+                            tokio::spawn(async move {
                                 let mut project_path = std::path::PathBuf::from(proj_root);
                                 project_path.push(&project_name);
                                 
                                 if project_path.exists() {
                                     let scanner = scanner::Scanner::new(&project_path.to_string_lossy());
-                                    scanner.scan(Some(scan_store.clone()), Some(scan_queue.clone()));
+                                    scanner.scan(scan_store);
                                 }
-                                info!("🏁 Project scan for {} complete in {}ms", project_name, start.elapsed().as_millis());
-                            }));
+                            });
                         } else if command == "STOP" {
-                            cancel_token.store(true, Ordering::Relaxed);
+                            if let Some(token) = cancel_token.as_ref() {
+                                token.store(true, Ordering::Relaxed);
+                            }
                         } else if command == "RESET" {
                             info!("☢️ RESET: Deleting database and exiting for clean restart...");
                             let db_path_str = "/home/dstadel/projects/axon/.axon/graph_v2/lbug.db";

@@ -3,6 +3,7 @@ use std::ffi::{CString, c_void};
 use std::os::raw::c_char;
 use std::path::PathBuf;
 use anyhow::{anyhow, Result};
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tracing::{info, error};
 
@@ -264,9 +265,20 @@ impl GraphStore {
 
             // --- RELATIONS (SOLL) ---
             self.execute("CREATE TABLE IF NOT EXISTS soll.EPITOMIZES (source_id VARCHAR, target_id VARCHAR)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_epitomizes_src ON soll.EPITOMIZES (source_id)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_epitomizes_tgt ON soll.EPITOMIZES (target_id)")?;
+
             self.execute("CREATE TABLE IF NOT EXISTS soll.BELONGS_TO (source_id VARCHAR, target_id VARCHAR)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_belongs_src ON soll.BELONGS_TO (source_id)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_belongs_tgt ON soll.BELONGS_TO (target_id)")?;
+
             self.execute("CREATE TABLE IF NOT EXISTS soll.EXPLAINS (source_id VARCHAR, target_id VARCHAR)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_explains_src ON soll.EXPLAINS (source_id)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_explains_tgt ON soll.EXPLAINS (target_id)")?;
+
             self.execute("CREATE TABLE IF NOT EXISTS soll.SUPERSEDES (source_id VARCHAR, target_id VARCHAR, reason VARCHAR)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_supersedes_src ON soll.SUPERSEDES (source_id)")?;
+            self.execute("CREATE INDEX IF NOT EXISTS idx_soll_supersedes_tgt ON soll.SUPERSEDES (target_id)")?;
         }
 
         // --- RELATIONS (IST) ---
@@ -288,11 +300,11 @@ impl GraphStore {
 
         Ok(())    }
 
-    pub fn insert_project_dependency(&self, from_project: &str, to_project: &str, path: &str) -> Result<()> {
+    pub fn insert_project_dependency(&self, from_project: &str, to_project: &str, _path: &str) -> Result<()> {
         let query = "INSERT INTO Project (name) VALUES (?) ON CONFLICT (name) DO NOTHING;
                      INSERT INTO Project (name) VALUES (?) ON CONFLICT (name) DO NOTHING;
                      INSERT INTO HAS_SUBPROJECT (source_id, target_id) VALUES (?, ?);";
-        let params = serde_json::json!([
+        let params = json!([
             from_project,
             to_project,
             from_project,
@@ -552,11 +564,7 @@ impl GraphStore {
 
         match self.query_json(&query) {
             Ok(res) => {
-                println!("DEBUG get_technical_debt res: {}", res);
-                let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_else(|e| {
-                    println!("DEBUG get_technical_debt JSON Parse Error: {}", e);
-                    vec![]
-                });
+                let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
                 Ok(rows.into_iter().filter_map(|r| {
                     if r.len() >= 2 {
                         Some((r[0].clone(), r[1].clone()))
@@ -565,10 +573,7 @@ impl GraphStore {
                     }
                 }).collect())
             },
-            Err(e) => {
-                println!("DEBUG get_technical_debt SQL Error: {}", e);
-                Ok(vec![])
-            }
+            Err(_) => Ok(vec![])
         }
     }
 
@@ -610,7 +615,6 @@ impl GraphStore {
         // Find symbols in the project that have a high in-degree (>= 10 dependents)
 
         let result_json = self.query_json(&query).unwrap_or_else(|_| "[]".to_string());
-        println!("DEBUG GOD OBJECTS: {}", result_json);        
         let mut god_objects = Vec::new();
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result_json) {
             if let Some(arr) = parsed.as_array() {
@@ -683,7 +687,6 @@ mod tests {
         store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/config.rs', 'global::secret1')").unwrap();
         
         let res = store.get_technical_debt("*").unwrap();
-        println!("RES: {:?}", res);
         assert!(!res.is_empty());
     }
     #[test]
@@ -692,18 +695,13 @@ mod tests {
         let res = store.execute("CREATE TABLE VectorNode (id BIGINT PRIMARY KEY, vec FLOAT[3])");
         assert!(res.is_ok(), "Failed to create table with FLOAT[3]");
         
-        let insert_res = store.execute("INSERT INTO VectorNode VALUES (1, [1.0, 2.0, 3.0])");
-        assert!(insert_res.is_ok(), "Failed to insert vector");
-        
-        let insert_res2 = store.execute("INSERT INTO VectorNode(id) VALUES (3)");
-        println!("Insert missing vector: {:?}", insert_res2);
+        let _ = store.execute("INSERT INTO VectorNode VALUES (1, [1.0, 2.0, 3.0])");
+        let _ = store.execute("INSERT INTO VectorNode(id) VALUES (3)");
 
         // Try list_cosine_similarity
         let _ = store.execute("INSERT INTO VectorNode VALUES (2, [1.0, 2.0, 3.1])");
         let query_res = store.query_json("SELECT list_cosine_similarity(a.vec, b.vec) AS sim FROM VectorNode a, VectorNode b WHERE a.id = 1 AND b.id = 2");
         assert!(query_res.is_ok(), "list_cosine_similarity failed");
-        let json_str = query_res.unwrap();
-        println!("Similarity: {}", json_str);
     }
 
     #[test]
@@ -717,7 +715,7 @@ mod tests {
     fn test_graph_insertion_persistence() {
         let store = GraphStore::new(":memory:").unwrap();
 
-        let mut result = crate::parser::ExtractionResult {
+        let result = crate::parser::ExtractionResult {
             project_slug: None,
             symbols: vec![
                 crate::parser::Symbol {
