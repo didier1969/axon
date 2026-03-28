@@ -176,6 +176,47 @@
     </header>
 
     <div class="container">
+        <!-- 0. STRUCTURE SOLL EXHAUSTIVE (THE GRAND LATTICE) -->
+        <section id="soll-structure">
+            <h2>Structure SOLL : Le Grand Treillis</h2>
+            <p>La couche intentionnelle (SOLL) est l'Autorité Sémantique d'Axon. Elle est sanctuarisée dans <code>soll.db</code> et gère la hiérarchie Vision -> Piliers -> Requirements -> Concepts.</p>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>Vision & Piliers (Macro)</h3>
+                    <p>La <strong>Souveraineté Sémantique Totale</strong> s'appuie sur 5 piliers fondamentaux : Ingestion Fantôme, Nexus Pull, Lattice Refiner, Witness Protocol et Architecture Sanctuaire.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Exigences & DNA (Meso)</h3>
+                    <p>Chaque intention humaine est codée sous forme de <code>Requirement</code> (ex: <code>REQ-AXO-001</code>). Cette traçabilité MBSE garantit le lien indéfectible entre l'idée et le code.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Concepts & Observabilité (Micro)</h3>
+                    <p>Les concepts techniques comme le <strong>Tracer T0-T4</strong>, les <strong>CTE Récursives</strong> et le <strong>Nexus Seal</strong> certifient la réalité physique de l'implémentation.</p>
+                </div>
+            </div>
+            <div class="mermaid">
+            graph TD
+                V[Vision : Souveraineté Totale] --> P1[PIL-AXO-001 : Ingestion Fantôme]
+                V --> P2[PIL-AXO-002 : Nexus Pull]
+                V --> P3[PIL-AXO-003 : Witness Protocol]
+                V --> P4[PIL-AXO-004 : Zero-Sleep Resiliency]
+                V --> P5[PIL-AXO-005 : Architecture Sanctuaire]
+
+                P1 --> R1[REQ-AXO-001 : Pilotage Déterministe]
+                P1 --> R3[REQ-AXO-003 : Protection Titan]
+                P2 --> R6[REQ-AXO-006 : Backpressure Adaptative]
+                P3 --> R5[REQ-AXO-005 : Audit Proactif]
+                P5 --> R4[REQ-AXO-004 : Isolation Sanctuaire]
+
+                R1 --> C1[CPT-AXO-001 : Tracer T0-T4]
+                R6 --> C3[CPT-AXO-003 : CTE USING KEY]
+                R4 --> C4[CPT-AXO-004 : Registry Authority]
+                
+                style V fill:#fef3c7,stroke:#d97706,stroke-width:4px
+                style P1,P2,P3,P4,P5 fill:#fef3c7,stroke:#d97706
+            </div>
+        </section>
+
         <!-- 1. CONTEXTE SYSTÈME (C4 LEVEL 1) -->
         <section id="c4-level-1">
             <h2>Vision Holistique (C4 Level 1)</h2>
