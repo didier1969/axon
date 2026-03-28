@@ -4,7 +4,10 @@ defmodule Axon.Watcher.CockpitLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: :timer.send_interval(500, self(), :tick)
+    if connected?(socket) do
+      :timer.send_interval(500, self(), :tick)
+      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "telemetry_events")
+    end
 
     repo_slug = System.get_env("AXON_REPO_SLUG") || Path.expand(".") |> Path.basename()
     monitoring_active = Axon.Watcher.Server.get_monitoring_status()
@@ -15,7 +18,7 @@ defmodule Axon.Watcher.CockpitLive do
        stats: %{},
        dir_stats: %{},
        monitoring_active: monitoring_active,
-       live: %{active_workers: %{}, last_files: [], total_ingested: 0, directories: %{}}
+       live: %{active_workers: %{}, last_files: [], total_ingested: 0, directories: %{}, target_pressure: 100, t4_ema: 0.0, flux_reel: 0.0}
      )}
   end
 
@@ -33,6 +36,12 @@ defmodule Axon.Watcher.CockpitLive do
        monitoring_active: monitoring_active,
        live: live
      )}
+  end
+
+  @impl true
+  def handle_info({:backpressure_update, data}, socket) do
+    live = Map.merge(socket.assigns.live, %{target_pressure: data.pressure, t4_ema: data.t4_ema})
+    {:noreply, assign(socket, live: live)}
   end
 
   @impl true
@@ -145,7 +154,7 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
       </div>
       
-    <!-- Unit 03: Operational Override -->
+      <!-- Unit 03: Operational Override -->
       <div class="card" style="border-color: var(--neon-blue);">
         <div class="card-title" style="color: var(--neon-blue);">
           <svg style="width:18px;height:18px" viewBox="0 0 24 24">
@@ -154,7 +163,7 @@ defmodule Axon.Watcher.CockpitLive do
               d="M12,15.5A2.5,2.5 0 0,1 14.5,18A2.5,2.5 0 0,1 12,20.5A2.5,2.5 0 0,1 9.5,18A2.5,2.5 0 0,1 12,15.5M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 12,14A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2Z"
             />
           </svg>
-          OPERATIONAL OVERRIDE
+          UNIT 03: OPERATIONAL OVERRIDE
         </div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
           <button phx-click="start_scan" class="btn btn-primary" style="grid-column: span 2;">
@@ -164,6 +173,31 @@ defmodule Axon.Watcher.CockpitLive do
             {if @monitoring_active, do: "Pause", else: "Resume"}
           </button>
           <button phx-click="purge_data" class="btn btn-danger">Purge DB</button>
+        </div>
+      </div>
+
+      <!-- Unit 04: Traffic Guardian (Backpressure) -->
+      <div class="card" style="border-color: var(--warning);">
+        <div class="card-title" style="color: var(--warning);">
+          <svg style="width:18px;height:18px" viewBox="0 0 24 24">
+            <path fill="currentColor" d="M12,2L1,21H23L12,2M12,6L19.53,19H4.47L12,6M11,10V14H13V10H11M11,16V18H13V16H11Z" />
+          </svg>
+          UNIT 04: TRAFFIC GUARDIAN
+        </div>
+        <div class="stat"><label>PRESSURE</label> <span style="color: var(--neon-green);">{@live.target_pressure} slots</span></div>
+        <div class="stat">
+          <label>T4_LATENCY</label>
+          <span style={"color: #{if @live.t4_ema > 200, do: "var(--neon-red)", else: "var(--neon-blue)"};"}>
+            {Float.round(@live.t4_ema, 2)}ms
+          </span>
+        </div>
+        <div class="stat">
+          <label>REAL_FLUX</label>
+          <span style="color: var(--neon-blue);">{Float.round(@live.flux_reel, 1)} f/s</span>
+        </div>
+        
+        <div class="progress-bar" style="background: rgba(217, 119, 6, 0.1);">
+          <div class="progress-fill" style={"width: #{(@live.target_pressure / 1000) * 100}%; background: var(--warning);"}></div>
         </div>
       </div>
       
