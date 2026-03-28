@@ -51,7 +51,7 @@ impl GraphStore {
         let ist_path = db_root_path.join("ist.db");
         let soll_path = db_root_path.join("soll.db");
 
-        // --- STEP 1: Bootstrap SOLL Sanctuary if it doesn't exist ---
+        // --- STEP 1: Bootstrap Base Intentionnelle (SOLL) if it doesn't exist ---
         // DuckDB ATTACH fails if the target directory is not a valid database.
         if db_root != ":memory:" {
             unsafe {
@@ -98,7 +98,7 @@ impl GraphStore {
 
         let store = Self { lib, ctx };
         
-        // --- STEP 3: Attach the SOLL Sanctuary (DuckDB Lifecycle) ---
+        // --- STEP 3: Attach the Base Intentionnelle (SOLL) (DuckDB Lifecycle) ---
         
         // Load the vss extension for vector similarity search
         if let Err(e) = store.execute("INSTALL vss; LOAD vss;") {
@@ -108,7 +108,7 @@ impl GraphStore {
         if db_root != ":memory:" {
             let attach_query = format!("ATTACH '{}' AS soll (READ_ONLY);", soll_path.to_string_lossy().replace("'", "\\'"));
             if let Err(e) = store.execute(&attach_query) {
-                error!("CRITICAL: Failed to attach SOLL sanctuary: {}", e);
+                error!("CRITICAL: Failed to attach base SOLL: {}", e);
                 return Err(e);
             }
         }

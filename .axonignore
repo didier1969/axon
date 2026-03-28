@@ -4,8 +4,9 @@ _build
 deps
 .elixir_ls
 **/*.log
-_build/
-deps/
 target/
 src/dashboard/priv/static/
 node_modules/
+*.db
+*.db-wal
+*.db-shm

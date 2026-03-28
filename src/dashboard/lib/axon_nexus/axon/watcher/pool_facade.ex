@@ -14,6 +14,13 @@ defmodule Axon.Watcher.PoolFacade do
   end
 
   @doc """
+  Triggers a full filesystem scan on the Rust Data Plane.
+  """
+  def trigger_global_scan do
+    GenServer.cast(__MODULE__, :trigger_global_scan)
+  end
+
+  @doc """
   Sends a single file to Axon Core for parsing and ingestion.
   """
   def parse(path, lane \\ "fast", trace_id \\ "none", t0 \\ 0, t1 \\ 0) do
@@ -41,6 +48,13 @@ defmodule Axon.Watcher.PoolFacade do
     boot_id = Ecto.UUID.generate()
     Process.send_after(self(), :connect, 500)
     {:ok, %{socket: nil, requests: %{}, batches: %{}, path_to_batch: %{}, boot_id: boot_id, buffer: ""}}
+  end
+
+  def handle_cast(:trigger_global_scan, state) do
+    if state.socket do
+      Task.start(fn -> :gen_tcp.send(state.socket, "SCAN_ALL\n") end)
+    end
+    {:noreply, state}
   end
 
   def handle_cast({:broadcast, type, payload}, state) do

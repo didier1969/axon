@@ -168,10 +168,10 @@
 </head>
 <body>
     <header>
-        <span class="version-badge">Nexus Blueprint v3.3 • Sanctuary Phase</span>
+        <span class="version-badge">Nexus Blueprint v3.3 • Couche SOLL Phase</span>
         <h1 class="hero-title">Axon Intelligence Engine</h1>
         <p style="font-size: 1.25rem; color: var(--text-dim); max-width: 800px; margin: 20px auto;">
-            Spécification intégrale de l'architecture <strong>Nexus Pull & Sanctuary</strong> : Isolation des Intentions (SOLL) et Performance Industrielle (IST).
+            Spécification intégrale de l'architecture <strong>Nexus Pull & Couche SOLL</strong> : Isolation des Intentions (SOLL) et Performance Industrielle (IST).
         </p>
     </header>
 
@@ -196,7 +196,7 @@
             </div>
             <div class="mermaid">
             graph TD
-                subgraph SOLL [Le Sanctuaire : soll.db]
+                subgraph SOLL [Couche SOLL : soll.db]
                     V[Vision]
                     P[Pillar]
                     R[Requirement]
@@ -210,7 +210,7 @@
                     C2[New Concept] -- "SUPERSEDES" --> C
                 end
 
-                subgraph IST [La Forge : ist.db]
+                subgraph IST [Couche IST : ist.db]
                     Proj[Project]
                     S[Symbol / AST]
                     
@@ -234,7 +234,7 @@
                 User((Agent IA / LLM)) -- "Requêtes Sémantiques (MCP)" --> Axon[Axon Engine]
                 Axon -- "Scan & Map" --> FS[(Filesystem)]
                 
-                subgraph "Unified Storage (Sanctuary)"
+                subgraph "Stockage Unifié (Multi-DB)"
                     SOLL[(soll.db)]
                     IST[(ist.db)]
                 end
@@ -252,14 +252,14 @@
                 style IST fill:#eff6ff,stroke:#0284c7,stroke-width:2px
             </div>
             <div class="llm-bubble">
-                "Axon est ma mémoire structurelle. Mes intentions sont sanctuarisées dans soll.db tandis que la forge technique travaille dans ist.db."
+                "Axon est ma mémoire structurelle. Mes intentions sont isolées dans soll.db tandis que la couche technique travaille dans ist.db."
             </div>
         </section>
 
         <!-- 2. ARCHITECTURE DES CONTENEURS (C4 LEVEL 2) -->
         <section id="c4-level-2">
             <h2>Architecture des Conteneurs (C4 Level 2)</h2>
-            <p>L'architecture Sanctuary sépare le sacré (SOLL) du profane (IST). Le binaire Rust ouvre <code>ist.db</code> et attache <code>soll.db</code> via le mécanisme ATTACH DATABASE.</p>
+            <p>L'architecture Couche SOLL sépare le couche intentionnelle (SOLL) du couche technique (IST). Le binaire Rust ouvre <code>ist.db</code> et attache <code>soll.db</code> via le mécanisme ATTACH DATABASE.</p>
             <div class="mermaid">
             graph LR
                 subgraph Elixir_Plane [Control Plane : Elixir/OTP]
@@ -282,7 +282,7 @@
                     Writer[DB Writer Actor]
                 end
 
-                subgraph Unified_Storage [Architecture Sanctuary]
+                subgraph Unified_Storage [Architecture SOLL]
                     IST[(ist.db)]
                     SOLL[(soll.db)]
                     IST -- "ATTACH" --> SOLL
@@ -312,17 +312,17 @@
             </div>
         </section>
 
-        <!-- 3. ARCHITECTURE SANCTUARY (V3.3) -->
-        <section id="sanctuary-v3-3">
-            <h2>Architecture Sanctuary (v3.3)</h2>
+        <!-- 3. ARCHITECTURE SOLL (V3.3) -->
+        <section id="soll-v3-3">
+            <h2>Architecture SOLL (v3.3)</h2>
             <p>Isolation physique des intentions humaines pour garantir l'immunité face aux réinitialisations techniques.</p>
             <div class="grid">
                 <div class="info-card">
-                    <h3>Le Sanctuaire (soll.db)</h3>
-                    <p>Contient la Vision, les Piliers, les Requirements et le Registre d'IDs. Ce fichier est <strong>sacré</strong> et ne subit jamais de purge automatique.</p>
+                    <h3>La Base SOLL (soll.db)</h3>
+                    <p>Contient la Vision, les Piliers, les Requirements et le Registre d'IDs. Ce fichier est <strong>protégée</strong> et ne subit jamais de purge automatique.</p>
                 </div>
                 <div class="info-card">
-                    <h3>La Forge (ist.db)</h3>
+                    <h3>La Base IST (ist.db)</h3>
                     <p>Contient les données volatiles : fichiers indexés, symboles AST et dépendances physiques. C'est la cible exclusive de la commande <code>reset</code>.</p>
                 </div>
                 <div class="info-card">
@@ -331,7 +331,7 @@
                 </div>
             </div>
             <div class="llm-bubble">
-                "Grâce au Sanctuaire, même si nous reconstruisons toute la forge technique (IST), je n'oublie jamais vos exigences stratégiques (SOLL)."
+                "Grâce à la Couche SOLL, même si nous reconstruisons toute la couche technique (IST), je n'oublie jamais vos exigences stratégiques (SOLL)."
             </div>
         </section>
 
@@ -407,7 +407,7 @@
                 </div>
                 <div class="info-card">
                     <h3>Réserve de Cycles MCP</h3>
-                    <p>Une portion des ressources CPU (Core Reserve) est sanctuarisée pour le serveur MCP. Même sous une charge d'indexation de 100%, l'intelligence reste réactive.</p>
+                    <p>Une portion des ressources CPU (Core Reserve) est isolée pour le serveur MCP. Même sous une charge d'indexation de 100%, l'intelligence reste réactive.</p>
                 </div>
             </div>
             <div class="mermaid">
@@ -453,10 +453,10 @@
             </div>
             <div class="mermaid">
             graph BT
-                subgraph "Physical_Layer [IST : La Forge]"
+                subgraph "Physical_Layer [IST : Couche Technique (IST)]"
                     Code[Symboles / Code] -- "SUBSTANTIATES" --> Concept
                 end
-                subgraph "Conceptual_Layer [SOLL : Le Sanctuaire]"
+                subgraph "Conceptual_Layer [SOLL : Le Couche SOLL]"
                     Concept[Concept Technique] -- "EXPLAINS" --> Req
                     Req[Requirement] -- "BELONGS_TO" --> Pillar[Pillar]
                     NewConcept[Nouveau Concept] -- "SUPERSEDES (Raison)" --> Concept
@@ -515,7 +515,7 @@
                     <p>Calcul intensif (Tree-sitter, FastEmbed ONNX). Isolation totale des ressources et performance brute.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Sanctuary Storage <span class="tech-tag">DuckDB (Dual-DB)</span></h3>
+                    <h3>Couche SOLL Storage <span class="tech-tag">DuckDB (Dual-DB)</span></h3>
                     <p>Isolation physique SOLL/IST via <code>ATTACH DATABASE</code>. Source unique pour l'intention et la réalité physique.</p>
                 </div>
                 <div class="info-card">

@@ -68,18 +68,20 @@ defmodule Axon.Watcher.Server do
 
   @impl true
   def handle_continue(:auto_trigger_scan, state) do
-    Logger.info("[Pod A] AUTO-START: Triggering initial scan...")
+    Logger.info("[Pod A] AUTO-START: Waiting for manual or Rust-led scan...")
 
-    Phoenix.PubSub.broadcast(
-      AxonDashboard.PubSub,
-      "bridge_events",
-      {:scan_started, state.watch_dir}
-    )
+    # Phoenix.PubSub.broadcast(
+    #   AxonDashboard.PubSub,
+    #   "bridge_events",
+    #   {:scan_started, state.watch_dir}
+    # )
 
-    send(self(), :initial_scan)
+    # send(self(), :initial_scan)
+    # Scan is now handled by Rust Data Plane.
+    # Axon.Watcher.PoolFacade.trigger_global_scan()
 
     # Schedule automated retry for failed files every 5 minutes
-    :timer.send_interval(300_000, self(), :retry_failed)
+    # :timer.send_interval(300_000, self(), :retry_failed)
 
     {:noreply, state}
   end
@@ -110,7 +112,8 @@ defmodule Axon.Watcher.Server do
 
   @impl true
   def handle_cast(:trigger_scan, state) do
-    send(self(), :initial_scan)
+    # send(self(), :initial_scan)
+    # Scan is now handled by Rust Data Plane.
     {:noreply, state}
   end
 
