@@ -176,27 +176,31 @@
     </header>
 
     <div class="container">
-        <!-- 0. STRUCTURE SOLL GÉNÉRIQUE (MÉTADONNÉES D'INTENTION) -->
-        <section id="soll-structure">
-            <h2>Structure SOLL : Schéma des Relations</h2>
-            <p>La couche intentionnelle (SOLL) définit l'ontologie du projet. Elle est isolée dans <code>soll.db</code> et structure la connaissance selon une hiérarchie stricte certifiée par le Registre.</p>
+        <!-- 0. GOUVERNANCE INTENTIONNELLE & TRAÇABILITÉ (MBSE) -->
+        <section id="soll-governance">
+            <h2>Gouvernance Intentionnelle & Traçabilité (MBSE)</h2>
+            <p>Axon implémente l'ingénierie basée sur les modèles (<strong>Model-Based Systems Engineering</strong>) pour assurer un "Digital Thread" entre l'intention humaine (SOLL) et la réalité technique (IST).</p>
             <div class="grid">
                 <div class="info-card">
                     <h3>Strate Macro (Vision & Piliers)</h3>
-                    <p>La <code>Vision</code> définit l'objectif ultime. Elle est soutenue par des <code>Pillars</code> (Piliers) qui représentent les domaines de contraintes majeures du système.</p>
+                    <p>La <code>Vision</code> définit l'objectif stratégique. Elle est soutenue par des <code>Pillars</code> (Piliers) qui représentent les domaines de contraintes physiques et logiques du système.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Strate Meso (Requirements)</h3>
-                    <p>Les <code>Requirements</code> (Exigences) décomposent les piliers en objectifs fonctionnels vérifiables, identifiés par un DNA unique (ex: <code>REQ-PROJ-001</code>).</p>
+                    <h3>Strate Meso (Requirements & DNA)</h3>
+                    <p>Les <code>Requirements</code> (Exigences) décomposent les piliers en objectifs fonctionnels vérifiables. Le Registre génère des identifiants uniques (DNA) pour garantir la traçabilité (ex: <code>REQ-PROJ-001</code>).</p>
                 </div>
                 <div class="info-card">
-                    <h3>Strate Micro (Concepts)</h3>
-                    <p>Les <code>Concepts</code> fournissent le "Comment" technique. Ils expliquent les exigences et sont physiquement liés au code source (IST).</p>
+                    <h3>Strate Micro (Concepts & Généalogie)</h3>
+                    <p>Les <code>Concepts</code> expliquent le "Comment" technique. La relation <code>SUPERSEDES</code> permet l'évolution du système sans perte de la mémoire historique des décisions.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Calcul d'Avancement Réel</h3>
+                    <p>L'état "Terminé" est une preuve physique. Un <code>Requirement</code> n'est validé que s'il est relié à un <code>Symbol</code> (Code) via un <code>Concept</code>. Sinon, il est marqué en <strong>Dette d'Intention</strong>.</p>
                 </div>
             </div>
             <div class="mermaid">
             graph TD
-                subgraph SOLL [Couche SOLL : soll.db]
+                subgraph SOLL [Couche Intentionnelle : soll.db]
                     V[Vision]
                     P[Pillar]
                     R[Requirement]
@@ -210,14 +214,14 @@
                     C2[New Concept] -- "SUPERSEDES" --> C
                 end
 
-                subgraph IST [Couche IST : ist.db]
+                subgraph IST [Couche Technique : ist.db]
+                    S[Symbol / Code]
                     Proj[Project]
-                    S[Symbol / AST]
-                    
                     Proj -- "HAS_SUBPROJECT" --> Proj
                 end
 
                 S -- "SUBSTANTIATES" --> C
+                S -- "BELONGS_TO" --> Proj
                 
                 style V fill:#f1f5f9,stroke:#475569,stroke-width:4px
                 style P,R,C,C2 fill:#f1f5f9,stroke:#475569
@@ -429,44 +433,7 @@
             </div>
         </section>
 
-        <!-- 5. VISION APOLLO : TRAÇABILITÉ & COMPLIANCE -->
-        <section id="compliance-mbse">
-            <h2>Compliance & Traçabilité (MBSE)</h2>
-            <p>Axon implémente l'ingénierie basée sur les modèles (<strong>Model-Based Systems Engineering</strong>) pour assurer un "Digital Thread" entre l'intention et le code.</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Traçabilité Bidirectionnelle</h3>
-                    <p>Chaque ligne de code est reliée à un Concept (SOLL). Le LLM peut justifier chaque fonction par rapport à un Requirement original de la Roadmap.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Généalogie & Historique</h3>
-                    <p>La relation <code>SUPERSEDES</code> permet de faire évoluer le système sans perdre la mémoire. Un nouveau concept "écrase" l'ancien mais conserve un lien vers lui pour expliquer le pivot.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Calcul d'Avancement Réel</h3>
-                    <p>L'état "Terminé" est une preuve physique. Si un <code>Requirement</code> n'est pas relié à un <code>Symbol</code> (Code) via un <code>Concept</code>, il est marqué comme <strong>En attente</strong>.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Souveraineté des IDs</h3>
-                    <p>Le système génère les identifiants (ex: <code>REQ-AXO-004</code>). Cette autorité centrale garantit l'unicité du Digital Thread à travers tout le graphe.</p>
-                </div>
-            </div>
-            <div class="mermaid">
-            graph BT
-                subgraph "Physical_Layer [IST : Couche Technique (IST)]"
-                    Code[Symboles / Code] -- "SUBSTANTIATES" --> Concept
-                end
-                subgraph "Conceptual_Layer [SOLL : Le Couche SOLL]"
-                    Concept[Concept Technique] -- "EXPLAINS" --> Req
-                    Req[Requirement] -- "BELONGS_TO" --> Pillar[Pillar]
-                    NewConcept[Nouveau Concept] -- "SUPERSEDES (Raison)" --> Concept
-                end
-                
-                style Concept fill:#fef3c7,stroke:#d97706
-                style NewConcept fill:#fef3c7,stroke:#d97706,stroke-dasharray: 5 5
-                style Code fill:#f0f9ff,stroke:#0284c7
-            </div>
-        </section>
+
 
         <!-- 6. HIÉRARCHIE DES PROJETS & DÉCISIONS -->
         <section id="hierarchy-decisions">
