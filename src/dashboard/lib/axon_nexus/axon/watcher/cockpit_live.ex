@@ -4,7 +4,11 @@ defmodule Axon.Watcher.CockpitLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: :timer.send_interval(500, self(), :tick)
+    if connected?(socket) do
+      :timer.send_interval(500, self(), :tick)
+      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "telemetry_events")
+      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
+    end
 
     repo_slug = System.get_env("AXON_REPO_SLUG") || Path.expand(".") |> Path.basename()
     monitoring_active = Axon.Watcher.Server.get_monitoring_status()
@@ -15,8 +19,27 @@ defmodule Axon.Watcher.CockpitLive do
        stats: %{},
        dir_stats: %{},
        monitoring_active: monitoring_active,
-       live: %{active_workers: %{}, last_files: [], total_ingested: 0, directories: %{}}
+       live: %{active_workers: %{}, last_files: [], total_ingested: 0, directories: %{}, target_pressure: 100, t4_ema: 0.0, flux_reel: 0.0}
      )}
+  end
+
+  @impl true
+  def handle_info({:backpressure_update, data}, socket) do
+    live = Map.merge(socket.assigns.live, %{target_pressure: data.pressure, t4_ema: data.t4_ema})
+    {:noreply, assign(socket, live: live)}
+  end
+
+  # NEXUS V5.6: We no longer handle individual telemetry events in LiveView
+  # to prevent rendering saturation during high-speed ingestion (> 100 f/s).
+  # The 500ms :tick is enough to keep the UI fresh without killing the BEAM scheduler.
+  @impl true
+  def handle_info({:telemetry_event, _event, _measurements, _metadata}, socket) do
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:bridge_event, event}, socket) do
+    {:noreply, apply_bridge_event(socket, event)}
   end
 
   @impl true
@@ -24,7 +47,15 @@ defmodule Axon.Watcher.CockpitLive do
     stats = Progress.get_status(socket.assigns.repo_slug)
     dir_stats = Progress.get_directory_stats(socket.assigns.repo_slug)
     monitoring_active = Axon.Watcher.Server.get_monitoring_status()
-    live = Axon.Watcher.Telemetry.get_stats()
+
+    live =
+      Axon.Watcher.Telemetry.get_stats()
+      |> Map.merge(%{
+        total_files: stats["total"] || 0,
+        total_ingested: stats["synced"] || 0,
+        indexing_progress: stats["progress"] || 0,
+        directories: dir_stats
+      })
 
     {:noreply,
      assign(socket,
@@ -72,6 +103,9 @@ defmodule Axon.Watcher.CockpitLive do
     <div class="header">
       <div class="logo">
         AXON <span style="font-weight: 400; color: var(--text-dim);">SYSTEMS</span>
+        <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 4px;">
+          Multi-Project Control Plane
+        </div>
       </div>
       <div style="display:flex; gap: 12px; align-items: center;">
         <div class={"status-badge #{if @monitoring_active, do: "status-live", else: "status-error"}"}>
@@ -145,7 +179,7 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
       </div>
       
-    <!-- Unit 03: Operational Override -->
+      <!-- Unit 03: Operational Override -->
       <div class="card" style="border-color: var(--neon-blue);">
         <div class="card-title" style="color: var(--neon-blue);">
           <svg style="width:18px;height:18px" viewBox="0 0 24 24">
@@ -154,7 +188,7 @@ defmodule Axon.Watcher.CockpitLive do
               d="M12,15.5A2.5,2.5 0 0,1 14.5,18A2.5,2.5 0 0,1 12,20.5A2.5,2.5 0 0,1 9.5,18A2.5,2.5 0 0,1 12,15.5M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 12,14A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2Z"
             />
           </svg>
-          OPERATIONAL OVERRIDE
+          UNIT 03: OPERATIONAL OVERRIDE
         </div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
           <button phx-click="start_scan" class="btn btn-primary" style="grid-column: span 2;">
@@ -164,6 +198,31 @@ defmodule Axon.Watcher.CockpitLive do
             {if @monitoring_active, do: "Pause", else: "Resume"}
           </button>
           <button phx-click="purge_data" class="btn btn-danger">Purge DB</button>
+        </div>
+      </div>
+
+      <!-- Unit 04: Traffic Guardian (Backpressure) -->
+      <div class="card" style="border-color: var(--warning);">
+        <div class="card-title" style="color: var(--warning);">
+          <svg style="width:18px;height:18px" viewBox="0 0 24 24">
+            <path fill="currentColor" d="M12,2L1,21H23L12,2M12,6L19.53,19H4.47L12,6M11,10V14H13V10H11M11,16V18H13V16H11Z" />
+          </svg>
+          UNIT 04: TRAFFIC GUARDIAN
+        </div>
+        <div class="stat"><label>PRESSURE</label> <span style="color: var(--neon-green);">{@live.target_pressure} slots</span></div>
+        <div class="stat">
+          <label>T4_LATENCY</label>
+          <span style={"color: #{if @live.t4_ema > 200, do: "var(--neon-red)", else: "var(--neon-blue)"};"}>
+            {Float.round(@live.t4_ema, 2)}ms
+          </span>
+        </div>
+        <div class="stat">
+          <label>REAL_FLUX</label>
+          <span style="color: var(--neon-blue);">{Float.round(@live.flux_reel, 1)} f/s</span>
+        </div>
+        
+        <div class="progress-bar" style="background: rgba(217, 119, 6, 0.1);">
+          <div class="progress-fill" style={"width: #{(@live.target_pressure / 1000) * 100}%; background: var(--warning);"}></div>
         </div>
       </div>
       
@@ -195,6 +254,9 @@ defmodule Axon.Watcher.CockpitLive do
               SYSTEM_IDLE: AWAITING_INGESTION_DATA
             </div>
           <% end %>
+          <div :if={Map.get(@live, :scan_complete, false)} style="color: var(--neon-green); text-align: center; margin-top: 12px;">
+            Fleet Ingestion Complete
+          </div>
         </div>
       </div>
       
@@ -252,4 +314,26 @@ defmodule Axon.Watcher.CockpitLive do
     </div>
     """
   end
+
+  defp apply_bridge_event(socket, %{"FileIndexed" => payload}) do
+    path = Map.get(payload, "path", "unknown")
+    status = if Map.get(payload, "status", "ok") == "ok", do: :ok, else: :error
+
+    live =
+      socket.assigns.live
+      |> Map.update(:last_files, [%{path: path, status: status, time: DateTime.utc_now()}], fn files ->
+        [%{path: path, status: status, time: DateTime.utc_now()} | Enum.take(files, 14)]
+      end)
+      |> Map.update(:total_ingested, 1, &(&1 + 1))
+      |> Map.put(:scan_complete, false)
+
+    assign(socket, live: live)
+  end
+
+  defp apply_bridge_event(socket, %{"ScanComplete" => _payload}) do
+    live = Map.put(socket.assigns.live, :scan_complete, true)
+    socket |> assign(live: live) |> put_flash(:info, "Fleet Ingestion Complete")
+  end
+
+  defp apply_bridge_event(socket, _event), do: socket
 end

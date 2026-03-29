@@ -6,14 +6,14 @@ set -e
 
 echo "🚀 Starting Axon v2 Industrial Setup..."
 
-# 1. Environment Check (asdf)
-if ! command -v asdf &> /dev/null; then
-    echo "❌ asdf not found. Please install it first."
+# 1. Environment Check (Devenv)
+if ! command -v devenv &> /dev/null; then
+    echo "❌ devenv not found. Please install it first."
     exit 1
 fi
 
-echo "📦 Installing runtimes via asdf..."
-asdf install
+echo "📦 Validating Devenv environment..."
+devenv shell -- bash -lc './scripts/validate-devenv.sh'
 
 # 2. Rust Data Plane (The "Factory")
 BIN_DIR="$(pwd)/bin"
@@ -48,17 +48,17 @@ echo "🧪 Running Quality Audit..."
 
 echo "--- Rust Unit Tests ---"
 cd "$RUST_CORE_DIR"
-cargo test --lib
+devenv shell -- bash -lc 'cargo test --lib'
 cd - > /dev/null
 
 echo "--- Elixir Business Tests (>85% Coverage) ---"
 cd "$DASHBOARD_DIR"
-mix test --cover
+devenv shell -- bash -lc 'mix test --cover'
 cd - > /dev/null
 
 echo "--- E2E Orchestration Test ---"
 export AXON_BIN="$TARGET_BIN"
-python3 tests/e2e_v2_orchestration.py
+devenv shell -- bash -lc 'python3 tests/e2e_v2_orchestration.py'
 
 echo "🏆 Axon v2 is fully operational!"
 echo "Run './bin/axon-core --mcp' to start the engine."

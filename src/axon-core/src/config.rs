@@ -19,7 +19,7 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| {
                 "py".to_string(), "ex".to_string(), "exs".to_string(), "rs".to_string(), 
                 "go".to_string(), "java".to_string(), "c".to_string(), "cpp".to_string(), "h".to_string(),
                 "js".to_string(), "jsx".to_string(), "ts".to_string(), "tsx".to_string(), "sql".to_string(), 
-                "md".to_string(), "markdown".to_string(), "txt".to_string(), "json".to_string(), 
+                "md".to_string(), "markdown".to_string(),
                 "yml".to_string(), "yaml".to_string(), "toml".to_string(), "conf".to_string(), 
                 "html".to_string(), "css".to_string()
             ]

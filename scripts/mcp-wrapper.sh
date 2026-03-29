@@ -21,7 +21,7 @@ fi
 # Check if Axon Core is listening on the HTTP port 44129
 if ! nc -z 127.0.0.1 44129 2>/dev/null; then
     # Server is down, auto-start it in background
-    rm -f "$PROJECT_ROOT/.axon/graph_v2/lbug.db.wal" "$PROJECT_ROOT/.axon/graph_v2/lbug.db" 2>/dev/null
+    rm -f "$PROJECT_ROOT/.axon/graph_v2/ist.db.wal" "$PROJECT_ROOT/.axon/graph_v2/ist.db" 2>/dev/null
     cd "$PROJECT_ROOT" && RUST_LOG=info "$CORE_BIN" > /dev/null 2>&1 &
     
     # Wait up to 5 seconds for the port to bind

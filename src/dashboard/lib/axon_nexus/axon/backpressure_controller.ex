@@ -76,7 +76,7 @@ defmodule Axon.BackpressureController do
 
   def compute_pressure(load) do
     {cpu_limit, ram_limit, io_limit} = get_limits()
-    
+
     cpu_val = if is_number(load.cpu), do: load.cpu, else: 0.0
     ram_val = if is_number(load.ram), do: load.ram, else: 0.0
     io_val = if is_number(Map.get(load, :io, 0.0)), do: Map.get(load, :io, 0.0), else: 0.0
@@ -84,7 +84,7 @@ defmodule Axon.BackpressureController do
     cpu_pressure = cpu_val / max(cpu_limit, 0.1)
     ram_pressure = ram_val / max(ram_limit, 0.1)
     io_pressure = io_val / max(io_limit, 0.1)
-    
+
     pressure = max(cpu_pressure, max(ram_pressure, io_pressure))
 
     :telemetry.execute([:axon, :backpressure, :pressure_computed], %{pressure: pressure}, %{
@@ -106,9 +106,11 @@ defmodule Axon.BackpressureController do
           Logger.warning(
             "System resources saturated (Pressure: #{Float.round(pressure * 100, 1)}%). Pausing indexing queues. (CPU: #{Float.round(load.cpu, 1)}%, RAM: #{Float.round(load.ram, 1)}%, IO Wait: #{Float.round(Map.get(load, :io, 0.0), 1)}%)"
           )
+
           :telemetry.execute([:axon, :backpressure, :queues_paused], %{pressure: pressure})
           pause_queues(state.oban_mod)
         end
+
         %{state | paused: true, last_limit: 0}
 
       true ->
@@ -116,6 +118,7 @@ defmodule Axon.BackpressureController do
           Logger.info(
             "System load recovered (Pressure: #{Float.round(pressure * 100, 1)}%). Resuming indexing queues."
           )
+
           :telemetry.execute([:axon, :backpressure, :queues_resumed], %{pressure: pressure})
           resume_queues(state.oban_mod)
         end
@@ -126,7 +129,11 @@ defmodule Axon.BackpressureController do
           Logger.info(
             "Adjusting indexing_default limit to #{limit} (Pressure: #{Float.round(pressure * 100, 1)}%)"
           )
-          :telemetry.execute([:axon, :backpressure, :limit_adjusted], %{limit: limit}, %{pressure: pressure})
+
+          :telemetry.execute([:axon, :backpressure, :limit_adjusted], %{limit: limit}, %{
+            pressure: pressure
+          })
+
           scale_queues(state.oban_mod, limit)
         end
 
@@ -145,15 +152,20 @@ defmodule Axon.BackpressureController do
   defp pause_queues(oban_mod) do
     oban_mod.pause_queue(queue: :indexing_default)
     oban_mod.pause_queue(queue: :indexing_hot)
+    oban_mod.pause_queue(queue: :indexing_titan)
   end
 
   defp resume_queues(oban_mod) do
     oban_mod.resume_queue(queue: :indexing_default)
     oban_mod.resume_queue(queue: :indexing_hot)
+    oban_mod.resume_queue(queue: :indexing_titan)
   end
 
   defp scale_queues(oban_mod, limit) do
+    # Main dynamic scaling
     oban_mod.scale_queue(queue: :indexing_default, limit: limit)
+    # User-priority queue always gets at least half the capacity
     oban_mod.scale_queue(queue: :indexing_hot, limit: max(1, div(limit, 2)))
+    # Titan queue remains unit-concurrency but follows the pause/resume signal
   end
 end

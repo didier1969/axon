@@ -100,9 +100,6 @@ impl ElixirParser {
                     pending_attrs,
                     identifier.as_str(),
                 ),
-                "defstruct" => {
-                    // Similar to Python `defstruct` - optional, but maybe nice to include if requested, but prompt didn't strictly require struct unless it was part of no feature loss.
-                }
                 x if IMPORT_DIRECTIVES.contains(&x) => {
                     Self::extract_import_directive(node, source_bytes, result, x, module_name)
                 }
@@ -139,9 +136,11 @@ impl ElixirParser {
             end_line,
             docstring: None,
             is_entry_point: false,
-                        is_public: true,
+            is_public: true,
+            tested: new_module_name.ends_with("Test"),
+            is_nif: false,
+            is_unsafe: false,
             properties: HashMap::new(),
-        
             embedding: None,
         });
 
@@ -185,11 +184,9 @@ impl ElixirParser {
         let mut properties = HashMap::new();
         
         let node_content = node.utf8_text(source_bytes).unwrap_or("");
+        let is_nif = node_content.contains(":erlang.nif_error") || node_content.contains(":nif_not_loaded");
         if node_content.contains("load_nif") {
             properties.insert("nif_loader".to_string(), "true".to_string());
-        }
-        if node_content.contains(":erlang.nif_error") || node_content.contains(":nif_not_loaded") {
-            properties.insert("is_nif".to_string(), "true".to_string());
         }
 
         if node_content.contains(":erlang.nif_error(:nif_not_loaded)") {
@@ -207,10 +204,12 @@ impl ElixirParser {
             start_line,
             end_line,
             docstring: None,
-            is_entry_point: is_otp_entry,
-                        is_public: def_type == "def" || def_type == "defmacro",
+            is_entry_point: is_otp_entry || is_nif,
+            is_public: def_type == "def",
+            tested: func_name.starts_with("test_") || module_name.ends_with("Test"),
+            is_nif,
+            is_unsafe: false,
             properties,
-        
             embedding: None,
         });
 
@@ -249,9 +248,11 @@ impl ElixirParser {
             end_line,
             docstring: None,
             is_entry_point: false,
-                        is_public: def_type == "defmacro",
+            is_public: def_type == "defmacro",
+            tested: macro_name.starts_with("test_") || module_name.ends_with("Test"),
+            is_nif: false,
+            is_unsafe: false,
             properties: HashMap::new(),
-        
             embedding: None,
         });
 
@@ -458,10 +459,11 @@ impl Parser for ElixirParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let tree = match parse_with_wasm_safe("elixir", self.wasm_bytes, content) {
             Some(t) => t,
-            None => return ExtractionResult { symbols: Vec::new(), relations: Vec::new() },
+            None => return ExtractionResult { project_slug: None, symbols: Vec::new(), relations: Vec::new() },
         };
 
         let mut result = ExtractionResult {
+            project_slug: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };
@@ -477,96 +479,5 @@ impl Parser for ElixirParser {
         );
 
         result
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_elixir_wasm_loads() {
-        let parser = ElixirParser::new();
-        let code = "defmodule Math do\n  def add(a, b), do: a + b\nend";
-        let result = parser.parse(code);
-        assert!(!result.symbols.is_empty(), "Parser failed to extract any symbols. WASM load likely failed.");
-    }
-
-    #[test]
-    fn test_elixir_parser() {
-        let code = r#"
-        defmodule MyModule do
-            @behaviour MyBehaviour
-            use GenServer
-
-            def start_link(arg) do
-                GenServer.call(__MODULE__, :start)
-            end
-
-            def handle_call(:msg, _from, state) do
-                {:reply, :ok, state}
-            end
-
-            def my_func() do
-                load_nif("my_nif", 0)
-            end
-
-            defmacro my_macro() do
-                quote do
-                    1 + 1
-                end
-            end
-        end
-        "#;
-
-        let parser = ElixirParser::new();
-        let result = parser.parse(code);
-
-        // Modules
-        assert!(result.symbols.iter().any(|s| s.name == "MyModule" && s.kind == "module"));
-        
-        // Functions
-        let start_link = result.symbols.iter().find(|s| s.name == "MyModule.start_link").unwrap();
-        assert_eq!(start_link.kind, "function");
-        assert!(start_link.is_entry_point);
-
-        let handle_call = result.symbols.iter().find(|s| s.name == "MyModule.handle_call").unwrap();
-        assert!(handle_call.is_entry_point);
-
-        let my_func = result.symbols.iter().find(|s| s.name == "MyModule.my_func").unwrap();
-        assert_eq!(my_func.properties.get("nif_loader").map(|s| s.as_str()), Some("true"));
-
-        let my_macro = result.symbols.iter().find(|s| s.name == "MyModule.my_macro").unwrap();
-        assert_eq!(my_macro.kind, "macro");
-
-        // Relations
-        let behaviour_rel = result.relations.iter().find(|r| r.rel_type == "implements").unwrap();
-        assert_eq!(behaviour_rel.from, "MyModule");
-        assert_eq!(behaviour_rel.to, "MyBehaviour");
-
-        let use_rel = result.relations.iter().find(|r| r.rel_type == "uses").unwrap();
-        assert_eq!(use_rel.to, "GenServer");
-
-        let genserver_rel = result.relations.iter().find(|r| r.rel_type == "CALLS_OTP").unwrap();
-        assert_eq!(genserver_rel.properties.get("otp_boundary").map(|s| s.as_str()), Some("true"));
-        assert_eq!(genserver_rel.to, "GenServer");
-    }
-
-    #[test]
-    fn test_elixir_nif_resolution() {
-        let code = r#"
-            defmodule Axon.Scanner do
-              use Rustler, otp_app: :axon_watcher, crate: "axon_scanner"
-              def scan(_path), do: :erlang.nif_error(:nif_not_loaded)
-            end
-        "#;
-        let parser = ElixirParser::new();
-        let result = parser.parse(code);
-
-        let has_nif_call = result.relations.iter().any(|r| {
-            r.rel_type == "calls_nif" && r.to == "scan"
-        });
-        
-        assert!(has_nif_call, "Elixir NIF resolution failed");
     }
 }

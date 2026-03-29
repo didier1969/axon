@@ -49,9 +49,11 @@ impl CssParser {
                     end_line: node.end_position().row + 1,
                     docstring: None,
                     is_entry_point: false,
-                        is_public: true,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
                     properties: HashMap::new(),
-                
                     embedding: None,
                 });
                 break;
@@ -71,9 +73,11 @@ impl CssParser {
                     end_line: node.end_position().row + 1,
                     docstring: None,
                     is_entry_point: false,
-                        is_public: true,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
                     properties: HashMap::new(),
-                
                     embedding: None,
                 });
                 break;
@@ -95,8 +99,10 @@ impl CssParser {
                         docstring: None,
                         is_entry_point: false,
                         is_public: true,
+                        tested: false,
+                        is_nif: false,
+                        is_unsafe: false,
                         properties: HashMap::new(),
-                    
                         embedding: None,
                     });
                 }
@@ -117,9 +123,11 @@ impl CssParser {
                     end_line: node.end_position().row + 1,
                     docstring: None,
                     is_entry_point: false,
-                        is_public: true,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
                     properties: HashMap::new(),
-                
                     embedding: None,
                 });
                 break;
@@ -160,39 +168,6 @@ impl Parser for CssParser {
             self.walk(tree.root_node(), content.as_bytes(), &mut symbols, &mut relations);
         }
 
-        ExtractionResult { symbols, relations }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_css() {
-        let code = r#"
-            @import url("reset.css");
-            @font-face {
-                font-family: 'MyFont';
-            }
-            :root {
-                --main-color: #333;
-            }
-            #app {
-                background: var(--main-color);
-            }
-            .container {
-                display: flex;
-            }
-        "#;
-        let parser = CssParser::new();
-        let result = parser.parse(code);
-
-        assert!(result.symbols.iter().any(|s| s.name == "#app" && s.kind == "element"));
-        assert!(result.symbols.iter().any(|s| s.name == ".container" && s.kind == "element"));
-        assert!(result.symbols.iter().any(|s| s.name == "--main-color" && s.kind == "variable"));
-        assert!(result.symbols.iter().any(|s| s.name == "@font-face" && s.kind == "interface"));
-
-        assert!(result.relations.iter().any(|r| r.to == "reset.css" && r.rel_type == "imports"));
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }

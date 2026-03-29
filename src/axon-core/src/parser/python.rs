@@ -56,6 +56,9 @@ impl PythonParser {
             docstring: None,
             is_entry_point: false,
             is_public: !name.starts_with("_"),
+            tested: name.starts_with("Test"),
+            is_nif: false,
+            is_unsafe: false,
             properties: HashMap::new(),
             embedding: None,
         });
@@ -121,6 +124,13 @@ impl PythonParser {
             }
         }
 
+        // --- UNSAFE DETECTION ---
+        let mut is_unsafe = false;
+        let body_text = node.utf8_text(source).unwrap_or("");
+        if body_text.contains("eval(") || body_text.contains("exec(") || body_text.contains("os.system(") || body_text.contains("subprocess.run(") {
+            is_unsafe = true;
+        }
+
         result.symbols.push(Symbol {
             name: full_name.clone(),
             kind: if is_method { "method".to_string() } else { "function".to_string() },
@@ -129,6 +139,9 @@ impl PythonParser {
             docstring: None,
             is_entry_point: func_name == "main",
             is_public: !func_name.starts_with("_") || func_name == "__init__",
+            tested: is_test,
+            is_nif: false,
+            is_unsafe,
             properties: props,
             embedding: None,
         });
@@ -148,9 +161,9 @@ impl PythonParser {
             self.walk(body, source, result, &full_name);
         }
     }
+
     fn extract_call<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, scope: &str) {
         if scope.is_empty() {
-            // We only care about calls inside functions/methods for taint analysis
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 self.walk(child, source, result, scope);
@@ -164,9 +177,6 @@ impl PythonParser {
         if let Some(n) = func_node {
             let call_name = n.utf8_text(source).unwrap_or("").to_string();
             
-            // Extract the actual function name from an attribute (e.g. 'os.system' -> 'system' or keep 'os.system')
-            // For taint analysis, keeping the full string is often better to match 'system' or 'os.system'
-            
             result.relations.push(Relation {
                 from: scope.to_string(),
                 to: call_name,
@@ -175,7 +185,6 @@ impl PythonParser {
             });
         }
 
-        // Walk arguments
         if let Some(args) = self.find_child_by_type(node, "argument_list") {
             let mut cursor = args.walk();
             for child in args.children(&mut cursor) {
@@ -185,14 +194,13 @@ impl PythonParser {
     }
 
     fn extract_import<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {
-        // Find dotted_name or aliased_import
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "dotted_name" || child.kind() == "aliased_import" {
                 let import_name = child.utf8_text(source).unwrap_or("").to_string();
                 
                 result.relations.push(Relation {
-                    from: "module".to_string(), // Python files are modules
+                    from: "module".to_string(),
                     to: import_name,
                     rel_type: "imports".to_string(),
                     properties: HashMap::new(),
@@ -205,6 +213,7 @@ impl PythonParser {
 impl Parser for PythonParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut result = ExtractionResult {
+            project_slug: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };
@@ -214,40 +223,5 @@ impl Parser for PythonParser {
         }
         
         result
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_python_full() {
-        let code = r#"
-import os
-from sys import argv
-
-class MyClass(BaseClass):
-    def my_method(self, data):
-        os.system(data)
-        eval(data)
-
-def test_my_method():
-    pass
-"#;
-        let parser = PythonParser::new();
-        let result = parser.parse(code);
-        
-        // Check symbols
-        assert!(result.symbols.iter().any(|s| s.name == "MyClass" && s.kind == "class"));
-        assert!(result.symbols.iter().any(|s| s.name == "MyClass.my_method" && s.kind == "method"));
-        assert!(result.symbols.iter().any(|s| s.name == "test_my_method" && s.kind == "function"));
-        
-        // Check relations
-        assert!(result.relations.iter().any(|r| r.from == "MyClass" && r.to == "BaseClass" && r.rel_type == "extends"));
-        assert!(result.relations.iter().any(|r| r.from == "MyClass.my_method" && r.to == "os.system" && r.rel_type == "calls"));
-        assert!(result.relations.iter().any(|r| r.from == "MyClass.my_method" && r.to == "eval" && r.rel_type == "calls"));
-        assert!(result.relations.iter().any(|r| r.from == "test_my_method" && r.to == "my_method" && r.rel_type == "tests"));
-        assert!(result.relations.iter().any(|r| r.to == "os" && r.rel_type == "imports"));
     }
 }

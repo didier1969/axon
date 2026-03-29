@@ -13,14 +13,17 @@ defmodule Axon.Watcher.Application do
     children = [
       Axon.Watcher.Repo,
       Axon.Watcher.Telemetry,
+      Axon.Watcher.Staging, # BUFFER ETS pour les insertions massives
+      Axon.Watcher.Tracer,
       Axon.Watcher.PoolFacade,
+      Axon.Watcher.TrafficGuardian,
       {Phoenix.PubSub, name: Axon.PubSub},
       {Oban, Application.fetch_env!(:axon_watcher, Oban)},
       {Axon.Watcher.Server, []},
       Axon.Watcher.Endpoint
     ]
 
-    opts = [strategy: :one_for_one, name: Axon.Watcher.Supervisor]
+    opts = [strategy: :rest_for_one, name: Axon.Watcher.Supervisor]
     Supervisor.start_link(children, opts)
   end
 end

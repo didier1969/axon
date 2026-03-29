@@ -28,5 +28,17 @@ Axon est nativement compatible avec le **Model Context Protocol (MCP)**. Il sert
 - **Mémoire Structurelle :** Fournit à l'IA le contexte qu'elle ne peut pas deviner, éliminant ainsi les hallucinations architecturales.
 - **TDD Sémantique :** L'IA peut désormais vérifier physiquement son travail via le pont de vérité Witness avant de certifier un changement.
 
+## Développement Local
+L'environnement de développement de référence est **Nix + Devenv**.
+
+Avant tout build, test ou démarrage de service :
+
+```bash
+devenv shell
+./scripts/validate-devenv.sh
+```
+
+Si le validateur échoue, le shell courant n'est pas l'environnement isolé attendu pour Axon. Les scripts de démarrage et de setup s'appuient désormais sur `devenv shell` comme chemin nominal.
+
 ---
 © 2025-2026 Didier Stadelmann - L'excellence au service de l'architecture.

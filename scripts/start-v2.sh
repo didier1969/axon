@@ -1,13 +1,15 @@
 #!/bin/bash
 set -e
 
-# Axon v2 - Industrial Start Script using TMUX for Resilience in WSL
+# Axon v2 - Industrial Start Script
+# Ensures a clean state by calling stop first, then launches everything in TMUX.
+
 PROJECT_ROOT="/home/dstadel/projects/axon"
 cd "$PROJECT_ROOT"
 
-# Verify nix-daemon is running (WSL2 specific mitigation)
+# 1. Verify nix-daemon is running (WSL2 specific mitigation)
 if ! nix store info >/dev/null 2>&1; then
-    echo "⚠️ Nix daemon is not responding. Attempting to start it (sudo may be required)..."
+    echo "⚠️ Nix daemon is not responding. Attempting to start it..."
     if command -v systemctl >/dev/null && systemctl is-system-running >/dev/null 2>&1; then
         sudo systemctl start nix-daemon
     else
@@ -16,35 +18,35 @@ if ! nix store info >/dev/null 2>&1; then
     fi
 fi
 
-# Clean up sockets if they exist
-if [ -S "/tmp/axon-telemetry.sock" ]; then rm -f "/tmp/axon-telemetry.sock"; fi
-if [ -S "/tmp/axon-mcp.sock" ]; then rm -f "/tmp/axon-mcp.sock"; fi
-
-# Clean up dangling processes and database locks
-echo "🧹 Cleaning up legacy locks and orphan processes..."
-pkill -f "bin/axon-core" 2>/dev/null || true
-pkill -f "bin/axon-mcp-tunnel" 2>/dev/null || true
-pkill -f "mix phx.server" 2>/dev/null || true
-pkill -f "axon-db-start" 2>/dev/null || true
-pkill -f "beam.smp.*hydra_axon" 2>/dev/null || true
-rm -f "$PROJECT_ROOT/.axon/graph_v2/lbug.db.lock"
-
-# Safety to avoid 'Text file busy' if the user just built a new version
+# 2. Synchronize binaries (handle 'Text file busy' via install)
 if [ -f "src/axon-core/target/release/axon-core" ]; then
-    echo "🔄 Updating bin/axon-core from latest release build..."
-    rm -f bin/axon-core
-    cp src/axon-core/target/release/axon-core bin/axon-core
+    echo "🔄 Updating bin/axon-core safely..."
+    install -m 755 src/axon-core/target/release/axon-core bin/axon-core
 fi
 
 if [ -f "src/axon-mcp-tunnel/target/release/axon-mcp-tunnel" ]; then
-    echo "🔄 Updating bin/axon-mcp-tunnel from latest release build..."
-    rm -f bin/axon-mcp-tunnel
-    cp src/axon-mcp-tunnel/target/release/axon-mcp-tunnel bin/axon-mcp-tunnel
+    echo "🔄 Updating bin/axon-mcp-tunnel safely..."
+    install -m 755 src/axon-mcp-tunnel/target/release/axon-mcp-tunnel bin/axon-mcp-tunnel
 fi
 
 echo "🚀 Starting Axon v2 Architecture (Managed via TMUX)..."
 
-# Generate deterministic ports > 40000 to avoid collisions
+# 3. Clean environment (Safety Protocol)
+echo "🧹 Cleaning TMUX sessions and Socket locks..."
+tmux kill-session -t axon 2>/dev/null || true
+# If TMUX server is unstable, we reset it
+if ! tmux ls >/dev/null 2>&1; then
+    tmux kill-server 2>/dev/null || true
+fi
+
+rm -f /tmp/axon-*.sock
+rm -f .axon/graph_v2/*.db.wal 2>/dev/null || true
+
+echo "🔓 Releasing Database locks..."
+fuser -k .axon/graph_v2/ist.db 2>/dev/null || true
+fuser -k .axon/graph_v2/sanctuary/soll.db 2>/dev/null || true
+
+# Configuration
 export PHX_PORT=44127
 export HYDRA_TCP_PORT=44128
 export HYDRA_HTTP_PORT=44129
@@ -52,77 +54,70 @@ export HYDRA_ODATA_PORT=44130
 export HYDRA_HTTP2_PORT=44131
 export HYDRA_MCP_PORT=44132
 
-# Kill existing axon session if any
-tmux kill-session -t axon 2>/dev/null || true
-sleep 1
+# Create new TMUX session
+tmux new-session -d -s axon -n "core" 
 
-# Create new session
-tmux new-session -d -s axon -n "db" 
+# Start Pod B (Data Plane)
+# We use 'devenv shell' to ensure the runtime matches the pinned project toolchain.
+# NEXUS v10.8: We force fastembed to use the system's libonnxruntime.so to prevent C++ aborts.
+tmux send-keys -t axon:core "devenv shell -- bash -lc 'export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; while true; do echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core; EXIT_CODE=\$?; echo \"⚠️ Axon Core exited with code \$EXIT_CODE. Restarting in 2s...\"; sleep 2; done'" C-m
 
-# Start Pod C (HydraDB)
-tmux send-keys -t axon:db "nix develop --impure --command bash -c \"HYDRA_TCP_PORT=$HYDRA_TCP_PORT HYDRA_HTTP_PORT=$HYDRA_HTTP_PORT HYDRA_ODATA_PORT=$HYDRA_ODATA_PORT HYDRA_HTTP2_PORT=$HYDRA_HTTP2_PORT HYDRA_MCP_PORT=$HYDRA_MCP_PORT axon-db-start\"" C-m
-sleep 2
-
-# Start Pod B (Core / Parser) with OS-level Niceness and Process Cycling Supervisor
-tmux new-window -t axon -n "core"
-tmux send-keys -t axon:core "nix develop --impure --command bash -c 'while true; do echo \"🚀 Starting Axon Core...\"; RUST_LOG=info nice -n 19 ionice -c 3 bin/axon-core; EXIT_CODE=\$?; echo \"⚠️ Axon Core exited with code \$EXIT_CODE. Restarting in 2s (Process Cycling)...\"; sleep 2; done'" C-m
-
-echo "⏳ Waiting for Axon Core (Rust Data Plane) to bind MCP socket (FastEmbed initialisation up to 10s)..."
-# Polling loop pour vérifier que le socket répond (Évite le MCP Disconnected pour les agents)
-for i in {1..30}; do
-    if [ -S "/tmp/axon-mcp.sock" ] && python3 -c 'import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect("/tmp/axon-mcp.sock"); s.close()' 2>/dev/null; then
-        echo "✅ Axon MCP Bridge (UDS) is Ready."
-        break
-    fi
-    sleep 1
-    if [ "$i" -eq 30 ]; then
-        echo "⚠️ Timeout waiting for Axon Bridge UDS. Check 'tmux attach -t axon' for errors."
-    fi
-done
-
-# Start Pod A/Control (Nexus Monolith)
+# Start Pod A (Control Plane)
 tmux new-window -t axon -n "nexus"
-tmux send-keys -t axon:nexus "cd src/dashboard && nix develop --impure --command bash -c \"mix ecto.setup && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects mix phx.server\"" C-m
+# PROTECTION: Rétablissement de hex, rebar et ecto.setup (indispensables pour la stabilité post-reset)
+tmux send-keys -t axon:nexus "cd src/dashboard && devenv shell -- bash -lc \"mix local.hex --force && mix local.rebar --force && mix compile && mix ecto.setup && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 
-echo "⏳ Waiting for Axon Dashboard (Elixir Control Plane) to boot (Database + Compilation)..."
-# Polling loop pour vérifier que Phoenix a fini sa compilation et lié son port
-for i in {1..60}; do
-    if nc -z localhost $PHX_PORT 2>/dev/null; then
-        echo "✅ Axon Dashboard is Ready."
+echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 60s)..."
+
+# Parallel wait loop for both services
+CORE_READY=false
+DASHBOARD_READY=false
+
+# Wait up to 120 * 0.5s = 60s
+for i in {1..120}; do
+    if [ "$CORE_READY" = false ]; then
+        # Core is ready if the telemetry socket exists AND the MCP port is responding
+        if [ -S "/tmp/axon-telemetry.sock" ] || nc -z localhost $HYDRA_HTTP_PORT 2>/dev/null; then
+            echo "✅ Axon Data Plane is Ready."
+            CORE_READY=true
+        fi
+    fi
+
+    if [ "$DASHBOARD_READY" = false ]; then
+        # Dashboard is ready if the Phoenix port is responding
+        if nc -z localhost $PHX_PORT 2>/dev/null; then
+            echo "✅ Axon Dashboard is Ready."
+            DASHBOARD_READY=true
+        fi
+    fi
+
+    if [ "$CORE_READY" = true ] && [ "$DASHBOARD_READY" = true ]; then
         break
     fi
-    sleep 2
-    if [ "$i" -eq 60 ]; then
-        echo "⚠️ Timeout waiting for Axon Dashboard. Check 'tmux attach -t axon:nexus' for compilation errors."
-    fi
+    
+    sleep 0.5
 done
+
+if [ "$CORE_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Core."; fi
+if [ "$DASHBOARD_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Dashboard."; fi
 
 echo ""
 echo "⚙️ Running MCP End-to-End Verification..."
-# Now we use the Rust tunnel for the test
 if ! echo '{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}' | bin/axon-mcp-tunnel | grep -q "axon_query"; then
     echo "❌ FATAL: MCP Tunnel failed End-to-End verification."
-    exit 1
+    # We don't exit here to allow user to debug in tmux
 else
-    echo "✅ E2E Verification Success! Rust Tunnel is active."
+    echo "✅ E2E Verification Success! System is healthy."
 fi
-echo ""
 
+# 6. Final Report
+WSL_IP=$(ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+if [ -z "$WSL_IP" ]; then WSL_IP="127.0.0.1"; fi
+
+echo ""
 echo "🛡️ Axon is rising in TMUX session 'axon'."
 echo "To view processes: 'tmux attach -t axon'"
+echo "Dashboard: http://$WSL_IP:44127/cockpit"
+echo "SQL Gateway: http://$WSL_IP:44129/sql"
+echo "MCP Server: http://$WSL_IP:44129/mcp"
 echo ""
-
-# Run the unified health check to show the state
-if [ -x "bin/axol" ]; then
-    ./bin/axol
-fi
-
-
-echo "🛡️ Axon is rising in TMUX session 'axon'."
-echo "To view processes: 'tmux attach -t axon'"
-echo ""
-
-# Run the unified health check to show the state
-if [ -x "bin/axol" ]; then
-    ./bin/axol
-fi

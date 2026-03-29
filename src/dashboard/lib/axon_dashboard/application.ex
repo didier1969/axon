@@ -10,6 +10,7 @@ defmodule AxonDashboard.Application do
     children = [
       AxonDashboardWeb.Telemetry,
       {Phoenix.PubSub, name: AxonDashboard.PubSub},
+      Axon.Watcher.Tracer,
       Axon.Watcher.Telemetry,
       AxonDashboard.TelemetryHandler,
       Axon.Watcher.Repo,
@@ -17,6 +18,7 @@ defmodule AxonDashboard.Application do
       Axon.Watcher.StatsCache,
       Axon.Watcher.Auditor,
       Axon.Watcher.PoolFacade,
+      Axon.Watcher.TrafficGuardian,
       {Axon.Watcher.Server, []},
       Axon.ResourceMonitor,
       Axon.BackpressureController,

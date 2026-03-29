@@ -9,12 +9,10 @@ defmodule Axon.Watcher.Schemas.Symbol do
     field(:kind, :string)
     field(:start_line, :integer)
     field(:end_line, :integer)
-    field(:start_byte, :integer, default: 0)
-    field(:end_byte, :integer, default: 0)
-    field(:content, :string, default: "")
-    field(:is_exported, :boolean, default: false)
+    field(:is_public, :boolean, default: true)
     field(:is_entry_point, :boolean, default: false)
-    field(:signature, :string, default: "")
+    field(:is_nif, :boolean, default: false)
+    field(:is_unsafe, :boolean, default: false)
     field(:tested, :boolean, default: false)
     field(:centrality, :float, default: 0.0)
   end
@@ -27,12 +25,10 @@ defmodule Axon.Watcher.Schemas.Symbol do
       :kind,
       :start_line,
       :end_line,
-      :start_byte,
-      :end_byte,
-      :content,
-      :is_exported,
+      :is_public,
       :is_entry_point,
-      :signature,
+      :is_nif,
+      :is_unsafe,
       :tested,
       :centrality
     ])

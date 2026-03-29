@@ -6,9 +6,30 @@ defmodule Axon.Capabilities do
   """
 
   @default_extensions [
-    "py", "ex", "exs", "rs", "go", "java", "c", "cpp", "h",
-    "js", "jsx", "ts", "tsx", "sql", "md", "markdown",
-    "txt", "json", "yml", "yaml", "toml", "conf", "html", "css"
+    "py",
+    "ex",
+    "exs",
+    "rs",
+    "go",
+    "java",
+    "c",
+    "cpp",
+    "h",
+    "js",
+    "jsx",
+    "ts",
+    "tsx",
+    "sql",
+    "md",
+    "markdown",
+    "txt",
+    "json",
+    "yml",
+    "yaml",
+    "toml",
+    "conf",
+    "html",
+    "css"
   ]
 
   @doc """
@@ -33,7 +54,7 @@ defmodule Axon.Capabilities do
   Vérifie si un chemin de fichier (path) se termine par une extension supportée.
   """
   def is_supported_file?(path) do
-    extension = 
+    extension =
       path
       |> Path.extname()
       |> String.replace_leading(".", "")

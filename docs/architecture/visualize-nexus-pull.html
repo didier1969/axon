@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Axon Blueprint v3.0 : Spécification Intégrale Nexus Pull</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #0284c7;
+            --primary-dark: #0369a1;
+            --secondary: #64748b;
+            --success: #059669;
+            --warning: #d97706;
+            --error: #dc2626;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #0f172a;
+            --text-dim: #475569;
+            --border: #e2e8f0;
+            --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+        }
+        
+        body { 
+            font-family: 'Inter', system-ui, sans-serif; 
+            background-color: var(--bg); 
+            color: var(--text); 
+            margin: 0;
+            padding: 0;
+            line-height: 1.6;
+        }
+
+        .container { 
+            max-width: 1200px; 
+            margin: auto; 
+            padding: 40px 20px;
+        }
+
+        header {
+            background: var(--card-bg);
+            border-bottom: 1px solid var(--border);
+            padding: 60px 20px;
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        .hero-title {
+            font-size: 2.75rem;
+            font-weight: 800;
+            color: #0f172a;
+            margin: 0;
+            letter-spacing: -0.05em;
+        }
+
+        .version-badge {
+            display: inline-block;
+            padding: 6px 16px;
+            background: #e0f2fe;
+            color: var(--primary-dark);
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 700;
+            margin-bottom: 20px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        section {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 40px;
+            margin-bottom: 40px;
+            box-shadow: var(--shadow);
+        }
+
+        h2 {
+            font-size: 1.75rem;
+            font-weight: 700;
+            margin-top: 0;
+            margin-bottom: 30px;
+            color: #1e293b;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        h2::before {
+            content: "";
+            width: 6px;
+            height: 32px;
+            background: var(--primary);
+            border-radius: 3px;
+        }
+
+        .mermaid {
+            background: #fff;
+            padding: 30px;
+            border-radius: 12px;
+            margin: 20px 0;
+            border: 1px solid #f1f5f9;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+            gap: 25px;
+            margin-top: 30px;
+        }
+
+        .info-card {
+            padding: 25px;
+            border-radius: 12px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            transition: transform 0.2s;
+        }
+
+        .info-card:hover {
+            transform: translateY(-4px);
+        }
+
+        .info-card h3 {
+            margin-top: 0;
+            font-size: 1.25rem;
+            color: var(--primary-dark);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .info-card p {
+            font-size: 0.95rem;
+            color: var(--text-dim);
+            margin-bottom: 0;
+        }
+
+        .tech-tag {
+            font-family: 'Fira Code', monospace;
+            background: #f1f5f9;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: 500;
+            color: #475569;
+        }
+
+        footer {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-dim);
+            font-size: 0.9rem;
+            border-top: 1px solid var(--border);
+        }
+
+        .llm-bubble {
+            background: #f0f9ff;
+            border: 1px solid #bae6fd;
+            border-radius: 12px;
+            padding: 15px;
+            margin: 10px 0;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <span class="version-badge">Nexus Blueprint v3.3 • Couche SOLL Phase</span>
+        <h1 class="hero-title">Axon Intelligence Engine</h1>
+        <p style="font-size: 1.25rem; color: var(--text-dim); max-width: 800px; margin: 20px auto;">
+            Spécification intégrale de l'architecture <strong>Nexus Pull & Couche SOLL</strong> : Isolation des Intentions (SOLL) et Performance Industrielle (IST).
+        </p>
+    </header>
+
+    <div class="container">
+        <!-- 0. GOUVERNANCE INTENTIONNELLE & REGISTRE DES DÉCISIONS (MBSE) -->
+        <section id="soll-governance">
+            <h2>Gouvernance Intentionnelle & Registre des Décisions (MBSE)</h2>
+            <p>Axon implémente l'ingénierie basée sur les modèles (<strong>Model-Based Systems Engineering</strong>). Le graphe n'est pas un simple index, c'est le <strong>Modèle Central</strong> assurant un "Digital Thread" entre l'intention et le code.</p>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>Strate Stratégique (Milestones)</h3>
+                    <p>Les <code>Milestones</code> (Jalons) regroupent les objectifs par phase (ex: Phase Apollo). Ils pilotent la roadmap en ciblant des exigences spécifiques.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Simulation de Rayon d'Impact</h3>
+                    <p>Grâce à la vue <code>ImpactRadius</code>, Axon calcule le <strong>Blast Radius</strong> physique de chaque exigence. On sait exactement combien de symboles de code sont affectés par un changement d'intention.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Flexibilité "Notion-Like"</h3>
+                    <p>Chaque entité SOLL dispose d'un champ <code>metadata JSON</code>. Cela permet d'ajouter des propriétés dynamiques (coûts, risques, tags) sans altérer le schéma physique de la base.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Calcul d'Avancement Réel</h3>
+                    <p>L'état "Terminé" est une preuve physique. Un <code>Requirement</code> n'est validé que s'il est couvert par une <code>Decision</code> dont l'impact est vérifié dans le code (IST).</p>
+                </div>
+            </div>
+            <div class="mermaid">
+            graph TD
+                subgraph SOLL [Couche Intentionnelle : soll.db]
+                    V[Vision]
+                    M[Milestone]
+                    P[Pillar]
+                    R[Requirement]
+                    D[Decision ADR]
+                    C[Concept]
+                    H[Stakeholder]
+                    Val[Validation / Proof]
+                    
+                    V -- "CONTRIBUTES_TO" --> V
+                    H -- "ORIGINATES" --> R
+                    M -- "TARGETS" --> R
+                    P -- "EPITOMIZES" --> V
+                    R -- "BELONGS_TO" --> P
+                    R -- "REFINES" --> R
+                    D -- "SOLVES" --> R
+                    Val -- "VERIFIES" --> R
+                    C -- "EXPLAINS" --> R
+                    C2[New Concept] -- "SUPERSEDES" --> C
+                end
+
+                subgraph IST [Couche Technique : ist.db]
+                    S[Symbol / Code]
+                    Proj[Project]
+                    Proj -- "HAS_SUBPROJECT" --> Proj
+                end
+
+                D -- "IMPACTS" --> S
+                S -- "SUBSTANTIATES" --> C
+                S -- "BELONGS_TO" --> Proj
+                
+                style V fill:#f1f5f9,stroke:#475569,stroke-width:4px
+                style M,P,R,D,C,C2,H,Val fill:#f1f5f9,stroke:#475569
+                style S,Proj fill:#eff6ff,stroke:#0284c7
+            </div>
+        </section>
+
+        <!-- 1. CONTEXTE SYSTÈME (C4 LEVEL 1) -->
+        <section id="c4-level-1">
+            <h2>Vision Holistique (C4 Level 1)</h2>
+            <p>Axon agit comme un cerveau structurel entre l'Agent IA (LLM) et la base de code physique. Il sépare physiquement l'intention (SOLL) de la réalité technique (IST).</p>
+            <div class="mermaid">
+            graph TD
+                User((Agent IA / LLM)) -- "Requêtes Sémantiques (MCP)" --> Axon[Axon Engine]
+                Axon -- "Scan & Map" --> FS[(Filesystem)]
+                
+                subgraph "Stockage Unifié (Multi-DB)"
+                    SOLL[(soll.db)]
+                    IST[(ist.db)]
+                end
+                
+                Axon -- "Souveraineté" --> SOLL
+                Axon -- "Ingestion" --> IST
+                
+                subgraph "Cycle de Vie"
+                    FS -- "Discovery" --> Axon
+                    Axon -- "Enrichment" --> IST
+                end
+
+                style Axon fill:#0ea5e9,color:#fff,stroke:#0284c7,stroke-width:4px
+                style SOLL fill:#fef3c7,stroke:#d97706,stroke-width:2px
+                style IST fill:#eff6ff,stroke:#0284c7,stroke-width:2px
+            </div>
+            <div class="llm-bubble">
+                "Axon est ma mémoire structurelle. Mes intentions sont isolées dans soll.db tandis que la couche technique travaille dans ist.db."
+            </div>
+        </section>
+
+        <!-- 2. ARCHITECTURE DES CONTENEURS (C4 LEVEL 2) -->
+        <section id="c4-level-2">
+            <h2>Architecture des Conteneurs (C4 Level 2)</h2>
+            <p>L'architecture Couche SOLL sépare le couche intentionnelle (SOLL) du couche technique (IST). Le binaire Rust ouvre <code>ist.db</code> et attache <code>soll.db</code> via le mécanisme ATTACH DATABASE.</p>
+            <div class="mermaid">
+            graph LR
+                subgraph Elixir_Plane [Control Plane : Elixir/OTP]
+                    Guardian[Traffic Guardian]
+                    subgraph Pool [Pool d'Agents 1..14]
+                        Agent1[Agent Core 1]
+                        AgentN[Agent Core N]
+                    end
+                end
+
+                subgraph Rust_Plane [Data Plane : Rust/Tokio]
+                    subgraph Arena [CPU Arena]
+                        Worker1[Worker 1]
+                        WorkerN[Worker N]
+                    end
+                    Scanner[Scanner Engine]
+                    MCP[Serveur MCP]
+                    
+                    Channel(((MPSC Channel<br/>The Choke Point)))
+                    Writer[DB Writer Actor]
+                end
+
+                subgraph Unified_Storage [Architecture SOLL]
+                    IST[(ist.db)]
+                    SOLL[(soll.db)]
+                    IST -- "ATTACH" --> SOLL
+                end
+
+                Scanner -- "1. Map Paths" --> Channel
+                Worker1 -- "5. Results" --> Channel
+                MCP -- "Write Commands" --> Channel
+                Channel -- "Batch DbWriteTask" --> Writer
+                
+                Guardian -- "2. Poll Pending" --> IST
+                Guardian -- "3. Assign" --> Agent1
+                Agent1 -- "4. Pull Command" --> Worker1
+                Writer -- "6. Commit IST" --> IST
+                Writer -- "6b. Commit SOLL" --> SOLL
+                Worker1 -- "7. ACK / Free Signal" --> Agent1
+                Agent1 -- "8. Ready for Next" --> Guardian
+                
+                User((Agent IA)) -- "9. axon_query" --> MCP
+                MCP -- "10. Unified Read" --> IST
+
+                style IST fill:#eff6ff,stroke:#0284c7,stroke-width:3px
+                style SOLL fill:#fef3c7,stroke:#d97706,stroke-width:3px
+                style MCP fill:#ecfdf5,stroke:#059669,stroke-width:2px
+                style Writer fill:#dbeafe,stroke:#2563eb,stroke-width:2px
+                style Channel fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,stroke-dasharray: 5 5
+            </div>
+        </section>
+
+        <!-- 3. ARCHITECTURE SOLL (V3.3) -->
+        <section id="soll-v3-3">
+            <h2>Architecture SOLL (v3.3)</h2>
+            <p>Isolation physique des intentions humaines pour garantir l'immunité face aux réinitialisations techniques.</p>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>La Base SOLL (soll.db)</h3>
+                    <p>Contient la Vision, les Piliers, les Requirements et le Registre d'IDs. Ce fichier est <strong>protégée</strong> et ne subit jamais de purge automatique.</p>
+                </div>
+                <div class="info-card">
+                    <h3>La Base IST (ist.db)</h3>
+                    <p>Contient les données volatiles : fichiers indexés, symboles AST et dépendances physiques. C'est la cible exclusive de la commande <code>reset</code>.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Mécanisme ATTACH</h3>
+                    <p>Au démarrage, Axon ouvre <code>ist.db</code> et attache <code>soll.db</code> sous un namespace dédié. Les requêtes Cypher peuvent croiser les données entre les deux mondes en toute transparence.</p>
+                </div>
+            </div>
+            <div class="llm-bubble">
+                "Grâce à la Couche SOLL, même si nous reconstruisons toute la couche technique (IST), je n'oublie jamais vos exigences stratégiques (SOLL)."
+            </div>
+        </section>
+
+        <!-- 4. DÉTAIL DES ÉCHANGES & SYNCHRONISATION -->
+        <section id="sync-details">
+            <h2>Dynamique des Échanges (Séquence Détaillée)</h2>
+            <p>Le cycle de vie d'un fichier, de sa découverte à sa libération pour le prochain traitement, incluant le retour d'information vers le Control Plane.</p>
+            <div class="mermaid">
+            sequenceDiagram
+                autonumber
+                participant G as Traffic Guardian (Elixir)
+                participant A as Agent Core X (Elixir)
+                participant W as Worker Core X (Rust)
+                participant WR as Writer Actor (Rust)
+                participant K as DuckDB
+
+                Note over W, K: PHASE 1 : DISCOVERY (RUST-LED)
+                W->>WR: NEW_FILE_FOUND {path}
+                WR->>K: INSERT File {status:'pending'}
+                K-->>WR: OK
+                
+                Note over G, K: PHASE 2 : THE PULL CYCLE (ELIXIR-LED)
+                G->>K: MATCH (f {status:'pending'}) LIMIT 1
+                K-->>G: path/to/code.ex
+                G->>A: Assigne file_path.rs
+                A->>W: REQ: PARSE_FILE {path}
+                
+                W->>W: AST Parsing + AI Embeddings
+                W->>WR: PUSH_DATA {path, extraction_results}
+                WR->>K: COMMIT Transaction
+                K-->>WR: OK
+                WR-->>W: DB_SYNC_COMPLETE (Truth Certified)
+                
+                Note over W, A: LE RETOUR D'INFORMATION (LIBÉRATION)
+                W-->>A: REP: DONE {status: 'indexed'}
+                A->>G: WORKER_READY (Donne-moi le prochain !)
+                
+                Note over G, K: Le Guardian boucle sur l'étape 4.
+            </div>
+        </section>
+
+        <!-- 4. ANALYSE DE LA CONCURRENCE -->
+        <section id="concurrency">
+            <h2>Gestion de la Concurrence (MVCC vs Guardian)</h2>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>Pourquoi le LLM accède en direct ?</h3>
+                    <p>Le serveur MCP interroge DuckDB via une connexion <strong>Read-Only</strong> dédiée. Grâce au <strong>MVCC</strong>, il accède à un instantané (Snapshot). Cela évite de charger l'orchestrateur Elixir et garantit une latence < 100ms.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Le rôle du Guardian</h3>
+                    <p>Le Guardian ne gère pas les lectures. Il est le <strong>Contrôleur de Débit</strong> pour les écritures. Il décide qui travaille et quand, s'assurant qu'aucun worker ne sature les I/O de la base de données.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Le Writer Actor</h3>
+                    <p>En Rust, toutes les écritures passent par un <strong>Acteur Unique</strong>. C'est le seul point d'entrée pour les transactions `WRITE`, éliminant physiquement les erreurs `Database busy`.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- NEW: SCALABILITÉ DES LECTURES -->
+        <section id="read-scalability">
+            <h2>Scalabilité et Multi-Agents</h2>
+            <p>Axon est conçu pour servir simultanément plusieurs instances d'agents IA (Claude, Gemini, etc.) sans dégradation de performance.</p>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>Multiplexage Tokio</h3>
+                    <p>Le serveur MCP utilise le runtime asynchrone <strong>Tokio</strong>. Il peut gérer des centaines de connexions concurrentes sur un pool de threads réduit, évitant ainsi le blocage I/O classique.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Multi-Reader MVCC</h3>
+                    <p>DuckDB permet des lectures parallèles illimitées. Chaque agent IA dispose de sa propre vue cohérente du graphe, isolée des écritures massives de l'ingestion.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Réserve de Cycles MCP</h3>
+                    <p>Une portion des ressources CPU (Core Reserve) est isolée pour le serveur MCP. Même sous une charge d'indexation de 100%, l'intelligence reste réactive.</p>
+                </div>
+            </div>
+            <div class="mermaid">
+            graph TD
+                A1((Agent IA 1)) -- "JSON-RPC" --> S[Serveur MCP Tokio]
+                A2((Agent IA 2)) -- "JSON-RPC" --> S
+                AN((Agent IA N)) -- "JSON-RPC" --> S
+                
+                S -- "Async Task 1" --> R1[Reader Handle 1]
+                S -- "Async Task 2" --> R2[Reader Handle 2]
+                S -- "Async Task N" --> RN[Reader Handle N]
+                
+                R1 -- "Snapshot" --> K[(DuckDB)]
+                R2 -- "Snapshot" --> K
+                RN -- "Snapshot" --> K
+                
+                style S fill:#ecfdf5,stroke:#059669
+                style K fill:#eff6ff,stroke:#0284c7
+            </div>
+        </section>
+
+
+
+
+
+        <!-- 7. ÉCOSYSTÈME TECHNIQUE -->
+        <section id="tech-ecosystem">
+            <h2>Écosystème Technologique</h2>
+            <p>Un socle polyglotte haute performance, hermétique et reproductible.</p>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>Control Plane <span class="tech-tag">Elixir / OTP</span></h3>
+                    <p>Orchestration résiliente basée sur le modèle d'acteurs. Gestion granulaire des cœurs CPU et du traffic shaping.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Data Plane <span class="tech-tag">Rust / Tokio</span></h3>
+                    <p>Calcul intensif (Tree-sitter, FastEmbed ONNX). Isolation totale des ressources et performance brute.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Couche SOLL Storage <span class="tech-tag">DuckDB (Dual-DB)</span></h3>
+                    <p>Isolation physique SOLL/IST via <code>ATTACH DATABASE</code>. Source unique pour l'intention et la réalité physique.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Environment <span class="tech-tag">Nix / Devenv</span></h3>
+                    <p>Isolation hermétique de la chaîne de compilation et des dépendances. Reproductibilité 100% garantie.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- 6. GESTION DES PRIORITÉS & GROS FICHIERS -->
+        <section id="priority-titan">
+            <h2>Traffic Shaping & Protocole Titan</h2>
+            <p>Axon utilise les métadonnées du graphe pour arbitrer l'accès aux ressources CPU.</p>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>Priorisation Dynamique</h3>
+                    <p>Chaque nœud <code>File</code> possède une propriété <code>priority</code> (0-100). Le Guardian "tire" en priorité les fichiers avec le score le plus élevé (fichiers ouverts ou requis par le LLM).</p>
+                </div>
+                <div class="info-card">
+                    <h3>Le Protocole Titan</h3>
+                    <p>Les fichiers <strong>> 1MB</strong> sont marqués dès le scan. Ils sont soit traités en mode "structure seule" (sans embeddings), soit isolés pour éviter de saturer la RAM des autres workers.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Zéro Oubli Sémantique</h3>
+                    <p>Même un fichier rejeté reste présent dans DuckDB avec le statut <code>titan_ignored</code>. Le LLM peut ainsi justifier ses lacunes d'analyse auprès de l'utilisateur.</p>
+                </div>
+            </div>
+            <div class="mermaid">
+            graph LR
+                Scan[Scanner Rust] -- "Detect Size/Ext" --> DuckDB
+                DuckDB -- "File {size: 5MB, priority: 10}" --> Guardian
+                Guardian -- "Decision: Titan Lane" --> Agent
+                Agent -- "INDEX_STRUCT_ONLY" --> Worker
+                Worker -- "status: titan_ignored" --> DuckDB
+                
+                style Worker fill:#fef3c7,stroke:#d97706
+            </div>
+        </section>
+
+        <!-- 7. OPTIMISATION DU DÉBIT : PIPELINING -->
+        <section id="pipelining">
+            <h2>Utilisation Optimale des Cœurs (Pipelining)</h2>
+            <p>Pour atteindre 100% d'utilisation CPU, Axon implémente un mécanisme de "Double-Buffering" entre Elixir et Rust.</p>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>La Trémie ETS</h3>
+                    <p>Le Guardian ne polle pas DuckDB pour chaque fichier. Il remplit une table <strong>ETS en RAM</strong> par lots de 100. Cette taille réduite garantit que les fichiers prioritaires ne sont pas bloqués par un backlog trop important.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Observabilité : Tracer</h3>
+                    <p>Le système utilise <strong>Axon.Watcher.Tracer</strong> pour mesurer les micro-latences (T0 à T4). Ces mesures permettent au Guardian d'ajuster le débit en temps réel pour éviter la saturation.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Points de Mesure (:telemetry)</h3>
+                    <p>Le système surveille le <code>fill_rate</code> de la trémie ETS et la <code>pressure</code> des sockets. Si un goulot apparaît, le Guardian ajuste dynamiquement la taille des lots de pull.</p>
+                </div>
+            </div>
+            <div class="mermaid">
+            sequenceDiagram
+                participant G as Guardian (ETS)
+                participant A as Agent Core X
+                participant W as Worker Core X (Rust)
+                
+                G->>A: Envoie Fichier N
+                A->>W: REQ: Index N
+                Note over W: Travaille sur N...
+                G->>A: Envoie Fichier N+1
+                A->>W: REQ: Index N+1 (Attends dans le buffer)
+                W-->>A: ACK: N Terminé
+                Note over W: Enchaîne immédiatement sur N+1
+                A->>G: Prêt pour N+2
+            </div>
+        </section>
+
+        <!-- 8. RÉGULATION DE FLUX ADAPTATIVE -->
+        <section id="adaptive-flow">
+            <h2>Régulation de Flux Adaptative (v3.2)</h2>
+            <p>Axon ajuste dynamiquement sa "matière première" en fonction de la vitesse réelle de traitement pour garantir une latence déterministe.</p>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>Calcul de Fenêtre Glissante</h3>
+                    <p>Le Guardian calcule la taille optimale du buffer : <code>Fenêtre = (Débit Files/sec) * Latence_Cible</code>. Si le système ralentit, le buffer rétrécit pour laisser passer les urgences plus vite.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Seuils Watermark (Min/Max)</h3>
+                    <p>Le système évite les temps morts avec un rechargement anticipé. Si la cible est de 200 fichiers, le Guardian déclenche un nouvel import dès que le buffer descend à 100.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Priorité Sémantique</h3>
+                    <p>Lors de chaque rechargement, les fichiers sont extraits par <code>ORDER BY priority DESC</code>. Un fichier urgent n'attendra jamais plus d'un cycle de fenêtre (max 10s).</p>
+                </div>
+            </div>
+            <div class="mermaid">
+            graph TD
+                T[Tracer] -- "Débit réel" --> G[Traffic Guardian]
+                G -- "Ajuste" --> B[Taille Buffer ETS]
+                B -- "Lent (2 f/s)" --> S[Buffer: 20]
+                B -- "Rapide (100 f/s)" --> F[Buffer: 1000]
+                
+                subgraph "Cycle de Recharge"
+                    E[ETS < 50%] -- "Trigger" --> K[(DuckDB)]
+                    K -- "Batch Pull" --> E
+                end
+            </div>
+        </section>
+
+        <!-- 9. PRINCIPES D'INGÉNIERIE -->
+        <section id="principles">
+            <h2>Principes d'Ingénierie Nexus</h2>
+            <div class="grid">
+                <div class="info-card">
+                    <h3><span class="tech-tag">Zero-Sleep</span></h3>
+                    <p>Aucune attente arbitraire. Le système est auto-régulé par la disponibilité physique des cœurs CPU.</p>
+                </div>
+                <div class="info-card">
+                    <h3><span class="tech-tag">Backpressure Physique</span></h3>
+                    <p>Le flux est tiré (Pull). On n'insère un nouveau fichier que si un slot est libre en base et sur le CPU.</p>
+                </div>
+                <div class="info-card">
+                    <h3><span class="tech-tag">Atomicité</span></h3>
+                    <p>Chaque fichier est traité comme une transaction atomique. Pas d'état "partiellement indexé".</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ANNEXE TECHNIQUE : SCHÉMA DUCKDB -->
+        <section id="technical-appendix">
+            <h2>Annexe Technique : Schéma du Treillis (DuckDB)</h2>
+            <p>Spécification des tables et types pour la Base Intentionnelle (SOLL) et la Base Technique (IST).</p>
+            
+            <h3>Couche SOLL (soll.db)</h3>
+            <table style="width:100%; border-collapse: collapse; margin-bottom: 30px;">
+                <tr style="background: #f1f5f9; text-align: left;">
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Table / Vue</th>
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Colonnes (Primary Key soulignée)</th>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Vision</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>title</u> VARCHAR, description VARCHAR, goal VARCHAR, metadata JSON</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Pillar</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, description VARCHAR, metadata JSON</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Milestone</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, status VARCHAR, deadline VARCHAR, metadata JSON</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Requirement</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, description VARCHAR, justification VARCHAR, priority VARCHAR, metadata JSON</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Decision</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, context VARCHAR, alternative VARCHAR, rationale VARCHAR, status VARCHAR, metadata JSON</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Stakeholder</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>name</u> VARCHAR, role VARCHAR, metadata JSON</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Validation</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, method VARCHAR, result VARCHAR, timestamp BIGINT, metadata JSON</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Registry</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>project_slug</u> VARCHAR, last_req BIGINT, last_cpt BIGINT, last_dec BIGINT, last_mil BIGINT, last_val BIGINT</td>
+                </tr>
+                <tr style="background: #fdf2f2;">
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><strong>ImpactRadius (Vue)</strong></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">requirement_id, symbols_count (Calculé via récursion IST)</td>
+                </tr>
+            </table>
+
+            <h3>Couche IST (ist.db)</h3>
+            <table style="width:100%; border-collapse: collapse;">
+                <tr style="background: #f1f5f9; text-align: left;">
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Table</th>
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Colonnes</th>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">File</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>path</u> VARCHAR, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Symbol</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384]</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Relations AST</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">CALLS, IMPORTS, IMPLEMENTS, EXTENDS, TESTS, USES, CALLS_NIF (source_id, target_id)</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Project</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>name</u> VARCHAR</td>
+                </tr>
+            </table>
+        </section>
+
+        <footer>
+            &copy; 2026 Didier Stadelmann - Nexus Lead Architect<br>
+            Axon Intelligence Engine • Excellence Architecturale
+        </footer>
+    </div>
+    <script>
+        mermaid.initialize({ 
+            startOnLoad: true, 
+            theme: 'default',
+            fontFamily: 'Inter',
+            sequence: { showSequenceNumbers: true }
+        });
+    </script>
+</body>
+</html>

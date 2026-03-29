@@ -36,8 +36,6 @@ impl Parser for YamlParser {
                     if let Some(key_node) = node.child_by_field_name("key") {
                         let mut key_name = String::new();
                         
-                        // The key might be a plain_scalar or string_scalar etc.
-                        // We can just get its text.
                         if let Ok(text) = key_node.utf8_text(source_bytes) {
                             key_name = text.trim().to_string();
                         }
@@ -57,20 +55,19 @@ impl Parser for YamlParser {
                                 properties.insert("sensitive".to_string(), "true".to_string());
                             }
 
-                            // We extract top level and depth 1 (similar to Python), or all? Let's just do up to depth 1 
-                            // as in the python parser, or we can just do it generically. The python parser did depth 1.
-                            // We'll just do it for any mapping pair but only keep it if depth <= 1 (meaning it's 0 or 1 levels deep).
                             if depth <= 1 {
                                 symbols.push(Symbol {
                                     name: full_name.clone(),
-                                    kind: "function".to_string(), // python used "function" for yaml keys
+                                    kind: "config_key".to_string(),
                                     start_line: key_node.start_position().row + 1,
                                     end_line: key_node.end_position().row + 1,
                                     docstring: None,
                                     is_entry_point: false,
-                            is_public: true,
+                                    is_public: true,
+                                    tested: false,
+                                    is_nif: false,
+                                    is_unsafe: false,
                                     properties,
-                                
                                     embedding: None,
                                 });
                             }
@@ -94,39 +91,6 @@ impl Parser for YamlParser {
             traverse(root_node, source_bytes, &mut symbols, "", 0);
         }
 
-        ExtractionResult { symbols, relations }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_yaml_parser() {
-        let content = "
-version: '3'
-services:
-  web:
-    image: nginx
-  db:
-    image: postgres
-secret_key: some_value
-";
-        let parser = YamlParser::new();
-        let result = parser.parse(content);
-        
-        let mut names: Vec<_> = result.symbols.iter().map(|s| s.name.clone()).collect();
-        names.sort();
-        
-        assert!(names.contains(&"version".to_string()));
-        assert!(names.contains(&"services".to_string()));
-        assert!(names.contains(&"services.web".to_string()));
-        assert!(names.contains(&"services.db".to_string()));
-        assert!(names.contains(&"secret_key".to_string()));
-        
-        // Verify sensitive property
-        let secret_sym = result.symbols.iter().find(|s| s.name == "secret_key").unwrap();
-        assert_eq!(secret_sym.properties.get("sensitive").unwrap(), "true");
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }

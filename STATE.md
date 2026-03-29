@@ -7,12 +7,12 @@
 ## État des piliers Apollo
 
 ### 1. Ingestion "Fantôme" (Ghost Ingestion)
-- **Status :** 🟢 OPÉRATIONNEL.
-- **Réalisations :** Suppression du "Memory Bloat" Elixir (Paths only), isolation des écritures Rust (Batch Transactions), déduplication KuzuDB. L'ingestion est douce et ne bloque plus le CPU de manière persistante.
+- **Status :** 🚀 REFONTE "ZERO-SLEEP".
+- **Objectif :** Migration vers MVCC et Backpressure mécanique pour supprimer les latences de lecture.
 
 ### 2. Système Nerveux (MCP)
-- **Status :** 🟢 OPÉRATIONNEL.
-- **Réalisations :** Isolation par threads (`spawn_blocking`) validée. Le socket UNIX est stable sous charge. Synthèse Sémantique Markdown implémentée pour tous les outils.
+- **Status :** 🚀 PRIORITÉ ABSOLUE.
+- **Objectif :** Latence < 100ms garantie via isolation des flux.
 
 ### 3. Réconciliateur Sémantique (Lattice Refiner)
 - **Status :** 🚀 DÉVELOPPEMENT INITIAL (Branche `feat/lattice-refiner`).

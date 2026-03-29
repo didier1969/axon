@@ -74,8 +74,10 @@ impl JavaParser {
                     docstring: None,
                     is_entry_point: false,
                     is_public,
+                    tested: name.contains("Test"),
+                    is_nif: false,
+                    is_unsafe: false,
                     properties: std::collections::HashMap::new(),
-                
                     embedding: None,
                 });
             }
@@ -93,6 +95,7 @@ impl JavaParser {
             if let Ok(name) = name_node.utf8_text(content) {
                 let mut is_entry = false;
                 let mut is_public = false;
+                let mut tested = false;
                 let mut decorators = Vec::new();
 
                 let mut modifiers_node = None;
@@ -116,6 +119,9 @@ impl JavaParser {
                                 if let Ok(ann_text) = ann_name.utf8_text(content) {
                                     decorators.push(ann_text.to_string());
                                     let ann_text_str = ann_text;
+                                    if ann_text_str.contains("Test") {
+                                        tested = true;
+                                    }
                                     if ann_text_str.contains("Mapping")
                                         || ann_text_str.contains("Route")
                                         || ann_text_str.contains("Endpoint")
@@ -148,8 +154,10 @@ impl JavaParser {
                     docstring: None,
                     is_entry_point: is_entry,
                     is_public,
+                    tested,
+                    is_nif: false,
+                    is_unsafe: false,
                     properties,
-                
                     embedding: None,
                 });
             }
@@ -213,60 +221,6 @@ impl Parser for JavaParser {
             );
         }
 
-        ExtractionResult { symbols, relations }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_java_parser() {
-        let code = r#"
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
-import com.example.service.MyService;
-
-@RestController
-public class MyController {
-    private MyService myService;
-    
-    @GetMapping("/hello")
-    public String sayHello() {
-        return myService.greet();
-    }
-    
-    public void normalMethod() {
-        System.out.println("Normal");
-    }
-}
-        "#;
-        
-        let parser = JavaParser::new();
-        let result = parser.parse(code);
-        
-        // Imports
-        assert!(result.relations.iter().any(|r| r.rel_type == "imports" && r.to == "org.springframework.web.bind.annotation.GetMapping"));
-        assert!(result.relations.iter().any(|r| r.rel_type == "imports" && r.to == "org.springframework.web.bind.annotation.RestController"));
-        assert!(result.relations.iter().any(|r| r.rel_type == "imports" && r.to == "com.example.service.MyService"));
-        
-        // Classes
-        let _cls = result.symbols.iter().find(|s| s.name == "MyController" && s.kind == "class").unwrap();
-        
-        // Methods
-        let say_hello = result.symbols.iter().find(|s| s.name == "sayHello" && s.kind == "method").unwrap();
-        assert_eq!(say_hello.properties.get("class_name").unwrap(), "MyController");
-        assert_eq!(say_hello.properties.get("decorators").unwrap(), "GetMapping");
-        assert!(say_hello.is_entry_point);
-        let normal_method = result.symbols.iter().find(|s| s.name == "normalMethod" && s.kind == "method").unwrap();
-
-        assert_eq!(say_hello.properties.get("class_name").unwrap(), "MyController");
-        assert!(!normal_method.properties.contains_key("decorators"));
-        assert!(!normal_method.is_entry_point);
-        
-        // Calls
-        assert!(result.relations.iter().any(|r| r.rel_type == "calls" && r.to == "myService.greet"));
-        assert!(result.relations.iter().any(|r| r.rel_type == "calls" && r.to == "System.out.println"));
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }

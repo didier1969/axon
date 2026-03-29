@@ -8,40 +8,61 @@ use futures_util::stream::{self, Stream};
 use tokio_stream::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpServer};
 
-pub fn app_router(mcp_server: Arc<McpServer>, mcp_active_flag: Arc<AtomicBool>) -> Router {
+use tracing::Instrument;
+
+pub fn app_router(mcp_server: Arc<McpServer>) -> Router {
     Router::new()
         .route("/mcp", post(handle_mcp_post))
         .route("/mcp/sse", get(handle_mcp_sse))
+        .route("/sql", post(handle_sql_post))
         .layer(Extension(mcp_server))
-        .layer(Extension(mcp_active_flag))
+}
+
+#[derive(serde::Deserialize)]
+struct SqlRequest {
+    query: String,
+}
+
+async fn handle_sql_post(
+    Extension(server): Extension<Arc<McpServer>>,
+    Json(payload): Json<SqlRequest>,
+) -> Json<serde_json::Value> {
+    let span = tracing::info_span!("sql_gateway", query = %payload.query);
+    
+    async move {
+        match tokio::task::spawn_blocking(move || {
+            server.execute_raw_sql(&payload.query)
+        }).await {
+            Ok(Ok(res)) => Json(serde_json::from_str(&res).unwrap_or(serde_json::json!([]))),
+            Ok(Err(e)) => Json(serde_json::json!({"error": format!("{:?}", e)})),
+            Err(e) => Json(serde_json::json!({"error": format!("Task Panic: {:?}", e)})),
+        }
+    }.instrument(span).await
 }
 
 async fn handle_mcp_post(
     Extension(server): Extension<Arc<McpServer>>,
-    Extension(mcp_active_flag): Extension<Arc<AtomicBool>>,
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<Option<JsonRpcResponse>> {
-    // 1. Signal priority to pause ingestion
-    mcp_active_flag.store(true, Ordering::SeqCst);
+    let span = tracing::info_span!("mcp_request", method = %payload.method);
     
-    // 2. Offload C-FFI / DB work to a blocking thread pool safely
-    let response = match tokio::task::spawn_blocking(move || {
-        server.handle_request(payload)
-    }).await {
-        Ok(res) => res,
-        Err(e) => {
-            log::error!("MCP Blocking Task Panicked: {:?}", e);
-            None
-        }
-    };
-    
-    // 3. Resume ingestion
-    mcp_active_flag.store(false, Ordering::SeqCst);
-    
-    Json(response)
+    async move {
+        // Offload C-FFI / DB work to a blocking thread pool safely
+        // No more mcp_active_flag: Zero-Sleep MVCC architecture handles concurrency.
+        let response = match tokio::task::spawn_blocking(move || {
+            server.handle_request(payload)
+        }).await {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!("MCP Blocking Task Panicked: {:?}", e);
+                None
+            }
+        };
+        
+        Json(response)
+    }.instrument(span).await
 }
 
 /// Compliant MCP SSE Endpoint
@@ -72,14 +93,13 @@ mod tests {
     use crate::graph::GraphStore;
     use crate::mcp::McpServer;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
 
     #[tokio::test]
     async fn test_mcp_http_endpoint_tools_list() {
-        let store = Arc::new(std::sync::RwLock::new(GraphStore::new(":memory:").unwrap()));
+        // Updated test server creation to use direct Arc (Zéro-Sleep)
+        let store = Arc::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db_http").unwrap()));
         let mcp_server = Arc::new(McpServer::new(store));
-        let flag = Arc::new(AtomicBool::new(false));
-        let app = app_router(mcp_server, flag);
+        let app = app_router(mcp_server);
 
         let request_body = json!({
             "jsonrpc": "2.0",

@@ -2,7 +2,7 @@ use super::{ExtractionResult, Parser};
 use std::process::Command;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use log::error;
+use tracing::error;
 
 pub struct TypeQLParser;
 
@@ -27,13 +27,13 @@ impl Parser for TypeQLParser {
             Ok(f) => f,
             Err(e) => {
                 error!("Failed to create temp file for TypeQL parser: {}", e);
-                return ExtractionResult { symbols, relations };
+                return ExtractionResult { project_slug: None, symbols, relations };
             }
         };
 
         if let Err(e) = temp_file.write_all(content.as_bytes()) {
             error!("Failed to write content to temp file for TypeQL parser: {}", e);
-            return ExtractionResult { symbols, relations };
+            return ExtractionResult { project_slug: None, symbols, relations };
         }
 
         let current_dir = std::env::current_dir().unwrap_or_default();
@@ -64,7 +64,7 @@ impl Parser for TypeQLParser {
             }
         }
 
-        ExtractionResult { symbols, relations }
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }
 

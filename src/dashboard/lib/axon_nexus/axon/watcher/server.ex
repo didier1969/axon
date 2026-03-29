@@ -41,23 +41,10 @@ defmodule Axon.Watcher.Server do
       pending_files: MapSet.new(),
       timer: nil,
       monitoring_active: true,
-      pending_batches: %{100 => [], 80 => [], 50 => [], 10 => []},
       idle_timer: start_idle_timer()
     }
 
-    backend_args =
-      case :os.type() do
-        {:unix, :linux} ->
-          [
-            "--exclude",
-            "(/.git/|/.axon/|/_build/|/deps/|/.devenv/|/node_modules/|/target/)"
-          ]
-
-        _ ->
-          []
-      end
-
-    case FileSystem.start_link(dirs: [watch_dir], backend_args: backend_args) do
+    case FileSystem.start_link(dirs: [watch_dir]) do
       {:ok, watcher_pid} ->
         FileSystem.subscribe(watcher_pid)
         {:ok, %{initial_state | watcher_pid: watcher_pid}, {:continue, :auto_trigger_scan}}
@@ -69,47 +56,28 @@ defmodule Axon.Watcher.Server do
 
   @impl true
   def handle_continue(:auto_trigger_scan, state) do
-    Logger.info("[Pod A] AUTO-START: Triggering initial scan...")
+    Logger.info("[Pod A] AUTO-START: Waiting for manual or Rust-led scan...")
 
-    Phoenix.PubSub.broadcast(
-      AxonDashboard.PubSub,
-      "bridge_events",
-      {:scan_started, state.watch_dir}
-    )
+    # Phoenix.PubSub.broadcast(
+    #   AxonDashboard.PubSub,
+    #   "bridge_events",
+    #   {:scan_started, state.watch_dir}
+    # )
 
-    send(self(), :initial_scan)
-    
+    # send(self(), :initial_scan)
+    # Scan is now handled by Rust Data Plane.
+    # Axon.Watcher.PoolFacade.trigger_global_scan()
+
     # Schedule automated retry for failed files every 5 minutes
-    :timer.send_interval(300_000, self(), :retry_failed)
-    
-    {:noreply, state}
-  end
+    # :timer.send_interval(300_000, self(), :retry_failed)
 
-  @impl true
-  def handle_info(:retry_failed, state) do
-    failed_files = Axon.Watcher.Tracking.get_failed_files(100)
-    if length(failed_files) > 0 do
-      Logger.info("[Pod A] Retrying #{length(failed_files)} failed files...")
-      
-      # Group them back into batches based on Priority
-      Enum.each(failed_files, fn str_path ->
-        try do
-          # Mark back to pending so they don't get retried twice if Oban is slow
-          Axon.Watcher.Tracking.mark_file_status!(str_path, "pending")
-        rescue
-          _ -> :ok
-        end
-      end)
-      
-      # Dispatch to hot queue for immediate reprocessing
-      dispatch_batch(failed_files, :indexing_hot)
-    end
     {:noreply, state}
   end
 
   @impl true
   def handle_cast(:trigger_scan, state) do
-    send(self(), :initial_scan)
+    # send(self(), :initial_scan)
+    # Scan is now handled by Rust Data Plane.
     {:noreply, state}
   end
 
@@ -130,26 +98,31 @@ defmodule Axon.Watcher.Server do
     do: {:reply, state.monitoring_active, state}
 
   @impl true
-  def handle_info(:initial_scan, state) do
-    Logger.info("[Pod A] Triggering Reactive Streaming Scan on: #{state.watch_dir}")
+  def handle_info(:retry_failed, state) do
+    failed_files = Axon.Watcher.Tracking.get_failed_files(100)
 
-    Axon.Watcher.Progress.update_status(state.repo_slug, %{
-      status: "indexing",
-      total: 0,
-      progress: 0
-    })
+    if length(failed_files) > 0 do
+      Logger.info("[Pod A] Retrying #{length(failed_files)} failed files...")
 
-    # Déclenche le scan asynchrone qui enverra des messages {:ok, path} ou {:ok, "done"}
-    Axon.Scanner.start_streaming(state.watch_dir, self())
+      Enum.each(failed_files, fn str_path ->
+        try do
+          Axon.Watcher.Tracking.mark_file_status!(str_path, "pending")
+        rescue
+          _ -> :ok
+        end
+      end)
+
+      dispatch_batch(failed_files, :indexing_hot)
+    end
+
     {:noreply, state}
   end
 
   @impl true
   def handle_info({:ok, "done"}, state) do
     Logger.info("[Pod A] Reactive Scan Completed.")
-    flush_all_batches(state.pending_batches)
     Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "live", progress: 100})
-    {:noreply, %{state | pending_batches: %{100 => [], 80 => [], 50 => [], 10 => []}}}
+    {:noreply, state}
   end
 
   @impl true
@@ -172,37 +145,27 @@ defmodule Axon.Watcher.Server do
         {:ok, %{mtime: mtime}} ->
           last_mtime = Axon.Watcher.Tracking.get_file_hash(str_path)
           current_mtime = :erlang.phash2(mtime)
-          
+
           # Optimization: Only mark as pending and enqueue if the file CHANGED 
           # or if it's not yet successfully indexed in the local DB.
           current_status = Axon.Watcher.Tracking.get_file_status(str_path)
 
-          if last_mtime == nil or current_mtime != last_mtime or current_status not in ["indexed", "ignored_by_rule"] do
-            try do
-              Axon.Watcher.Tracking.upsert_file!(project_name, str_path, current_mtime, "pending")
-            rescue
-              _ -> :ok
-            end
-
+          if last_mtime == nil or current_mtime != last_mtime or
+               current_status not in ["indexed", "ignored_by_rule"] do
+            
             # TITAN PROTOCOL: Route massive files (>1MB) to the single-threaded queue immediately.
             case File.stat(str_path) do
               {:ok, %{size: size}} when size > 1_048_576 ->
+                # Titan stays synchronous for now as they are rare
+                # We still need to upsert here if we bypass staging
+                Axon.Watcher.Tracking.upsert_file!(project_name, str_path, current_mtime, "pending")
                 dispatch_batch([str_path], :indexing_titan)
                 {:noreply, state}
+
               _ ->
-                current_batch = state.pending_batches[priority]
-                new_batch = [str_path | current_batch]
-
-                chunk_size = Axon.BackpressureController.get_chunk_size()
-                threshold = if priority >= 80, do: min(10, chunk_size), else: chunk_size
-
-                if length(new_batch) >= threshold do
-                  queue = if priority >= 80, do: :indexing_hot, else: :indexing_default
-                  dispatch_batch(new_batch, queue)
-                  {:noreply, put_in(state.pending_batches[priority], [])}
-                else
-                  {:noreply, put_in(state.pending_batches[priority], new_batch)}
-                end
+                # NEXUS PRODUCTION: All other files go to ETS for batched insertion
+                Axon.Watcher.Staging.stage_file(project_name, str_path, current_mtime, priority)
+                {:noreply, state}
             end
           else
             # File is already indexed and hasn't changed on disk.
@@ -239,16 +202,37 @@ defmodule Axon.Watcher.Server do
   end
 
   @impl true
+  def handle_info(:initial_scan, state) do
+    Logger.info("[Pod A] Triggering Reactive Streaming Scan on: #{state.watch_dir}")
+
+    # Mark all existing files as stale. True orphan files will remain stale and can be cleaned up later.
+    Axon.Watcher.Repo.query!("UPDATE indexed_files SET status = 'stale'")
+
+    Axon.Watcher.Progress.update_status(state.repo_slug, %{
+      status: "indexing",
+      total: 0,
+      progress: 0
+    })
+
+    # Déclenche le scan asynchrone qui enverra des messages {:ok, path} ou {:ok, "done"}
+    Axon.Scanner.start_streaming(state.watch_dir, self())
+    {:noreply, state}
+  end
+
+  @impl true
   def handle_info(:process_batch, state) do
     state = %{state | idle_timer: reset_idle_timer(state.idle_timer)}
     files_to_process = MapSet.to_list(state.pending_files)
 
     if length(files_to_process) > 0 do
-      chunk_size = Axon.BackpressureController.get_chunk_size()
-
-      files_to_process
-      |> Enum.chunk_every(chunk_size)
-      |> Enum.each(&dispatch_batch(&1, :indexing_hot))
+      Enum.each(files_to_process, fn path ->
+        priority = calculate_priority(path)
+        mtime = case File.stat(path) do
+          {:ok, %{mtime: t}} -> :erlang.phash2(t)
+          _ -> 0
+        end
+        Axon.Watcher.Staging.stage_file("event", path, mtime, priority)
+      end)
     end
 
     {:noreply, %{state | pending_files: MapSet.new(), timer: nil}}
@@ -261,6 +245,7 @@ defmodule Axon.Watcher.Server do
     if Process.whereis(Axon.Watcher.Auditor) do
       send(Axon.Watcher.Auditor, :run_audit)
     end
+
     # Do NOT restart the timer here. It will restart on the next activity.
     {:noreply, %{state | idle_timer: nil}}
   end
@@ -269,15 +254,13 @@ defmodule Axon.Watcher.Server do
     # BARE MINIMUM "ANTI-AVALANCHE" SHIELD
     # This prevents the Erlang VM from being flooded by 10,000+ Inotify events during builds/deps installs.
     # All other domain filtering (extensions, specific ignore rules) should be handled dynamically via .axonignore logic.
-    not (
-      String.contains?(path, "/.git/") or
-      String.contains?(path, "/.axon/") or
-      String.contains?(path, "/_build/") or
-      String.contains?(path, "/deps/") or
-      String.contains?(path, "/.devenv/") or
-      String.contains?(path, "/node_modules/") or
-      String.contains?(path, "/target/")
-    )
+    not (String.contains?(path, "/.git/") or
+           String.contains?(path, "/.axon/") or
+           String.contains?(path, "/_build/") or
+           String.contains?(path, "/deps/") or
+           String.contains?(path, "/.devenv/") or
+           String.contains?(path, "/node_modules/") or
+           String.contains?(path, "/target/"))
   end
 
   defp reset_timer(existing_timer) do
@@ -298,7 +281,14 @@ defmodule Axon.Watcher.Server do
   defp dispatch_batch(paths, queue) do
     # Optimization: we don't read file content here to avoid blocking the GenServer
     # and to prevent blowing up the Erlang RAM and Oban DB size.
-    files_payload = Enum.map(paths, fn path -> %{"path" => path} end)
+    files_payload =
+      Enum.map(paths, fn path ->
+        %{
+          "path" => path,
+          "trace_id" => Ecto.UUID.generate(),
+          "t0" => :os.system_time(:microsecond)
+        }
+      end)
 
     if length(files_payload) > 0 do
       try do
@@ -308,11 +298,18 @@ defmodule Axon.Watcher.Server do
         Axon.Watcher.IndexingWorker.new(job_args, queue: queue)
         |> Oban.insert!()
 
-        :telemetry.execute([:axon, :watcher, :batch_enqueued], %{count: length(files_payload)}, %{queue: queue})
+        :telemetry.execute([:axon, :watcher, :batch_enqueued], %{count: length(files_payload)}, %{
+          queue: queue
+        })
+
         Logger.info("[Pod A] Enqueued batch of #{length(files_payload)} files to #{queue}.")
       rescue
-        e -> 
-          :telemetry.execute([:axon, :watcher, :batch_failed], %{count: length(files_payload)}, %{queue: queue, error: inspect(e)})
+        e ->
+          :telemetry.execute([:axon, :watcher, :batch_failed], %{count: length(files_payload)}, %{
+            queue: queue,
+            error: inspect(e)
+          })
+
           Logger.error("[Pod A] FAILED to enqueue batch: #{inspect(e)}")
       end
     end
@@ -327,15 +324,6 @@ defmodule Axon.Watcher.Server do
       ext in [".md", ".txt", ".json", ".yml", ".yaml", ".toml", ".conf"] -> 50
       true -> 10
     end
-  end
-
-  defp flush_all_batches(batches) do
-    Enum.each(batches, fn {priority, paths} ->
-      if length(paths) > 0 do
-        queue = if priority >= 80, do: :indexing_hot, else: :indexing_default
-        dispatch_batch(paths, queue)
-      end
-    end)
   end
 
   defp get_top_dir(path, watch_dir) do

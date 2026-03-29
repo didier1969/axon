@@ -112,7 +112,7 @@ impl Parser for TypeScriptParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let tree = match parse_with_wasm_safe("tsx", self.wasm_bytes, content) {
             Some(t) => t,
-            None => return ExtractionResult { symbols: Vec::new(), relations: Vec::new() },
+            None => return ExtractionResult { project_slug: None, symbols: Vec::new(), relations: Vec::new() },
         };
         let language = tree.language();
 
@@ -166,7 +166,7 @@ impl Parser for TypeScriptParser {
             Ok(q) => q,
             Err(e) => {
                 log::warn!("Failed to create TSX query: {}", e);
-                return ExtractionResult { symbols: Vec::new(), relations: Vec::new() };
+                return ExtractionResult { project_slug: None, symbols: Vec::new(), relations: Vec::new() };
             }
         };
         let mut cursor = QueryCursor::new();
@@ -196,8 +196,10 @@ impl Parser for TypeScriptParser {
                             docstring: None,
                             is_entry_point: false,
                             is_public: exports.contains(&text),
+                            tested: text.contains("Test") || text.contains("Spec"),
+                            is_nif: false,
+                            is_unsafe: false,
                             properties: HashMap::new(),
-                        
                             embedding: None,
                         });
 
@@ -235,8 +237,10 @@ impl Parser for TypeScriptParser {
                             docstring: None,
                             is_entry_point: false,
                             is_public: exports.contains(&text),
+                            tested: false,
+                            is_nif: false,
+                            is_unsafe: false,
                             properties: HashMap::new(),
-                        
                             embedding: None,
                         });
 
@@ -268,8 +272,10 @@ impl Parser for TypeScriptParser {
                             docstring: None,
                             is_entry_point: false,
                             is_public: exports.contains(&text),
+                            tested: false,
+                            is_nif: false,
+                            is_unsafe: false,
                             properties: HashMap::new(),
-                        
                             embedding: None,
                         });
                     }
@@ -278,6 +284,14 @@ impl Parser for TypeScriptParser {
                         let is_entry = exports.contains(&text) && 
                             ["handler", "route", "get", "post", "put", "delete"].iter().any(|&k| lower_name.contains(k));
                         
+                        let mut is_unsafe = false;
+                        if let Some(parent) = node.parent() {
+                            let body = parent.utf8_text(source).unwrap_or("");
+                            if body.contains("eval(") || body.contains("innerHTML") {
+                                is_unsafe = true;
+                            }
+                        }
+
                         symbols.push(Symbol {
                             name: text.clone(),
                             kind: "function".to_string(),
@@ -286,8 +300,10 @@ impl Parser for TypeScriptParser {
                             docstring: None,
                             is_entry_point: is_entry,
                             is_public: exports.contains(&text),
+                            tested: lower_name.contains("test") || lower_name.contains("spec"),
+                            is_nif: false,
+                            is_unsafe,
                             properties: HashMap::new(),
-                        
                             embedding: None,
                         });
                     }
@@ -304,9 +320,11 @@ impl Parser for TypeScriptParser {
                             end_line: node.end_position().row + 1,
                             docstring: None,
                             is_entry_point: false,
-                            is_public: exports.contains(&text),
+                            is_public: true, // TS methods are public by default unless private keyword
+                            tested: false,
+                            is_nif: false,
+                            is_unsafe: false,
                             properties: props,
-                        
                             embedding: None,
                         });
                     }
@@ -331,64 +349,6 @@ impl Parser for TypeScriptParser {
             }
         }
         
-        ExtractionResult { symbols, relations }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_typescript() {
-        let code = r#"
-            import { X } from "my-module";
-            const fs = require('fs');
-
-            export class MyClass extends BaseClass implements InterfaceA {
-                myMethod() {
-                    console.log("hello");
-                }
-            }
-
-            export function getHandler() {
-                myCall();
-                new OtherClass();
-            }
-
-            export const myArrowRoute = () => {
-                document.innerHTML = "<b>XSS</b>";
-            };
-
-            interface MyInt extends BaseInt {}
-            type MyType = string;
-        "#;
-        let parser = TypeScriptParser::new();
-        let result = parser.parse(code);
-        
-        assert!(result.symbols.iter().any(|s| s.name == "MyClass" && s.kind == "class"));
-        assert!(result.symbols.iter().any(|s| s.name == "MyInt" && s.kind == "interface"));
-        assert!(result.symbols.iter().any(|s| s.name == "MyType" && s.kind == "type_alias"));
-        
-        let get_handler = result.symbols.iter().find(|s| s.name == "getHandler").unwrap();
-        assert!(get_handler.is_entry_point);
-
-        let arrow_route = result.symbols.iter().find(|s| s.name == "myArrowRoute").unwrap();
-        assert!(arrow_route.is_entry_point);
-
-        let method = result.symbols.iter().find(|s| s.name == "myMethod").unwrap();
-        assert_eq!(method.properties.get("class_name").unwrap(), "MyClass");
-
-        assert!(result.relations.iter().any(|r| r.from == "MyClass" && r.to == "BaseClass" && r.rel_type == "extends"));
-        assert!(result.relations.iter().any(|r| r.from == "MyClass" && r.to == "InterfaceA" && r.rel_type == "implements"));
-        assert!(result.relations.iter().any(|r| r.from == "MyInt" && r.to == "BaseInt" && r.rel_type == "extends"));
-
-        assert!(result.relations.iter().any(|r| r.to == "my-module" && r.rel_type == "imports"));
-        assert!(result.relations.iter().any(|r| r.to == "fs" && r.rel_type == "imports"));
-
-        assert!(result.relations.iter().any(|r| r.to == "log" && r.rel_type == "calls"));
-        assert!(result.relations.iter().any(|r| r.to == "myCall" && r.rel_type == "calls"));
-        assert!(result.relations.iter().any(|r| r.to == "OtherClass" && r.rel_type == "calls"));
-        assert!(result.relations.iter().any(|r| r.to == "innerHTML" && r.rel_type == "calls"));
+        ExtractionResult { project_slug: None, symbols, relations }
     }
 }

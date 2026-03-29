@@ -14,19 +14,22 @@ config :axon_dashboard,
 config :axon_dashboard, Axon.Watcher.Repo,
   adapter: Ecto.Adapters.SQLite3,
   database: "axon_nexus.db",
-  pool_size: 5,
+  pool_size: 1, # SERIALIZED WRITES to avoid 'Database busy'
   journal_mode: :wal,
-  busy_timeout: 5000
+  busy_timeout: 5000,
+  synchronous: :normal # High performance mode for WAL
 
 config :axon_dashboard, Oban,
   repo: Axon.Watcher.Repo,
   engine: Oban.Engines.Lite,
-  plugins: [Oban.Plugins.Pruner],
+  # Prune less frequently to avoid lock contention during massive ingestion
+  plugins: [{Oban.Plugins.Pruner, interval: 300_000}], 
   queues: [
     indexing_critical: [limit: 10],
     indexing_hot: [limit: 5],
     indexing_default: [limit: 10],
-    indexing_titan: [limit: 1] # Strict single-thread isolation for massive >1MB files
+    # Strict single-thread isolation for massive >1MB files
+    indexing_titan: [limit: 1]
   ]
 
 config :axon_dashboard, Axon.BackpressureController,
@@ -68,7 +71,7 @@ config :tailwind,
 
 # Configure Elixir's Logger
 config :logger, :default_formatter,
-  format: "$time $metadata[$level] $message\n",
+  format: "[$date $time] $metadata[$level] $message\n",
   metadata: [:request_id]
 
 # Use Jason for JSON parsing in Phoenix

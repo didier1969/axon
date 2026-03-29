@@ -1,485 +1,587 @@
-use libloading::{Library, Symbol};
 use std::ffi::{CString, c_void};
-use std::os::raw::c_char;
+use libloading::{Library, Symbol as LibSymbol};
 use std::path::PathBuf;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::sync::{Arc, Mutex};
 
-type InitDbFunc = unsafe extern "C" fn(*const c_char) -> *mut c_void;
-type ExecuteFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> bool;
-type ExecuteParamFunc = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> bool;
-type ExecuteBatchFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> bool;
-type QueryCountFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> i64;
-type QueryCountParamFunc = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> i64;
-type QueryJsonFunc = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char;
-type QueryJsonParamFunc = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> *mut c_char;
-type FreeStringFunc = unsafe extern "C" fn(*mut c_char);
-type CloseDbFunc = unsafe extern "C" fn(*mut c_void);
-
-pub struct GraphStore {
-    lib: Arc<Library>,
-    ctx: *mut c_void,
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct PendingFile {
+    pub path: String,
+    pub trace_id: String,
+    pub priority: i64,
 }
 
-unsafe impl Send for GraphStore {}
-unsafe impl Sync for GraphStore {}
+// FFI Types
+type InitDbFunc = unsafe extern "C" fn(path: *const std::os::raw::c_char, read_only: bool) -> *mut c_void;
+type ExecFunc = unsafe extern "C" fn(ctx: *mut c_void, query: *const std::os::raw::c_char) -> bool;
+type QueryJsonFunc = unsafe extern "C" fn(ctx: *mut c_void, query: *const std::os::raw::c_char) -> *mut std::os::raw::c_char;
+type QueryCountFunc = unsafe extern "C" fn(ctx: *mut c_void, query: *const std::os::raw::c_char) -> i64;
+type FreeStrFunc = unsafe extern "C" fn(ptr: *mut std::os::raw::c_char);
+type CloseDbFunc = unsafe extern "C" fn(ctx: *mut c_void);
 
-impl Drop for GraphStore {
-    fn drop(&mut self) {
-        if !self.ctx.is_null() {
-            unsafe {
-                if let Ok(close_fn) = self.lib.get::<CloseDbFunc>(b"ladybug_close_db\0") {
-                    close_fn(self.ctx);
-                }
-            }
-        }
-    }
+pub struct LatticePool {
+    lib: Arc<Library>,
+    writer_ctx: Mutex<*mut c_void>,
+    reader_ctx: Mutex<*mut c_void>,
+}
+
+unsafe impl Send for LatticePool {}
+unsafe impl Sync for LatticePool {}
+
+pub struct GraphStore {
+    pool: Arc<LatticePool>,
 }
 
 impl GraphStore {
-    pub fn new(db_path: &str) -> Result<Self> {
+    pub fn new(db_root: &str) -> Result<Self> {
         let plugin_path = Self::find_plugin_path()?;
-        let lib = unsafe { 
-            Library::new(&plugin_path)
-                .map_err(|e| anyhow!("Failed to load plugin {}: {}", plugin_path.display(), e))? 
-        };
-        let lib = Arc::new(lib);
+        let lib = Arc::new(unsafe { Library::new(&plugin_path)? });
+        let init_fn: LibSymbol<InitDbFunc> = unsafe { lib.get(b"duckdb_init_db\0")? };
+        let close_fn: LibSymbol<CloseDbFunc> = unsafe { lib.get(b"duckdb_close_db\0")? };
+        let is_memory = db_root == ":memory:";
 
-        let ctx = unsafe {
-            let init_fn: Symbol<InitDbFunc> = lib.get(b"ladybug_init_db\0")
-                .map_err(|e| anyhow!("Failed to load symbol ladybug_init_db: {}", e))?;
-            let c_path = CString::new(db_path)?;
-            let ctx = init_fn(c_path.as_ptr());
-            if ctx.is_null() {
-                return Err(anyhow!("Failed to initialize Ladybug database at {}", db_path));
-            }
-            ctx
-        };
+        if !is_memory {
+            let mut soll_dir = PathBuf::from(db_root);
+            soll_dir.push("sanctuary");
+            std::fs::create_dir_all(&soll_dir)?;
 
-        let store = Self { lib, ctx };
-        store.init_schema()?;
+            let mut soll_path = soll_dir.clone();
+            soll_path.push("soll.db");
+            let soll_c_path = CString::new(soll_path.to_string_lossy().to_string())?;
 
-        Ok(store)
-    }
-
-    fn find_plugin_path() -> Result<PathBuf> {
-        let plugin_name = if cfg!(target_os = "macos") {
-            "libaxon_plugin_ladybug.dylib"
-        } else if cfg!(target_os = "windows") {
-            "axon_plugin_ladybug.dll"
-        } else {
-            "libaxon_plugin_ladybug.so"
-        };
-
-        let current_dir = std::env::current_dir()?;
-        let search_paths = vec![
-            current_dir.join(plugin_name),
-            current_dir.join(format!("../axon-plugin-ladybug/target/release/{}", plugin_name)),
-            current_dir.join(format!("../axon-plugin-ladybug/target/debug/{}", plugin_name)),
-            current_dir.join(format!("../../target/release/{}", plugin_name)),
-            current_dir.join(format!("../../target/debug/{}", plugin_name)),
-            // If running from root of workspace
-            current_dir.join(format!("src/axon-plugin-ladybug/target/release/{}", plugin_name)),
-            current_dir.join(format!("src/axon-plugin-ladybug/target/debug/{}", plugin_name)),
-        ];
-
-        for path in search_paths {
-            if path.exists() {
-                return Ok(path);
+            unsafe {
+                let soll_ptr = init_fn(soll_c_path.as_ptr(), false);
+                if soll_ptr.is_null() {
+                    return Err(anyhow!("Failed to bootstrap SOLL database"));
+                }
+                close_fn(soll_ptr);
             }
         }
 
-        Err(anyhow!("Could not find plugin {}. Expected it to be compiled in axon-plugin-ladybug/target. You might need to run: cd src/axon-plugin-ladybug && cargo build", plugin_name))
+        let db_path_str = if is_memory { ":memory:".to_string() } else {
+            let mut p = PathBuf::from(db_root);
+            std::fs::create_dir_all(&p)?;
+            p.push("ist.db");
+            p.to_string_lossy().to_string()
+        };
+        let c_path = CString::new(db_path_str)?;
+
+        unsafe {
+            let writer_ptr = init_fn(c_path.as_ptr(), false);
+            if writer_ptr.is_null() { return Err(anyhow!("Failed to init DuckDB Writer")); }
+            
+            let reader_ptr = if is_memory {
+                writer_ptr
+            } else {
+                init_fn(c_path.as_ptr(), true)
+            };
+            if reader_ptr.is_null() { return Err(anyhow!("Failed to init DuckDB Reader")); }
+
+            let pool = Arc::new(LatticePool { 
+                lib, 
+                writer_ctx: Mutex::new(writer_ptr), 
+                reader_ctx: Mutex::new(reader_ptr) 
+            });
+            let store = Self { pool: pool.clone() };
+            
+            if !is_memory {
+                let mut soll_path = PathBuf::from(db_root);
+                soll_path.push("sanctuary/soll.db");
+                let attach_q = format!("ATTACH '{}' AS soll;", soll_path.to_string_lossy().replace("'", "''"));
+                // Must hold lock while setting up session
+                {
+                    let w_guard = store.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+                    store.setup_session(*w_guard, &attach_q)?;
+                }
+                {
+                    let r_guard = store.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+                    store.setup_session(*r_guard, &attach_q)?;
+                }
+            } else {
+                let _ = store.execute("CREATE SCHEMA IF NOT EXISTS soll;");
+            }
+
+            store.init_schema(is_memory)?;
+            store.execute("CHECKPOINT;")?;
+            Ok(store)
+        }
+    }
+
+    fn setup_session(&self, ctx: *mut c_void, attach_query: &str) -> Result<()> {
+        unsafe {
+            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            exec_fn(ctx, CString::new("INSTALL json; LOAD json;")?.as_ptr());
+            exec_fn(ctx, CString::new("SET checkpoint_threshold = '1GB';")?.as_ptr());
+            if !attach_query.is_empty() {
+                exec_fn(ctx, CString::new(attach_query)?.as_ptr());
+            }
+            Ok(())
+        }
     }
 
     pub fn execute(&self, query: &str) -> Result<()> {
+        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
-            let exec_fn: Symbol<ExecuteFunc> = self.lib.get(b"ladybug_execute\0")?;
-            let c_query = CString::new(query)?;
-            if !exec_fn(self.ctx, c_query.as_ptr()) {
-                return Err(anyhow!("Execution failed for query: {}", query));
+            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            if !exec_fn(*guard, CString::new(query)?.as_ptr()) {
+                return Err(anyhow!("Writer Error: {}", query));
             }
-            Ok(())
         }
+        Ok(())
     }
 
     pub fn execute_param(&self, query: &str, params: &serde_json::Value) -> Result<()> {
-        unsafe {
-            let exec_fn: Symbol<ExecuteParamFunc> = self.lib.get(b"ladybug_execute_param\0")?;
-            let c_query = CString::new(query)?;
-            let params_str = serde_json::to_string(params)?;
-            let c_params = CString::new(params_str)?;
-            if !exec_fn(self.ctx, c_query.as_ptr(), c_params.as_ptr()) {
-                return Err(anyhow!("Execution failed for parameterized query: {}", query));
-            }
-            Ok(())
-        }
+        let expanded = Self::expand_named_params(query, params)?;
+        self.execute(&expanded)
     }
 
-    pub fn execute_batch(&self, queries: &[String]) -> Result<()> {
-        unsafe {
-            let exec_batch_fn: Symbol<ExecuteBatchFunc> = self.lib.get(b"ladybug_execute_batch\0")?;
-            let json_str = serde_json::to_string(queries)?;
-            let c_query = CString::new(json_str)?;
-            if !exec_batch_fn(self.ctx, c_query.as_ptr()) {
-                return Err(anyhow!("Batch execution failed"));
-            }
-            Ok(())
-        }
+    pub fn query_json(&self, query: &str) -> Result<String> {
+        let guard = self.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        self.query_on_ctx(query, *guard)
+    }
+
+    pub fn query_json_param(&self, query: &str, params: &serde_json::Value) -> Result<String> {
+        let expanded = Self::expand_named_params(query, params)?;
+        let guard = self.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        self.query_on_ctx(&expanded, *guard)
     }
 
     pub fn query_count(&self, query: &str) -> Result<i64> {
+        let guard = self.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
-            let count_fn: Symbol<QueryCountFunc> = self.lib.get(b"ladybug_query_count\0")?;
-            let c_query = CString::new(query)?;
-            Ok(count_fn(self.ctx, c_query.as_ptr()))
+            let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
+            Ok(count_fn(*guard, CString::new(query)?.as_ptr()))
         }
     }
 
     pub fn query_count_param(&self, query: &str, params: &serde_json::Value) -> Result<i64> {
+        let res = self.query_json_param(query, params)?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res).unwrap_or_default();
+        if let Some(row) = rows.get(0) {
+            if let Some(val) = row.get(0) {
+                return Ok(val.as_i64().unwrap_or(0));
+            }
+        }
+        Ok(0)
+    }
+
+    fn query_on_ctx(&self, query: &str, ctx: *mut c_void) -> Result<String> {
         unsafe {
-            let count_fn: Symbol<QueryCountParamFunc> = self.lib.get(b"ladybug_query_count_param\0")?;
-            let c_query = CString::new(query)?;
-            let params_str = serde_json::to_string(params)?;
-            let c_params = CString::new(params_str)?;
-            Ok(count_fn(self.ctx, c_query.as_ptr(), c_params.as_ptr()))
+            let query_fn: LibSymbol<QueryJsonFunc> = self.pool.lib.get(b"duckdb_query_json\0")?;
+            let free_fn: LibSymbol<FreeStrFunc> = self.pool.lib.get(b"duckdb_free_string\0")?;
+            let ptr = query_fn(ctx, CString::new(query)?.as_ptr());
+            if ptr.is_null() { return Ok("[]".to_string()); }
+            let res = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            free_fn(ptr);
+            Ok(res)
         }
     }
 
-    pub fn query_json(&self, query: &str) -> Result<String> {
-        unsafe {
-            let query_fn: Symbol<QueryJsonFunc> = self.lib.get(b"ladybug_query_json\0")?;
-            let c_query = CString::new(query)?;
-            let result_ptr = query_fn(self.ctx, c_query.as_ptr());
-            
-            if result_ptr.is_null() {
-                return Err(anyhow!("Query returned null pointer"));
+    fn expand_named_params(query: &str, params: &serde_json::Value) -> Result<String> {
+        if let Some(arr) = params.as_array() {
+            let mut expanded = query.to_string();
+            for value in arr {
+                let replacement = match value {
+                    serde_json::Value::Null => "NULL".to_string(),
+                    serde_json::Value::Bool(v) => v.to_string(),
+                    serde_json::Value::Number(v) => v.to_string(),
+                    serde_json::Value::String(v) => format!("'{}'", v.replace('\'', "''")),
+                    _ => {
+                        return Err(anyhow!(
+                            "Unsupported positional parameter type: {}",
+                            value
+                        ))
+                    }
+                };
+
+                if let Some(pos) = expanded.find('?') {
+                    expanded.replace_range(pos..=pos, &replacement);
+                } else {
+                    return Err(anyhow!("Too many positional parameters supplied"));
+                }
             }
-            
-            let result_str = std::ffi::CStr::from_ptr(result_ptr).to_string_lossy().into_owned();
-            
-            if let Ok(free_fn) = self.lib.get::<FreeStringFunc>(b"ladybug_free_string\0") {
-                free_fn(result_ptr);
-            }
-            
-            Ok(result_str)
+            return Ok(expanded);
         }
+
+        let mut expanded = query.to_string();
+        let obj = match params.as_object() {
+            Some(obj) => obj,
+            None => return Ok(expanded),
+        };
+
+        for (key, value) in obj {
+            let replacement = match value {
+                serde_json::Value::Null => "NULL".to_string(),
+                serde_json::Value::Bool(v) => v.to_string(),
+                serde_json::Value::Number(v) => v.to_string(),
+                serde_json::Value::String(v) => format!("'{}'", v.replace('\'', "''")),
+                _ => {
+                    return Err(anyhow!(
+                        "Unsupported parameter type for ${}: {}",
+                        key,
+                        value
+                    ))
+                }
+            };
+            expanded = expanded.replace(&format!("${}", key), &replacement);
+        }
+
+        Ok(expanded)
     }
 
-    pub fn query_json_param(&self, query: &str, params: &serde_json::Value) -> Result<String> {
-        unsafe {
-            let query_fn: Symbol<QueryJsonParamFunc> = self.lib.get(b"ladybug_query_json_param\0")?;
-            let c_query = CString::new(query)?;
-            let params_str = serde_json::to_string(params)?;
-            let c_params = CString::new(params_str)?;
-            let result_ptr = query_fn(self.ctx, c_query.as_ptr(), c_params.as_ptr());
-            
-            if result_ptr.is_null() {
-                return Err(anyhow!("Query returned null pointer"));
-            }
-            
-            let result_str = std::ffi::CStr::from_ptr(result_ptr).to_string_lossy().into_owned();
-            
-            if let Ok(free_fn) = self.lib.get::<FreeStringFunc>(b"ladybug_free_string\0") {
-                free_fn(result_ptr);
-            }
-            
-            if result_str.starts_with("Error:") {
-                return Err(anyhow!("{}", result_str));
-            }
-            
-            Ok(result_str)
+    pub fn bulk_insert_files(&self, file_paths: &[(String, String, i64, i64)]) -> Result<()> {
+        let mut queries = Vec::new();
+        for (path, project, size, mtime) in file_paths {
+            queries.push(format!("INSERT INTO Project (name) VALUES ('{}') ON CONFLICT DO NOTHING;", project.replace("'", "''")));
+            queries.push(format!("INSERT INTO File (path, project_slug, size, mtime, status, priority) VALUES ('{}', '{}', {}, {}, 'pending', 100) ON CONFLICT(path) DO UPDATE SET mtime=EXCLUDED.mtime;", 
+                path.replace("'", "''"), project.replace("'", "''"), size, mtime));
         }
+        self.execute_batch(&queries)
     }
 
-    fn init_schema(&self) -> Result<()> {
-        self.execute("CREATE NODE TABLE IF NOT EXISTS File (path STRING, PRIMARY KEY (path))")?;
-        self.execute("CREATE NODE TABLE IF NOT EXISTS Symbol (name STRING, kind STRING, tested BOOLEAN, is_public BOOLEAN, is_unsafe BOOLEAN, is_nif BOOLEAN, is_entry_point BOOLEAN, embedding FLOAT[384], PRIMARY KEY (name))")?;
-        self.execute("CREATE NODE TABLE IF NOT EXISTS Project (name STRING, PRIMARY KEY (name))")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS CONTAINS (FROM File TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS CALLS (FROM Symbol TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS CALLS_NIF (FROM Symbol TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS CALLS_OTP (FROM Symbol TO Symbol, otp_boundary BOOLEAN)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS IMPORTS (FROM Symbol TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS IMPLEMENTS (FROM Symbol TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS USES (FROM Symbol TO Symbol)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS DEPENDS_ON (FROM Project TO Project, path STRING)")?;
-        self.execute("CREATE REL TABLE IF NOT EXISTS BELONGS_TO (FROM File TO Project)")?;
+    pub fn insert_file_data_batch(&self, tasks: &[crate::worker::DbWriteTask]) -> Result<()> {
+        if tasks.is_empty() { return Ok(()); }
+        let mut queries = Vec::new();
+        let mut indexed_paths = Vec::new();
+        let mut skipped_paths = Vec::new();
+        let mut symbol_values = Vec::new();
+
+        for task in tasks {
+            match task {
+                crate::worker::DbWriteTask::FileExtraction { path, extraction, .. } => {
+                    indexed_paths.push(format!("'{}'", path.replace("'", "''")));
+                    let slug = extraction.project_slug.as_deref().unwrap_or("global");
+                    for sym in &extraction.symbols {
+                        let embedding_sql = if let Some(ref v) = sym.embedding {
+                            format!("CAST({:?} AS FLOAT[384])", v)
+                        } else {
+                            "NULL".to_string()
+                        };
+
+                        symbol_values.push(format!("('{}::{}', '{}', '{}', {}, {}, {}, {}, '{}', {})",
+                            slug.replace("'", "''"), sym.name.replace("'", "''"), 
+                            sym.name.replace("'", "''"), sym.kind, 
+                            sym.tested, sym.is_public, sym.is_nif, sym.is_unsafe, 
+                            slug.replace("'", "''"),
+                            embedding_sql
+                        ));
+                    }
+                },
+                crate::worker::DbWriteTask::FileSkipped { path, .. } => {
+                    skipped_paths.push(format!("'{}'", path.replace("'", "''")));
+                },
+                _ => {}
+            }
+        }
+
+        if !indexed_paths.is_empty() {
+            queries.push(format!("UPDATE File SET status = 'indexed', worker_id = NULL WHERE path IN ({});", indexed_paths.join(",")));
+        }
+        if !skipped_paths.is_empty() {
+            queries.push(format!("UPDATE File SET status = 'skipped', worker_id = NULL WHERE path IN ({});", skipped_paths.join(",")));
+        }
+        for chunk in symbol_values.chunks(500) {
+            queries.push(format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET embedding=EXCLUDED.embedding;", chunk.join(",")));
+        }
+        self.execute_batch(&queries)
+    }
+
+    pub fn fetch_pending_batch(&self, count: usize) -> Result<Vec<PendingFile>> {
+        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let claim_id = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_micros());
+
+        unsafe {
+            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+
+            if !exec_fn(*guard, CString::new("BEGIN TRANSACTION;")?.as_ptr()) {
+                return Err(anyhow!("Pending Fetch Error: BEGIN TRANSACTION failed"));
+            }
+
+            let claim_query = format!(
+                "UPDATE File
+                 SET status = 'indexing', worker_id = {}
+                 WHERE path IN (
+                    SELECT path FROM File
+                    WHERE status = 'pending'
+                    ORDER BY priority DESC
+                    LIMIT {}
+                 );",
+                claim_id, count
+            );
+
+            if !exec_fn(*guard, CString::new(claim_query)?.as_ptr()) {
+                let _ = exec_fn(*guard, CString::new("ROLLBACK;")?.as_ptr());
+                return Err(anyhow!("Pending Fetch Error: claim update failed"));
+            }
+        }
+
+        let fetch_query = format!(
+            "SELECT path, COALESCE(trace_id, 'none'), priority
+             FROM File
+             WHERE status = 'indexing' AND worker_id = {}
+             ORDER BY priority DESC",
+            claim_id
+        );
+        let res = self.query_on_ctx(&fetch_query, *guard)?;
+
+        unsafe {
+            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            if !exec_fn(*guard, CString::new("COMMIT;")?.as_ptr()) {
+                return Err(anyhow!("Pending Fetch Error: COMMIT failed"));
+            }
+        }
+        drop(guard);
+        
+        if res == "[]" || res == "" { return Ok(vec![]); }
+        let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res)?;
+        let files: Vec<PendingFile> = raw.into_iter().filter_map(|row| {
+            if row.len() >= 3 {
+                let priority = row[2].as_i64().or_else(|| row[2].as_str().and_then(|s| s.parse::<i64>().ok()))?;
+                Some(PendingFile {
+                    path: row[0].as_str()?.to_string(),
+                    trace_id: row[1].as_str()?.to_string(),
+                    priority,
+                })
+            } else { None }
+        }).collect();
+        Ok(files)
+    }
+
+    pub fn fetch_unembedded_symbols(&self, count: usize) -> Result<Vec<(String, String)>> {
+        let query = format!("SELECT id, name || ': ' || kind FROM Symbol WHERE embedding IS NULL LIMIT {}", count);
+        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let res = self.query_on_ctx(&query, *guard)?;
+        drop(guard);
+
+        if res == "[]" || res == "" { return Ok(vec![]); }
+        
+        let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res)?;
+        let symbols: Vec<(String, String)> = raw.into_iter().filter_map(|row| {
+            if row.len() >= 2 {
+                Some((row[0].as_str()?.to_string(), row[1].as_str()?.to_string()))
+            } else { None }
+        }).collect();
+        Ok(symbols)
+    }
+
+    pub fn update_symbol_embeddings(&self, updates: &[(String, Vec<f32>)]) -> Result<()> {
+        if updates.is_empty() { return Ok(()); }
+        let mut queries = Vec::new();
+        
+        for chunk in updates.chunks(100) {
+            for (id, vector) in chunk {
+                let embedding_sql = format!("CAST({:?} AS FLOAT[384])", vector);
+                queries.push(format!("UPDATE Symbol SET embedding = {} WHERE id = '{}';", embedding_sql, id.replace("'", "''")));
+            }
+        }
+        self.execute_batch(&queries)
+    }
+
+    pub fn execute_batch(&self, queries: &[String]) -> Result<()> {
+        if queries.is_empty() { return Ok(()); }
+        
+        // NEXUS v11.3: The Ironclad Lock
+        // Hold the lock for the entire duration of the batch transaction
+        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        
+        unsafe {
+            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            
+            if !exec_fn(*guard, CString::new("BEGIN TRANSACTION;")?.as_ptr()) {
+                return Err(anyhow!("Batch Writer Error: BEGIN TRANSACTION failed"));
+            }
+            
+            for q in queries {
+                if !exec_fn(*guard, CString::new(q.as_str())?.as_ptr()) {
+                    let _ = exec_fn(*guard, CString::new("ROLLBACK;")?.as_ptr());
+                    return Err(anyhow!("Batch Writer Error on query: {}", q));
+                }
+            }
+            
+            if !exec_fn(*guard, CString::new("COMMIT;")?.as_ptr()) {
+                return Err(anyhow!("Batch Writer Error: COMMIT failed"));
+            }
+        }
         Ok(())
     }
 
-    pub fn insert_project_dependency(&self, from_project: &str, to_project: &str, path: &str) -> Result<()> {
-        let query = "MERGE (p1:Project {name: $from}) MERGE (p2:Project {name: $to}) MERGE (p1)-[:DEPENDS_ON {path: $path}]->(p2)";
-        let params = serde_json::json!({
-            "from": from_project,
-            "to": to_project,
-            "path": path,
-        });
-        self.execute_param(query, &params)
+    pub fn insert_project_dependency(&self, from: &str, to: &str, _path: &str) -> Result<()> {
+        self.execute(&format!("INSERT INTO CONTAINS (source_id, target_id) VALUES ('{}', '{}');", from, to))
     }
 
-    pub fn insert_file_data(&self, path: &str, result: &crate::parser::ExtractionResult) -> Result<()> {
-        // 1. Insert/Merge File node
-        self.execute_param("MERGE (f:File {path: $p})", &serde_json::json!({"p": path}))?;
-
-        // 2. Insert Symbols
-        let mut seen_symbols = std::collections::HashSet::new();
-        for sym in &result.symbols {
-            if seen_symbols.contains(&sym.name) { continue; }
-            seen_symbols.insert(sym.name.clone());
-
-            let is_test = sym.name.contains("test_") || path.contains("test");
-            let is_unsafe = sym.properties.get("unsafe").map(|s| s == "true").unwrap_or(false);
-            let is_nif = sym.properties.get("is_nif").map(|s| s == "true").unwrap_or(false);
-
-            let sym_query = "MATCH (f:File {path: $path}) \
-                             MERGE (s:Symbol {name: $name}) \
-                             SET s.kind = $kind, s.tested = $tested, s.is_public = $is_public, \
-                                 s.is_unsafe = $is_unsafe, s.is_nif = $is_nif, \
-                                 s.is_entry_point = $is_ep \
-                             MERGE (f)-[:CONTAINS]->(s)";
-
-            let mut params = serde_json::json!({
-                "path": path,
-                "name": sym.name,
-                "kind": sym.kind,
-                "tested": is_test,
-                "is_public": sym.is_public,
-                "is_unsafe": is_unsafe,
-                "is_nif": is_nif,
-                "is_ep": sym.is_entry_point
-            });
-
-            // Embedding is handled separately due to type complexity in C-FFI, but we will pass it as a JSON string for now 
-            // since KuzuDB handles vectors. Wait, if json_to_lbug_value turns arrays to strings, passing vector embeddings 
-            // as parameters is also broken! I'll skip embeddings in this specific pass to fix the core AST first, or just omit it.
-            // For now, omit embedding to guarantee AST insertion works.
-
-            self.execute_param(sym_query, &params)?;
-        }
-
-        // 3. Insert Relations
-        let valid_rels = ["CALLS", "IMPORTS", "IMPLEMENTS", "CALLS_NIF", "USES"];
-        for rel in &result.relations {
-            let rel_type = rel.rel_type.to_uppercase();
-            let safe_rel_type = if valid_rels.contains(&rel_type.as_str()) { rel_type } else { "CALLS".to_string() };
-
-            if rel.from.is_empty() || rel.from == "file" || rel.from == "method" {
-                for sym in &result.symbols {
-                    let rel_query = format!("MATCH (a:Symbol {{name: $from}}), (b:Symbol {{name: $to}}) MERGE (a)-[:{}]->(b)", safe_rel_type);
-                    self.execute_param(&rel_query, &serde_json::json!({"from": sym.name, "to": rel.to}))?;
-                }
-            } else {
-                let rel_query = format!("MATCH (a:Symbol {{name: $from}}), (b:Symbol {{name: $to}}) MERGE (a)-[:{}]->(b)", safe_rel_type);
-                self.execute_param(&rel_query, &serde_json::json!({"from": rel.from, "to": rel.to}))?;
-            }
-        }        Ok(())
-    }
-    pub fn get_security_audit(&self, project_name: &str) -> Result<(usize, String)> {
-        let count_query = if project_name == "*" || project_name.is_empty() {
-            "MATCH (d:Symbol) WHERE (d.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR d.is_unsafe = true) RETURN count(d)".to_string()
-        } else {
-            format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND (s.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR s.is_unsafe = true) RETURN count(s)", project_name)
-        };
-
-        let issues = self.query_count(&count_query).unwrap_or(0);
-        let score = if issues > 0 {
-            (100 - (issues * 15).min(100)) as usize
-        } else {
-            100
-        };
-
-        let paths_json = if issues > 0 {
-            let path_query = if project_name == "*" || project_name.is_empty() {
-                "MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS|CALLS_NIF|CALLS_OTP*1..3]->(danger:Symbol) \
-                 WHERE danger.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR danger.is_unsafe = true \
-                 RETURN f.path + ' -> ' + s.name + ' calls ' + danger.name AS path LIMIT 5".to_string()
-            } else {
-                format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol)-[:CALLS|CALLS_NIF|CALLS_OTP*1..3]->(danger:Symbol) \
-                         WHERE f.path CONTAINS '{}' AND (danger.name IN ['eval', 'exec', 'system', 'pickle', 'os.system', 'subprocess.run'] OR danger.is_unsafe = true) \
-                         RETURN f.path + ' -> ' + s.name + ' calls ' + danger.name AS path LIMIT 5", project_name)
-            };
-            self.query_json(&path_query).unwrap_or_else(|_| "[]".to_string())
-        } else {
-            "[]".to_string()
-        };
-
-        Ok((score, paths_json))
-    }
-    pub fn get_technical_debt(&self, project_name: &str) -> Result<Vec<(String, String)>> {
-        let query = if project_name == "*" || project_name.is_empty() {
-            "MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
-             OPTIONAL MATCH (s)-[:CALLS]->(debt) \
-             WHERE debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME'] OR s.kind STARTS WITH 'SECRET_' \
-             WITH f, COALESCE(debt.name, s.kind + ': ' + s.name) as issue \
-             RETURN DISTINCT f.path, issue LIMIT 50".to_string()
-        } else {
-            format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) \
-                     OPTIONAL MATCH (s)-[:CALLS]->(debt) \
-                     WHERE f.path CONTAINS '{}' AND (debt.name IN ['unwrap', 'expect', 'panic!'] OR s.kind IN ['TODO', 'FIXME'] OR s.kind STARTS WITH 'SECRET_') \
-                     WITH f, COALESCE(debt.name, s.kind + ': ' + s.name) as issue \
-                     RETURN DISTINCT f.path, issue LIMIT 50", project_name)
-        };
-
-        match self.query_json(&query) {
-            Ok(res) => {
-                let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-                Ok(rows.into_iter().filter_map(|r| {
-                    if r.len() >= 2 {
-                        Some((r[0].clone(), r[1].clone()))
-                    } else {
-                        None
-                    }
-                }).collect())
-            },
-            Err(_) => Ok(vec![]),
-        }
-    }
-
-    pub fn get_coverage_score(&self, project_name: &str) -> Result<usize> {
-        let (q_total, q_tested) = if project_name == "*" || project_name.is_empty() {
-            (
-                "MATCH (s:Symbol) WHERE s.kind = 'function' RETURN count(s)".to_string(),
-                "MATCH (s:Symbol) WHERE s.kind = 'function' AND s.tested = true RETURN count(s)".to_string()
+    // --- Analytics Stubs ---
+    pub fn get_security_audit(&self, _project: &str) -> Result<(i64, String)> {
+        let query = "
+            WITH dangerous_paths AS (
+                SELECT s1.name, s2.name AS target_name
+                FROM CALLS c
+                JOIN Symbol s1 ON s1.id = c.source_id
+                JOIN Symbol s2 ON s2.id = c.target_id
+                WHERE s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')
+                UNION ALL
+                SELECT s1.name, s2.name AS target_name
+                FROM CALLS_NIF c
+                JOIN Symbol s1 ON s1.id = c.source_id
+                JOIN Symbol s2 ON s2.id = c.target_id
+                WHERE s2.is_nif = true OR s2.is_unsafe = true
+                UNION ALL
+                SELECT s1.name, s2.name AS target_name
+                FROM Symbol s1
+                JOIN CALLS c1 ON c1.source_id = s1.id
+                JOIN Symbol mid ON mid.id = c1.target_id
+                JOIN CALLS c2 ON c2.source_id = mid.id
+                JOIN Symbol s2 ON s2.id = c2.target_id
+                WHERE s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')
+                UNION ALL
+                SELECT s1.name, s2.name AS target_name
+                FROM Symbol s1
+                JOIN CALLS_NIF c1 ON c1.source_id = s1.id
+                JOIN Symbol mid ON mid.id = c1.target_id
+                JOIN CALLS c2 ON c2.source_id = mid.id
+                JOIN Symbol s2 ON s2.id = c2.target_id
+                WHERE s2.is_unsafe = true OR lower(s2.name) IN ('eval', 'unwrap')
             )
-        } else {
-            (
-                format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.kind = 'function' RETURN count(s)", project_name),
-                format!("MATCH (f:File)-[:CONTAINS]->(s:Symbol) WHERE f.path CONTAINS '{}' AND s.kind = 'function' AND s.tested = true RETURN count(s)", project_name)
-            )
-        };
-        
-        let total = self.query_count(&q_total)?;
-        let tested = self.query_count(&q_tested)?;
-        
-        if total <= 0 { return Ok(100); }
-        Ok(((tested as f64 / total as f64) * 100.0) as usize)
+            SELECT name, target_name FROM dangerous_paths
+        ";
+
+        let res = self.query_json(query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        if rows.is_empty() {
+            return Ok((100, "[]".to_string()));
+        }
+
+        let score = (100 - (rows.len() as i64 * 20)).max(0);
+        Ok((score, serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())))
     }
 
-    pub fn get_god_objects(&self, project_name: &str) -> Result<Vec<String>> {
-        let filter = if project_name == "*" || project_name.is_empty() {
-            "".to_string()
-        } else {
-            format!("WHERE f.path CONTAINS '{}'", project_name)
-        };
-        // Find symbols in the project that have a high in-degree (>= 10 dependents)
-        let query = format!(
-            "MATCH (f:File)-[:CONTAINS]->(s:Symbol)<-[:CALLS]-(caller:Symbol)
-             {}
-             WITH s, count(caller) AS degree
-             WHERE degree >= 10
-             RETURN s.name",
-            filter
-        );
-        let result_json = self.query_json(&query).unwrap_or_else(|_| "[]".to_string());        
-        let mut god_objects = Vec::new();
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&result_json) {
-            if let Some(arr) = parsed.as_array() {
-                for item in arr {
-                    if let Some(inner_arr) = item.as_array() {
-                        for inner_item in inner_arr {
-                            if let Some(val_str) = inner_item.as_str() {
-                                if val_str.starts_with("String(\"") && val_str.ends_with("\")") {
-                                    let name = val_str[8..val_str.len()-2].to_string();
-                                    god_objects.push(name);
-                                }
-                            }
-                        }
-                    } else if let Some(obj) = item.as_object() {
-                        if let Some(name) = obj.get("s.name").and_then(|v| v.as_str()) {
-                            god_objects.push(name.to_string());
-                        }
-                    }
-                }
-            }
+    pub fn get_coverage_score(&self, _project: &str) -> Result<i64> {
+        let total = self.query_count("SELECT count(*) FROM Symbol")?;
+        if total <= 0 {
+            return Ok(0);
         }
-        
-        Ok(god_objects)
+        let tested = self.query_count("SELECT count(*) FROM Symbol WHERE tested = true")?;
+        Ok(((tested * 100) / total).clamp(0, 100))
     }
 
-    pub fn generate_mermaid_flow(paths_json: &str) -> String {
-        let mut mermaid = String::from("```mermaid\ngraph TD\n");
-        let mut has_paths = false;
-        
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(paths_json) {
-            if let Some(arr) = parsed.as_array() {
-                for item in arr {
-                    if let Some(path_str) = item.get("path").and_then(|v| v.as_str()) {
-                        let parts: Vec<&str> = path_str.split("-->").map(|s| s.trim()).collect();
-                        for i in 0..parts.len().saturating_sub(1) {
-                            mermaid.push_str(&format!("    {} --> {}\n", parts[i], parts[i+1]));
-                            has_paths = true;
-                        }
-                    }
-                }
+    pub fn get_technical_debt(&self, _project: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+        let query = "
+            SELECT f.path, s.name
+            FROM File f
+            JOIN CONTAINS c ON c.source_id = f.path
+            JOIN Symbol s ON s.id = c.target_id
+            WHERE lower(s.name) LIKE '%todo%'
+               OR lower(s.name) LIKE '%fixme%'
+               OR lower(s.name) LIKE '%secret%'
+               OR lower(s.name) LIKE '%hardcoded credential%'
+               OR EXISTS (
+                    SELECT 1 FROM CALLS call
+                    JOIN Symbol target ON target.id = call.target_id
+                    WHERE call.source_id = s.id
+                      AND lower(target.name) IN ('unwrap', 'eval')
+               )
+        ";
+
+        let res = self.query_json(query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        let mut findings = serde_json::Map::new();
+        for row in rows {
+            if row.len() >= 2 {
+                findings.insert(row[0].clone(), serde_json::Value::String(row[1].clone()));
             }
         }
-        
-        if !has_paths {
-            return String::new();
+        Ok(findings)
+    }
+
+    pub fn get_god_objects(&self, _project: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+        let query = "
+            SELECT s.name, count(*) AS fan_in
+            FROM Symbol s
+            JOIN CALLS c ON c.target_id = s.id
+            GROUP BY s.name
+            HAVING count(*) >= 5
+        ";
+        let res = self.query_json(query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        let mut findings = serde_json::Map::new();
+        for row in rows {
+            if row.len() >= 2 {
+                let count = row[1].parse::<i64>().unwrap_or(0);
+                findings.insert(row[0].clone(), serde_json::Value::Number(count.into()));
+            }
         }
-        
-        mermaid.push_str("```\n");
-        mermaid
+        Ok(findings)
+    }
+
+    fn find_plugin_path() -> Result<String> {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .ok_or_else(|| anyhow!("Unable to resolve repository root from CARGO_MANIFEST_DIR"))?
+            .to_path_buf();
+
+        let mut candidates = vec![
+            repo_root.join("src/axon-plugin-duckdb/target/release/libaxon_plugin_duckdb.so"),
+            repo_root.join("src/axon-plugin-duckdb/target/debug/libaxon_plugin_duckdb.so"),
+            repo_root.join("bin/libaxon_plugin_duckdb.so"),
+        ];
+
+        if let Ok(cwd) = std::env::current_dir() {
+            candidates.push(cwd.join("src/axon-plugin-duckdb/target/release/libaxon_plugin_duckdb.so"));
+            candidates.push(cwd.join("src/axon-plugin-duckdb/target/debug/libaxon_plugin_duckdb.so"));
+            candidates.push(cwd.join("bin/libaxon_plugin_duckdb.so"));
+        }
+
+        for path in candidates {
+            if path.exists() {
+                return Ok(path.to_string_lossy().to_string());
+            }
+        }
+        Err(anyhow!("Plugin not found"))
+    }
+
+    fn init_schema(&self, _is_memory: bool) -> Result<()> {
+        self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384])")?;
+        self.execute("CREATE TABLE IF NOT EXISTS Project (name VARCHAR PRIMARY KEY)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS CALLS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS CALLS_NIF (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS IMPACTS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Vision (id VARCHAR PRIMARY KEY DEFAULT 'VIS-AXO-001', title VARCHAR, description VARCHAR, goal VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Pillar (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Requirement (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, status VARCHAR, priority VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Decision (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, context VARCHAR, rationale VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Milestone (id VARCHAR PRIMARY KEY, title VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Validation (id VARCHAR PRIMARY KEY, method VARCHAR, result VARCHAR, timestamp BIGINT, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Concept (name VARCHAR PRIMARY KEY, explanation VARCHAR, rationale VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Stakeholder (name VARCHAR PRIMARY KEY, role VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.EPITOMIZES (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.BELONGS_TO (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.EXPLAINS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.SOLVES (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.TARGETS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.VERIFIES (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.ORIGINATES (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.SUPERSEDES (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.CONTRIBUTES_TO (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.REFINES (source_id VARCHAR, target_id VARCHAR)")?;
+        Ok(())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mermaid_generation() {
-        // Simulating JSON returned by Kuzu for paths
-        let paths_json = r#"[{"path": "source --> sanitizer --> sink"}]"#;
-        let mermaid = GraphStore::generate_mermaid_flow(paths_json);
-        
-        assert!(mermaid.contains("graph TD"));
-        assert!(mermaid.contains("source --> sanitizer"));
-        assert!(mermaid.contains("sanitizer --> sink"));
-    }
-
-    #[test]
-    fn test_kuzu_vector_support() {
-        let store = GraphStore::new(":memory:").unwrap();
-        let res = store.execute("CREATE NODE TABLE VectorNode (id INT64, vec FLOAT[3], PRIMARY KEY(id))");
-        assert!(res.is_ok(), "Failed to create table with FLOAT[3]");
-        
-        let insert_res = store.execute("CREATE (n:VectorNode {id: 1, vec: [1.0, 2.0, 3.0]})");
-        assert!(insert_res.is_ok(), "Failed to insert vector");
-        
-        let insert_res2 = store.execute("CREATE (n:VectorNode {id: 3})");
-        println!("Insert missing vector: {:?}", insert_res2);
-
-        // Try array_cosine_similarity
-        let _ = store.execute("CREATE (n:VectorNode {id: 2, vec: [1.0, 2.0, 3.1]})");
-        let query_res = store.query_json("MATCH (a:VectorNode {id: 1}), (b:VectorNode {id: 2}) RETURN array_cosine_similarity(a.vec, b.vec) AS sim");
-        assert!(query_res.is_ok(), "array_cosine_similarity failed");
-        let json_str = query_res.unwrap();
-        println!("Similarity: {}", json_str);
-    }
-
-    #[test]
-    fn test_graph_insertion_persistence() {
-        let store = GraphStore::new(":memory:").unwrap();
-
-        let mut result = crate::parser::ExtractionResult {
-            symbols: vec![
-                crate::parser::Symbol {
-                    name: "DummyFunc".to_string(),
-                    kind: "function".to_string(),
-                    start_line: 1, end_line: 2, docstring: None, is_public: true,
-                    properties: std::collections::HashMap::new(), embedding: None, is_entry_point: false
-                }
-            ],
-            relations: vec![]
-        };
-
-        let path = "/test/path.ex";
-        store.insert_file_data(path, &result).unwrap();
-
-        let query = format!("MATCH (f:File {{path: '{}'}})-[:CONTAINS]->(s:Symbol) RETURN count(s)", path);
-        let count = store.query_count(&query).unwrap();
-        assert_eq!(count, 1, "Graph insertion failed: 0 symbols found for file");
+impl Drop for LatticePool {
+    fn drop(&mut self) {
+        unsafe {
+            let close_fn: LibSymbol<CloseDbFunc> = self.lib.get(b"duckdb_close_db\0").unwrap();
+            let writer_ctx = *self.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+            let reader_ctx = *self.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+            if !writer_ctx.is_null() { close_fn(writer_ctx); }
+            if !reader_ctx.is_null() && reader_ctx != writer_ctx { close_fn(reader_ctx); }
+        }
     }
 }
