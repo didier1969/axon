@@ -1,173 +1,82 @@
 defmodule Axon.Watcher.Progress do
   @moduledoc """
-  Factual reporting of indexing progress to HydraDB (Pod C).
+  Factual reporting of indexing progress using DuckDB as the sole source of truth.
+  v6.0 Consolidation - Replaces SQLite and HydraDB reporting.
   """
   require Logger
+  alias Axon.Watcher.PoolFacade
 
-  @hydra_host {127, 0, 0, 1}
-  @api_key "dev_key"
-
-  defp hydra_port() do
-    String.to_integer(System.get_env("HYDRA_TCP_PORT") || "44128")
-  end
-
-  def update_status(repo_slug, status_map) do
-    now = DateTime.utc_now() |> DateTime.to_iso8601()
-
-    metadata = %{
-      "status" => status_map[:status] || "live",
-      "progress" => status_map[:progress] || 0,
-      "synced" => status_map[:synced] || 0,
-      "total" => status_map[:total] || 0,
-      "last_update" => now,
-      "last_scan_at" => status_map[:last_scan_at] || now,
-      "last_file_import_at" => status_map[:last_file_import_at] || now
-    }
-
-    # 1. Reliable local reporting (File)
-    write_local_status(repo_slug, metadata)
-
-    # 2. Centralized reporting (HydraDB) - Async attempt
-    Task.start(fn ->
-      key = "axon:repo:#{repo_slug}"
-      send_to_hydradb("put", %{"key" => key, "value" => metadata})
-    end)
-  end
-
-  def get_status(repo_slug) do
-    # 1. Try local status first (FAST & RELIABLE)
-    home = System.user_home!()
-    status_path = Path.join([home, ".axon", "repos", repo_slug, "status.json"])
-
-    case File.read(status_path) do
+  def get_status(_repo_slug) do
+    query = "SELECT status, count(*) as count FROM File GROUP BY status;"
+    
+    case PoolFacade.query_json(query) do
       {:ok, json} ->
         case Jason.decode(json) do
-          {:ok, data} -> data
-          _ -> fetch_from_hydradb(repo_slug)
+          {:ok, rows} ->
+            stats = Enum.into(rows, %{}, fn [status, count] -> {status, count} end)
+            total = Enum.sum(Map.values(stats))
+            indexed = Map.get(stats, "indexed", 0)
+            
+            progress = if total > 0, do: round((indexed / total) * 100), else: 0
+            
+            %{
+              "status" => "live",
+              "progress" => progress,
+              "synced" => indexed,
+              "total" => total,
+              "last_update" => DateTime.utc_now() |> DateTime.to_iso8601()
+            }
+          _ -> 
+            default_status()
         end
-
-      _ ->
-        fetch_from_hydradb(repo_slug)
-    end
-  end
-
-  defp fetch_from_hydradb(repo_slug) do
-    key = "axon:repo:#{repo_slug}"
-
-    case sync_send_to_hydradb("get", %{"key" => key}) do
-      {:ok, %{"status" => "ok", "value" => data}} -> data
-      _ -> %{"status" => "offline", "progress" => 0, "synced" => 0, "total" => 0}
+      _ -> 
+        default_status()
     end
   end
 
   def get_directory_stats(_repo_slug) do
-    # On récupère tous les fichiers via une requête Cypher sur Pod C
-    case sync_send_to_hydradb("keys", %{"pattern" => "axon:mtime:*"}) do
-      {:ok, %{"status" => "ok", "keys" => keys}} ->
-        keys
-        |> Enum.map(fn key ->
-          parts = String.split(key, ":")
-          path = List.last(parts)
-          Path.relative_to(path, File.cwd!()) |> Path.split() |> List.first()
-        end)
-        |> Enum.reject(&is_nil/1)
-        |> Enum.frequencies()
-
-      _ ->
-        %{}
-    end
-  end
-
-  def purge_repo(repo_slug) do
-    # On supprime les métadonnées et tous les mtimes associés au slug
-    sync_send_to_hydradb("delete", %{"key" => "axon:repo:#{repo_slug}"})
-    # Pour les mtimes, comme on n'a pas de delete by pattern natif simple ici, 
-    # on pourrait itérer ou envoyer une commande cypher si Pod C le permet.
-    # On se contente du repo status pour l'UI pour l'instant.
-    Logger.warning("[Progress] Knowledge base purge requested for #{repo_slug}")
-  end
-
-  def get_file_mtime(repo_slug, file_path) do
-    key = "axon:mtime:#{repo_slug}:#{file_path}"
-
-    case sync_send_to_hydradb("get", %{"key" => key}) do
-      {:ok, %{"status" => "ok", "value" => mtime}} -> mtime
-      _ -> 0
-    end
-  end
-
-  def save_file_mtime(repo_slug, file_path, mtime) do
-    key = "axon:mtime:#{repo_slug}:#{file_path}"
-
-    Task.start(fn ->
-      send_to_hydradb("put", %{"key" => key, "value" => mtime})
-    end)
-  end
-
-  defp write_local_status(repo_slug, data) do
-    home = System.user_home!()
-    status_path = Path.join([home, ".axon", "repos", repo_slug, "status.json"])
-
-    case Jason.encode(data) do
+    # On agrège les stats par projet directement depuis DuckDB
+    query = "SELECT project_slug, status, count(*) as count FROM File GROUP BY project_slug, status;"
+    
+    case PoolFacade.query_json(query) do
       {:ok, json} ->
-        File.mkdir_p!(Path.dirname(status_path))
-        File.write(status_path, json)
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp sync_send_to_hydradb(op, args) do
-    case :gen_tcp.connect(@hydra_host, hydra_port(), [:binary, packet: 4, active: false], 5000) do
-      {:ok, socket} ->
-        :gen_tcp.send(socket, Msgpax.pack!(%{"auth" => @api_key}))
-
-        case :gen_tcp.recv(socket, 0, 5000) do
-          {:ok, _auth_resp} ->
-            payload = %{"op" => op} |> Map.merge(args)
-            :gen_tcp.send(socket, Msgpax.pack!(payload))
-
-            case :gen_tcp.recv(socket, 0, 5000) do
-              {:ok, data} ->
-                :gen_tcp.close(socket)
-                {:ok, Msgpax.unpack!(data)}
-
-              _ ->
-                :gen_tcp.close(socket)
-                :error
-            end
-
-          _ ->
-            :gen_tcp.close(socket)
-            :error
+        case Jason.decode(json) do
+          {:ok, rows} ->
+            rows
+            |> Enum.group_by(fn [slug, _status, _count] -> slug end)
+            |> Enum.into(%{}, fn {slug, project_rows} ->
+              total = Enum.sum(Enum.map(project_rows, fn [_, _, c] -> c end))
+              completed = Enum.find_value(project_rows, 0, fn 
+                [_, "indexed", c] -> c
+                _ -> false 
+              end)
+              
+              {slug, %{
+                total: total,
+                completed: completed,
+                failed: 0,
+                last_update: DateTime.utc_now()
+              }}
+            end)
+          _ -> %{}
         end
-
-      _ ->
-        :error
+      _ -> %{}
     end
   end
 
-  defp send_to_hydradb(op, args) do
-    case :gen_tcp.connect(@hydra_host, hydra_port(), [:binary, packet: 4, active: false], 5000) do
-      {:ok, socket} ->
-        :gen_tcp.send(socket, Msgpax.pack!(%{"auth" => @api_key}))
-
-        case :gen_tcp.recv(socket, 0, 5000) do
-          {:ok, _auth_resp} ->
-            payload = %{"op" => op} |> Map.merge(args)
-            :gen_tcp.send(socket, Msgpax.pack!(payload))
-            :gen_tcp.close(socket)
-            :ok
-
-          {:error, reason} ->
-            Logger.error("[Progress] Auth failed with HydraDB: #{inspect(reason)}")
-            :gen_tcp.close(socket)
-        end
-
-      {:error, reason} ->
-        # Log only in debug to avoid pollution, as this is best-effort async reporting
-        Logger.debug("[Progress] HydraDB offline at #{hydra_port()}: #{inspect(reason)}")
-    end
+  defp default_status do
+    %{
+      "status" => "connecting",
+      "progress" => 0,
+      "synced" => 0,
+      "total" => 0,
+      "last_update" => DateTime.utc_now() |> DateTime.to_iso8601()
+    }
   end
+
+  # Obsolete methods kept for compatibility with other modules but neutralized
+  def update_status(_, _), do: :ok
+  def purge_repo(_), do: :ok
+  def get_file_mtime(_, _), do: 0
+  def save_file_mtime(_, _, _), do: :ok
 end

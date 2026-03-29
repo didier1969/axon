@@ -27,11 +27,11 @@ defmodule Axon.Watcher.TrafficGuardian do
     )
 
     # Start periodic check
-    :timer.send_interval(1000, :check_pressure)
+    :timer.send_interval(200, :check_pressure)
     :timer.send_interval(1000, :calculate_flux)
 
     {:ok, %{
-      target_pressure: 100,
+      target_pressure: 500,
       current_load: 0,
       t4_ema: 0.0,
       processed_this_sec: 0,
@@ -99,19 +99,23 @@ defmodule Axon.Watcher.TrafficGuardian do
     end
 
     Logger.info("[TrafficGuardian] Checking pressure: load=#{state.current_load}, target=#{state.target_pressure}")
-    # If current_load < (target_pressure / 2), call PoolFacade.pull_pending(target_pressure - current_load)
-    if state.current_load < (state.target_pressure / 2) do
-      to_pull = state.target_pressure - state.current_load
-      
-      if to_pull > 0 do
-        Logger.info("[TrafficGuardian] Pulling #{to_pull} files from Rust...")
-        Axon.Watcher.PoolFacade.pull_pending(to_pull)
-        {:noreply, %{state | current_load: state.current_load + to_pull}}
-      else
-        {:noreply, state}
-      end
-    else
-      {:noreply, state}
-    end
+    
+    # NEXUS v7.0: Active pulling DISABLED. 
+    # Rust is now autonomous (Auto-Hopper). Elixir only monitors results.
+    {:noreply, state}
+    
+    # if state.current_load < (state.target_pressure / 2) do
+    #   to_pull = state.target_pressure - state.current_load
+    #   
+    #   if to_pull > 0 do
+    #     Logger.info("[TrafficGuardian] Pulling #{to_pull} files from Rust...")
+    #     Axon.Watcher.PoolFacade.pull_pending(to_pull)
+    #     {:noreply, %{state | current_load: state.current_load + to_pull}}
+    #   else
+    #     {:noreply, state}
+    #   end
+    # else
+    #   {:noreply, state}
+    # end
   end
 end

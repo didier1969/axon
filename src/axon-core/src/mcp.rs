@@ -131,12 +131,16 @@ impl McpServer {
         output
     }
 
-    pub fn handle_request(&self, req: JsonRpcRequest) -> Option<JsonRpcResponse> {
-        if req.id.is_none() {
+    pub fn execute_raw_sql(&self, query: &str) -> anyhow::Result<String> {
+        self.graph_store.query_json(query)
+    }
+
+    pub fn handle_request(&self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {
+        if request.id.is_none() {
             return None;
         }
 
-        let result = match req.method.as_str() {
+        let result = match request.method.as_str() {
             "initialize" => Some(json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
@@ -363,7 +367,7 @@ impl McpServer {
                     })
                 ]
             })),
-            "tools/call" => self.handle_call_tool(req.params),
+            "tools/call" => self.handle_call_tool(request.params),
             _ => None,
         };
 
@@ -372,7 +376,7 @@ impl McpServer {
                 jsonrpc: "2.0".to_string(),
                 result: Some(res),
                 error: None,
-                id: req.id,
+                id: request.id,
             })
         } else {
             Some(JsonRpcResponse {
@@ -382,7 +386,7 @@ impl McpServer {
                     "code": -32601,
                     "message": "Method not found"
                 })),
-                id: req.id,
+                id: request.id,
             })
         }
     }

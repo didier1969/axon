@@ -14,10 +14,10 @@ defmodule AxonDashboardWeb.Router do
     plug :accepts, ["json"]
   end
 
-  scope "/", AxonDashboardWeb do
+  scope "/", Axon.Watcher do
     pipe_through :browser
-
-    live "/", StatusLive, :index
+    live "/", CockpitLive, :index
+    live "/cockpit", CockpitLive, :index
   end
 
   # Other scopes may use custom stacks.

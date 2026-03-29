@@ -44,12 +44,9 @@ defmodule Axon.Watcher.CockpitLive do
     {:noreply, assign(socket, live: live)}
   end
 
-  @impl true
-  def handle_info({:telemetry_event, [:axon, :watcher, :file_indexed], _measurements, _metadata}, socket) do
-    live = Map.update!(socket.assigns.live, :total_ingested, &(&1 + 1))
-    {:noreply, assign(socket, live: live)}
-  end
-
+  # NEXUS V5.6: We no longer handle individual telemetry events in LiveView
+  # to prevent rendering saturation during high-speed ingestion (> 100 f/s).
+  # The 500ms :tick is enough to keep the UI fresh without killing the BEAM scheduler.
   @impl true
   def handle_info({:telemetry_event, _event, _measurements, _metadata}, socket) do
     {:noreply, socket}
@@ -84,6 +81,22 @@ defmodule Axon.Watcher.CockpitLive do
     Logger.info("[Cockpit] User triggered PURGE_DATA")
     Axon.Watcher.Server.purge_data()
     {:noreply, put_flash(socket, :error, "Knowledge base purged!")}
+  end
+
+  @impl true
+  def handle_info(:tick, socket) do
+    # NEXUS v8.12: Unified Truth Pull from SQL Gateway
+    stats = Axon.Watcher.Progress.get_status("global")
+    dir_stats = Axon.Watcher.Progress.get_directory_stats("global")
+
+    new_live = Map.merge(socket.assigns.live, %{
+      total_files: stats["total"] || 0,
+      total_ingested: stats["synced"] || 0,
+      indexing_progress: stats["progress"] || 0,
+      directory_stats: dir_stats
+    })
+
+    {:noreply, assign(socket, live: new_live)}
   end
 
   @impl true

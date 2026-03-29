@@ -32,9 +32,19 @@ fi
 echo "🚀 Starting Axon v2 Architecture (Managed via TMUX)..."
 
 # 3. Clean environment (Safety Protocol)
+echo "🧹 Cleaning TMUX sessions and Socket locks..."
 tmux kill-session -t axon 2>/dev/null || true
+# If TMUX server is unstable, we reset it
+if ! tmux ls >/dev/null 2>&1; then
+    tmux kill-server 2>/dev/null || true
+fi
+
 rm -f /tmp/axon-*.sock
 rm -f .axon/graph_v2/*.db.wal 2>/dev/null || true
+
+echo "🔓 Releasing Database locks..."
+fuser -k .axon/graph_v2/ist.db 2>/dev/null || true
+fuser -k .axon/graph_v2/sanctuary/soll.db 2>/dev/null || true
 
 # Configuration
 export PHX_PORT=44127
@@ -49,29 +59,32 @@ tmux new-session -d -s axon -n "core"
 
 # Start Pod B (Data Plane)
 # We use 'nix develop' to ensure all WASM/AI dependencies are in path
-# Optimization: Parallel start, no blocking wait for Elixir.
-tmux send-keys -t axon:core "nix develop --impure --command bash -c 'while true; do echo \"🚀 Starting Axon Core...\"; AXON_DISABLE_ML=1 RUST_LOG=info bin/axon-core; EXIT_CODE=\$?; echo \"⚠️ Axon Core exited with code \$EXIT_CODE. Restarting in 2s...\"; sleep 2; done'" C-m
+# NEXUS v10.8: We force fastembed to use the system's libonnxruntime.so to prevent C++ aborts.
+tmux send-keys -t axon:core "nix develop --impure --command bash -c 'export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; while true; do echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core; EXIT_CODE=\$?; echo \"⚠️ Axon Core exited with code \$EXIT_CODE. Restarting in 2s...\"; sleep 2; done'" C-m
 
 # Start Pod A (Control Plane)
 tmux new-window -t axon -n "nexus"
 # PROTECTION: Rétablissement de hex, rebar et ecto.setup (indispensables pour la stabilité post-reset)
 tmux send-keys -t axon:nexus "cd src/dashboard && nix develop --impure --command bash -c \"mix local.hex --force && mix local.rebar --force && mix compile && mix ecto.setup && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 
-echo "⏳ Waiting for Axon Infrastructure to rise..."
+echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 60s)..."
 
 # Parallel wait loop for both services
 CORE_READY=false
 DASHBOARD_READY=false
 
-for i in {1..60}; do
+# Wait up to 120 * 0.5s = 60s
+for i in {1..120}; do
     if [ "$CORE_READY" = false ]; then
-        if [ -S "/tmp/axon-telemetry.sock" ] && nc -z localhost $HYDRA_HTTP_PORT 2>/dev/null; then
+        # Core is ready if the telemetry socket exists AND the MCP port is responding
+        if [ -S "/tmp/axon-telemetry.sock" ] || nc -z localhost $HYDRA_HTTP_PORT 2>/dev/null; then
             echo "✅ Axon Data Plane is Ready."
             CORE_READY=true
         fi
     fi
 
     if [ "$DASHBOARD_READY" = false ]; then
+        # Dashboard is ready if the Phoenix port is responding
         if nc -z localhost $PHX_PORT 2>/dev/null; then
             echo "✅ Axon Dashboard is Ready."
             DASHBOARD_READY=true
@@ -97,8 +110,14 @@ else
     echo "✅ E2E Verification Success! System is healthy."
 fi
 
+# 6. Final Report
+WSL_IP=$(ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+if [ -z "$WSL_IP" ]; then WSL_IP="127.0.0.1"; fi
+
 echo ""
 echo "🛡️ Axon is rising in TMUX session 'axon'."
 echo "To view processes: 'tmux attach -t axon'"
-echo "Dashboard: http://localhost:44127/cockpit"
+echo "Dashboard: http://$WSL_IP:44127/cockpit"
+echo "SQL Gateway: http://$WSL_IP:44129/sql"
+echo "MCP Server: http://$WSL_IP:44129/mcp"
 echo ""

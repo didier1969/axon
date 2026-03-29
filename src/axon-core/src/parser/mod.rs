@@ -180,14 +180,16 @@ pub mod markdown;
 pub mod sql;
 pub mod typeql;
 pub mod datalog;
+pub mod text;
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
-    match path.extension()?.to_str()? {
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    match ext.as_str() {
         "py" => Some(Box::new(python::PythonParser::new())),
         "ex" | "exs" => Some(Box::new(elixir::ElixirParser::new())),
         "rs" => Some(Box::new(rust::RustParser::new())),
         "ts" | "tsx" => Some(Box::new(typescript::TypeScriptParser::new())),
-        "js" | "jsx" => Some(Box::new(typescript::TypeScriptParser::new())), // TS parser handles JS
+        "js" | "jsx" => Some(Box::new(typescript::TypeScriptParser::new())),
         "go" => Some(Box::new(go::GoParser::new())),
         "java" => Some(Box::new(java::JavaParser::new())),
         "yaml" | "yml" => Some(Box::new(yaml::YamlParser::new())),
@@ -197,6 +199,8 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "sql" => Some(Box::new(sql::SqlParser::new())),
         "tql" | "typeql" => Some(Box::new(typeql::TypeQLParser::new())),
         "dl" | "datalog" => Some(Box::new(datalog::DatalogParser::new())),
+        // NEXUS v7.5: Fallback to TextParser for Knowledge capturing
+        "txt" | "conf" | "ini" => Some(Box::new(text::TextParser::new())),
         _ => None,
     }
 }

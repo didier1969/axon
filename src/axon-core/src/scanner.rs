@@ -1,74 +1,48 @@
-use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
 use std::fs;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 use crate::graph::GraphStore;
+use std::sync::Arc;
+use tracing::{info, error, debug};
+use walkdir::WalkDir;
 
-pub struct ProjectDependency {
-    pub to: String,
-    pub path: String,
-}
-
-pub fn extract_toml_dependencies(content: &str) -> Vec<ProjectDependency> {
-    let mut deps = Vec::new();
-    if let Ok(parsed) = content.parse::<toml::Value>() {
-        if let Some(dependencies) = parsed.get("dependencies").or_else(|| parsed.get("tool").and_then(|t| t.get("poetry")).and_then(|p| p.get("dependencies"))) {
-            if let Some(table) = dependencies.as_table() {
-                for (k, v) in table {
-                    if let Some(path) = v.get("path").and_then(|p| p.as_str()) {
-                        deps.push(ProjectDependency { to: k.clone(), path: path.to_string() });
-                    }
-                }
-            }
-        }
-    }
-    deps
+struct ProjectDependency {
+    path: String,
+    to: String,
 }
 
 pub struct Scanner {
-    pub root: PathBuf,
+    root: PathBuf,
 }
 
 impl Scanner {
-    pub fn new(path: &str) -> Self {
+    pub fn new(root: &str) -> Self {
         Self {
-            root: PathBuf::from(path),
+            root: PathBuf::from(root),
         }
     }
 
-    /// MBSE CERTIFICATION: REQ-AXO-002, REQ-AXO-003
-    /// Deep scan of the filesystem using .axonignore sovereignty.
-    /// Maps the IST layer (Physical Reality) into DuckDB.
     pub fn scan(&self, graph: Arc<GraphStore>) {
-        tracing::info!("🚀 Starting Nexus Deep Scan of sector: {}", self.root.display());
+        info!("Lattice Engine: Initializing recursive traversal on {:?}", self.root);
 
-        let mut builder = WalkBuilder::new(&self.root);
-        builder.hidden(false) 
-               .git_ignore(false) // REQ-AXO-002: Bypass Git convention for semantic sovereignty
-               .parents(false)
-               .ignore(true);
-               
-        // Load .axonignore patterns
-        let global_axonignore = Path::new("/home/dstadel/projects/.axonignore");
-        if global_axonignore.exists() { let _ = builder.add_ignore(global_axonignore); }
-        let local_axonignore = self.root.join(".axonignore");
-        if local_axonignore.exists() { let _ = builder.add_ignore(local_axonignore); }
-
-        let walker = builder.build();
         let mut batch = Vec::new();
         let mut total_files = 0;
 
-        for entry in walker.flatten() {
-            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-                let path = entry.path().to_path_buf();
+        // NEXUS v10.1: Fallback to WalkDir for resilient filesystem traversal.
+        // It ignores symlinks by default and never silently aborts on hidden files.
+        for entry in WalkDir::new(&self.root).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+
+            if path.is_file() {
                 let path_str = path.to_string_lossy().to_string();
                 
-                // Identify project name (first dir after root /home/dstadel/projects)
+                // NEXUS: Manual filtering
+                if !self.is_supported(&path) {
+                    continue;
+                }
+
                 let project_name = self.extract_project_slug(&path);
 
-                // REQ-AXO-003: Sub-project detection
+                // Dependency detection
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name == "pyproject.toml" || name == "Cargo.toml" || name == "mix.exs" {
                         if let Ok(content) = fs::read_to_string(&path) {
@@ -80,33 +54,30 @@ impl Scanner {
                     }
                 }
 
-                if self.is_supported(&path) {
-                    let path_str = if let Ok(abs_path) = fs::canonicalize(&path) {
-                        abs_path.to_string_lossy().to_string()
-                    } else {
-                        path.to_string_lossy().to_string()
-                    };
+                let path_str = if let Ok(abs_path) = fs::canonicalize(&path) {
+                    abs_path.to_string_lossy().to_string()
+                } else {
+                    path.to_string_lossy().to_string()
+                };
 
-                    let metadata = fs::metadata(&path);
-                    let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
-                    let mtime = metadata.as_ref().ok()
-                        .and_then(|m| m.modified().ok())
-                        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
-                        .unwrap_or(0);
-                    
-                    batch.push((path_str, project_name, size, mtime));
-                    
-                    if batch.len() >= 1000 {
-                        total_files += batch.len();
-                        if let Err(e) = graph.bulk_insert_files(&batch) {
-                            tracing::error!("Bulk insert failed: {:?}", e);
-                        }
-                        batch.clear();
-                        tracing::info!("... {} files mapped", total_files);
-                        
-                        // NEXUS HARMONY: Release DuckDB lock and let Elixir pull data.
-                        std::thread::sleep(std::time::Duration::from_millis(100));
+                let metadata = fs::metadata(&path);
+                let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+                let mtime = metadata.as_ref().ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
+                    .unwrap_or(0);
+                
+                batch.push((path_str, project_name, size, mtime));
+                
+                if batch.len() >= 100 {
+                    total_files += batch.len();
+                    if let Err(e) = graph.bulk_insert_files(&batch) {
+                        error!("Bulk insert failed: {:?}", e);
                     }
+                    batch.clear();
+                    info!("... {} files mapped", total_files);
+                    // Minimal pause to yield DB lock
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
             }
         }
@@ -117,14 +88,11 @@ impl Scanner {
             let _ = graph.bulk_insert_files(&batch);
         }
 
-        tracing::info!("🏁 Nexus Scan Complete: {} files mapped to DuckDB (status: pending).", total_files);
+        info!("🏁 Nexus Scan Complete: {} files mapped to DuckDB (status: pending).", total_files);
     }
 
     fn extract_project_slug(&self, path: &Path) -> String {
-        // We assume projects root is /home/dstadel/projects
-        // We want the directory name immediately under that.
-        let projects_root = Path::new("/home/dstadel/projects");
-        if let Ok(relative) = path.strip_prefix(projects_root) {
+        if let Ok(relative) = path.strip_prefix(&self.root) {
             if let Some(first_dir) = relative.components().next() {
                 return first_dir.as_os_str().to_string_lossy().to_string();
             }
@@ -133,6 +101,29 @@ impl Scanner {
     }
 
     fn is_supported(&self, path: &Path) -> bool {
+        let path_str = path.to_string_lossy().to_lowercase();
+        
+        // 1. DIRECTORY NOISE FILTER (Strict)
+        if path_str.contains("/.git/") || 
+           path_str.contains("/.mypy_cache/") || 
+           path_str.contains("/.pytest_cache/") ||
+           path_str.contains("/__pycache__/") ||
+           path_str.contains("/.venv/") ||
+           path_str.contains("/node_modules/") ||
+           path_str.contains("/target/") ||
+           path_str.contains("/_build/") ||
+           path_str.contains("/deps/") {
+            return false;
+        }
+
+        // 2. HIDDEN FILE FILTER
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with('.') && name != ".env" { 
+                return false; 
+            }
+        }
+
+        // 3. EXTENSION FILTER
         if let Some(ext) = path.extension() {
             let ext_str = ext.to_string_lossy().to_lowercase();
             crate::config::CONFIG.indexing.supported_extensions.iter().any(|e| e.to_lowercase() == ext_str)
@@ -140,4 +131,9 @@ impl Scanner {
             false
         }
     }
+}
+
+// Temporary stubs for dependency extraction
+fn extract_toml_dependencies(_content: &str) -> Vec<ProjectDependency> {
+    Vec::new()
 }

@@ -18,6 +18,7 @@ defmodule AxonDashboard.Application do
       Axon.Watcher.StatsCache,
       Axon.Watcher.Auditor,
       Axon.Watcher.PoolFacade,
+      Axon.Watcher.TrafficGuardian,
       {Axon.Watcher.Server, []},
       Axon.ResourceMonitor,
       Axon.BackpressureController,

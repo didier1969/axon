@@ -1,86 +1,79 @@
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
+use tracing::{info, error, debug};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+use crate::graph::GraphStore;
 
-pub struct EmbedderState {
-    model: TextEmbedding,
-    batch_count: usize,
+// NEXUS v10.5: Sovereign Semantic Engine
+// We isolate the ONNX runtime inside a pure OS thread to prevent Tokio/jemalloc aborts.
+// No Lazy statics, no global Mutex. The model is owned by the background worker.
+
+pub struct SemanticWorkerPool {
+    _worker: thread::JoinHandle<()>,
 }
 
-impl EmbedderState {
-    fn try_new() -> anyhow::Result<Self> {
-        Ok(Self {
-            model: TextEmbedding::try_new(
-                InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-                    .with_show_download_progress(false)
-            ).map_err(|e| anyhow::anyhow!("Failed to initialize FastEmbed model: {}", e))?,
-            batch_count: 0,
-        })
-    }
-}
-
-pub static EMBEDDER: Lazy<Mutex<Option<EmbedderState>>> = Lazy::new(|| {
-    Mutex::new(EmbedderState::try_new().ok())
-});
-
-pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
-    if texts.is_empty() {
-        return Ok(Vec::new());
+impl SemanticWorkerPool {
+    pub fn new(graph_store: Arc<GraphStore>) -> Self {
+        info!("Semantic Factory: Spawning Native OS ML Worker...");
+        let worker = thread::spawn(move || {
+            Self::worker_loop(graph_store);
+        });
+        Self { _worker: worker }
     }
 
-    // --- NEXUS BYPASS: Disable ML if requested ---
-    if std::env::var("AXON_DISABLE_ML").is_ok() {
-        return Ok(vec![vec![0.0; 384]; texts.len()]);
-    }
+    fn worker_loop(graph_store: Arc<GraphStore>) {
+        info!("Semantic Worker: Initializing BGE-Small Model (384d) in isolated thread...");
 
-    let mut lock = match EMBEDDER.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
+        let mut options = InitOptions::new(EmbeddingModel::BGESmallENV15);
+        options.show_download_progress = true;
 
-    if lock.is_none() {
-        *lock = EmbedderState::try_new().ok();
-    }
+        let mut model = match TextEmbedding::try_new(options) {
+            Ok(m) => {
+                info!("✅ Semantic Worker: BGE-Small Model loaded successfully.");
+                m
+            },
+            Err(e) => {
+                error!("❌ Semantic Worker: FATAL ONNX INIT ERROR: {:?}", e);
+                return;
+            }
+        };
 
-    let embedder = lock.as_mut().ok_or_else(|| anyhow::anyhow!("AI Embedder unavailable"))?;
-    embedder.batch_count += 1;
-
-    if embedder.batch_count % 1000 == 0 {
-        log::info!("Re-initializing FastEmbed ONNX session to clear Arena allocator...");
-        if let Ok(new_state) = EmbedderState::try_new() {
-            *embedder = new_state;
-        }
-    }
-
-    let mut all_embeddings = Vec::with_capacity(texts.len());
-    
-    for chunk in texts.chunks(64) {
-        let mut truncated_chunk = Vec::new();
-        for s in chunk {
-            if s.len() > 1000 {
-                truncated_chunk.push(s[..1000].to_string());
-            } else {
-                truncated_chunk.push(s.to_string());
+        info!("Semantic Worker: Hunting for unembedded symbols...");
+        
+        loop {
+            match graph_store.fetch_unembedded_symbols(100) {
+                Ok(symbols) if !symbols.is_empty() => {
+                    debug!("Semantic Worker: Embedding {} symbols...", symbols.len());
+                    
+                    let texts: Vec<String> = symbols.iter().map(|s| s.1.clone()).collect();
+                    match model.embed(texts, None) {
+                        Ok(embeddings) => {
+                            let updates: Vec<(String, Vec<f32>)> = symbols.into_iter()
+                                .zip(embeddings.into_iter())
+                                .map(|((id, _), emb)| (id, emb))
+                                .collect();
+                            
+                            if let Err(e) = graph_store.update_symbol_embeddings(&updates) {
+                                error!("Semantic Worker: DB Write Error: {:?}", e);
+                            }
+                        },
+                        Err(e) => error!("Semantic Worker: Embedding failed: {:?}", e),
+                    }
+                },
+                Ok(_) => thread::sleep(Duration::from_secs(5)),
+                Err(e) => {
+                    error!("Semantic Worker: DB Fetch error: {:?}", e);
+                    thread::sleep(Duration::from_secs(5));
+                }
             }
         }
-        
-        let texts_ref: Vec<&str> = truncated_chunk.iter().map(|s| s.as_str()).collect();
-        let chunk_embeddings = embedder.model.embed(texts_ref, None)?;
-        all_embeddings.extend(chunk_embeddings);
     }
-    
-    Ok(all_embeddings)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_batch_embed() {
-        let texts = vec!["Hello world".to_string(), "Axon is great".to_string()];
-        let embeddings = batch_embed(texts).unwrap();
-        assert_eq!(embeddings.len(), 2);
-        assert_eq!(embeddings[0].len(), 384);
-    }
+// STUB for MCP compatibility without crashing
+pub fn batch_embed(_texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
+    // In v10.5, we disable synchronous MCP embedding to protect the runtime.
+    // MCP semantic search will be temporarily bypassed until we build a safe bridge.
+    Err(anyhow::anyhow!("MCP Real-time embedding is disabled in safe mode. Use structural search."))
 }

@@ -74,4 +74,8 @@ impl QueueStore {
         info!("RAM Queues entirely purged for rescan.");
         Ok(())
     }
+
+    pub fn len(&self) -> usize {
+        self.priority_sender.len() + self.bulk_sender.len()
+    }
 }

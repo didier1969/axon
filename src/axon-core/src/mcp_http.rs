@@ -16,7 +16,30 @@ pub fn app_router(mcp_server: Arc<McpServer>) -> Router {
     Router::new()
         .route("/mcp", post(handle_mcp_post))
         .route("/mcp/sse", get(handle_mcp_sse))
+        .route("/sql", post(handle_sql_post))
         .layer(Extension(mcp_server))
+}
+
+#[derive(serde::Deserialize)]
+struct SqlRequest {
+    query: String,
+}
+
+async fn handle_sql_post(
+    Extension(server): Extension<Arc<McpServer>>,
+    Json(payload): Json<SqlRequest>,
+) -> Json<serde_json::Value> {
+    let span = tracing::info_span!("sql_gateway", query = %payload.query);
+    
+    async move {
+        match tokio::task::spawn_blocking(move || {
+            server.execute_raw_sql(&payload.query)
+        }).await {
+            Ok(Ok(res)) => Json(serde_json::from_str(&res).unwrap_or(serde_json::json!([]))),
+            Ok(Err(e)) => Json(serde_json::json!({"error": format!("{:?}", e)})),
+            Err(e) => Json(serde_json::json!({"error": format!("Task Panic: {:?}", e)})),
+        }
+    }.instrument(span).await
 }
 
 async fn handle_mcp_post(

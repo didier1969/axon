@@ -1,12 +1,14 @@
 defmodule Axon.Watcher.PoolFacade do
   @moduledoc """
-  Nexus v5.0 - Monolithic Stable Bridge.
-  Restores the functional feedback loop between Elixir and Rust.
+  Nexus v8.3 - Convergence Bridge.
+  Telemetry still flows via Unix Socket (Full-Duplex).
+  Analytics & Dashboard stats flow via HTTP SQL Gateway (Port 44129).
   """
   use GenServer
   require Logger
 
   @socket_path "/tmp/axon-telemetry.sock"
+  @sql_gateway "http://127.0.0.1:44129/sql"
 
   # --- API ---
 
@@ -26,13 +28,28 @@ defmodule Axon.Watcher.PoolFacade do
     GenServer.call(__MODULE__, {:parse_batch, files}, 60_000)
   end
 
+  def query_json(query) do
+    # Direct Synchronous HTTP Request to Rust SQL Gateway
+    headers = [{'content-type', 'application/json'}]
+    body = Jason.encode!(%{"query" => query})
+    
+    case :httpc.request(:post, {to_charlist(@sql_gateway), headers, 'application/json', body}, [timeout: 5000], []) do
+      {:ok, {{_version, 200, _reason}, _headers, response_body}} ->
+        {:ok, List.to_string(response_body)}
+      {:ok, {{_version, code, reason}, _headers, _body}} ->
+        {:error, "HTTP #{code}: #{reason}"}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   # --- Callbacks ---
 
   def init(_opts) do
-    Logger.info("[PoolFacade] IDENTITY PROBE: Nexus v5.0 (Monolith) Starting...")
+    Logger.info("[PoolFacade] IDENTITY PROBE: Nexus v8.3 (Convergence) Starting...")
     boot_id = Ecto.UUID.generate()
     Process.send_after(self(), :connect, 500)
-    {:ok, %{socket: nil, requests: %{}, batches: %{}, path_to_batch: %{}, boot_id: boot_id, buffer: ""}}
+    {:ok, %{socket: nil, requests: %{}, batches: %{}, boot_id: boot_id, buffer: ""}}
   end
 
   def handle_cast(:trigger_global_scan, state) do
@@ -49,22 +66,23 @@ defmodule Axon.Watcher.PoolFacade do
     if state.socket do
       batch_id = Ecto.UUID.generate()
       payload = Jason.encode!(files)
-      
       :gen_tcp.send(state.socket, "PARSE_BATCH #{payload}\n")
-
       new_batches = Map.put(state.batches, batch_id, {from, length(files), []})
-      new_path_to_batch = Enum.reduce(files, state.path_to_batch, fn f, acc -> Map.put(acc, f["path"], batch_id) end)
-      
-      {:noreply, %{state | batches: new_batches, path_to_batch: new_path_to_batch}}
+      {:noreply, %{state | batches: new_batches}}
     else
       {:reply, {:error, :not_connected}, state}
     end
   end
 
+  def handle_call({:query_json, query}, _from, state) do
+    # Fallback handle_call for legacy callers
+    {:reply, query_json(query), state}
+  end
+
   def handle_info(:connect, state) do
     case :gen_tcp.connect({:local, @socket_path}, 0, [:binary, active: true]) do
       {:ok, socket} ->
-        Logger.info("[Pod A] Connected to Axon Core Bridge (v5.0 Stable)")
+        Logger.info("[Pod A] Connected to Axon Core Telemetry (v8.3 Stable)")
         :gen_tcp.send(socket, "SESSION_INIT {\"boot_id\": \"#{state.boot_id}\"}\n")
         {:noreply, %{state | socket: socket, buffer: ""}}
       {:error, _} ->
@@ -81,6 +99,7 @@ defmodule Axon.Watcher.PoolFacade do
       case Jason.decode(line) do
         {:ok, %{"FileIndexed" => payload}} -> process_indexed(payload, acc)
         {:ok, %{"event" => "PENDING_BATCH_READY", "files" => files}} -> process_pending(files, acc)
+        {:ok, %{"event" => "BATCH_ACCEPTED"}} -> process_ack(acc)
         _ -> acc
       end
     end)
@@ -108,16 +127,6 @@ defmodule Axon.Watcher.PoolFacade do
     files_to_index = Enum.map(batch_files, fn f -> 
       %{"path" => f["path"], "trace_id" => f["trace_id"], "priority" => f["priority"] || 100}
     end)
-
-    # Register in Tracking
-    batch_files
-    |> Enum.group_by(fn f -> extract_project(f["path"]) end)
-    |> Enum.each(fn {proj, files} ->
-      Axon.Watcher.Tracking.upsert_project!(proj, "workspace")
-      Axon.Watcher.Tracking.upsert_files_batch!(proj, Enum.map(files, fn f -> {f["path"], 0, "pending"} end))
-    end)
-
-    # Launch Oban
     %{"batch" => files_to_index} |> Axon.Watcher.IndexingWorker.new() |> Oban.insert()
     state
   end
@@ -127,30 +136,23 @@ defmodule Axon.Watcher.PoolFacade do
     final_status = if p["status"] == "ok", do: "indexed", else: p["status"]
     project_id = extract_project(path)
 
-    # Update Tracking & Stats
-    data = [{path, 0, final_status, p["symbol_count"] || 0, p["relation_count"] || 0, p["security_score"] || 100, p["coverage_score"] || 0, 0, 0, 0, p["error_reason"] || ""}]
-    Axon.Watcher.Tracking.upsert_files_full_batch!(project_id, data)
-    
     if final_status == "indexed" do
       Axon.Watcher.StatsCache.increment_file_stats(project_id, %{completed: 1, symbols: p["symbol_count"] || 0, relations: p["relation_count"] || 0})
     end
 
-    # Tracer
     if p["t0"] > 0, do: Axon.Watcher.Tracer.record_trace(p["trace_id"] || "none", path, p["t0"], p["t1"] || 0, p["t2"] || 0, p["t3"] || 0, p["t4"] || 0)
+    state
+  end
 
-    # IMPORTANT: Reply to GenServer calls (Fixes the Deadlock)
-    case Map.pop(state.path_to_batch, path) do
-      {nil, _} -> state
-      {batch_id, new_p2b} ->
-        case Map.get(state.batches, batch_id) do
-          {from, 1, results} ->
-            GenServer.reply(from, %{"status" => "ok", "results" => [%{"path" => path, "status" => final_status} | results]})
-            %{state | batches: Map.delete(state.batches, batch_id), path_to_batch: new_p2b}
-          {from, count, results} ->
-            new_batches = Map.put(state.batches, batch_id, {from, count - 1, [%{"path" => path, "status" => final_status} | results]})
-            %{state | batches: new_batches, path_to_batch: new_p2b}
-          _ -> state
-        end
+  defp process_ack(state) do
+    # Release waiting parse_batch calls
+    if Map.has_key?(state, :batches) do
+      Enum.each(state.batches, fn {_, {from, _, _}} -> 
+        GenServer.reply(from, :ok)
+      end)
+      %{state | batches: %{}}
+    else
+      state
     end
   end
 

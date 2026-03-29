@@ -11,49 +11,36 @@ defmodule Axon.Watcher.IndexingWorker do
 
     lane = if queue_name == "indexing_titan", do: "titan", else: "fast"
 
-    # Optimization: Filter out ignored extensions and titan files before batching
+    # Optimization: Filter out ignored extensions
     {ignored, valid} = Enum.split_with(batch, fn file ->
       ext = Path.extname(file["path"]) |> String.downcase()
-      ext in [".csv", ".log", ".tar.gz"]
+      ext in [".csv", ".log", ".tar.gz", ".zip", ".png", ".jpg", ".jpeg", ".pdf"]
     end)
 
     # Handle ignored
     Enum.each(ignored, fn file ->
       path = file["path"]
-      Axon.Watcher.Telemetry.report_finish("oban:#{job_id}", path, :skipped_binary)
-      Axon.Watcher.Tracking.mark_file_status!(path, "ignored_by_rule", %{error_reason: "Ignored extension"})
+      # Record as skipped in stats cache if needed, but DuckDB is master
+      :ok
     end)
 
     # Dispatch valid batch to Rust in ONE CALL
     if valid != [] do
-      # Add t1 (processing start) to each file in batch
       t1 = :os.system_time(:microsecond)
       batch_payload = Enum.map(valid, fn f -> Map.merge(f, %{"lane" => lane, "t1" => t1}) end)
 
       case PoolFacade.parse_batch(batch_payload) do
-        %{"status" => "ok"} ->
-          # Batch completed successfully. Individual file stats are updated by PoolFacade via mark_files_status_batch!
-          # We still need to increment global StatsCache for each SUCCESSFUL file in the result.
-          # Note: PoolFacade could return individual results if needed.
-          :ok
-
-        error ->
-          Logger.error("[Oban] Batch failure: #{inspect(error)}")
-          raise "Batch Processing Error"
+        :ok -> {:ok, :success}
+        {:ok, _} -> {:ok, :success}
+        {:error, reason} -> 
+          Logger.error("[Oban] Batch failure for Job #{job_id}: #{inspect(reason)}")
+          {:error, reason}
+        other -> 
+          Logger.warning("[Oban] Batch Job #{job_id} unexpected return: #{inspect(other)}")
+          {:ok, other}
       end
-    end
-
-    :ok
-  end
-
-  defp get_sys_ram_mb() do
-    try do
-      {output, 0} = System.cmd("free", ["-m"])
-      [_, mem_line | _] = String.split(output, "\n")
-      [_, _total, used | _] = String.split(mem_line, " ", trim: true)
-      String.to_integer(used)
-    rescue
-      _ -> 0
+    else
+      {:ok, :empty_batch}
     end
   end
 end

@@ -70,6 +70,7 @@ in
     ERL_AFLAGS = "-kernel shell_history enabled";
     
     PYTHONPATH = "/home/dstadel/projects/axon/src";
+    FILESYSTEM_FSINOTIFY_EXECUTABLE_FILE = "${pkgs.inotify-tools}/bin/inotifywait";
   };
 
   # Managed Processes (Triple-Pod Architecture)
