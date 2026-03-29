@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use crate::graph::GraphStore;
 use std::sync::Arc;
-use tracing::{info, error, debug};
+use tracing::{info, error};
 use walkdir::WalkDir;
 
 struct ProjectDependency {
@@ -33,8 +33,6 @@ impl Scanner {
             let path = entry.path();
 
             if path.is_file() {
-                let path_str = path.to_string_lossy().to_string();
-                
                 // NEXUS: Manual filtering
                 if !self.is_supported(&path) {
                     continue;

@@ -10,12 +10,6 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    
-    # HydraDB Stable Source
-    hydradb-src = {
-      url = "git+https://github.com/didier1969/hydraDB.git";
-      flake = false;
-    };
   };
 
   outputs = { self, nixpkgs, flake-utils, devenv, ... } @ inputs:

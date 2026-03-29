@@ -56,16 +56,16 @@ defmodule Axon.Watcher.Tracer do
 
   def handle_cast({:record, _trace_id, path, t0, t1, t2, t3, t4}, state) do
     # Convert microseconds to milliseconds for easier reading
-    lat_t1 = max(0, (t1 - t0) / 1000.0)
-    lat_t2 = max(0, (t2 - t1) / 1000.0)
-    lat_t3 = max(0, (t3 - t2) / 1000.0)
-    lat_t4 = max(0, (t4 - t3) / 1000.0)
+    lat_t1 = delta_ms(t0, t1)
+    lat_t2 = delta_ms(t1, t2)
+    lat_t3 = delta_ms(t2, t3)
+    lat_t4 = delta_ms(t3, t4)
 
     # Emit telemetry event for TrafficGuardian and other observers
     :telemetry.execute([:axon, :watcher, :file_indexed], %{t4: lat_t4}, %{path: path})
 
     t5 = :os.system_time(:microsecond)
-    total_lat = max(0, (t5 - t0) / 1000.0)
+    total_lat = delta_ms(t0, t5)
 
     case :ets.lookup(@table, :metrics) do
       [{:metrics, stats}] ->
@@ -119,6 +119,12 @@ defmodule Axon.Watcher.Tracer do
   defp keep_last(list, val, max_len) do
     Enum.take([val | list], max_len)
   end
+
+  defp delta_ms(from, to) when is_integer(from) and is_integer(to) do
+    max(0, (to - from) / 1000.0)
+  end
+
+  defp delta_ms(_, _), do: 0.0
 
   defp calculate_p99([]) do
     0.0

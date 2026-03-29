@@ -7,6 +7,7 @@ defmodule Axon.Watcher.CockpitLive do
     if connected?(socket) do
       :timer.send_interval(500, self(), :tick)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "telemetry_events")
+      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
     end
 
     repo_slug = System.get_env("AXON_REPO_SLUG") || Path.expand(".") |> Path.basename()
@@ -23,22 +24,6 @@ defmodule Axon.Watcher.CockpitLive do
   end
 
   @impl true
-  def handle_info(:tick, socket) do
-    stats = Progress.get_status(socket.assigns.repo_slug)
-    dir_stats = Progress.get_directory_stats(socket.assigns.repo_slug)
-    monitoring_active = Axon.Watcher.Server.get_monitoring_status()
-    live = Axon.Watcher.Telemetry.get_stats()
-
-    {:noreply,
-     assign(socket,
-       stats: stats,
-       dir_stats: dir_stats,
-       monitoring_active: monitoring_active,
-       live: live
-     )}
-  end
-
-  @impl true
   def handle_info({:backpressure_update, data}, socket) do
     live = Map.merge(socket.assigns.live, %{target_pressure: data.pressure, t4_ema: data.t4_ema})
     {:noreply, assign(socket, live: live)}
@@ -50,6 +35,35 @@ defmodule Axon.Watcher.CockpitLive do
   @impl true
   def handle_info({:telemetry_event, _event, _measurements, _metadata}, socket) do
     {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:bridge_event, event}, socket) do
+    {:noreply, apply_bridge_event(socket, event)}
+  end
+
+  @impl true
+  def handle_info(:tick, socket) do
+    stats = Progress.get_status(socket.assigns.repo_slug)
+    dir_stats = Progress.get_directory_stats(socket.assigns.repo_slug)
+    monitoring_active = Axon.Watcher.Server.get_monitoring_status()
+
+    live =
+      Axon.Watcher.Telemetry.get_stats()
+      |> Map.merge(%{
+        total_files: stats["total"] || 0,
+        total_ingested: stats["synced"] || 0,
+        indexing_progress: stats["progress"] || 0,
+        directories: dir_stats
+      })
+
+    {:noreply,
+     assign(socket,
+       stats: stats,
+       dir_stats: dir_stats,
+       monitoring_active: monitoring_active,
+       live: live
+     )}
   end
 
   @impl true
@@ -84,27 +98,14 @@ defmodule Axon.Watcher.CockpitLive do
   end
 
   @impl true
-  def handle_info(:tick, socket) do
-    # NEXUS v8.12: Unified Truth Pull from SQL Gateway
-    stats = Axon.Watcher.Progress.get_status("global")
-    dir_stats = Axon.Watcher.Progress.get_directory_stats("global")
-
-    new_live = Map.merge(socket.assigns.live, %{
-      total_files: stats["total"] || 0,
-      total_ingested: stats["synced"] || 0,
-      indexing_progress: stats["progress"] || 0,
-      directory_stats: dir_stats
-    })
-
-    {:noreply, assign(socket, live: new_live)}
-  end
-
-  @impl true
   def render(assigns) do
     ~H"""
     <div class="header">
       <div class="logo">
         AXON <span style="font-weight: 400; color: var(--text-dim);">SYSTEMS</span>
+        <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 4px;">
+          Multi-Project Control Plane
+        </div>
       </div>
       <div style="display:flex; gap: 12px; align-items: center;">
         <div class={"status-badge #{if @monitoring_active, do: "status-live", else: "status-error"}"}>
@@ -253,6 +254,9 @@ defmodule Axon.Watcher.CockpitLive do
               SYSTEM_IDLE: AWAITING_INGESTION_DATA
             </div>
           <% end %>
+          <div :if={Map.get(@live, :scan_complete, false)} style="color: var(--neon-green); text-align: center; margin-top: 12px;">
+            Fleet Ingestion Complete
+          </div>
         </div>
       </div>
       
@@ -310,4 +314,26 @@ defmodule Axon.Watcher.CockpitLive do
     </div>
     """
   end
+
+  defp apply_bridge_event(socket, %{"FileIndexed" => payload}) do
+    path = Map.get(payload, "path", "unknown")
+    status = if Map.get(payload, "status", "ok") == "ok", do: :ok, else: :error
+
+    live =
+      socket.assigns.live
+      |> Map.update(:last_files, [%{path: path, status: status, time: DateTime.utc_now()}], fn files ->
+        [%{path: path, status: status, time: DateTime.utc_now()} | Enum.take(files, 14)]
+      end)
+      |> Map.update(:total_ingested, 1, &(&1 + 1))
+      |> Map.put(:scan_complete, false)
+
+    assign(socket, live: live)
+  end
+
+  defp apply_bridge_event(socket, %{"ScanComplete" => _payload}) do
+    live = Map.put(socket.assigns.live, :scan_complete, true)
+    socket |> assign(live: live) |> put_flash(:info, "Fleet Ingestion Complete")
+  end
+
+  defp apply_bridge_event(socket, _event), do: socket
 end

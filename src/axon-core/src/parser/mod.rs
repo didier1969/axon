@@ -5,9 +5,8 @@ use once_cell::sync::Lazy;
 use std::panic::catch_unwind;
 use std::collections::HashMap;
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracing::{info, warn, error, debug};
+use tracing::{warn, debug};
 
 pub static WASM_ENGINE: Lazy<Engine> = Lazy::new(|| Engine::default());
 

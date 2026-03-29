@@ -27,7 +27,7 @@ pub enum DbWriteTask {
 }
 
 pub struct WorkerPool {
-    workers: Vec<thread::JoinHandle<()>>,
+    _workers: Vec<thread::JoinHandle<()>>,
 }
 
 impl WorkerPool {
@@ -51,7 +51,7 @@ impl WorkerPool {
                 Self::worker_loop(i, q, gs, d_tx, r_tx);
             }));
         }
-        Self { workers }
+        Self { _workers: workers }
     }
 
     fn worker_loop(
@@ -86,7 +86,7 @@ impl WorkerPool {
     }
 
     pub fn process_one_task(
-        worker_id: usize,
+        _worker_id: usize,
         task: crate::queue::Task,
         db_sender: &Sender<DbWriteTask>,
         _result_sender: &tokio::sync::broadcast::Sender<String>,

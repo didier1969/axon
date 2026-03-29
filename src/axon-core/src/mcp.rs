@@ -476,7 +476,7 @@ impl McpServer {
 
         match action {
             "create" => {
-                let project_slug = data.get("project_slug").and_then(|v| v.as_str()).unwrap_or("GLOBAL");
+                let project_slug = data.get("project_slug").and_then(|v| v.as_str()).unwrap_or("AXO");
                 let reg_col = match entity {
                     "pillar" | "requirement" => "last_req",
                     "concept" => "last_cpt",
@@ -499,8 +499,8 @@ impl McpServer {
                 let update_query = if entity == "stakeholder" {
                     "SELECT 0".to_string()
                 } else {
-                    format!("INSERT INTO soll.Registry (project_slug, last_req, last_cpt, last_dec, last_mil, last_val) \
-                             VALUES ('{0}', 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING; \
+                    format!("INSERT INTO soll.Registry (project_slug, id, last_req, last_cpt, last_dec, last_mil, last_val) \
+                             VALUES ('{0}', 'AXON_GLOBAL', 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING; \
                              UPDATE soll.Registry SET {1} = {1} + 1 WHERE project_slug = '{0}' RETURNING {1}", 
                              project_slug.replace("'", "''"), reg_col)
                 };
@@ -537,7 +537,7 @@ impl McpServer {
                                 let rat = data.get("rationale")?.as_str()?;
                                 let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                                 let final_name = format!("{}: {}", formatted_id, name);
-                                let q = "INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES (?, ?, ?)";
+                                let q = "INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES (?, ?, ?, ?)";
                                 self.graph_store.execute_param(q, &json!([final_name, expl, rat, meta.to_string()]))
                             },
                             "decision" => {
@@ -675,7 +675,7 @@ impl McpServer {
     }
 
     fn axon_export_soll(&self) -> Option<Value> {
-        let mut markdown = String::from("# Axon Lattice - SOLL Extraction\n\n");
+        let mut markdown = String::from("# SOLL Extraction\n\n");
         
         let now = std::time::SystemTime::now();
         let datetime: chrono::DateTime<chrono::Local> = now.into();
@@ -686,7 +686,8 @@ impl McpServer {
         if let Ok(res) = self.graph_store.query_json("SELECT title, description, goal, metadata FROM soll.Vision") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {}\n**Description:** {}\n**Goal:** {}\n**Meta:** `{}`\n\n", r[0], r[1], r[2], r[3]));
+                let meta = r.get(3).cloned().unwrap_or_default();
+                markdown.push_str(&format!("### {}\n**Description:** {}\n**Goal:** {}\n**Meta:** `{}`\n\n", r[0], r[1], r[2], meta));
             }
         }
         
@@ -698,23 +699,28 @@ impl McpServer {
             }
         }
 
-        markdown.push_str("\n## 3. Jalons & Roadmap (Milestones)\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status, deadline FROM soll.Milestone") {
+        markdown.push_str("\n## 2b. Concepts\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT name, explanation, rationale FROM soll.Concept") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {} : {}\n*Statut :* `{}` | *Échéance :* {}\n\n", r[0], r[1], r[2], r[3]));
+                markdown.push_str(&format!("* **{}** : {} ({})\n", r[0], r[1], r[2]));
+            }
+        }
+
+        markdown.push_str("\n## 3. Jalons & Roadmap (Milestones)\n");
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status FROM soll.Milestone") {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            for r in rows {
+                markdown.push_str(&format!("### {} : {}\n*Statut :* `{}`\n\n", r[0], r[1], r[2]));
             }
         }
 
         markdown.push_str("## 4. Exigences & Rayon d'Impact (Requirements)\n");
-        let req_query = "SELECT r.id, r.title, r.priority, COALESCE(ir.symbols_count, 0) as blast_radius, r.description \
-                         FROM soll.Requirement r \
-                         LEFT JOIN soll.ImpactRadius ir ON r.id = ir.requirement_id \
-                         ORDER BY blast_radius DESC";
+        let req_query = "SELECT id, title, priority, description FROM soll.Requirement";
         if let Ok(res) = self.graph_store.query_json(req_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {} - {}\n*Priorité :* `{}` | **Blast Radius :** `{} symboles` \n*Description :* {}\n\n", r[0], r[1], r[2], r[3], r[4]));
+                markdown.push_str(&format!("### {} - {}\n*Priorité :* `{}`\n*Description :* {}\n\n", r[0], r[1], r[2], r[3]));
             }
         }
 
@@ -740,7 +746,7 @@ impl McpServer {
         let _ = std::fs::create_dir_all("docs/vision");
         match std::fs::write(&file_path, &markdown) {
             Ok(_) => {
-                let report = format!("✅ Exportation réussie dans {}\n\n---\n\n{}", file_path, markdown.chars().take(300).collect::<String>());
+                let report = format!("✅ Exported to {}\n\n---\n\n{}", file_path, markdown.chars().take(300).collect::<String>());
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture: {}", e) }], "isError": true }))
@@ -1547,7 +1553,7 @@ mod tests {
     fn test_axon_soll_manager_auto_id() {
         let server = create_test_server();
         // Initialize registry
-        server.graph_store.execute("INSERT INTO soll.Registry (id, last_req, last_cpt, last_dec) VALUES ('AXON_GLOBAL', 0, 10, 0)").unwrap();
+        server.graph_store.execute("INSERT INTO soll.Registry (project_slug, id, last_req, last_cpt, last_dec) VALUES ('AXO', 'AXON_GLOBAL', 0, 10, 0)").unwrap();
         
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1558,6 +1564,7 @@ mod tests {
                     "action": "create",
                     "entity": "concept",
                     "data": {
+                        "project_slug": "AXO",
                         "name": "Test Concept",
                         "explanation": "To test auto id",
                         "rationale": "Because testing is good"
@@ -1581,8 +1588,8 @@ mod tests {
     #[test]
     fn test_axon_export_soll() {
         let server = create_test_server();
-        server.graph_store.execute("INSERT INTO soll.Vision (title, description, goal) VALUES ('Test Vision', 'Desc', 'Goal')").unwrap();
-        server.graph_store.execute("INSERT INTO soll.Concept (name, explanation, rationale) VALUES ('CPT-AXO-001: My Concept', 'Expl', 'Rat')").unwrap();
+        server.graph_store.execute("INSERT INTO soll.Vision (id, title, description, goal, metadata) VALUES ('VIS-AXO-001', 'Test Vision', 'Desc', 'Goal', '{}')").unwrap();
+        server.graph_store.execute("INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES ('CPT-AXO-001: My Concept', 'Expl', 'Rat', '{}')").unwrap();
         
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),

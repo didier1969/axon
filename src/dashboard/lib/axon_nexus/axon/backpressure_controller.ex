@@ -143,9 +143,9 @@ defmodule Axon.BackpressureController do
 
   defp calculate_limit(pressure) do
     cond do
-      pressure < 0.50 -> 64
-      pressure < 0.75 -> 32
-      true -> 8
+      pressure < 0.50 -> 16
+      pressure < 0.75 -> 8
+      true -> 2
     end
   end
 
@@ -165,7 +165,7 @@ defmodule Axon.BackpressureController do
     # Main dynamic scaling
     oban_mod.scale_queue(queue: :indexing_default, limit: limit)
     # User-priority queue always gets at least half the capacity
-    oban_mod.scale_queue(queue: :indexing_hot, limit: max(2, div(limit, 2)))
+    oban_mod.scale_queue(queue: :indexing_hot, limit: max(1, div(limit, 2)))
     # Titan queue remains unit-concurrency but follows the pause/resume signal
   end
 end

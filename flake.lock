@@ -569,22 +569,6 @@
         "type": "github"
       }
     },
-    "hydradb-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1773009479,
-        "narHash": "sha256-huUz2Sea8h/UKTPMhCEps5soRcZqfMxMEmVa5W+J4wY=",
-        "ref": "refs/heads/master",
-        "rev": "cd86c03c6519750c55a3b771df61f892c72ce159",
-        "revCount": 165,
-        "type": "git",
-        "url": "https://github.com/didier1969/hydraDB.git"
-      },
-      "original": {
-        "type": "git",
-        "url": "https://github.com/didier1969/hydraDB.git"
-      }
-    },
     "nix": {
       "inputs": {
         "flake-compat": [
@@ -846,7 +830,6 @@
       "inputs": {
         "devenv": "devenv",
         "flake-utils": "flake-utils",
-        "hydradb-src": "hydradb-src",
         "nixpkgs": "nixpkgs_5",
         "rust-overlay": "rust-overlay_2"
       }

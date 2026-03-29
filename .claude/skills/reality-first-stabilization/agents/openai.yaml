@@ -1,0 +1,7 @@
+interface:
+  display_name: "Reality-First Stabilization"
+  short_description: "Stabilise un système avant optimisation"
+  default_prompt: "Use $reality-first-stabilization to audit and realign this system from environment to runtime before optimizing it."
+
+policy:
+  allow_implicit_invocation: true

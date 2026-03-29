@@ -6,7 +6,7 @@ use axon_core::mcp::McpServer;
 use axon_core::queue::QueueStore;
 use axon_core::scanner;
 use std::fs;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{info, error, debug, warn};

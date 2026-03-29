@@ -20,7 +20,7 @@ fn test_full_pipeline_loop() {
     
     // 3. Create a mock Elixir file with proper extension
     println!("[TEST] Step 3: Create mock Elixir file...");
-    let mut temp_dir = std::env::temp_dir();
+    let temp_dir = std::env::temp_dir();
     let file_path = temp_dir.join("test_file_axon.ex");
     let mut file = std::fs::File::create(&file_path).unwrap();
     writeln!(file, "defmodule Test do\n  def hello, do: :ok\nend").unwrap();

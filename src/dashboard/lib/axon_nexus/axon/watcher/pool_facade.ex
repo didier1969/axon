@@ -30,10 +30,10 @@ defmodule Axon.Watcher.PoolFacade do
 
   def query_json(query) do
     # Direct Synchronous HTTP Request to Rust SQL Gateway
-    headers = [{'content-type', 'application/json'}]
+    headers = [{~c"content-type", ~c"application/json"}]
     body = Jason.encode!(%{"query" => query})
     
-    case :httpc.request(:post, {to_charlist(@sql_gateway), headers, 'application/json', body}, [timeout: 5000], []) do
+    case :httpc.request(:post, {to_charlist(@sql_gateway), headers, ~c"application/json", body}, [timeout: 5000], []) do
       {:ok, {{_version, 200, _reason}, _headers, response_body}} ->
         {:ok, List.to_string(response_body)}
       {:ok, {{_version, code, reason}, _headers, _body}} ->

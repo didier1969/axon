@@ -1,5 +1,4 @@
 use std::time::Instant;
-use std::sync::Arc;
 use crate::parser;
 
 #[test]

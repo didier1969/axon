@@ -6,9 +6,6 @@ pub struct SqlParser {
     create_table_re: Regex,
     create_view_re: Regex,
     create_func_re: Regex,
-    create_proc_re: Regex,
-    drop_re: Regex,
-    alter_re: Regex,
     dml_re: Regex,
 }
 
@@ -24,9 +21,6 @@ impl SqlParser {
             create_table_re: Regex::new(r"(?im)^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
             create_view_re: Regex::new(r"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
             create_func_re: Regex::new(r"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
-            create_proc_re: Regex::new(r"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
-            drop_re: Regex::new(r"(?im)^\s*DROP\s+(?:TABLE|VIEW|FUNCTION|PROCEDURE)\s+(?:IF\s+EXISTS\s+)?(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
-            alter_re: Regex::new(r"(?im)^\s*ALTER\s+TABLE\s+(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
             dml_re: Regex::new(r"(?im)^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:`|\x22)?(\w+)(?:`|\x22)?").unwrap(),
         }
     }

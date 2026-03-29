@@ -47,7 +47,7 @@ impl GoParser {
 
             let is_public = name.chars().next().is_some_and(|c| c.is_uppercase());
             let mut is_unsafe = false;
-            let mut properties = HashMap::new();
+            let properties = HashMap::new();
 
             if let Some(body) = Self::find_child_by_type(node, "block") {
                 let node_content = body.utf8_text(source_bytes).unwrap_or("");

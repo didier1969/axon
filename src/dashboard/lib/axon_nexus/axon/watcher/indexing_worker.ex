@@ -18,8 +18,7 @@ defmodule Axon.Watcher.IndexingWorker do
     end)
 
     # Handle ignored
-    Enum.each(ignored, fn file ->
-      path = file["path"]
+    Enum.each(ignored, fn _file ->
       # Record as skipped in stats cache if needed, but DuckDB is master
       :ok
     end)

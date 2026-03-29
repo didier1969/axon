@@ -44,19 +44,7 @@ defmodule Axon.Watcher.Server do
       idle_timer: start_idle_timer()
     }
 
-    backend_args =
-      case :os.type() do
-        {:unix, :linux} ->
-          [
-            "--exclude",
-            "(/.git/|/.axon/|/_build/|/deps/|/.devenv/|/node_modules/|/target/)"
-          ]
-
-        _ ->
-          []
-      end
-
-    case FileSystem.start_link(dirs: [watch_dir], backend_args: backend_args) do
+    case FileSystem.start_link(dirs: [watch_dir]) do
       {:ok, watcher_pid} ->
         FileSystem.subscribe(watcher_pid)
         {:ok, %{initial_state | watcher_pid: watcher_pid}, {:continue, :auto_trigger_scan}}
@@ -87,30 +75,6 @@ defmodule Axon.Watcher.Server do
   end
 
   @impl true
-  def handle_info(:retry_failed, state) do
-    failed_files = Axon.Watcher.Tracking.get_failed_files(100)
-
-    if length(failed_files) > 0 do
-      Logger.info("[Pod A] Retrying #{length(failed_files)} failed files...")
-
-      # Group them back into batches based on Priority
-      Enum.each(failed_files, fn str_path ->
-        try do
-          # Mark back to pending so they don't get retried twice if Oban is slow
-          Axon.Watcher.Tracking.mark_file_status!(str_path, "pending")
-        rescue
-          _ -> :ok
-        end
-      end)
-
-      # Dispatch to hot queue for immediate reprocessing
-      dispatch_batch(failed_files, :indexing_hot)
-    end
-
-    {:noreply, state}
-  end
-
-  @impl true
   def handle_cast(:trigger_scan, state) do
     # send(self(), :initial_scan)
     # Scan is now handled by Rust Data Plane.
@@ -134,20 +98,23 @@ defmodule Axon.Watcher.Server do
     do: {:reply, state.monitoring_active, state}
 
   @impl true
-  def handle_info(:initial_scan, state) do
-    Logger.info("[Pod A] Triggering Reactive Streaming Scan on: #{state.watch_dir}")
+  def handle_info(:retry_failed, state) do
+    failed_files = Axon.Watcher.Tracking.get_failed_files(100)
 
-    # Mark all existing files as stale. True orphan files will remain stale and can be cleaned up later.
-    Axon.Watcher.Repo.query!("UPDATE indexed_files SET status = 'stale'")
+    if length(failed_files) > 0 do
+      Logger.info("[Pod A] Retrying #{length(failed_files)} failed files...")
 
-    Axon.Watcher.Progress.update_status(state.repo_slug, %{
-      status: "indexing",
-      total: 0,
-      progress: 0
-    })
+      Enum.each(failed_files, fn str_path ->
+        try do
+          Axon.Watcher.Tracking.mark_file_status!(str_path, "pending")
+        rescue
+          _ -> :ok
+        end
+      end)
 
-    # Déclenche le scan asynchrone qui enverra des messages {:ok, path} ou {:ok, "done"}
-    Axon.Scanner.start_streaming(state.watch_dir, self())
+      dispatch_batch(failed_files, :indexing_hot)
+    end
+
     {:noreply, state}
   end
 
@@ -232,6 +199,24 @@ defmodule Axon.Watcher.Server do
     else
       {:noreply, state}
     end
+  end
+
+  @impl true
+  def handle_info(:initial_scan, state) do
+    Logger.info("[Pod A] Triggering Reactive Streaming Scan on: #{state.watch_dir}")
+
+    # Mark all existing files as stale. True orphan files will remain stale and can be cleaned up later.
+    Axon.Watcher.Repo.query!("UPDATE indexed_files SET status = 'stale'")
+
+    Axon.Watcher.Progress.update_status(state.repo_slug, %{
+      status: "indexing",
+      total: 0,
+      progress: 0
+    })
+
+    # Déclenche le scan asynchrone qui enverra des messages {:ok, path} ou {:ok, "done"}
+    Axon.Scanner.start_streaming(state.watch_dir, self())
+    {:noreply, state}
   end
 
   @impl true

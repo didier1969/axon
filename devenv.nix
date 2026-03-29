@@ -47,8 +47,6 @@ in
     CXXFLAGS = "-include cstdint -mavx2 -msse4.2 -mpclmul";
     LIBCLANG_PATH = "${pkgs.llvmPackages_18.libclang.lib}/lib";
     
-    HYDRADB_SOURCE = inputs.hydradb-src.outPath;
-    HYDRADB_RUNTIME = "/home/dstadel/projects/axon/.axon/runtime/hydradb";
     ELIXIR_HOME = "/home/dstadel/projects/axon/.axon/elixir_home";
     MIX_HOME = "/home/dstadel/projects/axon/.axon/elixir_home/mix";
     HEX_HOME = "/home/dstadel/projects/axon/.axon/elixir_home/hex";
@@ -73,9 +71,8 @@ in
     FILESYSTEM_FSINOTIFY_EXECUTABLE_FILE = "${pkgs.inotify-tools}/bin/inotifywait";
   };
 
-  # Managed Processes (Triple-Pod Architecture)
+  # Managed Processes
   processes = {
-    db.exec = "axon-db-start";
     core.exec = "/home/dstadel/projects/axon/bin/axon-core";
     
     nexus.exec = ''
@@ -83,26 +80,12 @@ in
     '';
   };
 
-  # Scripts to start the different Pods
+  # Project scripts
   scripts = {
-    axon-db-setup.exec = ''
-      echo "🛠️ Setting up HydraDB v1.0.0 Stable..."
-      mkdir -p $HYDRADB_RUNTIME
-      cp -r $HYDRADB_SOURCE/* $HYDRADB_RUNTIME/
-      chmod -R +w $HYDRADB_RUNTIME
-      cd $HYDRADB_RUNTIME && mix deps.get && mix compile
-      echo "✅ HydraDB v1.0.0 Ready in $HYDRADB_RUNTIME"
-    '';
-
     axon-db-start.exec = ''
-      if [ ! -d "$HYDRADB_RUNTIME/deps" ]; then axon-db-setup; fi
-      export TCP_PORT=''${HYDRA_TCP_PORT:-6040}
-      export HTTP_PORT=''${HYDRA_HTTP_PORT:-4000}
-      export ODATA_PORT=''${HYDRA_ODATA_PORT:-5000}
-      export HTTP2_PORT=''${HYDRA_HTTP2_PORT:-50051}
-      export MCP_PORT=''${HYDRA_MCP_PORT:-7047}
-      echo "🚀 Starting Isolated HydraDB (Pod C) [TCP: $TCP_PORT, HTTP: $HTTP_PORT]..."
-      cd $HYDRADB_RUNTIME && export HYDRA_DB_API_KEY=dev_key && elixir --name hydra_axon@127.0.0.1 -S mix run --no-halt
+      echo "HydraDB is intentionally detached from the current Axon Devenv workflow."
+      echo "Re-enable it explicitly when the integration is ready."
+      exit 1
     '';
   };
 
@@ -124,7 +107,7 @@ in
     echo "--- AXON v1.0 - DEVENV ARCHITECTURE ---"
     echo "Pod A (Watcher): Elixir $(elixir --version | awk '/Elixir/ {print $2}')"
     echo "Pod B (Parser):  Python $(python --version | awk '/Python/ {print $2}')"
-    echo "Pod C (HydraDB): v1.0.0 Stable (Run 'axon-db-start' to launch)"
+    echo "Pod C (HydraDB): detached from current Devenv workflow"
     echo "---------------------------------------"
   '';
 }
