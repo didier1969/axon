@@ -1,7 +1,7 @@
 ---
 title: Reality-First Stabilization Handoff
 date: 2026-03-30
-branch: feat/axon-stabilization-continuation
+branch: feat/rust-first-control-plane
 status: in-progress
 ---
 
@@ -24,7 +24,7 @@ Stabilize Axon for real daily use before further sophistication:
 
 Current working branch:
 
-`feat/axon-stabilization-continuation`
+`feat/rust-first-control-plane`
 
 This branch was created after merging the previous stabilization wave into `main`.
 
@@ -58,6 +58,22 @@ The workflow used so far is:
 5. Fix foundations first: environment, storage bootstrap, atomic claiming, protocol correctness, test reliability.
 6. Measure progress after each phase with concrete test signals.
 7. Prefer validation en conditions reelles over speculative product promises.
+
+# Current Architecture Reference
+
+For the next ingestion redesign, the active concept document is:
+
+- `/home/dstadel/projects/axon/docs/architecture/2026-03-30-adaptive-ingestion-concept.md`
+- `/home/dstadel/projects/axon/docs/architecture/2026-03-30-rust-first-elixir-visualization.md`
+
+# Current Architecture Decision
+
+Axon now targets this split:
+
+- Rust = canonical runtime plane
+- Elixir/Phoenix = visualization and operator plane
+
+This means the ongoing migration must remove remaining ingestion/control-plane authority from Elixir while preserving the UI.
 
 # High-Value Findings Identified Earlier
 
@@ -103,6 +119,18 @@ What changed:
 - The stable operational rule is now explicit: if Axon is started through `start_v2.sh`, the authoritative release binary must come from `.axon/cargo-target/release/axon-core`, built inside `devenv shell`.
 - `start_v2.sh` now attempts the Devenv rebuild automatically before falling back to a manual instruction.
 - `start_v2.sh` now performs a live SQL schema probe after the core port opens, so a false-positive runtime start is rejected if `/sql` does not expose the expected tables.
+- `Axon Ignore` redesign is now started with a real hierarchical `.axonignore` / `.axonignore.local` path in the Rust core scanner, validated by test, and aligned with the dashboard NIF scanner without hardcoded absolute ignore paths.
+- the Rust autonomous ingestor no longer uses a fixed `queue.len() < 5000` / `fetch_pending_batch(2000)` policy only; it now applies an adaptive claim policy based on queue pressure, memory pressure, and recent live `/sql` + `/mcp` latency
+- a new `service_guard` module records recent MCP and SQL latency so bulk claiming can slow down before live service becomes unresponsive
+- the semantic worker is no longer unconditional work: embeddings now pause under queue pressure or recent live service degradation, making semantic enrichment a true slack-driven layer instead of a permanent competitor to structural ingestion
+- the scanner itself now applies adaptive discovery throttling based on pending backlog, memory pressure, and recent live `/sql` + `/mcp` latency; discovery is no longer a blind fixed-rate producer
+- the Rust core now computes a host-specific runtime profile at boot and uses it to size worker count, queue capacity, blocking-thread budget, and RAM headroom instead of relying on fixed constants
+- the dashboard resource monitor now computes real `io` pressure from `/proc/stat` deltas instead of always publishing `0.0`
+- the first Rust-native delta staging slice now exists through `fs_watcher::stage_hot_delta(...)`, which re-stages changed files directly into `IST`, enforces hierarchical `Axon Ignore`, and promotes the delta with hot priority without relying on Elixir watcher authority
+- this slice is now wired to a native Rust filesystem watcher in `main_background.rs`, using debounced OS events to feed the same durable `IST` backlog path
+- duplicate bursts and missing short-lived paths are now tolerated by the Rust watcher path instead of surfacing as runtime failures
+- the watcher no longer assumes that the whole universe can be armed as one clean recursive watch target; it now skips unreadable immediate project roots instead of letting a single bad subtree poison the global arming step
+- the active project root is now prioritized when computing watcher targets, so the hot set can be armed before the full universe finishes its recursive registration
 
 ## Rust Core / Native Ingestion / MCP
 
@@ -114,6 +142,7 @@ Files changed:
 - `/home/dstadel/projects/axon/src/axon-core/src/main_background.rs`
 - `/home/dstadel/projects/axon/src/axon-core/src/main_services.rs`
 - `/home/dstadel/projects/axon/src/axon-core/src/main_telemetry.rs`
+- `/home/dstadel/projects/axon/src/axon-core/src/fs_watcher.rs`
 - `/home/dstadel/projects/axon/src/axon-core/src/graph_analytics.rs`
 - `/home/dstadel/projects/axon/src/axon-core/src/graph_ingestion.rs`
 - `/home/dstadel/projects/axon/src/axon-core/src/graph_query.rs`
@@ -136,6 +165,19 @@ What changed:
 - `fetch_pending_batch()` was changed to claim work atomically under transaction.
 - `worker_id` is now cleared when files transition to terminal states.
 - SQL parameter handling now supports positional `?` arguments in addition to named params.
+- the Rust core now contains a first watcher-facing delta staging API:
+  - `fs_watcher::stage_hot_delta(...)`
+  - `fs_watcher::stage_hot_deltas(...)`
+  - `GraphStore::upsert_hot_file(...)`
+  - this path reuses the same durable `IST` backlog instead of routing changed files through Elixir-first authority
+- `main_background.rs` now starts a native debounced filesystem watcher and routes events into `fs_watcher::stage_hot_deltas(...)`
+- watcher-side safety rescan support is now present for `need_rescan()` events, guarded to avoid concurrent safety rescans
+- watcher target selection now:
+  - keeps the universe root in non-recursive mode
+  - arms readable immediate project roots recursively
+  - skips unreadable roots
+  - prioritizes `AXON_PROJECT_ROOT` before other projects
+- hierarchical `Axon Ignore` is now enforced both for full discovery and for Rust-side hot delta staging
 - MCP/SOLL test expectations were updated to match the current schema and export behavior.
 - Several previously stub-like audit/health helpers in `graph.rs` were replaced with real graph-derived signals.
 - `axon_query` now reports its effective mode instead of overstating semantic availability.
@@ -152,6 +194,21 @@ Rust validation reached a clean state during this session:
 - result reached now: `27 passed; 0 failed`
 - result reached now after VCR coverage expansion: `30 passed; 0 failed`
 - result reached now after reader/writer consistency coverage: `36 passed; 0 failed`
+- result reached now after Axon Ignore unification and adaptive claim policy tests: `38 passed; 0 failed` in `src/lib.rs` and `6 passed; 0 failed` in `src/main.rs`
+- result reached now after service latency guard integration: `40 passed; 0 failed` in `src/lib.rs` and `8 passed; 0 failed` in `src/main.rs`
+- result reached now after slack-driven semantic policy: `43 passed; 0 failed` in `src/lib.rs` and `8 passed; 0 failed` in `src/main.rs`
+- result reached now after adaptive discovery throttling: `47 passed; 0 failed` in `src/lib.rs` and `8 passed; 0 failed` in `src/main.rs`
+- result reached now after runtime profile integration: `50 passed; 0 failed` in `src/lib.rs` and `8 passed; 0 failed` in `src/main.rs`
+- result reached now after first Rust-native delta watcher staging slice: `53 passed; 0 failed` in `src/lib.rs` and `8 passed; 0 failed` in `src/main.rs`
+- result reached now after native debounced watcher wiring and hot-delta hardening: `55 passed; 0 failed` in `src/lib.rs` and `9 passed; 0 failed` in `src/main.rs`
+- result reached now after watcher target prioritization and unreadable-root tolerance: `55 passed; 0 failed` in `src/lib.rs` and `12 passed; 0 failed` in `src/main.rs`
+- dashboard validation remains green after real `io` monitoring work: `31 tests, 0 failures`
+
+Runtime note:
+
+- live boot now shows `Rust FS watcher preparing targets under /home/dstadel/projects`
+- the full universe recursive registration still needs longer real-world validation to prove the final arming cadence and the first live hot-delta on the active repo
+- the important architectural point is now explicit in code: the active repo can be prioritized ahead of the cold universe instead of waiting for a monolithic recursive watch step
 
 Important note:
 

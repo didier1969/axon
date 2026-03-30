@@ -52,27 +52,13 @@ impl GraphStore {
     pub fn bulk_insert_files(&self, file_paths: &[(String, String, i64, i64)]) -> Result<()> {
         let mut queries = Vec::new();
         for (path, project, size, mtime) in file_paths {
-            queries.push(format!(
-                "INSERT INTO Project (name) VALUES ('{}') ON CONFLICT DO NOTHING;",
-                Self::escape_sql(project)
-            ));
-            queries.push(format!(
-                "INSERT INTO File (path, project_slug, size, mtime, status, priority) VALUES ('{}', '{}', {}, {}, 'pending', 100) \
-                 ON CONFLICT(path) DO UPDATE SET \
-                    project_slug=EXCLUDED.project_slug, \
-                    size=EXCLUDED.size, \
-                    mtime=EXCLUDED.mtime, \
-                    status='pending', \
-                    worker_id=NULL \
-                 WHERE File.mtime IS DISTINCT FROM EXCLUDED.mtime \
-                    OR File.size IS DISTINCT FROM EXCLUDED.size \
-                    OR File.status <> 'indexed';",
-                Self::escape_sql(path),
-                Self::escape_sql(project),
-                size,
-                mtime
-            ));
+            queries.extend(Self::upsert_file_queries(path, project, *size, *mtime, 100));
         }
+        self.execute_batch(&queries)
+    }
+
+    pub fn upsert_hot_file(&self, path: &str, project: &str, size: i64, mtime: i64, priority: i64) -> Result<()> {
+        let queries = Self::upsert_file_queries(path, project, size, mtime, priority);
         self.execute_batch(&queries)
     }
 
@@ -455,5 +441,35 @@ impl GraphStore {
             "INSERT INTO CONTAINS (source_id, target_id) VALUES ('{}', '{}');",
             from, to
         ))
+    }
+}
+
+impl GraphStore {
+    fn upsert_file_queries(path: &str, project: &str, size: i64, mtime: i64, priority: i64) -> Vec<String> {
+        vec![
+            format!(
+                "INSERT INTO Project (name) VALUES ('{}') ON CONFLICT DO NOTHING;",
+                Self::escape_sql(project)
+            ),
+            format!(
+                "INSERT INTO File (path, project_slug, size, mtime, status, priority) VALUES ('{}', '{}', {}, {}, 'pending', {}) \
+                 ON CONFLICT(path) DO UPDATE SET \
+                    project_slug=EXCLUDED.project_slug, \
+                    size=EXCLUDED.size, \
+                    mtime=EXCLUDED.mtime, \
+                    status='pending', \
+                    priority=EXCLUDED.priority, \
+                    worker_id=NULL \
+                 WHERE File.mtime IS DISTINCT FROM EXCLUDED.mtime \
+                    OR File.size IS DISTINCT FROM EXCLUDED.size \
+                    OR File.status <> 'indexed' \
+                    OR File.priority IS DISTINCT FROM EXCLUDED.priority;",
+                Self::escape_sql(path),
+                Self::escape_sql(project),
+                size,
+                mtime,
+                priority
+            ),
+        ]
     }
 }

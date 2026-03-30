@@ -36,8 +36,9 @@ pub(crate) fn start_runtime_services(
     });
 
     let semantic_store = graph_store.clone();
+    let semantic_queue = queue_store.clone();
     tokio::task::spawn_blocking(move || {
-        axon_core::embedder::SemanticWorkerPool::new(semantic_store);
+        axon_core::embedder::SemanticWorkerPool::new(semantic_store, semantic_queue);
     });
 
     let mcp_store_for_axum = graph_store;

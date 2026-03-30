@@ -9,6 +9,25 @@ branch: feat/axon-stabilization-continuation
 
 Turn Axon first into a tool that Didier can use confidently on real projects under real conditions, then into a commercially viable product by prioritizing stability, trustworthiness, and operational clarity before aggressive optimization.
 
+# Architecture Direction
+
+Effective immediately, the target split is:
+
+- `Rust` is the canonical runtime plane
+- `Elixir/Phoenix` is the visualization and operator plane
+
+That means:
+
+- ingestion, parsing, scheduling, indexing, embeddings, MCP/SQL, backpressure, and recovery converge into Rust
+- `IST` / `SOLL` remain independent of the UI stack
+- Phoenix/LiveView remains useful as a console, not as a co-owner of ingestion truth
+
+This transition must be progressive:
+
+1. make Rust the only source of truth
+2. make Elixir read from that truth
+3. remove Elixir ingestion/control-plane responsibilities only after the UI is preserved
+
 # Phase 0: Validation En Conditions Reelles
 
 Goal: make Axon genuinely usable by Didier in day-to-day development under real conditions before any commercialization effort.
@@ -61,6 +80,22 @@ Didier voluntarily uses Axon on real development work because it is helpful, sta
 # Phase 1: Foundation
 
 Goal: make Axon reliable after the first successful real-conditions validation threshold and before selling it.
+
+## P0-0. Runtime Responsibility Split
+
+Objective:
+
+- make the runtime boundary explicit
+- define which responsibilities remain in Rust
+- define which responsibilities remain in Elixir
+- remove ambiguity between dashboard, control plane, and canonical runtime
+
+Acceptance criteria:
+
+- architecture decision documented
+- critical ingestion responsibilities classified as `Rust-owned`
+- dashboard/operator responsibilities classified as `Elixir-owned`
+- at least one first migration slice identified with low transition pain
 
 ## P0-1. IST/SOLL Integrity
 
@@ -188,10 +223,11 @@ Acceptance criteria:
 
 Objective:
 
-- make dashboard states explicit and reliable
+- make the operator console explicit and reliable
 - ensure user actions are safe
 - remove misleading displays
 - separate live state, persisted state, and conceptual state clearly
+- align the dashboard with a visualization-only role over a Rust-owned runtime
 
 Acceptance criteria:
 
@@ -280,6 +316,38 @@ Acceptance criteria:
 - guarantee surface documented
 - non-goals documented
 - commercial positioning grounded in current reality
+
+## P2-4. Native LLM Knowledge Bootstrap
+
+Objective:
+
+- generate a canonical startup context pack for LLM sessions
+- inject project vision, actual architecture, handoff state, Git state, and invariants at session start
+- complement this with live Axon retrieval instead of exhaustive prompt loading
+- make Axon a native external memory layer for LLM-assisted development
+
+Acceptance criteria:
+
+- bootstrap context contents defined
+- regeneration path documented
+- split between injected context and live retrieval made explicit
+- at least one real startup workflow uses this bootstrap successfully
+
+## P2-5. Python Script Re-evaluation And Removal
+
+Objective:
+
+- audit all remaining Python scripts, benchmarks, and ad hoc tests
+- keep only the Python pieces that are still justified by current Axon architecture
+- remove obsolete Python operational paths that no longer match the Devenv-native runtime
+- make the remaining Python surface explicit and minimal
+
+Acceptance criteria:
+
+- every remaining Python artifact is classified as current, tolerated, or obsolete
+- obsolete Python scripts are removed
+- any retained Python dependency has a written justification
+- operational startup and validation paths no longer depend on legacy Python scripts
 
 # Recommended Execution Order
 

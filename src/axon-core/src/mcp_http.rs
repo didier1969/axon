@@ -8,7 +8,9 @@ use futures_util::stream::{self, Stream};
 use tokio_stream::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Instant;
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpServer};
+use crate::service_guard::{record_latency, ServiceKind};
 
 use tracing::Instrument;
 
@@ -32,12 +34,22 @@ async fn handle_sql_post(
     let span = tracing::info_span!("sql_gateway", query = %payload.query);
     
     async move {
+        let t0 = Instant::now();
         match tokio::task::spawn_blocking(move || {
             server.execute_raw_sql(&payload.query)
         }).await {
-            Ok(Ok(res)) => Json(serde_json::from_str(&res).unwrap_or(serde_json::json!([]))),
-            Ok(Err(e)) => Json(serde_json::json!({"error": format!("{:?}", e)})),
-            Err(e) => Json(serde_json::json!({"error": format!("Task Panic: {:?}", e)})),
+            Ok(Ok(res)) => {
+                record_latency(ServiceKind::Sql, t0.elapsed().as_millis() as u64);
+                Json(serde_json::from_str(&res).unwrap_or(serde_json::json!([])))
+            }
+            Ok(Err(e)) => {
+                record_latency(ServiceKind::Sql, t0.elapsed().as_millis() as u64);
+                Json(serde_json::json!({"error": format!("{:?}", e)}))
+            }
+            Err(e) => {
+                record_latency(ServiceKind::Sql, t0.elapsed().as_millis() as u64);
+                Json(serde_json::json!({"error": format!("Task Panic: {:?}", e)}))
+            }
         }
     }.instrument(span).await
 }
@@ -49,13 +61,18 @@ async fn handle_mcp_post(
     let span = tracing::info_span!("mcp_request", method = %payload.method);
     
     async move {
+        let t0 = Instant::now();
         // Offload C-FFI / DB work to a blocking thread pool safely
         // No more mcp_active_flag: Zero-Sleep MVCC architecture handles concurrency.
         let response = match tokio::task::spawn_blocking(move || {
             server.handle_request(payload)
         }).await {
-            Ok(res) => res,
+            Ok(res) => {
+                record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
+                res
+            }
             Err(e) => {
+                record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
                 tracing::error!("MCP Blocking Task Panicked: {:?}", e);
                 None
             }

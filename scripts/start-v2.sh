@@ -5,7 +5,11 @@ set -euo pipefail
 # Canonical daily workflow entrypoint for running Axon in TMUX.
 
 PROJECT_ROOT="/home/dstadel/projects/axon"
+DEFAULT_PROJECTS_ROOT="/home/dstadel/projects"
 cd "$PROJECT_ROOT"
+WATCH_ROOT="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
+PROJECTS_ROOT="${AXON_PROJECTS_ROOT:-$WATCH_ROOT}"
+REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
 
 if ! command -v tmux >/dev/null 2>&1; then
     echo "❌ tmux is required to start Axon via scripts/start-v2.sh"
@@ -124,6 +128,8 @@ if [ -f "$CARGO_TARGET_ROOT/release/axon-mcp-tunnel" ]; then
 fi
 
 echo "🚀 Starting Axon in TMUX session 'axon'..."
+echo "📂 Watch root: $WATCH_ROOT"
+echo "🗂️ Projects root: $PROJECTS_ROOT"
 
 # Configuration
 export PHX_PORT=44127
@@ -143,11 +149,11 @@ tmux new-session -d -s axon -n "core"
 # Start Data Plane
 # We use 'devenv shell' to ensure the runtime matches the pinned project toolchain.
 # NEXUS v10.8: We force fastembed to use the system's libonnxruntime.so to prevent C++ aborts.
-tmux send-keys -t axon:core "devenv shell -- bash -lc 'export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
+tmux send-keys -t axon:core "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
 
 # Start Control Plane
 tmux new-window -t axon -n "nexus"
-tmux send-keys -t axon:nexus "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+tmux send-keys -t axon:nexus "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 
 echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 60s)..."
 

@@ -20,7 +20,7 @@ defmodule Axon.ResourceMonitor do
   def init(_opts) do
     # Initial call to clear garbage value per Erlang docs
     _ = :cpu_sup.util([:detailed])
-    state = %{cpu: 0.0, ram: 0.0, io: 0.0}
+    state = %{cpu: 0.0, ram: 0.0, io: 0.0, io_prev: read_proc_stat()}
     schedule_poll()
     {:ok, state}
   end
@@ -31,13 +31,14 @@ defmodule Axon.ResourceMonitor do
   end
 
   @impl true
-  def handle_info(:poll, _state) do
-    {cpu, io} = get_cpu_and_io()
+  def handle_info(:poll, state) do
+    {cpu, io, io_prev} = get_cpu_and_io(state.io_prev)
 
     new_state = %{
       cpu: cpu,
       ram: get_ram(),
-      io: io
+      io: io,
+      io_prev: io_prev
     }
 
     schedule_poll()
@@ -48,16 +49,15 @@ defmodule Axon.ResourceMonitor do
     Process.send_after(self(), :poll, @poll_interval)
   end
 
-  defp get_cpu_and_io do
+  defp get_cpu_and_io(previous_io) do
     try do
       # `:cpu_sup.util()` safely returns the total CPU usage as a float percentage.
       total_cpu = :cpu_sup.util()
-
-      # IO Wait extraction using detailed pattern matching if needed, 
-      # but returning 0.0 is safer to avoid crashing the monitor if the OS structure changes.
-      {total_cpu, 0.0}
+      current_io = read_proc_stat()
+      io = io_wait_percent(previous_io, current_io)
+      {total_cpu, io, current_io}
     rescue
-      _ -> {0.0, 0.0}
+      _ -> {0.0, 0.0, previous_io}
     end
   end
 
@@ -76,6 +76,36 @@ defmodule Axon.ResourceMonitor do
 
     if total > 0 do
       used / total * 100.0
+    else
+      0.0
+    end
+  end
+
+  defp read_proc_stat do
+    with {:ok, content} <- File.read("/proc/stat"),
+         ["cpu" | values] <- content |> String.split("\n", trim: true) |> List.first() |> String.split(),
+         parsed <- Enum.map(values, &String.to_integer/1),
+         true <- length(parsed) >= 5 do
+      idle = Enum.at(parsed, 3, 0)
+      iowait = Enum.at(parsed, 4, 0)
+      total = Enum.sum(parsed)
+      %{idle: idle, iowait: iowait, total: total}
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp io_wait_percent(nil, _current), do: 0.0
+  defp io_wait_percent(_previous, nil), do: 0.0
+
+  defp io_wait_percent(previous, current) do
+    total_delta = max(current.total - previous.total, 0)
+    iowait_delta = max(current.iowait - previous.iowait, 0)
+
+    if total_delta > 0 do
+      iowait_delta / total_delta * 100.0
     else
       0.0
     end

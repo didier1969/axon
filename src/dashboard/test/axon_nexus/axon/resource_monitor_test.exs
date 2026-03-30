@@ -29,11 +29,19 @@ defmodule Axon.ResourceMonitorTest do
 
   test "handle_info(:poll, state) updates the state" do
     # Test the callback in isolation to avoid spawning a duplicate polling loop
-    {:noreply, load} = ResourceMonitor.handle_info(:poll, %{})
+    {:noreply, load} = ResourceMonitor.handle_info(:poll, %{io_prev: nil})
 
     assert is_map(load)
     assert Map.has_key?(load, :cpu)
     assert Map.has_key?(load, :ram)
     assert Map.has_key?(load, :io)
+  end
+
+  test "handle_info(:poll, state) keeps io as a numeric percentage" do
+    {:noreply, load} =
+      ResourceMonitor.handle_info(:poll, %{cpu: 0.0, ram: 0.0, io: 0.0, io_prev: %{total: 100, iowait: 10}})
+
+    assert is_number(load.io)
+    assert load.io >= 0.0
   end
 end

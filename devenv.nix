@@ -105,9 +105,10 @@ in
     fi
 
     echo "--- AXON v1.0 - DEVENV ARCHITECTURE ---"
-    echo "Pod A (Watcher): Elixir $(elixir --version | awk '/Elixir/ {print $2}')"
-    echo "Pod B (Parser):  Python $(python --version | awk '/Python/ {print $2}')"
-    echo "Pod C (HydraDB): detached from current Devenv workflow"
+    echo "Pod A (Control Plane): Elixir $(elixir --version | awk '/Elixir/ {print $2}')"
+    echo "Pod B (Data Plane):    Rust $(rustc --version | awk '{print $2}')"
+    echo "Support Tooling:       Python $(python --version | awk '/Python/ {print $2}')"
+    echo "Pod C (HydraDB):       detached from current Devenv workflow"
     echo "---------------------------------------"
   '';
 }

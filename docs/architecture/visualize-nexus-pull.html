@@ -168,7 +168,7 @@
 </head>
 <body>
     <header>
-        <span class="version-badge">Nexus Blueprint v3.4 • Etat Reel + Cible</span>
+        <span class="version-badge">Nexus Blueprint v3.5 • Rust Canonique + Vue Operateur</span>
         <h1 class="hero-title">Axon Intelligence Engine</h1>
         <p style="font-size: 1.25rem; color: var(--text-dim); max-width: 800px; margin: 20px auto;">
             Vue d'architecture <strong>Nexus Pull & Couche SOLL</strong> : séparation de l'intention (SOLL) et de la réalité technique (IST), avec distinction explicite entre la cible et l'état réellement branché.
@@ -272,23 +272,24 @@
         <!-- 2. ARCHITECTURE DES CONTENEURS (C4 LEVEL 2) -->
         <section id="c4-level-2">
             <h2>Architecture des Conteneurs (C4 Level 2)</h2>
-            <p>L'architecture Couche SOLL sépare la couche intentionnelle (SOLL) de la couche technique (IST). Le binaire Rust ouvre <code>ist.db</code> et attache <code>soll.db</code> via <code>ATTACH</code>. Aujourd'hui, l'ingestion reste majoritairement <strong>Rust-led</strong>, tandis que le dashboard Elixir agit comme control plane, télémétrie et façade opérateur.</p>
+            <p>L'architecture Couche SOLL sépare la couche intentionnelle (SOLL) de la couche technique (IST). Le binaire Rust ouvre <code>ist.db</code> et attache <code>soll.db</code> via <code>ATTACH</code>. Désormais, <strong>Rust</strong> est le runtime canonique pour le scan, le staging, le claiming, le parsing et l'indexation. Elixir/Phoenix reste la couche de visualisation et de plan opérateur.</p>
             <div class="mermaid">
             graph LR
-                subgraph Elixir_Plane [Control Plane : Elixir/OTP]
-                    Guardian[Watcher / Guardian]
-                    Pool[PoolFacade + Cockpit]
+                subgraph Elixir_Plane [Visualization Plane : Elixir/Phoenix]
+                    Cockpit[Cockpit / LiveView]
+                    Telemetry[Read Models + Telemetry]
                 end
 
-                subgraph Rust_Plane [Data Plane : Rust/Tokio]
+                subgraph Rust_Plane [Canonical Runtime : Rust/Tokio]
                     subgraph Arena [CPU Arena]
                         Worker1[Worker 1]
                         WorkerN[Worker N]
                     end
-                    Scanner[Scanner Engine]
+                    Scanner[Scanner Engine + Axon Ignore]
+                    Watcher[Native FS Watcher]
+                    Planner[Adaptive Claimer]
                     MCP[Serveur MCP]
-                    
-                    Channel(((Queue Memoire + Batch Pull)))
+                    Channel(((Hot / Bulk / Titan Queues)))
                     Writer[DB Writer Actor]
                 end
 
@@ -298,18 +299,22 @@
                     IST -- "ATTACH" --> SOLL
                 end
 
-                Scanner -- "1. Discover / queue" --> Channel
-                Worker1 -- "4. Results" --> Writer
-                MCP -- "Unified Read + Commands" --> IST
-                Pool -- "Manual scan / parse_batch" --> Guardian
-                Guardian -- "2. Trigger / monitor" --> Channel
-                Channel -- "3. Claim pending atomique" --> Worker1
-                Writer -- "5. Commit IST" --> IST
-                Writer -- "5b. Commit SOLL" --> SOLL
-                Worker1 -- "6. ACK batch_id" --> Pool
+                Scanner -- "1. Discovery -> pending" --> IST
+                Watcher -- "2. Delta chaud -> pending (priority 900)" --> IST
+                Planner -- "3. Claim atomique / throttle adaptatif" --> Channel
+                IST -- "Backlog durable" --> Planner
+                Channel -- "4. Dispatch lanes" --> Worker1
+                Worker1 -- "5. Results" --> Writer
+                Writer -- "6. Commit IST" --> IST
+                Writer -- "6b. Commit SOLL" --> SOLL
+                MCP -- "Read + Commands" --> IST
+                MCP -- "SOLL Commands / Links / Restore" --> SOLL
+                Cockpit -- "Read only / telemetry" --> MCP
+                Telemetry -- "Projections operateur" --> MCP
                 
                 User((Agent IA)) -- "7. axon_query / inspect / audit" --> MCP
-                MCP -- "8. Read MVCC" --> IST
+                MCP -- "8. MVCC / writer-backed truth" --> IST
+                User -. "9. create / link / refine / restore SOLL" .-> MCP
 
                 style IST fill:#eff6ff,stroke:#0284c7,stroke-width:3px
                 style SOLL fill:#fef3c7,stroke:#d97706,stroke-width:3px
@@ -349,35 +354,36 @@
         <!-- 4. DÉTAIL DES ÉCHANGES & SYNCHRONISATION -->
         <section id="sync-details">
             <h2>Dynamique des Échanges (Séquence Détaillée)</h2>
-            <p>Le cycle de vie réel d'un fichier, de sa découverte à sa validation de traitement, avec corrélation explicite des lots entre Elixir et Rust.</p>
+            <p>Le cycle de vie réel d'un fichier, de sa découverte à sa validation de traitement. Le point de vérité d'ingestion est désormais Rust; Elixir se contente de refléter l'état opérateur.</p>
             <div class="mermaid">
             sequenceDiagram
                 autonumber
-                participant G as Traffic Guardian (Elixir)
-                participant P as PoolFacade (Elixir)
+                participant F as Native FS Watcher (Rust)
+                participant PL as Planner / Claimer (Rust)
                 participant W as Worker Core X (Rust)
                 participant WR as Writer Actor (Rust)
                 participant K as DuckDB
+                participant UI as Cockpit (Elixir)
 
-                Note over W, K: PHASE 1 : DISCOVERY / CLAIM (RUST-LED)
-                W->>WR: NEW_FILE_FOUND {path}
-                WR->>K: INSERT File {status:'pending'}
+                Note over F, K: PHASE 1 : DISCOVERY / DELTA
+                F->>WR: HOT_DELTA {path, priority:900}
+                WR->>K: UPSERT File {status:'pending'}
                 K-->>WR: OK
-                
-                Note over G, K: PHASE 2 : ORCHESTRATION MIXTE
-                G->>P: trigger_scan / parse_batch
-                P->>W: PARSE_BATCH {batch_id, files}
-                W->>K: CLAIM pending -> indexing (atomique)
-                
+
+                Note over PL, K: PHASE 2 : CLAIM ADAPTATIF
+                PL->>K: CLAIM pending -> indexing (atomique)
+                K-->>PL: batch hot / bulk / titan
+                PL->>W: dispatch files
+
                 W->>W: AST Parsing + AI Embeddings
                 W->>WR: PUSH_DATA {path, extraction_results}
                 WR->>K: COMMIT Transaction
                 K-->>WR: OK
-                WR-->>W: DB_SYNC_COMPLETE
-                
-                Note over W, P: LE RETOUR D'INFORMATION
-                W-->>P: BATCH_ACCEPTED {batch_id}
-                P->>G: état cockpit / progression
+                WR-->>W: DB_SYNC_COMPLETE / query truth ready
+
+                Note over UI, K: LE RETOUR D'INFORMATION
+                UI->>K: lecture operateur via surfaces Rust
+                K-->>UI: progression / sante / backlog
             </div>
         </section>
 
@@ -390,8 +396,12 @@
                     <p>Le serveur MCP interroge DuckDB via une connexion <strong>read-only</strong> dédiée. Grâce au <strong>MVCC</strong>, il lit un instantané cohérent sans dépendre du dashboard. Cela préserve la latence des lectures sous charge d'ingestion.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Le rôle du Guardian</h3>
-                    <p>Le Guardian ne porte pas encore tout le scheduling cible. Il agit aujourd'hui comme plan de contrôle, télémétrie, déclenchement opérateur et futur point de shaping plus fin.</p>
+                    <h3>Le rôle MCP sur SOLL</h3>
+                    <p>Le LLM n'accède pas seulement au graphe technique. Via MCP, il peut aussi <strong>créer, relier, exporter et restaurer</strong> des entités <code>SOLL</code>. Cette écriture conceptuelle reste distincte de l'ingestion technique.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Le rôle d'Elixir</h3>
+                    <p>La couche Phoenix ne doit plus porter l'autorité d'ingestion. Elle affiche l'état, la télémétrie et les projections opérateur construites à partir des surfaces Rust.</p>
                 </div>
                 <div class="info-card">
                     <h3>Le Writer Actor</h3>
@@ -405,11 +415,11 @@
             <div class="grid">
                 <div class="info-card">
                     <h3>Ce qui est branche</h3>
-                    <p>Scan manuel cockpit branche, <code>PARSE_BATCH</code> corrélé par <code>batch_id</code>, claiming atomique des fichiers <code>pending -&gt; indexing</code>, export SOLL officiel via MCP, restauration SOLL en cours d'integration.</p>
+                    <p>Claiming atomique des fichiers <code>pending -&gt; indexing</code>, lecture live alignée sur le writer, <code>Axon Ignore</code> hiérarchique, scheduler adaptatif, profil runtime matériel-aware, delta staging Rust natif, et voie MCP explicite vers <code>SOLL</code> pour créer/relier/exporter/restaurer la couche conceptuelle.</p>
                 </div>
                 <div class="info-card">
                     <h3>Ce qui reste cible</h3>
-                    <p>Guardian pleinement pull-led, shaping ETS complet, protocoles internes totalement versionnés, et modularisation de la couche MCP encore très concentrée dans <code>mcp.rs</code>.</p>
+                    <p>Watcher OS Rust complet avec gestion native des suppressions, lanes <code>hot / bulk / titan</code> entièrement assumées, vectorisation graphe dérivée, et retrait progressif des derniers chemins d'ingestion encore présents côté Elixir.</p>
                 </div>
                 <div class="info-card">
                     <h3>Principe de verite</h3>
@@ -465,12 +475,12 @@
             <p>Un socle polyglotte haute performance, hermétique et reproductible.</p>
             <div class="grid">
                 <div class="info-card">
-                    <h3>Control Plane <span class="tech-tag">Elixir / OTP</span></h3>
-                    <p>Orchestration résiliente basée sur le modèle d'acteurs. Gestion granulaire des cœurs CPU et du traffic shaping.</p>
+                    <h3>Plan Operateur <span class="tech-tag">Elixir / Phoenix</span></h3>
+                    <p>Visualisation, télémétrie, projections opérateur et interfaces temps réel. Cette couche ne doit plus être l'autorité d'ingestion.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Data Plane <span class="tech-tag">Rust / Tokio</span></h3>
-                    <p>Calcul intensif (Tree-sitter, FastEmbed ONNX en mode prudent). Le parsing AST se distribue bien; la couche vectorielle reste contrainte par sa propre realite d'execution et n'est pas sur-promue.</p>
+                    <h3>Runtime Canonique <span class="tech-tag">Rust / Tokio</span></h3>
+                    <p>Scan, delta watcher, backlog IST, claiming adaptatif, parsing AST, writer actor, MCP/SQL, et enrichissements dérivés. La couche vectorielle reste secondaire par rapport à la vérité structurelle.</p>
                 </div>
                 <div class="info-card">
                     <h3>Couche SOLL Storage <span class="tech-tag">DuckDB (Dual-DB)</span></h3>
@@ -490,7 +500,7 @@
             <div class="grid">
                 <div class="info-card">
                     <h3>Priorisation Dynamique</h3>
-                    <p>Chaque nœud <code>File</code> possède une propriété <code>priority</code> (0-100). Le Guardian "tire" en priorité les fichiers avec le score le plus élevé (fichiers ouverts ou requis par le LLM).</p>
+                    <p>Chaque nœud <code>File</code> porte une <code>priority</code>. Les deltas chauds remontent immédiatement, les scans de fond restent en bulk, et les gros fichiers peuvent basculer en lane <code>titan</code>.</p>
                 </div>
                 <div class="info-card">
                     <h3>Le Protocole Titan</h3>
@@ -504,9 +514,9 @@
             <div class="mermaid">
             graph LR
                 Scan[Scanner Rust] -- "Detect Size/Ext" --> DuckDB
-                DuckDB -- "File {size: 5MB, priority: 10}" --> Guardian
-                Guardian -- "Decision: Titan Lane" --> Agent
-                Agent -- "INDEX_STRUCT_ONLY" --> Worker
+                DuckDB -- "File {size: 5MB, priority: titan}" --> Planner[Adaptive Planner Rust]
+                Planner -- "Decision: Titan Lane" --> Worker
+                Worker -- "INDEX_STRUCT_ONLY" --> Writer
                 Worker -- "status: titan_ignored" --> DuckDB
                 
                 style Worker fill:#fef3c7,stroke:#d97706
@@ -516,66 +526,65 @@
         <!-- 7. OPTIMISATION DU DÉBIT : PIPELINING -->
         <section id="pipelining">
             <h2>Utilisation Optimale des Cœurs (Pipelining)</h2>
-            <p>Pour atteindre 100% d'utilisation CPU, Axon implémente un mécanisme de "Double-Buffering" entre Elixir et Rust.</p>
+            <p>Pour saturer utilement les cœurs sans faire tomber SQL/MCP, Axon s'appuie désormais sur un pipeline Rust avec backlog DB durable, queue mémoire et throttling adaptatif.</p>
             <div class="grid">
                 <div class="info-card">
-                    <h3>La Trémie ETS</h3>
-                    <p>Le Guardian ne polle pas DuckDB pour chaque fichier. Il remplit une table <strong>ETS en RAM</strong> par lots de 100. Cette taille réduite garantit que les fichiers prioritaires ne sont pas bloqués par un backlog trop important.</p>
+                    <h3>Backlog Durable</h3>
+                    <p><code>IST</code> reste la source de vérité du travail à faire. La RAM accélère, mais ne décide jamais du backlog canonique.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Observabilité : Tracer</h3>
-                    <p>Le système utilise <strong>Axon.Watcher.Tracer</strong> pour mesurer les micro-latences (T0 à T4). Ces mesures permettent au Guardian d'ajuster le débit en temps réel pour éviter la saturation.</p>
+                    <h3>Service Guard</h3>
+                    <p>Les latences récentes de <code>/sql</code> et <code>/mcp</code> sont intégrées dans le throttling. Si la vérité live se dégrade, le bulk ralentit avant que le service ne devienne muet.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Points de Mesure (:telemetry)</h3>
-                    <p>Le système surveille le <code>fill_rate</code> de la trémie ETS et la <code>pressure</code> des sockets. Si un goulot apparaît, le Guardian ajuste dynamiquement la taille des lots de pull.</p>
+                    <h3>Découverte et Semantique Suspendables</h3>
+                    <p>La découverte et les embeddings ralentissent ou se mettent en pause sous pression mémoire, backlog ou latence. La vérité structurelle passe avant l'enrichissement sémantique.</p>
                 </div>
             </div>
             <div class="mermaid">
             sequenceDiagram
-                participant G as Guardian (ETS)
-                participant A as Agent Core X
-                participant W as Worker Core X (Rust)
+                participant DB as IST backlog
+                participant P as Adaptive Planner
+                participant Q as RAM Queues
+                participant W as Worker Core X
                 
-                G->>A: Envoie Fichier N
-                A->>W: REQ: Index N
-                Note over W: Travaille sur N...
-                G->>A: Envoie Fichier N+1
-                A->>W: REQ: Index N+1 (Attends dans le buffer)
-                W-->>A: ACK: N Terminé
-                Note over W: Enchaîne immédiatement sur N+1
-                A->>G: Prêt pour N+2
+                DB->>P: pending ordered by priority
+                P->>Q: hot / bulk / titan claim
+                Q->>W: dispatch when slot available
+                W-->>P: commit / latency / pressure feedback
+                P->>DB: shrink or pause bulk when service degrades
             </div>
         </section>
 
         <!-- 8. RÉGULATION DE FLUX ADAPTATIVE -->
         <section id="adaptive-flow">
             <h2>Régulation de Flux Adaptative (v3.2)</h2>
-            <p>Axon ajuste dynamiquement sa "matière première" en fonction de la vitesse réelle de traitement pour garantir une latence déterministe.</p>
+            <p>Axon ajuste dynamiquement sa matière première selon la mémoire, la profondeur des queues, la latence SQL/MCP et la santé globale du runtime.</p>
             <div class="grid">
                 <div class="info-card">
-                    <h3>Calcul de Fenêtre Glissante</h3>
-                    <p>Le Guardian calcule la taille optimale du buffer : <code>Fenêtre = (Débit Files/sec) * Latence_Cible</code>. Si le système ralentit, le buffer rétrécit pour laisser passer les urgences plus vite.</p>
+                    <h3>Profil Runtime</h3>
+                    <p>Le boot détecte les cœurs, la RAM disponible et un budget mémoire. Le nombre de workers, la taille des queues et les threads bloquants s'adaptent à la machine.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Seuils Watermark (Min/Max)</h3>
-                    <p>Le système évite les temps morts avec un rechargement anticipé. Si la cible est de 200 fichiers, le Guardian déclenche un nouvel import dès que le buffer descend à 100.</p>
+                    <h3>Seuils de Service</h3>
+                    <p>Si <code>/sql</code> ou <code>/mcp</code> montent en latence, le claim bulk se rétrécit, puis se met en pause. Les embeddings sont coupés avant la vérité structurelle.</p>
                 </div>
                 <div class="info-card">
-                    <h3>Priorité Sémantique</h3>
-                    <p>Lors de chaque rechargement, les fichiers sont extraits par <code>ORDER BY priority DESC</code>. Un fichier urgent n'attendra jamais plus d'un cycle de fenêtre (max 10s).</p>
+                    <h3>Delta Hot vs Univers Froid</h3>
+                    <p>Les modifications récentes passent en priorité chaude. Le scan de tout l'univers projet continue en arrière-plan, aussi vite que possible, mais aussi lentement que nécessaire.</p>
                 </div>
             </div>
             <div class="mermaid">
             graph TD
-                T[Tracer] -- "Débit réel" --> G[Traffic Guardian]
-                G -- "Ajuste" --> B[Taille Buffer ETS]
-                B -- "Lent (2 f/s)" --> S[Buffer: 20]
-                B -- "Rapide (100 f/s)" --> F[Buffer: 1000]
+                H[Runtime Profile] --> P[Adaptive Planner]
+                L[SQL/MCP Latency] --> P
+                M[Memory Pressure] --> P
+                B[Pending Backlog] --> P
                 
-                subgraph "Cycle de Recharge"
-                    E[ETS < 50%] -- "Trigger" --> K[(DuckDB)]
-                    K -- "Batch Pull" --> E
+                subgraph "Actions"
+                    P -- "Healthy" --> F[Fast bulk claim]
+                    P -- "Service degraded" --> S[Slow bulk / keep hot lane]
+                    P -- "Critical" --> X[Pause bulk + semantics]
                 end
             </div>
         </section>
@@ -661,6 +670,14 @@
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Symbol</td>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384]</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Chunk</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, source_type VARCHAR, source_id VARCHAR, project_slug VARCHAR, content VARCHAR, content_hash VARCHAR, start_line BIGINT, end_line BIGINT</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">EmbeddingModel / ChunkEmbedding</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Modèles d'embedding versionnés et couche dérivée de chunk embeddings, recalculable et suspendable sous pression.</td>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Relations AST</td>

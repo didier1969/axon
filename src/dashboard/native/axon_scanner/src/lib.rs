@@ -26,15 +26,12 @@ fn scan(path: String, extensions: Vec<String>) -> NifResult<Vec<String>> {
     
     // 1. Scan standard respectant .axonignore
     let mut builder = WalkBuilder::new(root_path);
+    builder.hidden(false);
     builder.git_ignore(false);
     builder.git_global(false);
     builder.git_exclude(false);
     builder.add_custom_ignore_filename(".axonignore");
-    
-    let agence_ignore = Path::new("/home/dstadel/projects/.axonignore");
-    if agence_ignore.exists() { builder.add_ignore(agence_ignore); }
-    let moteur_ignore = Path::new("/home/dstadel/projects/axon/.axonignore");
-    if moteur_ignore.exists() { builder.add_ignore(moteur_ignore); }
+    builder.add_custom_ignore_filename(".axonignore.local");
 
     for result in builder.build() {
         if let Ok(entry) = result {
@@ -61,15 +58,12 @@ fn start_streaming(path: String, pid: LocalPid, extensions: Vec<String>) -> NifR
 
         // Scan standard respectant .axonignore + Extension filtering
         let mut builder = WalkBuilder::new(root_path);
+        builder.hidden(false);
         builder.git_ignore(false);
         builder.git_global(false);
         builder.git_exclude(false);
         builder.add_custom_ignore_filename(".axonignore");
-
-        let agence_ignore = Path::new("/home/dstadel/projects/.axonignore");
-        if agence_ignore.exists() { builder.add_ignore(agence_ignore); }
-        let moteur_ignore = Path::new("/home/dstadel/projects/axon/.axonignore");
-        if moteur_ignore.exists() { builder.add_ignore(moteur_ignore); }
+        builder.add_custom_ignore_filename(".axonignore.local");
 
         for result in builder.build() {
             if let Ok(entry) = result {

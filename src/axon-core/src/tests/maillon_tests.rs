@@ -22,6 +22,38 @@ mod tests {
         assert_eq!(count, 1, "Le scanner doit insérer les fichiers en status 'pending'");
     }
 
+    #[test]
+    fn test_maillon_1b_scanner_respects_hierarchical_axonignore() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        std::fs::write(root.join(".axonignore"), "ignored/\n*.md\n!progress.md\n").unwrap();
+        std::fs::create_dir_all(root.join("ignored")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join("docs/open")).unwrap();
+
+        std::fs::write(root.join("kept.rs"), "fn kept() {}").unwrap();
+        std::fs::write(root.join("progress.md"), "keep me").unwrap();
+        std::fs::write(root.join("ignored").join("lost.rs"), "fn lost() {}").unwrap();
+        std::fs::write(root.join("docs").join(".axonignore"), "*.md\n!open/keep.md\n").unwrap();
+        std::fs::write(root.join("docs").join("drop.md"), "# hidden").unwrap();
+        std::fs::write(root.join("docs").join("open").join("keep.md"), "# visible").unwrap();
+
+        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy());
+        scanner.scan(store.clone());
+
+        let files = store
+            .query_json("SELECT path FROM File ORDER BY path")
+            .unwrap();
+
+        assert!(files.contains("kept.rs"), "Le scanner doit garder les fichiers autorisés");
+        assert!(files.contains("progress.md"), "Une ré-inclusion !pattern doit être respectée");
+        assert!(files.contains("keep.md"), "Une ré-ouverture locale doit être respectée");
+        assert!(!files.contains("lost.rs"), "Un répertoire ignoré par Axon Ignore ne doit pas être indexé");
+        assert!(!files.contains("drop.md"), "Une règle locale .axonignore doit exclure le fichier");
+    }
+
     // --- MAILLON 2: LE SÉLECTEUR (The Pull) ---
     #[test]
     fn test_maillon_2_selector_pull() {
@@ -81,6 +113,140 @@ mod tests {
         assert_eq!(visible_after_restart, 1, "La donnée doit survivre au redémarrage");
 
         let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
+    fn test_maillon_2d_rust_watcher_requeues_hot_delta() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("live.ex");
+        std::fs::write(&file_path, "defmodule Live do\nend\n").unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[(
+                file_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                10,
+                1,
+            )])
+            .unwrap();
+        store
+            .execute(&format!(
+                "UPDATE File SET status = 'indexed', priority = 10 WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        let staged = crate::fs_watcher::stage_hot_delta(
+            &store,
+            root,
+            &file_path,
+            crate::fs_watcher::HOT_PRIORITY,
+        )
+        .unwrap();
+
+        assert!(staged, "Le watcher Rust doit ré-enqueuer un delta valide");
+
+        let row = store
+            .query_json(&format!(
+                "SELECT status, priority, project_slug FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        assert!(row.contains("pending"), "Le delta doit remettre le fichier en pending");
+        assert!(row.contains("900"), "Le delta chaud doit imposer une priorité élevée");
+        assert!(row.contains("proj"), "Le slug projet doit être conservé");
+    }
+
+    #[test]
+    fn test_maillon_2e_rust_watcher_respects_axonignore_for_delta() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        let ignored = project.join("ignored");
+        std::fs::create_dir_all(&ignored).unwrap();
+        std::fs::write(project.join(".axonignore"), "ignored/\n").unwrap();
+        let file_path = ignored.join("skip.ex");
+        std::fs::write(&file_path, "defmodule Skip do\nend\n").unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+        let staged = crate::fs_watcher::stage_hot_delta(
+            &store,
+            root,
+            &file_path,
+            crate::fs_watcher::HOT_PRIORITY,
+        )
+        .unwrap();
+
+        assert!(!staged, "Un chemin ignoré par Axon Ignore ne doit pas être staged");
+
+        let count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert_eq!(count, 0, "Le fichier ignoré ne doit pas apparaître dans IST");
+    }
+
+    #[test]
+    fn test_maillon_2f_rust_watcher_ignores_missing_delta_without_failing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let missing = root.join("proj").join("gone.ex");
+        let store = GraphStore::new(":memory:").unwrap();
+
+        let staged = crate::fs_watcher::stage_hot_delta(
+            &store,
+            root,
+            &missing,
+            crate::fs_watcher::HOT_PRIORITY,
+        )
+        .unwrap();
+
+        assert!(!staged, "Un delta manquant doit etre ignore sans erreur");
+
+        let count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM File WHERE path = '{}'",
+                missing.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert_eq!(count, 0, "Un fichier manquant ne doit pas etre staged");
+    }
+
+    #[test]
+    fn test_maillon_2g_rust_watcher_deduplicates_burst_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("burst.ex");
+        std::fs::write(&file_path, "defmodule Burst do\nend\n").unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+
+        let staged = crate::fs_watcher::stage_hot_deltas(
+            &store,
+            root,
+            vec![file_path.clone(), file_path.clone(), file_path.clone()],
+            crate::fs_watcher::HOT_PRIORITY,
+        )
+        .unwrap();
+
+        assert_eq!(staged, 1, "Une rafale d'evenements identiques ne doit stager qu'une fois");
+
+        let count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert_eq!(count, 1, "Le fichier ne doit pas etre duplique dans IST");
     }
 
     // --- MAILLON 3: LA SOCKET (Le Protocole) ---
