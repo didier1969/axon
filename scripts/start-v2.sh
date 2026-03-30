@@ -15,6 +15,9 @@ fi
 echo "📦 Validating Devenv environment..."
 devenv shell -- bash -lc './scripts/validate-devenv.sh'
 
+echo "📦 Pre-warming Elixir environment (Hex/Rebar)..."
+devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null"
+
 if [ ! -x "bin/axon-core" ]; then
     echo "❌ Missing bin/axon-core"
     echo "   Run ./scripts/setup_v2.sh first."
@@ -22,9 +25,27 @@ if [ ! -x "bin/axon-core" ]; then
 fi
 
 if tmux has-session -t axon 2>/dev/null; then
-    echo "ℹ️ Axon is already running in TMUX session 'axon'."
-    echo "   Attach with: tmux attach -t axon"
-    exit 0
+    DELETED_EXE_PIDS=$(for pid in $(pgrep -f "$PROJECT_ROOT/bin/axon-core" || true); do
+        exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+        if [[ "$exe" == *"(deleted)"* ]]; then
+            echo "$pid"
+        fi
+    done)
+
+    if [ -n "${DELETED_EXE_PIDS:-}" ]; then
+        echo "⚠️ Found Axon processes still running on deleted executables: $DELETED_EXE_PIDS"
+        echo "   Resetting stale runtime state before restart..."
+        bash "$PROJECT_ROOT/scripts/stop-v2.sh"
+    fi
+
+    if nc -z localhost 44129 2>/dev/null || [ -S "/tmp/axon-telemetry.sock" ]; then
+        echo "ℹ️ Axon is already running in TMUX session 'axon'."
+        echo "   Attach with: tmux attach -t axon"
+        exit 0
+    fi
+
+    echo "⚠️ Found stale TMUX session 'axon' without a healthy data plane. Resetting local runtime state..."
+    tmux kill-session -t axon 2>/dev/null || true
 fi
 
 # 1. Verify nix-daemon is running (WSL2 specific mitigation)
@@ -40,10 +61,61 @@ fi
 
 # 2. Synchronize binaries (handle 'Text file busy' via install)
 CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
+LEGACY_RELEASE_BIN="$PROJECT_ROOT/src/axon-core/target/release/axon-core"
+DEVENV_RELEASE_BIN="$CARGO_TARGET_ROOT/release/axon-core"
 
-if [ -f "$CARGO_TARGET_ROOT/release/axon-core" ]; then
+rebuild_core_release() {
+    echo "🔧 Rebuilding axon-core release inside Devenv..."
+    if ! devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/axon-core' && cargo build --release"; then
+        echo "❌ Automatic Devenv rebuild failed."
+        return 1
+    fi
+    return 0
+}
+
+verify_sql_gateway() {
+    local response
+    response="$(curl -sS -X POST http://127.0.0.1:$HYDRA_HTTP_PORT/sql \
+        -H 'content-type: application/json' \
+        -d '{"query":"SHOW TABLES"}' 2>/dev/null || true)"
+
+    if [[ -z "$response" ]]; then
+        echo "❌ SQL Gateway did not answer the schema probe."
+        return 1
+    fi
+
+    for table in File Symbol RuntimeMetadata; do
+        if [[ "$response" != *"\"$table\""* ]]; then
+            echo "❌ SQL Gateway is up but missing required table '$table'."
+            echo "   Response: $response"
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+if [ -f "$LEGACY_RELEASE_BIN" ] && [ ! -f "$DEVENV_RELEASE_BIN" ]; then
+    echo "⚠️ Found a release build outside Devenv at $LEGACY_RELEASE_BIN"
+    echo "   Axon starts from $DEVENV_RELEASE_BIN. Attempting automatic rebuild..."
+    rebuild_core_release || exit 1
+fi
+
+if [ -f "$LEGACY_RELEASE_BIN" ] && [ "$LEGACY_RELEASE_BIN" -nt "$DEVENV_RELEASE_BIN" ]; then
+    echo "⚠️ Detected a newer release binary outside Devenv:"
+    echo "   $LEGACY_RELEASE_BIN"
+    echo "   Attempting to refresh the authoritative Devenv build..."
+    rebuild_core_release || exit 1
+fi
+
+if [ ! -f "$DEVENV_RELEASE_BIN" ]; then
+    echo "⚠️ Missing Devenv release binary at $DEVENV_RELEASE_BIN"
+    rebuild_core_release || exit 1
+fi
+
+if [ -f "$DEVENV_RELEASE_BIN" ]; then
     echo "🔄 Updating bin/axon-core safely..."
-    install -m 755 "$CARGO_TARGET_ROOT/release/axon-core" bin/axon-core
+    install -m 755 "$DEVENV_RELEASE_BIN" bin/axon-core
 fi
 
 if [ -f "$CARGO_TARGET_ROOT/release/axon-mcp-tunnel" ]; then
@@ -63,6 +135,7 @@ export HYDRA_MCP_PORT=44132
 
 # Clean only the sockets used by the active runtime path
 rm -f /tmp/axon-telemetry.sock /tmp/axon-mcp.sock
+rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.wal "$PROJECT_ROOT/.axon/graph_v2/"*.lock 2>/dev/null || true
 
 # Create TMUX session
 tmux new-session -d -s axon -n "core" 
@@ -74,7 +147,7 @@ tmux send-keys -t axon:core "devenv shell -- bash -lc 'export ORT_STRATEGY=syste
 
 # Start Control Plane
 tmux new-window -t axon -n "nexus"
-tmux send-keys -t axon:nexus "cd src/dashboard && devenv shell -- bash -lc \"PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+tmux send-keys -t axon:nexus "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 
 echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 60s)..."
 
@@ -109,6 +182,17 @@ done
 
 if [ "$CORE_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Core."; fi
 if [ "$DASHBOARD_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Dashboard."; fi
+
+if [ "$CORE_READY" = true ]; then
+    echo ""
+    echo "🧪 Verifying live SQL schema..."
+    if ! verify_sql_gateway; then
+        echo "❌ Axon Core exposed its port but failed the live schema check."
+        echo "   Inspect TMUX with: tmux attach -t axon"
+        exit 1
+    fi
+    echo "✅ Live SQL schema check succeeded."
+fi
 
 echo ""
 echo "⚙️ Running MCP End-to-End Verification..."

@@ -199,7 +199,7 @@ impl ElixirParser {
         }
 
         result.symbols.push(Symbol {
-            name: full_name,
+            name: full_name.clone(),
             kind: "function".to_string(),
             start_line,
             end_line,
@@ -214,7 +214,7 @@ impl ElixirParser {
         });
 
         if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
-            Self::extract_calls_from_block(do_block, source_bytes, result, module_name);
+            Self::extract_calls_from_block(do_block, source_bytes, result, &full_name);
         }
     }
 
@@ -242,7 +242,7 @@ impl ElixirParser {
         };
 
         result.symbols.push(Symbol {
-            name: full_name,
+            name: full_name.clone(),
             kind: "macro".to_string(),
             start_line,
             end_line,
@@ -257,7 +257,7 @@ impl ElixirParser {
         });
 
         if let Some(do_block) = Self::find_child_by_type(node, "do_block") {
-            Self::extract_calls_from_block(do_block, source_bytes, result, module_name);
+            Self::extract_calls_from_block(do_block, source_bytes, result, &full_name);
         }
     }
 
@@ -327,7 +327,7 @@ impl ElixirParser {
         node: Node<'a>,
         source_bytes: &[u8],
         result: &mut ExtractionResult,
-        module_name: &str,
+        caller_name: &str,
     ) {
         if let Some(dot_node) = Self::find_child_by_type(node, "dot") {
             let mut receiver = String::new();
@@ -370,13 +370,43 @@ impl ElixirParser {
                     }
 
                     result.relations.push(Relation {
-                        from: module_name.to_string(),
+                        from: caller_name.to_string(),
                         to: target_module,
                         rel_type,
                         properties: props,
                     });
                 }
             }
+        } else if let Some(func_name) = Self::call_identifier(node, source_bytes) {
+            let skip = [
+                "def",
+                "defp",
+                "defmodule",
+                "defmacro",
+                "defmacrop",
+                "defstruct",
+                "alias",
+                "import",
+                "use",
+                "require",
+            ];
+
+            if skip.contains(&func_name.as_str()) {
+                return;
+            }
+
+            let target = if let Some((module_name, _)) = caller_name.rsplit_once('.') {
+                format!("{}.{}", module_name, func_name)
+            } else {
+                func_name
+            };
+
+            result.relations.push(Relation {
+                from: caller_name.to_string(),
+                to: target,
+                rel_type: "CALLS".to_string(),
+                properties: HashMap::new(),
+            });
         }
     }
 
@@ -479,5 +509,37 @@ impl Parser for ElixirParser {
         );
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ElixirParser;
+    use crate::parser::Parser;
+
+    #[test]
+    fn test_elixir_parser_tracks_local_function_calls_with_function_scope() {
+        let parser = ElixirParser::new();
+        let content = r#"
+        defmodule Axon.Sample do
+          def trigger_scan do
+            parse_batch()
+          end
+
+          defp parse_batch do
+            :ok
+          end
+        end
+        "#;
+
+        let result = parser.parse(content);
+
+        assert!(result.symbols.iter().any(|sym| sym.name == "Axon.Sample.trigger_scan"));
+        assert!(result.symbols.iter().any(|sym| sym.name == "Axon.Sample.parse_batch"));
+        assert!(result.relations.iter().any(|rel|
+            rel.from == "Axon.Sample.trigger_scan"
+                && rel.to == "Axon.Sample.parse_batch"
+                && rel.rel_type == "CALLS"
+        ));
     }
 }

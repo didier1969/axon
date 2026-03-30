@@ -20,8 +20,12 @@ fn test_full_pipeline_loop() {
     
     // 3. Create a mock Elixir file with proper extension
     println!("[TEST] Step 3: Create mock Elixir file...");
-    let temp_dir = std::env::temp_dir();
-    let file_path = temp_dir.join("test_file_axon.ex");
+    let temp_root = std::env::temp_dir().join("axon_pipeline_root");
+    let project_root = temp_root.join("test_proj");
+    std::fs::create_dir_all(&project_root).unwrap();
+    std::env::set_var("AXON_PROJECTS_ROOT", &temp_root);
+
+    let file_path = project_root.join("test_file_axon.ex");
     let mut file = std::fs::File::create(&file_path).unwrap();
     writeln!(file, "defmodule Test do\n  def hello, do: :ok\nend").unwrap();
     let path = file_path.to_string_lossy().to_string();
@@ -62,13 +66,26 @@ fn test_full_pipeline_loop() {
     let symbol_count = graph.query_count("SELECT count(*) FROM Symbol").expect("Query failed");
     println!("[TEST] Symbols found: {}", symbol_count);
     assert!(symbol_count > 0, "At least one symbol (the module) should be extracted");
-    
+
+    let contains_count = graph.query_count("SELECT count(*) FROM CONTAINS").expect("Query failed");
+    assert!(contains_count > 0, "At least one containment edge should be persisted");
+
+    let chunk_count = graph.query_count("SELECT count(*) FROM Chunk").expect("Query failed");
+    assert!(chunk_count > 0, "At least one chunk should be derived from indexed symbols");
+
+    let chunk_json = graph.query_json("SELECT source_type, kind, project_slug, content_hash FROM Chunk").expect("Query failed");
+    assert!(chunk_json.contains("symbol"), "Chunk rows should be tied to symbol sources");
+    assert!(chunk_json.contains("test_proj"), "Chunk rows should inherit project slug");
+
     // Verify 9 columns integrity
-    let symbols_json = graph.query_json("SELECT name, kind, is_public, tested, is_nif, is_unsafe FROM Symbol").expect("Query failed");
+    let symbols_json = graph.query_json("SELECT name, kind, project_slug, is_public, tested, is_nif, is_unsafe FROM Symbol").expect("Query failed");
     println!("[TEST] Extracted Symbols: {}", symbols_json);
     assert!(symbols_json.contains("Test"), "Module name 'Test' should be present in extracted symbols");
+    assert!(symbols_json.contains("test_proj"), "Project slug should be inferred from the indexed path");
     
     // Clean up
     let _ = std::fs::remove_file(&file_path);
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::env::remove_var("AXON_PROJECTS_ROOT");
     println!("[TEST] SUCCESS: Pipeline loop is functional.");
 }

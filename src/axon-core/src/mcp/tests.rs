@@ -636,6 +636,32 @@ fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
 }
 
 #[test]
+fn test_axon_query_falls_back_when_contains_is_absent() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::Axon.Watcher.Server.trigger_scan', 'Axon.Watcher.Server.trigger_scan', 'function', true, true, false, 'global')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_query",
+            "arguments": { "query": "trigger scan", "project": "axon" }
+        })),
+        id: Some(json!(211)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    assert!(content.contains("degrade structurel sans ancrage fichier"));
+    assert!(content.contains("trigger_scan"));
+}
+
+#[test]
 fn test_vcr2_impact_before_change_on_public_api() {
     let server = create_test_server();
     server
@@ -709,6 +735,32 @@ fn test_vcr2_impact_before_change_on_public_api() {
     assert!(api_break_text.contains("RISQUE DE RUPTURE D'API"));
     assert!(api_break_text.contains("consumer_a"));
     assert!(api_break_text.contains("consumer_b"));
+}
+
+#[test]
+fn test_axon_impact_reports_missing_call_graph_truthfully() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::parse_batch', 'parse_batch', 'function', true, true, false, 'global')")
+        .unwrap();
+
+    let impact_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_impact",
+            "arguments": { "symbol": "parse_batch", "depth": 2 }
+        })),
+        id: Some(json!(221)),
+    };
+
+    let impact_response = server.handle_request(impact_req);
+    let impact_result = impact_response.unwrap().result.expect("Expected result");
+    let impact_text = impact_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    assert!(impact_text.contains("le graphe d'appel n'est pas encore disponible"));
+    assert!(impact_text.contains("parse_batch"));
 }
 
 #[test]

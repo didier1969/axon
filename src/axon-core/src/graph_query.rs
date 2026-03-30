@@ -23,18 +23,18 @@ impl GraphStore {
     }
 
     pub fn query_json(&self, query: &str) -> Result<String> {
-        let guard = self.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
         self.query_on_ctx(query, *guard)
     }
 
     pub fn query_json_param(&self, query: &str, params: &serde_json::Value) -> Result<String> {
         let expanded = Self::expand_named_params(query, params)?;
-        let guard = self.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
         self.query_on_ctx(&expanded, *guard)
     }
 
     pub fn query_count(&self, query: &str) -> Result<i64> {
-        let guard = self.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
             let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
             Ok(count_fn(*guard, CString::new(query)?.as_ptr()))

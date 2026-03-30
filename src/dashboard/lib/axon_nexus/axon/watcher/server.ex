@@ -49,14 +49,15 @@ defmodule Axon.Watcher.Server do
         FileSystem.subscribe(watcher_pid)
         {:ok, %{initial_state | watcher_pid: watcher_pid}, {:continue, :auto_trigger_scan}}
 
-      _ ->
-        {:ok, initial_state, {:continue, :auto_trigger_scan}}
+      {:error, reason} ->
+        Logger.error("[Pod A] FileSystem watcher failed to start: #{inspect(reason)}")
+        {:ok, %{initial_state | monitoring_active: false}, {:continue, :auto_trigger_scan}}
     end
   end
 
   @impl true
   def handle_continue(:auto_trigger_scan, state) do
-    Logger.info("[Pod A] AUTO-START: Waiting for manual or Rust-led scan...")
+    Logger.info("[Pod A] AUTO-START: File watching is active; Rust handles the initial workspace scan.")
 
     # Phoenix.PubSub.broadcast(
     #   AxonDashboard.PubSub,
@@ -184,11 +185,12 @@ defmodule Axon.Watcher.Server do
     if length(files_to_process) > 0 do
       Enum.each(files_to_process, fn path ->
         priority = Axon.Watcher.PathPolicy.calculate_priority(path)
+        project_name = Axon.Watcher.PathPolicy.get_top_dir(path, state.watch_dir)
         mtime = case File.stat(path) do
           {:ok, %{mtime: t}} -> :erlang.phash2(t)
           _ -> 0
         end
-        Axon.Watcher.Staging.stage_file("event", path, mtime, priority)
+        Axon.Watcher.Staging.stage_file(project_name, path, mtime, priority)
       end)
     end
 

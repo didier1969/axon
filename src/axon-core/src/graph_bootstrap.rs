@@ -4,8 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use libloading::{Library, Symbol as LibSymbol};
+use tracing::{info, warn};
 
 use crate::graph::{CloseDbFunc, ExecFunc, GraphStore, InitDbFunc, LatticePool};
+
+const IST_SCHEMA_VERSION: &str = "1";
+const IST_INGESTION_VERSION: &str = "2";
+const IST_EMBEDDING_VERSION: &str = "1";
 
 impl GraphStore {
     pub fn new(db_root: &str) -> Result<Self> {
@@ -49,19 +54,10 @@ impl GraphStore {
                 return Err(anyhow!("Failed to init DuckDB Writer"));
             }
 
-            let reader_ptr = if is_memory {
-                writer_ptr
-            } else {
-                init_fn(c_path.as_ptr(), true)
-            };
-            if reader_ptr.is_null() {
-                return Err(anyhow!("Failed to init DuckDB Reader"));
-            }
-
             let pool = Arc::new(LatticePool {
-                lib,
+                lib: lib.clone(),
                 writer_ctx: Mutex::new(writer_ptr),
-                reader_ctx: Mutex::new(reader_ptr),
+                reader_ctx: Mutex::new(std::ptr::null_mut()),
             });
             let store = Self { pool: pool.clone() };
 
@@ -73,16 +69,37 @@ impl GraphStore {
                     let w_guard = store.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
                     store.setup_session(*w_guard, &attach_q)?;
                 }
-                {
-                    let r_guard = store.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
-                    store.setup_session(*r_guard, &attach_q)?;
-                }
             } else {
                 let _ = store.execute("CREATE SCHEMA IF NOT EXISTS soll;");
             }
 
             store.init_schema(is_memory)?;
+            store.ensure_runtime_compatibility()?;
             store.execute("CHECKPOINT;")?;
+
+            let reader_ptr = if is_memory {
+                writer_ptr
+            } else {
+                let ptr = init_fn(c_path.as_ptr(), true);
+                if ptr.is_null() {
+                    return Err(anyhow!("Failed to init DuckDB Reader"));
+                }
+                ptr
+            };
+
+            {
+                let mut reader_guard = store.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+                *reader_guard = reader_ptr;
+            }
+
+            if !is_memory {
+                let mut soll_path = PathBuf::from(db_root);
+                soll_path.push("sanctuary/soll.db");
+                let attach_q = format!("ATTACH '{}' AS soll;", soll_path.to_string_lossy().replace("'", "''"));
+                let r_guard = store.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+                store.setup_session(*r_guard, &attach_q)?;
+            }
+
             Ok(store)
         }
     }
@@ -128,8 +145,12 @@ impl GraphStore {
     }
 
     fn init_schema(&self, _is_memory: bool) -> Result<()> {
+        self.execute("CREATE TABLE IF NOT EXISTS RuntimeMetadata (key VARCHAR PRIMARY KEY, value VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384])")?;
+        self.execute("CREATE TABLE IF NOT EXISTS Chunk (id VARCHAR PRIMARY KEY, source_type VARCHAR, source_id VARCHAR, project_slug VARCHAR, kind VARCHAR, content VARCHAR, content_hash VARCHAR, start_line BIGINT, end_line BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS EmbeddingModel (id VARCHAR PRIMARY KEY, kind VARCHAR, model_name VARCHAR, dimension BIGINT, version VARCHAR, created_at BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS ChunkEmbedding (chunk_id VARCHAR, model_id VARCHAR, embedding FLOAT[384], source_hash VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS Project (name VARCHAR PRIMARY KEY)")?;
         self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS CALLS (source_id VARCHAR, target_id VARCHAR)")?;
@@ -155,6 +176,75 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.SUPERSEDES (source_id VARCHAR, target_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.CONTRIBUTES_TO (source_id VARCHAR, target_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.REFINES (source_id VARCHAR, target_id VARCHAR)")?;
+        Ok(())
+    }
+
+    fn ensure_runtime_compatibility(&self) -> Result<()> {
+        let expected = [
+            ("schema_version", IST_SCHEMA_VERSION),
+            ("ingestion_version", IST_INGESTION_VERSION),
+            ("embedding_version", IST_EMBEDDING_VERSION),
+        ];
+
+        let existing = self.query_json("SELECT key, value FROM RuntimeMetadata")?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&existing).unwrap_or_default();
+        let mut current = std::collections::HashMap::new();
+        for row in rows {
+            if row.len() >= 2 {
+                current.insert(row[0].clone(), row[1].clone());
+            }
+        }
+
+        let mut drift = Vec::new();
+        for (key, expected_value) in expected {
+            match current.get(key) {
+                Some(value) if value == expected_value => {}
+                Some(value) => drift.push(format!("{key}: {value} -> {expected_value}")),
+                None => drift.push(format!("{key}: <missing> -> {expected_value}")),
+            }
+        }
+
+        if !drift.is_empty() {
+            warn!(
+                "IST compatibility drift detected. Rebuilding IST while preserving SOLL. Drift: {}",
+                drift.join(", ")
+            );
+            self.reset_ist_state()?;
+        } else {
+            info!("IST runtime metadata is compatible with current Axon Core.");
+        }
+
+        self.execute("DELETE FROM RuntimeMetadata")?;
+        for (key, value) in expected {
+            self.execute(&format!(
+                "INSERT INTO RuntimeMetadata (key, value) VALUES ('{}', '{}')",
+                key, value
+            ))?;
+        }
+
+        Ok(())
+    }
+
+    fn reset_ist_state(&self) -> Result<()> {
+        let cleanup_queries = [
+            "DELETE FROM CALLS_NIF",
+            "DELETE FROM CALLS",
+            "DELETE FROM CONTAINS",
+            "DELETE FROM IMPACTS",
+            "DELETE FROM SUBSTANTIATES",
+            "DELETE FROM ChunkEmbedding",
+            "DELETE FROM EmbeddingModel",
+            "DELETE FROM Chunk",
+            "DELETE FROM Symbol",
+            "DELETE FROM File",
+            "DELETE FROM Project",
+        ];
+
+        for query in cleanup_queries {
+            self.execute(query)?;
+        }
+
+        info!("IST state reset complete. SOLL sanctuary preserved.");
         Ok(())
     }
 }

@@ -140,11 +140,6 @@ defmodule AxonDashboardWeb.StatusLive do
     {:noreply, fetch_and_assign_stats(socket)}
   end
 
-  def handle_info(:trigger_initial_scan, socket) do
-    AxonDashboard.BridgeClient.trigger_scan()
-    {:noreply, assign(socket, status: :processing)}
-  end
-
   def handle_info(
         {:telemetry_event, [:axon, :backpressure, :pressure_computed], measurements, metadata},
         socket
@@ -213,11 +208,6 @@ defmodule AxonDashboardWeb.StatusLive do
 
   def handle_event("dismiss_witness_alert", _, socket) do
     {:noreply, assign(socket, witness_alert: nil)}
-  end
-
-  def handle_event("reindex_project", %{"project" => project}, socket) do
-    AxonDashboard.BridgeClient.trigger_scan(project)
-    {:noreply, socket}
   end
 
   defp process_event({:file_indexed, _path}, socket), do: socket
@@ -476,28 +466,7 @@ defmodule AxonDashboardWeb.StatusLive do
                 </div>
               </div>
 
-              <div class="px-4 py-2 bg-slate-800/30 flex justify-between items-center border-b border-white/5">
-                <button
-                  phx-click="reindex_project"
-                  phx-value-project={name}
-                  class="text-[9px] font-black text-slate-500 hover:text-amber-500 transition-colors uppercase tracking-widest flex items-center gap-2"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke-width="2.5"
-                    stroke="currentColor"
-                    class="w-3 h-3"
-                  >
-                    <path
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"
-                    />
-                  </svg>
-                  SYNC_SECTOR
-                </button>
+              <div class="px-4 py-2 bg-slate-800/30 flex justify-end items-center border-b border-white/5">
                 <div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_5px_rgba(16,185,129,0.5)]">
                 </div>
               </div>

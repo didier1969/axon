@@ -107,6 +107,8 @@ impl Scanner {
            path_str.contains("/.pytest_cache/") ||
            path_str.contains("/__pycache__/") ||
            path_str.contains("/.venv/") ||
+           path_str.contains("/.fastembed_cache/") ||
+           path_str.contains("/.devenv/") ||
            path_str.contains("/node_modules/") ||
            path_str.contains("/target/") ||
            path_str.contains("/_build/") ||

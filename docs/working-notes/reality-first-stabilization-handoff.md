@@ -99,6 +99,10 @@ What changed:
 - Active HydraDB coupling was removed from `flake.nix`, `devenv.nix`, `devenv.yaml`, `flake.lock`, and `devenv.lock`.
 - `axon-db-start` is now a guarded placeholder instead of a live dependency path.
 - `setup_v2.sh` and `start_v2.sh` were corrected to use the Devenv `CARGO_TARGET_DIR` output path instead of the stale `src/axon-core/target/...` assumption.
+- `start_v2.sh` now also fails fast if it detects a newer `src/axon-core/target/release/axon-core` built outside Devenv, because that path does not feed the runtime launched by the official start script.
+- The stable operational rule is now explicit: if Axon is started through `start_v2.sh`, the authoritative release binary must come from `.axon/cargo-target/release/axon-core`, built inside `devenv shell`.
+- `start_v2.sh` now attempts the Devenv rebuild automatically before falling back to a manual instruction.
+- `start_v2.sh` now performs a live SQL schema probe after the core port opens, so a false-positive runtime start is rejected if `/sql` does not expose the expected tables.
 
 ## Rust Core / Native Ingestion / MCP
 
@@ -126,6 +130,8 @@ What changed:
 
 - DuckDB plugin path resolution now uses robust repo-relative discovery instead of fragile `cwd` assumptions.
 - `GraphStore` bootstrap was hardened for `ist.db` and attached `soll.db`.
+- live SQL/MCP reads now use the writer connection path instead of a stale separate reader snapshot, because the previous split could return `File=0` and `Chunk=0` while ingestion was actively writing.
+- this writer-backed live read path is now validated both by an on-disk red/green test and by the real runtime launched through `start-v2.sh`.
 - In-memory DB handling was adjusted to avoid read-only attach failure patterns.
 - `fetch_pending_batch()` was changed to claim work atomically under transaction.
 - `worker_id` is now cleared when files transition to terminal states.
@@ -145,10 +151,19 @@ Rust validation reached a clean state during this session:
 - result reached first: `26 passed; 0 failed`
 - result reached now: `27 passed; 0 failed`
 - result reached now after VCR coverage expansion: `30 passed; 0 failed`
+- result reached now after reader/writer consistency coverage: `36 passed; 0 failed`
 
 Important note:
 
 - This signal was obtained after stabilizing DuckDB path resolution, SOLL schema gaps, MCP behavior, and the sandbox-sensitive socket test.
+- A new persistent on-disk test now proves `writer_ctx -> query_count/query_json -> reopen` consistency:
+  - `test_maillon_2c_reader_writer_consistency_after_bulk_insert_and_reopen`
+- Runtime live signal after a Devenv rebuild and restart:
+  - `SELECT count(*) FROM File` -> `900`
+  - `SELECT count(*) FROM Chunk` -> `3370`
+  - `SELECT status, count(*) FROM File GROUP BY status` -> `skipped=5`, `indexed=300`, `indexing=595`
+  - `SELECT count(*) FROM EmbeddingModel` -> `2`
+  - `SELECT count(*) FROM ChunkEmbedding` -> `1088`
 
 # Elixir / Dashboard Validation State
 
@@ -269,6 +284,26 @@ What changed:
 - A validation en conditions reelles run log now exists:
   - `/home/dstadel/projects/axon/docs/plans/2026-03-30-validation-conditions-reelles-log.md`
   - latest live runtime finding: `/mcp` and `/sql` are reachable after nominal bootstrap/start, but live value on Axon itself is still limited by real index coverage on some watcher/Elixir symbols
+- A dedicated FOSS vectorization migration plan now exists:
+  - `/home/dstadel/projects/axon/docs/plans/2026-03-30-ist-vectorization-migration-plan.md`
+  - it keeps `IST` canonical, `SOLL` protected, and treats `Chunk`, `ChunkEmbedding`, `GraphProjection`, and `GraphEmbedding` as derived/versioned layers
+- The first two vectorization layers are now partially implemented in Rust:
+  - `Chunk` is materialized from indexed symbol spans during `insert_file_data_batch`
+  - `EmbeddingModel` and `ChunkEmbedding` now exist as derived tables
+  - the semantic worker now registers both symbol and chunk embedding models and can populate `ChunkEmbedding`
+  - Rust validation is green after this step: `35 passed; 0 failed`
+- A dedicated FOSS vectorization migration plan now exists:
+  - `/home/dstadel/projects/axon/docs/plans/2026-03-30-foss-vectorization-migration-plan.md`
+  - target direction is now explicitly `IST truth -> Chunk -> ChunkEmbedding -> GraphProjection -> GraphEmbedding`
+- `IST` runtime compatibility is now enforced at boot in `src/axon-core/src/graph_bootstrap.rs`
+  - `RuntimeMetadata` stores at least `schema_version`, `ingestion_version`, and `embedding_version`
+  - when drift is detected, Axon now resets `IST` tables while preserving the `SOLL` sanctuary
+- `scripts/start-v2.sh` now treats `tmux` health more strictly
+- `scripts/start-v2.sh` now pre-warms Hex/Rebar non-interactively so the watcher can boot without pausing on `mix local.hex`
+- `scripts/start-v2.sh` now launches the dashboard Devenv shell from the repo root before `cd src/dashboard`, avoiding false starts where `devenv.nix` was not found
+- `scripts/start-v2.sh` now rejects stale release builds produced outside Devenv so runtime truth cannot silently diverge from the official build path
+  - if session `axon` exists but no healthy data plane is visible, the stale session is killed and startup continues
+  - local WAL and lock remnants under `.axon/graph_v2` are cleaned before relaunch
 
 # Validation In Conditions Reelles Priority
 

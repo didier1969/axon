@@ -86,6 +86,9 @@ Objective:
 - define a restoration procedure
 - validate that timestamped exports can reconstruct a usable conceptual state
 - formalize whether exports are versioned artifacts or external archives
+- define executable `SOLL` invariants for structural coherence
+- improve restoration so links and critical metadata are reconstructed, not only top-level entities
+- evaluate whether `SOLL` also needs a more granular disk projection for review and versioning
 
 Acceptance criteria:
 
@@ -93,6 +96,9 @@ Acceptance criteria:
 - restore path implemented or documented with verification
 - at least one restore validation executed successfully
 - retention policy decided
+- `SOLL` coherence rules are documented and at least partially automated
+- restore coverage of critical links is explicit
+- decision recorded on whether granular `SOLL` artifacts should complement timestamped snapshots
 
 ## P0-3. Rust / Elixir / MCP Contracts
 
@@ -209,6 +215,21 @@ Acceptance criteria:
 - secrets handling reviewed
 - risky paths identified
 - minimum audit trail available
+
+## P1-5. Graph Vectorization
+
+Objective:
+
+- evaluate and introduce graph-aware vectorization as a derived capability on top of trusted `IST`
+- improve context awareness for LLM-assisted development without weakening structural truth
+- define when graph embeddings are helpful, when they are optional, and how they are refreshed
+
+Acceptance criteria:
+
+- the target use cases for graph vectorization are documented
+- the derivation path from structural graph to vectorized representation is defined
+- recomputation or invalidation rules are explicit
+- at least one validation en conditions reelles scenario shows added value over structural search alone
 
 # Phase 3: Productization
 

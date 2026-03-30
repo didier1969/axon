@@ -5,6 +5,11 @@ use std::thread;
 use std::time::Duration;
 use crate::graph::GraphStore;
 
+const SYMBOL_MODEL_ID: &str = "sym-bge-small-en-v1.5-384";
+const CHUNK_MODEL_ID: &str = "chunk-bge-small-en-v1.5-384";
+const MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
+const MODEL_VERSION: &str = "1";
+
 // NEXUS v10.5: Sovereign Semantic Engine
 // We isolate the ONNX runtime inside a pure OS thread to prevent Tokio/jemalloc aborts.
 // No Lazy statics, no global Mutex. The model is owned by the background worker.
@@ -39,9 +44,38 @@ impl SemanticWorkerPool {
             }
         };
 
+        if let Err(e) = graph_store.ensure_embedding_model(SYMBOL_MODEL_ID, "symbol", MODEL_NAME, 384, MODEL_VERSION) {
+            error!("Semantic Worker: failed to register symbol embedding model: {:?}", e);
+        }
+        if let Err(e) = graph_store.ensure_embedding_model(CHUNK_MODEL_ID, "chunk", MODEL_NAME, 384, MODEL_VERSION) {
+            error!("Semantic Worker: failed to register chunk embedding model: {:?}", e);
+        }
+
         info!("Semantic Worker: Hunting for unembedded symbols...");
         
         loop {
+            match graph_store.fetch_unembedded_chunks(CHUNK_MODEL_ID, 64) {
+                Ok(chunks) if !chunks.is_empty() => {
+                    debug!("Semantic Worker: Embedding {} chunks...", chunks.len());
+                    let texts: Vec<String> = chunks.iter().map(|(_, content, _)| content.clone()).collect();
+                    match model.embed(texts, None) {
+                        Ok(embeddings) => {
+                            let updates: Vec<(String, String, Vec<f32>)> = chunks.into_iter()
+                                .zip(embeddings.into_iter())
+                                .map(|((id, _, hash), emb)| (id, hash, emb))
+                                .collect();
+
+                            if let Err(e) = graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, &updates) {
+                                error!("Semantic Worker: Chunk DB Write Error: {:?}", e);
+                            }
+                        }
+                        Err(e) => error!("Semantic Worker: Chunk embedding failed: {:?}", e),
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => error!("Semantic Worker: Chunk DB Fetch error: {:?}", e),
+            }
+
             match graph_store.fetch_unembedded_symbols(100) {
                 Ok(symbols) if !symbols.is_empty() => {
                     debug!("Semantic Worker: Embedding {} symbols...", symbols.len());

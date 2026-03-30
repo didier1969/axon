@@ -11,6 +11,7 @@ use crate::queue::QueueStore;
 pub enum DbWriteTask {
     FileExtraction {
         path: String,
+        content: String,
         extraction: crate::parser::ExtractionResult,
         trace_id: String,
         t0: i64, t1: i64, t2: i64, t3: i64,
@@ -31,6 +32,21 @@ pub struct WorkerPool {
 }
 
 impl WorkerPool {
+    fn infer_project_slug(path: &str) -> Option<String> {
+        let projects_root =
+            std::env::var("AXON_PROJECTS_ROOT").unwrap_or_else(|_| "/home/dstadel/projects".to_string());
+        let path = std::path::Path::new(path);
+        let relative = path.strip_prefix(&projects_root).ok()?;
+        let first = relative.components().next()?;
+        let slug = first.as_os_str().to_string_lossy().trim().to_string();
+
+        if slug.is_empty() || slug == "." {
+            None
+        } else {
+            Some(slug)
+        }
+    }
+
     pub fn new(
         count: usize,
         queue: Arc<QueueStore>,
@@ -108,11 +124,15 @@ impl WorkerPool {
                 }
 
                 if let Some(parser) = parser::get_parser_for_file(std::path::Path::new(&task.path)) {
-                    let extraction = parser.parse(&content);
+                    let mut extraction = parser.parse(&content);
+                    if extraction.project_slug.is_none() {
+                        extraction.project_slug = Self::infer_project_slug(&task.path);
+                    }
                     let t3 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
                     
                     let _ = db_sender.send(DbWriteTask::FileExtraction {
                         path: task.path.clone(),
+                        content,
                         extraction,
                         trace_id: task.trace_id.clone(),
                         t0: task.t0, t1: task.t1, t2, t3
@@ -150,8 +170,8 @@ impl WorkerPool {
             loop {
                 // 1. BLOCKING WAIT for first message
                 match db_receiver.recv() {
-                    Ok(DbWriteTask::FileExtraction { path, extraction, trace_id, t0, t1, t2, t3 }) => {
-                        batch.push(DbWriteTask::FileExtraction { path, extraction, trace_id, t0, t1, t2, t3 });
+                    Ok(DbWriteTask::FileExtraction { path, content, extraction, trace_id, t0, t1, t2, t3 }) => {
+                        batch.push(DbWriteTask::FileExtraction { path, content, extraction, trace_id, t0, t1, t2, t3 });
                     },
                     Ok(DbWriteTask::FileSkipped { path, reason, trace_id, t0, t1, t2 }) => {
                         batch.push(DbWriteTask::FileSkipped { path, reason, trace_id, t0, t1, t2 });
@@ -174,7 +194,7 @@ impl WorkerPool {
                 if !batch.is_empty() {
                     let mut combined_feedback = String::new();
                     for task in &batch {
-                        if let DbWriteTask::FileExtraction { path, extraction, trace_id, t0, t1, t2, t3 } = task {
+                        if let DbWriteTask::FileExtraction { path, extraction, trace_id, t0, t1, t2, t3, .. } = task {
                             let t4 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
                             let msg = serde_json::json!({
                                 "FileIndexed": {

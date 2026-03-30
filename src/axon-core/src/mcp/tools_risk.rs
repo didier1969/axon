@@ -32,6 +32,7 @@ impl McpServer {
 
         match self.graph_store.query_json_param(&query, &params) {
             Ok(res) => {
+                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
                 let table = format_table_from_json(&res, &["Fichier / Projet", "Symbole Impacté", "Type"]);
                 let count_query = format!(
                     "WITH RECURSIVE traverse(caller, callee, depth) AS (
@@ -50,6 +51,10 @@ impl McpServer {
                     .query_count_param(&count_query, &params)
                     .unwrap_or(0);
 
+                if rows.is_empty() && impact_radius == 0 {
+                    return self.axon_impact_without_calls(symbol, depth);
+                }
+
                 let mut report = format!("## 💥 Analyse d'Impact Transversale : {}\n\n", symbol);
                 report.push_str(&format!(
                     "**Rayon d'Impact (profondeur {}) :** {} composants affectés à travers le Treillis.\n\n",
@@ -61,6 +66,49 @@ impl McpServer {
             }
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Impact Analysis Error: {}", e) }], "isError": true })),
         }
+    }
+
+    fn axon_impact_without_calls(&self, symbol: &str, depth: u64) -> Option<Value> {
+        let symbol_res = self
+            .graph_store
+            .query_json_param(
+                "SELECT name, kind, COALESCE(project_slug, 'unknown') FROM Symbol WHERE name = $sym OR id = $sym LIMIT 5",
+                &json!({"sym": symbol}),
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let symbol_rows: Vec<Vec<Value>> = serde_json::from_str(&symbol_res).unwrap_or_default();
+        if symbol_rows.is_empty() {
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("## 💥 Analyse d'Impact Transversale : {}\n\nAucun symbole correspondant n'a ete trouve.", symbol)
+                }]
+            }));
+        }
+
+        let calls_count = self.graph_store.query_count("SELECT count(*) FROM CALLS").unwrap_or(0);
+        if calls_count > 0 {
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "## 💥 Analyse d'Impact Transversale : {}\n\nAucun impact n'a ete calcule a la profondeur {}.",
+                        symbol, depth
+                    )
+                }]
+            }));
+        }
+
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "## 💥 Analyse d'Impact Transversale : {}\n\nLe symbole existe, mais le graphe d'appel n'est pas encore disponible dans cette base live.\n\n{}\n\n**Etat:** CALLS est vide; le rayon d'impact ne peut pas encore etre calcule de maniere fiable.",
+                    symbol,
+                    format_table_from_json(&symbol_res, &["Nom", "Type", "Projet"])
+                )
+            }]
+        }))
     }
 
     pub(crate) fn axon_diff(&self, args: &Value) -> Option<Value> {

@@ -27,6 +27,13 @@ impl McpServer {
         }
     }
 
+    fn symbol_search_predicate() -> &'static str {
+        "lower(s.name) LIKE '%' || $normalized || '%' \
+         OR lower(replace(replace(replace(s.name, '_', ' '), '-', ' '), ':', ' ')) LIKE '%' || $normalized || '%' \
+         OR lower(s.name) LIKE '%' || $wildcard || '%' \
+         OR lower(replace(replace(replace(replace(s.name, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%'"
+    }
+
     pub(crate) fn axon_fs_read(&self, args: &Value) -> Option<Value> {
         let uri = args.get("uri")?.as_str()?;
         let start_line = args.get("start_line").and_then(|v| v.as_u64());
@@ -61,6 +68,7 @@ impl McpServer {
             .ok()
             .and_then(|v| v.into_iter().next());
 
+        let base_predicate = Self::symbol_search_predicate();
         let (sql, params) = if let Some(emb) = embedding {
             let vec_str = format!("{:?}", emb);
             if project == "*" {
@@ -68,13 +76,10 @@ impl McpServer {
                     format!(
                         "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[384]) as score \
                          FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                         WHERE lower(s.name) LIKE '%' || $normalized || '%' \
-                            OR lower(replace(replace(replace(s.name, '_', ' '), '-', ' '), ':', ' ')) LIKE '%' || $normalized || '%' \
-                            OR lower(s.name) LIKE '%' || $wildcard || '%' \
-                            OR lower(replace(replace(replace(replace(s.name, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%' \
+                         WHERE {} \
                             OR array_cosine_distance(s.embedding, {}::FLOAT[384]) < 0.5 \
                          ORDER BY score ASC LIMIT 10",
-                        vec_str, vec_str
+                        vec_str, base_predicate, vec_str
                     ),
                     Self::build_symbol_search_params(query_text, project),
                 )
@@ -83,15 +88,11 @@ impl McpServer {
                     format!(
                         "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[384]) as score \
                          FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                         WHERE f.path LIKE '%' || $proj || '%' AND ( \
-                            lower(s.name) LIKE '%' || $normalized || '%' \
-                            OR lower(replace(replace(replace(s.name, '_', ' '), '-', ' '), ':', ' ')) LIKE '%' || $normalized || '%' \
-                            OR lower(s.name) LIKE '%' || $wildcard || '%' \
-                            OR lower(replace(replace(replace(replace(s.name, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%' \
+                         WHERE f.path LIKE '%' || $proj || '%' AND ( {} \
                             OR array_cosine_distance(s.embedding, {}::FLOAT[384]) < 0.5 \
                          ) \
                          ORDER BY score ASC LIMIT 10",
-                        vec_str, vec_str
+                        vec_str, base_predicate, vec_str
                     ),
                     Self::build_symbol_search_params(query_text, project),
                 )
@@ -100,25 +101,17 @@ impl McpServer {
             (
                 "SELECT s.name, s.kind, f.path AS uri \
                  FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                 WHERE lower(s.name) LIKE '%' || $normalized || '%' \
-                    OR lower(replace(replace(replace(s.name, '_', ' '), '-', ' '), ':', ' ')) LIKE '%' || $normalized || '%' \
-                    OR lower(s.name) LIKE '%' || $wildcard || '%' \
-                    OR lower(replace(replace(replace(replace(s.name, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%' \
+                 WHERE {} \
                  LIMIT 10"
-                    .to_string(),
+                    .replace("{}", base_predicate),
                 Self::build_symbol_search_params(query_text, project),
             )
         } else {
             (
                 "SELECT s.name, s.kind, f.path AS uri \
                  FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                 WHERE f.path LIKE '%' || $proj || '%' AND ( \
-                    lower(s.name) LIKE '%' || $normalized || '%' \
-                    OR lower(replace(replace(replace(s.name, '_', ' '), '-', ' '), ':', ' ')) LIKE '%' || $normalized || '%' \
-                    OR lower(s.name) LIKE '%' || $wildcard || '%' \
-                    OR lower(replace(replace(replace(replace(s.name, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%' \
-                 ) LIMIT 10"
-                    .to_string(),
+                 WHERE f.path LIKE '%' || $proj || '%' AND ( {} ) LIMIT 10"
+                    .replace("{}", base_predicate),
                 Self::build_symbol_search_params(query_text, project),
             )
         };
@@ -131,6 +124,10 @@ impl McpServer {
 
         match self.graph_store.query_json_param(&sql, &params) {
             Ok(res) => {
+                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+                if rows.is_empty() {
+                    return self.axon_query_without_contains(query_text, project, &params);
+                }
                 let headers = if sql.contains("score") {
                     vec!["Nom", "Type", "URI (Chemin)", "Distance Sémantique"]
                 } else {
@@ -139,7 +136,58 @@ impl McpServer {
                 let table = format_table_from_json(&res, &headers);
                 Some(json!({ "content": [{ "type": "text", "text": format!("### 🔎 Resultats de recherche : '{}'\n\n**Mode:** {}\n\n{}", query_text, mode_label, table) }] }))
             }
-            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Search Error: {}", e) }], "isError": true })),
+            Err(_) => self.axon_query_without_contains(query_text, project, &params),
+        }
+    }
+
+    fn axon_query_without_contains(&self, query_text: &str, project: &str, params: &Value) -> Option<Value> {
+        let contains_count = self.graph_store.query_count("SELECT count(*) FROM CONTAINS").unwrap_or(0);
+        if contains_count > 0 {
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("### 🔎 Resultats de recherche : '{}'\n\n**Mode:** structurel\n\nAucun résultat trouvé.", query_text)
+                }]
+            }));
+        }
+
+        let fallback_query = format!(
+            "SELECT s.name, s.kind, COALESCE(s.project_slug, 'unknown') \
+             FROM Symbol s \
+             WHERE {} \
+             LIMIT 10",
+            Self::symbol_search_predicate()
+        );
+        let fallback_res = self
+            .graph_store
+            .query_json_param(&fallback_query, params)
+            .unwrap_or_else(|_| "[]".to_string());
+        let fallback_rows: Vec<Vec<Value>> = serde_json::from_str(&fallback_res).unwrap_or_default();
+
+        if fallback_rows.is_empty() {
+            Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n\nAucun résultat trouvé.", query_text)
+                }]
+            }))
+        } else {
+            let project_note = if project == "*" {
+                "portee projet non contrainte"
+            } else {
+                "contrainte projet non fiable tant que CONTAINS est vide"
+            };
+            Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n**Etat:** le graphe de containment n'est pas encore disponible; les symboles ci-dessous restent exploitables mais sans URI verifiee ({})\n\n{}",
+                        query_text,
+                        project_note,
+                        format_table_from_json(&fallback_res, &["Nom", "Type", "Projet"])
+                    )
+                }]
+            }))
         }
     }
 

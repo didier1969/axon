@@ -67,14 +67,6 @@ defmodule Axon.Watcher.CockpitLive do
   end
 
   @impl true
-  def handle_event("start_scan", _params, socket) do
-    require Logger
-    Logger.info("[Cockpit] User triggered START_SCAN")
-    Axon.Watcher.Server.trigger_scan()
-    {:noreply, put_flash(socket, :info, "Full scan triggered!")}
-  end
-
-  @impl true
   def handle_event("toggle_monitoring", _params, socket) do
     require Logger
 
@@ -179,7 +171,7 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
       </div>
       
-      <!-- Unit 03: Operational Override -->
+      <!-- Unit 03: Monitoring Control -->
       <div class="card" style="border-color: var(--neon-blue);">
         <div class="card-title" style="color: var(--neon-blue);">
           <svg style="width:18px;height:18px" viewBox="0 0 24 24">
@@ -188,12 +180,9 @@ defmodule Axon.Watcher.CockpitLive do
               d="M12,15.5A2.5,2.5 0 0,1 14.5,18A2.5,2.5 0 0,1 12,20.5A2.5,2.5 0 0,1 9.5,18A2.5,2.5 0 0,1 12,15.5M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 12,14A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2Z"
             />
           </svg>
-          UNIT 03: OPERATIONAL OVERRIDE
+          UNIT 03: MONITORING CONTROL
         </div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-          <button phx-click="start_scan" class="btn btn-primary" style="grid-column: span 2;">
-            Execute Full Scan
-          </button>
           <button phx-click="toggle_monitoring" class="btn">
             {if @monitoring_active, do: "Pause", else: "Resume"}
           </button>
