@@ -74,6 +74,7 @@ impl GraphStore {
             }
 
             store.init_schema(is_memory)?;
+            store.ensure_additive_schema()?;
             store.ensure_runtime_compatibility()?;
             store.execute("CHECKPOINT;")?;
 
@@ -176,6 +177,11 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.SUPERSEDES (source_id VARCHAR, target_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.CONTRIBUTES_TO (source_id VARCHAR, target_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.REFINES (source_id VARCHAR, target_id VARCHAR)")?;
+        Ok(())
+    }
+
+    fn ensure_additive_schema(&self) -> Result<()> {
+        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS needs_reindex BOOLEAN DEFAULT FALSE")?;
         Ok(())
     }
 

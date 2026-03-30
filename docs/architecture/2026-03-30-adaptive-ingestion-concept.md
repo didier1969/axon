@@ -42,6 +42,11 @@ It must support:
 
 Any reset, purge, rebuild, or compatibility repair applies to `IST`, never to `SOLL` unless explicitly requested.
 
+`IST` must also support additive boot-time repair for legacy schemas.
+
+If a new column is required by the runtime, Axon should first attempt a safe additive migration before falling back to a broader `IST` reset.
+This preserves delta continuity across restarts and avoids replaying the whole universe when a narrow schema drift can be repaired in place.
+
 ### 3. DuckDB is a single-write authority
 
 Axon must embrace DuckDB's write model instead of fighting it.
@@ -188,6 +193,9 @@ Two invariants now apply to this commit path:
 - a real metadata change observed during `indexing` must be replayed as a second pass after the current commit finishes
 
 This avoids duplicate work and duplicate symbol insertion while still preserving delta truth.
+
+The same path must remain compatible with previously created `IST` files.
+When a newly introduced field such as `needs_reindex` is absent from a legacy `File` table, Axon repairs that gap additively at boot before any claim or reopen logic runs.
 
 ## Stage 6. Derived Semantic Work
 

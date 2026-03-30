@@ -116,6 +116,55 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_2c_legacy_ist_reopen_adds_needs_reindex_column() {
+        let db_root = std::env::temp_dir().join(format!(
+            "axon-legacy-ist-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&db_root);
+        std::fs::create_dir_all(&db_root).unwrap();
+
+        let db_root_str = db_root.to_string_lossy().to_string();
+        let store = GraphStore::new(&db_root_str).unwrap();
+
+        store
+            .execute("DROP TABLE File;")
+            .unwrap();
+        store
+            .execute(
+                "CREATE TABLE File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR)"
+            )
+            .unwrap();
+        store
+            .execute("DELETE FROM RuntimeMetadata;")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '1')")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '2')")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '1')")
+            .unwrap();
+        drop(store);
+
+        let reopened = GraphStore::new(&db_root_str).unwrap();
+        reopened
+            .bulk_insert_files(&[("/tmp/legacy_reopen.ex".to_string(), "proj".to_string(), 100, 1)])
+            .unwrap();
+
+        let row = reopened
+            .query_json("SELECT status, needs_reindex FROM File WHERE path = '/tmp/legacy_reopen.ex'")
+            .unwrap();
+        assert!(row.contains("pending"));
+        assert!(row.contains("false"), "La colonne needs_reindex doit etre disponible apres reopen");
+
+        let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
     fn test_maillon_2d_rust_watcher_requeues_hot_delta() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
