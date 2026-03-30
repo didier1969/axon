@@ -214,16 +214,23 @@ This avoids duplicate work and duplicate symbol insertion while still preserving
 The same path must remain compatible with previously created `IST` files.
 When a newly introduced field such as `needs_reindex` is absent from a legacy `File` table, Axon repairs that gap additively at boot before any claim or reopen logic runs.
 
-The watcher path now also carries explicit checkpoints:
+The watcher path now also carries explicit primary checkpoints:
 
 - `watcher.storm_suppressed`
 - `watcher.storm_salvaged`
+- `watcher.rescan_requested`
+- `watcher.rescan_started`
+- `watcher.rescan_completed`
+- `watcher.rescan_skipped`
 - `watcher.received`
 - `watcher.filtered`
 - `watcher.db_upsert`
 - `watcher.staged`
+- `watcher.staged_none`
+- `watcher.staging_failed`
+- `watcher.error`
 
-These checkpoints are emitted on the live runtime so Axon can prove where a hot delta stops instead of inferring it indirectly from missing rows.
+Additional lower-level probes such as `watcher.staged_batch`, `watcher.storm_salvaged_none`, and `watcher.missing` also exist in the runtime, but the list above is the primary operator-facing checkpoint chain used to prove where a hot delta stops instead of inferring it indirectly from missing rows.
 
 ## Stage 6. Derived Semantic Work
 

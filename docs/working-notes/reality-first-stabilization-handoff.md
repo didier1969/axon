@@ -195,6 +195,14 @@ What changed:
 - non-qualified top-level symbols are now path-aware in `Symbol.id`, which avoids cross-file collisions for helpers such as repeated `send_cypher` functions inside the same project
 - legacy `IST` files are now repaired additively at boot for `needs_reindex` before runtime-compatibility logic runs, so a narrow schema drift no longer causes `Binder Error` loops during live restart
 - the Rust watcher now emits explicit checkpoints on the hot-delta path (`watcher.storm_suppressed`, `watcher.storm_salvaged`, `watcher.received`, `watcher.filtered`, `watcher.db_upsert`, `watcher.staged`) through a shared in-memory probe buffer plus runtime logs
+- the Rust watcher now also emits explicit rescan and failure checkpoints:
+  - `watcher.rescan_requested`
+  - `watcher.rescan_started`
+  - `watcher.rescan_completed`
+  - `watcher.rescan_skipped`
+  - `watcher.staged_none`
+  - `watcher.staging_failed`
+  - `watcher.error`
 - bootstrap-storm salvage is now restricted to active-project file paths only; whole directories from a startup storm are no longer recursively restaged inside the watcher callback
 
 ## Rust Core / Native Ingestion / MCP
@@ -273,6 +281,7 @@ Rust validation reached a clean state during this session:
 - result reached now after additive legacy-`IST` schema repair for `needs_reindex`: `62 passed; 0 failed` in `src/lib.rs` and `19 passed; 0 failed` in `src/main.rs`
 - result reached now after watcher probes and file-only bootstrap salvage: `63 passed; 0 failed` in `src/lib.rs` and `21 passed; 0 failed` in `src/main.rs`
 - result reached now after explicit `IST` invalidation policy tests: `66 passed; 0 failed` in `src/lib.rs` and `25 passed; 0 failed` in `src/main.rs`
+- result reached now after watcher rescan/no-op/error checkpoint coverage: `66 passed; 0 failed` in `src/lib.rs` and `30 passed; 0 failed` in `src/main.rs`
 - dashboard validation remains green after real `io` monitoring work: `31 tests, 0 failures`
 
 Runtime note:
@@ -287,9 +296,8 @@ Runtime note:
 - live boot now pre-indexes the active repo before the full universe scan:
   - `Hot subtree scan complete: 366 files mapped from "/home/dstadel/projects/axon"`
   - `SELECT count(*) FROM File WHERE path LIKE '/home/dstadel/projects/axon/%'` returned `366` while the universe scan was still in progress
-- one live proof is still open:
-  - explicit watcher-driven delta insertion for newly created files in the active repo has not yet been observed end-to-end in runtime logs
-  - the hot arming and active-project pre-scan are now proven; the remaining gap is the final live delta proof
+- the previous live proof gap is now closed:
+  - explicit watcher-driven delta insertion for newly created files in the active repo has now been observed end-to-end in runtime logs and confirmed via `/sql`
 - one new live defect is now isolated for the next slice:
   - the previous `Duplicate key` failures on top-level helper symbols were traced to cross-file `Symbol.id` collisions and to hot deltas reopening active claims
   - both are now covered by executable Rust tests and corrected in the commit path
@@ -306,6 +314,14 @@ Runtime note:
     - `/home/dstadel/projects/axon/tmp/rust_watcher_live_three.ex`
     - `/home/dstadel/projects/axon/tmp/rust_watcher_live_final.ex`
     - `/home/dstadel/projects/axon/tmp/rust_watcher_live_success.ex`
+- watcher observability is now broader in live logs too:
+  - `watcher.storm_suppressed`
+  - `watcher.storm_salvaged`
+  - `watcher.received`
+  - `watcher.filtered`
+  - `watcher.db_upsert`
+  - `watcher.staged`
+  were observed again from the real runtime pane after restart
 
 Important note:
 

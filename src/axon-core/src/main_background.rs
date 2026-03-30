@@ -546,19 +546,33 @@ fn handle_watcher_events(
             }
 
             if rescan_requested
-                && !rescan_guard.swap(true, Ordering::SeqCst)
             {
-                let rescan_store = store.clone();
-                let rescan_root = watch_root.clone();
-                let rescan_guard_release = rescan_guard.clone();
-                std::thread::spawn(move || {
-                    warn!(
-                        "Rust FS watcher requested a safety rescan on {}",
-                        rescan_root.display()
-                    );
-                    Scanner::new(rescan_root.to_string_lossy().as_ref()).scan(rescan_store);
-                    rescan_guard_release.store(false, Ordering::SeqCst);
-                });
+                if !rescan_guard.swap(true, Ordering::SeqCst) {
+                    watcher_probe::record("watcher.rescan_requested", None, format!("paths={}", paths.len()));
+                    let rescan_store = store.clone();
+                    let rescan_root = watch_root.clone();
+                    let rescan_guard_release = rescan_guard.clone();
+                    std::thread::spawn(move || {
+                        let _guard_reset = RescanGuardReset::new(rescan_guard_release);
+                        warn!(
+                            "Rust FS watcher requested a safety rescan on {}",
+                            rescan_root.display()
+                        );
+                        watcher_probe::record(
+                            "watcher.rescan_started",
+                            Some(&rescan_root),
+                            "reason=notify_rescan",
+                        );
+                        Scanner::new(rescan_root.to_string_lossy().as_ref()).scan(rescan_store);
+                        watcher_probe::record(
+                            "watcher.rescan_completed",
+                            Some(&rescan_root),
+                            "status=ok",
+                        );
+                    });
+                } else {
+                    watcher_probe::record("watcher.rescan_skipped", None, "reason=guard_active");
+                }
             }
 
             match fs_watcher::stage_hot_deltas(&store, &watch_root, paths, HOT_PRIORITY) {
@@ -570,14 +584,34 @@ fn handle_watcher_events(
                     info!("Rust FS watcher received event(s) but staged no hot delta.");
                     watcher_probe::record("watcher.staged_none", None, "reason=no_eligible_delta");
                 }
-                Err(err) => warn!("Rust FS watcher failed to stage hot delta(s): {}", err),
+                Err(err) => {
+                    watcher_probe::record("watcher.staging_failed", None, err.to_string());
+                    warn!("Rust FS watcher failed to stage hot delta(s): {}", err)
+                }
             }
         }
         Err(errors) => {
             for err in errors {
+                watcher_probe::record("watcher.error", None, err.to_string());
                 warn!("Rust FS watcher event error: {}", err);
             }
         }
+    }
+}
+
+struct RescanGuardReset {
+    guard: Arc<AtomicBool>,
+}
+
+impl RescanGuardReset {
+    fn new(guard: Arc<AtomicBool>) -> Self {
+        Self { guard }
+    }
+}
+
+impl Drop for RescanGuardReset {
+    fn drop(&mut self) {
+        self.guard.store(false, Ordering::SeqCst);
     }
 }
 
@@ -615,14 +649,16 @@ fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>
 
 #[cfg(test)]
 mod tests {
-    use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, handle_watcher_events, memory_limit_bytes, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets};
+    use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, handle_watcher_events, memory_limit_bytes, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets, RescanGuardReset};
     use axon_core::graph::GraphStore;
     use axon_core::watcher_probe;
     use notify_debouncer_full::notify::{Event, EventKind};
-    use notify_debouncer_full::notify::event::ModifyKind;
+    use notify_debouncer_full::notify::event::{Flag, ModifyKind};
+    use notify_debouncer_full::notify::Error;
     use notify_debouncer_full::DebouncedEvent;
+    use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
@@ -856,6 +892,154 @@ mod tests {
 
         assert_eq!(salvaged.len(), 1);
         assert_eq!(salvaged[0], std::fs::canonicalize(file_path).unwrap());
+    }
+
+    #[test]
+    fn test_handle_watcher_events_records_staged_none_reason_for_ineligible_delta() {
+        watcher_probe::clear();
+
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("ignored.png");
+        std::fs::write(&file_path, "not parsable").unwrap();
+
+        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let event = DebouncedEvent::new(
+            Event {
+                kind: EventKind::Modify(ModifyKind::Data(notify_debouncer_full::notify::event::DataChange::Any)),
+                paths: vec![file_path.clone()],
+                attrs: Default::default(),
+            },
+            std::time::Instant::now(),
+        );
+
+        handle_watcher_events(
+            store,
+            root.to_path_buf(),
+            Some(project),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+            Instant::now(),
+            Ok(vec![event]),
+        );
+
+        let events = watcher_probe::recent();
+        assert!(events.iter().any(|line| line.contains("watcher.filtered")));
+        assert!(events.iter().any(|line| line.contains("watcher.staged_none")));
+    }
+
+    #[test]
+    fn test_handle_watcher_events_records_rescan_request() {
+        watcher_probe::clear();
+
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("watch.ex");
+        std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
+
+        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let event = DebouncedEvent::new(
+            Event {
+                kind: EventKind::Other,
+                paths: vec![file_path],
+                attrs: Default::default(),
+            }
+            .set_flag(Flag::Rescan),
+            std::time::Instant::now(),
+        );
+
+        handle_watcher_events(
+            store,
+            root.to_path_buf(),
+            Some(project),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+            Instant::now(),
+            Ok(vec![event]),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let events = watcher_probe::recent();
+            let requested = events.iter().any(|line| line.contains("watcher.rescan_requested"));
+            let completed = events.iter().any(|line| line.contains("watcher.rescan_completed"));
+            if requested && completed {
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!("watcher rescan checkpoints not observed in time");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn test_handle_watcher_events_records_rescan_skipped_when_guard_active() {
+        watcher_probe::clear();
+
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("watch.ex");
+        std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
+
+        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let event = DebouncedEvent::new(
+            Event {
+                kind: EventKind::Other,
+                paths: vec![file_path],
+                attrs: Default::default(),
+            }
+            .set_flag(Flag::Rescan),
+            std::time::Instant::now(),
+        );
+
+        handle_watcher_events(
+            store,
+            root.to_path_buf(),
+            Some(project),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(Mutex::new(None)),
+            Instant::now(),
+            Ok(vec![event]),
+        );
+
+        let events = watcher_probe::recent();
+        assert!(events.iter().any(|line| line.contains("watcher.rescan_skipped")));
+    }
+
+    #[test]
+    fn test_handle_watcher_events_records_watcher_errors() {
+        watcher_probe::clear();
+
+        handle_watcher_events(
+            Arc::new(GraphStore::new(":memory:").unwrap()),
+            PathBuf::from("/tmp"),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+            Instant::now(),
+            Err(vec![Error::generic("boom")]),
+        );
+
+        let events = watcher_probe::recent();
+        assert!(events.iter().any(|line| line.contains("watcher.error")));
+        assert!(events.iter().any(|line| line.contains("boom")));
+    }
+
+    #[test]
+    fn test_rescan_guard_reset_releases_guard_on_drop() {
+        let guard = Arc::new(AtomicBool::new(true));
+        {
+            let _reset = RescanGuardReset::new(guard.clone());
+            assert!(guard.load(Ordering::SeqCst));
+        }
+        assert!(!guard.load(Ordering::SeqCst));
     }
 
     #[test]
