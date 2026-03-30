@@ -135,6 +135,19 @@ It must adapt to:
 
 Claim size and claim frequency must be dynamic, not fixed.
 
+The canonical throttling state now belongs to Rust.
+Elixir may still publish observational system pressure for the UI, but it must not be treated as the source of truth for ingestion control.
+
+The runtime claim policy should therefore remain explicit and observable in Rust with stable modes such as:
+
+- `fast`
+- `slow`
+- `guarded`
+- `paused`
+
+These modes are not cosmetic.
+They are the runtime truth the operator plane should eventually consume instead of inventing a second control policy.
+
 ## Hot Project First
 
 The current repo must become queryable early.

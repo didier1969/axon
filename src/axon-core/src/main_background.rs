@@ -58,6 +58,7 @@ pub(crate) fn spawn_autonomous_ingestor(
     tokio::spawn(async move {
         info!("Autonomous Ingestor: Ignition. Monitoring DuckDB for work...");
         let memory_limit = memory_limit_bytes();
+        let mut last_mode: Option<ClaimMode> = None;
         loop {
             let policy = claim_policy(
                 queue.len(),
@@ -65,6 +66,17 @@ pub(crate) fn spawn_autonomous_ingestor(
                 memory_limit,
                 service_guard::recent_peak_latency_ms(),
             );
+            if last_mode != Some(policy.mode) {
+                info!(
+                    "Autonomous Ingestor claim mode={} claim_count={} sleep_ms={} queue_len={} recent_service_latency_ms={}",
+                    policy.mode.label(),
+                    policy.claim_count,
+                    policy.sleep.as_millis(),
+                    queue.len(),
+                    service_guard::recent_peak_latency_ms(),
+                );
+                last_mode = Some(policy.mode);
+            }
             if policy.claim_count > 0 {
                 if let Ok(files) = store.fetch_pending_batch(policy.claim_count) {
                     if !files.is_empty() {
@@ -384,8 +396,28 @@ fn split_watch_targets(
 
 #[derive(Debug, Clone, Copy)]
 struct ClaimPolicy {
+    mode: ClaimMode,
     claim_count: usize,
     sleep: std::time::Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimMode {
+    Fast,
+    Slow,
+    Guarded,
+    Paused,
+}
+
+impl ClaimMode {
+    fn label(self) -> &'static str {
+        match self {
+            ClaimMode::Fast => "fast",
+            ClaimMode::Slow => "slow",
+            ClaimMode::Guarded => "guarded",
+            ClaimMode::Paused => "paused",
+        }
+    }
 }
 
 fn claim_policy(
@@ -400,6 +432,7 @@ fn claim_policy(
 
     if recent_service_latency_ms >= 1_500 || rss_ratio >= 0.92 || queue_len >= 6_000 {
         return ClaimPolicy {
+            mode: ClaimMode::Paused,
             claim_count: 0,
             sleep: std::time::Duration::from_millis(1_000),
         };
@@ -407,6 +440,7 @@ fn claim_policy(
 
     if recent_service_latency_ms >= 500 || rss_ratio >= 0.82 || queue_len >= 3_000 {
         return ClaimPolicy {
+            mode: ClaimMode::Guarded,
             claim_count: 100,
             sleep: std::time::Duration::from_millis(500),
         };
@@ -414,12 +448,14 @@ fn claim_policy(
 
     if queue_len >= 1_500 {
         return ClaimPolicy {
+            mode: ClaimMode::Slow,
             claim_count: 500,
             sleep: std::time::Duration::from_millis(250),
         };
     }
 
     ClaimPolicy {
+        mode: ClaimMode::Fast,
         claim_count: 2_000,
         sleep: std::time::Duration::from_millis(100),
     }
@@ -659,6 +695,39 @@ mod tests {
         let policy = claim_policy(200, Some(2 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024, 2_000);
         assert_eq!(policy.claim_count, 0);
         assert_eq!(policy.sleep, std::time::Duration::from_millis(1_000));
+    }
+
+    #[test]
+    fn test_claim_policy_reports_fast_mode() {
+        let policy = claim_policy(
+            200,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            0,
+        );
+        assert_eq!(policy.mode.label(), "fast");
+    }
+
+    #[test]
+    fn test_claim_policy_reports_guarded_mode() {
+        let policy = claim_policy(
+            3_500,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            0,
+        );
+        assert_eq!(policy.mode.label(), "guarded");
+    }
+
+    #[test]
+    fn test_claim_policy_reports_paused_mode() {
+        let policy = claim_policy(
+            200,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            2_000,
+        );
+        assert_eq!(policy.mode.label(), "paused");
     }
 
     #[test]

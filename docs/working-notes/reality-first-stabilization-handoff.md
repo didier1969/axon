@@ -115,6 +115,7 @@ Wave-1 constraint now discovered:
 - therefore Task 3 cannot be delayed far behind Task 2
 - explicit operator `trigger_scan` may still be relayed to Rust
 - but Elixir must no longer force a local `indexing` overlay before Rust/DB truth confirms it
+- Elixir may display pressure, but Rust must remain the only canonical throttling authority
 
 # High-Value Findings Identified Earlier
 
@@ -163,6 +164,12 @@ What changed:
 - `Axon Ignore` redesign is now started with a real hierarchical `.axonignore` / `.axonignore.local` path in the Rust core scanner, validated by test, and aligned with the dashboard NIF scanner without hardcoded absolute ignore paths.
 - the Rust autonomous ingestor no longer uses a fixed `queue.len() < 5000` / `fetch_pending_batch(2000)` policy only; it now applies an adaptive claim policy based on queue pressure, memory pressure, and recent live `/sql` + `/mcp` latency
 - a new `service_guard` module records recent MCP and SQL latency so bulk claiming can slow down before live service becomes unresponsive
+- the Rust claim policy now exposes explicit canonical modes:
+  - `fast`
+  - `slow`
+  - `guarded`
+  - `paused`
+  and logs transitions so the operator plane can consume runtime truth instead of inventing a second throttling authority
 - the semantic worker is no longer unconditional work: embeddings now pause under queue pressure or recent live service degradation, making semantic enrichment a true slack-driven layer instead of a permanent competitor to structural ingestion
 - the scanner itself now applies adaptive discovery throttling based on pending backlog, memory pressure, and recent live `/sql` + `/mcp` latency; discovery is no longer a blind fixed-rate producer
 - the Rust core now computes a host-specific runtime profile at boot and uses it to size worker count, queue capacity, blocking-thread budget, and RAM headroom instead of relying on fixed constants
@@ -321,7 +328,7 @@ Code fixes applied to reach this state:
 - `CockpitLive` now subscribes to bridge events and tolerates `FileIndexed` / `ScanComplete`
 - duplicate `:tick` handling was consolidated into a single runtime truth pull
 - `Tracer` no longer crashes on partial or missing timestamps
-- `BackpressureController` now scales according to the conservative policy expected by tests
+- `BackpressureController` now publishes pressure guidance for the UI without pausing or scaling Oban queues
 
 Residual non-blocking warnings still visible during `mix test`:
 
