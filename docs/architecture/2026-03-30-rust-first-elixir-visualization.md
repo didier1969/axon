@@ -102,6 +102,81 @@ The least painful first slice is:
 - continue moving scheduling and regulation into Rust
 - make the dashboard consume Rust state instead of coordinating the pipeline
 
+## Residual Elixir Runtime Authority To Retire
+
+The following Elixir modules still retain real ingestion or control-plane authority today.
+They are no longer target ownership. They are transitional and must be retired in order.
+
+### Tier 1. Canonical ingestion authority still active
+
+- `Axon.Watcher.Server`
+  - owns filesystem event batching
+  - stages paths into Elixir-side backlog
+  - can still trigger `SCAN_ALL`
+  - still performs purge and retry actions
+- `Axon.Watcher.Staging`
+  - owns an ETS-backed discovery buffer
+  - writes pending rows and enqueues jobs transactionally
+- `Axon.Watcher.PathPolicy`
+  - still decides eligibility, project mapping, and hot priority on the Elixir watcher path
+- `Axon.Watcher.IndexingWorker`
+  - owns Oban worker execution for parse batches
+- `Axon.Watcher.BatchDispatch`
+  - enqueues canonical indexing jobs into Oban
+- `Axon.Watcher.PoolFacade`
+  - forwards control commands to Rust
+  - remains an ingestion bridge for `PARSE_BATCH`, `SCAN_ALL`, and `PULL_PENDING`
+- `Axon.Watcher.PoolEventHandler`
+  - reacts to Rust-side batch readiness and still re-enqueues work through Oban
+
+These modules are marked `to retire` as ingestion authorities.
+
+### Tier 2. Canonical pressure/control authority still active
+
+- `Axon.BackpressureController`
+  - pauses/resumes/scales Oban queues from Elixir
+  - still acts as a circuit breaker over active ingestion queues
+- `Axon.Watcher.TrafficGuardian`
+  - no longer pulls from Rust actively
+  - is now mostly telemetry-oriented
+  - still remains transitional because it publishes pressure semantics around a path that is being de-authorized
+
+These modules are marked `to retire` as canonical control authority.
+Their telemetry can survive, but their decisions must not remain authoritative.
+
+### Tier 3. Elixir modules that may remain after de-authoring
+
+- `Axon.Watcher.CockpitLive`
+- `Axon.Watcher.Progress`
+- `Axon.Watcher.Telemetry`
+- `Axon.Watcher.StatsCache`
+- `Axon.Watcher.Auditor`
+- `Axon.Watcher.SqlGateway`
+
+These are expected to remain as visualization, projection, telemetry, or operator-facing read models.
+They are not marked `to retire` unless they reintroduce ingestion ownership.
+
+## Retirement Order
+
+The safe removal order is:
+
+1. freeze authority inventory and stop adding any new Elixir ingestion behavior
+2. de-authorize `Axon.BackpressureController`, while keeping `Axon.Watcher.TrafficGuardian` as display-only telemetry if still useful
+3. de-authorize `Axon.Watcher.Server` and `Axon.Watcher.PathPolicy` as staging/dispatch owners
+4. retire `Axon.Watcher.BatchDispatch` and `Axon.Watcher.PoolEventHandler`
+5. retire `Axon.Watcher.IndexingWorker` and `Axon.Watcher.Staging`
+6. reduce `Axon.Watcher.PoolFacade` to read/telemetry-only bridge logic
+7. keep Phoenix/LiveView consuming Rust-owned truth through SQL/MCP/API/SSE only
+
+## Explicit Rule During Migration
+
+Until the migration is complete:
+
+- Rust remains the canonical runtime
+- Elixir ingestion/control modules are `to retire`
+- no new canonical backlog, scheduler, worker, or retry logic may be added to Elixir
+- any temporary Elixir action must be treated as compatibility scaffolding, not target architecture
+
 ## First Delivered Slice
 
 The first concrete migration slice now exists on the Rust side:

@@ -75,6 +75,39 @@ Axon now targets this split:
 
 This means the ongoing migration must remove remaining ingestion/control-plane authority from Elixir while preserving the UI.
 
+## Residual Elixir Authority Frozen For Wave 1
+
+The inventory is now explicit and must be treated as migration debt, not product architecture.
+
+Marked `to retire` as canonical ingestion/control authority:
+
+- `Axon.Watcher.Server`
+- `Axon.Watcher.Staging`
+- `Axon.Watcher.PathPolicy`
+- `Axon.Watcher.IndexingWorker`
+- `Axon.Watcher.BatchDispatch`
+- `Axon.Watcher.PoolFacade`
+- `Axon.Watcher.PoolEventHandler`
+- `Axon.BackpressureController`
+- `Axon.Watcher.TrafficGuardian`
+
+Allowed to remain as visualization/operator consumers unless later evidence says otherwise:
+
+- `Axon.Watcher.CockpitLive`
+- `Axon.Watcher.Progress`
+- `Axon.Watcher.Telemetry`
+- `Axon.Watcher.StatsCache`
+- `Axon.Watcher.Auditor`
+- `Axon.Watcher.SqlGateway`
+
+Wave-1 removal order is now fixed:
+
+1. remove canonical pressure authority from Elixir
+2. remove canonical watcher gating and staging/dispatch authority from Elixir
+3. collapse `batch_dispatch -> pool_event_handler -> indexing_worker -> staging`
+4. reduce bridge modules to read/telemetry-only duties
+5. preserve UI behavior while Rust remains sole runtime truth
+
 # High-Value Findings Identified Earlier
 
 These were the dominant issues initially identified:
