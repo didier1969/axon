@@ -29,77 +29,21 @@ impl Scanner {
 
     pub fn scan(&self, graph: Arc<GraphStore>) {
         info!("Lattice Engine: Initializing recursive traversal on {:?}", self.root);
-
-        let mut batch = Vec::new();
-        let mut total_files = 0;
-        let walker = self.build_walker();
-
-        for entry in walker.build().filter_map(|e| e.ok()) {
-            let path = entry.path();
-
-            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-                // NEXUS: Manual filtering
-                if !self.is_supported(&path) {
-                    continue;
-                }
-
-                let project_name = self.extract_project_slug(&path);
-
-                // Dependency detection
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name == "pyproject.toml" || name == "Cargo.toml" || name == "mix.exs" {
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            let deps = extract_toml_dependencies(&content);
-                            for dep in deps {
-                                let _ = graph.insert_project_dependency(&project_name, &dep.to, &dep.path);
-                            }
-                        }
-                    }
-                }
-
-                let path_str = if let Ok(abs_path) = fs::canonicalize(&path) {
-                    abs_path.to_string_lossy().to_string()
-                } else {
-                    path.to_string_lossy().to_string()
-                };
-
-                let metadata = fs::metadata(&path);
-                let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
-                let mtime = metadata.as_ref().ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
-                    .unwrap_or(0);
-                
-                batch.push((path_str, project_name, size, mtime));
-                
-                if batch.len() >= 100 {
-                    total_files += batch.len();
-                    if let Err(e) = graph.bulk_insert_files(&batch) {
-                        error!("Bulk insert failed: {:?}", e);
-                    }
-                    batch.clear();
-                    info!("... {} files mapped", total_files);
-                    let pending = graph
-                        .query_count("SELECT count(*) FROM File WHERE status = 'pending'")
-                        .unwrap_or(0);
-                    let policy = discovery_policy(
-                        pending,
-                        current_rss_bytes(),
-                        memory_limit_bytes(),
-                        service_guard::recent_peak_latency_ms(),
-                    );
-                    std::thread::sleep(policy.sleep);
-                }
-            }
-        }
-
-        // Final batch
-        if !batch.is_empty() {
-            total_files += batch.len();
-            let _ = graph.bulk_insert_files(&batch);
-        }
-
+        let total_files = self.scan_path(graph, &self.root);
         info!("🏁 Nexus Scan Complete: {} files mapped to DuckDB (status: pending).", total_files);
+    }
+
+    pub fn scan_subtree(&self, graph: Arc<GraphStore>, subtree: &Path) {
+        info!(
+            "Lattice Engine: Prioritizing hot subtree traversal on {:?}",
+            subtree
+        );
+        let total_files = self.scan_path(graph, subtree);
+        info!(
+            "🔥 Hot subtree scan complete: {} files mapped from {:?}.",
+            total_files,
+            subtree
+        );
     }
 
     pub fn should_process_path(&self, path: &Path) -> bool {
@@ -125,8 +69,8 @@ impl Scanner {
         "global".to_string()
     }
 
-    fn build_walker(&self) -> WalkBuilder {
-        let mut builder = WalkBuilder::new(&self.root);
+    fn build_walker_from(&self, start: &Path) -> WalkBuilder {
+        let mut builder = WalkBuilder::new(start);
         builder.hidden(false);
         builder.git_ignore(false);
         builder.git_global(false);
@@ -201,6 +145,76 @@ impl Scanner {
         } else {
             false
         }
+    }
+
+    fn scan_path(&self, graph: Arc<GraphStore>, start: &Path) -> usize {
+        let mut batch = Vec::new();
+        let mut total_files = 0;
+        let walker = self.build_walker_from(start);
+
+        for entry in walker.build().filter_map(|e| e.ok()) {
+            let path = entry.path();
+
+            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                if !self.is_supported(path) {
+                    continue;
+                }
+
+                let project_name = self.extract_project_slug(path);
+
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name == "pyproject.toml" || name == "Cargo.toml" || name == "mix.exs" {
+                        if let Ok(content) = fs::read_to_string(path) {
+                            let deps = extract_toml_dependencies(&content);
+                            for dep in deps {
+                                let _ = graph.insert_project_dependency(&project_name, &dep.to, &dep.path);
+                            }
+                        }
+                    }
+                }
+
+                let path_str = if let Ok(abs_path) = fs::canonicalize(path) {
+                    abs_path.to_string_lossy().to_string()
+                } else {
+                    path.to_string_lossy().to_string()
+                };
+
+                let metadata = fs::metadata(path);
+                let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+                let mtime = metadata.as_ref().ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
+                    .unwrap_or(0);
+
+                batch.push((path_str, project_name, size, mtime));
+
+                if batch.len() >= 100 {
+                    total_files += batch.len();
+                    if let Err(e) = graph.bulk_insert_files(&batch) {
+                        error!("Bulk insert failed: {:?}", e);
+                    }
+                    batch.clear();
+                    info!("... {} files mapped", total_files);
+                    let pending = graph
+                        .query_count("SELECT count(*) FROM File WHERE status = 'pending'")
+                        .unwrap_or(0);
+                    let policy = discovery_policy(
+                        pending,
+                        current_rss_bytes(),
+                        memory_limit_bytes(),
+                        service_guard::recent_peak_latency_ms(),
+                    );
+                    std::thread::sleep(policy.sleep);
+                }
+            }
+        }
+
+        if !batch.is_empty() {
+            total_files += batch.len();
+            let _ = graph.bulk_insert_files(&batch);
+        }
+
+        total_files
     }
 }
 
@@ -278,7 +292,9 @@ fn discovery_policy(
 #[cfg(test)]
 mod tests {
     use super::{discovery_policy, Scanner};
+    use crate::graph::GraphStore;
     use std::path::Path;
+    use std::sync::Arc;
 
     #[test]
     fn test_discovery_policy_is_fast_when_backlog_is_low() {
@@ -320,6 +336,32 @@ mod tests {
         let scanner = Scanner::new(root.to_string_lossy().as_ref());
         assert!(scanner.should_process_path(Path::new(&kept)));
         assert!(!scanner.should_process_path(Path::new(&skipped)));
+    }
+
+    #[test]
+    fn test_scan_subtree_preserves_project_slug_from_universe_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project_a = root.join("proj_a");
+        let project_b = root.join("proj_b");
+        std::fs::create_dir_all(&project_a).unwrap();
+        std::fs::create_dir_all(&project_b).unwrap();
+        std::fs::write(project_a.join("keep.ex"), "defmodule Keep do\nend\n").unwrap();
+        std::fs::write(project_b.join("skip.ex"), "defmodule Skip do\nend\n").unwrap();
+
+        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        scanner.scan_subtree(store.clone(), &project_a);
+
+        let count_a = store
+            .query_count("SELECT count(*) FROM File WHERE project_slug = 'proj_a'")
+            .unwrap();
+        let count_b = store
+            .query_count("SELECT count(*) FROM File WHERE project_slug = 'proj_b'")
+            .unwrap();
+
+        assert_eq!(count_a, 1);
+        assert_eq!(count_b, 0);
     }
 }
 

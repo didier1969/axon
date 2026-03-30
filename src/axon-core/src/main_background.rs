@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
 
 use axon_core::graph::GraphStore;
@@ -81,7 +81,14 @@ pub(crate) fn spawn_autonomous_ingestor(
 pub(crate) fn spawn_initial_scan(store: Arc<GraphStore>, projects_root: String) {
     std::thread::spawn(move || {
         info!("🚀 Auto-Ignition: Beginning initial workspace mapping...");
-        axon_core::scanner::Scanner::new(&projects_root).scan(store);
+        let scanner = axon_core::scanner::Scanner::new(&projects_root);
+        if let Ok(preferred_project_root) = std::env::var("AXON_PROJECT_ROOT") {
+            let preferred_path = PathBuf::from(preferred_project_root);
+            if preferred_path.starts_with(&projects_root) && preferred_path.is_dir() {
+                scanner.scan_subtree(store.clone(), &preferred_path);
+            }
+        }
+        scanner.scan(store);
         info!("✅ Auto-Ignition: Initial mapping sequence complete.");
     });
 }
@@ -102,12 +109,14 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
             let callback_store = store.clone();
             let rescan_guard = Arc::new(AtomicBool::new(false));
             let callback_rescan_guard = rescan_guard.clone();
+            let watcher_started_at = Instant::now();
 
             let mut debouncer = match new_debouncer(Duration::from_millis(750), None, move |result: DebounceEventResult| {
                 handle_watcher_events(
                     callback_store.clone(),
                     callback_root.clone(),
                     callback_rescan_guard.clone(),
+                    watcher_started_at,
                     result,
                 );
             }) {
@@ -118,8 +127,55 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
                 }
             };
 
+            let targets = watch_targets(&watch_root, preferred_project_root.as_deref());
+            let mut hot_targets = active_project_hot_targets(preferred_project_root.as_deref());
+            let (_, cold_targets) = split_watch_targets(targets, preferred_project_root.as_deref());
+            hot_targets.insert(
+                0,
+                WatchTarget {
+                    path: watch_root.clone(),
+                    recursive: false,
+                },
+            );
+
             let mut armed = 0usize;
-            for target in watch_targets(&watch_root, preferred_project_root.as_deref()) {
+            let hot_started_at = Instant::now();
+            for target in hot_targets {
+                let mode = if target.recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+
+                match debouncer.watch(&target.path, mode) {
+                    Ok(_) => {
+                        armed += 1;
+                        info!(
+                            "Rust FS watcher armed hot target {} ({}) after {} ms",
+                            target.path.display(),
+                            if target.recursive { "recursive" } else { "non-recursive" },
+                            hot_started_at.elapsed().as_millis()
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Rust FS watcher skipped target {}: {}",
+                            target.path.display(),
+                            err
+                        );
+                    }
+                }
+            }
+
+            if armed > 0 {
+                info!(
+                    "Rust FS watcher armed hot set on {} target(s) under {}",
+                    armed,
+                    watch_root.display()
+                );
+            }
+
+            for target in cold_targets {
                 let mode = if target.recursive {
                     RecursiveMode::Recursive
                 } else {
@@ -233,6 +289,89 @@ fn watch_targets(root: &Path, preferred_root: Option<&Path>) -> Vec<WatchTarget>
     targets
 }
 
+fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget> {
+    let Some(preferred_root) = preferred_root else {
+        return Vec::new();
+    };
+
+    let mut targets = vec![WatchTarget {
+        path: preferred_root.to_path_buf(),
+        recursive: false,
+    }];
+
+    let entries = match std::fs::read_dir(preferred_root) {
+        Ok(entries) => entries,
+        Err(_) => return targets,
+    };
+
+    let mut child_targets = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|segment| segment.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        if std::fs::read_dir(&path).is_err() {
+            continue;
+        }
+        child_targets.push(WatchTarget {
+            path,
+            recursive: true,
+        });
+    }
+
+    child_targets.sort_by_key(|target| project_hot_target_rank(&target.path));
+    targets.extend(child_targets);
+    targets
+}
+
+fn project_hot_target_rank(path: &Path) -> (u8, String) {
+    let name = path
+        .file_name()
+        .and_then(|segment| segment.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let rank = match name.as_str() {
+        "src" => 0,
+        "lib" => 1,
+        "test" | "tests" => 2,
+        "docs" => 3,
+        "scripts" => 4,
+        _ => 10,
+    };
+
+    (rank, name)
+}
+
+fn split_watch_targets(
+    targets: Vec<WatchTarget>,
+    preferred_root: Option<&Path>,
+) -> (Vec<WatchTarget>, Vec<WatchTarget>) {
+    let mut hot_targets = Vec::new();
+    let mut cold_targets = Vec::new();
+
+    for target in targets {
+        if !target.recursive {
+            hot_targets.push(target);
+            continue;
+        }
+
+        if preferred_root.is_some_and(|preferred| target.path == preferred) {
+            continue;
+        } else {
+            cold_targets.push(target);
+        }
+    }
+
+    (hot_targets, cold_targets)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ClaimPolicy {
     claim_count: usize,
@@ -280,6 +419,7 @@ fn handle_watcher_events(
     store: Arc<GraphStore>,
     watch_root: std::path::PathBuf,
     rescan_guard: Arc<AtomicBool>,
+    watcher_started_at: Instant,
     result: DebounceEventResult,
 ) {
     match result {
@@ -292,6 +432,23 @@ fn handle_watcher_events(
                     rescan_requested = true;
                 }
                 paths.extend(event.paths.iter().cloned());
+            }
+
+            if should_suppress_bootstrap_event_storm(paths.len(), watcher_started_at) {
+                warn!(
+                    "Rust FS watcher suppressed bootstrap event storm ({} path(s)) under {}",
+                    paths.len(),
+                    watch_root.display()
+                );
+                return;
+            }
+
+            if !paths.is_empty() {
+                info!(
+                    "Rust FS watcher received {} path event(s) under {}",
+                    paths.len(),
+                    watch_root.display()
+                );
             }
 
             if rescan_requested
@@ -312,9 +469,11 @@ fn handle_watcher_events(
 
             match fs_watcher::stage_hot_deltas(&store, &watch_root, paths, HOT_PRIORITY) {
                 Ok(staged) if staged > 0 => {
-                    debug!("Rust FS watcher staged {} hot delta(s).", staged);
+                    info!("Rust FS watcher staged {} hot delta(s).", staged);
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    info!("Rust FS watcher received event(s) but staged no hot delta.");
+                }
                 Err(err) => warn!("Rust FS watcher failed to stage hot delta(s): {}", err),
             }
         }
@@ -326,15 +485,20 @@ fn handle_watcher_events(
     }
 }
 
+fn should_suppress_bootstrap_event_storm(path_count: usize, watcher_started_at: Instant) -> bool {
+    watcher_started_at.elapsed() <= Duration::from_secs(120) && path_count >= 5_000
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{claim_policy, handle_watcher_events, memory_limit_bytes, watch_targets};
+    use super::{active_project_hot_targets, claim_policy, handle_watcher_events, memory_limit_bytes, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets};
     use axon_core::graph::GraphStore;
     use notify_debouncer_full::notify::{Event, EventKind};
     use notify_debouncer_full::notify::event::ModifyKind;
     use notify_debouncer_full::DebouncedEvent;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     #[test]
@@ -430,6 +594,7 @@ mod tests {
             store.clone(),
             root.to_path_buf(),
             Arc::new(AtomicBool::new(false)),
+            Instant::now(),
             Ok(vec![event]),
         );
 
@@ -514,5 +679,81 @@ mod tests {
 
         assert_eq!(rendered[0], root.to_string_lossy(), "La racine doit rester observee en premier");
         assert_eq!(rendered[1], proj_b.to_string_lossy(), "Le projet actif doit etre arme avant les autres");
+    }
+
+    #[test]
+    fn test_split_watch_targets_keeps_root_and_active_project_hot() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let proj_a = root.join("proj_a");
+        let proj_b = root.join("proj_b");
+        std::fs::create_dir_all(&proj_a).unwrap();
+        std::fs::create_dir_all(&proj_b).unwrap();
+
+        let targets = watch_targets(root, Some(proj_b.as_path()));
+        let (hot, cold) = split_watch_targets(targets, Some(proj_b.as_path()));
+
+        let hot_paths: Vec<String> = hot
+            .into_iter()
+            .map(|target| target.path.to_string_lossy().to_string())
+            .collect();
+        let cold_paths: Vec<String> = cold
+            .into_iter()
+            .map(|target| target.path.to_string_lossy().to_string())
+            .collect();
+
+        assert_eq!(hot_paths.len(), 1, "Le split universel ne garde que la racine chaude; le projet actif est detaille a part");
+        assert_eq!(hot_paths[0], root.to_string_lossy());
+        assert!(cold_paths.iter().any(|path| path == &proj_a.to_string_lossy()));
+        assert!(!cold_paths.iter().any(|path| path == &proj_b.to_string_lossy()));
+    }
+
+    #[test]
+    fn test_split_watch_targets_without_active_project_keeps_only_root_hot() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let proj_a = root.join("proj_a");
+        std::fs::create_dir_all(&proj_a).unwrap();
+
+        let targets = watch_targets(root, None);
+        let (hot, cold) = split_watch_targets(targets, None);
+
+        assert_eq!(hot.len(), 1, "Sans projet actif, seul le watcher de racine doit etre chaud");
+        assert_eq!(hot[0].path, root);
+        assert!(cold.iter().any(|target| target.path == proj_a));
+    }
+
+    #[test]
+    fn test_active_project_hot_targets_expand_visible_child_subtrees() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let targets = active_project_hot_targets(Some(root));
+        let rendered: Vec<(String, bool)> = targets
+            .into_iter()
+            .map(|target| (target.path.to_string_lossy().to_string(), target.recursive))
+            .collect();
+
+        assert_eq!(rendered[0].0, root.to_string_lossy());
+        assert!(!rendered[0].1);
+        assert!(rendered.iter().any(|(path, recursive)| path.ends_with("/src") && *recursive));
+        assert!(rendered.iter().any(|(path, recursive)| path.ends_with("/docs") && *recursive));
+        assert!(!rendered.iter().any(|(path, _)| path.ends_with("/.git")));
+    }
+
+    #[test]
+    fn test_bootstrap_event_storm_is_suppressed_early() {
+        let started = Instant::now();
+        assert!(should_suppress_bootstrap_event_storm(6_000, started));
+    }
+
+    #[test]
+    fn test_bootstrap_event_storm_is_not_suppressed_late_or_small() {
+        let started = Instant::now() - Duration::from_secs(180);
+        assert!(!should_suppress_bootstrap_event_storm(6_000, started));
+        assert!(!should_suppress_bootstrap_event_storm(100, Instant::now()));
     }
 }

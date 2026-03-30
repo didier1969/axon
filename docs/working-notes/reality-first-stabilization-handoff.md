@@ -131,6 +131,11 @@ What changed:
 - duplicate bursts and missing short-lived paths are now tolerated by the Rust watcher path instead of surfacing as runtime failures
 - the watcher no longer assumes that the whole universe can be armed as one clean recursive watch target; it now skips unreadable immediate project roots instead of letting a single bad subtree poison the global arming step
 - the active project root is now prioritized when computing watcher targets, so the hot set can be armed before the full universe finishes its recursive registration
+- the hot watcher path is now explicitly split into:
+  - universe root non-recursive watcher
+  - active project root non-recursive watcher
+  - active project visible child subtrees as recursive hot targets
+- the Rust boot sequence now pre-indexes `AXON_PROJECT_ROOT` before launching the full universe scan, so the current repo becomes visible in `IST` earlier
 
 ## Rust Core / Native Ingestion / MCP
 
@@ -202,13 +207,23 @@ Rust validation reached a clean state during this session:
 - result reached now after first Rust-native delta watcher staging slice: `53 passed; 0 failed` in `src/lib.rs` and `8 passed; 0 failed` in `src/main.rs`
 - result reached now after native debounced watcher wiring and hot-delta hardening: `55 passed; 0 failed` in `src/lib.rs` and `9 passed; 0 failed` in `src/main.rs`
 - result reached now after watcher target prioritization and unreadable-root tolerance: `55 passed; 0 failed` in `src/lib.rs` and `12 passed; 0 failed` in `src/main.rs`
+- result reached now after hot-target split, bootstrap-storm suppression, and active-project pre-scan: `57 passed; 0 failed` in `src/lib.rs` and `17 passed; 0 failed` in `src/main.rs`
 - dashboard validation remains green after real `io` monitoring work: `31 tests, 0 failures`
 
 Runtime note:
 
 - live boot now shows `Rust FS watcher preparing targets under /home/dstadel/projects`
-- the full universe recursive registration still needs longer real-world validation to prove the final arming cadence and the first live hot-delta on the active repo
-- the important architectural point is now explicit in code: the active repo can be prioritized ahead of the cold universe instead of waiting for a monolithic recursive watch step
+- live boot now also shows:
+  - immediate arming of `/home/dstadel/projects`
+  - immediate arming of `/home/dstadel/projects/axon`
+  - recursive arming of active-project hot subtrees such as `/src`, `/tests`, `/docs`, `/scripts`
+  - suppression of early bootstrap storms instead of immediate safety rescan
+- live boot now pre-indexes the active repo before the full universe scan:
+  - `Hot subtree scan complete: 366 files mapped from "/home/dstadel/projects/axon"`
+  - `SELECT count(*) FROM File WHERE path LIKE '/home/dstadel/projects/axon/%'` returned `366` while the universe scan was still in progress
+- one live proof is still open:
+  - explicit watcher-driven delta insertion for newly created files in the active repo has not yet been observed end-to-end in runtime logs
+  - the hot arming and active-project pre-scan are now proven; the remaining gap is the final live delta proof
 
 Important note:
 

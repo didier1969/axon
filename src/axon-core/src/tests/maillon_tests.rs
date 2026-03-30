@@ -249,6 +249,39 @@ mod tests {
         assert_eq!(count, 1, "Le fichier ne doit pas etre duplique dans IST");
     }
 
+    #[test]
+    fn test_maillon_2h_rust_watcher_directory_event_stages_nested_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        let nested = project.join("tmp");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file_path = nested.join("dir_event.ex");
+        std::fs::write(&file_path, "defmodule DirEvent do\nend\n").unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+        let staged = crate::fs_watcher::stage_hot_delta(
+            &store,
+            root,
+            &nested,
+            crate::fs_watcher::HOT_PRIORITY,
+        )
+        .unwrap();
+
+        assert!(staged, "Un evenement de repertoire doit pouvoir remonter un fichier imbrique");
+
+        let row = store
+            .query_json(&format!(
+                "SELECT path, status, priority FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        assert!(row.contains("dir_event.ex"));
+        assert!(row.contains("pending"));
+        assert!(row.contains("900"));
+    }
+
     // --- MAILLON 3: LA SOCKET (Le Protocole) ---
     #[tokio::test]
     async fn test_maillon_3_socket_protocol() {

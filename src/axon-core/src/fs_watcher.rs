@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use walkdir::WalkDir;
 
 use crate::graph::GraphStore;
 use crate::scanner::Scanner;
@@ -9,19 +10,81 @@ use crate::scanner::Scanner;
 pub const HOT_PRIORITY: i64 = 900;
 
 pub fn stage_hot_delta(store: &GraphStore, watch_root: &Path, path: &Path, priority: i64) -> Result<bool> {
+    Ok(stage_hot_path_delta_count(store, watch_root, path, priority)? > 0)
+}
+
+fn stage_hot_path_delta_count(
+    store: &GraphStore,
+    watch_root: &Path,
+    path: &Path,
+    priority: i64,
+) -> Result<usize> {
     let scanner = Scanner::new(watch_root.to_string_lossy().as_ref());
 
     if !scanner.should_process_path(path) {
-        return Ok(false);
+        if !path.is_dir() {
+            return Ok(0);
+        }
     }
 
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err.into()),
+    };
+
+    if metadata.is_dir() {
+        let mut staged = 0usize;
+        for entry in WalkDir::new(path).into_iter().filter_map(|entry| entry.ok()) {
+            let candidate = entry.path();
+            if !entry.file_type().is_file() || !scanner.should_process_path(candidate) {
+                continue;
+            }
+            staged += stage_single_file_delta(store, &scanner, candidate, priority)? as usize;
+        }
+        return Ok(staged);
+    }
+
+    Ok(stage_single_file_delta(store, &scanner, path, priority)? as usize)
+}
+
+pub fn stage_hot_deltas<I>(
+    store: &GraphStore,
+    watch_root: &Path,
+    paths: I,
+    priority: i64,
+) -> Result<usize>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let mut unique = HashSet::new();
+    let mut staged = 0usize;
+
+    for path in paths {
+        let dedup_key = std::fs::canonicalize(&path).unwrap_or(path.clone());
+        if !unique.insert(dedup_key) {
+            continue;
+        }
+
+        staged += stage_hot_path_delta_count(store, watch_root, &path, priority)?;
+    }
+
+    Ok(staged)
+}
+
+fn stage_single_file_delta(
+    store: &GraphStore,
+    scanner: &Scanner,
+    path: &Path,
+    priority: i64,
+) -> Result<bool> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(err) => return Err(err.into()),
     };
 
-    if !metadata.is_file() {
+    if !metadata.is_file() || !scanner.should_process_path(path) {
         return Ok(false);
     }
 
@@ -45,30 +108,4 @@ pub fn stage_hot_delta(store: &GraphStore, watch_root: &Path, path: &Path, prior
     )?;
 
     Ok(true)
-}
-
-pub fn stage_hot_deltas<I>(
-    store: &GraphStore,
-    watch_root: &Path,
-    paths: I,
-    priority: i64,
-) -> Result<usize>
-where
-    I: IntoIterator<Item = PathBuf>,
-{
-    let mut unique = HashSet::new();
-    let mut staged = 0usize;
-
-    for path in paths {
-        let dedup_key = std::fs::canonicalize(&path).unwrap_or(path.clone());
-        if !unique.insert(dedup_key) {
-            continue;
-        }
-
-        if stage_hot_delta(store, watch_root, &path, priority)? {
-            staged += 1;
-        }
-    }
-
-    Ok(staged)
 }

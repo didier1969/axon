@@ -110,6 +110,7 @@ The first Rust-native delta path is now aligned with this model:
 - a native debounced filesystem watcher now feeds this path directly
 - duplicate bursts and short-lived missing paths are tolerated without poisoning the backlog
 - the active project root can be armed before the cold universe, so the hot set becomes reactive without waiting for every recursive watch target to finish registering
+- the active project can also be pre-indexed before the full universe scan, so `IST` becomes useful for the current repo before cold-universe discovery completes
 - unreadable project roots are skipped instead of poisoning the whole watch setup
 
 ## Stage 3. Adaptive Claiming
@@ -128,6 +129,20 @@ It must adapt to:
 - MCP and SQL latency
 
 Claim size and claim frequency must be dynamic, not fixed.
+
+## Hot Project First
+
+The current repo must become queryable early.
+
+The target boot order is:
+
+1. arm the universe root watcher
+2. arm the active project hot set
+3. pre-index the active project subtree into `IST`
+4. continue the cold-universe scan
+
+This does not change the global universe objective.
+It changes time-to-usefulness for the active project.
 
 ## Stage 4. Worker Lanes
 
