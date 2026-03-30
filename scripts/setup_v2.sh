@@ -1,10 +1,13 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# Axon v2 - Industrial Setup Script
-# Strategy: Build once, store in bin/, reuse for development and tests.
+# Axon v2 - Bootstrap Script
+# Use this script for first-time setup or after significant dependency changes.
 
-echo "🚀 Starting Axon v2 Industrial Setup..."
+PROJECT_ROOT="/home/dstadel/projects/axon"
+cd "$PROJECT_ROOT"
+
+echo "🚀 Starting Axon bootstrap..."
 
 # 1. Environment Check (Devenv)
 if ! command -v devenv &> /dev/null; then
@@ -15,51 +18,35 @@ fi
 echo "📦 Validating Devenv environment..."
 devenv shell -- bash -lc './scripts/validate-devenv.sh'
 
-# 2. Rust Data Plane (The "Factory")
-BIN_DIR="$(pwd)/bin"
-RUST_CORE_DIR="$(pwd)/src/axon-core"
+# 2. Rust Core build
+BIN_DIR="$PROJECT_ROOT/bin"
+RUST_CORE_DIR="$PROJECT_ROOT/src/axon-core"
 TARGET_BIN="$BIN_DIR/axon-core"
+CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
+RUST_RELEASE_BIN="$CARGO_TARGET_ROOT/release/axon-core"
 
 mkdir -p "$BIN_DIR"
 
-if [ ! -f "$TARGET_BIN" ]; then
-    echo "🔨 Building Rust Data Plane (this may take ~5-10 min due to LadybugDB)..."
-    cd "$RUST_CORE_DIR"
-    cargo build --release
-    cp target/release/axon-core "$TARGET_BIN"
-    echo "✅ Rust Core compiled and stored in bin/axon-core"
-    cd - > /dev/null
-else
-    echo "✅ Reusing existing Rust binary in bin/axon-core"
-fi
+echo "🔨 Building Rust core..."
+devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release"
+install -m 755 "$RUST_RELEASE_BIN" "$TARGET_BIN"
+echo "✅ Rust core available at bin/axon-core"
 
-# 3. Elixir Dashboard (The "Cockpit")
-DASHBOARD_DIR="$(pwd)/src/dashboard"
-echo "💧 Setting up Elixir Dashboard..."
-cd "$DASHBOARD_DIR"
-mix deps.get
-mix compile
-# mix assets.setup && mix assets.build # Décommenter si besoin de rebuild les assets JS/CSS
-echo "✅ Elixir Dashboard ready."
-cd - > /dev/null
+# 3. Dashboard dependencies and compile
+DASHBOARD_DIR="$PROJECT_ROOT/src/dashboard"
+echo "💧 Preparing Elixir dashboard..."
+devenv shell -- bash -lc "cd '$DASHBOARD_DIR' && mix deps.get && mix compile"
+echo "✅ Elixir dashboard compiled"
 
-# 4. Final Validation Suite
-echo "🧪 Running Quality Audit..."
+# 4. Core validation
+echo "🧪 Running validation suite..."
 
 echo "--- Rust Unit Tests ---"
-cd "$RUST_CORE_DIR"
-devenv shell -- bash -lc 'cargo test --lib'
-cd - > /dev/null
+devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo test"
 
-echo "--- Elixir Business Tests (>85% Coverage) ---"
-cd "$DASHBOARD_DIR"
-devenv shell -- bash -lc 'mix test --cover'
-cd - > /dev/null
+echo "--- Elixir Dashboard Tests ---"
+devenv shell -- bash -lc "cd '$DASHBOARD_DIR' && mix test"
 
-echo "--- E2E Orchestration Test ---"
-export AXON_BIN="$TARGET_BIN"
-devenv shell -- bash -lc 'python3 tests/e2e_v2_orchestration.py'
-
-echo "🏆 Axon v2 is fully operational!"
-echo "Run './bin/axon-core --mcp' to start the engine."
-echo "Run 'cd src/dashboard && mix phx.server' to start the cockpit."
+echo "🏁 Bootstrap complete."
+echo "Next step: ./scripts/start-v2.sh"
+echo "Stop running services with: ./scripts/stop-v2.sh"

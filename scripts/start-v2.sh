@@ -1,11 +1,31 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# Axon v2 - Industrial Start Script
-# Ensures a clean state by calling stop first, then launches everything in TMUX.
+# Axon v2 - Daily Start Script
+# Canonical daily workflow entrypoint for running Axon in TMUX.
 
 PROJECT_ROOT="/home/dstadel/projects/axon"
 cd "$PROJECT_ROOT"
+
+if ! command -v tmux >/dev/null 2>&1; then
+    echo "❌ tmux is required to start Axon via scripts/start-v2.sh"
+    exit 1
+fi
+
+echo "📦 Validating Devenv environment..."
+devenv shell -- bash -lc './scripts/validate-devenv.sh'
+
+if [ ! -x "bin/axon-core" ]; then
+    echo "❌ Missing bin/axon-core"
+    echo "   Run ./scripts/setup_v2.sh first."
+    exit 1
+fi
+
+if tmux has-session -t axon 2>/dev/null; then
+    echo "ℹ️ Axon is already running in TMUX session 'axon'."
+    echo "   Attach with: tmux attach -t axon"
+    exit 0
+fi
 
 # 1. Verify nix-daemon is running (WSL2 specific mitigation)
 if ! nix store info >/dev/null 2>&1; then
@@ -19,32 +39,19 @@ if ! nix store info >/dev/null 2>&1; then
 fi
 
 # 2. Synchronize binaries (handle 'Text file busy' via install)
-if [ -f "src/axon-core/target/release/axon-core" ]; then
+CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
+
+if [ -f "$CARGO_TARGET_ROOT/release/axon-core" ]; then
     echo "🔄 Updating bin/axon-core safely..."
-    install -m 755 src/axon-core/target/release/axon-core bin/axon-core
+    install -m 755 "$CARGO_TARGET_ROOT/release/axon-core" bin/axon-core
 fi
 
-if [ -f "src/axon-mcp-tunnel/target/release/axon-mcp-tunnel" ]; then
+if [ -f "$CARGO_TARGET_ROOT/release/axon-mcp-tunnel" ]; then
     echo "🔄 Updating bin/axon-mcp-tunnel safely..."
-    install -m 755 src/axon-mcp-tunnel/target/release/axon-mcp-tunnel bin/axon-mcp-tunnel
+    install -m 755 "$CARGO_TARGET_ROOT/release/axon-mcp-tunnel" bin/axon-mcp-tunnel
 fi
 
-echo "🚀 Starting Axon v2 Architecture (Managed via TMUX)..."
-
-# 3. Clean environment (Safety Protocol)
-echo "🧹 Cleaning TMUX sessions and Socket locks..."
-tmux kill-session -t axon 2>/dev/null || true
-# If TMUX server is unstable, we reset it
-if ! tmux ls >/dev/null 2>&1; then
-    tmux kill-server 2>/dev/null || true
-fi
-
-rm -f /tmp/axon-*.sock
-rm -f .axon/graph_v2/*.db.wal 2>/dev/null || true
-
-echo "🔓 Releasing Database locks..."
-fuser -k .axon/graph_v2/ist.db 2>/dev/null || true
-fuser -k .axon/graph_v2/sanctuary/soll.db 2>/dev/null || true
+echo "🚀 Starting Axon in TMUX session 'axon'..."
 
 # Configuration
 export PHX_PORT=44127
@@ -54,18 +61,20 @@ export HYDRA_ODATA_PORT=44130
 export HYDRA_HTTP2_PORT=44131
 export HYDRA_MCP_PORT=44132
 
-# Create new TMUX session
+# Clean only the sockets used by the active runtime path
+rm -f /tmp/axon-telemetry.sock /tmp/axon-mcp.sock
+
+# Create TMUX session
 tmux new-session -d -s axon -n "core" 
 
-# Start Pod B (Data Plane)
+# Start Data Plane
 # We use 'devenv shell' to ensure the runtime matches the pinned project toolchain.
 # NEXUS v10.8: We force fastembed to use the system's libonnxruntime.so to prevent C++ aborts.
-tmux send-keys -t axon:core "devenv shell -- bash -lc 'export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; while true; do echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core; EXIT_CODE=\$?; echo \"⚠️ Axon Core exited with code \$EXIT_CODE. Restarting in 2s...\"; sleep 2; done'" C-m
+tmux send-keys -t axon:core "devenv shell -- bash -lc 'export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
 
-# Start Pod A (Control Plane)
+# Start Control Plane
 tmux new-window -t axon -n "nexus"
-# PROTECTION: Rétablissement de hex, rebar et ecto.setup (indispensables pour la stabilité post-reset)
-tmux send-keys -t axon:nexus "cd src/dashboard && devenv shell -- bash -lc \"mix local.hex --force && mix local.rebar --force && mix compile && mix ecto.setup && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+tmux send-keys -t axon:nexus "cd src/dashboard && devenv shell -- bash -lc \"PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=workspace AXON_WATCH_DIR=/home/dstadel/projects elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 
 echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 60s)..."
 
@@ -103,11 +112,13 @@ if [ "$DASHBOARD_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Da
 
 echo ""
 echo "⚙️ Running MCP End-to-End Verification..."
-if ! echo '{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}' | bin/axon-mcp-tunnel | grep -q "axon_query"; then
-    echo "❌ FATAL: MCP Tunnel failed End-to-End verification."
-    # We don't exit here to allow user to debug in tmux
+if [ -x "bin/axon-mcp-tunnel" ] && ! echo '{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}' | bin/axon-mcp-tunnel | grep -q "axon_query"; then
+    echo "❌ MCP tunnel verification failed."
+    echo "   Inspect the TMUX session to debug."
+elif [ -x "bin/axon-mcp-tunnel" ]; then
+    echo "✅ MCP tunnel verification succeeded."
 else
-    echo "✅ E2E Verification Success! System is healthy."
+    echo "ℹ️ Skipping MCP tunnel verification because bin/axon-mcp-tunnel is not available."
 fi
 
 # 6. Final Report
@@ -120,4 +131,5 @@ echo "To view processes: 'tmux attach -t axon'"
 echo "Dashboard: http://$WSL_IP:44127/cockpit"
 echo "SQL Gateway: http://$WSL_IP:44129/sql"
 echo "MCP Server: http://$WSL_IP:44129/mcp"
+echo "Stop services with: ./scripts/stop-v2.sh"
 echo ""

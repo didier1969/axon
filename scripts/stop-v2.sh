@@ -17,7 +17,7 @@ fi
 
 # 2. Kill lingering processes by pattern and PGID
 # Targeted patterns to avoid killing other beam.smp or unrelated tools
-PIDS=$(pgrep -f "AXON_REPO_SLUG=workspace|bin/axon-core|bin/axon-mcp-tunnel|axon-db-start|beam.smp.*axon_nexus")
+PIDS=$(pgrep -f "AXON_REPO_SLUG=workspace|bin/axon-core|bin/axon-mcp-tunnel|beam.smp.*axon_nexus")
 
 if [ ! -z "$PIDS" ]; then 
     echo "Cleaning up lingering Axon processes: $PIDS"

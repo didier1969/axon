@@ -76,8 +76,13 @@ defmodule Axon.Watcher.Server do
 
   @impl true
   def handle_cast(:trigger_scan, state) do
-    # send(self(), :initial_scan)
-    # Scan is now handled by Rust Data Plane.
+    Logger.info("[Pod A] Forwarding manual scan request to Rust Data Plane.")
+    Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "indexing", progress: 0})
+    :telemetry.execute([:axon, :watcher, :manual_scan_triggered], %{count: 1}, %{
+      repo_slug: state.repo_slug,
+      watch_dir: state.watch_dir
+    })
+    Axon.Watcher.PoolFacade.trigger_global_scan()
     {:noreply, state}
   end
 
@@ -112,7 +117,7 @@ defmodule Axon.Watcher.Server do
         end
       end)
 
-      dispatch_batch(failed_files, :indexing_hot)
+      Axon.Watcher.BatchDispatch.dispatch(failed_files, :indexing_hot)
     end
 
     {:noreply, state}
@@ -129,55 +134,7 @@ defmodule Axon.Watcher.Server do
   def handle_info({:ok, path}, state) do
     str_path = to_string(path)
 
-    project_name = get_top_dir(str_path, state.watch_dir)
-    project_path = Path.expand(project_name, state.watch_dir)
-
-    try do
-      Axon.Watcher.Tracking.upsert_project!(project_name, project_path)
-    rescue
-      _ -> :ok
-    end
-
-    if should_process?(str_path) do
-      priority = calculate_priority(str_path)
-
-      case File.stat(str_path) do
-        {:ok, %{mtime: mtime}} ->
-          last_mtime = Axon.Watcher.Tracking.get_file_hash(str_path)
-          current_mtime = :erlang.phash2(mtime)
-
-          # Optimization: Only mark as pending and enqueue if the file CHANGED 
-          # or if it's not yet successfully indexed in the local DB.
-          current_status = Axon.Watcher.Tracking.get_file_status(str_path)
-
-          if last_mtime == nil or current_mtime != last_mtime or
-               current_status not in ["indexed", "ignored_by_rule"] do
-            
-            # TITAN PROTOCOL: Route massive files (>1MB) to the single-threaded queue immediately.
-            case File.stat(str_path) do
-              {:ok, %{size: size}} when size > 1_048_576 ->
-                # Titan stays synchronous for now as they are rare
-                # We still need to upsert here if we bypass staging
-                Axon.Watcher.Tracking.upsert_file!(project_name, str_path, current_mtime, "pending")
-                dispatch_batch([str_path], :indexing_titan)
-                {:noreply, state}
-
-              _ ->
-                # NEXUS PRODUCTION: All other files go to ETS for batched insertion
-                Axon.Watcher.Staging.stage_file(project_name, str_path, current_mtime, priority)
-                {:noreply, state}
-            end
-          else
-            # File is already indexed and hasn't changed on disk.
-            {:noreply, state}
-          end
-
-        _ ->
-          {:noreply, state}
-      end
-    else
-      {:noreply, state}
-    end
+    {:noreply, process_discovered_file(str_path, state)}
   end
 
   @impl true
@@ -185,7 +142,7 @@ defmodule Axon.Watcher.Server do
     state = %{state | idle_timer: reset_idle_timer(state.idle_timer)}
     str_path = to_string(path)
 
-    if state.monitoring_active and should_process?(str_path) do
+    if state.monitoring_active and Axon.Watcher.PathPolicy.should_process?(str_path) do
       if :deleted in events do
         # Dans le futur, on notifiera la suppression au Pod C. Pour l'instant on l'ignore.
         {:noreply, state}
@@ -226,7 +183,7 @@ defmodule Axon.Watcher.Server do
 
     if length(files_to_process) > 0 do
       Enum.each(files_to_process, fn path ->
-        priority = calculate_priority(path)
+        priority = Axon.Watcher.PathPolicy.calculate_priority(path)
         mtime = case File.stat(path) do
           {:ok, %{mtime: t}} -> :erlang.phash2(t)
           _ -> 0
@@ -250,19 +207,6 @@ defmodule Axon.Watcher.Server do
     {:noreply, %{state | idle_timer: nil}}
   end
 
-  defp should_process?(path) do
-    # BARE MINIMUM "ANTI-AVALANCHE" SHIELD
-    # This prevents the Erlang VM from being flooded by 10,000+ Inotify events during builds/deps installs.
-    # All other domain filtering (extensions, specific ignore rules) should be handled dynamically via .axonignore logic.
-    not (String.contains?(path, "/.git/") or
-           String.contains?(path, "/.axon/") or
-           String.contains?(path, "/_build/") or
-           String.contains?(path, "/deps/") or
-           String.contains?(path, "/.devenv/") or
-           String.contains?(path, "/node_modules/") or
-           String.contains?(path, "/target/"))
-  end
-
   defp reset_timer(existing_timer) do
     if existing_timer, do: Process.cancel_timer(existing_timer)
     Process.send_after(self(), :process_batch, @batch_timeout)
@@ -278,74 +222,56 @@ defmodule Axon.Watcher.Server do
     start_idle_timer()
   end
 
-  defp dispatch_batch(paths, queue) do
-    # Optimization: we don't read file content here to avoid blocking the GenServer
-    # and to prevent blowing up the Erlang RAM and Oban DB size.
-    files_payload =
-      Enum.map(paths, fn path ->
-        %{
-          "path" => path,
-          "trace_id" => Ecto.UUID.generate(),
-          "t0" => :os.system_time(:microsecond)
-        }
-      end)
+  defp process_discovered_file(str_path, state) do
+    project_name = Axon.Watcher.PathPolicy.get_top_dir(str_path, state.watch_dir)
+    ensure_project(project_name, state.watch_dir)
 
-    if length(files_payload) > 0 do
-      try do
-        # On passe explicitement une Map à Oban
-        job_args = %{"batch" => files_payload}
+    if Axon.Watcher.PathPolicy.should_process?(str_path) do
+      maybe_enqueue_discovered_file(str_path, project_name)
+    end
 
-        Axon.Watcher.IndexingWorker.new(job_args, queue: queue)
-        |> Oban.insert!()
+    state
+  end
 
-        :telemetry.execute([:axon, :watcher, :batch_enqueued], %{count: length(files_payload)}, %{
-          queue: queue
-        })
+  defp ensure_project(project_name, watch_dir) do
+    project_path = Path.expand(project_name, watch_dir)
 
-        Logger.info("[Pod A] Enqueued batch of #{length(files_payload)} files to #{queue}.")
-      rescue
-        e ->
-          :telemetry.execute([:axon, :watcher, :batch_failed], %{count: length(files_payload)}, %{
-            queue: queue,
-            error: inspect(e)
-          })
+    try do
+      Axon.Watcher.Tracking.upsert_project!(project_name, project_path)
+    rescue
+      _ -> :ok
+    end
+  end
 
-          Logger.error("[Pod A] FAILED to enqueue batch: #{inspect(e)}")
+  defp maybe_enqueue_discovered_file(str_path, project_name) do
+    with {:ok, %{mtime: mtime}} <- File.stat(str_path) do
+      current_mtime = :erlang.phash2(mtime)
+
+      if should_reindex_file?(str_path, current_mtime) do
+        route_discovered_file(project_name, str_path, current_mtime)
       end
     end
   end
 
-  defp calculate_priority(path) do
-    ext = Path.extname(path) |> String.downcase()
+  defp should_reindex_file?(str_path, current_mtime) do
+    last_mtime = Axon.Watcher.Tracking.get_file_hash(str_path)
+    current_status = Axon.Watcher.Tracking.get_file_status(str_path)
 
-    cond do
-      ext in [".ex", ".exs", ".rs", ".py", ".go"] -> 100
-      ext in [".js", ".ts", ".c", ".cpp", ".h"] -> 80
-      ext in [".md", ".txt", ".json", ".yml", ".yaml", ".toml", ".conf"] -> 50
-      true -> 10
+    last_mtime == nil or current_mtime != last_mtime or
+      current_status not in ["indexed", "ignored_by_rule"]
+  end
+
+  defp route_discovered_file(project_name, str_path, current_mtime) do
+    priority = Axon.Watcher.PathPolicy.calculate_priority(str_path)
+
+    case File.stat(str_path) do
+      {:ok, %{size: size}} when size > 1_048_576 ->
+        Axon.Watcher.Tracking.upsert_file!(project_name, str_path, current_mtime, "pending")
+        Axon.Watcher.BatchDispatch.dispatch([str_path], :indexing_titan)
+
+      _ ->
+        Axon.Watcher.Staging.stage_file(project_name, str_path, current_mtime, priority)
     end
   end
 
-  defp get_top_dir(path, watch_dir) do
-    # On force la résolution absolue pour la sécurité
-    abs_path = Path.expand(path)
-    abs_watch_dir = Path.expand(watch_dir)
-
-    # On vérifie que le fichier est bien DANS le watch_dir
-    if String.starts_with?(abs_path, abs_watch_dir) do
-      # On soustrait le watch_dir au chemin complet
-      relative_path =
-        abs_path
-        |> String.replace_prefix(abs_watch_dir, "")
-        |> String.trim_leading("/")
-
-      # On prend le premier dossier de ce chemin relatif (le nom du projet)
-      case Path.split(relative_path) do
-        [dir | _] when dir != "." and dir != "" -> dir
-        _ -> "root"
-      end
-    else
-      "external"
-    end
-  end
 end

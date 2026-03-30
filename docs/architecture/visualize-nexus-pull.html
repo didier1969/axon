@@ -168,10 +168,10 @@
 </head>
 <body>
     <header>
-        <span class="version-badge">Nexus Blueprint v3.3 • Couche SOLL Phase</span>
+        <span class="version-badge">Nexus Blueprint v3.4 • Etat Reel + Cible</span>
         <h1 class="hero-title">Axon Intelligence Engine</h1>
         <p style="font-size: 1.25rem; color: var(--text-dim); max-width: 800px; margin: 20px auto;">
-            Spécification intégrale de l'architecture <strong>Nexus Pull & Couche SOLL</strong> : Isolation des Intentions (SOLL) et Performance Industrielle (IST).
+            Vue d'architecture <strong>Nexus Pull & Couche SOLL</strong> : séparation de l'intention (SOLL) et de la réalité technique (IST), avec distinction explicite entre la cible et l'état réellement branché.
         </p>
     </header>
 
@@ -272,15 +272,12 @@
         <!-- 2. ARCHITECTURE DES CONTENEURS (C4 LEVEL 2) -->
         <section id="c4-level-2">
             <h2>Architecture des Conteneurs (C4 Level 2)</h2>
-            <p>L'architecture Couche SOLL sépare le couche intentionnelle (SOLL) du couche technique (IST). Le binaire Rust ouvre <code>ist.db</code> et attache <code>soll.db</code> via le mécanisme ATTACH DATABASE.</p>
+            <p>L'architecture Couche SOLL sépare la couche intentionnelle (SOLL) de la couche technique (IST). Le binaire Rust ouvre <code>ist.db</code> et attache <code>soll.db</code> via <code>ATTACH</code>. Aujourd'hui, l'ingestion reste majoritairement <strong>Rust-led</strong>, tandis que le dashboard Elixir agit comme control plane, télémétrie et façade opérateur.</p>
             <div class="mermaid">
             graph LR
                 subgraph Elixir_Plane [Control Plane : Elixir/OTP]
-                    Guardian[Traffic Guardian]
-                    subgraph Pool [Pool d'Agents 1..14]
-                        Agent1[Agent Core 1]
-                        AgentN[Agent Core N]
-                    end
+                    Guardian[Watcher / Guardian]
+                    Pool[PoolFacade + Cockpit]
                 end
 
                 subgraph Rust_Plane [Data Plane : Rust/Tokio]
@@ -291,7 +288,7 @@
                     Scanner[Scanner Engine]
                     MCP[Serveur MCP]
                     
-                    Channel(((MPSC Channel<br/>The Choke Point)))
+                    Channel(((Queue Memoire + Batch Pull)))
                     Writer[DB Writer Actor]
                 end
 
@@ -301,21 +298,18 @@
                     IST -- "ATTACH" --> SOLL
                 end
 
-                Scanner -- "1. Map Paths" --> Channel
-                Worker1 -- "5. Results" --> Channel
-                MCP -- "Write Commands" --> Channel
-                Channel -- "Batch DbWriteTask" --> Writer
+                Scanner -- "1. Discover / queue" --> Channel
+                Worker1 -- "4. Results" --> Writer
+                MCP -- "Unified Read + Commands" --> IST
+                Pool -- "Manual scan / parse_batch" --> Guardian
+                Guardian -- "2. Trigger / monitor" --> Channel
+                Channel -- "3. Claim pending atomique" --> Worker1
+                Writer -- "5. Commit IST" --> IST
+                Writer -- "5b. Commit SOLL" --> SOLL
+                Worker1 -- "6. ACK batch_id" --> Pool
                 
-                Guardian -- "2. Poll Pending" --> IST
-                Guardian -- "3. Assign" --> Agent1
-                Agent1 -- "4. Pull Command" --> Worker1
-                Writer -- "6. Commit IST" --> IST
-                Writer -- "6b. Commit SOLL" --> SOLL
-                Worker1 -- "7. ACK / Free Signal" --> Agent1
-                Agent1 -- "8. Ready for Next" --> Guardian
-                
-                User((Agent IA)) -- "9. axon_query" --> MCP
-                MCP -- "10. Unified Read" --> IST
+                User((Agent IA)) -- "7. axon_query / inspect / audit" --> MCP
+                MCP -- "8. Read MVCC" --> IST
 
                 style IST fill:#eff6ff,stroke:#0284c7,stroke-width:3px
                 style SOLL fill:#fef3c7,stroke:#d97706,stroke-width:3px
@@ -328,7 +322,7 @@
         <!-- 3. ARCHITECTURE SOLL (V3.3) -->
         <section id="soll-v3-3">
             <h2>Architecture SOLL (v3.3)</h2>
-            <p>Isolation physique des intentions humaines pour garantir l'immunité face aux réinitialisations techniques.</p>
+            <p>Isolation physique des intentions humaines pour garantir l'immunité face aux réinitialisations techniques. <code>SOLL</code> est un actif conceptuel à conserver; <code>IST</code> est reconstructible depuis le code.</p>
             <div class="grid">
                 <div class="info-card">
                     <h3>La Base SOLL (soll.db)</h3>
@@ -340,7 +334,11 @@
                 </div>
                 <div class="info-card">
                     <h3>Mécanisme ATTACH</h3>
-                    <p>Au démarrage, Axon ouvre <code>ist.db</code> et attache <code>soll.db</code> sous un namespace dédié. Les requêtes Cypher peuvent croiser les données entre les deux mondes en toute transparence.</p>
+                    <p>Au démarrage, Axon ouvre <code>ist.db</code> et attache <code>soll.db</code> sous un namespace dédié. Les lectures MCP et les écritures du writer peuvent traverser les deux mondes sans les confondre.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Exports SOLL Horodates</h3>
+                    <p>Les fichiers <code>SOLL_EXPORT_*.md</code> servent de snapshots conceptuels versionnables. Ils protègent la mémoire de projet et servent désormais de base à la restauration <code>axon_restore_soll</code>.</p>
                 </div>
             </div>
             <div class="llm-bubble">
@@ -351,38 +349,35 @@
         <!-- 4. DÉTAIL DES ÉCHANGES & SYNCHRONISATION -->
         <section id="sync-details">
             <h2>Dynamique des Échanges (Séquence Détaillée)</h2>
-            <p>Le cycle de vie d'un fichier, de sa découverte à sa libération pour le prochain traitement, incluant le retour d'information vers le Control Plane.</p>
+            <p>Le cycle de vie réel d'un fichier, de sa découverte à sa validation de traitement, avec corrélation explicite des lots entre Elixir et Rust.</p>
             <div class="mermaid">
             sequenceDiagram
                 autonumber
                 participant G as Traffic Guardian (Elixir)
-                participant A as Agent Core X (Elixir)
+                participant P as PoolFacade (Elixir)
                 participant W as Worker Core X (Rust)
                 participant WR as Writer Actor (Rust)
                 participant K as DuckDB
 
-                Note over W, K: PHASE 1 : DISCOVERY (RUST-LED)
+                Note over W, K: PHASE 1 : DISCOVERY / CLAIM (RUST-LED)
                 W->>WR: NEW_FILE_FOUND {path}
                 WR->>K: INSERT File {status:'pending'}
                 K-->>WR: OK
                 
-                Note over G, K: PHASE 2 : THE PULL CYCLE (ELIXIR-LED)
-                G->>K: MATCH (f {status:'pending'}) LIMIT 1
-                K-->>G: path/to/code.ex
-                G->>A: Assigne file_path.rs
-                A->>W: REQ: PARSE_FILE {path}
+                Note over G, K: PHASE 2 : ORCHESTRATION MIXTE
+                G->>P: trigger_scan / parse_batch
+                P->>W: PARSE_BATCH {batch_id, files}
+                W->>K: CLAIM pending -> indexing (atomique)
                 
                 W->>W: AST Parsing + AI Embeddings
                 W->>WR: PUSH_DATA {path, extraction_results}
                 WR->>K: COMMIT Transaction
                 K-->>WR: OK
-                WR-->>W: DB_SYNC_COMPLETE (Truth Certified)
+                WR-->>W: DB_SYNC_COMPLETE
                 
-                Note over W, A: LE RETOUR D'INFORMATION (LIBÉRATION)
-                W-->>A: REP: DONE {status: 'indexed'}
-                A->>G: WORKER_READY (Donne-moi le prochain !)
-                
-                Note over G, K: Le Guardian boucle sur l'étape 4.
+                Note over W, P: LE RETOUR D'INFORMATION
+                W-->>P: BATCH_ACCEPTED {batch_id}
+                P->>G: état cockpit / progression
             </div>
         </section>
 
@@ -392,15 +387,33 @@
             <div class="grid">
                 <div class="info-card">
                     <h3>Pourquoi le LLM accède en direct ?</h3>
-                    <p>Le serveur MCP interroge DuckDB via une connexion <strong>Read-Only</strong> dédiée. Grâce au <strong>MVCC</strong>, il accède à un instantané (Snapshot). Cela évite de charger l'orchestrateur Elixir et garantit une latence < 100ms.</p>
+                    <p>Le serveur MCP interroge DuckDB via une connexion <strong>read-only</strong> dédiée. Grâce au <strong>MVCC</strong>, il lit un instantané cohérent sans dépendre du dashboard. Cela préserve la latence des lectures sous charge d'ingestion.</p>
                 </div>
                 <div class="info-card">
                     <h3>Le rôle du Guardian</h3>
-                    <p>Le Guardian ne gère pas les lectures. Il est le <strong>Contrôleur de Débit</strong> pour les écritures. Il décide qui travaille et quand, s'assurant qu'aucun worker ne sature les I/O de la base de données.</p>
+                    <p>Le Guardian ne porte pas encore tout le scheduling cible. Il agit aujourd'hui comme plan de contrôle, télémétrie, déclenchement opérateur et futur point de shaping plus fin.</p>
                 </div>
                 <div class="info-card">
                     <h3>Le Writer Actor</h3>
-                    <p>En Rust, toutes les écritures passent par un <strong>Acteur Unique</strong>. C'est le seul point d'entrée pour les transactions `WRITE`, éliminant physiquement les erreurs `Database busy`.</p>
+                    <p>En Rust, les écritures critiques passent par un <strong>writer actor</strong> dédié. Cela réduit fortement les conflits et sert de point de vérité pour les commits IST/SOLL.</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="reality-check">
+            <h2>Etat Reel au 30 Mars 2026</h2>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>Ce qui est branche</h3>
+                    <p>Scan manuel cockpit branche, <code>PARSE_BATCH</code> corrélé par <code>batch_id</code>, claiming atomique des fichiers <code>pending -&gt; indexing</code>, export SOLL officiel via MCP, restauration SOLL en cours d'integration.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Ce qui reste cible</h3>
+                    <p>Guardian pleinement pull-led, shaping ETS complet, protocoles internes totalement versionnés, et modularisation de la couche MCP encore très concentrée dans <code>mcp.rs</code>.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Principe de verite</h3>
+                    <p>Cette page sert de blueprint guide. Elle ne doit plus etre lue comme un as-built parfait. Toute reprise doit croiser ce document avec le handoff et les tests verts du depot.</p>
                 </div>
             </div>
         </section>
@@ -457,11 +470,11 @@
                 </div>
                 <div class="info-card">
                     <h3>Data Plane <span class="tech-tag">Rust / Tokio</span></h3>
-                    <p>Calcul intensif (Tree-sitter, FastEmbed ONNX). Isolation totale des ressources et performance brute.</p>
+                    <p>Calcul intensif (Tree-sitter, FastEmbed ONNX en mode prudent). Le parsing AST se distribue bien; la couche vectorielle reste contrainte par sa propre realite d'execution et n'est pas sur-promue.</p>
                 </div>
                 <div class="info-card">
                     <h3>Couche SOLL Storage <span class="tech-tag">DuckDB (Dual-DB)</span></h3>
-                    <p>Isolation physique SOLL/IST via <code>ATTACH DATABASE</code>. Source unique pour l'intention et la réalité physique.</p>
+                    <p>Isolation physique SOLL/IST via <code>ATTACH DATABASE</code>. DuckDB a remplace Kuzu pour permettre un meilleur controle operatoire, au prix de quelques contraintes de plugin et de modelisation encore en cours de durcissement.</p>
                 </div>
                 <div class="info-card">
                     <h3>Environment <span class="tech-tag">Nix / Devenv</span></h3>

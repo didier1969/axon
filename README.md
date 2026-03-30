@@ -31,14 +31,35 @@ Axon est nativement compatible avec le **Model Context Protocol (MCP)**. Il sert
 ## Développement Local
 L'environnement de développement de référence est **Nix + Devenv**.
 
-Avant tout build, test ou démarrage de service :
+Avant tout build, test ou démarrage de service:
 
 ```bash
 devenv shell
 ./scripts/validate-devenv.sh
 ```
 
-Si le validateur échoue, le shell courant n'est pas l'environnement isolé attendu pour Axon. Les scripts de démarrage et de setup s'appuient désormais sur `devenv shell` comme chemin nominal.
+Si le validateur échoue, le shell courant n'est pas l'environnement isolé attendu pour Axon.
+
+Workflow nominal:
+
+```bash
+./scripts/setup_v2.sh
+./scripts/start-v2.sh
+```
+
+Pour arrêter les services:
+
+```bash
+./scripts/stop-v2.sh
+```
+
+Rôle des scripts:
+
+- `setup_v2.sh`: bootstrap initial, build et validations principales
+- `start-v2.sh`: démarrage quotidien via TMUX
+- `stop-v2.sh`: arrêt ciblé des services Axon
+
+Le workflow HydraDB est actuellement détaché du chemin nominal Devenv et ne fait plus partie du démarrage quotidien d'Axon.
 
 ---
 © 2025-2026 Didier Stadelmann - L'excellence au service de l'architecture.
