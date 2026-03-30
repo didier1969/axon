@@ -141,6 +141,8 @@ What changed:
 - real metadata drift observed during `indexing` is now preserved through a `needs_reindex` flag, so the file is replayed once after the current commit instead of being claimed twice concurrently
 - non-qualified top-level symbols are now path-aware in `Symbol.id`, which avoids cross-file collisions for helpers such as repeated `send_cypher` functions inside the same project
 - legacy `IST` files are now repaired additively at boot for `needs_reindex` before runtime-compatibility logic runs, so a narrow schema drift no longer causes `Binder Error` loops during live restart
+- the Rust watcher now emits explicit checkpoints on the hot-delta path (`watcher.storm_suppressed`, `watcher.storm_salvaged`, `watcher.received`, `watcher.filtered`, `watcher.db_upsert`, `watcher.staged`) through a shared in-memory probe buffer plus runtime logs
+- bootstrap-storm salvage is now restricted to active-project file paths only; whole directories from a startup storm are no longer recursively restaged inside the watcher callback
 
 ## Rust Core / Native Ingestion / MCP
 
@@ -216,6 +218,7 @@ Rust validation reached a clean state during this session:
 - result reached now after delayed cold-arm storm suppression: `57 passed; 0 failed` in `src/lib.rs` and `19 passed; 0 failed` in `src/main.rs`
 - result reached now after active-claim preservation and path-aware top-level symbol IDs: `61 passed; 0 failed` in `src/lib.rs` and `19 passed; 0 failed` in `src/main.rs`
 - result reached now after additive legacy-`IST` schema repair for `needs_reindex`: `62 passed; 0 failed` in `src/lib.rs` and `19 passed; 0 failed` in `src/main.rs`
+- result reached now after watcher probes and file-only bootstrap salvage: `63 passed; 0 failed` in `src/lib.rs` and `21 passed; 0 failed` in `src/main.rs`
 - dashboard validation remains green after real `io` monitoring work: `31 tests, 0 failures`
 
 Runtime note:
@@ -239,6 +242,16 @@ Runtime note:
 - the previous live restart defect on legacy `IST` is now isolated and corrected too:
   - older `File` tables without `needs_reindex` no longer enter `Binder Error` loops
   - additive boot migration repairs the column before claim/reopen paths execute
+- the explicit watcher live proof is now available:
+  - runtime logs show `watcher.db_upsert` then `watcher.staged` on real files in the active repo
+  - `/sql` confirms those same rows in `File` with `status='indexed'` and `priority=900`
+  - verified examples:
+    - `/home/dstadel/projects/axon/src/watcher_src_probe.ex`
+    - `/home/dstadel/projects/axon/tmp/rust_watcher_live.ex`
+    - `/home/dstadel/projects/axon/tmp/rust_watcher_live_two.ex`
+    - `/home/dstadel/projects/axon/tmp/rust_watcher_live_three.ex`
+    - `/home/dstadel/projects/axon/tmp/rust_watcher_live_final.ex`
+    - `/home/dstadel/projects/axon/tmp/rust_watcher_live_success.ex`
 
 Important note:
 

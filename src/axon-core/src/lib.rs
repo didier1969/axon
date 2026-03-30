@@ -15,6 +15,7 @@ pub mod worker;
 pub mod queue;
 pub mod runtime_profile;
 pub mod service_guard;
+pub mod watcher_probe;
 
 #[cfg(test)]
 pub mod tests;

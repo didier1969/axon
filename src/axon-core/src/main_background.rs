@@ -9,6 +9,7 @@ use axon_core::queue::QueueStore;
 use axon_core::service_guard;
 use axon_core::scanner::Scanner;
 use axon_core::fs_watcher::{self, HOT_PRIORITY};
+use axon_core::watcher_probe;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use notify_debouncer_full::notify::RecursiveMode;
 use tracing::{debug, error, info, warn};
@@ -108,6 +109,7 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
 
             let callback_root = watch_root.clone();
             let callback_store = store.clone();
+            let callback_active_project_root = preferred_project_root.clone();
             let rescan_guard = Arc::new(AtomicBool::new(false));
             let callback_rescan_guard = rescan_guard.clone();
             let cold_arm_completed_at = Arc::new(Mutex::new(None));
@@ -118,6 +120,7 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
                 handle_watcher_events(
                     callback_store.clone(),
                     callback_root.clone(),
+                    callback_active_project_root.clone(),
                     callback_rescan_guard.clone(),
                     callback_cold_arm_completed_at.clone(),
                     watcher_started_at,
@@ -425,6 +428,7 @@ fn claim_policy(
 fn handle_watcher_events(
     store: Arc<GraphStore>,
     watch_root: std::path::PathBuf,
+    active_project_root: Option<PathBuf>,
     rescan_guard: Arc<AtomicBool>,
     cold_arm_completed_at: Arc<Mutex<Option<Instant>>>,
     watcher_started_at: Instant,
@@ -452,11 +456,47 @@ fn handle_watcher_events(
                 watcher_started_at,
                 cold_arm_completed_at,
             ) {
+                let salvaged = bootstrap_salvage_paths(&paths, active_project_root.as_deref());
                 warn!(
                     "Rust FS watcher suppressed bootstrap event storm ({} path(s)) under {}",
                     paths.len(),
                     watch_root.display()
                 );
+                watcher_probe::record(
+                    "watcher.storm_suppressed",
+                    None,
+                    format!("paths={} salvaged={}", paths.len(), salvaged.len()),
+                );
+                if !salvaged.is_empty() {
+                    match fs_watcher::stage_hot_deltas(&store, &watch_root, salvaged.clone(), HOT_PRIORITY) {
+                        Ok(staged) if staged > 0 => {
+                            info!(
+                                "Rust FS watcher salvaged {} hot delta(s) from bootstrap storm.",
+                                staged
+                            );
+                            watcher_probe::record(
+                                "watcher.storm_salvaged",
+                                None,
+                                format!("staged={}", staged),
+                            );
+                        }
+                        Ok(_) => {
+                            watcher_probe::record(
+                                "watcher.storm_salvaged_none",
+                                None,
+                                format!("candidates={}", salvaged.len()),
+                            );
+                        }
+                        Err(err) => {
+                            warn!("Rust FS watcher failed to salvage hot delta(s): {}", err);
+                            watcher_probe::record(
+                                "watcher.storm_salvage_failed",
+                                None,
+                                err.to_string(),
+                            );
+                        }
+                    }
+                }
                 return;
             }
 
@@ -466,6 +506,7 @@ fn handle_watcher_events(
                     paths.len(),
                     watch_root.display()
                 );
+                watcher_probe::record("watcher.received", None, format!("paths={}", paths.len()));
             }
 
             if rescan_requested
@@ -487,9 +528,11 @@ fn handle_watcher_events(
             match fs_watcher::stage_hot_deltas(&store, &watch_root, paths, HOT_PRIORITY) {
                 Ok(staged) if staged > 0 => {
                     info!("Rust FS watcher staged {} hot delta(s).", staged);
+                    watcher_probe::record("watcher.staged_batch", None, format!("staged={}", staged));
                 }
                 Ok(_) => {
                     info!("Rust FS watcher received event(s) but staged no hot delta.");
+                    watcher_probe::record("watcher.staged_none", None, "reason=no_eligible_delta");
                 }
                 Err(err) => warn!("Rust FS watcher failed to stage hot delta(s): {}", err),
             }
@@ -516,10 +559,29 @@ fn should_suppress_bootstrap_event_storm(
         .unwrap_or(false)
 }
 
+fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>) -> Vec<PathBuf> {
+    let Some(active_project_root) = active_project_root else {
+        return Vec::new();
+    };
+
+    paths.iter()
+        .filter_map(|path| {
+            let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let metadata = std::fs::metadata(&absolute).ok()?;
+            if metadata.is_file() && absolute.starts_with(active_project_root) {
+                Some(absolute)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{active_project_hot_targets, claim_policy, handle_watcher_events, memory_limit_bytes, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets};
+    use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, handle_watcher_events, memory_limit_bytes, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets};
     use axon_core::graph::GraphStore;
+    use axon_core::watcher_probe;
     use notify_debouncer_full::notify::{Event, EventKind};
     use notify_debouncer_full::notify::event::ModifyKind;
     use notify_debouncer_full::DebouncedEvent;
@@ -621,6 +683,7 @@ mod tests {
         handle_watcher_events(
             store.clone(),
             root.to_path_buf(),
+            Some(project.clone()),
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(None)),
             Instant::now(),
@@ -636,6 +699,94 @@ mod tests {
 
         assert!(row.contains("pending"));
         assert!(row.contains("900"));
+    }
+
+    #[test]
+    fn test_bootstrap_storm_still_salvages_active_project_delta() {
+        watcher_probe::clear();
+
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("watch.ex");
+        std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
+
+        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let mut events = Vec::new();
+        for idx in 0..5_100 {
+            let path = if idx == 0 {
+                file_path.clone()
+            } else {
+                root.join(format!("cold-{idx}.tmp"))
+            };
+            events.push(DebouncedEvent::new(
+                Event {
+                    kind: EventKind::Modify(ModifyKind::Data(notify_debouncer_full::notify::event::DataChange::Any)),
+                    paths: vec![path],
+                    attrs: Default::default(),
+                },
+                std::time::Instant::now(),
+            ));
+        }
+
+        handle_watcher_events(
+            store.clone(),
+            root.to_path_buf(),
+            Some(project.clone()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+            Instant::now(),
+            Ok(events),
+        );
+
+        let row = store
+            .query_json(&format!(
+                "SELECT status, priority FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        assert!(row.contains("pending"));
+        assert!(row.contains("900"));
+
+        let events = watcher_probe::recent();
+        assert!(events.iter().any(|line| line.contains("watcher.storm_suppressed")));
+        assert!(events.iter().any(|line| line.contains("watcher.storm_salvaged")));
+    }
+
+    #[test]
+    fn test_bootstrap_salvage_paths_keeps_only_active_project_candidates() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        let file_path = project.join("src").join("watch.ex");
+        std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
+        let outside = root.join("other").join("cold.tmp");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, "x").unwrap();
+
+        let salvaged = bootstrap_salvage_paths(&[file_path.clone(), outside.clone()], Some(project.as_path()));
+
+        assert_eq!(salvaged.len(), 1);
+        assert_eq!(salvaged[0], std::fs::canonicalize(file_path).unwrap());
+    }
+
+    #[test]
+    fn test_bootstrap_salvage_paths_ignores_directories() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        let src_dir = project.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let file_path = src_dir.join("watch.ex");
+        std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
+
+        let salvaged = bootstrap_salvage_paths(&[src_dir.clone(), file_path.clone()], Some(project.as_path()));
+
+        assert_eq!(salvaged.len(), 1);
+        assert_eq!(salvaged[0], std::fs::canonicalize(file_path).unwrap());
     }
 
     #[test]

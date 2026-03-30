@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use libloading::Symbol as LibSymbol;
 
 use crate::graph::{ExecFunc, GraphStore, PendingFile};
+use crate::watcher_probe;
 
 impl GraphStore {
     fn escape_sql(value: &str) -> String {
@@ -81,7 +82,13 @@ impl GraphStore {
 
     pub fn upsert_hot_file(&self, path: &str, project: &str, size: i64, mtime: i64, priority: i64) -> Result<()> {
         let queries = Self::upsert_file_queries(path, project, size, mtime, priority);
-        self.execute_batch(&queries)
+        self.execute_batch(&queries)?;
+        watcher_probe::record(
+            "watcher.db_upsert",
+            Some(Path::new(path)),
+            format!("project={} priority={} size={} mtime={}", project, priority, size, mtime),
+        );
+        Ok(())
     }
 
     pub fn insert_file_data_batch(&self, tasks: &[crate::worker::DbWriteTask]) -> Result<()> {

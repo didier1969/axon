@@ -164,6 +164,10 @@ The suppression policy must therefore cover both windows explicitly:
 
 Outside these windows, genuine watcher `need_rescan()` signals must still be honored.
 
+Bootstrap suppression must not discard the active project's real hot deltas.
+During a storm, Axon now salvages only file paths that belong to the active project, instead of recursively restaging whole directories from that batch.
+This keeps the watcher callback responsive and preserves the operator-visible delta path.
+
 ## Stage 4. Worker Lanes
 
 Work is dispatched into explicit lanes:
@@ -196,6 +200,17 @@ This avoids duplicate work and duplicate symbol insertion while still preserving
 
 The same path must remain compatible with previously created `IST` files.
 When a newly introduced field such as `needs_reindex` is absent from a legacy `File` table, Axon repairs that gap additively at boot before any claim or reopen logic runs.
+
+The watcher path now also carries explicit checkpoints:
+
+- `watcher.storm_suppressed`
+- `watcher.storm_salvaged`
+- `watcher.received`
+- `watcher.filtered`
+- `watcher.db_upsert`
+- `watcher.staged`
+
+These checkpoints are emitted on the live runtime so Axon can prove where a hot delta stops instead of inferring it indirectly from missing rows.
 
 ## Stage 6. Derived Semantic Work
 

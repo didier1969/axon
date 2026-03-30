@@ -6,6 +6,7 @@ use walkdir::WalkDir;
 
 use crate::graph::GraphStore;
 use crate::scanner::Scanner;
+use crate::watcher_probe;
 
 pub const HOT_PRIORITY: i64 = 900;
 
@@ -23,13 +24,17 @@ fn stage_hot_path_delta_count(
 
     if !scanner.should_process_path(path) {
         if !path.is_dir() {
+            watcher_probe::record("watcher.filtered", Some(path), "reason=not_processable");
             return Ok(0);
         }
     }
 
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            watcher_probe::record("watcher.missing", Some(path), "reason=not_found");
+            return Ok(0);
+        }
         Err(err) => return Err(err.into()),
     };
 
@@ -80,11 +85,15 @@ fn stage_single_file_delta(
 ) -> Result<bool> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            watcher_probe::record("watcher.missing", Some(path), "reason=single_file_not_found");
+            return Ok(false);
+        }
         Err(err) => return Err(err.into()),
     };
 
     if !metadata.is_file() || !scanner.should_process_path(path) {
+        watcher_probe::record("watcher.filtered", Some(path), "reason=single_file_not_processable");
         return Ok(false);
     }
 
@@ -106,6 +115,12 @@ fn stage_single_file_delta(
         mtime,
         priority,
     )?;
+
+    watcher_probe::record(
+        "watcher.staged",
+        Some(&absolute),
+        format!("project={} priority={} size={} mtime={}", project_slug, priority, size, mtime),
+    );
 
     Ok(true)
 }
