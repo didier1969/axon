@@ -177,6 +177,26 @@ Until the migration is complete:
 - no new canonical backlog, scheduler, worker, or retry logic may be added to Elixir
 - any temporary Elixir action must be treated as compatibility scaffolding, not target architecture
 
+## Wave 1 Constraint Discovered
+
+`Axon.BackpressureController` is now being reduced to telemetry/display semantics before the full Elixir ingestion chain is removed.
+That is acceptable only if the next slice follows immediately:
+
+- `Axon.Watcher.Server`
+- `Axon.Watcher.Staging`
+- `Axon.Watcher.BatchDispatch`
+- `Axon.Watcher.IndexingWorker`
+- `Axon.Watcher.PoolEventHandler`
+
+must lose their remaining authority quickly, otherwise Elixir can still feed Oban while no longer applying queue-side braking.
+
+The intended steady state remains:
+
+- Rust throttles canonical ingestion
+- Elixir displays pressure and operator state
+- explicit operator intent may be relayed to Rust
+- Elixir must not fabricate local `indexing` truth ahead of Rust/DB evidence
+
 ## First Delivered Slice
 
 The first concrete migration slice now exists on the Rust side:

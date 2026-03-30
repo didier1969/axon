@@ -108,6 +108,14 @@ Wave-1 removal order is now fixed:
 4. reduce bridge modules to read/telemetry-only duties
 5. preserve UI behavior while Rust remains sole runtime truth
 
+Wave-1 constraint now discovered:
+
+- `BackpressureController` can be display-only only as a transitional state
+- because `server -> staging -> Oban -> indexing_worker -> parse_batch` still exists today
+- therefore Task 3 cannot be delayed far behind Task 2
+- explicit operator `trigger_scan` may still be relayed to Rust
+- but Elixir must no longer force a local `indexing` overlay before Rust/DB truth confirms it
+
 # High-Value Findings Identified Earlier
 
 These were the dominant issues initially identified:

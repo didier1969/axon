@@ -77,8 +77,7 @@ defmodule Axon.Watcher.Server do
 
   @impl true
   def handle_cast(:trigger_scan, state) do
-    Logger.info("[Pod A] Forwarding manual scan request to Rust Data Plane.")
-    Axon.Watcher.Progress.update_status(state.repo_slug, %{status: "indexing", progress: 0})
+    Logger.info("[Pod A] Forwarding explicit operator scan request to Rust canonical runtime.")
     :telemetry.execute([:axon, :watcher, :manual_scan_triggered], %{count: 1}, %{
       repo_slug: state.repo_slug,
       watch_dir: state.watch_dir

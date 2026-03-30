@@ -1,6 +1,7 @@
 defmodule Axon.Watcher.ServerTest do
   use ExUnit.Case, async: false
 
+  alias Axon.Watcher.Progress
   alias Axon.Watcher.Server
 
   setup do
@@ -34,11 +35,14 @@ defmodule Axon.Watcher.ServerTest do
     :ok
   end
 
-  test "trigger_scan emits operator and forwarding telemetry" do
+  test "trigger_scan forwards explicit operator intent without forcing local indexing state" do
+    repo_slug = System.get_env("AXON_REPO_SLUG") || Path.expand(".") |> Path.basename()
+
     Server.trigger_scan()
 
     assert_receive {:manual_scan_triggered, %{count: 1}, %{repo_slug: _repo, watch_dir: _dir}}, 1000
     assert_receive {:scan_forwarded, %{count: 1}, %{connected: connected}}, 1000
     assert is_boolean(connected)
+    refute Progress.get_status(repo_slug)["status"] == "indexing"
   end
 end
