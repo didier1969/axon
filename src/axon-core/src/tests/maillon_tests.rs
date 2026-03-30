@@ -282,6 +282,139 @@ mod tests {
         assert!(row.contains("900"));
     }
 
+    #[test]
+    fn test_maillon_2i_hot_delta_does_not_reopen_file_already_indexing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("live_reopen.ex");
+        std::fs::write(&file_path, "defmodule LiveReopen do\nend\n").unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[(
+                file_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                10,
+                1,
+            )])
+            .unwrap();
+
+        let first_batch = store.fetch_pending_batch(10).unwrap();
+        assert_eq!(first_batch.len(), 1, "Le premier claim doit prendre le fichier");
+
+        store
+            .upsert_hot_file(
+                &file_path.to_string_lossy(),
+                "proj",
+                10,
+                1,
+                crate::fs_watcher::HOT_PRIORITY,
+            )
+            .unwrap();
+
+        let second_batch = store.fetch_pending_batch(10).unwrap();
+        assert!(
+            second_batch.is_empty(),
+            "Un hot delta ne doit pas re-ouvrir un fichier deja indexing sans changement reel"
+        );
+
+        let row = store
+            .query_json(&format!(
+                "SELECT status, worker_id FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        assert!(row.contains("indexing"), "Le fichier doit rester en cours d'indexation");
+        assert!(!row.contains("null"), "Le worker actif doit rester attache au fichier");
+    }
+
+    #[test]
+    fn test_maillon_2j_hot_delta_changed_during_indexing_requeues_after_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("live_changed.ex");
+        std::fs::write(&file_path, "defmodule LiveChanged do\nend\n").unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[(
+                file_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                10,
+                1,
+            )])
+            .unwrap();
+
+        let first_batch = store.fetch_pending_batch(10).unwrap();
+        assert_eq!(first_batch.len(), 1, "Le premier claim doit prendre le fichier");
+
+        store
+            .upsert_hot_file(
+                &file_path.to_string_lossy(),
+                "proj",
+                20,
+                2,
+                crate::fs_watcher::HOT_PRIORITY,
+            )
+            .unwrap();
+
+        let second_batch = store.fetch_pending_batch(10).unwrap();
+        assert!(
+            second_batch.is_empty(),
+            "Un changement reel pendant indexing ne doit pas dupliquer le claim immediatement"
+        );
+
+        let extraction = parser::ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "live_changed".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                path: file_path.to_string_lossy().to_string(),
+                content: "defmodule LiveChanged do\nend\n".to_string(),
+                extraction,
+                trace_id: "trace".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        let row = store
+            .query_json(&format!(
+                "SELECT status, priority FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        assert!(
+            row.contains("pending"),
+            "Le fichier doit etre replanifie apres le commit si un vrai changement est arrive pendant indexing"
+        );
+        assert!(row.contains("900"), "La priorite chaude doit etre preservee pour la seconde passe");
+    }
+
     // --- MAILLON 3: LA SOCKET (Le Protocole) ---
     #[tokio::test]
     async fn test_maillon_3_socket_protocol() {
@@ -441,5 +574,160 @@ mod tests {
 
         let stored = store.query_count("SELECT count(*) FROM ChunkEmbedding").unwrap();
         assert_eq!(stored, 1, "Le vector store dérivé doit persister l'embedding du chunk");
+    }
+
+    #[test]
+    fn test_maillon_7c_writer_keeps_distinct_top_level_symbols_from_different_files() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path_a = "/tmp/scripts/a.py".to_string();
+        let path_b = "/tmp/scripts/b.py".to_string();
+        store
+            .bulk_insert_files(&[
+                (path_a.clone(), "proj".to_string(), 100, 1),
+                (path_b.clone(), "proj".to_string(), 100, 1),
+            ])
+            .unwrap();
+
+        let extraction_a = parser::ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "send_cypher".to_string(),
+                kind: "function".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        let extraction_b = parser::ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "send_cypher".to_string(),
+                kind: "function".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[
+                DbWriteTask::FileExtraction {
+                    path: path_a.clone(),
+                    content: "def send_cypher(query):\n    return query\n".to_string(),
+                    extraction: extraction_a,
+                    trace_id: "a".to_string(),
+                    t0: 0,
+                    t1: 0,
+                    t2: 0,
+                    t3: 0,
+                },
+                DbWriteTask::FileExtraction {
+                    path: path_b.clone(),
+                    content: "def send_cypher(query):\n    return query\n".to_string(),
+                    extraction: extraction_b,
+                    trace_id: "b".to_string(),
+                    t0: 0,
+                    t1: 0,
+                    t2: 0,
+                    t3: 0,
+                },
+            ])
+            .unwrap();
+
+        let symbols_json = store
+            .query_json("SELECT id, name FROM Symbol ORDER BY id")
+            .unwrap();
+        let symbol_count = store
+            .query_count("SELECT count(*) FROM Symbol WHERE name = 'send_cypher'")
+            .unwrap();
+        assert_eq!(
+            symbol_count, 2,
+            "Deux fichiers distincts ne doivent pas se partager le meme symbole top-level: {}",
+            symbols_json
+        );
+    }
+
+    #[test]
+    fn test_maillon_7d_writer_coalesces_duplicate_symbol_names_inside_same_file() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/status_live.ex".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "axon".to_string(), 100, 1)])
+            .unwrap();
+
+        let extraction = parser::ExtractionResult {
+            project_slug: Some("axon".to_string()),
+            symbols: vec![
+                parser::Symbol {
+                    name: "AxonDashboardWeb.StatusLive.handle_info".to_string(),
+                    kind: "function".to_string(),
+                    start_line: 10,
+                    end_line: 12,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: std::collections::HashMap::new(),
+                    embedding: None,
+                },
+                parser::Symbol {
+                    name: "AxonDashboardWeb.StatusLive.handle_info".to_string(),
+                    kind: "function".to_string(),
+                    start_line: 30,
+                    end_line: 34,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: std::collections::HashMap::new(),
+                    embedding: None,
+                },
+            ],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                path: path.clone(),
+                content: "defmodule AxonDashboardWeb.StatusLive do\nend\n".to_string(),
+                extraction,
+                trace_id: "trace".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        let symbol_count = store
+            .query_count(
+                "SELECT count(*) FROM Symbol WHERE name = 'AxonDashboardWeb.StatusLive.handle_info'"
+            )
+            .unwrap();
+        assert_eq!(
+            symbol_count, 1,
+            "Les clauses multiples doivent etre coalescees en un symbole logique"
+        );
     }
 }

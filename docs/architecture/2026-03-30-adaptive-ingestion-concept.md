@@ -182,6 +182,13 @@ Instead of parallelizing writes blindly, Axon must optimize:
 - priority
 - commit cadence
 
+Two invariants now apply to this commit path:
+
+- a file already in `indexing` must not be reopened immediately by a hot delta
+- a real metadata change observed during `indexing` must be replayed as a second pass after the current commit finishes
+
+This avoids duplicate work and duplicate symbol insertion while still preserving delta truth.
+
 ## Stage 6. Derived Semantic Work
 
 Derived semantic work is executed only when structural ingestion is healthy.
@@ -195,6 +202,17 @@ Derived layers include:
 
 These layers are disposable and versioned.
 They must never be treated as primary truth.
+
+## Symbol Identity
+
+`Symbol.id` must stay stable enough for graph work, but unique enough to survive a large universe scan.
+
+The current rule is:
+
+- globally qualified names keep a project-qualified ID
+- non-qualified top-level names become path-aware inside their project
+
+This prevents collisions such as repeated helper names across multiple scripts in the same project without changing the human-facing `name` field.
 
 ## Axon Ignore
 

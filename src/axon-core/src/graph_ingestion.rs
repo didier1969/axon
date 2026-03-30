@@ -1,5 +1,6 @@
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use libloading::Symbol as LibSymbol;
@@ -11,8 +12,12 @@ impl GraphStore {
         value.replace("'", "''")
     }
 
-    fn symbol_id(slug: &str, name: &str) -> String {
-        format!("{}::{}", slug, name)
+    fn symbol_id(slug: &str, path: &str, name: &str) -> String {
+        if Self::is_globally_qualified_symbol(name) {
+            format!("{}::{}", slug, name)
+        } else {
+            format!("{}::{}::{}", slug, Self::symbol_path_namespace(path), name)
+        }
     }
 
     fn relation_table(rel_type: &str) -> Option<&'static str> {
@@ -25,6 +30,23 @@ impl GraphStore {
 
     fn chunk_id(symbol_id: &str) -> String {
         format!("{}::chunk", symbol_id)
+    }
+
+    fn is_globally_qualified_symbol(name: &str) -> bool {
+        name.contains('.') || name.contains("::")
+    }
+
+    fn symbol_path_namespace(path: &str) -> String {
+        let path = Path::new(path);
+        let projects_root =
+            std::env::var("AXON_PROJECTS_ROOT").unwrap_or_else(|_| "/home/dstadel/projects".to_string());
+        let relative = path
+            .strip_prefix(&projects_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        relative.replace('/', "::")
     }
 
     fn build_chunk_content(path: &str, symbol: &crate::parser::Symbol, content: &str) -> String {
@@ -81,7 +103,7 @@ impl GraphStore {
                     indexed_paths.push(format!("'{}'", Self::escape_sql(path)));
                     let slug = extraction.project_slug.as_deref().unwrap_or("global");
                     for sym in &extraction.symbols {
-                        let symbol_id = Self::symbol_id(slug, &sym.name);
+                        let symbol_id = Self::symbol_id(slug, path, &sym.name);
                         let chunk_id = Self::chunk_id(&symbol_id);
                         let embedding_sql = if let Some(ref v) = sym.embedding {
                             format!("CAST({:?} AS FLOAT[384])", v)
@@ -92,9 +114,8 @@ impl GraphStore {
                         let chunk_hash = Self::stable_content_hash(&chunk_content);
 
                         symbol_values.push(format!(
-                            "('{}::{}', '{}', '{}', {}, {}, {}, {}, '{}', {})",
-                            Self::escape_sql(slug),
-                            Self::escape_sql(&sym.name),
+                            "('{}', '{}', '{}', {}, {}, {}, {}, '{}', {})",
+                            Self::escape_sql(&symbol_id),
                             Self::escape_sql(&sym.name),
                             sym.kind,
                             sym.tested,
@@ -131,8 +152,8 @@ impl GraphStore {
 
                         let relation_value = format!(
                             "('{}', '{}')",
-                            Self::escape_sql(&Self::symbol_id(slug, &relation.from)),
-                            Self::escape_sql(&Self::symbol_id(slug, &relation.to))
+                            Self::escape_sql(&Self::symbol_id(slug, path, &relation.from)),
+                            Self::escape_sql(&Self::symbol_id(slug, path, &relation.to))
                         );
 
                         match table {
@@ -172,13 +193,21 @@ impl GraphStore {
                 indexed_filter
             ));
             queries.push(format!(
-                "UPDATE File SET status = 'indexed', worker_id = NULL WHERE path IN ({});",
+                "UPDATE File \
+                 SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed' END, \
+                     worker_id = NULL, \
+                     needs_reindex = FALSE \
+                 WHERE path IN ({});",
                 indexed_filter
             ));
         }
         if !skipped_paths.is_empty() {
             queries.push(format!(
-                "UPDATE File SET status = 'skipped', worker_id = NULL WHERE path IN ({});",
+                "UPDATE File \
+                 SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'skipped' END, \
+                     worker_id = NULL, \
+                     needs_reindex = FALSE \
+                 WHERE path IN ({});",
                 skipped_paths.join(",")
             ));
         }
@@ -452,15 +481,29 @@ impl GraphStore {
                 Self::escape_sql(project)
             ),
             format!(
-                "INSERT INTO File (path, project_slug, size, mtime, status, priority) VALUES ('{}', '{}', {}, {}, 'pending', {}) \
+                "INSERT INTO File (path, project_slug, size, mtime, status, priority, needs_reindex) VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE) \
                  ON CONFLICT(path) DO UPDATE SET \
                     project_slug=EXCLUDED.project_slug, \
                     size=EXCLUDED.size, \
                     mtime=EXCLUDED.mtime, \
-                    status='pending', \
-                    priority=EXCLUDED.priority, \
-                    worker_id=NULL \
-                 WHERE File.mtime IS DISTINCT FROM EXCLUDED.mtime \
+                    status = CASE \
+                        WHEN File.status = 'indexing' THEN File.status \
+                        ELSE 'pending' \
+                    END, \
+                    priority = EXCLUDED.priority, \
+                    worker_id = CASE \
+                        WHEN File.status = 'indexing' THEN File.worker_id \
+                        ELSE NULL \
+                    END, \
+                    needs_reindex = CASE \
+                        WHEN File.status = 'indexing' \
+                             AND (File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size) \
+                        THEN TRUE \
+                        WHEN File.status = 'indexing' THEN File.needs_reindex \
+                        ELSE FALSE \
+                    END \
+                 WHERE File.project_slug IS DISTINCT FROM EXCLUDED.project_slug \
+                    OR File.mtime IS DISTINCT FROM EXCLUDED.mtime \
                     OR File.size IS DISTINCT FROM EXCLUDED.size \
                     OR File.status <> 'indexed' \
                     OR File.priority IS DISTINCT FROM EXCLUDED.priority;",
