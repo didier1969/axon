@@ -136,6 +136,7 @@ What changed:
   - active project root non-recursive watcher
   - active project visible child subtrees as recursive hot targets
 - the Rust boot sequence now pre-indexes `AXON_PROJECT_ROOT` before launching the full universe scan, so the current repo becomes visible in `IST` earlier
+- the watcher bootstrap suppression window now also covers the short period immediately after the cold universe finishes arming, so a delayed registration storm does not trigger a destructive safety rescan right after the watcher becomes fully armed
 
 ## Rust Core / Native Ingestion / MCP
 
@@ -208,6 +209,7 @@ Rust validation reached a clean state during this session:
 - result reached now after native debounced watcher wiring and hot-delta hardening: `55 passed; 0 failed` in `src/lib.rs` and `9 passed; 0 failed` in `src/main.rs`
 - result reached now after watcher target prioritization and unreadable-root tolerance: `55 passed; 0 failed` in `src/lib.rs` and `12 passed; 0 failed` in `src/main.rs`
 - result reached now after hot-target split, bootstrap-storm suppression, and active-project pre-scan: `57 passed; 0 failed` in `src/lib.rs` and `17 passed; 0 failed` in `src/main.rs`
+- result reached now after delayed cold-arm storm suppression: `57 passed; 0 failed` in `src/lib.rs` and `19 passed; 0 failed` in `src/main.rs`
 - dashboard validation remains green after real `io` monitoring work: `31 tests, 0 failures`
 
 Runtime note:
@@ -218,12 +220,16 @@ Runtime note:
   - immediate arming of `/home/dstadel/projects/axon`
   - recursive arming of active-project hot subtrees such as `/src`, `/tests`, `/docs`, `/scripts`
   - suppression of early bootstrap storms instead of immediate safety rescan
+  - suppression of the delayed cold-arm event burst instead of an immediate post-arm safety rescan
 - live boot now pre-indexes the active repo before the full universe scan:
   - `Hot subtree scan complete: 366 files mapped from "/home/dstadel/projects/axon"`
   - `SELECT count(*) FROM File WHERE path LIKE '/home/dstadel/projects/axon/%'` returned `366` while the universe scan was still in progress
 - one live proof is still open:
   - explicit watcher-driven delta insertion for newly created files in the active repo has not yet been observed end-to-end in runtime logs
   - the hot arming and active-project pre-scan are now proven; the remaining gap is the final live delta proof
+- one new live defect is now isolated for the next slice:
+  - hot subtree scanning can still hit a `Duplicate key "id: axon::main"` constraint violation on `Symbol`
+  - this does not invalidate the watcher bootstrap work, but it is now the next dominant correctness issue on the Rust-first path
 
 Important note:
 

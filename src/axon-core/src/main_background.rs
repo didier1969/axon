@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
 
@@ -109,6 +110,8 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
             let callback_store = store.clone();
             let rescan_guard = Arc::new(AtomicBool::new(false));
             let callback_rescan_guard = rescan_guard.clone();
+            let cold_arm_completed_at = Arc::new(Mutex::new(None));
+            let callback_cold_arm_completed_at = cold_arm_completed_at.clone();
             let watcher_started_at = Instant::now();
 
             let mut debouncer = match new_debouncer(Duration::from_millis(750), None, move |result: DebounceEventResult| {
@@ -116,6 +119,7 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
                     callback_store.clone(),
                     callback_root.clone(),
                     callback_rescan_guard.clone(),
+                    callback_cold_arm_completed_at.clone(),
                     watcher_started_at,
                     result,
                 );
@@ -214,6 +218,9 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
                 armed,
                 watch_root.display()
             );
+            if let Ok(mut armed_at) = cold_arm_completed_at.lock() {
+                *armed_at = Some(Instant::now());
+            }
 
             loop {
                 std::thread::sleep(Duration::from_secs(3600));
@@ -419,6 +426,7 @@ fn handle_watcher_events(
     store: Arc<GraphStore>,
     watch_root: std::path::PathBuf,
     rescan_guard: Arc<AtomicBool>,
+    cold_arm_completed_at: Arc<Mutex<Option<Instant>>>,
     watcher_started_at: Instant,
     result: DebounceEventResult,
 ) {
@@ -434,7 +442,16 @@ fn handle_watcher_events(
                 paths.extend(event.paths.iter().cloned());
             }
 
-            if should_suppress_bootstrap_event_storm(paths.len(), watcher_started_at) {
+            let cold_arm_completed_at = cold_arm_completed_at
+                .lock()
+                .ok()
+                .and_then(|guard| *guard);
+
+            if should_suppress_bootstrap_event_storm(
+                paths.len(),
+                watcher_started_at,
+                cold_arm_completed_at,
+            ) {
                 warn!(
                     "Rust FS watcher suppressed bootstrap event storm ({} path(s)) under {}",
                     paths.len(),
@@ -485,8 +502,18 @@ fn handle_watcher_events(
     }
 }
 
-fn should_suppress_bootstrap_event_storm(path_count: usize, watcher_started_at: Instant) -> bool {
-    watcher_started_at.elapsed() <= Duration::from_secs(120) && path_count >= 5_000
+fn should_suppress_bootstrap_event_storm(
+    path_count: usize,
+    watcher_started_at: Instant,
+    cold_arm_completed_at: Option<Instant>,
+) -> bool {
+    if watcher_started_at.elapsed() <= Duration::from_secs(120) && path_count >= 5_000 {
+        return true;
+    }
+
+    cold_arm_completed_at
+        .map(|armed_at| armed_at.elapsed() <= Duration::from_secs(30) && path_count >= 1_000)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -498,6 +525,7 @@ mod tests {
     use notify_debouncer_full::DebouncedEvent;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
@@ -594,6 +622,7 @@ mod tests {
             store.clone(),
             root.to_path_buf(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
             Instant::now(),
             Ok(vec![event]),
         );
@@ -747,13 +776,35 @@ mod tests {
     #[test]
     fn test_bootstrap_event_storm_is_suppressed_early() {
         let started = Instant::now();
-        assert!(should_suppress_bootstrap_event_storm(6_000, started));
+        assert!(should_suppress_bootstrap_event_storm(6_000, started, None));
     }
 
     #[test]
     fn test_bootstrap_event_storm_is_not_suppressed_late_or_small() {
         let started = Instant::now() - Duration::from_secs(180);
-        assert!(!should_suppress_bootstrap_event_storm(6_000, started));
-        assert!(!should_suppress_bootstrap_event_storm(100, Instant::now()));
+        assert!(!should_suppress_bootstrap_event_storm(6_000, started, None));
+        assert!(!should_suppress_bootstrap_event_storm(100, Instant::now(), None));
+    }
+
+    #[test]
+    fn test_bootstrap_event_storm_is_suppressed_right_after_cold_arm() {
+        let started = Instant::now() - Duration::from_secs(180);
+        let cold_arm_completed_at = Some(Instant::now());
+        assert!(should_suppress_bootstrap_event_storm(
+            2_000,
+            started,
+            cold_arm_completed_at,
+        ));
+    }
+
+    #[test]
+    fn test_bootstrap_event_storm_is_not_suppressed_long_after_cold_arm() {
+        let started = Instant::now() - Duration::from_secs(180);
+        let cold_arm_completed_at = Some(Instant::now() - Duration::from_secs(45));
+        assert!(!should_suppress_bootstrap_event_storm(
+            2_000,
+            started,
+            cold_arm_completed_at,
+        ));
     }
 }

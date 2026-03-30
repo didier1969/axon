@@ -144,6 +144,21 @@ The target boot order is:
 This does not change the global universe objective.
 It changes time-to-usefulness for the active project.
 
+The watcher must also tolerate two startup storms:
+
+1. the early event burst while the hot set is still arming
+2. the delayed event burst right after the cold universe finishes arming
+
+Both are expected side effects of large watch registration on a busy workspace.
+They must be suppressed instead of triggering a destructive safety rescan during startup.
+
+The suppression policy must therefore cover both windows explicitly:
+
+- the early hot-set registration window
+- the short post-cold-arm stabilization window
+
+Outside these windows, genuine watcher `need_rescan()` signals must still be honored.
+
 ## Stage 4. Worker Lanes
 
 Work is dispatched into explicit lanes:
