@@ -12,6 +12,15 @@ const IST_SCHEMA_VERSION: &str = "2";
 const IST_INGESTION_VERSION: &str = "3";
 const IST_EMBEDDING_VERSION: &str = "1";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IstCompatibilityAction {
+    Noop,
+    AdditiveRepair,
+    SoftDerivedInvalidation,
+    SoftEmbeddingInvalidation,
+    HardRebuild,
+}
+
 impl GraphStore {
     pub fn new(db_root: &str) -> Result<Self> {
         let plugin_path = Self::find_plugin_path()?;
@@ -192,6 +201,48 @@ impl GraphStore {
             ("embedding_version", IST_EMBEDDING_VERSION),
         ];
 
+        let current = self.load_runtime_metadata()?;
+        let schema_matches = current.get("schema_version").is_some_and(|v| v == IST_SCHEMA_VERSION);
+        let ingestion_matches = current
+            .get("ingestion_version")
+            .is_some_and(|v| v == IST_INGESTION_VERSION);
+        let embedding_matches = current
+            .get("embedding_version")
+            .is_some_and(|v| v == IST_EMBEDDING_VERSION);
+
+        let mut applied = Vec::new();
+
+        if !schema_matches {
+            if self.is_known_additive_schema_repair(&current, ingestion_matches, embedding_matches)? {
+                info!("IST schema drift detected but preserved via additive repair.");
+                applied.push(IstCompatibilityAction::AdditiveRepair);
+            } else {
+                warn!("IST schema drift is incompatible with current runtime. Rebuilding IST while preserving SOLL.");
+                self.reset_ist_state()?;
+                applied.push(IstCompatibilityAction::HardRebuild);
+            }
+        }
+
+        if !ingestion_matches && !applied.contains(&IstCompatibilityAction::HardRebuild) {
+            warn!("IST ingestion drift detected. Soft-invalidating derived structural layers while preserving File backlog.");
+            self.soft_invalidate_derived_state()?;
+            applied.push(IstCompatibilityAction::SoftDerivedInvalidation);
+        } else if !embedding_matches && !applied.contains(&IstCompatibilityAction::HardRebuild) {
+            warn!("IST embedding drift detected. Soft-invalidating semantic embedding layers only.");
+            self.soft_invalidate_embedding_state()?;
+            applied.push(IstCompatibilityAction::SoftEmbeddingInvalidation);
+        }
+
+        if applied.is_empty() {
+            info!("IST runtime metadata is compatible with current Axon Core.");
+            applied.push(IstCompatibilityAction::Noop);
+        }
+
+        self.write_runtime_metadata(&expected)?;
+        Ok(())
+    }
+
+    fn load_runtime_metadata(&self) -> Result<std::collections::HashMap<String, String>> {
         let existing = self.query_json("SELECT key, value FROM RuntimeMetadata")?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&existing).unwrap_or_default();
         let mut current = std::collections::HashMap::new();
@@ -200,26 +251,10 @@ impl GraphStore {
                 current.insert(row[0].clone(), row[1].clone());
             }
         }
+        Ok(current)
+    }
 
-        let mut drift = Vec::new();
-        for (key, expected_value) in expected {
-            match current.get(key) {
-                Some(value) if value == expected_value => {}
-                Some(value) => drift.push(format!("{key}: {value} -> {expected_value}")),
-                None => drift.push(format!("{key}: <missing> -> {expected_value}")),
-            }
-        }
-
-        if !drift.is_empty() {
-            warn!(
-                "IST compatibility drift detected. Rebuilding IST while preserving SOLL. Drift: {}",
-                drift.join(", ")
-            );
-            self.reset_ist_state()?;
-        } else {
-            info!("IST runtime metadata is compatible with current Axon Core.");
-        }
-
+    fn write_runtime_metadata(&self, expected: &[(&str, &str)]) -> Result<()> {
         self.execute("DELETE FROM RuntimeMetadata")?;
         for (key, value) in expected {
             self.execute(&format!(
@@ -227,8 +262,43 @@ impl GraphStore {
                 key, value
             ))?;
         }
-
         Ok(())
+    }
+
+    fn is_known_additive_schema_repair(
+        &self,
+        current: &std::collections::HashMap<String, String>,
+        ingestion_matches: bool,
+        embedding_matches: bool,
+    ) -> Result<bool> {
+        if current.get("schema_version").map(String::as_str) != Some("1") {
+            return Ok(false);
+        }
+
+        if !ingestion_matches || !embedding_matches {
+            return Ok(false);
+        }
+
+        let existing = self.query_json("SELECT name FROM pragma_table_info('File')")?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&existing).unwrap_or_default();
+        let columns: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .collect();
+
+        let required = [
+            "path",
+            "project_slug",
+            "status",
+            "size",
+            "priority",
+            "mtime",
+            "worker_id",
+            "trace_id",
+            "needs_reindex",
+        ];
+
+        Ok(required.iter().all(|column| columns.contains(*column)))
     }
 
     fn reset_ist_state(&self) -> Result<()> {
@@ -251,6 +321,43 @@ impl GraphStore {
         }
 
         info!("IST state reset complete. SOLL sanctuary preserved.");
+        Ok(())
+    }
+
+    fn soft_invalidate_derived_state(&self) -> Result<()> {
+        let cleanup_queries = [
+            "DELETE FROM CALLS_NIF",
+            "DELETE FROM CALLS",
+            "DELETE FROM CONTAINS",
+            "DELETE FROM IMPACTS",
+            "DELETE FROM SUBSTANTIATES",
+            "DELETE FROM ChunkEmbedding",
+            "DELETE FROM EmbeddingModel",
+            "DELETE FROM Chunk",
+            "DELETE FROM Symbol",
+            "UPDATE File SET status = 'pending', worker_id = NULL, needs_reindex = FALSE",
+        ];
+
+        for query in cleanup_queries {
+            self.execute(query)?;
+        }
+
+        info!("IST derived structural layers soft-invalidated. File backlog preserved for replay.");
+        Ok(())
+    }
+
+    fn soft_invalidate_embedding_state(&self) -> Result<()> {
+        let cleanup_queries = [
+            "DELETE FROM ChunkEmbedding",
+            "DELETE FROM EmbeddingModel",
+            "UPDATE Symbol SET embedding = NULL",
+        ];
+
+        for query in cleanup_queries {
+            self.execute(query)?;
+        }
+
+        info!("IST embedding layers soft-invalidated. Structural truth preserved.");
         Ok(())
     }
 }

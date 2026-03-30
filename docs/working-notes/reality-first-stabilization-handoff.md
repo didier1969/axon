@@ -170,6 +170,11 @@ What changed:
   - `guarded`
   - `paused`
   and logs transitions so the operator plane can consume runtime truth instead of inventing a second throttling authority
+- the `IST` restart policy is no longer binary:
+  - additive repair preserves compatible `File` state
+  - ingestion drift now soft-invalidates derived structural layers and requeues `File`
+  - embedding drift now soft-invalidates semantic layers only
+  - hard rebuild is reserved for incompatible base `File` schema
 - the semantic worker is no longer unconditional work: embeddings now pause under queue pressure or recent live service degradation, making semantic enrichment a true slack-driven layer instead of a permanent competitor to structural ingestion
 - the scanner itself now applies adaptive discovery throttling based on pending backlog, memory pressure, and recent live `/sql` + `/mcp` latency; discovery is no longer a blind fixed-rate producer
 - the Rust core now computes a host-specific runtime profile at boot and uses it to size worker count, queue capacity, blocking-thread budget, and RAM headroom instead of relying on fixed constants
@@ -267,6 +272,7 @@ Rust validation reached a clean state during this session:
 - result reached now after active-claim preservation and path-aware top-level symbol IDs: `61 passed; 0 failed` in `src/lib.rs` and `19 passed; 0 failed` in `src/main.rs`
 - result reached now after additive legacy-`IST` schema repair for `needs_reindex`: `62 passed; 0 failed` in `src/lib.rs` and `19 passed; 0 failed` in `src/main.rs`
 - result reached now after watcher probes and file-only bootstrap salvage: `63 passed; 0 failed` in `src/lib.rs` and `21 passed; 0 failed` in `src/main.rs`
+- result reached now after explicit `IST` invalidation policy tests: `66 passed; 0 failed` in `src/lib.rs` and `25 passed; 0 failed` in `src/main.rs`
 - dashboard validation remains green after real `io` monitoring work: `31 tests, 0 failures`
 
 Runtime note:

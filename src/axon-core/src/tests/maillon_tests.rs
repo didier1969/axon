@@ -137,10 +137,139 @@ mod tests {
             )
             .unwrap();
         store
+            .execute(
+                "INSERT INTO File (path, project_slug, status, size, priority, mtime, worker_id, trace_id) VALUES ('/tmp/legacy_reopen.ex', 'proj', 'indexed', 100, 1, 1, NULL, 'trace-legacy')"
+            )
+            .unwrap();
+        store
             .execute("DELETE FROM RuntimeMetadata;")
             .unwrap();
         store
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '1')")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '3')")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '1')")
+            .unwrap();
+        drop(store);
+
+        let reopened = GraphStore::new(&db_root_str).unwrap();
+
+        let row = reopened
+            .query_json("SELECT status, needs_reindex FROM File WHERE path = '/tmp/legacy_reopen.ex'")
+            .unwrap();
+        assert!(row.contains("indexed"));
+        assert!(row.contains("false"), "La colonne needs_reindex doit etre disponible apres reopen");
+
+        let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
+    fn test_maillon_2c_embedding_version_drift_resets_only_embedding_layers() {
+        let db_root = std::env::temp_dir().join(format!(
+            "axon-embedding-soft-reset-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&db_root);
+        std::fs::create_dir_all(&db_root).unwrap();
+
+        let db_root_str = db_root.to_string_lossy().to_string();
+        let store = GraphStore::new(&db_root_str).unwrap();
+
+        store
+            .bulk_insert_files(&[("/tmp/embed_reset.ex".to_string(), "proj".to_string(), 100, 1)])
+            .unwrap();
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES ('sym-embed-reset', 'embed_reset', 'function', 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('chunk-embed-reset', 'symbol', 'sym-embed-reset', 'proj', 'function', 'content', 'hash-1', 1, 1)")
+            .unwrap();
+        store
+            .execute("INSERT INTO EmbeddingModel (id, kind, model_name, dimension, version, created_at) VALUES ('model-embed-reset', 'chunk', 'bge-small-en-v1.5', 384, '0', 1)")
+            .unwrap();
+        store
+            .execute("INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash) VALUES ('chunk-embed-reset', 'model-embed-reset', 'hash-1')")
+            .unwrap();
+        store
+            .execute("DELETE FROM RuntimeMetadata;")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '2')")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '3')")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '0')")
+            .unwrap();
+        drop(store);
+
+        let reopened = GraphStore::new(&db_root_str).unwrap();
+
+        assert_eq!(
+            reopened
+                .query_count("SELECT count(*) FROM File WHERE path = '/tmp/embed_reset.ex'")
+                .unwrap(),
+            1,
+            "Le drift embedding ne doit pas purger File"
+        );
+        assert_eq!(
+            reopened
+                .query_count("SELECT count(*) FROM Symbol WHERE id = 'sym-embed-reset'")
+                .unwrap(),
+            1,
+            "Le drift embedding ne doit pas purger Symbol"
+        );
+        assert_eq!(
+            reopened
+                .query_count("SELECT count(*) FROM Chunk WHERE id = 'chunk-embed-reset'")
+                .unwrap(),
+            1,
+            "Le drift embedding ne doit pas purger Chunk"
+        );
+        assert_eq!(
+            reopened.query_count("SELECT count(*) FROM ChunkEmbedding").unwrap(),
+            0,
+            "Le drift embedding doit purger uniquement ChunkEmbedding"
+        );
+
+        let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
+    fn test_maillon_2c_ingestion_version_drift_preserves_file_rows_and_requeues_them() {
+        let db_root = std::env::temp_dir().join(format!(
+            "axon-ingestion-soft-reset-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&db_root);
+        std::fs::create_dir_all(&db_root).unwrap();
+
+        let db_root_str = db_root.to_string_lossy().to_string();
+        let store = GraphStore::new(&db_root_str).unwrap();
+
+        store
+            .bulk_insert_files(&[("/tmp/ingestion_reset.ex".to_string(), "proj".to_string(), 100, 1)])
+            .unwrap();
+        store
+            .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/ingestion_reset.ex'")
+            .unwrap();
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES ('sym-ingestion-reset', 'ingestion_reset', 'function', 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/ingestion_reset.ex', 'sym-ingestion-reset')")
+            .unwrap();
+        store
+            .execute("DELETE FROM RuntimeMetadata;")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '2')")
             .unwrap();
         store
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '2')")
@@ -151,15 +280,89 @@ mod tests {
         drop(store);
 
         let reopened = GraphStore::new(&db_root_str).unwrap();
-        reopened
-            .bulk_insert_files(&[("/tmp/legacy_reopen.ex".to_string(), "proj".to_string(), 100, 1)])
-            .unwrap();
 
-        let row = reopened
-            .query_json("SELECT status, needs_reindex FROM File WHERE path = '/tmp/legacy_reopen.ex'")
+        assert_eq!(
+            reopened
+                .query_count("SELECT count(*) FROM File WHERE path = '/tmp/ingestion_reset.ex'")
+                .unwrap(),
+            1,
+            "Le drift ingestion ne doit pas purger File"
+        );
+        let file_row = reopened
+            .query_json("SELECT status FROM File WHERE path = '/tmp/ingestion_reset.ex'")
             .unwrap();
-        assert!(row.contains("pending"));
-        assert!(row.contains("false"), "La colonne needs_reindex doit etre disponible apres reopen");
+        assert!(
+            file_row.contains("pending"),
+            "Le drift ingestion doit remettre les fichiers en pending pour replay"
+        );
+        assert_eq!(
+            reopened
+                .query_count("SELECT count(*) FROM Symbol WHERE id = 'sym-ingestion-reset'")
+                .unwrap(),
+            0,
+            "Le drift ingestion doit purger les dérivés structurels"
+        );
+        assert_eq!(
+            reopened.query_count("SELECT count(*) FROM CONTAINS").unwrap(),
+            0,
+            "Le drift ingestion doit purger les relations dérivées"
+        );
+
+        let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
+    fn test_maillon_2c_incompatible_file_schema_triggers_hard_rebuild() {
+        let db_root = std::env::temp_dir().join(format!(
+            "axon-hard-rebuild-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&db_root);
+        std::fs::create_dir_all(&db_root).unwrap();
+
+        let db_root_str = db_root.to_string_lossy().to_string();
+        let store = GraphStore::new(&db_root_str).unwrap();
+
+        store.execute("DROP TABLE File;").unwrap();
+        store
+            .execute(
+                "CREATE TABLE File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, priority BIGINT)"
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO File (path, project_slug, priority) VALUES ('/tmp/hard_reset.ex', 'proj', 1)"
+            )
+            .unwrap();
+        store.execute("DELETE FROM RuntimeMetadata;").unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '1')")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '3')")
+            .unwrap();
+        store
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '1')")
+            .unwrap();
+        drop(store);
+
+        let reopened = GraphStore::new(&db_root_str).unwrap();
+
+        assert_eq!(
+            reopened
+                .query_count("SELECT count(*) FROM File WHERE path = '/tmp/hard_reset.ex'")
+                .unwrap(),
+            0,
+            "Un schéma File incompatible doit déclencher un rebuild dur de IST"
+        );
+        assert_eq!(
+            reopened
+                .query_count("SELECT count(*) FROM RuntimeMetadata WHERE key = 'schema_version' AND value = '2'")
+                .unwrap(),
+            1,
+            "Le metadata runtime doit être réaligné après rebuild"
+        );
 
         let _ = std::fs::remove_dir_all(&db_root);
     }
