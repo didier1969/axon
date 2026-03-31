@@ -80,6 +80,7 @@ Axon now targets this split:
 - `Decision` must link to a need or impact
 - validation is advisory only and stays compatible with historical merge restore
 - the official Markdown `export -> restore` path now replays metadata and explicit SOLL links when they are present in the export, while keeping historical exports valid through optional append-only sections
+- the next thin governance prototype is now selected: keep `soll.db` canonical, keep timestamped snapshots, and add only a derived per-item `current` disk view for stable-ID entities (`Requirement`, `Decision`, `Validation`)
 
 This means the ongoing migration must remove remaining ingestion/control-plane authority from Elixir while preserving the UI.
 
