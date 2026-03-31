@@ -561,6 +561,14 @@ git commit -m "feat: add targeted chunk invalidation"
 
 ### Task 14: Introduce `GraphProjection`
 
+Status:
+
+- completed on `feat/rust-first-control-plane`
+- added a dedicated derived `GraphProjection` table; no truth tables (`CALLS`, `CONTAINS`, `Symbol`) were repurposed
+- symbol projection now materializes a bounded call-neighborhood around an anchor symbol
+- file projection now materializes a stable bounded neighborhood anchored on the file and its contained symbols
+- `axon_impact` now appends an explicit local projection section, clearly labeled as derived context rather than canonical call-graph truth
+
 **Files:**
 - Modify: `src/axon-core/src/graph_bootstrap.rs`
 - Modify: `src/axon-core/src/graph_query.rs`

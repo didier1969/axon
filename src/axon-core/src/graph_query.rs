@@ -2,10 +2,172 @@ use std::ffi::CString;
 
 use anyhow::{anyhow, Result};
 use libloading::Symbol as LibSymbol;
+use serde_json::Value;
 
 use crate::graph::{ExecFunc, FreeStrFunc, GraphStore, QueryCountFunc, QueryJsonFunc};
 
 impl GraphStore {
+    fn graph_projection_version() -> &'static str {
+        "1"
+    }
+
+    fn resolve_symbol_anchor_id(&self, symbol: &str) -> Result<Option<String>> {
+        let res = self.query_json_param(
+            "SELECT id FROM Symbol WHERE id = $sym OR name = $sym LIMIT 1",
+            &serde_json::json!({ "sym": symbol }),
+        )?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string()))
+    }
+
+    pub fn refresh_symbol_projection(&self, symbol: &str, radius: u64) -> Result<Option<String>> {
+        let Some(anchor_id) = self.resolve_symbol_anchor_id(symbol)? else {
+            return Ok(None);
+        };
+
+        let radius = radius.max(1) as i64;
+        let params = serde_json::json!({
+            "anchor": anchor_id,
+            "radius": radius,
+        });
+        let query = "WITH RECURSIVE \
+                call_edges(source_id, target_id) AS ( \
+                    SELECT source_id, target_id FROM CALLS \
+                    UNION ALL \
+                    SELECT target_id, source_id FROM CALLS \
+                ), \
+                traverse(node_id, distance) AS ( \
+                    SELECT $anchor AS node_id, 0 AS distance \
+                    UNION ALL \
+                    SELECT e.target_id, t.distance + 1 \
+                    FROM call_edges e JOIN traverse t ON e.source_id = t.node_id \
+                    WHERE t.distance < $radius \
+                ) \
+            SELECT node_id, MIN(distance) \
+            FROM traverse \
+            GROUP BY node_id";
+        let res = self.query_json_param(query, &params)?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        let created_at = chrono::Utc::now().timestamp_millis();
+        let anchor_escaped = anchor_id.replace('\'', "''");
+        let version = Self::graph_projection_version();
+
+        let mut queries = vec![format!(
+            "DELETE FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = '{}' AND radius = {};",
+            anchor_escaped, radius
+        )];
+
+        queries.push(format!(
+            "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('symbol', '{}', 'symbol', '{}', 'anchor', 0, {}, '{}', {});",
+            anchor_escaped, anchor_escaped, radius, version, created_at
+        ));
+
+        for row in rows {
+            let Some(node_id) = row.first().and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(0);
+            if node_id == anchor_id {
+                continue;
+            }
+            queries.push(format!(
+                "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('symbol', '{}', 'symbol', '{}', 'call-neighborhood', {}, {}, '{}', {});",
+                anchor_escaped,
+                node_id.replace('\'', "''"),
+                distance,
+                radius,
+                version,
+                created_at
+            ));
+        }
+
+        self.execute_batch(&queries)?;
+        Ok(Some(anchor_id))
+    }
+
+    pub fn refresh_file_projection(&self, file_path: &str, radius: u64) -> Result<()> {
+        let radius = radius.max(1) as i64;
+        let params = serde_json::json!({
+            "file": file_path,
+            "radius": radius,
+        });
+        let query = "WITH RECURSIVE \
+                call_edges(source_id, target_id) AS ( \
+                    SELECT source_id, target_id FROM CALLS \
+                    UNION ALL \
+                    SELECT target_id, source_id FROM CALLS \
+                ), \
+                seed(node_id, distance) AS ( \
+                    SELECT target_id, 1 AS distance FROM CONTAINS WHERE source_id = $file \
+                    UNION ALL \
+                    SELECT e.target_id, s.distance + 1 \
+                    FROM call_edges e JOIN seed s ON e.source_id = s.node_id \
+                    WHERE s.distance < $radius \
+                ) \
+            SELECT node_id, MIN(distance) \
+            FROM seed \
+            GROUP BY node_id";
+        let res = self.query_json_param(query, &params)?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        let created_at = chrono::Utc::now().timestamp_millis();
+        let file_escaped = file_path.replace('\'', "''");
+        let version = Self::graph_projection_version();
+
+        let mut queries = vec![format!(
+            "DELETE FROM GraphProjection WHERE anchor_type = 'file' AND anchor_id = '{}' AND radius = {};",
+            file_escaped, radius
+        )];
+
+        queries.push(format!(
+            "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('file', '{}', 'file', '{}', 'file', 0, {}, '{}', {});",
+            file_escaped, file_escaped, radius, version, created_at
+        ));
+
+        for row in rows {
+            let Some(node_id) = row.first().and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(1);
+            let edge_kind = if distance == 1 { "contains" } else { "call-neighborhood" };
+            queries.push(format!(
+                "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('file', '{}', 'symbol', '{}', '{}', {}, {}, '{}', {});",
+                file_escaped,
+                node_id.replace('\'', "''"),
+                edge_kind,
+                distance,
+                radius,
+                version,
+                created_at
+            ));
+        }
+
+        self.execute_batch(&queries)
+    }
+
+    pub fn query_graph_projection(&self, anchor_type: &str, anchor_id: &str, radius: u64) -> Result<String> {
+        let query = "SELECT gp.target_type, gp.target_id, gp.edge_kind, gp.distance, \
+                            COALESCE(s.name, gp.target_id) AS label, \
+                            COALESCE(f.path, contain.source_id, '') AS uri \
+                     FROM GraphProjection gp \
+                     LEFT JOIN Symbol s ON gp.target_type = 'symbol' AND s.id = gp.target_id \
+                     LEFT JOIN CONTAINS contain ON gp.target_type = 'symbol' AND contain.target_id = gp.target_id \
+                     LEFT JOIN File f ON gp.target_type = 'file' AND f.path = gp.target_id \
+                     WHERE gp.anchor_type = $anchor_type AND gp.anchor_id = $anchor_id AND gp.radius = $radius \
+                     ORDER BY gp.distance ASC, gp.edge_kind ASC, label ASC";
+        self.query_json_param(
+            query,
+            &serde_json::json!({
+                "anchor_type": anchor_type,
+                "anchor_id": anchor_id,
+                "radius": radius as i64,
+            }),
+        )
+    }
+
     pub fn execute(&self, query: &str) -> Result<()> {
         let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {

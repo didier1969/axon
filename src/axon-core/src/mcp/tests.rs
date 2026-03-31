@@ -1001,6 +1001,7 @@ fn test_vcr2_impact_before_change_on_public_api() {
     assert!(impact_text.contains("parse_batch"));
     assert!(impact_text.contains("consumer_a"));
     assert!(impact_text.contains("consumer_b"));
+    assert!(impact_text.contains("Projection locale"));
 
     let api_break_req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),

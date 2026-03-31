@@ -8,6 +8,27 @@ impl McpServer {
         "target_id IN (SELECT id FROM Symbol WHERE name = $sym OR id = $sym)"
     }
 
+    fn build_local_projection_section(&self, symbol: &str, depth: u64) -> Option<String> {
+        let radius = depth.max(1).min(2);
+        let anchor_id = self.graph_store.refresh_symbol_projection(symbol, radius).ok()??;
+        let projection_res = self
+            .graph_store
+            .query_graph_projection("symbol", &anchor_id, radius)
+            .ok()?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&projection_res).unwrap_or_default();
+        if rows.len() <= 1 {
+            return None;
+        }
+
+        Some(format!(
+            "\n\n### Projection locale derivee\n\n**Etat:** vue de voisinage derivee, utile pour le contexte local; elle ne remplace pas la verite canonique de `CALLS`.\n\n{}",
+            format_table_from_json(
+                &projection_res,
+                &["Type cible", "ID cible", "Type de lien", "Distance", "Label", "URI"]
+            )
+        ))
+    }
+
     pub(crate) fn axon_impact(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
@@ -61,6 +82,9 @@ impl McpServer {
                     depth, impact_radius
                 ));
                 report.push_str(&table);
+                if let Some(section) = self.build_local_projection_section(symbol, depth) {
+                    report.push_str(&section);
+                }
 
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }

@@ -1435,4 +1435,127 @@ mod tests {
             "Les clauses multiples doivent etre coalescees en un symbole logique"
         );
     }
+
+    #[test]
+    fn test_graph_projection_symbol_radius_1_returns_useful_neighborhood() {
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/other.rs', 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+                ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
+                ('proj::B', 'B', 'function', true, true, false, false, 'proj'), \
+                ('proj::C', 'C', 'function', true, true, false, false, 'proj'), \
+                ('proj::X', 'X', 'function', true, true, false, false, 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES \
+                ('/tmp/graph/a.rs', 'proj::A'), \
+                ('/tmp/graph/a.rs', 'proj::B'), \
+                ('/tmp/graph/other.rs', 'proj::C'), \
+                ('/tmp/graph/other.rs', 'proj::X')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::B'), ('proj::B', 'proj::C'), ('proj::X', 'proj::C')")
+            .unwrap();
+
+        let anchor_id = store
+            .refresh_symbol_projection("A", 1)
+            .unwrap()
+            .expect("anchor should resolve");
+        let projection = store
+            .query_graph_projection("symbol", &anchor_id, 1)
+            .unwrap();
+
+        assert!(projection.contains("proj::A"));
+        assert!(projection.contains("proj::B"));
+        assert!(!projection.contains("proj::C"));
+        assert!(!projection.contains("proj::X"));
+        assert!(projection.contains("call-neighborhood"));
+    }
+
+    #[test]
+    fn test_graph_projection_symbol_radius_2_expands_but_stays_bounded() {
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/other.rs', 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+                ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
+                ('proj::B', 'B', 'function', true, true, false, false, 'proj'), \
+                ('proj::C', 'C', 'function', true, true, false, false, 'proj'), \
+                ('proj::X', 'X', 'function', true, true, false, false, 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES \
+                ('/tmp/graph/a.rs', 'proj::A'), \
+                ('/tmp/graph/a.rs', 'proj::B'), \
+                ('/tmp/graph/other.rs', 'proj::C'), \
+                ('/tmp/graph/other.rs', 'proj::X')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::B'), ('proj::B', 'proj::C'), ('proj::X', 'proj::C')")
+            .unwrap();
+
+        let anchor_id = store
+            .refresh_symbol_projection("A", 2)
+            .unwrap()
+            .expect("anchor should resolve");
+        let projection = store
+            .query_graph_projection("symbol", &anchor_id, 2)
+            .unwrap();
+
+        assert!(projection.contains("proj::A"));
+        assert!(projection.contains("proj::B"));
+        assert!(projection.contains("proj::C"));
+        assert!(!projection.contains("proj::X"));
+    }
+
+    #[test]
+    fn test_graph_projection_file_anchor_is_stable_and_idempotent() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let file_path = "/tmp/graph/file_anchor.rs";
+        store
+            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/file_anchor.rs', 'proj'), ('/tmp/graph/helper.rs', 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+                ('proj::FileAlpha', 'FileAlpha', 'function', true, true, false, false, 'proj'), \
+                ('proj::FileBeta', 'FileBeta', 'function', true, true, false, false, 'proj'), \
+                ('proj::Helper', 'Helper', 'function', true, true, false, false, 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES \
+                ('/tmp/graph/file_anchor.rs', 'proj::FileAlpha'), \
+                ('/tmp/graph/file_anchor.rs', 'proj::FileBeta'), \
+                ('/tmp/graph/helper.rs', 'proj::Helper')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::FileAlpha', 'proj::Helper')")
+            .unwrap();
+
+        store.refresh_file_projection(file_path, 2).unwrap();
+        let first_count = store
+            .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'file' AND anchor_id = '/tmp/graph/file_anchor.rs' AND radius = 2")
+            .unwrap();
+        let first_projection = store
+            .query_graph_projection("file", file_path, 2)
+            .unwrap();
+
+        store.refresh_file_projection(file_path, 2).unwrap();
+        let second_count = store
+            .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'file' AND anchor_id = '/tmp/graph/file_anchor.rs' AND radius = 2")
+            .unwrap();
+        let second_projection = store
+            .query_graph_projection("file", file_path, 2)
+            .unwrap();
+
+        assert_eq!(first_count, second_count, "La projection dérivée ne doit pas se dupliquer");
+        assert_eq!(first_projection, second_projection, "La même ancre et le même rayon doivent rester stables");
+        assert!(second_projection.contains("contains"));
+        assert!(second_projection.contains("proj::FileAlpha"));
+        assert!(second_projection.contains("proj::FileBeta"));
+    }
 }

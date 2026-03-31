@@ -261,6 +261,16 @@ What changed:
    - new maillon proofs now cover:
      - targeted invalidation for one changed file with unrelated chunks preserved
      - stale hash detection causing requeue for semantic recompute without global replay
+ - Wave 5 / Task 14 is now completed:
+   - `GraphProjection` is introduced as a dedicated derived table, separate from `CALLS`, `CONTAINS`, `Symbol`, and other canonical IST truth
+   - symbol projection now materializes a bounded call-neighborhood around an anchor symbol
+   - file projection now materializes a stable local neighborhood around a file and its contained symbols
+   - `axon_impact` now appends an explicit `Projection locale derivee` section when local graph context is available
+   - this section is intentionally labeled as derived context and does not replace the canonical `CALLS`-based impact report
+   - current proofs cover:
+     - symbol projection with radius 1
+     - symbol projection with radius 2
+     - file-anchor projection stability and idempotence
   - claim depth no longer reacts only to a raw latency number
   - recovery back to full throughput is gradual instead of on/off
   - embeddings pause before structural ingestion is fully stopped
