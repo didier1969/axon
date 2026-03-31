@@ -195,6 +195,94 @@ fn test_axon_inspect() {
 }
 
 #[test]
+fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/auth.rs', 'global')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/access.rs', 'global')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::authorize_request', 'authorize_request', 'function', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::check_token_chain', 'check_token_chain', 'function', false, true, false, 'global')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/auth.rs', 'global::authorize_request')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/access.rs', 'global::check_token_chain')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'sig-access', '1', 1001)").unwrap();
+    server.graph_store.execute("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'graph-bge-small-en-v1.5-384', 'sig-auth', '1', CAST([1.0] || repeat([0.0], 383) AS FLOAT[384]), 1000)").unwrap();
+    server.graph_store.execute("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'graph-bge-small-en-v1.5-384', 'sig-access', '1', CAST([0.99, 0.01] || repeat([0.0], 382) AS FLOAT[384]), 1001)").unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_semantic_clones",
+            "arguments": { "symbol": "authorize_request" }
+        })),
+        id: Some(json!(77)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    assert!(content.contains("check_token_chain"));
+    assert!(content.contains("derive du graphe"));
+}
+
+#[test]
+fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/auth.rs', 'global')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/access.rs', 'global')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::authorize_request', 'authorize_request', 'function', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::check_token_chain', 'check_token_chain', 'function', false, true, false, 'global')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/auth.rs', 'global::authorize_request')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/access.rs', 'global::check_token_chain')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'sig-access-current', '1', 1001)").unwrap();
+    server.graph_store.execute("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'graph-bge-small-en-v1.5-384', 'sig-auth', '1', CAST([1.0] || repeat([0.0], 383) AS FLOAT[384]), 1000)").unwrap();
+    server.graph_store.execute("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'graph-bge-small-en-v1.5-384', 'sig-access-stale', '1', CAST([0.99, 0.01] || repeat([0.0], 382) AS FLOAT[384]), 1001)").unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_semantic_clones",
+            "arguments": { "symbol": "authorize_request" }
+        })),
+        id: Some(json!(78)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    assert!(!content.contains("derive du graphe"));
+    assert!(!content.contains("check_token_chain"));
+}
+
+#[test]
 fn test_axon_audit_taint_analysis() {
     let server = create_test_server();
     server

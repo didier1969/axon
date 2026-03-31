@@ -669,3 +669,38 @@ Method skill already created:
 After compaction, do not trust any summary blindly, including this one.
 
 Use this file as a map, then verify the code and runtime state directly.
+
+## 2026-03-31 Task 16 Update
+
+Branch:
+
+- `feat/rust-first-control-plane`
+
+Newly completed slice:
+
+- `Task 16` is now complete
+- `GraphEmbedding` exists as a derived, disposable layer on top of `GraphProjectionState`
+- refresh is anchor-scoped and validity is tied to `source_signature + projection_version`
+- the semantic worker computes graph embeddings only when chunk/symbol backlog is clear and service pressure is `Healthy`
+- `axon_semantic_clones` now exposes graph-derived neighborhood similarity as an explicit non-canonical section
+
+Files changed in this slice:
+
+- `src/axon-core/src/embedder.rs`
+- `src/axon-core/src/graph_bootstrap.rs`
+- `src/axon-core/src/mcp/tools_governance.rs`
+- `src/axon-core/src/mcp/tests.rs`
+
+Validation passed:
+
+- `cargo test --manifest-path src/axon-core/Cargo.toml graph_embedding`
+- `cargo test --manifest-path src/axon-core/Cargo.toml`
+
+Most important decision:
+
+- graph embeddings are not used to invent truth
+- they only enrich an existing MCP surface with clearly labeled derived context
+
+Next logical step:
+
+- `Task 17`: classify Python operational paths as `current`, `tolerated`, `obsolete`, then retire obsolete ones without touching the Datalog/TypeQL bridge yet

@@ -647,6 +647,15 @@ git commit -m "feat: add targeted graph projection invalidation"
 
 ### Task 16: Add graph embeddings only after projection validation
 
+Status:
+
+- completed on `feat/rust-first-control-plane`
+- added a dedicated derived `GraphEmbedding` table keyed by anchor/radius/model and tied to `GraphProjectionState`
+- graph embeddings are refreshed only when the underlying projection signature or projection version drifts
+- the semantic worker now computes graph embeddings only after chunk and symbol backlog is clear and the live service is `Healthy`
+- MCP consumption stays honest: `axon_semantic_clones` appends a clearly labeled graph-derived neighborhood section, never canonical truth
+- stale graph embeddings are ignored by joining back to current `GraphProjectionState`
+
 **Files:**
 - Modify: `src/axon-core/src/embedder.rs`
 - Modify: `src/axon-core/src/graph_bootstrap.rs`

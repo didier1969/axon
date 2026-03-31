@@ -4,6 +4,56 @@ use super::format::format_table_from_json;
 use super::McpServer;
 
 impl McpServer {
+    fn build_graph_clone_section(&self, symbol: &str) -> Option<String> {
+        let anchor_res = self
+            .graph_store
+            .query_json_param(
+                "SELECT id FROM Symbol WHERE id = $sym OR name = $sym LIMIT 1",
+                &json!({"sym": symbol}),
+            )
+            .ok()?;
+        let anchor_rows: Vec<Vec<Value>> = serde_json::from_str(&anchor_res).unwrap_or_default();
+        let anchor_id = anchor_rows.first()?.first()?.as_str()?;
+        let query = "
+            SELECT other.name, other.kind, array_cosine_distance(anchor.embedding, peer.embedding) AS score
+            FROM GraphEmbedding anchor
+            JOIN GraphProjectionState anchor_state
+              ON anchor_state.anchor_type = anchor.anchor_type
+             AND anchor_state.anchor_id = anchor.anchor_id
+             AND anchor_state.radius = anchor.radius
+             AND anchor_state.source_signature = anchor.source_signature
+             AND anchor_state.projection_version = anchor.projection_version
+            JOIN GraphEmbedding peer
+              ON peer.anchor_type = anchor.anchor_type
+             AND peer.radius = anchor.radius
+             AND peer.model_id = anchor.model_id
+             AND peer.anchor_id <> anchor.anchor_id
+            JOIN GraphProjectionState peer_state
+              ON peer_state.anchor_type = peer.anchor_type
+             AND peer_state.anchor_id = peer.anchor_id
+             AND peer_state.radius = peer.radius
+             AND peer_state.source_signature = peer.source_signature
+             AND peer_state.projection_version = peer.projection_version
+            JOIN Symbol other
+              ON other.id = peer.anchor_id
+            WHERE anchor.anchor_type = 'symbol'
+              AND anchor.anchor_id = $anchor
+              AND anchor.model_id = 'graph-bge-small-en-v1.5-384'
+              AND array_cosine_distance(anchor.embedding, peer.embedding) < 0.05
+            ORDER BY score ASC
+            LIMIT 5";
+        let res = self.graph_store.query_json_param(query, &json!({"anchor": anchor_id})).ok()?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        if rows.is_empty() {
+            return None;
+        }
+
+        Some(format!(
+            "\n\n### Voisinages similaires derives du graphe\n\n**Etat:** contexte derive du graphe via `GraphEmbedding`, utile pour reperer des neighborhoods proches; ce n'est pas une verite canonique d'architecture.\n\n{}",
+            format_table_from_json(&res, &["Nom", "Type", "Distance de voisinage"])
+        ))
+    }
+
     pub(crate) fn axon_audit(&self, args: &Value) -> Option<Value> {
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         let project = requested_project;
@@ -106,7 +156,8 @@ impl McpServer {
         );
         match self.graph_store.query_json(&query) {
             Ok(res) => {
-                let report = if res.len() > 5 && res != "[]" {
+                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+                let mut report = if !rows.is_empty() {
                     format!(
                         "### 👯 Clones Sémantiques détectés pour '{}'\n\n{}",
                         symbol,
@@ -115,6 +166,9 @@ impl McpServer {
                 } else {
                     format!("✅ Aucun clone sémantique évident (similitude > 95%) trouvé pour '{}'.", symbol)
                 };
+                if let Some(section) = self.build_graph_clone_section(symbol) {
+                    report.push_str(&section);
+                }
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Cloning Error: {}", e) }], "isError": true })),

@@ -9,10 +9,12 @@ use crate::service_guard::{self, ServicePressure};
 
 const SYMBOL_MODEL_ID: &str = "sym-bge-small-en-v1.5-384";
 const CHUNK_MODEL_ID: &str = "chunk-bge-small-en-v1.5-384";
+const GRAPH_MODEL_ID: &str = "graph-bge-small-en-v1.5-384";
 const MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 const MODEL_VERSION: &str = "1";
 const CHUNK_BATCH_SIZE: usize = 16;
 const SYMBOL_BATCH_SIZE: usize = 32;
+const GRAPH_BATCH_SIZE: usize = 6;
 
 // NEXUS v10.5: Sovereign Semantic Engine
 // We isolate the ONNX runtime inside a pure OS thread to prevent Tokio/jemalloc aborts.
@@ -54,6 +56,9 @@ impl SemanticWorkerPool {
         if let Err(e) = graph_store.ensure_embedding_model(CHUNK_MODEL_ID, "chunk", MODEL_NAME, 384, MODEL_VERSION) {
             error!("Semantic Worker: failed to register chunk embedding model: {:?}", e);
         }
+        if let Err(e) = graph_store.ensure_embedding_model(GRAPH_MODEL_ID, "graph", MODEL_NAME, 384, MODEL_VERSION) {
+            error!("Semantic Worker: failed to register graph embedding model: {:?}", e);
+        }
 
         info!("Semantic Worker: Hunting for unembedded symbols...");
         
@@ -64,8 +69,10 @@ impl SemanticWorkerPool {
                 continue;
             }
 
+            let mut chunk_backlog_active = false;
             match graph_store.fetch_unembedded_chunks(CHUNK_MODEL_ID, CHUNK_BATCH_SIZE) {
                 Ok(chunks) if !chunks.is_empty() => {
+                    chunk_backlog_active = true;
                     debug!("Semantic Worker: Embedding {} chunks...", chunks.len());
                     let texts: Vec<String> = chunks.iter().map(|(_, content, _)| content.clone()).collect();
                     match model.embed(texts, None) {
@@ -92,8 +99,10 @@ impl SemanticWorkerPool {
                 Err(e) => error!("Semantic Worker: Chunk DB Fetch error: {:?}", e),
             }
 
+            let mut symbol_backlog_active = false;
             match graph_store.fetch_unembedded_symbols(SYMBOL_BATCH_SIZE) {
                 Ok(symbols) if !symbols.is_empty() => {
+                    symbol_backlog_active = true;
                     debug!("Semantic Worker: Embedding {} symbols...", symbols.len());
                     
                     let texts: Vec<String> = symbols.iter().map(|s| s.1.clone()).collect();
@@ -123,7 +132,185 @@ impl SemanticWorkerPool {
                     thread::sleep(policy.idle_sleep);
                 }
             }
+
+            if chunk_backlog_active
+                || symbol_backlog_active
+                || service_guard::current_pressure() != ServicePressure::Healthy
+            {
+                continue;
+            }
+
+            match graph_store.fetch_unembedded_graph_projections(GRAPH_MODEL_ID, GRAPH_BATCH_SIZE) {
+                Ok(graphs) if !graphs.is_empty() => {
+                    debug!("Semantic Worker: Embedding {} graph projections...", graphs.len());
+                    let texts: Vec<String> = graphs.iter().map(|(_, _, _, _, _, content)| content.clone()).collect();
+                    match model.embed(texts, None) {
+                        Ok(embeddings) => {
+                            let updates: Vec<(String, String, i64, String, String, Vec<f32>)> = graphs
+                                .into_iter()
+                                .zip(embeddings.into_iter())
+                                .map(|((anchor_type, anchor_id, radius, source_signature, projection_version, _), emb)| {
+                                    (anchor_type, anchor_id, radius, source_signature, projection_version, emb)
+                                })
+                                .collect();
+
+                            if let Err(e) = graph_store.update_graph_embeddings(GRAPH_MODEL_ID, &updates) {
+                                error!("Semantic Worker: Graph DB Write Error: {:?}", e);
+                            }
+                        }
+                        Err(e) => {
+                            if is_fatal_embedding_error(&e) {
+                                error!("Semantic Worker: fatal graph embedding error, disabling semantic worker: {:?}", e);
+                                return;
+                            }
+                            error!("Semantic Worker: Graph embedding failed: {:?}", e);
+                        }
+                    }
+                }
+                Ok(_) => thread::sleep(policy.idle_sleep),
+                Err(e) => {
+                    error!("Semantic Worker: Graph DB Fetch error: {:?}", e);
+                    thread::sleep(policy.idle_sleep);
+                }
+            }
         }
+    }
+}
+
+impl GraphStore {
+    fn escape_embedding_sql(value: &str) -> String {
+        value.replace('\'', "''")
+    }
+
+    fn graph_projection_embedding_text(&self, anchor_type: &str, anchor_id: &str, radius: i64) -> anyhow::Result<String> {
+        let projection = self.query_graph_projection(anchor_type, anchor_id, radius as u64)?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&projection).unwrap_or_default();
+        let mut lines = vec![
+            format!("anchor_type: {}", anchor_type),
+            format!("anchor_id: {}", anchor_id),
+            format!("radius: {}", radius),
+        ];
+
+        for row in rows {
+            let target_type = row.first().and_then(|value| value.as_str()).unwrap_or("unknown");
+            let target_id = row.get(1).and_then(|value| value.as_str()).unwrap_or("unknown");
+            let edge_kind = row.get(2).and_then(|value| value.as_str()).unwrap_or("unknown");
+            let distance = row.get(3).and_then(|value| value.as_i64()).unwrap_or(0);
+            let label = row.get(4).and_then(|value| value.as_str()).unwrap_or(target_id);
+            lines.push(format!(
+                "target_type: {} | target_id: {} | edge_kind: {} | distance: {} | label: {}",
+                target_type, target_id, edge_kind, distance, label
+            ));
+        }
+
+        Ok(lines.join("\n"))
+    }
+
+    pub fn fetch_unembedded_graph_projections(
+        &self,
+        model_id: &str,
+        count: usize,
+    ) -> anyhow::Result<Vec<(String, String, i64, String, String, String)>> {
+        let query = format!(
+            "SELECT gps.anchor_type, gps.anchor_id, gps.radius, gps.source_signature, gps.projection_version \
+             FROM GraphProjectionState gps \
+             LEFT JOIN GraphEmbedding ge \
+               ON ge.anchor_type = gps.anchor_type \
+              AND ge.anchor_id = gps.anchor_id \
+              AND ge.radius = gps.radius \
+              AND ge.model_id = '{}' \
+             WHERE ge.anchor_id IS NULL \
+                OR ge.source_signature <> gps.source_signature \
+                OR ge.projection_version <> gps.projection_version \
+             ORDER BY CASE WHEN gps.anchor_type = 'symbol' THEN 0 ELSE 1 END ASC, gps.updated_at ASC \
+             LIMIT {}",
+            Self::escape_embedding_sql(model_id),
+            count
+        );
+        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let res = self.query_on_ctx(&query, *guard)?;
+        drop(guard);
+
+        if res == "[]" || res.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res)?;
+        let mut jobs = Vec::new();
+        for row in raw {
+            let Some(anchor_type) = row.first().and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let Some(anchor_id) = row.get(1).and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let radius = row.get(2).and_then(|value| value.as_i64()).unwrap_or(1);
+            let Some(source_signature) = row.get(3).and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let Some(projection_version) = row.get(4).and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let content = self.graph_projection_embedding_text(anchor_type, anchor_id, radius)?;
+            jobs.push((
+                anchor_type.to_string(),
+                anchor_id.to_string(),
+                radius,
+                source_signature.to_string(),
+                projection_version.to_string(),
+                content,
+            ));
+        }
+
+        Ok(jobs)
+    }
+
+    pub fn update_graph_embeddings(
+        &self,
+        model_id: &str,
+        updates: &[(String, String, i64, String, String, Vec<f32>)],
+    ) -> anyhow::Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        let mut queries = Vec::new();
+        for (anchor_type, anchor_id, radius, _, _, _) in updates {
+            queries.push(format!(
+                "DELETE FROM GraphEmbedding WHERE anchor_type = '{}' AND anchor_id = '{}' AND radius = {} AND model_id = '{}';",
+                Self::escape_embedding_sql(anchor_type),
+                Self::escape_embedding_sql(anchor_id),
+                radius,
+                Self::escape_embedding_sql(model_id)
+            ));
+        }
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let values: Vec<String> = updates
+            .iter()
+            .map(|(anchor_type, anchor_id, radius, source_signature, projection_version, vector)| {
+                format!(
+                    "('{}', '{}', {}, '{}', '{}', '{}', CAST({:?} AS FLOAT[384]), {})",
+                    Self::escape_embedding_sql(anchor_type),
+                    Self::escape_embedding_sql(anchor_id),
+                    radius,
+                    Self::escape_embedding_sql(model_id),
+                    Self::escape_embedding_sql(source_signature),
+                    Self::escape_embedding_sql(projection_version),
+                    vector,
+                    now
+                )
+            })
+            .collect();
+
+        for chunk in values.chunks(100) {
+            queries.push(format!(
+                "INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES {};",
+                chunk.join(",")
+            ));
+        }
+
+        self.execute_batch(&queries)
     }
 }
 
