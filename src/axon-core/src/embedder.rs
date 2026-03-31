@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 use crate::graph::GraphStore;
 use crate::queue::QueueStore;
-use crate::service_guard;
+use crate::service_guard::{self, ServicePressure};
 
 const SYMBOL_MODEL_ID: &str = "sym-bge-small-en-v1.5-384";
 const CHUNK_MODEL_ID: &str = "chunk-bge-small-en-v1.5-384";
@@ -58,7 +58,7 @@ impl SemanticWorkerPool {
         info!("Semantic Worker: Hunting for unembedded symbols...");
         
         loop {
-            let policy = semantic_policy(queue_store.len(), service_guard::recent_peak_latency_ms());
+            let policy = semantic_policy(queue_store.common_len(), service_guard::current_pressure());
             if policy.pause {
                 thread::sleep(policy.sleep);
                 continue;
@@ -134,8 +134,8 @@ struct SemanticPolicy {
     idle_sleep: Duration,
 }
 
-fn semantic_policy(queue_len: usize, recent_service_latency_ms: u64) -> SemanticPolicy {
-    if recent_service_latency_ms >= 1_500 || queue_len >= 3_000 {
+fn semantic_policy(queue_len: usize, service_pressure: ServicePressure) -> SemanticPolicy {
+    if service_pressure == ServicePressure::Critical || queue_len >= 3_000 {
         return SemanticPolicy {
             pause: true,
             sleep: Duration::from_secs(10),
@@ -143,11 +143,19 @@ fn semantic_policy(queue_len: usize, recent_service_latency_ms: u64) -> Semantic
         };
     }
 
-    if recent_service_latency_ms >= 500 || queue_len >= 1_500 {
+    if service_pressure == ServicePressure::Degraded || queue_len >= 1_500 {
         return SemanticPolicy {
             pause: true,
             sleep: Duration::from_secs(3),
             idle_sleep: Duration::from_secs(5),
+        };
+    }
+
+    if service_pressure == ServicePressure::Recovering {
+        return SemanticPolicy {
+            pause: true,
+            sleep: Duration::from_secs(2),
+            idle_sleep: Duration::from_secs(3),
         };
     }
 
@@ -175,6 +183,7 @@ pub fn batch_embed(_texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
 #[cfg(test)]
 mod tests {
     use super::{is_fatal_embedding_error, semantic_policy};
+    use crate::service_guard::ServicePressure;
     use std::time::Duration;
 
     #[test]
@@ -186,22 +195,37 @@ mod tests {
 
     #[test]
     fn test_semantic_policy_runs_when_system_is_healthy() {
-        let policy = semantic_policy(100, 0);
+        let policy = semantic_policy(100, ServicePressure::Healthy);
         assert!(!policy.pause);
         assert_eq!(policy.idle_sleep, Duration::from_secs(5));
     }
 
     #[test]
     fn test_semantic_policy_pauses_under_queue_pressure() {
-        let policy = semantic_policy(2_000, 0);
+        let policy = semantic_policy(2_000, ServicePressure::Healthy);
         assert!(policy.pause);
         assert_eq!(policy.sleep, Duration::from_secs(3));
     }
 
     #[test]
     fn test_semantic_policy_pauses_when_live_service_is_critical() {
-        let policy = semantic_policy(100, 2_000);
+        let policy = semantic_policy(100, ServicePressure::Critical);
         assert!(policy.pause);
         assert_eq!(policy.sleep, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_semantic_policy_pauses_when_service_is_degraded() {
+        let policy = semantic_policy(100, ServicePressure::Degraded);
+        assert!(policy.pause);
+        assert_eq!(policy.sleep, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_semantic_policy_stays_paused_while_service_recovers() {
+        let policy = semantic_policy(100, ServicePressure::Recovering);
+        assert!(policy.pause);
+        assert_eq!(policy.sleep, Duration::from_secs(2));
+        assert_eq!(policy.idle_sleep, Duration::from_secs(3));
     }
 }

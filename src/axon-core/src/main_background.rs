@@ -10,6 +10,7 @@ use axon_core::queue::QueueStore;
 use axon_core::service_guard;
 use axon_core::scanner::Scanner;
 use axon_core::fs_watcher::{self, HOT_PRIORITY};
+use axon_core::service_guard::ServicePressure;
 use axon_core::watcher_probe;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use notify_debouncer_full::notify::RecursiveMode;
@@ -65,16 +66,16 @@ pub(crate) fn spawn_autonomous_ingestor(
                 queue.common_len(),
                 current_rss_bytes(),
                 memory_limit,
-                service_guard::recent_peak_latency_ms(),
+                service_guard::current_pressure(),
             );
             if last_mode != Some(policy.mode) {
                 info!(
-                    "Autonomous Ingestor claim mode={} claim_count={} sleep_ms={} queue_len={} recent_service_latency_ms={}",
+                    "Autonomous Ingestor claim mode={} claim_count={} sleep_ms={} queue_len={} service_pressure={:?}",
                     policy.mode.label(),
                     policy.claim_count,
                     policy.sleep.as_millis(),
                     queue.common_len(),
-                    service_guard::recent_peak_latency_ms(),
+                    service_guard::current_pressure(),
                 );
                 last_mode = Some(policy.mode);
             }
@@ -444,13 +445,13 @@ fn claim_policy(
     queue_len: usize,
     rss_bytes: Option<u64>,
     memory_limit: u64,
-    recent_service_latency_ms: u64,
+    service_pressure: ServicePressure,
 ) -> ClaimPolicy {
     let rss_ratio = rss_bytes
         .map(|rss| rss as f64 / memory_limit.max(1) as f64)
         .unwrap_or(0.0);
 
-    if recent_service_latency_ms >= 1_500 || rss_ratio >= 0.92 || queue_len >= 6_000 {
+    if service_pressure == ServicePressure::Critical || rss_ratio >= 0.92 || queue_len >= 6_000 {
         return ClaimPolicy {
             mode: ClaimMode::Paused,
             claim_count: 0,
@@ -458,11 +459,19 @@ fn claim_policy(
         };
     }
 
-    if recent_service_latency_ms >= 500 || rss_ratio >= 0.82 || queue_len >= 3_000 {
+    if service_pressure == ServicePressure::Degraded || rss_ratio >= 0.82 || queue_len >= 3_000 {
         return ClaimPolicy {
             mode: ClaimMode::Guarded,
             claim_count: 100,
             sleep: std::time::Duration::from_millis(500),
+        };
+    }
+
+    if service_pressure == ServicePressure::Recovering {
+        return ClaimPolicy {
+            mode: ClaimMode::Slow,
+            claim_count: 500,
+            sleep: std::time::Duration::from_millis(250),
         };
     }
 
@@ -672,6 +681,7 @@ mod tests {
     use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files, handle_watcher_events, memory_limit_bytes, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets, RescanGuardReset};
     use axon_core::graph::GraphStore;
     use axon_core::queue::QueueStore;
+    use axon_core::service_guard::ServicePressure;
     use axon_core::watcher_probe;
     use notify_debouncer_full::notify::{Event, EventKind};
     use notify_debouncer_full::notify::event::{Flag, ModifyKind};
@@ -703,7 +713,7 @@ mod tests {
             200,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
-            0,
+            ServicePressure::Healthy,
         );
         assert_eq!(policy.claim_count, 2_000);
         assert_eq!(policy.sleep, std::time::Duration::from_millis(100));
@@ -715,7 +725,7 @@ mod tests {
             2_000,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
-            0,
+            ServicePressure::Healthy,
         );
         assert_eq!(policy.claim_count, 500);
         assert_eq!(policy.sleep, std::time::Duration::from_millis(250));
@@ -727,7 +737,7 @@ mod tests {
             3_500,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
-            0,
+            ServicePressure::Healthy,
         );
         assert_eq!(policy.claim_count, 100);
         assert_eq!(policy.sleep, std::time::Duration::from_millis(500));
@@ -735,23 +745,51 @@ mod tests {
 
     #[test]
     fn test_claim_policy_pauses_claiming_when_pressure_is_critical() {
-        let policy = claim_policy(500, Some(95 * 1024 * 1024), 100 * 1024 * 1024, 0);
+        let policy = claim_policy(
+            500,
+            Some(95 * 1024 * 1024),
+            100 * 1024 * 1024,
+            ServicePressure::Healthy,
+        );
         assert_eq!(policy.claim_count, 0);
         assert_eq!(policy.sleep, std::time::Duration::from_millis(1_000));
     }
 
     #[test]
-    fn test_claim_policy_slows_when_live_service_latency_rises() {
-        let policy = claim_policy(200, Some(2 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024, 700);
+    fn test_claim_policy_enters_guarded_mode_when_service_is_degraded() {
+        let policy = claim_policy(
+            200,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            ServicePressure::Degraded,
+        );
         assert_eq!(policy.claim_count, 100);
         assert_eq!(policy.sleep, std::time::Duration::from_millis(500));
     }
 
     #[test]
-    fn test_claim_policy_pauses_when_live_service_is_critically_slow() {
-        let policy = claim_policy(200, Some(2 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024, 2_000);
+    fn test_claim_policy_pauses_when_live_service_is_critical() {
+        let policy = claim_policy(
+            200,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            ServicePressure::Critical,
+        );
         assert_eq!(policy.claim_count, 0);
         assert_eq!(policy.sleep, std::time::Duration::from_millis(1_000));
+    }
+
+    #[test]
+    fn test_claim_policy_recovers_gradually_after_service_pressure() {
+        let policy = claim_policy(
+            200,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            ServicePressure::Recovering,
+        );
+        assert_eq!(policy.mode.label(), "slow");
+        assert_eq!(policy.claim_count, 500);
+        assert_eq!(policy.sleep, std::time::Duration::from_millis(250));
     }
 
     #[test]
@@ -760,7 +798,7 @@ mod tests {
             200,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
-            0,
+            ServicePressure::Healthy,
         );
         assert_eq!(policy.mode.label(), "fast");
     }
@@ -771,7 +809,7 @@ mod tests {
             3_500,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
-            0,
+            ServicePressure::Healthy,
         );
         assert_eq!(policy.mode.label(), "guarded");
     }
@@ -782,7 +820,7 @@ mod tests {
             200,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
-            2_000,
+            ServicePressure::Critical,
         );
         assert_eq!(policy.mode.label(), "paused");
     }

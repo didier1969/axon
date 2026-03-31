@@ -418,6 +418,35 @@ That means:
 - accelerate when the system is healthy
 - slow down when truth, service quality, or machine health are at risk
 
+## Live Service Health As Canonical Rust Input
+
+`SQL` and `MCP` latency is now a canonical Rust input to the ingestion policy, not passive telemetry.
+
+Rust derives a live pressure state from recent service latency:
+
+- `Healthy`
+- `Recovering`
+- `Degraded`
+- `Critical`
+
+This state drives both structural and semantic work, with one ordering rule:
+
+- structural truth slows down gradually
+- semantic work pauses first
+
+Operationally:
+
+- `Critical` pressure pauses structural claiming and pauses embeddings
+- `Degraded` pressure reduces claim depth and pauses embeddings
+- `Recovering` keeps structural throughput below `fast` and keeps embeddings paused briefly, so recovery is gradual rather than on/off
+- `Healthy` allows normal claim depth and semantic work to resume
+
+Recovery is now backed by a cooldown window in the live guard:
+
+- low-latency samples no longer clear pressure instantly
+- recent degraded/critical service keeps the runtime in `Recovering` for a bounded window
+- this avoids bouncing directly from `Critical` to `Fast`
+
 ## Implementation Phases
 
 ### Phase 1. Unify `Axon Ignore`
@@ -477,6 +506,7 @@ The following invariants must hold:
 - `SOLL` is never purged by automatic ingestion recovery
 - `IST` remains reconstructible
 - structural truth is committed before semantic enrichment
+- semantic work pauses before structural work is fully stopped
 - live SQL and MCP service remain protected under load
 - a file accepted by `Axon Ignore` and by parser capabilities eventually reaches `IST`
 - no adaptive mechanism may silently drop accepted work

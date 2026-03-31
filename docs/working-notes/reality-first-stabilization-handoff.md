@@ -223,6 +223,17 @@ What changed:
   - the remaining limit is now explicit:
     - priority is proven at queue drain level
     - a stricter end-to-end fairness bound at worker prefetch level remains for a later slice if needed
+- live service health is now modeled explicitly inside Rust:
+  - `Healthy`
+  - `Recovering`
+  - `Degraded`
+  - `Critical`
+- this state is now canonical for both structural claiming and semantic work:
+  - claim depth no longer reacts only to a raw latency number
+  - recovery back to full throughput is gradual instead of on/off
+  - embeddings pause before structural ingestion is fully stopped
+  - the semantic worker now follows the same common-lane pressure signal as the structural ingestor
+  - low-latency samples no longer clear pressure instantly; a bounded cooldown keeps the runtime in `Recovering` before it returns to `Healthy`
 
 ## Rust Core / Native Ingestion / MCP
 
@@ -303,6 +314,7 @@ Rust validation reached a clean state during this session:
 - result reached now after watcher rescan/no-op/error checkpoint coverage: `66 passed; 0 failed` in `src/lib.rs` and `30 passed; 0 failed` in `src/main.rs`
 - result reached now after delete/rename tombstone handling and crash-mid-index replay: `70 passed; 0 failed` in `src/lib.rs` and `30 passed; 0 failed` in `src/main.rs`
 - result reached now after explicit `hot / bulk / titan` queue lanes: `73 passed; 0 failed` in `src/lib.rs` and `31 passed; 0 failed` in `src/main.rs`
+- result reached now after live-service health states and gradual recovery policy: `79 passed; 0 failed` in `src/lib.rs` and `32 passed; 0 failed` in `src/main.rs`
 - dashboard validation remains green after real `io` monitoring work: `31 tests, 0 failures`
 
 Runtime note:
