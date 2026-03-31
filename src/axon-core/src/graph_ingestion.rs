@@ -267,6 +267,10 @@ impl GraphStore {
                 indexed_filter
             ));
             queries.push(format!(
+                "DELETE FROM ChunkEmbedding WHERE chunk_id IN (SELECT id FROM Chunk WHERE source_type = 'symbol' AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})));",
+                indexed_filter
+            ));
+            queries.push(format!(
                 "DELETE FROM Chunk WHERE source_type = 'symbol' AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 indexed_filter
             ));
@@ -464,7 +468,7 @@ impl GraphStore {
             "SELECT c.id, c.content, c.content_hash \
              FROM Chunk c \
              LEFT JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{}' \
-             WHERE ce.chunk_id IS NULL \
+             WHERE ce.chunk_id IS NULL OR ce.source_hash <> c.content_hash \
              LIMIT {}",
             Self::escape_sql(model_id),
             count

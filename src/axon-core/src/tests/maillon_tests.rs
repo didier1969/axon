@@ -1137,6 +1137,151 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_7e_chunk_invalidation_requeues_only_changed_file_embeddings() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path_a = "/tmp/chunk/a.rs".to_string();
+        let path_b = "/tmp/chunk/b.rs".to_string();
+        let path_c = "/tmp/other/c.rs".to_string();
+        store
+            .bulk_insert_files(&[
+                (path_a.clone(), "proj".to_string(), 100, 1),
+                (path_b.clone(), "proj".to_string(), 100, 1),
+                (path_c.clone(), "other".to_string(), 100, 1),
+            ])
+            .unwrap();
+
+        let extraction_for = |project: &str, name: &str, _body: &str, docstring: Option<&str>| parser::ExtractionResult {
+            project_slug: Some(project.to_string()),
+            symbols: vec![parser::Symbol {
+                name: name.to_string(),
+                kind: "function".to_string(),
+                start_line: 1,
+                end_line: 3,
+                docstring: docstring.map(|value| value.to_string()),
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[
+                DbWriteTask::FileExtraction {
+                    path: path_a.clone(),
+                    content: "fn alpha() {\n    old_body();\n}\n".to_string(),
+                    extraction: extraction_for("proj", "alpha", "old_body", None),
+                    trace_id: "alpha-1".to_string(),
+                    t0: 0,
+                    t1: 0,
+                    t2: 0,
+                    t3: 0,
+                },
+                DbWriteTask::FileExtraction {
+                    path: path_b.clone(),
+                    content: "fn beta() {\n    stable_body();\n}\n".to_string(),
+                    extraction: extraction_for("proj", "beta", "stable_body", None),
+                    trace_id: "beta-1".to_string(),
+                    t0: 0,
+                    t1: 0,
+                    t2: 0,
+                    t3: 0,
+                },
+                DbWriteTask::FileExtraction {
+                    path: path_c.clone(),
+                    content: "fn gamma() {\n    foreign_project();\n}\n".to_string(),
+                    extraction: extraction_for("other", "gamma", "foreign_project", None),
+                    trace_id: "gamma-1".to_string(),
+                    t0: 0,
+                    t1: 0,
+                    t2: 0,
+                    t3: 0,
+                },
+            ])
+            .unwrap();
+
+        store
+            .ensure_embedding_model("chunk-bge-small-en-v1.5-384", "chunk", "BAAI/bge-small-en-v1.5", 384, "1")
+            .unwrap();
+
+        let initial_pending = store
+            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
+            .unwrap();
+        assert_eq!(initial_pending.len(), 3, "Tous les chunks initiaux doivent etre vectorisables");
+
+        let alpha_chunk_id = initial_pending
+            .iter()
+            .find(|(_, content, _)| content.contains("alpha"))
+            .expect("alpha chunk missing")
+            .0
+            .clone();
+        let updates: Vec<(String, String, Vec<f32>)> = initial_pending
+            .iter()
+            .map(|(id, _, hash)| (id.clone(), hash.clone(), vec![0.0_f32; 384]))
+            .collect();
+        store
+            .update_chunk_embeddings("chunk-bge-small-en-v1.5-384", &updates)
+            .unwrap();
+        assert_eq!(store.query_count("SELECT count(*) FROM ChunkEmbedding").unwrap(), 3);
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                path: path_a.clone(),
+                content: "fn alpha() {\n    new_body();\n}\n".to_string(),
+                extraction: extraction_for(
+                    "proj",
+                    "alpha",
+                    "new_body",
+                    Some("routes the new behavior without replaying all semantic work"),
+                ),
+                trace_id: "alpha-2".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        assert_eq!(
+            store.query_count("SELECT count(*) FROM ChunkEmbedding").unwrap(),
+            2,
+            "Seul le chunk du fichier change doit perdre son embedding derive"
+        );
+
+        let pending = store
+            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
+            .unwrap();
+        assert_eq!(pending.len(), 1, "Le delta ne doit revectoriser que le chunk modifie");
+        assert_eq!(pending[0].0, alpha_chunk_id);
+        assert!(pending[0].1.contains("new_body") || pending[0].1.contains("new behavior"));
+    }
+
+    #[test]
+    fn test_maillon_7f_fetch_unembedded_chunks_detects_source_hash_drift() {
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('chunk-drift', 'symbol', 'sym-drift', 'proj', 'function', 'fresh content', 'hash-fresh', 1, 1)")
+            .unwrap();
+        store
+            .ensure_embedding_model("chunk-bge-small-en-v1.5-384", "chunk", "BAAI/bge-small-en-v1.5", 384, "1")
+            .unwrap();
+        store
+            .execute("INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash) VALUES ('chunk-drift', 'chunk-bge-small-en-v1.5-384', 'hash-stale')")
+            .unwrap();
+
+        let pending = store
+            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
+            .unwrap();
+        assert_eq!(pending.len(), 1, "Un hash derive stale doit etre revectorise");
+        assert_eq!(pending[0].0, "chunk-drift");
+        assert_eq!(pending[0].2, "hash-fresh");
+    }
+
+    #[test]
     fn test_maillon_7c_writer_keeps_distinct_top_level_symbols_from_different_files() {
         let store = GraphStore::new(":memory:").unwrap();
         let path_a = "/tmp/scripts/a.py".to_string();

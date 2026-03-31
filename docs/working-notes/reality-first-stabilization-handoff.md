@@ -251,6 +251,16 @@ What changed:
      - natural behavior phrases can recover the right symbol through chunk content
      - the response exposes evidence/snippet for disambiguation
      - ingested docstrings are usable retrieval material without overstating semantic confidence
+ - Wave 5 / Task 13 is now completed:
+   - file-scoped reindex now explicitly removes only the `ChunkEmbedding` rows attached to chunks derived from the reindexed file
+   - `fetch_unembedded_chunks()` no longer treats `chunk_id` presence as sufficient truth; it also checks `ChunkEmbedding.source_hash` against the current `Chunk.content_hash`
+   - this makes semantic recompute truly targeted:
+     - changed file => affected chunks only
+     - stale chunk hash => affected chunk only
+     - unrelated project chunks remain untouched
+   - new maillon proofs now cover:
+     - targeted invalidation for one changed file with unrelated chunks preserved
+     - stale hash detection causing requeue for semantic recompute without global replay
   - claim depth no longer reacts only to a raw latency number
   - recovery back to full throughput is gradual instead of on/off
   - embeddings pause before structural ingestion is fully stopped

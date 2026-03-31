@@ -516,6 +516,13 @@ git commit -m "feat: improve chunk retrieval for llm developer queries"
 
 ### Task 13: Add explicit `Chunk` invalidation and recompute targeting
 
+Status:
+
+- completed on `feat/rust-first-control-plane`
+- file-scoped reindex now drops only the affected `ChunkEmbedding` rows before replacing derived chunks
+- `fetch_unembedded_chunks()` now treats `source_hash != content_hash` as stale and requeues only the affected chunks for semantic recompute
+- unrelated project chunks and embeddings remain untouched
+
 **Files:**
 - Modify: `src/axon-core/src/graph_ingestion.rs`
 - Modify: `src/axon-core/src/embedder.rs`
