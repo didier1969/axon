@@ -854,6 +854,48 @@ Before calling this program phase complete, confirm:
 7. Startup/shutdown/restart are canonical and repeatable.
 8. Obsolete Python operational paths are retired.
 
+Final Gate passed on `2026-03-31` on branch `feat/rust-first-control-plane`.
+
+Evidence recorded during the execution waves:
+
+1. Rust is the only ingestion/control authority on the canonical path.
+- Rust owns scan, delta staging, claim policy, queue lanes, structural commit, semantic throttling, SQL/MCP service health, and restart recovery.
+- Elixir runtime no longer boots `Oban` or `Axon.Watcher.Server` on the canonical dashboard path.
+
+2. Elixir is only visualization/operator plane.
+- dashboard wording, telemetry, and bridge behavior were reduced to observation and explicit operator relays.
+- legacy watcher enqueue paths are labeled ignored/legacy instead of asserting control.
+
+3. `IST` restart/delta behavior is trustworthy.
+- additive repair, soft invalidation, crash replay, tombstones, `needs_reindex`, and hot delta replay are covered by Rust tests.
+- live restart validation succeeded repeatedly through `start-v2.sh` and `/sql`.
+
+4. `SOLL` has executable governance and usable restore.
+- `axon_validate_soll` exists.
+- `SOLL_EXPORT_*.md` now carries richer metadata and explicit traceability links.
+- restore replays those links and metadata in merge mode.
+
+5. Chunk retrieval is useful in practice.
+- `axon_query` is symbol-first, then chunk fallback with ranked reasons and snippets.
+- `vcr1` and related tests proved better developer retrieval behavior.
+
+6. Graph vectorization exists only as derived truth.
+- `GraphProjection` and `GraphEmbedding` are derived layers, invalidatable and slack-driven.
+- canonical truth remains structural (`File`, `Symbol`, `CONTAINS`, `CALLS`, `SOLL`).
+
+7. Startup/shutdown/restart are canonical and repeatable.
+- canonical workflow is now:
+  - `devenv shell`
+  - `./scripts/validate-devenv.sh`
+  - `./scripts/setup_v2.sh`
+  - `./scripts/start-v2.sh`
+  - `./scripts/stop-v2.sh`
+- startup now verifies SQL schema and MCP HTTP truth before declaring readiness.
+
+8. Obsolete Python operational paths are retired.
+- obsolete ad hoc Python operational files were audited and removed.
+- Datalog/TypeQL bridges remain intentionally preserved until a dedicated replacement plan exists.
+
 ## Suggested Commit Rhythm
 
 - one commit per task or per tightly coupled pair of tasks,
