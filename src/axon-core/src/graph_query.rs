@@ -12,15 +12,8 @@ impl GraphStore {
         "1"
     }
 
-    fn projection_signature(rows: &[Vec<Value>]) -> String {
-        let mut normalized: Vec<String> = rows
-            .iter()
-            .filter_map(|row| {
-                let node = row.first()?.as_str()?.to_string();
-                let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(0);
-                Some(format!("{}:{}", node, distance))
-            })
-            .collect();
+    fn projection_signature(entries: &[String]) -> String {
+        let mut normalized = entries.to_vec();
         normalized.sort();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         normalized.hash(&mut hasher);
@@ -102,10 +95,25 @@ impl GraphStore {
             GROUP BY node_id";
         let res = self.query_json_param(query, &params)?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-        let signature = Self::projection_signature(&rows);
         let created_at = chrono::Utc::now().timestamp_millis();
         let anchor_escaped = anchor_id.replace('\'', "''");
         let version = Self::graph_projection_version();
+        let mut signature_entries = vec![format!("symbol|{}|symbol|{}|anchor|0", anchor_id, anchor_id)];
+
+        for row in &rows {
+            let Some(node_id) = row.first().and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(0);
+            if node_id == anchor_id {
+                continue;
+            }
+            signature_entries.push(format!(
+                "symbol|{}|symbol|{}|call-neighborhood|{}",
+                anchor_id, node_id, distance
+            ));
+        }
+        let signature = Self::projection_signature(&signature_entries);
 
         if self.graph_projection_state_matches("symbol", &anchor_id, radius, &signature, version)? {
             return Ok(Some(anchor_id));
@@ -176,10 +184,23 @@ impl GraphStore {
             GROUP BY node_id";
         let res = self.query_json_param(query, &params)?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-        let signature = Self::projection_signature(&rows);
         let created_at = chrono::Utc::now().timestamp_millis();
         let file_escaped = file_path.replace('\'', "''");
         let version = Self::graph_projection_version();
+        let mut signature_entries = vec![format!("file|{}|file|{}|file|0", file_path, file_path)];
+
+        for row in &rows {
+            let Some(node_id) = row.first().and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(1);
+            let edge_kind = if distance == 1 { "contains" } else { "call-neighborhood" };
+            signature_entries.push(format!(
+                "file|{}|symbol|{}|{}|{}",
+                file_path, node_id, edge_kind, distance
+            ));
+        }
+        let signature = Self::projection_signature(&signature_entries);
 
         if self.graph_projection_state_matches("file", file_path, radius, &signature, version)? {
             return Ok(());
