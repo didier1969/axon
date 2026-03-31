@@ -25,6 +25,7 @@ defmodule AxonDashboard.TelemetryHandler do
         [:axon, :backpressure, :limit_adjusted],
         [:axon, :watcher, :batch_enqueued],
         [:axon, :watcher, :batch_failed],
+        [:axon, :watcher, :pending_batch_ignored],
         [:axon, :watcher, :file_indexed]
       ],
       &__MODULE__.handle_event/4,

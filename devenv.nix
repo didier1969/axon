@@ -105,10 +105,10 @@ in
     fi
 
     echo "--- AXON v1.0 - DEVENV ARCHITECTURE ---"
-    echo "Pod A (Control Plane): Elixir $(elixir --version | awk '/Elixir/ {print $2}')"
-    echo "Pod B (Data Plane):    Rust $(rustc --version | awk '{print $2}')"
-    echo "Support Tooling:       Python $(python --version | awk '/Python/ {print $2}')"
-    echo "Pod C (HydraDB):       detached from current Devenv workflow"
+    echo "Plane A (Visualization): Elixir $(elixir --version | awk '/Elixir/ {print $2}')"
+    echo "Plane B (Runtime+DuckDB): Rust $(rustc --version | awk '{print $2}')"
+    echo "Support Tooling:         Python $(python --version | awk '/Python/ {print $2}')"
+    echo "HydraDB:                 detached legacy workflow"
     echo "---------------------------------------"
   '';
 }

@@ -4,7 +4,7 @@ defmodule AxonDashboardWeb.StatusLiveTest do
 
   test "renders waiting status initially", %{conn: conn} do
     {:ok, _view, html} = live(conn, "/")
-    assert html =~ "Multi-Project Control Plane"
+    assert html =~ "Multi-Project Visualization Plane"
   end
 
   test "updates stats on bridge event", %{conn: conn} do
@@ -38,6 +38,6 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     )
 
     # Wait for the re-render explicitly by asserting the rendered output directly
-    assert render(view) =~ "Fleet Ingestion Complete"
+    assert render(view) =~ "Runtime reported scan completion"
   end
 end

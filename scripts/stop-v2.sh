@@ -5,6 +5,7 @@ set -euo pipefail
 # Kills ONLY Axon-related processes to avoid interfering with other projects.
 
 PROJECT_ROOT="/home/dstadel/projects/axon"
+REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
 
 wait_for_exit() {
     local pattern="$1"
@@ -34,7 +35,7 @@ if tmux has-session -t axon 2>/dev/null; then
 fi
 
 # 3. Kill lingering processes by exact project patterns
-PATTERN="$PROJECT_ROOT/bin/axon-core|$PROJECT_ROOT/bin/axon-mcp-tunnel|beam.smp.*axon_nexus|AXON_REPO_SLUG=workspace"
+PATTERN="$PROJECT_ROOT/bin/axon-core|$PROJECT_ROOT/bin/axon-mcp-tunnel|beam.smp.*axon_nexus|AXON_REPO_SLUG=$REPO_SLUG|AXON_REPO_SLUG=workspace"
 PIDS=$(pgrep -f "$PATTERN" || true)
 
 if [ -n "${PIDS:-}" ]; then
@@ -48,7 +49,7 @@ fi
 
 # 4. Clean up sockets and locks
 echo "Cleaning up sockets, ports and locks..."
-fuser -k 44127/tcp 44129/tcp 44132/tcp 2>/dev/null || true
+fuser -k 44127/tcp 44128/tcp 44129/tcp 44130/tcp 44131/tcp 44132/tcp 2>/dev/null || true
 fuser -k /tmp/axon-telemetry.sock /tmp/axon-mcp.sock 2>/dev/null || true
 rm -f "/tmp/axon-mcp.sock"
 rm -f "/tmp/axon-telemetry.sock"

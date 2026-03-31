@@ -99,6 +99,21 @@ verify_sql_gateway() {
     return 0
 }
 
+probe_sql_gateway() {
+    curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" \
+        -H 'content-type: application/json' \
+        -d '{"query":"SELECT 1"}' >/dev/null 2>&1
+}
+
+verify_mcp_http() {
+    local response
+    response="$(curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/mcp" \
+        -H 'content-type: application/json' \
+        -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}' 2>/dev/null || true)"
+
+    [[ "$response" == *"axon_query"* ]]
+}
+
 if [ -f "$LEGACY_RELEASE_BIN" ] && [ ! -f "$DEVENV_RELEASE_BIN" ]; then
     echo "⚠️ Found a release build outside Devenv at $LEGACY_RELEASE_BIN"
     echo "   Axon starts from $DEVENV_RELEASE_BIN. Attempting automatic rebuild..."
@@ -151,21 +166,20 @@ tmux new-session -d -s axon -n "core"
 # NEXUS v10.8: We force fastembed to use the system's libonnxruntime.so to prevent C++ aborts.
 tmux send-keys -t axon:core "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
 
-# Start Control Plane
+# Start Visualization Plane
 tmux new-window -t axon -n "nexus"
 tmux send-keys -t axon:nexus "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 
-echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 60s)..."
+echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 120s)..."
 
 # Parallel wait loop for both services
 CORE_READY=false
 DASHBOARD_READY=false
 
-# Wait up to 120 * 0.5s = 60s
+# Wait up to 120 * 1s = 120s
 for i in {1..120}; do
     if [ "$CORE_READY" = false ]; then
-        # Core is ready if the telemetry socket exists AND the MCP port is responding
-        if [ -S "/tmp/axon-telemetry.sock" ] || nc -z localhost $HYDRA_HTTP_PORT 2>/dev/null; then
+        if probe_sql_gateway; then
             echo "✅ Axon Data Plane is Ready."
             CORE_READY=true
         fi
@@ -183,11 +197,17 @@ for i in {1..120}; do
         break
     fi
     
-    sleep 0.5
+    sleep 1
 done
 
 if [ "$CORE_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Core."; fi
 if [ "$DASHBOARD_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Dashboard."; fi
+
+if [ "$CORE_READY" = false ] || [ "$DASHBOARD_READY" = false ]; then
+    echo "❌ Axon did not reach a fully ready state within the startup budget."
+    echo "   Inspect TMUX with: tmux attach -t axon"
+    exit 1
+fi
 
 if [ "$CORE_READY" = true ]; then
     echo ""
@@ -207,8 +227,12 @@ if [ -x "bin/axon-mcp-tunnel" ] && ! echo '{"jsonrpc": "2.0", "method": "tools/l
     echo "   Inspect the TMUX session to debug."
 elif [ -x "bin/axon-mcp-tunnel" ]; then
     echo "✅ MCP tunnel verification succeeded."
+elif verify_mcp_http; then
+    echo "✅ MCP HTTP verification succeeded."
 else
-    echo "ℹ️ Skipping MCP tunnel verification because bin/axon-mcp-tunnel is not available."
+    echo "❌ MCP HTTP verification failed."
+    echo "   Inspect the TMUX session to debug."
+    exit 1
 fi
 
 # 6. Final Report

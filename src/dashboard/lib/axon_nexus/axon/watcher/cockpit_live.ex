@@ -71,7 +71,7 @@ defmodule Axon.Watcher.CockpitLive do
       <div class="logo">
         AXON <span style="font-weight: 400; color: var(--text-dim);">SYSTEMS</span>
         <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 4px;">
-          Multi-Project Control Plane
+          Multi-Project Visualization Plane
         </div>
       </div>
       <div style="display:flex; gap: 12px; align-items: center;">
@@ -113,7 +113,7 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
       </div>
       
-    <!-- Unit 02: Parser Matrix (POD B) -->
+    <!-- Unit 02: Runtime Worker Activity -->
       <div class="card">
         <div class="card-title">
           <svg style="width:18px;height:18px" viewBox="0 0 24 24">
@@ -122,7 +122,7 @@ defmodule Axon.Watcher.CockpitLive do
               d="M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5Z"
             />
           </svg>
-          UNIT 02: PARSER MATRIX (POD B)
+          UNIT 02: RUNTIME WORKER ACTIVITY
         </div>
         <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
           <%= for i <- 1..8 do %>
@@ -140,7 +140,7 @@ defmodule Axon.Watcher.CockpitLive do
             </div>
           <% else %>
             <div style="font-size: 0.7rem; color: var(--text-dim); font-family: monospace;">
-              IDLE_WAITING_FOR_TASKS
+              RUNTIME_IDLE_WAITING_FOR_WORK
             </div>
           <% end %>
         </div>
@@ -167,15 +167,15 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
       </div>
 
-      <!-- Unit 04: Traffic Guardian (Backpressure) -->
+      <!-- Unit 04: Runtime Pressure -->
       <div class="card" style="border-color: var(--warning);">
         <div class="card-title" style="color: var(--warning);">
           <svg style="width:18px;height:18px" viewBox="0 0 24 24">
             <path fill="currentColor" d="M12,2L1,21H23L12,2M12,6L19.53,19H4.47L12,6M11,10V14H13V10H11M11,16V18H13V16H11Z" />
           </svg>
-          UNIT 04: TRAFFIC GUARDIAN
+          UNIT 04: RUNTIME PRESSURE
         </div>
-        <div class="stat"><label>PRESSURE</label> <span style="color: var(--neon-green);">{@live.target_pressure} slots</span></div>
+        <div class="stat"><label>RUST_GUIDANCE</label> <span style="color: var(--neon-green);">{@live.target_pressure} slots</span></div>
         <div class="stat">
           <label>T4_LATENCY</label>
           <span style={"color: #{if @live.t4_ema > 200, do: "var(--neon-red)", else: "var(--neon-blue)"};"}>
@@ -221,7 +221,7 @@ defmodule Axon.Watcher.CockpitLive do
             </div>
           <% end %>
           <div :if={Map.get(@live, :scan_complete, false)} style="color: var(--neon-green); text-align: center; margin-top: 12px;">
-            Fleet Ingestion Complete
+            Runtime reported scan completion
           </div>
         </div>
       </div>
@@ -243,7 +243,7 @@ defmodule Axon.Watcher.CockpitLive do
               class="stat"
               style="grid-column: span 3; text-align: center; border: 1px dashed var(--border); padding: 20px;"
             >
-              WAITING FOR DATA... RUN FULL SCAN TO INITIALIZE TRACKER
+              WAITING FOR RUNTIME DATA...
             </div>
           <% else %>
             <%= for {dir, d_stats} <- @live.directories do %>
@@ -298,7 +298,7 @@ defmodule Axon.Watcher.CockpitLive do
 
   defp apply_bridge_event(socket, %{"ScanComplete" => _payload}) do
     live = Map.put(socket.assigns.live, :scan_complete, true)
-    socket |> assign(live: live) |> put_flash(:info, "Fleet Ingestion Complete")
+    socket |> assign(live: live) |> put_flash(:info, "Runtime reported scan completion")
   end
 
   defp apply_bridge_event(socket, _event), do: socket

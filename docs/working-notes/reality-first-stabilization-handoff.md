@@ -770,3 +770,52 @@ Important interpretation:
 Next logical step:
 
 - `Task 19`: prepare the operator and product surface
+
+Additional work completed on `Task 19`:
+
+- `README.md` now matches the current product truth:
+  - Rust-first runtime
+  - DuckDB-backed `IST`
+  - protected `SOLL`
+  - Elixir/Phoenix kept as visualization plane only
+- `docs/getting-started.md` was rewritten from the obsolete package/CLI workflow to the canonical source workflow
+- `devenv.nix` banner now reflects the real runtime split:
+  - `Plane A (Visualization): Elixir`
+  - `Plane B (Runtime+DuckDB): Rust`
+- `scripts/start-v2.sh` now:
+  - waits on real SQL responsiveness instead of weak socket-only readiness
+  - fails hard if either plane does not become ready
+  - verifies live SQL schema after boot
+  - verifies live MCP over HTTP if the tunnel binary is absent
+- `scripts/stop-v2.sh` now matches the active repo slug and clears the full local active port set used by the canonical runtime
+- `scripts/validate-devenv.sh` now verifies `tmux`, `nc`, and `curl`, because they are part of the real operator path
+- `AxonDashboard.TelemetryHandler`, `StatusLive`, and `CockpitLive` wording now reflects the final boundary:
+  - Elixir observes and reports
+  - Rust owns runtime truth and work execution
+  - legacy watcher events are labeled as ignored/legacy instead of implied authority
+
+Validation:
+
+- shell syntax:
+  - `bash -n scripts/setup_v2.sh`
+  - `bash -n scripts/start-v2.sh`
+  - `bash -n scripts/stop-v2.sh`
+- dashboard tests:
+  - `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
+  - `35 tests, 0 failures`
+- canonical restart validation:
+  - `bash scripts/stop-v2.sh`
+  - `bash scripts/start-v2.sh`
+  - startup checks succeeded:
+    - `Axon Data Plane is Ready`
+    - `Axon Dashboard is Ready`
+    - `Live SQL schema check succeeded`
+    - `MCP HTTP verification succeeded`
+  - live SQL check:
+    - `SELECT count(*) AS file_count FROM File` -> `40732`
+
+Important interpretation:
+
+- the operator path is now much closer to a single truthful workflow instead of a mix of historical commands
+- the visualization plane no longer claims runtime authority in its wording
+- startup, shutdown, and live verification are now aligned closely enough to evaluate the Final Gate instead of continuing to patch the operator surface blindly

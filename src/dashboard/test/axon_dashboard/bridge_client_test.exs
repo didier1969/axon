@@ -4,7 +4,12 @@ defmodule AxonDashboard.BridgeClientTest do
   alias AxonDashboard.BridgeClient
 
   setup do
-    # On s'assure que le PubSub est prêt
+    pid = Process.whereis(BridgeClient)
+
+    if pid do
+      send(pid, {:tcp, nil, Jason.encode!(%{"ScanComplete" => %{}}) <> "\n"})
+    end
+
     {:ok, %{}}
   end
 

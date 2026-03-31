@@ -809,6 +809,38 @@ git add README.md docs scripts
 git commit -m "docs: finalize operator-facing canonical workflow"
 ```
 
+Completed on `2026-03-31` with this delivered slice:
+
+- `README.md` and `docs/getting-started.md` now describe only the canonical source checkout workflow:
+  - `devenv shell`
+  - `./scripts/validate-devenv.sh`
+  - `./scripts/setup_v2.sh`
+  - `./scripts/start-v2.sh`
+  - `./scripts/stop-v2.sh`
+- operator wording now aligns with the runtime split:
+  - Rust = canonical runtime and DuckDB truth
+  - Elixir = visualization plane
+- `start-v2.sh` now hard-fails on incomplete readiness and verifies:
+  - live SQL schema
+  - live MCP over HTTP when the tunnel binary is absent
+- `stop-v2.sh` now matches the current repo slug and clears the full active local port set
+- `validate-devenv.sh` now checks the operator-critical tools used by the nominal path:
+  - `tmux`
+  - `nc`
+  - `curl`
+- dashboard wording no longer implies that the visualization plane owns worker control or queue authority
+
+Validations passed:
+
+- `bash -n scripts/setup_v2.sh`
+- `bash -n scripts/start-v2.sh`
+- `bash -n scripts/stop-v2.sh`
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
+- `bash scripts/stop-v2.sh`
+- `bash scripts/start-v2.sh`
+- `curl -sS -X POST http://127.0.0.1:44129/sql -H "content-type: application/json" --data "{\"query\":\"SELECT count(*) AS file_count FROM File\"}"`
+  - returned `40732`
+
 ## Final Gate
 
 Before calling this program phase complete, confirm:

@@ -39,7 +39,7 @@ done
 
 echo ""
 echo "Toolchain origins:"
-required_tools=(python uv cargo rustc mix elixir)
+required_tools=(python uv cargo rustc mix elixir tmux nc curl)
 missing_tools=0
 for tool in "${required_tools[@]}"; do
   path="$(command -v "$tool" || true)"

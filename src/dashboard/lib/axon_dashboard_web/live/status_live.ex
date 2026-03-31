@@ -178,7 +178,7 @@ defmodule AxonDashboardWeb.StatusLive do
         {:telemetry_event, [:axon, :watcher, :batch_enqueued], measurements, metadata},
         socket
       ) do
-    msg = "[Watcher] Enqueued batch of #{measurements.count} files to #{metadata.queue}"
+    msg = "[Legacy path] Observed enqueue of #{measurements.count} file(s) to #{metadata.queue}"
     {:noreply, assign(socket, last_event: msg)}
   end
 
@@ -186,9 +186,17 @@ defmodule AxonDashboardWeb.StatusLive do
         {:telemetry_event, [:axon, :watcher, :batch_failed], _measurements, metadata},
         socket
       ) do
-    alert = "ERROR: Failed to enqueue batch: #{metadata.error}"
+    alert = "LEGACY_PATH_ERROR: enqueue observation failed: #{metadata.error}"
     new_alerts = [alert | socket.assigns.alerts] |> Enum.take(3)
     {:noreply, assign(socket, alerts: new_alerts)}
+  end
+
+  def handle_info(
+        {:telemetry_event, [:axon, :watcher, :pending_batch_ignored], measurements, _metadata},
+        socket
+      ) do
+    msg = "[Rust canonical] Ignored #{measurements.count} pending file(s) from legacy watcher path"
+    {:noreply, assign(socket, last_event: msg)}
   end
 
   def handle_info({:bridge_event, event}, socket) do
@@ -310,14 +318,14 @@ defmodule AxonDashboardWeb.StatusLive do
               AXON_<span class="text-amber-500">MAESTRIA</span>
             </h1>
             <p class="text-[10px] text-amber-500/50 font-bold uppercase tracking-widest">
-              Tactical Control Plane v2.2
+              Runtime Observation Surface v2.2
             </p>
           </div>
         </div>
 
         <div class="col-span-6 bg-slate-900/50 border border-white/5 p-4 rounded-lg flex flex-col gap-2">
           <div class="flex justify-between items-center text-[10px] font-black uppercase tracking-[0.2em]">
-            <span class="text-slate-500">Global Fleet Sync</span>
+            <span class="text-slate-500">Workspace Index Coverage</span>
             <span class="text-amber-500 font-mono">{@progress}% COMPLETED</span>
           </div>
           <div class="w-full bg-black/40 h-2 rounded-full overflow-hidden p-[1px] border border-white/5">
@@ -332,12 +340,12 @@ defmodule AxonDashboardWeb.StatusLive do
         <div class="col-span-3 bg-slate-900/50 border border-white/5 p-4 rounded-lg flex justify-between items-center">
           <div class="text-left">
             <p class="text-[9px] text-slate-500 uppercase font-black tracking-widest">
-              System Uptime
+              Runtime Uptime
             </p>
             <p class="text-xl font-bold text-white tracking-tighter">{@uptime_str}</p>
           </div>
           <div class="text-right">
-            <p class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Kernel Time</p>
+            <p class="text-[9px] text-slate-500 uppercase font-black tracking-widest">UTC Time</p>
             <p class="text-xl font-bold text-white tracking-tighter">{@sys_time}</p>
           </div>
         </div>
@@ -391,9 +399,9 @@ defmodule AxonDashboardWeb.StatusLive do
           </div>
 
           <div class="mt-auto pt-4 border-t border-white/5 flex justify-between items-center text-[9px] font-bold uppercase tracking-widest text-slate-500">
-            <span>Workers: {@indexing_limit} Parallel</span>
+            <span>Rust Guidance: {@indexing_limit} Slots</span>
             <span class="text-amber-500">
-              {if @queues_paused, do: "CONSTRAINED", else: "UNRESTRICTED"}
+              {if @queues_paused, do: "CONSTRAINED", else: "HEALTHY"}
             </span>
           </div>
         </div>

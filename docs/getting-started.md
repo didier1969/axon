@@ -1,103 +1,80 @@
 # Getting Started with Axon
 
-Axon indexes your codebase into a knowledge graph and exposes it as MCP tools so AI agents get structural understanding without reading raw files.
+Ce document décrit le **workflow source checkout canonique** du dépôt Axon.
 
-## Prerequisites
+Pour l’instant, la vérité opératoire est:
+- **Rust** est le runtime canonique
+- **Elixir/Phoenix** sert la visualisation et les diagnostics
+- **HydraDB** n’est pas dans le chemin nominal quotidien
 
-- Python 3.11+
-- uv or pip
-- An AI assistant that supports MCP (Claude Code, Cursor, etc.)
+## Prérequis
 
-## Step 1: Install
+- Nix
+- Devenv
+- `tmux`
+- `curl`
+- `nc`
 
-```bash
-pip install axoniq
-# or with uv (recommended)
-uv add axoniq
-```
-
-## Step 2: Index your project
-
-```bash
-cd your-project
-axon analyze .
-```
-
-Expected output:
-
-```
-Walking files...               142 files found
-Parsing code...                142/142
-Tracing calls...               847 calls resolved
-...
-Done in 4.2s — 623 symbols, 1,847 edges, 8 clusters, 34 flows
-```
-
-For a faster first run, skip embedding generation:
+## 1. Entrer dans l’environnement officiel
 
 ```bash
-axon analyze . --no-embeddings
+devenv shell
+./scripts/validate-devenv.sh
 ```
 
-## Step 3: Connect your AI assistant
+Si le validateur échoue, le shell courant n’est pas l’environnement supporté pour Axon.
 
-**Claude Code** — add to `.claude/settings.json` or `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "axon": {
-      "command": "axon",
-      "args": ["serve", "--watch"]
-    }
-  }
-}
-```
-
-Or use the helper: `axon setup --claude`
-
-**Cursor** — add to MCP settings:
-
-```json
-{
-  "axon": {
-    "command": "axon",
-    "args": ["serve", "--watch"]
-  }
-}
-```
-
-Or use: `axon setup --cursor`
-
-## Step 4: Verify it's working
-
-In your AI assistant, ask:
-
-- "Use axon_list_repos to show indexed repositories"
-- "Use axon_query to find the authentication handler"
-
-The tool should return results from the knowledge graph.
-
-## Step 5 (Optional): Auto-start on project entry
-
-Choose one:
-
-**Shell hook** (bash/zsh — auto-starts watcher when you cd into any indexed project):
+## 2. Bootstrap initial
 
 ```bash
-echo 'eval "$(axon shell-hook)"' >> ~/.bashrc
-# or for zsh:
-echo 'eval "$(axon shell-hook --shell zsh)"' >> ~/.zshrc
+./scripts/setup_v2.sh
 ```
 
-**direnv** (per-project):
+Ce script:
+- compile le core Rust
+- prépare et compile le dashboard Elixir
+- exécute les validations principales
+
+## 3. Démarrer Axon
 
 ```bash
-axon init --direnv
+./scripts/start-v2.sh
 ```
 
-## What's next
+Le script:
+- vérifie l’environnement
+- resynchronise `bin/axon-core`
+- démarre Axon dans `tmux`
+- attend le dashboard et la surface SQL
+- vérifie `MCP`
 
-- [MCP Tool Reference](../README.md#mcp-integration) — all 7 tools with usage patterns
-- [CI Integration](../README.md#ci-integration) — dead-code quality gates and template configs
-- `axon --help` — full CLI reference
+## 4. Vérifier la surface live
+
+Sur une instance démarrée:
+
+- dashboard: `http://127.0.0.1:44127/cockpit`
+- SQL: `http://127.0.0.1:44129/sql`
+- MCP: `http://127.0.0.1:44129/mcp`
+
+Exemple:
+
+```bash
+curl -sS -X POST http://127.0.0.1:44129/sql \
+  -H "content-type: application/json" \
+  --data '{"query":"SELECT count(*) FROM File"}'
+```
+
+## 5. Arrêter Axon
+
+```bash
+./scripts/stop-v2.sh
+```
+
+Le script arrête uniquement les processus Axon et nettoie sockets, locks et WAL locaux.
+
+## Notes utiles
+
+- `IST` est la vérité technique reconstructible
+- `SOLL` est la vérité conceptuelle protégée
+- Python reste présent surtout pour les bridges Datalog/TypeQL
+- le vieux flux CLI `pip install axoniq` n’est **pas** le workflow source checkout canonique actuel
