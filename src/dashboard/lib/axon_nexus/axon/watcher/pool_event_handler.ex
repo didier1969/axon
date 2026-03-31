@@ -1,15 +1,20 @@
 defmodule Axon.Watcher.PoolEventHandler do
   @moduledoc false
 
-  def process_pending(batch_files) do
-    files_to_index =
-      Enum.map(batch_files, fn f ->
-        %{"path" => f["path"], "trace_id" => f["trace_id"], "priority" => f["priority"] || 100}
-      end)
+  require Logger
 
-    %{"batch" => files_to_index}
-    |> Axon.Watcher.IndexingWorker.new()
-    |> Oban.insert()
+  def process_pending(batch_files) do
+    if batch_files != [] do
+      :telemetry.execute(
+        [:axon, :watcher, :pending_batch_ignored],
+        %{count: length(batch_files)},
+        %{paths: Enum.map(batch_files, & &1["path"])}
+      )
+
+      Logger.info(
+        "[PoolEventHandler] Ignoring #{length(batch_files)} pending files because Rust is canonical ingestion authority."
+      )
+    end
 
     :ok
   end

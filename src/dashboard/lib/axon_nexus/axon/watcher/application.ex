@@ -10,20 +10,21 @@ defmodule Axon.Watcher.Application do
     # On force le port pour le Cockpit
     System.put_env("PHOENIX_PORT", "6061")
 
-    children = [
+    children = visualization_children()
+
+    opts = [strategy: :rest_for_one, name: Axon.Watcher.Supervisor]
+    Supervisor.start_link(children, opts)
+  end
+
+  def visualization_children do
+    [
       Axon.Watcher.Repo,
       Axon.Watcher.Telemetry,
-      Axon.Watcher.Staging, # BUFFER ETS pour les insertions massives
       Axon.Watcher.Tracer,
       Axon.Watcher.PoolFacade,
       Axon.Watcher.TrafficGuardian,
       {Phoenix.PubSub, name: Axon.PubSub},
-      {Oban, Application.fetch_env!(:axon_watcher, Oban)},
-      {Axon.Watcher.Server, []},
       Axon.Watcher.Endpoint
     ]
-
-    opts = [strategy: :rest_for_one, name: Axon.Watcher.Supervisor]
-    Supervisor.start_link(children, opts)
   end
 end

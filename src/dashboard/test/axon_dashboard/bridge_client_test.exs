@@ -50,4 +50,26 @@ defmodule AxonDashboard.BridgeClientTest do
     send(pid, {:tcp, nil, "Axon Bridge Ready\n"})
     assert Process.alive?(pid)
   end
+
+  test "trigger_scan does not fabricate indexing state before runtime confirmation" do
+    pid = Process.whereis(BridgeClient)
+    assert pid
+
+    :ok = GenServer.cast(pid, :trigger_scan)
+
+    state = BridgeClient.get_state()
+    assert state.engine_state == :idle
+  end
+
+  test "stop_scan does not override runtime state locally" do
+    pid = Process.whereis(BridgeClient)
+    assert pid
+
+    send(pid, {:tcp, nil, Jason.encode!(%{"ScanStarted" => %{}}) <> "\n"})
+    assert BridgeClient.get_state().engine_state == :indexing
+
+    :ok = GenServer.cast(pid, :stop_scan)
+
+    assert BridgeClient.get_state().engine_state == :indexing
+  end
 end

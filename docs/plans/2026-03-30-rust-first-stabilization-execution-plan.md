@@ -769,6 +769,20 @@ git add src/dashboard/lib docs/architecture/2026-03-30-rust-first-elixir-visuali
 git commit -m "refactor: reduce elixir to visualization role"
 ```
 
+Completed on `2026-03-31` with this delivered slice:
+
+- canonical dashboard supervisor no longer boots `Oban` or `Axon.Watcher.Server`
+- `Axon.Watcher.Application` helper child list excludes `Staging`, `Oban`, and `Server`
+- `BridgeClient` no longer fabricates local engine state on control casts
+- `PoolEventHandler` no longer re-enqueues canonical pending work and emits an explicit ignored checkpoint
+- cockpit controls were reduced to runtime status/diagnostics
+- validations passed:
+  - `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
+  - `cargo test --manifest-path src/axon-core/Cargo.toml`
+  - `bash scripts/stop-v2.sh`
+  - `bash scripts/start-v2.sh`
+  - `/sql` live check
+
 ### Task 19: Prepare the operator and product surface
 
 **Files:**

@@ -197,6 +197,30 @@ The intended steady state remains:
 - explicit operator intent may be relayed to Rust
 - Elixir must not fabricate local `indexing` truth ahead of Rust/DB evidence
 
+## Delivered Visualization-Only Slice
+
+The canonical dashboard runtime now enforces a narrower boundary:
+
+- `AxonDashboard.Application` no longer supervises `Oban`
+- `AxonDashboard.Application` no longer supervises `Axon.Watcher.Server`
+- `Axon.Watcher.Application` now exposes only visualization-oriented child specs on its canonical helper path
+- `AxonDashboard.BridgeClient` no longer fabricates local engine state on `trigger_scan`, `stop_scan`, or `reset_db`
+- `Axon.Watcher.PoolEventHandler.process_pending/1` no longer re-enqueues canonical work through Oban and now emits an explicit `pending_batch_ignored` checkpoint
+- `Axon.Watcher.CockpitLive` no longer exposes pause/resume or purge controls and presents Elixir as visualization + diagnostics only
+
+This means the canonical startup path no longer boots an Elixir-owned ingestion queue or an Elixir filesystem watcher.
+
+What still remains transitional:
+
+- the historical modules `Axon.Watcher.Server`, `Axon.Watcher.Staging`, `Axon.Watcher.BatchDispatch`, `Axon.Watcher.IndexingWorker`, and `Axon.Watcher.PoolFacade` still exist in the tree
+- `Axon.Watcher.Application` is still a historical entrypoint even though its helper child list now excludes `Staging`, `Oban`, and `Server`
+- `Axon.Watcher.PoolFacade` still exists as a bridge module and must continue shrinking toward read/telemetry-only responsibilities
+
+So the safe statement is:
+
+- the canonical dashboard runtime is now visualization-first
+- the remaining Elixir ingestion modules are compatibility debt, not target architecture
+
 ## First Delivered Slice
 
 The first concrete migration slice now exists on the Rust side:

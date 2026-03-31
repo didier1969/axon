@@ -57,7 +57,7 @@ defmodule AxonDashboard.BridgeClient do
       :gen_tcp.send(state.socket, "SCAN_ALL\n")
     end
 
-    {:noreply, %{state | engine_state: :indexing}}
+    {:noreply, state}
   end
 
   def handle_cast({:trigger_scan, project_name}, state) do
@@ -66,25 +66,17 @@ defmodule AxonDashboard.BridgeClient do
       :gen_tcp.send(state.socket, "SCAN_PROJECT #{project_name}\n")
     end
 
-    {:noreply, %{state | engine_state: :indexing}}
+    {:noreply, state}
   end
 
   def handle_cast(:stop_scan, state) do
-    if state.socket != nil do
-      Logger.info("[BRIDGE] Sending STOP command")
-      :gen_tcp.send(state.socket, "STOP\n")
-    end
-
-    {:noreply, %{state | engine_state: :idle}}
+    Logger.info("[BRIDGE] Ignoring STOP command because Elixir is visualization-only.")
+    {:noreply, state}
   end
 
   def handle_cast(:reset_db, state) do
-    if state.socket != nil do
-      Logger.info("[BRIDGE] Sending RESET command")
-      :gen_tcp.send(state.socket, "RESET\n")
-    end
-
-    {:noreply, %{state | engine_state: :idle}}
+    Logger.info("[BRIDGE] Ignoring RESET command because Elixir is visualization-only.")
+    {:noreply, state}
   end
 
   def handle_cast({:async_audit, project_name}, %{socket: socket} = state)

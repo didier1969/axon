@@ -735,6 +735,38 @@ Important interpretation:
 - the failures discovered during validation were real but unrelated to those removals
 - they were absorbed because the nominal path itself must remain self-healing and stable
 
+Additional work completed on `Task 18`:
+
+- `AxonDashboard.Application` no longer boots `Oban` or `Axon.Watcher.Server` on the canonical dashboard runtime path
+- `Axon.Watcher.Application.visualization_children/0` now excludes `Axon.Watcher.Staging`, `Oban`, and `Axon.Watcher.Server`
+- `AxonDashboard.BridgeClient` no longer fabricates `engine_state` on `trigger_scan`; `stop_scan` and `reset_db` are now ignored locally because Elixir is visualization-only
+- `Axon.Watcher.PoolEventHandler.process_pending/1` no longer enqueues canonical work through Oban and emits `[:axon, :watcher, :pending_batch_ignored]`
+- `Axon.Watcher.CockpitLive` no longer depends on `Axon.Watcher.Server` and no longer exposes pause/resume/purge controls
+- obsolete `server_test.exs` was removed and replaced by explicit visualization-boundary tests:
+  - `test/axon_dashboard/application_visualization_test.exs`
+  - `test/axon_nexus/axon/watcher/application_visualization_test.exs`
+  - `test/axon_nexus/axon/watcher/pool_event_handler_test.exs`
+  - extended `test/axon_dashboard/bridge_client_test.exs`
+
+Validation:
+
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
+  - `35 tests, 0 failures`
+- `cargo test --manifest-path src/axon-core/Cargo.toml`
+  - `95 passed; 0 failed` in `src/lib.rs`
+  - `32 passed; 0 failed` in `src/main.rs`
+- canonical restart validation:
+  - `bash scripts/stop-v2.sh`
+  - `bash scripts/start-v2.sh`
+  - live SQL check recovered after boot:
+    - `SELECT count(*) FROM File` -> `40731`
+
+Important interpretation:
+
+- the canonical dashboard runtime is now much closer to visualization-only
+- the Rust core remained healthy during this slice
+- there is still compatibility debt in the historical Elixir watcher modules and in `Axon.Watcher.Application`, but they are no longer on the canonical dashboard boot path as ingestion authority
+
 Next logical step:
 
-- `Task 18`: finish reducing Elixir to visualization-only and remove the last ingestion/control semantics from that side
+- `Task 19`: prepare the operator and product surface
