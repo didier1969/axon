@@ -59,10 +59,17 @@ impl GraphStore {
         } else {
             String::new()
         };
+        let docstring = symbol
+            .docstring
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("docstring: {}\n", value))
+            .unwrap_or_default();
 
         format!(
-            "symbol: {}\nkind: {}\nfile: {}\nlines: {}-{}\n\n{}",
-            symbol.name, symbol.kind, path, symbol.start_line, symbol.end_line, snippet
+            "symbol: {}\nkind: {}\nfile: {}\nlines: {}-{}\n{}\
+\n{}",
+            symbol.name, symbol.kind, path, symbol.start_line, symbol.end_line, docstring, snippet
         )
     }
 

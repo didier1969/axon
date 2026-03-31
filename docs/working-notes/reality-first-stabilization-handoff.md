@@ -238,6 +238,19 @@ What changed:
   - `Degraded`
   - `Critical`
 - this state is now canonical for both structural claiming and semantic work:
+ - Wave 5 / Task 12 is now completed:
+   - `Chunk` content now includes docstring text when present, while remaining a derived layer anchored to structural truth
+   - `axon_query` still prefers symbol-level truth first, then falls back to chunk retrieval only when symbol retrieval is empty or unavailable
+   - chunk fallback results are now ranked and explicit about why they matched:
+     - `docstring`
+     - `chunk body`
+     - `chunk metadata`
+     - `file path`
+   - the fallback no longer returns effectively arbitrary rows from DuckDB ordering; path-only matches are intentionally ranked behind docstring/body matches
+   - `vcr1` now proves three concrete gains:
+     - natural behavior phrases can recover the right symbol through chunk content
+     - the response exposes evidence/snippet for disambiguation
+     - ingested docstrings are usable retrieval material without overstating semantic confidence
   - claim depth no longer reacts only to a raw latency number
   - recovery back to full throughput is gradual instead of on/off
   - embeddings pause before structural ingestion is fully stopped

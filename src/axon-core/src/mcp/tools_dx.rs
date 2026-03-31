@@ -34,6 +34,30 @@ impl McpServer {
          OR lower(replace(replace(replace(replace(s.name, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%'"
     }
 
+    fn chunk_search_predicate() -> &'static str {
+        "lower(c.content) LIKE '%' || $normalized || '%' \
+         OR lower(replace(replace(replace(c.content, '_', ' '), '-', ' '), ':', ' ')) LIKE '%' || $normalized || '%' \
+         OR lower(c.content) LIKE '%' || $wildcard || '%' \
+         OR lower(replace(replace(replace(replace(c.content, '_', ''), '-', ''), ':', ''), ' ', '')) LIKE '%' || $compact || '%' \
+         OR lower(f.path) LIKE '%' || $wildcard || '%'"
+    }
+
+    fn chunk_docstring_match_expression() -> &'static str {
+        "position('docstring:' in lower(c.content)) > 0 \
+         AND position($normalized in lower(c.content)) > position('docstring:' in lower(c.content)) \
+         AND (position('\n\n' in c.content) = 0 OR position($normalized in lower(c.content)) < position('\n\n' in c.content))"
+    }
+
+    fn chunk_body_match_expression() -> &'static str {
+        "position('\n\n' in c.content) > 0 \
+         AND position($normalized in lower(c.content)) > position('\n\n' in c.content)"
+    }
+
+    fn chunk_path_match_expression() -> &'static str {
+        "lower(f.path) LIKE '%' || $wildcard || '%' \
+         OR lower(f.path) LIKE '%' || $normalized || '%'"
+    }
+
     pub(crate) fn axon_fs_read(&self, args: &Value) -> Option<Value> {
         let uri = args.get("uri")?.as_str()?;
         let start_line = args.get("start_line").and_then(|v| v.as_u64());
@@ -126,7 +150,7 @@ impl McpServer {
             Ok(res) => {
                 let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
                 if rows.is_empty() {
-                    return self.axon_query_without_contains(query_text, project, &params);
+                    return self.axon_query_from_chunks(query_text, project, &params);
                 }
                 let headers = if sql.contains("score") {
                     vec!["Nom", "Type", "URI (Chemin)", "Distance Sémantique"]
@@ -136,7 +160,105 @@ impl McpServer {
                 let table = format_table_from_json(&res, &headers);
                 Some(json!({ "content": [{ "type": "text", "text": format!("### 🔎 Resultats de recherche : '{}'\n\n**Mode:** {}\n\n{}", query_text, mode_label, table) }] }))
             }
-            Err(_) => self.axon_query_without_contains(query_text, project, &params),
+            Err(_) => self.axon_query_from_chunks(query_text, project, &params),
+        }
+    }
+
+    fn axon_query_from_chunks(&self, query_text: &str, project: &str, params: &Value) -> Option<Value> {
+        let predicate = Self::chunk_search_predicate();
+        let docstring_match = Self::chunk_docstring_match_expression();
+        let body_match = Self::chunk_body_match_expression();
+        let path_match = Self::chunk_path_match_expression();
+        let sql = if project == "*" {
+            format!(
+                "WITH chunk_matches AS ( \
+                    SELECT s.name, s.kind, f.path AS uri, \
+                           CASE \
+                               WHEN {docstring_match} THEN 'docstring' \
+                               WHEN {body_match} THEN 'chunk body' \
+                               WHEN {path_match} THEN 'file path' \
+                               ELSE 'chunk metadata' \
+                           END AS match_reason, \
+                           CASE \
+                               WHEN {docstring_match} THEN 0 \
+                               WHEN {body_match} THEN 1 \
+                               WHEN {path_match} THEN 3 \
+                               ELSE 2 \
+                           END AS match_rank, \
+                           CASE \
+                               WHEN {path_match} THEN f.path \
+                               ELSE replace(replace(substr(c.content, 1, 220), '\n', ' '), '\r', ' ') \
+                           END AS evidence \
+                    FROM Chunk c \
+                    JOIN Symbol s ON s.id = c.source_id \
+                    JOIN CONTAINS rel ON rel.target_id = s.id \
+                    JOIN File f ON f.path = rel.source_id \
+                    WHERE {predicate} \
+                 ) \
+                 SELECT name, kind, uri, match_reason, evidence \
+                 FROM chunk_matches \
+                 ORDER BY match_rank ASC, uri ASC, name ASC \
+                 LIMIT 10",
+                docstring_match = docstring_match,
+                body_match = body_match,
+                path_match = path_match,
+                predicate = predicate,
+            )
+        } else {
+            format!(
+                "WITH chunk_matches AS ( \
+                    SELECT s.name, s.kind, f.path AS uri, \
+                           CASE \
+                               WHEN {docstring_match} THEN 'docstring' \
+                               WHEN {body_match} THEN 'chunk body' \
+                               WHEN {path_match} THEN 'file path' \
+                               ELSE 'chunk metadata' \
+                           END AS match_reason, \
+                           CASE \
+                               WHEN {docstring_match} THEN 0 \
+                               WHEN {body_match} THEN 1 \
+                               WHEN {path_match} THEN 3 \
+                               ELSE 2 \
+                           END AS match_rank, \
+                           CASE \
+                               WHEN {path_match} THEN f.path \
+                               ELSE replace(replace(substr(c.content, 1, 220), '\n', ' '), '\r', ' ') \
+                           END AS evidence \
+                    FROM Chunk c \
+                    JOIN Symbol s ON s.id = c.source_id \
+                    JOIN CONTAINS rel ON rel.target_id = s.id \
+                    JOIN File f ON f.path = rel.source_id \
+                    WHERE c.project_slug = $proj AND ({predicate}) \
+                 ) \
+                 SELECT name, kind, uri, match_reason, evidence \
+                 FROM chunk_matches \
+                 ORDER BY match_rank ASC, uri ASC, name ASC \
+                 LIMIT 10",
+                docstring_match = docstring_match,
+                body_match = body_match,
+                path_match = path_match,
+                predicate = predicate,
+            )
+        };
+
+        match self.graph_store.query_json_param(&sql, params) {
+            Ok(res) => {
+                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+                if rows.is_empty() {
+                    return self.axon_query_without_contains(query_text, project, params);
+                }
+                Some(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!(
+                            "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** fallback lexical sur chunk derive\n**Provenance:** chaque resultat precise sa source de match (`docstring`, `chunk body`, `chunk metadata`, `file path`) et reste ancre sur un fichier structurel.\n\n{}",
+                            query_text,
+                            format_table_from_json(&res, &["Nom", "Type", "URI (Chemin)", "Why it matched", "Evidence"])
+                        )
+                    }]
+                }))
+            }
+            Err(_) => self.axon_query_without_contains(query_text, project, params),
         }
     }
 

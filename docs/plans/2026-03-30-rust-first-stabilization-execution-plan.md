@@ -476,6 +476,12 @@ git commit -m "docs: evaluate granular soll disk projection"
 
 ### Task 12: Finish `Chunk` quality and retrieval usefulness
 
+Status:
+
+- completed on `feat/rust-first-control-plane`
+- retrieval now keeps `symbol-first` behavior, then falls back to ranked chunk retrieval with explicit provenance (`docstring`, `chunk body`, `chunk metadata`, `file path`)
+- derived chunk content now carries docstring text when present so natural developer questions can recover behaviorally relevant context without pretending semantic certainty
+
 **Files:**
 - Modify: `src/axon-core/src/graph_ingestion.rs`
 - Modify: `src/axon-core/src/mcp/tools_dx.rs`

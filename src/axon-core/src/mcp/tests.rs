@@ -723,6 +723,203 @@ fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
 }
 
 #[test]
+fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/runtime/watcher.rs', 'axon')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('axon::opaque_worker', 'opaque_worker', 'function', true, true, false, 'axon')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/watcher.rs', 'axon::opaque_worker')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('axon::opaque_worker::chunk', 'symbol', 'axon::opaque_worker', 'axon', 'function', 'symbol: opaque_worker\nkind: function\nfile: src/runtime/watcher.rs\nlines: 10-18\n\nwhen a manual scan requested event arrives, relay it to the rust watcher and keep the ui passive', 'hash-a', 10, 18)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_query",
+            "arguments": { "query": "manual scan requested", "project": "axon" }
+        })),
+        id: Some(json!(24)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    assert!(content.contains("opaque_worker"));
+    assert!(content.contains("chunk body") || content.contains("chunk metadata"));
+    assert!(content.contains("rust watcher"));
+}
+
+#[test]
+fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/runtime/requeue.rs', 'axon')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/runtime/noise.rs', 'axon')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('axon::worker_alpha', 'worker_alpha', 'function', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('axon::worker_beta', 'worker_beta', 'function', true, true, false, 'axon')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/requeue.rs', 'axon::worker_alpha')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/noise.rs', 'axon::worker_beta')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('axon::worker_alpha::chunk', 'symbol', 'axon::worker_alpha', 'axon', 'function', 'symbol: worker_alpha\nkind: function\nfile: src/runtime/requeue.rs\nlines: 20-28\n\nrequeue claimed file back to pending when the common lane is full', 'hash-b', 20, 28)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('axon::worker_beta::chunk', 'symbol', 'axon::worker_beta', 'axon', 'function', 'symbol: worker_beta\nkind: function\nfile: src/runtime/noise.rs\nlines: 2-8\n\nlog queue metrics and continue', 'hash-c', 2, 8)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_query",
+            "arguments": { "query": "requeue claimed file", "project": "axon" }
+        })),
+        id: Some(json!(25)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    assert!(content.contains("worker_alpha"));
+    assert!(content.contains("requeue claimed file back to pending"));
+    assert!(content.contains("src/runtime/requeue.rs"));
+}
+
+#[test]
+fn test_vcr1_chunk_retrieval_uses_ingested_docstring_content() {
+    let server = create_test_server();
+    let path = "/tmp/axon_docstring_query.rs".to_string();
+    server
+        .graph_store
+        .bulk_insert_files(&[(path.clone(), "axon".to_string(), 120, 1)])
+        .unwrap();
+
+    let extraction = crate::parser::ExtractionResult {
+        project_slug: Some("axon".to_string()),
+        symbols: vec![crate::parser::Symbol {
+            name: "opaque_gate".to_string(),
+            kind: "function".to_string(),
+            start_line: 1,
+            end_line: 3,
+            docstring: Some("Relays manual scan requests to the rust watcher without forcing a fake indexing overlay.".to_string()),
+            is_entry_point: false,
+            is_public: true,
+            tested: true,
+            is_nif: false,
+            is_unsafe: false,
+            properties: std::collections::HashMap::new(),
+            embedding: None,
+        }],
+        relations: vec![],
+    };
+
+    server
+        .graph_store
+        .insert_file_data_batch(&[crate::worker::DbWriteTask::FileExtraction {
+            path: path.clone(),
+            content: "fn opaque_gate() {\n    notify_runtime();\n}\n".to_string(),
+            extraction,
+            trace_id: "docstring-trace".to_string(),
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            t3: 0,
+        }])
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_query",
+            "arguments": { "query": "fake indexing overlay", "project": "axon" }
+        })),
+        id: Some(json!(26)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    assert!(content.contains("opaque_gate"));
+    assert!(content.contains("fake indexing overlay"));
+    assert!(content.contains("docstring"));
+}
+
+#[test]
+fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/runtime/path_only_fake_indexing_overlay.rs', 'axon')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/runtime/docstring_truth.rs', 'axon')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('axon::path_only_probe', 'path_only_probe', 'function', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('axon::truth_probe', 'truth_probe', 'function', true, true, false, 'axon')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/path_only_fake_indexing_overlay.rs', 'axon::path_only_probe')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/docstring_truth.rs', 'axon::truth_probe')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('axon::path_only_probe::chunk', 'symbol', 'axon::path_only_probe', 'axon', 'function', 'symbol: path_only_probe\nkind: function\nfile: src/runtime/path_only_fake_indexing_overlay.rs\nlines: 1-4\n\nlog metrics and continue', 'hash-path', 1, 4)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('axon::truth_probe::chunk', 'symbol', 'axon::truth_probe', 'axon', 'function', 'symbol: truth_probe\nkind: function\nfile: src/runtime/docstring_truth.rs\nlines: 10-18\ndocstring: prevent fake indexing overlay in the cockpit while forwarding to the rust watcher.\n\nnotify runtime and preserve live truth', 'hash-doc', 10, 18)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_query",
+            "arguments": { "query": "fake indexing overlay", "project": "axon" }
+        })),
+        id: Some(json!(27)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    let truth_pos = content.find("truth_probe").expect("truth probe should appear");
+    let path_pos = content.find("path_only_probe").expect("path-only probe should appear");
+    assert!(truth_pos < path_pos, "content-backed match should rank ahead of path-only match");
+    assert!(content.contains("docstring"));
+    assert!(content.contains("file path"));
+}
+
+#[test]
 fn test_axon_query_falls_back_when_contains_is_absent() {
     let server = create_test_server();
     server
