@@ -289,6 +289,77 @@ impl McpServer {
         }
     }
 
+    pub(crate) fn axon_validate_soll(&self) -> Option<Value> {
+        let orphan_requirements = self
+            .query_single_column(
+                "SELECT id FROM soll.Requirement r
+                 WHERE NOT EXISTS (SELECT 1 FROM soll.BELONGS_TO WHERE source_id = r.id OR target_id = r.id)
+                   AND NOT EXISTS (SELECT 1 FROM soll.EXPLAINS WHERE source_id = r.id OR target_id = r.id)
+                   AND NOT EXISTS (SELECT 1 FROM soll.SOLVES WHERE source_id = r.id OR target_id = r.id)
+                   AND NOT EXISTS (SELECT 1 FROM soll.TARGETS WHERE source_id = r.id OR target_id = r.id)
+                   AND NOT EXISTS (SELECT 1 FROM soll.VERIFIES WHERE source_id = r.id OR target_id = r.id)
+                   AND NOT EXISTS (SELECT 1 FROM soll.ORIGINATES WHERE source_id = r.id OR target_id = r.id)
+                   AND NOT EXISTS (SELECT 1 FROM SUBSTANTIATES WHERE source_id = r.id OR target_id = r.id)
+                   AND NOT EXISTS (SELECT 1 FROM IMPACTS WHERE source_id = r.id OR target_id = r.id)
+                 ORDER BY id",
+            )
+            .ok()?;
+
+        let validations_without_verifies = self
+            .query_single_column(
+                "SELECT id FROM soll.Validation v
+                 WHERE NOT EXISTS (SELECT 1 FROM soll.VERIFIES WHERE source_id = v.id OR target_id = v.id)
+                 ORDER BY id",
+            )
+            .ok()?;
+
+        let decisions_without_links = self
+            .query_single_column(
+                "SELECT id FROM soll.Decision d
+                 WHERE NOT EXISTS (SELECT 1 FROM soll.SOLVES WHERE source_id = d.id OR target_id = d.id)
+                   AND NOT EXISTS (SELECT 1 FROM IMPACTS WHERE source_id = d.id OR target_id = d.id)
+                 ORDER BY id",
+            )
+            .ok()?;
+
+        let violation_count =
+            orphan_requirements.len() + validations_without_verifies.len() + decisions_without_links.len();
+
+        let mut report = format!(
+            "Validation SOLL: {} violation(s) de cohérence minimale détectée(s).\n",
+            violation_count
+        );
+        report.push_str("Mode: lecture seule, sans auto-réparation.\n");
+
+        if violation_count == 0 {
+            report.push_str("Etat: cohérence minimale vérifiée, 0 violation détectée.\n");
+            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
+        }
+
+        if !orphan_requirements.is_empty() {
+            report.push_str("\n- Requirements orphelins:\n");
+            for id in orphan_requirements {
+                report.push_str(&format!("  - {}\n", id));
+            }
+        }
+
+        if !validations_without_verifies.is_empty() {
+            report.push_str("\n- Validations sans lien VERIFIES:\n");
+            for id in validations_without_verifies {
+                report.push_str(&format!("  - {}\n", id));
+            }
+        }
+
+        if !decisions_without_links.is_empty() {
+            report.push_str("\n- Decisions sans lien SOLVES/IMPACTS:\n");
+            for id in decisions_without_links {
+                report.push_str(&format!("  - {}\n", id));
+            }
+        }
+
+        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+    }
+
     pub(crate) fn axon_restore_soll(&self, args: &Value) -> Option<Value> {
         let path = args.get("path").and_then(|v| v.as_str())
             .map(|s| s.to_string())
@@ -452,5 +523,14 @@ impl McpServer {
                 )
             }]
         }))
+    }
+
+    fn query_single_column(&self, query: &str) -> anyhow::Result<Vec<String>> {
+        let res = self.graph_store.query_json(query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .collect())
     }
 }

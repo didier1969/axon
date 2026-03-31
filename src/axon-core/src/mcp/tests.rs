@@ -26,7 +26,7 @@ fn test_mcp_tools_list() {
         .as_array()
         .expect("tools is array");
 
-    assert_eq!(tools.len(), 19);
+    assert_eq!(tools.len(), 20);
 
     let tool_names: Vec<&str> = tools
         .iter()
@@ -37,6 +37,7 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"axon_fs_read"));
     assert!(tool_names.contains(&"axon_query"));
     assert!(tool_names.contains(&"axon_restore_soll"));
+    assert!(tool_names.contains(&"axon_validate_soll"));
     assert!(tool_names.contains(&"axon_inspect"));
     assert!(tool_names.contains(&"axon_audit"));
     assert!(tool_names.contains(&"axon_impact"));
@@ -592,6 +593,92 @@ fn test_axon_restore_soll() {
     assert_eq!(server.graph_store.query_count("SELECT count(*) FROM soll.Validation").unwrap(), 1);
 
     let _ = std::fs::remove_file(export_path);
+}
+
+#[test]
+fn test_axon_validate_soll_reports_orphan_invariants() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES ('REQ-AXO-001', 'Orphan requirement', 'No structural links', 'draft', 'P1', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Validation (id, method, result, timestamp, metadata) VALUES ('VAL-AXO-001', 'manual', 'pending', 1234567890, '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata) VALUES ('DEC-AXO-001', 'Orphan decision', '', 'No link', 'Testing', 'proposed', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_validate_soll",
+            "arguments": {}
+        })),
+        id: Some(json!(31)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    assert!(content.contains("3 violation"));
+    assert!(content.contains("REQ-AXO-001"));
+    assert!(content.contains("VAL-AXO-001"));
+    assert!(content.contains("DEC-AXO-001"));
+}
+
+#[test]
+fn test_axon_validate_soll_reports_clean_minimal_graph() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Pillar (id, title, description, metadata) VALUES ('PIL-AXO-001', 'Platform Core', 'Protect SOLL', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES ('REQ-AXO-001', 'Linked requirement', 'Has links', 'draft', 'P1', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Validation (id, method, result, timestamp, metadata) VALUES ('VAL-AXO-001', 'manual', 'passed', 1234567890, '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata) VALUES ('DEC-AXO-001', 'Linked decision', '', 'Context', 'Because', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.BELONGS_TO (source_id, target_id) VALUES ('REQ-AXO-001', 'PIL-AXO-001')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.VERIFIES (source_id, target_id) VALUES ('VAL-AXO-001', 'REQ-AXO-001')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.SOLVES (source_id, target_id) VALUES ('DEC-AXO-001', 'REQ-AXO-001')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_validate_soll",
+            "arguments": {}
+        })),
+        id: Some(json!(32)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    assert!(content.contains("0 violation"));
+    assert!(content.contains("cohérence minimale"));
 }
 
 #[test]

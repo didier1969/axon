@@ -73,6 +73,13 @@ Axon now targets this split:
 - Rust = canonical runtime plane
 - Elixir/Phoenix = visualization and operator plane
 
+`SOLL` also gained a first executable read-only coherence layer via `axon_validate_soll`:
+
+- `Requirement` must not be fully orphaned
+- `Validation` must verify something
+- `Decision` must link to a need or impact
+- validation is advisory only and stays compatible with historical merge restore
+
 This means the ongoing migration must remove remaining ingestion/control-plane authority from Elixir while preserving the UI.
 
 ## Residual Elixir Authority Frozen For Wave 1

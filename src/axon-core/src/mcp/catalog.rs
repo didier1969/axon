@@ -62,6 +62,15 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
+                "name": "axon_validate_soll",
+                "description": "[SOLL] Exécute des garde-fous minimaux de cohérence sur le graphe intentionnel. Validation en lecture seule: détecte les états orphelins évidents sans modifier SOLL.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
                 "name": "axon_query",
                 "description": "[DX] Recherche de symboles à forte valeur développeur. Utilise la recherche structurelle immédiatement, et ajoute la similarité sémantique seulement si l'embedding temps réel est disponible.",
                 "inputSchema": {

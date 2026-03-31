@@ -12,6 +12,7 @@ impl McpServer {
             "axon_refine_lattice" => self.axon_refine_lattice(arguments),
             "axon_fs_read" => self.axon_fs_read(arguments),
             "axon_restore_soll" => self.axon_restore_soll(arguments),
+            "axon_validate_soll" => self.axon_validate_soll(),
             "axon_query" => self.axon_query(arguments),
             "axon_soll_manager" => self.axon_soll_manager(arguments),
             "axon_export_soll" => self.axon_export_soll(),
