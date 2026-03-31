@@ -54,3 +54,18 @@ Les prochains durcissements devront rester compatibles avec ces principes:
 - validation d'abord, mutation ensuite seulement si elle est explicite
 - invariants bases sur les liens reellement modelises et restaurantables
 - pas de promesse de coherence totale tant que le restore reste partiel
+
+## Restore Coverage Etendue
+
+Le format officiel d'export/restore couvre maintenant davantage d'etat quand il est present dans le Markdown:
+
+- metadonnees de `Pillar`, `Concept`, `Milestone`, `Requirement`, `Decision`, `Validation`
+- `Requirement.status`
+- `Decision.context` et `Decision.description`
+- liaisons `SOLL` exportees explicitement dans une section dediee
+
+Le contrat reste tolerant:
+
+- les anciens exports sans ces champs continuent a se restaurer
+- les nouvelles sections restent optionnelles
+- le restore reste merge-oriented et idempotent

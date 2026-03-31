@@ -4,6 +4,21 @@ use serde_json::{json, Value};
 use super::McpServer;
 use super::soll::{find_latest_soll_export, parse_soll_export, SollRestoreCounts};
 
+const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
+    ("EPITOMIZES", "soll.EPITOMIZES"),
+    ("BELONGS_TO", "soll.BELONGS_TO"),
+    ("EXPLAINS", "soll.EXPLAINS"),
+    ("SOLVES", "soll.SOLVES"),
+    ("TARGETS", "soll.TARGETS"),
+    ("VERIFIES", "soll.VERIFIES"),
+    ("ORIGINATES", "soll.ORIGINATES"),
+    ("SUPERSEDES", "soll.SUPERSEDES"),
+    ("CONTRIBUTES_TO", "soll.CONTRIBUTES_TO"),
+    ("REFINES", "soll.REFINES"),
+    ("IMPACTS", "IMPACTS"),
+    ("SUBSTANTIATES", "SUBSTANTIATES"),
+];
+
 impl McpServer {
     pub(crate) fn axon_soll_manager(&self, args: &Value) -> Option<Value> {
         let action = args.get("action")?.as_str()?;
@@ -228,55 +243,101 @@ impl McpServer {
         }
 
         markdown.push_str("## 2. Piliers d'Architecture\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description FROM soll.Pillar") {
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description, metadata FROM soll.Pillar") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
                 markdown.push_str(&format!("* **{}** : {} ({})\n", r[0], r[1], r[2]));
+                if let Some(meta) = r.get(3).filter(|m| !m.is_empty() && *m != "{}") {
+                    markdown.push_str(&format!("  Meta: `{}`\n", meta));
+                }
             }
         }
 
         markdown.push_str("\n## 2b. Concepts\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT name, explanation, rationale FROM soll.Concept") {
+        if let Ok(res) = self.graph_store.query_json("SELECT name, explanation, rationale, metadata FROM soll.Concept") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
                 markdown.push_str(&format!("* **{}** : {} ({})\n", r[0], r[1], r[2]));
+                if let Some(meta) = r.get(3).filter(|m| !m.is_empty() && *m != "{}") {
+                    markdown.push_str(&format!("  Meta: `{}`\n", meta));
+                }
             }
         }
 
         markdown.push_str("\n## 3. Jalons & Roadmap (Milestones)\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status FROM soll.Milestone") {
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status, metadata FROM soll.Milestone") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
                 markdown.push_str(&format!("### {} : {}\n*Statut :* `{}`\n\n", r[0], r[1], r[2]));
+                if let Some(meta) = r.get(3).filter(|m| !m.is_empty() && *m != "{}") {
+                    markdown.push_str(&format!("*Meta :* `{}`\n", meta));
+                }
+                markdown.push('\n');
             }
         }
 
         markdown.push_str("## 4. Exigences & Rayon d'Impact (Requirements)\n");
-        let req_query = "SELECT id, title, priority, description FROM soll.Requirement";
+        let req_query = "SELECT id, title, priority, description, status, metadata FROM soll.Requirement";
         if let Ok(res) = self.graph_store.query_json(req_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {} - {}\n*Priorité :* `{}`\n*Description :* {}\n\n", r[0], r[1], r[2], r[3]));
+                markdown.push_str(&format!("### {} - {}\n*Priorité :* `{}`\n*Description :* {}\n", r[0], r[1], r[2], r[3]));
+                if let Some(status) = r.get(4).filter(|m| !m.is_empty()) {
+                    markdown.push_str(&format!("*Statut :* `{}`\n", status));
+                }
+                if let Some(meta) = r.get(5).filter(|m| !m.is_empty() && *m != "{}") {
+                    markdown.push_str(&format!("*Meta :* `{}`\n", meta));
+                }
+                markdown.push('\n');
             }
         }
 
         markdown.push_str("## 5. Registre des Décisions (ADR)\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status, rationale FROM soll.Decision") {
+        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status, context, description, rationale, metadata FROM soll.Decision") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {}\n**Titre :** {}\n**Statut :** `{}`\n**Rationnel :** {}\n\n", r[0], r[1], r[2], r[3]));
+                markdown.push_str(&format!("### {}\n**Titre :** {}\n**Statut :** `{}`\n", r[0], r[1], r[2]));
+                if let Some(context) = r.get(3).filter(|m| !m.is_empty()) {
+                    markdown.push_str(&format!("**Contexte :** {}\n", context));
+                }
+                if let Some(description) = r.get(4).filter(|m| !m.is_empty()) {
+                    markdown.push_str(&format!("**Description :** {}\n", description));
+                }
+                markdown.push_str(&format!("**Rationnel :** {}\n", r[5]));
+                if let Some(meta) = r.get(6).filter(|m| !m.is_empty() && *m != "{}") {
+                    markdown.push_str(&format!("**Meta :** `{}`\n", meta));
+                }
+                markdown.push('\n');
             }
         }
 
         markdown.push_str("## 6. Preuves de Validation & Witness\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, method, result, timestamp FROM soll.Validation") {
+        if let Ok(res) = self.graph_store.query_json("SELECT id, method, result, timestamp, metadata FROM soll.Validation") {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
                 markdown.push_str(&format!("*   `{}` : **{}** via `{}` (Certifié le {})\n", r[0], r[2], r[1], r[3]));
+                if let Some(meta) = r.get(4).filter(|m| !m.is_empty() && *m != "{}") {
+                    markdown.push_str(&format!("  Meta: `{}`\n", meta));
+                }
             }
         }
 
-        let file_name = format!("SOLL_EXPORT_{}.md", datetime.format("%Y-%m-%d_%H%M%S"));
+        markdown.push_str("\n## 7. Liens de Traçabilité SOLL\n");
+        for (relation_type, table_name) in SOLL_RELATION_EXPORTS {
+            if let Ok(res) = self
+                .graph_store
+                .query_json(&format!("SELECT source_id, target_id FROM {} ORDER BY source_id, target_id", table_name))
+            {
+                let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+                for row in rows {
+                    if row.len() >= 2 {
+                        markdown.push_str(&format!("* `{}`: `{}` -> `{}`\n", relation_type, row[0], row[1]));
+                    }
+                }
+            }
+        }
+
+        let file_name = format!("SOLL_EXPORT_{}.md", datetime.format("%Y-%m-%d_%H%M%S_%3f"));
         let file_path = format!("docs/vision/{}", file_name);
 
         let _ = std::fs::create_dir_all("docs/vision");
@@ -421,13 +482,15 @@ impl McpServer {
         }
 
         for pillar in restore.pillars {
+            let metadata = pillar.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Pillar (id, title, description, metadata)
-                 VALUES ($id, $title, $description, '{}')
+                 VALUES ($id, $title, $description, $metadata)
                  ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title,
-                   description = EXCLUDED.description",
-                &json!({"id": pillar.id, "title": pillar.title, "description": pillar.description})
+                   description = EXCLUDED.description,
+                   metadata = EXCLUDED.metadata",
+                &json!({"id": pillar.id, "title": pillar.title, "description": pillar.description, "metadata": metadata})
             ) {
                 return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore pillar error: {}", e) }], "isError": true }));
             }
@@ -435,13 +498,15 @@ impl McpServer {
         }
 
         for concept in restore.concepts {
+            let metadata = concept.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Concept (name, explanation, rationale, metadata)
-                 VALUES ($name, $explanation, $rationale, '{}')
+                 VALUES ($name, $explanation, $rationale, $metadata)
                  ON CONFLICT (name) DO UPDATE SET
                    explanation = EXCLUDED.explanation,
-                   rationale = EXCLUDED.rationale",
-                &json!({"name": concept.name, "explanation": concept.explanation, "rationale": concept.rationale})
+                   rationale = EXCLUDED.rationale,
+                   metadata = EXCLUDED.metadata",
+                &json!({"name": concept.name, "explanation": concept.explanation, "rationale": concept.rationale, "metadata": metadata})
             ) {
                 return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore concept error: {}", e) }], "isError": true }));
             }
@@ -449,13 +514,15 @@ impl McpServer {
         }
 
         for milestone in restore.milestones {
+            let metadata = milestone.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Milestone (id, title, status, metadata)
-                 VALUES ($id, $title, $status, '{}')
+                 VALUES ($id, $title, $status, $metadata)
                  ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title,
-                   status = EXCLUDED.status",
-                &json!({"id": milestone.id, "title": milestone.title, "status": milestone.status})
+                   status = EXCLUDED.status,
+                   metadata = EXCLUDED.metadata",
+                &json!({"id": milestone.id, "title": milestone.title, "status": milestone.status, "metadata": metadata})
             ) {
                 return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore milestone error: {}", e) }], "isError": true }));
             }
@@ -463,14 +530,18 @@ impl McpServer {
         }
 
         for requirement in restore.requirements {
+            let metadata = requirement.metadata.unwrap_or_else(|| "{}".to_string());
+            let status = requirement.status.unwrap_or_else(|| "restored".to_string());
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Requirement (id, title, description, status, priority, metadata)
-                 VALUES ($id, $title, $description, 'restored', $priority, '{}')
+                 VALUES ($id, $title, $description, $status, $priority, $metadata)
                  ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title,
                    description = EXCLUDED.description,
-                   priority = EXCLUDED.priority",
-                &json!({"id": requirement.id, "title": requirement.title, "description": requirement.description, "priority": requirement.priority})
+                   status = EXCLUDED.status,
+                   priority = EXCLUDED.priority,
+                   metadata = EXCLUDED.metadata",
+                &json!({"id": requirement.id, "title": requirement.title, "description": requirement.description, "priority": requirement.priority, "status": status, "metadata": metadata})
             ) {
                 return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore requirement error: {}", e) }], "isError": true }));
             }
@@ -478,14 +549,20 @@ impl McpServer {
         }
 
         for decision in restore.decisions {
+            let description = decision.description.unwrap_or_default();
+            let context = decision.context.unwrap_or_default();
+            let metadata = decision.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata)
-                 VALUES ($id, $title, '', '', $rationale, $status, '{}')
+                 VALUES ($id, $title, $description, $context, $rationale, $status, $metadata)
                  ON CONFLICT (id) DO UPDATE SET
                    title = EXCLUDED.title,
+                   description = EXCLUDED.description,
+                   context = EXCLUDED.context,
                    rationale = EXCLUDED.rationale,
-                   status = EXCLUDED.status",
-                &json!({"id": decision.id, "title": decision.title, "rationale": decision.rationale, "status": decision.status})
+                   status = EXCLUDED.status,
+                   metadata = EXCLUDED.metadata",
+                &json!({"id": decision.id, "title": decision.title, "description": description, "context": context, "rationale": decision.rationale, "status": decision.status, "metadata": metadata})
             ) {
                 return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore decision error: {}", e) }], "isError": true }));
             }
@@ -493,25 +570,38 @@ impl McpServer {
         }
 
         for validation in restore.validations {
+            let metadata = validation.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Validation (id, method, result, timestamp, metadata)
-                 VALUES ($id, $method, $result, $timestamp, '{}')
+                 VALUES ($id, $method, $result, $timestamp, $metadata)
                  ON CONFLICT (id) DO UPDATE SET
                    method = EXCLUDED.method,
                    result = EXCLUDED.result,
-                   timestamp = EXCLUDED.timestamp",
-                &json!({"id": validation.id, "method": validation.method, "result": validation.result, "timestamp": validation.timestamp})
+                   timestamp = EXCLUDED.timestamp,
+                   metadata = EXCLUDED.metadata",
+                &json!({"id": validation.id, "method": validation.method, "result": validation.result, "timestamp": validation.timestamp, "metadata": metadata})
             ) {
                 return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore validation error: {}", e) }], "isError": true }));
             }
             restored.validations += 1;
         }
 
+        for relation in restore.relations {
+            if let Err(e) = self.restore_soll_relation(
+                &relation.relation_type,
+                &relation.source_id,
+                &relation.target_id,
+            ) {
+                return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore relation error: {}", e) }], "isError": true }));
+            }
+            restored.relations += 1;
+        }
+
         Some(json!({
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "### Restauration SOLL terminee\n\nSource: `{}`\n\nRestaure en mode merge:\n- Vision: {}\n- Pillars: {}\n- Concepts: {}\n- Milestones: {}\n- Requirements: {}\n- Decisions: {}\n- Validations: {}\n\nNote: ce chemin de restauration reconstruit les entites conceptuelles depuis le format Markdown officiel d'export. Les liaisons hierarchiques et metadonnees absentes de l'export restent hors perimetre.",
+                    "### Restauration SOLL terminee\n\nSource: `{}`\n\nRestaure en mode merge:\n- Vision: {}\n- Pillars: {}\n- Concepts: {}\n- Milestones: {}\n- Requirements: {}\n- Decisions: {}\n- Validations: {}\n- Relations: {}\n\nNote: ce chemin de restauration reconstruit les entites conceptuelles depuis le format Markdown officiel d'export. Les metadonnees et liaisons presentes dans l'export sont rejouees en mode merge; les champs absents conservent le comportement historique tolerant.",
                     path,
                     restored.vision,
                     restored.pillars,
@@ -519,7 +609,8 @@ impl McpServer {
                     restored.milestones,
                     restored.requirements,
                     restored.decisions,
-                    restored.validations
+                    restored.validations,
+                    restored.relations
                 )
             }]
         }))
@@ -532,5 +623,41 @@ impl McpServer {
             .into_iter()
             .filter_map(|row| row.into_iter().next())
             .collect())
+    }
+
+    fn restore_soll_relation(
+        &self,
+        relation_type: &str,
+        source_id: &str,
+        target_id: &str,
+    ) -> anyhow::Result<()> {
+        let table_name = match relation_type {
+            "EPITOMIZES" => "soll.EPITOMIZES",
+            "BELONGS_TO" => "soll.BELONGS_TO",
+            "EXPLAINS" => "soll.EXPLAINS",
+            "SOLVES" => "soll.SOLVES",
+            "TARGETS" => "soll.TARGETS",
+            "VERIFIES" => "soll.VERIFIES",
+            "ORIGINATES" => "soll.ORIGINATES",
+            "SUPERSEDES" => "soll.SUPERSEDES",
+            "CONTRIBUTES_TO" => "soll.CONTRIBUTES_TO",
+            "REFINES" => "soll.REFINES",
+            "IMPACTS" => "IMPACTS",
+            "SUBSTANTIATES" => "SUBSTANTIATES",
+            _ => return Ok(()),
+        };
+
+        self.graph_store.execute_param(
+            &format!(
+                "INSERT INTO {} (source_id, target_id)
+                 SELECT ?, ?
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM {} WHERE source_id = ? AND target_id = ?
+                 )",
+                table_name, table_name
+            ),
+            &json!([source_id, target_id, source_id, target_id]),
+        )?;
+        Ok(())
     }
 }

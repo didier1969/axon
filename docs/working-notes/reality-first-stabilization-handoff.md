@@ -79,6 +79,7 @@ Axon now targets this split:
 - `Validation` must verify something
 - `Decision` must link to a need or impact
 - validation is advisory only and stays compatible with historical merge restore
+- the official Markdown `export -> restore` path now replays metadata and explicit SOLL links when they are present in the export, while keeping historical exports valid through optional append-only sections
 
 This means the ongoing migration must remove remaining ingestion/control-plane authority from Elixir while preserving the UI.
 

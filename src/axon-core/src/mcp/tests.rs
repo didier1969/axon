@@ -1006,3 +1006,256 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
 
     let _ = std::fs::remove_file(&export_path);
 }
+
+#[test]
+fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
+    let source_server = create_test_server();
+    source_server
+        .graph_store
+        .execute("INSERT INTO soll.Vision (id, title, description, goal, metadata) VALUES ('VIS-AXO-901', 'Axon Vision', 'Stable conceptual continuity', 'Protect SOLL while evolving IST', '{\"scenario\":\"vcr4-links\"}')")
+        .unwrap();
+
+    let create_calls = vec![
+        json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "pillar",
+                "data": {
+                    "project_slug": "AXO",
+                    "title": "Concept Preservation",
+                    "description": "SOLL must survive runtime churn",
+                    "metadata": { "owner": "platform" }
+                }
+            }
+        }),
+        json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "requirement",
+                "data": {
+                    "project_slug": "AXO",
+                    "title": "Reliable Restore",
+                    "description": "Restore from official export without destructive reset",
+                    "priority": "P1",
+                    "metadata": { "risk": "high" }
+                }
+            }
+        }),
+        json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "decision",
+                "data": {
+                    "project_slug": "AXO",
+                    "title": "Protect SOLL",
+                    "context": "Agents previously removed conceptual state",
+                    "rationale": "Exports must preserve the conceptual thread",
+                    "status": "accepted",
+                    "metadata": { "scope": "restore" }
+                }
+            }
+        }),
+        json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "validation",
+                "data": {
+                    "project_slug": "AXO",
+                    "method": "vcr4-links",
+                    "result": "passed",
+                    "metadata": { "evidence": "test" }
+                }
+            }
+        }),
+    ];
+
+    let mut created_ids = Vec::new();
+    for (idx, call) in create_calls.into_iter().enumerate() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(call),
+            id: Some(json!(300 + idx)),
+        };
+        let response = source_server.handle_request(req);
+        let result = response.unwrap().result.expect("Expected SOLL creation result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        assert!(content.contains("Entité SOLL créée"));
+        created_ids.push(
+            content
+                .split('`')
+                .nth(1)
+                .expect("Expected generated SOLL id")
+                .to_string(),
+        );
+    }
+
+    let pillar_id = created_ids[0].clone();
+    let requirement_id = created_ids[1].clone();
+    let decision_id = created_ids[2].clone();
+    let validation_id = created_ids[3].clone();
+
+    let link_calls = vec![
+        json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "requirement",
+                "data": {
+                    "source_id": requirement_id.clone(),
+                    "target_id": pillar_id.clone(),
+                    "relation_type": "BELONGS_TO"
+                }
+            }
+        }),
+        json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "decision",
+                "data": {
+                    "source_id": decision_id.clone(),
+                    "target_id": requirement_id.clone(),
+                    "relation_type": "SOLVES"
+                }
+            }
+        }),
+        json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "validation",
+                "data": {
+                    "source_id": validation_id.clone(),
+                    "target_id": requirement_id.clone(),
+                    "relation_type": "VERIFIES"
+                }
+            }
+        }),
+    ];
+
+    for (idx, call) in link_calls.into_iter().enumerate() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(call),
+            id: Some(json!(400 + idx)),
+        };
+        let response = source_server.handle_request(req);
+        let result = response.unwrap().result.expect("Expected SOLL link result");
+        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        assert!(content.contains("Liaison établie"));
+    }
+
+    let export_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_export_soll",
+            "arguments": {}
+        })),
+        id: Some(json!(500)),
+    };
+
+    let export_response = source_server.handle_request(export_req);
+    let export_result = export_response.unwrap().result.expect("Expected SOLL export result");
+    let export_text = export_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let export_path = export_text
+        .lines()
+        .find_map(|line| line.strip_prefix("✅ Exported to "))
+        .expect("Expected export path line")
+        .trim()
+        .to_string();
+    let export_markdown = std::fs::read_to_string(&export_path).unwrap();
+    assert!(export_markdown.contains("BELONGS_TO"));
+    assert!(export_markdown.contains("SOLVES"));
+    assert!(export_markdown.contains("VERIFIES"));
+    assert!(export_markdown.contains("platform"));
+    assert!(export_markdown.contains("high"));
+    assert!(export_markdown.contains("scope"));
+
+    let restore_server = create_test_server();
+    let restore_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_restore_soll",
+            "arguments": { "path": export_path }
+        })),
+        id: Some(json!(501)),
+    };
+
+    let restore_response = restore_server.handle_request(restore_req);
+    let restore_result = restore_response.unwrap().result.expect("Expected SOLL restore result");
+    let restore_text = restore_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+
+    assert!(restore_text.contains("Restauration SOLL terminee"));
+    assert_eq!(
+        restore_server.graph_store.query_count(&format!(
+            "SELECT count(*) FROM soll.BELONGS_TO WHERE source_id = '{}' AND target_id = '{}'",
+            requirement_id, pillar_id
+        )).unwrap(),
+        1
+    );
+    assert_eq!(
+        restore_server.graph_store.query_count(&format!(
+            "SELECT count(*) FROM soll.SOLVES WHERE source_id = '{}' AND target_id = '{}'",
+            decision_id, requirement_id
+        )).unwrap(),
+        1
+    );
+    assert_eq!(
+        restore_server.graph_store.query_count(&format!(
+            "SELECT count(*) FROM soll.VERIFIES WHERE source_id = '{}' AND target_id = '{}'",
+            validation_id, requirement_id
+        )).unwrap(),
+        1
+    );
+
+    let pillar_metadata = restore_server
+        .graph_store
+        .query_json(&format!("SELECT metadata FROM soll.Pillar WHERE id = '{}'", pillar_id))
+        .unwrap();
+    let requirement_metadata = restore_server
+        .graph_store
+        .query_json(&format!("SELECT metadata FROM soll.Requirement WHERE id = '{}'", requirement_id))
+        .unwrap();
+    let decision_metadata = restore_server
+        .graph_store
+        .query_json(&format!("SELECT metadata FROM soll.Decision WHERE id = '{}'", decision_id))
+        .unwrap();
+    let validation_metadata = restore_server
+        .graph_store
+        .query_json(&format!("SELECT metadata FROM soll.Validation WHERE id = '{}'", validation_id))
+        .unwrap();
+
+    assert!(pillar_metadata.contains("platform"));
+    assert!(requirement_metadata.contains("high"), "{}", requirement_metadata);
+    assert!(decision_metadata.contains("restore"));
+    assert!(validation_metadata.contains("test"));
+
+    let second_restore_response = restore_server.handle_request(JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_restore_soll",
+            "arguments": { "path": export_path }
+        })),
+        id: Some(json!(502)),
+    });
+    second_restore_response.unwrap().result.expect("Expected second restore result");
+
+    assert_eq!(
+        restore_server.graph_store.query_count(&format!(
+            "SELECT count(*) FROM soll.BELONGS_TO WHERE source_id = '{}' AND target_id = '{}'",
+            requirement_id, pillar_id
+        )).unwrap(),
+        1
+    );
+
+    let _ = std::fs::remove_file(&export_path);
+}
