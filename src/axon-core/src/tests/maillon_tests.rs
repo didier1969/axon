@@ -667,6 +667,314 @@ mod tests {
         assert!(row.contains("900"), "La priorite chaude doit etre preservee pour la seconde passe");
     }
 
+    #[test]
+    fn test_maillon_2k_rust_watcher_tombstones_deleted_file_and_purges_truth() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("deleted_live.ex");
+        std::fs::write(&file_path, "defmodule DeletedLive do\nend\n").unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[(
+                file_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                10,
+                1,
+            )])
+            .unwrap();
+
+        let extraction = parser::ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "deleted_live".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                path: file_path.to_string_lossy().to_string(),
+                content: "defmodule DeletedLive do\nend\n".to_string(),
+                extraction,
+                trace_id: "trace".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        std::fs::remove_file(&file_path).unwrap();
+
+        let staged = crate::fs_watcher::stage_hot_delta(
+            &store,
+            root,
+            &file_path,
+            crate::fs_watcher::HOT_PRIORITY,
+        )
+        .unwrap();
+
+        assert!(staged, "Une suppression doit modifier IST via un tombstone");
+
+        let row = store
+            .query_json(&format!(
+                "SELECT status, worker_id FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert!(row.contains("deleted"), "Le fichier supprimé doit être tombstoné");
+        assert!(row.contains("null"), "Le worker doit être libéré après tombstone");
+
+        let contains_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM CONTAINS WHERE source_id = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert_eq!(contains_count, 0, "Le lien CONTAINS du fichier supprimé doit disparaître");
+
+        let symbol_count = store.query_count("SELECT count(*) FROM Symbol").unwrap();
+        assert_eq!(symbol_count, 0, "Les symboles du fichier supprimé doivent disparaître");
+    }
+
+    #[test]
+    fn test_maillon_2l_rust_watcher_rename_tombstones_old_path_and_stages_new_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let old_path = project.join("rename_old.ex");
+        let new_path = project.join("rename_new.ex");
+        std::fs::write(&old_path, "defmodule RenameOld do\nend\n").unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[(
+                old_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                10,
+                1,
+            )])
+            .unwrap();
+
+        let extraction = parser::ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "rename_old".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                path: old_path.to_string_lossy().to_string(),
+                content: "defmodule RenameOld do\nend\n".to_string(),
+                extraction,
+                trace_id: "trace".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        std::fs::rename(&old_path, &new_path).unwrap();
+
+        let staged = crate::fs_watcher::stage_hot_deltas(
+            &store,
+            root,
+            vec![old_path.clone(), new_path.clone()],
+            crate::fs_watcher::HOT_PRIORITY,
+        )
+        .unwrap();
+
+        assert_eq!(staged, 2, "Un rename doit tombstoner l'ancien chemin et stager le nouveau");
+
+        let old_row = store
+            .query_json(&format!(
+                "SELECT status FROM File WHERE path = '{}'",
+                old_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert!(old_row.contains("deleted"), "L'ancien chemin doit être tombstoné");
+
+        let new_row = store
+            .query_json(&format!(
+                "SELECT status, priority FROM File WHERE path = '{}'",
+                new_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert!(new_row.contains("pending"), "Le nouveau chemin doit être staged en pending");
+        assert!(new_row.contains("900"), "Le nouveau chemin doit garder la priorité chaude");
+
+        let old_contains_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM CONTAINS WHERE source_id = '{}'",
+                old_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert_eq!(old_contains_count, 0, "L'ancien chemin ne doit pas garder de vérité dérivée");
+    }
+
+    #[test]
+    fn test_maillon_2m_reopen_requeues_interrupted_indexing_after_crash() {
+        let db_root = std::env::temp_dir().join(format!(
+            "axon-crash-replay-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&db_root);
+        std::fs::create_dir_all(&db_root).unwrap();
+
+        let db_root_str = db_root.to_string_lossy().to_string();
+        let file_path = db_root.join("proj").join("crash_replay.ex");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(&file_path, "defmodule CrashReplay do\nend\n").unwrap();
+
+        let store = GraphStore::new(&db_root_str).unwrap();
+        store
+            .bulk_insert_files(&[(
+                file_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                10,
+                1,
+            )])
+            .unwrap();
+
+        let claimed = store.fetch_pending_batch(10).unwrap();
+        assert_eq!(claimed.len(), 1, "Le fichier doit d'abord être pris par un claim actif");
+
+        let indexing_row = store
+            .query_json(&format!(
+                "SELECT status, worker_id FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert!(indexing_row.contains("indexing"));
+        assert!(!indexing_row.contains("null"));
+
+        drop(store);
+
+        let reopened = GraphStore::new(&db_root_str).unwrap();
+        let replay_row = reopened
+            .query_json(&format!(
+                "SELECT status, worker_id FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert!(
+            replay_row.contains("pending"),
+            "Un fichier resté indexing après crash doit être rejoué au redémarrage"
+        );
+        assert!(replay_row.contains("null"), "Le worker orphelin doit être libéré au redémarrage");
+
+        let replay_batch = reopened.fetch_pending_batch(10).unwrap();
+        assert_eq!(replay_batch.len(), 1, "Le fichier doit redevenir claimable après redémarrage");
+
+        let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
+    fn test_maillon_2n_late_commit_does_not_resurrect_tombstoned_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("late_deleted.ex");
+        std::fs::write(&file_path, "defmodule LateDeleted do\nend\n").unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[(
+                file_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                10,
+                1,
+            )])
+            .unwrap();
+
+        let first_batch = store.fetch_pending_batch(10).unwrap();
+        assert_eq!(first_batch.len(), 1, "Le fichier doit d'abord être claimé");
+
+        std::fs::remove_file(&file_path).unwrap();
+        let staged = crate::fs_watcher::stage_hot_delta(
+            &store,
+            root,
+            &file_path,
+            crate::fs_watcher::HOT_PRIORITY,
+        )
+        .unwrap();
+        assert!(staged, "Le delete doit tombstoner pendant qu'un worker est encore en vol");
+
+        let extraction = parser::ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "late_deleted".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                path: file_path.to_string_lossy().to_string(),
+                content: "defmodule LateDeleted do\nend\n".to_string(),
+                extraction,
+                trace_id: "trace".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        let row = store
+            .query_json(&format!(
+                "SELECT status FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert!(row.contains("deleted"), "Un commit tardif ne doit pas ressusciter un tombstone");
+
+        let symbol_count = store.query_count("SELECT count(*) FROM Symbol").unwrap();
+        assert_eq!(symbol_count, 0, "Aucune vérité dérivée ne doit réapparaître après tombstone");
+    }
+
     // --- MAILLON 3: LA SOCKET (Le Protocole) ---
     #[tokio::test]
     async fn test_maillon_3_socket_protocol() {

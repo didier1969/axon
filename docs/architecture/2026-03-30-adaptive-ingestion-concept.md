@@ -213,6 +213,18 @@ This avoids duplicate work and duplicate symbol insertion while still preserving
 
 The same path must remain compatible with previously created `IST` files.
 When a newly introduced field such as `needs_reindex` is absent from a legacy `File` table, Axon repairs that gap additively at boot before any claim or reopen logic runs.
+The same restart path must also salvage interrupted claims:
+
+- files left in `status='indexing'` after a crash are moved back to `pending` at boot
+- `worker_id` is cleared
+- `needs_reindex` is preserved, so a true mid-index change still forces the second pass after replay
+
+Delete and rename events must also preserve `IST` truth without a full rescan:
+
+- a missing watcher path now tombstones the matching `File` row, or the matching subtree if the missing path is a directory prefix
+- derived truth attached to that path (`CONTAINS`, `Symbol`, `Chunk`, `CALLS`, `CALLS_NIF`, `ChunkEmbedding`) is purged immediately
+- a late worker commit must not resurrect a tombstoned path; tombstone state wins over stale extraction results
+- a rename is therefore represented as `old path -> tombstoned`, `new path -> staged hot delta`
 
 The watcher path now also carries explicit primary checkpoints:
 
@@ -226,6 +238,7 @@ The watcher path now also carries explicit primary checkpoints:
 - `watcher.filtered`
 - `watcher.db_upsert`
 - `watcher.staged`
+- `watcher.tombstoned`
 - `watcher.staged_none`
 - `watcher.staging_failed`
 - `watcher.error`

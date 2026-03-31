@@ -22,21 +22,22 @@ fn stage_hot_path_delta_count(
 ) -> Result<usize> {
     let scanner = Scanner::new(watch_root.to_string_lossy().as_ref());
 
-    if !scanner.should_process_path(path) {
-        if !path.is_dir() {
-            watcher_probe::record("watcher.filtered", Some(path), "reason=not_processable");
-            return Ok(0);
-        }
-    }
-
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            watcher_probe::record("watcher.missing", Some(path), "reason=not_found");
-            return Ok(0);
+            let tombstoned = store.tombstone_missing_path(path)?;
+            if tombstoned == 0 {
+                watcher_probe::record("watcher.missing", Some(path), "reason=not_found");
+            }
+            return Ok(tombstoned);
         }
         Err(err) => return Err(err.into()),
     };
+
+    if !metadata.is_dir() && !scanner.should_process_path(path) {
+        watcher_probe::record("watcher.filtered", Some(path), "reason=not_processable");
+        return Ok(0);
+    }
 
     if metadata.is_dir() {
         let mut staged = 0usize;
@@ -86,8 +87,11 @@ fn stage_single_file_delta(
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            watcher_probe::record("watcher.missing", Some(path), "reason=single_file_not_found");
-            return Ok(false);
+            let tombstoned = store.tombstone_missing_path(path)?;
+            if tombstoned == 0 {
+                watcher_probe::record("watcher.missing", Some(path), "reason=single_file_not_found");
+            }
+            return Ok(tombstoned > 0);
         }
         Err(err) => return Err(err.into()),
     };

@@ -85,6 +85,7 @@ impl GraphStore {
             store.init_schema(is_memory)?;
             store.ensure_additive_schema()?;
             store.ensure_runtime_compatibility()?;
+            store.recover_interrupted_indexing()?;
             store.execute("CHECKPOINT;")?;
 
             let reader_ptr = if is_memory {
@@ -239,6 +240,31 @@ impl GraphStore {
         }
 
         self.write_runtime_metadata(&expected)?;
+        Ok(())
+    }
+
+    fn recover_interrupted_indexing(&self) -> Result<()> {
+        let existing = self.query_json("SELECT name FROM pragma_table_info('File')")?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&existing).unwrap_or_default();
+        let columns: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .collect();
+
+        if !columns.contains("status") {
+            return Ok(());
+        }
+
+        let interrupted = self.query_count("SELECT count(*) FROM File WHERE status = 'indexing'")?;
+        if interrupted > 0 {
+            warn!(
+                "Recovering {} interrupted indexing claim(s) back to pending during startup.",
+                interrupted
+            );
+            self.execute(
+                "UPDATE File SET status = 'pending', worker_id = NULL WHERE status = 'indexing'",
+            )?;
+        }
         Ok(())
     }
 

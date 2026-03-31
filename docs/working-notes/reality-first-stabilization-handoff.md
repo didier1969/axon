@@ -200,10 +200,20 @@ What changed:
   - `watcher.rescan_started`
   - `watcher.rescan_completed`
   - `watcher.rescan_skipped`
+  - `watcher.tombstoned`
   - `watcher.staged_none`
   - `watcher.staging_failed`
   - `watcher.error`
 - bootstrap-storm salvage is now restricted to active-project file paths only; whole directories from a startup storm are no longer recursively restaged inside the watcher callback
+- a missing watcher path no longer dies as a blind no-op when it maps to known `IST` truth:
+  - delete and rename now tombstone the old `File` path
+  - derived truth for that path is purged immediately
+  - a late worker commit can no longer resurrect a tombstoned path
+  - the new rename target is staged as an ordinary hot delta
+- startup now salvages interrupted claims too:
+  - `File.status='indexing'` rows are moved back to `pending`
+  - `worker_id` is cleared
+  - replay can resume without requiring a full rescan or an `IST` version drift
 
 ## Rust Core / Native Ingestion / MCP
 
@@ -282,6 +292,7 @@ Rust validation reached a clean state during this session:
 - result reached now after watcher probes and file-only bootstrap salvage: `63 passed; 0 failed` in `src/lib.rs` and `21 passed; 0 failed` in `src/main.rs`
 - result reached now after explicit `IST` invalidation policy tests: `66 passed; 0 failed` in `src/lib.rs` and `25 passed; 0 failed` in `src/main.rs`
 - result reached now after watcher rescan/no-op/error checkpoint coverage: `66 passed; 0 failed` in `src/lib.rs` and `30 passed; 0 failed` in `src/main.rs`
+- result reached now after delete/rename tombstone handling and crash-mid-index replay: `70 passed; 0 failed` in `src/lib.rs` and `30 passed; 0 failed` in `src/main.rs`
 - dashboard validation remains green after real `io` monitoring work: `31 tests, 0 failures`
 
 Runtime note:

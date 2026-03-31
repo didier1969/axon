@@ -91,11 +91,65 @@ impl GraphStore {
         Ok(())
     }
 
+    pub fn tombstone_missing_path(&self, path: &Path) -> Result<usize> {
+        let path = path.to_string_lossy().to_string();
+        let escaped = Self::escape_sql(&path);
+        let prefix = Self::escape_sql(&format!("{}/%", path.trim_end_matches('/')));
+        let selector = format!("SELECT path FROM File WHERE path = '{}' OR path LIKE '{}'", escaped, prefix);
+        let affected = self.query_count(&format!("SELECT count(*) FROM ({}) AS tombstone_paths", selector))?;
+
+        if affected == 0 {
+            return Ok(0);
+        }
+
+        let queries = vec![
+            format!(
+                "DELETE FROM CALLS WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) \
+                 OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
+                selector, selector
+            ),
+            format!(
+                "DELETE FROM CALLS_NIF WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) \
+                 OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
+                selector, selector
+            ),
+            format!(
+                "DELETE FROM ChunkEmbedding WHERE chunk_id IN (SELECT id FROM Chunk WHERE source_type = 'symbol' \
+                 AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})));",
+                selector
+            ),
+            format!(
+                "DELETE FROM Chunk WHERE source_type = 'symbol' \
+                 AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
+                selector
+            ),
+            format!(
+                "DELETE FROM Symbol WHERE id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
+                selector
+            ),
+            format!("DELETE FROM CONTAINS WHERE source_id IN ({});", selector),
+            format!(
+                "UPDATE File SET status = 'deleted', worker_id = NULL, needs_reindex = FALSE \
+                 WHERE path IN ({});",
+                selector
+            ),
+        ];
+
+        self.execute_batch(&queries)?;
+        watcher_probe::record(
+            "watcher.tombstoned",
+            Some(path.as_ref()),
+            format!("affected={}", affected),
+        );
+        Ok(affected as usize)
+    }
+
     pub fn insert_file_data_batch(&self, tasks: &[crate::worker::DbWriteTask]) -> Result<()> {
         if tasks.is_empty() {
             return Ok(());
         }
         let mut queries = Vec::new();
+        let mut deleted_paths = Vec::new();
         let mut indexed_paths = Vec::new();
         let mut skipped_paths = Vec::new();
         let mut symbol_values = Vec::new();
@@ -107,6 +161,10 @@ impl GraphStore {
         for task in tasks {
             match task {
                 crate::worker::DbWriteTask::FileExtraction { path, content, extraction, .. } => {
+                    if self.is_file_tombstoned(path)? {
+                        deleted_paths.push(format!("'{}'", Self::escape_sql(path)));
+                        continue;
+                    }
                     indexed_paths.push(format!("'{}'", Self::escape_sql(path)));
                     let slug = extraction.project_slug.as_deref().unwrap_or("global");
                     for sym in &extraction.symbols {
@@ -171,12 +229,22 @@ impl GraphStore {
                     }
                 }
                 crate::worker::DbWriteTask::FileSkipped { path, .. } => {
+                    if self.is_file_tombstoned(path)? {
+                        deleted_paths.push(format!("'{}'", Self::escape_sql(path)));
+                        continue;
+                    }
                     skipped_paths.push(format!("'{}'", Self::escape_sql(path)));
                 }
                 _ => {}
             }
         }
 
+        if !deleted_paths.is_empty() {
+            queries.push(format!(
+                "UPDATE File SET status = 'deleted', worker_id = NULL, needs_reindex = FALSE WHERE path IN ({});",
+                deleted_paths.join(",")
+            ));
+        }
         if !indexed_paths.is_empty() {
             let indexed_filter = indexed_paths.join(",");
             queries.push(format!(
@@ -521,5 +589,12 @@ impl GraphStore {
                 priority
             ),
         ]
+    }
+
+    fn is_file_tombstoned(&self, path: &str) -> Result<bool> {
+        Ok(self.query_count(&format!(
+            "SELECT count(*) FROM File WHERE path = '{}' AND status = 'deleted'",
+            Self::escape_sql(path)
+        ))? > 0)
     }
 }
