@@ -643,6 +643,15 @@ Secondary next step:
 
 5. keep aligning dashboard actions and MCP outputs with real value for LLM-assisted development
 
+Decision now fixed for the post-plan LLM quality work:
+
+- after the current execution plan and after the Final Gate, prioritize `A` then `B`
+- keep `C` only at the very end
+- where:
+  - `A` = task-oriented retrieval for coding
+  - `B` = pre-change safety and quality guardrails
+  - `C` = richer conceptual/project memory
+
 Method skill already created:
 
 - `/home/dstadel/projects/axon/.claude/skills/reality-first-stabilization/SKILL.md`

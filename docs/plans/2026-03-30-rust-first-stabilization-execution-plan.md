@@ -791,6 +791,25 @@ Before calling this program phase complete, confirm:
 - update handoff after every wave,
 - never leave runtime-shaping work uncommitted.
 
+## Post-Plan LLM Quality Work
+
+After Tasks 15 to 19 and after the Final Gate, the next exploitation order is fixed:
+
+1. `A` task-oriented retrieval for developer work
+- help a coding LLM decide where to look, what to load, and what to modify
+
+2. `B` pre-change safety and quality guardrails
+- impact before edit, public surface warnings, SOLL constraints, test suggestions, risk framing
+
+3. `C` richer project memory and conceptual continuity
+- why the code exists, architectural intent, decisions, constraints, historical rationale
+
+Decision recorded:
+
+- do `A` first
+- then `B`
+- keep `C` for the very end
+
 Plan complete and saved to `docs/plans/2026-03-30-rust-first-stabilization-execution-plan.md`. Two execution options:
 
 1. Subagent-Driven (this session) - I dispatch fresh subagent per task, review between tasks, fast iteration
