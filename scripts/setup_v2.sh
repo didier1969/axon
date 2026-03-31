@@ -35,7 +35,7 @@ echo "✅ Rust core available at bin/axon-core"
 # 3. Dashboard dependencies and compile
 DASHBOARD_DIR="$PROJECT_ROOT/src/dashboard"
 echo "💧 Preparing Elixir dashboard..."
-devenv shell -- bash -lc "cd '$DASHBOARD_DIR' && mix deps.get && mix compile"
+devenv shell -- bash -lc "cd '$DASHBOARD_DIR' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && mix deps.get && mix compile"
 echo "✅ Elixir dashboard compiled"
 
 # 4. Core validation

@@ -20,10 +20,21 @@ defmodule Axon.BackpressureControllerTest do
   end
 
   setup do
+    if Process.whereis(:test_pid) do
+      Process.unregister(:test_pid)
+    end
+
     Process.register(self(), :test_pid)
 
-    {:ok, _pid} =
-      Agent.start_link(fn -> %{cpu: 10.0, ram: 10.0, io: 0.0} end, name: MockResourceMonitor)
+    case Agent.start_link(fn -> %{cpu: 10.0, ram: 10.0, io: 0.0} end, name: MockResourceMonitor) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, {:already_started, pid}} ->
+        Agent.stop(pid)
+        {:ok, _pid} = Agent.start_link(fn -> %{cpu: 10.0, ram: 10.0, io: 0.0} end, name: MockResourceMonitor)
+        :ok
+    end
 
     # Ensure consistent test environment config
     Application.put_env(:axon_dashboard, Axon.BackpressureController,
@@ -31,6 +42,20 @@ defmodule Axon.BackpressureControllerTest do
       ram_hard_limit: 70.0,
       io_hard_limit: 20.0
     )
+
+    on_exit(fn ->
+      if pid = Process.whereis(MockResourceMonitor) do
+        if Process.alive?(pid) do
+          Agent.stop(pid)
+        end
+      end
+
+      if Process.whereis(:test_pid) do
+        Process.unregister(:test_pid)
+      end
+
+      Application.delete_env(:axon_dashboard, Axon.BackpressureController)
+    end)
 
     :ok
   end

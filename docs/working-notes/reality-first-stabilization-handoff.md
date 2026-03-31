@@ -704,3 +704,37 @@ Most important decision:
 Next logical step:
 
 - `Task 17`: classify Python operational paths as `current`, `tolerated`, `obsolete`, then retire obsolete ones without touching the Datalog/TypeQL bridge yet
+
+## 2026-03-31 Task 17 Update
+
+Branch:
+
+- `feat/rust-first-control-plane`
+
+Newly completed slice:
+
+- Python operational audit written in `docs/plans/2026-03-31-python-operational-audit.md`
+- removed first obsolete set:
+  - `scripts/mcp-stdio-proxy.py`
+  - `scripts/demo_uds.py`
+  - root-level ad hoc conversion / benchmark / probe Python files with no canonical role
+- parser bridges preserved:
+  - `src/axon-core/src/parser/python_bridge/datalog_parser.py`
+  - `src/axon-core/src/parser/python_bridge/typeql_parser.py`
+
+Validation and fixes found while re-running the nominal path:
+
+- `setup_v2.sh` now pre-warms `Hex/Rebar` explicitly before `mix deps.get && mix compile`
+- `Axon.BackpressureControllerTest` was made idempotent so repeated nominal validation no longer fails on leftover named processes
+- targeted validation passed:
+  - `devenv shell -- bash -lc 'cd src/dashboard && mix test test/axon_nexus/axon/backpressure_controller_test.exs'`
+
+Important interpretation:
+
+- removed Python files were not on the canonical startup path
+- the failures discovered during validation were real but unrelated to those removals
+- they were absorbed because the nominal path itself must remain self-healing and stable
+
+Next logical step:
+
+- `Task 18`: finish reducing Elixir to visualization-only and remove the last ingestion/control semantics from that side

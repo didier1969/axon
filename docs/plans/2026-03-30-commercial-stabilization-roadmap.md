@@ -348,6 +348,7 @@ Acceptance criteria:
 - obsolete Python scripts are removed
 - any retained Python dependency has a written justification
 - operational startup and validation paths no longer depend on legacy Python scripts
+- first completed slice: obsolete stdio/UDS and ad hoc conversion Python artifacts removed on `2026-03-31`; runtime Python kept only for parser bridges pending later review
 
 # Recommended Execution Order
 

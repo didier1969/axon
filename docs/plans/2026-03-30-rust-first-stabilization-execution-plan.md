@@ -692,6 +692,14 @@ git commit -m "feat: add derived graph embeddings"
 
 ### Task 17: Audit and retire obsolete Python scripts
 
+Status:
+
+- completed on `feat/rust-first-control-plane`
+- runtime Python scope is now explicit: parser bridges only (`datalog`, `typeql`)
+- a first high-confidence obsolete set was removed from the repo
+- canonical startup scripts were revalidated and hardened while running this audit
+- legacy Python still present in the repo is now intentionally treated as `tolerated`, not canonical
+
 **Files:**
 - Modify: `docs/plans/2026-03-30-commercial-stabilization-roadmap.md`
 - Modify/Delete: legacy Python scripts/tests/benchmarks after explicit classification
