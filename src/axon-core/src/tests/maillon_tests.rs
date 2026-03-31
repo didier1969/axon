@@ -1558,4 +1558,111 @@ mod tests {
         assert!(second_projection.contains("proj::FileAlpha"));
         assert!(second_projection.contains("proj::FileBeta"));
     }
+
+    #[test]
+    fn test_graph_projection_refresh_reuses_unchanged_anchor_without_rebuild() {
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+                ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
+                ('proj::B', 'B', 'function', true, true, false, false, 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/graph/a.rs', 'proj::A'), ('/tmp/graph/a.rs', 'proj::B')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::B')")
+            .unwrap();
+
+        let anchor_id = store
+            .refresh_symbol_projection("A", 1)
+            .unwrap()
+            .expect("anchor should resolve");
+        let first_state = store
+            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
+            .unwrap();
+        assert_ne!(first_state, "[]", "L'etat de projection doit etre materialise");
+        let first_projection_count = store
+            .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second_anchor = store
+            .refresh_symbol_projection("A", 1)
+            .unwrap()
+            .expect("anchor should resolve");
+        let second_state = store
+            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
+            .unwrap();
+        assert_ne!(second_state, "[]", "L'etat de projection doit rester disponible");
+        let second_projection_count = store
+            .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
+            .unwrap();
+
+        assert_eq!(anchor_id, second_anchor);
+        assert_eq!(first_projection_count, second_projection_count);
+        assert_eq!(
+            first_state, second_state,
+            "Une projection inchangée doit être réutilisée sans réécriture"
+        );
+    }
+
+    #[test]
+    fn test_graph_projection_refresh_rebuilds_only_changed_anchor() {
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/d.rs', 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+                ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
+                ('proj::B', 'B', 'function', true, true, false, false, 'proj'), \
+                ('proj::C', 'C', 'function', true, true, false, false, 'proj'), \
+                ('proj::D', 'D', 'function', true, true, false, false, 'proj'), \
+                ('proj::E', 'E', 'function', true, true, false, false, 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES \
+                ('/tmp/graph/a.rs', 'proj::A'), ('/tmp/graph/a.rs', 'proj::B'), ('/tmp/graph/a.rs', 'proj::C'), \
+                ('/tmp/graph/d.rs', 'proj::D'), ('/tmp/graph/d.rs', 'proj::E')")
+            .unwrap();
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::B'), ('proj::D', 'proj::E')")
+            .unwrap();
+
+        store.refresh_symbol_projection("A", 2).unwrap();
+        store.refresh_symbol_projection("D", 2).unwrap();
+        let before_d_state = store
+            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::D' AND radius = 2")
+            .unwrap();
+        assert_ne!(before_d_state, "[]", "Le voisinage non touche doit avoir un etat materialise");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .execute("DELETE FROM CALLS WHERE source_id = 'proj::A' AND target_id = 'proj::B'")
+            .unwrap();
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::C')")
+            .unwrap();
+
+        store.refresh_symbol_projection("A", 2).unwrap();
+
+        let projection_a = store
+            .query_graph_projection("symbol", "proj::A", 2)
+            .unwrap();
+        let after_d_state = store
+            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::D' AND radius = 2")
+            .unwrap();
+        assert_ne!(after_d_state, "[]", "Le voisinage non touche doit rester materialise");
+
+        assert!(projection_a.contains("proj::C"));
+        assert!(!projection_a.contains("proj::B"));
+        assert_eq!(
+            before_d_state, after_d_state,
+            "Le refresh d'une ancre modifiée ne doit pas réécrire les voisinages non touchés"
+        );
+    }
 }

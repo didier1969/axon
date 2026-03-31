@@ -604,6 +604,13 @@ git commit -m "feat: add graph projection layer"
 
 ### Task 15: Add explicit `GraphProjection` invalidation
 
+Status:
+
+- completed on `feat/rust-first-control-plane`
+- added a dedicated `GraphProjectionState` table to track source signature and projection version per anchor/radius
+- unchanged symbol/file projections are now reused without rewrite
+- changed anchors refresh only their own projection rows; unrelated neighborhoods stay reusable
+
 **Files:**
 - Modify: `src/axon-core/src/graph_query.rs`
 - Modify: `src/axon-core/src/graph_bootstrap.rs`

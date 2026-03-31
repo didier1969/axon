@@ -1,4 +1,5 @@
 use std::ffi::CString;
+use std::hash::{Hash, Hasher};
 
 use anyhow::{anyhow, Result};
 use libloading::Symbol as LibSymbol;
@@ -9,6 +10,55 @@ use crate::graph::{ExecFunc, FreeStrFunc, GraphStore, QueryCountFunc, QueryJsonF
 impl GraphStore {
     fn graph_projection_version() -> &'static str {
         "1"
+    }
+
+    fn projection_signature(rows: &[Vec<Value>]) -> String {
+        let mut normalized: Vec<String> = rows
+            .iter()
+            .filter_map(|row| {
+                let node = row.first()?.as_str()?.to_string();
+                let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(0);
+                Some(format!("{}:{}", node, distance))
+            })
+            .collect();
+        normalized.sort();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        normalized.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    fn graph_projection_state_matches(
+        &self,
+        anchor_type: &str,
+        anchor_id: &str,
+        radius: i64,
+        signature: &str,
+        version: &str,
+    ) -> Result<bool> {
+        let res = self.query_json_param(
+            "SELECT source_signature, projection_version \
+             FROM GraphProjectionState \
+             WHERE anchor_type = $anchor_type \
+               AND anchor_id = $anchor_id \
+               AND radius = $radius \
+             LIMIT 1",
+            &serde_json::json!({
+                "anchor_type": anchor_type,
+                "anchor_id": anchor_id,
+                "radius": radius,
+            }),
+        )?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        let Some(row) = rows.first() else {
+            return Ok(false);
+        };
+        let Some(existing_signature) = row.first().and_then(|value| value.as_str()) else {
+            return Ok(false);
+        };
+        let Some(existing_version) = row.get(1).and_then(|value| value.as_str()) else {
+            return Ok(false);
+        };
+        Ok(existing_signature == signature && existing_version == version)
     }
 
     fn resolve_symbol_anchor_id(&self, symbol: &str) -> Result<Option<String>> {
@@ -52,14 +102,23 @@ impl GraphStore {
             GROUP BY node_id";
         let res = self.query_json_param(query, &params)?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        let signature = Self::projection_signature(&rows);
         let created_at = chrono::Utc::now().timestamp_millis();
         let anchor_escaped = anchor_id.replace('\'', "''");
         let version = Self::graph_projection_version();
+
+        if self.graph_projection_state_matches("symbol", &anchor_id, radius, &signature, version)? {
+            return Ok(Some(anchor_id));
+        }
 
         let mut queries = vec![format!(
             "DELETE FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = '{}' AND radius = {};",
             anchor_escaped, radius
         )];
+        queries.push(format!(
+            "DELETE FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = '{}' AND radius = {};",
+            anchor_escaped, radius
+        ));
 
         queries.push(format!(
             "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('symbol', '{}', 'symbol', '{}', 'anchor', 0, {}, '{}', {});",
@@ -84,6 +143,10 @@ impl GraphStore {
                 created_at
             ));
         }
+        queries.push(format!(
+            "INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', '{}', {}, '{}', '{}', {});",
+            anchor_escaped, radius, signature, version, created_at
+        ));
 
         self.execute_batch(&queries)?;
         Ok(Some(anchor_id))
@@ -113,14 +176,23 @@ impl GraphStore {
             GROUP BY node_id";
         let res = self.query_json_param(query, &params)?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        let signature = Self::projection_signature(&rows);
         let created_at = chrono::Utc::now().timestamp_millis();
         let file_escaped = file_path.replace('\'', "''");
         let version = Self::graph_projection_version();
+
+        if self.graph_projection_state_matches("file", file_path, radius, &signature, version)? {
+            return Ok(());
+        }
 
         let mut queries = vec![format!(
             "DELETE FROM GraphProjection WHERE anchor_type = 'file' AND anchor_id = '{}' AND radius = {};",
             file_escaped, radius
         )];
+        queries.push(format!(
+            "DELETE FROM GraphProjectionState WHERE anchor_type = 'file' AND anchor_id = '{}' AND radius = {};",
+            file_escaped, radius
+        ));
 
         queries.push(format!(
             "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('file', '{}', 'file', '{}', 'file', 0, {}, '{}', {});",
@@ -144,6 +216,10 @@ impl GraphStore {
                 created_at
             ));
         }
+        queries.push(format!(
+            "INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('file', '{}', {}, '{}', '{}', {});",
+            file_escaped, radius, signature, version, created_at
+        ));
 
         self.execute_batch(&queries)
     }

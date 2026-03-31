@@ -271,6 +271,14 @@ What changed:
      - symbol projection with radius 1
      - symbol projection with radius 2
      - file-anchor projection stability and idempotence
+ - Wave 5 / Task 15 is now completed:
+   - `GraphProjectionState` now tracks source signature and projection version per anchor/radius
+   - refreshing an unchanged projection no longer rewrites its rows
+   - refreshing a changed anchor rewrites only that anchor's projection rows
+   - unrelated neighborhoods remain reusable and are no longer rewritten as collateral work
+   - proofs now cover:
+     - reuse of unchanged symbol projections without rebuild
+     - targeted rebuild of only the changed anchor neighborhood
   - claim depth no longer reacts only to a raw latency number
   - recovery back to full throughput is gradual instead of on/off
   - embeddings pause before structural ingestion is fully stopped
