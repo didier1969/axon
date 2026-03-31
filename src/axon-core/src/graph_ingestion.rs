@@ -392,6 +392,13 @@ impl GraphStore {
         Ok(files)
     }
 
+    pub fn requeue_claimed_file(&self, path: &str) -> Result<()> {
+        self.execute(&format!(
+            "UPDATE File SET status = 'pending', worker_id = NULL WHERE path = '{}' AND status = 'indexing';",
+            Self::escape_sql(path)
+        ))
+    }
+
     pub fn fetch_unembedded_symbols(&self, count: usize) -> Result<Vec<(String, String)>> {
         let query = format!("SELECT id, name || ': ' || kind FROM Symbol WHERE embedding IS NULL LIMIT {}", count);
         let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());

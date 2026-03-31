@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
 
 use axon_core::graph::GraphStore;
+use axon_core::graph::PendingFile;
 use axon_core::queue::QueueStore;
 use axon_core::service_guard;
 use axon_core::scanner::Scanner;
@@ -61,7 +62,7 @@ pub(crate) fn spawn_autonomous_ingestor(
         let mut last_mode: Option<ClaimMode> = None;
         loop {
             let policy = claim_policy(
-                queue.len(),
+                queue.common_len(),
                 current_rss_bytes(),
                 memory_limit,
                 service_guard::recent_peak_latency_ms(),
@@ -72,7 +73,7 @@ pub(crate) fn spawn_autonomous_ingestor(
                     policy.mode.label(),
                     policy.claim_count,
                     policy.sleep.as_millis(),
-                    queue.len(),
+                    queue.common_len(),
                     service_guard::recent_peak_latency_ms(),
                 );
                 last_mode = Some(policy.mode);
@@ -81,15 +82,34 @@ pub(crate) fn spawn_autonomous_ingestor(
                 if let Ok(files) = store.fetch_pending_batch(policy.claim_count) {
                     if !files.is_empty() {
                         debug!("Autonomous Ingestor: Feeding {} tasks to workers.", files.len());
-                        for f in files {
-                            let _ = queue.push(&f.path, 0, &f.trace_id, 0, 0, false);
-                        }
+                        enqueue_claimed_files(&store, &queue, files);
                     }
                 }
             }
             tokio::time::sleep(policy.sleep).await;
         }
     });
+}
+
+fn enqueue_claimed_files(store: &GraphStore, queue: &QueueStore, files: Vec<PendingFile>) {
+    for file in files {
+        let is_hot = file.priority >= HOT_PRIORITY;
+        if let Err(err) = queue.push(&file.path, 0, &file.trace_id, 0, 0, is_hot) {
+            warn!(
+                "Autonomous Ingestor failed to enqueue {} (priority={}): {}. Requeueing claim.",
+                file.path,
+                file.priority,
+                err
+            );
+            if let Err(requeue_err) = store.requeue_claimed_file(&file.path) {
+                error!(
+                    "Autonomous Ingestor failed to requeue claimed file {} after queue pressure: {}",
+                    file.path,
+                    requeue_err
+                );
+            }
+        }
+    }
 }
 
 pub(crate) fn spawn_initial_scan(store: Arc<GraphStore>, projects_root: String) {
@@ -649,8 +669,9 @@ fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>
 
 #[cfg(test)]
 mod tests {
-    use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, handle_watcher_events, memory_limit_bytes, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets, RescanGuardReset};
+    use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files, handle_watcher_events, memory_limit_bytes, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets, RescanGuardReset};
     use axon_core::graph::GraphStore;
+    use axon_core::queue::QueueStore;
     use axon_core::watcher_probe;
     use notify_debouncer_full::notify::{Event, EventKind};
     use notify_debouncer_full::notify::event::{Flag, ModifyKind};
@@ -1030,6 +1051,40 @@ mod tests {
         let events = watcher_probe::recent();
         assert!(events.iter().any(|line| line.contains("watcher.error")));
         assert!(events.iter().any(|line| line.contains("boom")));
+    }
+
+    #[test]
+    fn test_enqueue_claimed_files_requeues_work_when_common_lane_is_full() {
+        let temp = tempdir().unwrap();
+        let file_path = temp.path().join("bulk_overflow.ex");
+        std::fs::write(&file_path, "defmodule BulkOverflow do\nend\n").unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[(
+                file_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                10,
+                1,
+            )])
+            .unwrap();
+
+        let claimed = store.fetch_pending_batch(10).unwrap();
+        assert_eq!(claimed.len(), 1);
+
+        let queue = QueueStore::new(3);
+        queue.push("/tmp/fill-bulk.ex", 0, "fill-bulk", 0, 0, false).unwrap();
+
+        enqueue_claimed_files(&store, &queue, claimed);
+
+        let row = store
+            .query_json(&format!(
+                "SELECT status, worker_id FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert!(row.contains("pending"));
+        assert!(row.contains("null"));
     }
 
     #[test]

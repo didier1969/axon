@@ -214,6 +214,15 @@ What changed:
   - `File.status='indexing'` rows are moved back to `pending`
   - `worker_id` is cleared
   - replay can resume without requiring a full rescan or an `IST` version drift
+- the RAM scheduler now carries explicit `hot / bulk / titan` lanes:
+  - `hot` keeps reserved capacity and drains first
+  - `bulk` hits backpressure before `hot`
+  - `titan` is isolated from the common lane so oversized files do not poison ordinary throughput
+  - canonical claim pressure now follows `hot + bulk`, not the isolated `titan` backlog
+  - if a lane is saturated, the claimed file is requeued to `pending` in `IST` instead of being dropped
+  - the remaining limit is now explicit:
+    - priority is proven at queue drain level
+    - a stricter end-to-end fairness bound at worker prefetch level remains for a later slice if needed
 
 ## Rust Core / Native Ingestion / MCP
 
@@ -293,6 +302,7 @@ Rust validation reached a clean state during this session:
 - result reached now after explicit `IST` invalidation policy tests: `66 passed; 0 failed` in `src/lib.rs` and `25 passed; 0 failed` in `src/main.rs`
 - result reached now after watcher rescan/no-op/error checkpoint coverage: `66 passed; 0 failed` in `src/lib.rs` and `30 passed; 0 failed` in `src/main.rs`
 - result reached now after delete/rename tombstone handling and crash-mid-index replay: `70 passed; 0 failed` in `src/lib.rs` and `30 passed; 0 failed` in `src/main.rs`
+- result reached now after explicit `hot / bulk / titan` queue lanes: `73 passed; 0 failed` in `src/lib.rs` and `31 passed; 0 failed` in `src/main.rs`
 - dashboard validation remains green after real `io` monitoring work: `31 tests, 0 failures`
 
 Runtime note:

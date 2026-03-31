@@ -442,6 +442,25 @@ That means:
 - `bulk`
 - `titan`
 
+The separation is now explicit in Rust memory queues:
+
+- `hot` keeps reserved capacity and drains first
+- `bulk` absorbs ordinary background work and hits backpressure before `hot`
+- `titan` isolates oversized files so they do not poison the common lane
+
+The structural commit path does not split:
+
+- workers still converge into the same writer actor
+- `IST` truth remains single-path
+- lanes change scheduling and pressure isolation, not truth ownership
+
+Canonical claim pressure now follows the common lane:
+
+- `hot + bulk` drive claim slowdown
+- `titan` backlog is isolated from that signal
+- oversized files therefore stop degrading ordinary throughput prematurely
+- if a RAM lane is saturated, a claimed file must be requeued back to `pending` in `IST` rather than being silently lost
+
 ### Phase 5. Make semantic work slack-driven
 
 - suspend embeddings first under pressure
