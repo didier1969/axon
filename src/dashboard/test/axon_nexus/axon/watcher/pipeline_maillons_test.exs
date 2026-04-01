@@ -36,6 +36,52 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
     assert Process.alive?(pid)
   end
 
+  test "file indexed events update live telemetry without stats cache" do
+    pid =
+      case Process.whereis(PoolFacade) do
+        nil ->
+          {:ok, started} = PoolFacade.start_link([])
+          started
+
+        started ->
+          started
+      end
+
+    send(
+      pid,
+      {:tcp, nil,
+       Jason.encode!(%{
+         "FileIndexed" => %{
+           "path" => "/tmp/test.ex",
+           "status" => "ok",
+           "trace_id" => "trace-telemetry",
+           "t0" => 1,
+           "t1" => 2,
+           "t2" => 3,
+           "t3" => 4,
+           "t4" => 5,
+           "symbol_count" => 7,
+           "relation_count" => 2
+         }
+       }) <> "\n"}
+    )
+
+    stats =
+      wait_for(fn ->
+        stats = Axon.Watcher.Telemetry.get_stats()
+
+        case stats[:last_files] do
+          [%{path: "/tmp/test.ex", status: :ok} | _] ->
+            if stats[:total_ingested] >= 1, do: stats, else: nil
+
+          _ -> nil
+        end
+      end)
+
+    assert stats[:total_ingested] >= 1
+    assert [%{path: "/tmp/test.ex", status: :ok} | _] = stats[:last_files]
+  end
+
   test "runtime status updates telemetry store from canonical Rust payload" do
     pid =
       case Process.whereis(PoolFacade) do

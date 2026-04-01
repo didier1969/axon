@@ -40,10 +40,13 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
   - visualisation
   - télémétrie opérateur
   - projections et surface cockpit
-  - affichage du budget Rust courant, des réservations en vol, du taux d’épuisement, de la profondeur de queue et du mode runtime
+  - affichage du budget Rust courant, des réservations en vol, du taux d’épuisement, de la profondeur de queue, du mode runtime, des refus `oversized` et des entrées en mode dégradé
 
 Il n’existe plus de voie canonique `Titan` dans le runtime Rust.
 Les gros fichiers sont désormais traités par budget, packing et refus explicite `oversized_for_current_budget`, pas par un seuil métier fixe.
+Les gros fichiers différés accumulent aussi maintenant une dette de fairness persistante (`defer_count`) afin d’éviter leur affamement derrière des vagues infinies de petits fichiers.
+Avant un refus `oversized` final, Axon accorde désormais une courte probation de déferrement aux candidats encore froids pour éviter qu’une estimation initiale trop conservatrice ne les exclue trop tôt.
+`StatsCache` n’est plus supervisé sur le chemin actif du dashboard, et `PoolFacade` alimente désormais `Telemetry` directement pour les événements `FileIndexed` et `RuntimeTelemetry`.
 
 ## Dette encore ouverte
 

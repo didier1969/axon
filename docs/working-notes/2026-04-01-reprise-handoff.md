@@ -156,6 +156,28 @@ Conséquence:
 - la fairness n’est plus un TODO théorique mais une propriété persistante du scheduler Rust
 - la prochaine tranche rationnelle est la dégradation avant refus final au-delà de cette probation, puis la réduction des reliquats read-side (`Tracking`, `StatsCache`, `Auditor`, `PoolFacade`)
 
+# Update 2026-04-01 Dashboard Read-Side Reduction Slice
+
+Une cinquième tranche a maintenant été validée côté dashboard:
+
+- `Axon.Watcher.StatsCache` n’est plus supervisé sur le chemin actif
+- `Axon.Watcher.PoolFacade` écrit directement dans `Axon.Watcher.Telemetry` pour `FileIndexed` et n’utilise plus `StatsCache` comme agrégateur parallèle
+- la preuve UI côté tests couvre maintenant explicitement que:
+  - `StatsCache` n’est plus un child actif du supervisor
+  - un `FileIndexed` reçu sur le bridge hydrate bien `Telemetry` directement
+
+Validation fraîche:
+
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `39` tests verts
+- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `151` tests verts (`109` lib + `42` bin)
+- `bash scripts/start-v2.sh` -> vert
+- `bash scripts/stop-v2.sh` -> vert
+
+Conséquence:
+
+- le cockpit actif dépend encore moins d’un read-side Elixir parallèle
+- la dette read-side restante est désormais plus concentrée dans `Tracking`, `Auditor`, les restes morts comme `StatusLive`, et l’étroitesse encore insuffisante de `PoolFacade`
+
 # Files Updated During Reprise
 
 - `/home/dstadel/projects/axon/task_plan.md`

@@ -79,7 +79,25 @@ defmodule Axon.Watcher.PoolFacade do
 
   # --- Internal Helpers ---
   defp process_indexed(p, state) do
-    Axon.Watcher.PoolEventHandler.process_indexed(p)
+    worker_id = "bridge:#{p["trace_id"] || p["path"] || "unknown"}"
+    status = if p["status"] == "ok", do: :ok, else: :error
+
+    if path = p["path"] do
+      Axon.Watcher.Telemetry.report_finish(worker_id, path, status)
+    end
+
+    if (p["t0"] || 0) > 0 do
+      Axon.Watcher.Tracer.record_trace(
+        p["trace_id"] || "none",
+        p["path"] || "unknown",
+        p["t0"] || 0,
+        p["t1"] || 0,
+        p["t2"] || 0,
+        p["t3"] || 0,
+        p["t4"] || 0
+      )
+    end
+
     state
   end
 

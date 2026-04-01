@@ -13,5 +13,6 @@ defmodule AxonDashboard.ApplicationVisualizationTest do
     refute Axon.Watcher.Server in child_ids
     refute Axon.Watcher.TrafficGuardian in child_ids
     refute Axon.Watcher.Auditor in child_ids
+    refute Axon.Watcher.StatsCache in child_ids
   end
 end

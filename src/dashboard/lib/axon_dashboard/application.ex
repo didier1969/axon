@@ -16,7 +16,6 @@ defmodule AxonDashboard.Application do
       Axon.Watcher.Telemetry,
       AxonDashboard.TelemetryHandler,
       Axon.Watcher.Repo,
-      Axon.Watcher.StatsCache,
       Axon.Watcher.PoolFacade,
       Axon.ResourceMonitor,
       Axon.BackpressureController,
