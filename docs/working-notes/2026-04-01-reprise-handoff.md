@@ -123,7 +123,7 @@ Conséquence:
 - la dette critique n’est plus la chaîne de dispatch legacy
 - la prochaine tranche rationnelle est l’exposition cockpit des métriques Rust et la réduction des reliquats read-side Elixir
 
-# Update 2026-04-01 Rust Runtime Telemetry Slice
+# Update 2026-04-01 Rust Runtime Telemetry and Fairness Slice
 
 Une quatrième tranche a maintenant été validée entre Rust et Phoenix:
 
@@ -135,19 +135,24 @@ Une quatrième tranche a maintenant été validée entre Rust et Phoenix:
   - `queue_depth`
   - `claim_mode`
   - `service_pressure`
+  - `oversized_refusals_total`
+  - `degraded_mode_entries_total`
 - le cockpit racine Phoenix affiche ces métriques en lecture seule
 - `PoolFacade` reflète aussi `RuntimeTelemetry` dans `Axon.Watcher.Telemetry`, sans recréer d’autorité de scheduling côté Elixir
+- les fichiers `pending` accumulent maintenant une dette de fairness persistante (`defer_count`, `last_deferred_at_ms`) lorsque le scheduler Rust les diffère
+- une claim effective remet cette dette à zéro, ce qui permet à un gros fichier durablement repoussé d’être finalement promu sans casser le packing par défaut
+- un fichier `oversized` froid n’est pas classé trop tôt comme refus définitif: le scheduler lui laisse d’abord une probation de quelques reports avant de le basculer en `oversized_for_current_budget`
 
 Validation fraîche:
 
 - `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `38` tests verts
-- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `147` tests verts
-- `bash scripts/start-v2.sh` puis `bash scripts/stop-v2.sh` -> verts
+- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `151` tests verts (`109` lib + `42` bin)
 
 Conséquence:
 
 - le cockpit principal commence à refléter la vérité Rust au lieu d’un proxy Elixir heuristique
-- la prochaine tranche rationnelle est l’exposition des refus `oversized`, des dégradations avant refus final, puis la réduction des reliquats read-side (`Tracking`, `StatsCache`, `Auditor`, `PoolFacade`)
+- la fairness n’est plus un TODO théorique mais une propriété persistante du scheduler Rust
+- la prochaine tranche rationnelle est la dégradation avant refus final au-delà de cette probation, puis la réduction des reliquats read-side (`Tracking`, `StatsCache`, `Auditor`, `PoolFacade`)
 
 # Files Updated During Reprise
 

@@ -38,7 +38,9 @@ Already true as of 2026-04-01:
 - fixed `>1MB => skip` behavior has been removed
 - the legacy Elixir control chain `Server/Staging/PathPolicy/Oban/IndexingWorker/BatchDispatch` has been removed from the dashboard code path
 - `PoolFacade` no longer exposes batch admission or pull APIs on the Elixir side
-- the Rust bridge now emits runtime telemetry consumed by the Phoenix cockpit (`budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`)
+- the Rust bridge now emits runtime telemetry consumed by the Phoenix cockpit (`budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`, `oversized_refusals_total`, `degraded_mode_entries_total`)
+- fairness debt now persists in `IST` (`defer_count`, `last_deferred_at_ms`) so repeatedly deferred large files can eventually outrank newer packable work
+- cold oversized candidates now receive a bounded probation before definitive `oversized_for_current_budget` refusal
 - no external scheduling crate has been adopted; current direction is a Rust-native Axon scheduler because existing FIFO semaphore/queue crates are a poor fit for budget packing
 
 ## Delivery Definition
@@ -79,12 +81,17 @@ Tasks:
   - structure only
   - delayed semantics
   - lower priority retry
-- add fairness so large files are delayed, not starved forever
 - expose the new Rust admission metrics cleanly to the operator plane
 
 Exit criteria:
 - no canonical ingest decision depends on fixed-size thresholds or Elixir routing
 - admission decisions are explainable by budget, confidence, and priority
+
+Already completed in this phase:
+
+- fairness / anti-starvation now exists through persistent defer debt recorded in `File.defer_count`
+- Phoenix cockpit shows `oversized_refusals_total` and `degraded_mode_entries_total`
+- cold oversized candidates are first deferred during a bounded probation window instead of being refused on first sight
 
 ## Phase 2: Retire Residual Elixir Ingestion Authority
 
@@ -149,7 +156,7 @@ Exit criteria:
 
 Already completed in this phase:
 
-- runtime telemetry bridge exports `budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, and `service_pressure`
+- runtime telemetry bridge exports `budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`, `oversized_refusals_total`, and `degraded_mode_entries_total`
 - Phoenix cockpit displays these Rust-origin signals without regaining scheduling authority
 
 ## Phase 4: Retrieval and Developer Utility

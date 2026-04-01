@@ -8,6 +8,8 @@ pub struct PendingFile {
     pub trace_id: String,
     pub priority: i64,
     pub size_bytes: u64,
+    pub defer_count: u32,
+    pub last_deferred_at_ms: Option<i64>,
 }
 
 // FFI Types

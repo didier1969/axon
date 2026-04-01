@@ -57,7 +57,9 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
            "exhaustion_ratio" => 0.5,
            "queue_depth" => 17,
            "claim_mode" => "guarded",
-           "service_pressure" => "degraded"
+           "service_pressure" => "degraded",
+           "oversized_refusals_total" => 4,
+           "degraded_mode_entries_total" => 9
          }
        }) <> "\n"}
     )
@@ -76,6 +78,8 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
     assert stats[:queue_depth] == 17
     assert stats[:claim_mode] == "guarded"
     assert stats[:service_pressure] == "degraded"
+    assert stats[:oversized_refusals_total] == 4
+    assert stats[:degraded_mode_entries_total] == 9
   end
 
   defp wait_for(fun, attempts \\ 50)

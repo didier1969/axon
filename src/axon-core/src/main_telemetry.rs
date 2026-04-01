@@ -31,6 +31,8 @@ pub(crate) fn spawn_runtime_telemetry(
                 queue_depth: snapshot.queue_depth,
                 claim_mode: snapshot.claim_mode,
                 service_pressure: snapshot.service_pressure,
+                oversized_refusals_total: snapshot.oversized_refusals_total,
+                degraded_mode_entries_total: snapshot.degraded_mode_entries_total,
             };
 
             if let Ok(message) = serde_json::to_string(&event) {

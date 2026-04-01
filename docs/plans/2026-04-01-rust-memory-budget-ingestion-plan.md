@@ -20,12 +20,14 @@ Already delivered in code and verified:
 - bounded candidate packing under budget
 - removal of the canonical Rust `Titan` path
 - dynamic claim throttling based on combined runtime pressure
+- persistent fairness debt in `IST` via `defer_count` and `last_deferred_at_ms`
+- probationary deferral for cold oversized candidates before definitive refusal
+- cockpit exposure of `oversized_refusals_total` and `degraded_mode_entries_total`
 
 Still remaining for this plan:
 
 - degradation-before-refusal where feasible
-- fairness / anti-starvation for delayed large files
-- operator-surface exposure of the new Rust admission metrics
+- final operator wording for probationary oversized files versus definitive oversized refusals
 
 ## Dependency Decision
 

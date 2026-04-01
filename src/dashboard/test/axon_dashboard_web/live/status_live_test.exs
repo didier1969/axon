@@ -65,7 +65,9 @@ defmodule AxonDashboardWeb.StatusLiveTest do
            "budget_bytes" => 1_073_741_824,
            "reserved_bytes" => 268_435_456,
            "exhaustion_ratio" => 0.25,
-           "queue_depth" => 12
+           "queue_depth" => 12,
+           "oversized_refusals_total" => 5,
+           "degraded_mode_entries_total" => 2
          }
        }}
     )
@@ -75,5 +77,9 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     assert html =~ "25.0%"
     assert html =~ "Queue Depth"
     assert html =~ "12"
+    assert html =~ "Oversized Refusals"
+    assert html =~ "5"
+    assert html =~ "Degraded Entries"
+    assert html =~ "2"
   end
 end

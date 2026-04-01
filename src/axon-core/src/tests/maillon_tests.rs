@@ -931,6 +931,40 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_2p_deferred_pending_file_builds_aging_debt_and_claim_reset() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/deferred_file.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 4_096, 1)])
+            .unwrap();
+
+        store
+            .mark_pending_files_deferred(std::slice::from_ref(&path))
+            .unwrap();
+        store
+            .mark_pending_files_deferred(std::slice::from_ref(&path))
+            .unwrap();
+
+        let deferred_row = store
+            .query_json("SELECT defer_count, last_deferred_at_ms FROM File WHERE path = '/tmp/deferred_file.rs'")
+            .unwrap();
+        assert!(deferred_row.contains("2"), "Le déferrement doit construire une dette de fairness persistante");
+        assert!(!deferred_row.contains("null"), "Le timestamp de dernier déferrement doit être renseigné");
+
+        let claimed = store
+            .claim_pending_paths(std::slice::from_ref(&path))
+            .unwrap();
+        assert_eq!(claimed.len(), 1, "Le fichier différé doit rester claimable");
+
+        let claimed_row = store
+            .query_json("SELECT status, defer_count, last_deferred_at_ms FROM File WHERE path = '/tmp/deferred_file.rs'")
+            .unwrap();
+        assert!(claimed_row.contains("indexing"));
+        assert!(claimed_row.contains("0"), "Une claim effective doit remettre à zéro la dette de fairness");
+        assert!(claimed_row.contains("null"), "Le timestamp de déferrement doit être purgé après claim");
+    }
+
+    #[test]
     fn test_maillon_2n_late_commit_does_not_resurrect_tombstoned_file() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();

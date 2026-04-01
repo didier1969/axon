@@ -33,7 +33,9 @@ defmodule Axon.Watcher.CockpitLive do
          exhaustion_ratio: 0.0,
          queue_depth: 0,
          claim_mode: "unknown",
-         service_pressure: "unknown"
+         service_pressure: "unknown",
+         oversized_refusals_total: 0,
+         degraded_mode_entries_total: 0
        }
      )}
   end
@@ -218,6 +220,14 @@ defmodule Axon.Watcher.CockpitLive do
           <span style="color: var(--warning);">{String.upcase(Map.get(@live, :service_pressure, "unknown"))}</span>
         </div>
         <div class="stat">
+          <label>Oversized Refusals</label>
+          <span style="color: var(--neon-red);">{Map.get(@live, :oversized_refusals_total, 0)}</span>
+        </div>
+        <div class="stat">
+          <label>Degraded Entries</label>
+          <span style="color: var(--warning);">{Map.get(@live, :degraded_mode_entries_total, 0)}</span>
+        </div>
+        <div class="stat">
           <label>T4_LATENCY</label>
           <span style={"color: #{if @live.t4_ema > 200, do: "var(--neon-red)", else: "var(--neon-blue)"};"}>
             {Float.round(@live.t4_ema, 2)}ms
@@ -351,6 +361,8 @@ defmodule Axon.Watcher.CockpitLive do
       |> Map.put(:queue_depth, Map.get(payload, "queue_depth", 0))
       |> Map.put(:claim_mode, Map.get(payload, "claim_mode", "unknown"))
       |> Map.put(:service_pressure, Map.get(payload, "service_pressure", "unknown"))
+      |> Map.put(:oversized_refusals_total, Map.get(payload, "oversized_refusals_total", 0))
+      |> Map.put(:degraded_mode_entries_total, Map.get(payload, "degraded_mode_entries_total", 0))
 
     assign(socket, live: live)
   end

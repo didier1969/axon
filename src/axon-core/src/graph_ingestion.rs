@@ -8,6 +8,40 @@ use libloading::Symbol as LibSymbol;
 use crate::graph::{ExecFunc, GraphStore, PendingFile};
 use crate::watcher_probe;
 
+fn parse_i64_field(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().map(|v| v.min(i64::MAX as u64) as i64))
+        .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
+}
+
+fn parse_u64_field(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().map(|v| v.max(0) as u64))
+        .or_else(|| value.as_str().and_then(|s| s.parse::<u64>().ok()))
+}
+
+fn parse_pending_file_row(row: Vec<serde_json::Value>) -> Option<PendingFile> {
+    if row.len() < 6 {
+        return None;
+    }
+
+    let priority = parse_i64_field(&row[2])?;
+    let size_bytes = parse_u64_field(&row[3]).unwrap_or(0);
+    let defer_count = parse_u64_field(&row[4]).unwrap_or(0).min(u32::MAX as u64) as u32;
+    let last_deferred_at_ms = parse_i64_field(&row[5]);
+
+    Some(PendingFile {
+        path: row[0].as_str()?.to_string(),
+        trace_id: row[1].as_str()?.to_string(),
+        priority,
+        size_bytes,
+        defer_count,
+        last_deferred_at_ms,
+    })
+}
+
 impl GraphStore {
     fn escape_sql(value: &str) -> String {
         value.replace("'", "''")
@@ -248,7 +282,7 @@ impl GraphStore {
 
         if !deleted_paths.is_empty() {
             queries.push(format!(
-                "UPDATE File SET status = 'deleted', worker_id = NULL, needs_reindex = FALSE WHERE path IN ({});",
+                "UPDATE File SET status = 'deleted', worker_id = NULL, needs_reindex = FALSE, defer_count = 0, last_deferred_at_ms = NULL WHERE path IN ({});",
                 deleted_paths.join(",")
             ));
         }
@@ -283,7 +317,9 @@ impl GraphStore {
                  SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed' END, \
                      worker_id = NULL, \
                      needs_reindex = FALSE, \
-                     last_error_reason = NULL \
+                     last_error_reason = NULL, \
+                     defer_count = 0, \
+                     last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
                 indexed_filter
             ));
@@ -294,7 +330,9 @@ impl GraphStore {
                  SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'skipped' END, \
                      worker_id = NULL, \
                      needs_reindex = FALSE, \
-                     last_error_reason = 'worker_skipped_file' \
+                     last_error_reason = 'worker_skipped_file', \
+                     defer_count = 0, \
+                     last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
                 skipped_paths.join(",")
             ));
@@ -348,11 +386,11 @@ impl GraphStore {
 
             let claim_query = format!(
                 "UPDATE File
-                 SET status = 'indexing', worker_id = {}
+                 SET status = 'indexing', worker_id = {}, defer_count = 0, last_deferred_at_ms = NULL
                  WHERE path IN (
                     SELECT path FROM File
                     WHERE status = 'pending'
-                    ORDER BY priority DESC
+                    ORDER BY priority DESC, COALESCE(defer_count, 0) DESC, COALESCE(last_deferred_at_ms, 9223372036854775807) ASC, size ASC
                     LIMIT {}
                  );",
                 claim_id, count
@@ -365,7 +403,7 @@ impl GraphStore {
         }
 
         let fetch_query = format!(
-            "SELECT path, COALESCE(trace_id, 'none'), priority, COALESCE(size, 0)
+            "SELECT path, COALESCE(trace_id, 'none'), priority, COALESCE(size, 0), COALESCE(defer_count, 0), last_deferred_at_ms
              FROM File
              WHERE status = 'indexing' AND worker_id = {}
              ORDER BY priority DESC",
@@ -385,38 +423,16 @@ impl GraphStore {
             return Ok(vec![]);
         }
         let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res)?;
-        let files: Vec<PendingFile> = raw
-            .into_iter()
-            .filter_map(|row| {
-                if row.len() >= 4 {
-                    let priority = row[2]
-                        .as_i64()
-                        .or_else(|| row[2].as_str().and_then(|s| s.parse::<i64>().ok()))?;
-                    let size_bytes = row[3]
-                        .as_u64()
-                        .or_else(|| row[3].as_i64().map(|value| value.max(0) as u64))
-                        .or_else(|| row[3].as_str().and_then(|s| s.parse::<u64>().ok()))
-                        .unwrap_or(0);
-                    Some(PendingFile {
-                        path: row[0].as_str()?.to_string(),
-                        trace_id: row[1].as_str()?.to_string(),
-                        priority,
-                        size_bytes,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let files: Vec<PendingFile> = raw.into_iter().filter_map(parse_pending_file_row).collect();
         Ok(files)
     }
 
     pub fn fetch_pending_candidates(&self, count: usize) -> Result<Vec<PendingFile>> {
         let query = format!(
-            "SELECT path, COALESCE(trace_id, 'none'), priority, COALESCE(size, 0)
+            "SELECT path, COALESCE(trace_id, 'none'), priority, COALESCE(size, 0), COALESCE(defer_count, 0), last_deferred_at_ms
              FROM File
              WHERE status = 'pending'
-             ORDER BY priority DESC, size ASC
+             ORDER BY priority DESC, COALESCE(defer_count, 0) DESC, COALESCE(last_deferred_at_ms, 9223372036854775807) ASC, size ASC
              LIMIT {}",
             count
         );
@@ -426,28 +442,7 @@ impl GraphStore {
         }
 
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                if row.len() < 4 {
-                    return None;
-                }
-                let priority = row[2]
-                    .as_i64()
-                    .or_else(|| row[2].as_str().and_then(|s| s.parse::<i64>().ok()))?;
-                let size_bytes = row[3]
-                    .as_u64()
-                    .or_else(|| row[3].as_i64().map(|value| value.max(0) as u64))
-                    .or_else(|| row[3].as_str().and_then(|s| s.parse::<u64>().ok()))
-                    .unwrap_or(0);
-                Some(PendingFile {
-                    path: row[0].as_str()?.to_string(),
-                    trace_id: row[1].as_str()?.to_string(),
-                    priority,
-                    size_bytes,
-                })
-            })
-            .collect())
+        Ok(rows.into_iter().filter_map(parse_pending_file_row).collect())
     }
 
     pub fn claim_pending_paths(&self, paths: &[String]) -> Result<Vec<PendingFile>> {
@@ -474,7 +469,7 @@ impl GraphStore {
 
             let claim_query = format!(
                 "UPDATE File
-                 SET status = 'indexing', worker_id = {}
+                 SET status = 'indexing', worker_id = {}, defer_count = 0, last_deferred_at_ms = NULL
                  WHERE status = 'pending' AND path IN ({});",
                 claim_id, path_list
             );
@@ -486,7 +481,7 @@ impl GraphStore {
         }
 
         let fetch_query = format!(
-            "SELECT path, COALESCE(trace_id, 'none'), priority, COALESCE(size, 0)
+            "SELECT path, COALESCE(trace_id, 'none'), priority, COALESCE(size, 0), COALESCE(defer_count, 0), last_deferred_at_ms
              FROM File
              WHERE status = 'indexing' AND worker_id = {}
              ORDER BY priority DESC, size ASC",
@@ -507,28 +502,7 @@ impl GraphStore {
         }
 
         let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res)?;
-        Ok(raw
-            .into_iter()
-            .filter_map(|row| {
-                if row.len() < 4 {
-                    return None;
-                }
-                let priority = row[2]
-                    .as_i64()
-                    .or_else(|| row[2].as_str().and_then(|s| s.parse::<i64>().ok()))?;
-                let size_bytes = row[3]
-                    .as_u64()
-                    .or_else(|| row[3].as_i64().map(|value| value.max(0) as u64))
-                    .or_else(|| row[3].as_str().and_then(|s| s.parse::<u64>().ok()))
-                    .unwrap_or(0);
-                Some(PendingFile {
-                    path: row[0].as_str()?.to_string(),
-                    trace_id: row[1].as_str()?.to_string(),
-                    priority,
-                    size_bytes,
-                })
-            })
-            .collect())
+        Ok(raw.into_iter().filter_map(parse_pending_file_row).collect())
     }
 
     pub fn mark_file_oversized_for_current_budget(&self, path: &str) -> Result<()> {
@@ -536,15 +510,46 @@ impl GraphStore {
             "UPDATE File \
              SET status = 'oversized_for_current_budget', \
                  worker_id = NULL, \
-                 last_error_reason = 'estimated cost exceeds current budget envelope' \
+                 last_error_reason = 'estimated cost exceeds current budget envelope', \
+                 defer_count = 0, \
+                 last_deferred_at_ms = NULL \
              WHERE path = '{}';",
             Self::escape_sql(path)
         ))
     }
 
-    pub fn requeue_claimed_file(&self, path: &str) -> Result<()> {
+    pub fn mark_pending_files_deferred(&self, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let path_list = paths
+            .iter()
+            .map(|path| format!("'{}'", Self::escape_sql(path)))
+            .collect::<Vec<_>>()
+            .join(",");
+
         self.execute(&format!(
-            "UPDATE File SET status = 'pending', worker_id = NULL, last_error_reason = NULL WHERE path = '{}' AND status = 'indexing';",
+            "UPDATE File \
+             SET defer_count = COALESCE(defer_count, 0) + 1, \
+                 last_deferred_at_ms = {} \
+             WHERE status = 'pending' AND path IN ({});",
+            now_ms, path_list
+        ))
+    }
+
+    pub fn requeue_claimed_file(&self, path: &str) -> Result<()> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.execute(&format!(
+            "UPDATE File \
+             SET status = 'pending', \
+                 worker_id = NULL, \
+                 last_error_reason = NULL, \
+                 defer_count = COALESCE(defer_count, 0) + 1, \
+                 last_deferred_at_ms = {} \
+             WHERE path = '{}' AND status = 'indexing';",
+            now_ms,
             Self::escape_sql(path)
         ))
     }
@@ -713,7 +718,7 @@ impl GraphStore {
                 Self::escape_sql(project)
             ),
             format!(
-                "INSERT INTO File (path, project_slug, size, mtime, status, priority, needs_reindex, last_error_reason) VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE, NULL) \
+                "INSERT INTO File (path, project_slug, size, mtime, status, priority, needs_reindex, last_error_reason, defer_count, last_deferred_at_ms) VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE, NULL, 0, NULL) \
                  ON CONFLICT(path) DO UPDATE SET \
                     project_slug=EXCLUDED.project_slug, \
                     size=EXCLUDED.size, \
@@ -729,6 +734,14 @@ impl GraphStore {
                     END, \
                     last_error_reason = CASE \
                         WHEN File.status = 'indexing' THEN File.last_error_reason \
+                        ELSE NULL \
+                    END, \
+                    defer_count = CASE \
+                        WHEN File.status = 'indexing' THEN File.defer_count \
+                        ELSE 0 \
+                    END, \
+                    last_deferred_at_ms = CASE \
+                        WHEN File.status = 'indexing' THEN File.last_deferred_at_ms \
                         ELSE NULL \
                     END, \
                     needs_reindex = CASE \

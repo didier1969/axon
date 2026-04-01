@@ -28,6 +28,8 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:queue_depth, 0})
     :ets.insert(:axon_telemetry, {:claim_mode, "unknown"})
     :ets.insert(:axon_telemetry, {:service_pressure, "healthy"})
+    :ets.insert(:axon_telemetry, {:oversized_refusals_total, 0})
+    :ets.insert(:axon_telemetry, {:degraded_mode_entries_total, 0})
     {:ok, %{}}
   end
 
@@ -46,6 +48,14 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:exhaustion_ratio, Map.get(payload, "exhaustion_ratio", 0.0)})
     :ets.insert(:axon_telemetry, {:queue_depth, Map.get(payload, "queue_depth", 0)})
     :ets.insert(:axon_telemetry, {:claim_mode, Map.get(payload, "claim_mode", "unknown")})
+    :ets.insert(
+      :axon_telemetry,
+      {:oversized_refusals_total, Map.get(payload, "oversized_refusals_total", 0)}
+    )
+    :ets.insert(
+      :axon_telemetry,
+      {:degraded_mode_entries_total, Map.get(payload, "degraded_mode_entries_total", 0)}
+    )
 
     :ets.insert(
       :axon_telemetry,
@@ -122,7 +132,9 @@ defmodule Axon.Watcher.Telemetry do
       exhaustion_ratio: get_val(:exhaustion_ratio),
       queue_depth: get_val(:queue_depth),
       claim_mode: get_val(:claim_mode),
-      service_pressure: get_val(:service_pressure)
+      service_pressure: get_val(:service_pressure),
+      oversized_refusals_total: get_val(:oversized_refusals_total),
+      degraded_mode_entries_total: get_val(:degraded_mode_entries_total)
     }
   end
 

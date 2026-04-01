@@ -33,6 +33,8 @@ pub enum BridgeEvent {
         queue_depth: usize,
         claim_mode: String,
         service_pressure: String,
+        oversized_refusals_total: u64,
+        degraded_mode_entries_total: u64,
     },
     ScanComplete { total_files: usize, duration_ms: u64 },
     Heartbeat,
@@ -51,6 +53,8 @@ mod tests {
             queue_depth: 3,
             claim_mode: "guarded".to_string(),
             service_pressure: "degraded".to_string(),
+            oversized_refusals_total: 7,
+            degraded_mode_entries_total: 3,
         };
 
         let json = serde_json::to_string(&payload).expect("bridge event serializes");
@@ -62,5 +66,7 @@ mod tests {
         assert!(json.contains("\"queue_depth\":3"));
         assert!(json.contains("\"claim_mode\":\"guarded\""));
         assert!(json.contains("\"service_pressure\":\"degraded\""));
+        assert!(json.contains("\"oversized_refusals_total\":7"));
+        assert!(json.contains("\"degraded_mode_entries_total\":3"));
     }
 }

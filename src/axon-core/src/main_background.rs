@@ -1,7 +1,7 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
@@ -31,6 +31,14 @@ struct AdmissionPlan {
     oversized: Vec<PendingFile>,
 }
 
+const CLAIM_MODE_SENTINEL: u8 = u8::MAX;
+const FAIRNESS_PROMOTION_DEFER_THRESHOLD: u32 = 3;
+const OVERSIZED_PROBATION_DEFER_THRESHOLD: u32 = 3;
+
+static OVERSIZED_REFUSALS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static DEGRADED_MODE_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LAST_REPORTED_CLAIM_MODE: AtomicU8 = AtomicU8::new(CLAIM_MODE_SENTINEL);
+
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeTelemetrySnapshot {
     pub budget_bytes: u64,
@@ -39,6 +47,8 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub queue_depth: usize,
     pub claim_mode: String,
     pub service_pressure: String,
+    pub oversized_refusals_total: u64,
+    pub degraded_mode_entries_total: u64,
 }
 
 pub(crate) fn start_memory_watchdog() {
@@ -89,6 +99,7 @@ pub(crate) fn spawn_autonomous_ingestor(
                 service_guard::current_pressure(),
             );
             if last_mode != Some(policy.mode) {
+                record_claim_mode_transition(policy.mode);
                 info!(
                     "Autonomous Ingestor claim mode={} claim_count={} sleep_ms={} queue_len={} service_pressure={:?}",
                     policy.mode.label(),
@@ -103,7 +114,19 @@ pub(crate) fn spawn_autonomous_ingestor(
                 if let Ok(candidates) = store.fetch_pending_candidates(policy.claim_count.saturating_mul(4).max(policy.claim_count)) {
                     let plan = plan_admissions(&queue, candidates, policy.claim_count);
 
+                    if !plan.deferred.is_empty() {
+                        let deferred_paths = plan
+                            .deferred
+                            .iter()
+                            .map(|file| file.path.clone())
+                            .collect::<Vec<_>>();
+                        if let Err(err) = store.mark_pending_files_deferred(&deferred_paths) {
+                            warn!("Autonomous Ingestor failed to record deferred fairness debt: {}", err);
+                        }
+                    }
+
                     for oversized in &plan.oversized {
+                        record_oversized_refusal();
                         if let Err(err) = store.mark_file_oversized_for_current_budget(&oversized.path) {
                             warn!(
                                 "Autonomous Ingestor failed to mark {} as oversized: {}",
@@ -146,6 +169,8 @@ pub(crate) fn runtime_telemetry_snapshot(queue: &QueueStore) -> RuntimeTelemetry
         queue_depth,
         claim_mode: policy.mode.label().to_string(),
         service_pressure: service_pressure_label(service_pressure).to_string(),
+        oversized_refusals_total: OVERSIZED_REFUSALS_TOTAL.load(Ordering::Relaxed),
+        degraded_mode_entries_total: DEGRADED_MODE_ENTRIES_TOTAL.load(Ordering::Relaxed),
     }
 }
 
@@ -188,6 +213,9 @@ fn fill_admission_plan(
         right
             .priority
             .cmp(&left.priority)
+            .then_with(|| fairness_bucket(right).cmp(&fairness_bucket(left)))
+            .then_with(|| right.defer_count.cmp(&left.defer_count))
+            .then_with(|| left.last_deferred_at_ms.unwrap_or(i64::MAX).cmp(&right.last_deferred_at_ms.unwrap_or(i64::MAX)))
             .then_with(|| left.size_bytes.cmp(&right.size_bytes))
             .then_with(|| left.path.cmp(&right.path))
     });
@@ -200,7 +228,11 @@ fn fill_admission_plan(
 
         let estimated_cost = queue.estimate_cost_for_path(&candidate.path, candidate.size_bytes);
         if !queue.can_fit_alone(&candidate.path, candidate.size_bytes) {
-            plan.oversized.push(candidate);
+            if candidate.defer_count < OVERSIZED_PROBATION_DEFER_THRESHOLD {
+                plan.deferred.push(candidate);
+            } else {
+                plan.oversized.push(candidate);
+            }
         } else if estimated_cost <= *remaining_budget {
             *remaining_budget = remaining_budget.saturating_sub(estimated_cost);
             plan.selected.push(candidate);
@@ -213,6 +245,7 @@ fn fill_admission_plan(
 fn enqueue_claimed_files(store: &GraphStore, queue: &QueueStore, files: Vec<PendingFile>) {
     for file in files {
         if !queue.can_fit_alone(&file.path, file.size_bytes) {
+            record_oversized_refusal();
             warn!(
                 "Autonomous Ingestor marked {} as oversized for current budget (priority={}, size={}).",
                 file.path,
@@ -668,6 +701,36 @@ fn service_pressure_label(service_pressure: ServicePressure) -> &'static str {
     }
 }
 
+fn record_oversized_refusal() {
+    OVERSIZED_REFUSALS_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_claim_mode_transition(mode: ClaimMode) {
+    let code = claim_mode_code(mode);
+    let previous = LAST_REPORTED_CLAIM_MODE.swap(code, Ordering::Relaxed);
+
+    if previous != code && matches!(mode, ClaimMode::Guarded | ClaimMode::Paused) {
+        DEGRADED_MODE_ENTRIES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn claim_mode_code(mode: ClaimMode) -> u8 {
+    match mode {
+        ClaimMode::Fast => 0,
+        ClaimMode::Slow => 1,
+        ClaimMode::Guarded => 2,
+        ClaimMode::Paused => 3,
+    }
+}
+
+fn fairness_bucket(candidate: &PendingFile) -> u8 {
+    if candidate.defer_count >= FAIRNESS_PROMOTION_DEFER_THRESHOLD {
+        1
+    } else {
+        0
+    }
+}
+
 fn dynamic_claim_sleep(pressure: f64, mode: ClaimMode) -> std::time::Duration {
     let pressure = pressure.clamp(0.0, 1.0);
     let sleep_ms = match mode {
@@ -867,7 +930,7 @@ fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>
 
 #[cfg(test)]
 mod tests {
-    use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files, handle_watcher_events, memory_limit_bytes, plan_admissions, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets, RescanGuardReset};
+    use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files, handle_watcher_events, memory_limit_bytes, plan_admissions, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets, RescanGuardReset, OVERSIZED_PROBATION_DEFER_THRESHOLD};
     use axon_core::graph::{GraphStore, PendingFile};
     use axon_core::queue::QueueStore;
     use axon_core::service_guard::ServicePressure;
@@ -1423,18 +1486,24 @@ mod tests {
                 trace_id: "large".to_string(),
                 priority: 100,
                 size_bytes: 8 * 1024,
+                defer_count: 0,
+                last_deferred_at_ms: None,
             },
             PendingFile {
                 path: medium.to_string_lossy().to_string(),
                 trace_id: "medium".to_string(),
                 priority: 100,
                 size_bytes: 2 * 1024,
+                defer_count: 0,
+                last_deferred_at_ms: None,
             },
             PendingFile {
                 path: small.to_string_lossy().to_string(),
                 trace_id: "small".to_string(),
                 priority: 100,
                 size_bytes: 1024,
+                defer_count: 0,
+                last_deferred_at_ms: None,
             },
         ];
 
@@ -1459,12 +1528,138 @@ mod tests {
             trace_id: "oversized".to_string(),
             priority: 100,
             size_bytes: 16 * 1024,
+            defer_count: OVERSIZED_PROBATION_DEFER_THRESHOLD,
+            last_deferred_at_ms: Some(1),
         }];
 
         let plan = plan_admissions(&queue, candidates, 1);
         assert!(plan.selected.is_empty());
         assert_eq!(plan.oversized.len(), 1);
         assert_eq!(plan.oversized[0].trace_id, "oversized");
+    }
+
+    #[test]
+    fn test_plan_admissions_gives_probation_to_cold_oversized_candidate() {
+        let temp = tempdir().unwrap();
+        let oversized = temp.path().join("oversized.rs");
+        std::fs::write(&oversized, vec![b'x'; 16 * 1024]).unwrap();
+
+        let queue = QueueStore::with_memory_budget(100, 2 * 1024 * 1024);
+        let candidates = vec![PendingFile {
+            path: oversized.to_string_lossy().to_string(),
+            trace_id: "oversized".to_string(),
+            priority: 100,
+            size_bytes: 16 * 1024,
+            defer_count: 0,
+            last_deferred_at_ms: None,
+        }];
+
+        let plan = plan_admissions(&queue, candidates, 1);
+        assert!(plan.selected.is_empty());
+        assert!(plan.oversized.is_empty(), "a cold oversized candidate should first be deferred while the estimator is still conservative");
+        assert_eq!(plan.deferred.len(), 1);
+        assert_eq!(plan.deferred[0].trace_id, "oversized");
+    }
+
+    #[test]
+    fn test_plan_admissions_eventually_ages_deferred_large_candidate_into_selection() {
+        let temp = tempdir().unwrap();
+        let large = temp.path().join("large.txt");
+        let medium = temp.path().join("medium.txt");
+        let small = temp.path().join("small.txt");
+        std::fs::write(&large, vec![b'x'; 8 * 1024]).unwrap();
+        std::fs::write(&medium, vec![b'x'; 2 * 1024]).unwrap();
+        std::fs::write(&small, vec![b'x'; 1024]).unwrap();
+
+        let queue = QueueStore::with_memory_budget(100, 3_200_000);
+        let candidates = |large_defer_count: u32| {
+            vec![
+                PendingFile {
+                    path: large.to_string_lossy().to_string(),
+                    trace_id: "large".to_string(),
+                    priority: 100,
+                    size_bytes: 8 * 1024,
+                    defer_count: large_defer_count,
+                    last_deferred_at_ms: (large_defer_count > 0).then_some(1),
+                },
+                PendingFile {
+                    path: medium.to_string_lossy().to_string(),
+                    trace_id: "medium".to_string(),
+                    priority: 100,
+                    size_bytes: 2 * 1024,
+                    defer_count: 0,
+                    last_deferred_at_ms: None,
+                },
+                PendingFile {
+                    path: small.to_string_lossy().to_string(),
+                    trace_id: "small".to_string(),
+                    priority: 100,
+                    size_bytes: 1024,
+                    defer_count: 0,
+                    last_deferred_at_ms: None,
+                },
+            ]
+        };
+
+        let plan = plan_admissions(&queue, candidates(0), 2);
+        assert_eq!(
+            plan.selected.iter().map(|file| file.trace_id.as_str()).collect::<Vec<_>>(),
+            vec!["small", "medium"],
+            "before aging kicks in, the scheduler should keep picking the better-fitting pair"
+        );
+        assert!(plan.deferred.iter().any(|file| file.trace_id == "large"));
+
+        let aged = plan_admissions(&queue, candidates(3), 2);
+        assert_eq!(
+            aged.selected.first().map(|file| file.trace_id.as_str()),
+            Some("large"),
+            "after repeated deferrals, the large file should gain enough fairness to pass first"
+        );
+    }
+
+    #[test]
+    fn test_plan_admissions_promotes_repeatedly_deferred_large_file_before_smaller_new_work() {
+        let temp = tempdir().unwrap();
+        let large = temp.path().join("large.txt");
+        let small_a = temp.path().join("small-a.txt");
+        let small_b = temp.path().join("small-b.txt");
+        std::fs::write(&large, vec![b'x'; 8 * 1024]).unwrap();
+        std::fs::write(&small_a, vec![b'x'; 2 * 1024]).unwrap();
+        std::fs::write(&small_b, vec![b'x'; 2 * 1024]).unwrap();
+
+        let queue = QueueStore::with_memory_budget(100, 3_200_000);
+        let candidates = vec![
+            PendingFile {
+                path: large.to_string_lossy().to_string(),
+                trace_id: "large".to_string(),
+                priority: 100,
+                size_bytes: 8 * 1024,
+                defer_count: 3,
+                last_deferred_at_ms: Some(1),
+            },
+            PendingFile {
+                path: small_a.to_string_lossy().to_string(),
+                trace_id: "small-a".to_string(),
+                priority: 100,
+                size_bytes: 2 * 1024,
+                defer_count: 0,
+                last_deferred_at_ms: None,
+            },
+            PendingFile {
+                path: small_b.to_string_lossy().to_string(),
+                trace_id: "small-b".to_string(),
+                priority: 100,
+                size_bytes: 2 * 1024,
+                defer_count: 0,
+                last_deferred_at_ms: None,
+            },
+        ];
+
+        let plan = plan_admissions(&queue, candidates, 2);
+        assert!(
+            plan.selected.iter().any(|file| file.trace_id == "large"),
+            "a repeatedly deferred large file should eventually be promoted ahead of newer packable work"
+        );
     }
 
     #[test]
