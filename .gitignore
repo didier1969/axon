@@ -30,8 +30,29 @@ logs/
 
 # Rust & Build Artifacts
 target/
+src/axon-core/target/
 bin/
 .fastembed_cache/
 
 # Misplaced generated SOLL exports
 src/axon-core/docs/vision/SOLL_EXPORT_*.md
+
+# Local Codex state
+.codex
+
+# Devenv transient state
+.devenv/bash-bash
+.devenv/gc/shell
+.devenv/gc/task-config-devenv-config-task-config
+.devenv/nix-eval-cache.db
+.devenv/nix-eval-cache.db-shm
+.devenv/nix-eval-cache.db-wal
+.devenv/profile
+.devenv/run
+.devenv/shell-*.sh
+.devenv/tasks.db
+.devenv/tasks.db-shm
+.devenv/tasks.db-wal
+
+# Generated native artifacts
+src/dashboard/priv/native/*.so

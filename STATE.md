@@ -78,3 +78,4 @@ La chaîne legacy suivante a déjà été retirée du dashboard:
 - lire `README.md` et `docs/getting-started.md` avant toute autre doc
 - traiter `docs/archive/` comme historique
 - traiter les anciens récits `KuzuDB`, Triple-Pod, HydraDB ou `v1/v2` comme contexte de migration, pas comme contrat courant
+- traiter `.devenv` transitoire, `src/axon-core/target/`, `src/dashboard/priv/native/*.so` et `.codex` comme artefacts locaux ignorés, pas comme source canonique

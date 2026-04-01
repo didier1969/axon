@@ -261,6 +261,37 @@ Conséquence:
 - `BackpressureController` reste un moniteur read-only, mais a perdu un reliquat d’autorité de sizing qui ne reflétait plus la réalité Rust-first
 - le prochain bloc rationnel reste la dégradation avant refus final côté Rust, plus le resserrement ou renommage final des surfaces read-side restantes
 
+# Update 2026-04-01 Repo Hygiene Slice
+
+Une neuvième tranche a maintenant été validée sur l’hygiène du dépôt:
+
+- `.gitignore` couvre désormais explicitement:
+  - `.devenv` transitoire (`nix-eval-cache`, `tasks.db`, `profile`, `run`, `shell-*`)
+  - `src/axon-core/target/`
+  - `src/dashboard/priv/native/*.so`
+  - `.codex`
+- les artefacts historiquement suivis par erreur ont été retirés de l’index Git sans suppression locale:
+  - caches `.devenv`
+  - artefacts `src/axon-core/target/`
+  - binaire natif `libaxon_scanner.so`
+- les modules morts déjà exclus par les tests ont aussi été effectivement retirés du tree:
+  - `AxonDashboardWeb.StatusLive`
+  - `Axon.Watcher.StatsCache`
+  - `Axon.Watcher.PoolEventHandler`
+  - test legacy associé
+
+Validation fraîche:
+
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `40` tests verts
+- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `151` tests verts
+- `bash scripts/start-v2.sh` -> vert
+- `bash scripts/stop-v2.sh` -> vert
+
+Conséquence:
+
+- `git status` cesse d’être pollué par les artefacts de build/runtime les plus bruyants
+- ce qui reste visible côté code reflète bien mieux le vrai chantier encore ouvert
+
 # Files Updated During Reprise
 
 - `/home/dstadel/projects/axon/task_plan.md`
