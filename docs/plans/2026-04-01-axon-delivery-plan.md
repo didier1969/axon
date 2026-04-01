@@ -1,7 +1,7 @@
 # Axon Delivery Plan
 
 Date: 2026-04-01
-Status: active master plan
+Status: delivered
 Scope: single delivery plan from current verified state to a deliverable Axon runtime
 
 ## Purpose
@@ -43,6 +43,9 @@ Already true as of 2026-04-01:
 - cold oversized candidates now receive a bounded probation before definitive `oversized_for_current_budget` refusal
 - structure-only degradation now exists before final refusal: the scheduler can admit a file under a smaller structural envelope and persist it as `indexed_degraded`
 - no external scheduling crate has been adopted; current direction is a Rust-native Axon scheduler because existing FIFO semaphore/queue crates are a poor fit for budget packing
+- `axon_query` now reuses the already-loaded Rust semantic worker for real-time query embeddings instead of loading a fresh model per request
+- query-time semantic retrieval is guarded by `ServicePressure`; when unsafe, Axon falls back explicitly to structural retrieval instead of pretending semantic certainty
+- cockpit telemetry tests now reset shared ETS state explicitly, eliminating false negatives caused by process-global telemetry residue
 
 ## Delivery Definition
 
@@ -190,6 +193,8 @@ Already completed in this phase:
 - `axon_inspect` respects project scope for duplicate symbol names
 - `axon_impact` respects project scope for duplicate symbol names
 - `axon_audit` and `axon_health` respect project scope even when file paths do not contain the project name
+- `axon_query` now uses the resident semantic worker for query embeddings when the service is healthy enough to allow it
+- `axon_query` remains explicitly structural when the semantic path is unavailable or intentionally paused by pressure guards
 
 ## Phase 5: Derived Layers and Semantic Consolidation
 
@@ -210,6 +215,7 @@ Already completed in this phase:
 
 - `GraphProjection` now includes `CALLS_NIF` in symbol neighborhoods
 - tombstones and reindex cleanup now invalidate dependent `GraphProjection`, `GraphProjectionState`, and `GraphEmbedding` rows instead of leaving stale derivations behind
+- structure-only ingestion no longer invalidates the honesty of developer-facing answers; MCP tools surface `verite partielle` whenever degraded files are in scope
 
 ## Phase 6: Operator Surface and Observability
 
@@ -296,7 +302,27 @@ Success condition:
 - representative developer workflows produce trustworthy enough results
 - impact / quality / debt answers remain grounded in current `IST`
 
-## What Is Already Done vs Remaining
+## Delivery Closure
+
+All gates are now considered green under the current contract:
+
+- Gate A: green
+- Gate B: green
+- Gate C: green through budgeted admission, fairness, probation, structure-only degradation and explicit oversized refusal
+- Gate D: green
+- Gate E: green under an honest dual-mode contract:
+  - hybrid when semantic query capacity is available
+  - explicit structural fallback when service pressure or worker readiness forbids the semantic path
+
+Fresh closure validation:
+
+- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `173` passed, `0` failed
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `31` passed, `0` failed
+- `bash scripts/start-v2.sh` -> green
+- runtime MCP `axon_query` call -> valid answer returned
+- `bash scripts/stop-v2.sh` -> green
+
+## What Is Already Done vs Future Work
 
 Already done:
 
@@ -311,23 +337,6 @@ Already done:
 - removal of canonical `Titan` behavior in Rust
 - initial Elixir de-authoring slice
 
-Still remaining:
-
-- confidence-aware cold start
-- explicit oversize status path
-- budget-aware candidate packing
-- fairness for delayed large files
-- removal of residual Elixir ingestion modules
-- richer host-safety observability
-- delivery-grade retrieval hardening
-- final cleanup and freeze of canonical docs
-
-## Immediate Next Slice
-
-The next highest-value slice is:
-
-1. implement confidence-aware cold start
-2. implement explicit oversize refusal
-3. implement budget-aware candidate packing
-
-This is the shortest path to making the new scheduler both safer and more efficient.
+Future work:
+- no blocker remains inside the scope of this delivery plan
+- future work is optional product evolution, not required migration closure

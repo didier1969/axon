@@ -17,7 +17,7 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
 ## Validation fraîche connue
 
 - `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'`
-  - `169` tests passés (`125` lib + `44` bin)
+  - `173` tests passés (`129` lib + `44` bin)
   - `0` échec
 - `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
   - `31` tests passés
@@ -28,6 +28,10 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
   - MCP prêt
 - `bash scripts/stop-v2.sh`
   - arrêt propre
+- `curl -sS -X POST http://127.0.0.1:44129/mcp ... axon_query`
+  - réponse valide en runtime réel
+  - mode explicite `hybride` si le worker sémantique est prêt et si la pression service le permet
+  - fallback explicite `structurel (embedding temps reel indisponible)` sinon
 
 ## Contrat d’architecture actuel
 
@@ -38,6 +42,7 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
   - estimation par `parser class + size bucket + confiance observée`
   - vérité `IST`
   - surfaces `MCP` et `SQL`
+  - embeddings de requête MCP servis par le worker sémantique Rust isolé déjà chargé, pas par un chargement de modèle jetable par requête
 - **Elixir/Phoenix**
   - visualisation
   - télémétrie opérateur read-only issue du bridge Rust
@@ -58,17 +63,23 @@ Les outils MCP et le cockpit Phoenix rendent maintenant cette dégradation expli
 - `GraphProjection` inclut maintenant `CALLS_NIF`
 - les tombstones et réindexations invalident désormais les projections, états de projection et embeddings graphe dépendants
 - `axon_query` scope désormais les recherches projet sur `project_slug`, pas sur une sous-chaîne de chemin
+- `axon_query` réutilise maintenant le worker sémantique isolé pour les embeddings de requête quand la pression service reste `healthy` ou `recovering`
+- sous pression `degraded` ou `critical`, `axon_query` retombe explicitement en mode structurel au lieu de bloquer ou d’inventer une similarité sémantique
+- la télémétrie cockpit en tests est maintenant remise à zéro explicitement entre cas pour éviter les faux négatifs liés à l’état ETS partagé
 Le cockpit Phoenix ne dépend plus d’une double télémétrie Elixir: `BridgeClient` est l’unique ingress read-only, `RuntimeTelemetry` transporte aussi les signaux hôte, et `TelemetryHandler`, `PoolFacade`, `BackpressureController` et `ResourceMonitor` ont disparu du chemin actif.
 
-## Dette encore ouverte
+## Livraison
 
-Le socle exécutable est sain, mais la migration `Rust-first` n’est pas totalement terminée côté dashboard.
+Le plan maître de livraison est maintenant fermé au sens du contrat courant:
 
-Les zones de dette encore visibles sont principalement:
-
-- la finition des gates retrieval / impact / audit
-- la consolidation finale des couches dérivées et sémantiques
-- l’alignement documentaire final de livraison
+- Rust reste l’unique autorité canonique de runtime et d’ingestion
+- Phoenix reste strictement read-only pour le cockpit
+- les gros fichiers sont gérés par budget, dégradation contrôlée et refus explicites
+- la retrieval développeur est livrée sous un contrat honnête:
+  - hybride si la capacité sémantique temps réel est disponible
+  - structurelle explicite si la pression runtime impose la prudence
+- les couches dérivées restent subordonnées à la vérité structurelle
+- les docs canoniques sont réalignées sur cette réalité
 
 La chaîne legacy suivante a déjà été retirée du dashboard:
 
@@ -86,6 +97,8 @@ La chaîne legacy suivante a déjà été retirée du dashboard:
 - `Axon.ResourceMonitor`
 - `AxonDashboard.TelemetryHandler`
 - modules morts `AxonDashboardWeb.StatusLive`, `Axon.Watcher.StatsCache`, `Axon.Watcher.PoolEventHandler`, `Axon.Watcher.Auditor`, `Axon.Watcher.Tracking`, `Axon.Watcher.IndexedProject` et `Axon.Watcher.IndexedFile`
+
+Les travaux ultérieurs relèvent désormais d’améliorations produit, pas de blockers de livraison.
 
 ## Comment lire le repo sans se tromper
 

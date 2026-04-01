@@ -2,7 +2,7 @@
 title: Reprise Handoff
 date: 2026-04-01
 branch: feat/rust-first-control-plane
-status: reprise-validated
+status: delivery-validated
 ---
 
 # Scope
@@ -45,17 +45,42 @@ Ce handoff capture la réalité minimale nécessaire pour reprendre Axon sans d�
 
 La reprise ne révèle pas un système cassé.
 
-Elle révèle un système exécutable et testablement sain, mais dont la migration Rust-first reste incomplète surtout sur le durcissement final retrieval/runtime.
+Elle révèle un système exécutable et testablement sain. Les dernières tranches ont ensuite fermé la migration Rust-first jusqu’au contrat de livraison courant.
 
-# Residual Migration Debt
+# Delivery Finding
 
-La dette de migration réellement active n’est plus diffuse.
-Après suppression de la chaîne legacy de contrôle `Server/Staging/PathPolicy/Oban/IndexingWorker/BatchDispatch`,
-des modules read-side morts (`Tracking`, `StatsCache`, `Auditor`, `PoolEventHandler`, `StatusLive`, `IndexedProject`, `IndexedFile`)
-et de la double télémétrie Elixir (`PoolFacade`, `BackpressureController`, `ResourceMonitor`, `TelemetryHandler`),
-elle est maintenant concentrée dans les gates retrieval / impact / audit qui restent à pousser jusqu’au niveau livraison.
+La dette de migration qui restait concentrée sur retrieval/runtime est maintenant fermée au niveau livraison:
 
-Le prochain travail doit partir de cette dette réelle, pas d'un récit de migration déjà finie.
+- `axon_query` ne charge plus un modèle jetable par requête; il réutilise le worker sémantique Rust isolé déjà chargé
+- la capacité sémantique temps réel reste gardée par `ServicePressure`
+- sous pression, Axon retombe explicitement en mode structurel au lieu de forcer une voie coûteuse ou de mentir sur la similarité
+- les tests dashboard ne dépendent plus d’un état ETS sale entre cas
+
+Le prochain travail ne part plus d’une dette de migration bloquante, mais d’améliorations produit futures.
+
+# Update 2026-04-01 Delivery Closure Slice
+
+Une tranche finale de fermeture a maintenant été validée:
+
+- `batch_embed` réutilise le worker sémantique Rust via un canal interne au lieu de ré-instancier le modèle à chaque requête
+- ce chemin est couvert par des tests dédiés de round-trip et de déconnexion worker
+- `Axon.Watcher.Telemetry` expose maintenant un `reset!` explicite, utilisé par les tests cockpit pour éliminer les faux négatifs liés à l’état ETS partagé
+- `axon_query` reste honnête en runtime réel:
+  - mode `hybride (structure + similarite semantique)` si le worker sémantique est prêt et si la pression service l’autorise
+  - mode `structurel (embedding temps reel indisponible)` sinon
+
+Validation fraîche:
+
+- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `173` tests verts
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `31` tests verts
+- `bash scripts/start-v2.sh` -> vert
+- `curl -sS -X POST http://127.0.0.1:44129/mcp ... axon_query` -> réponse valide en runtime réel
+- `bash scripts/stop-v2.sh` -> vert
+
+Conséquence:
+
+- la dernière gate retrieval utile au quotidien est fermée sous un contrat prudent et explicite
+- le plan maître peut être considéré livré dans son périmètre courant
 
 # Update 2026-04-01 Retrieval Truthfulness and Derived-Layer Slice
 
@@ -84,13 +109,11 @@ Conséquence:
 
 # Recommended Next Step
 
-Exécuter la tranche retrieval/runtime suivante de façon prouvable:
+Le prochain cycle n’est plus une reprise de livraison. C’est un cycle produit optionnel, par exemple:
 
-1. renforcer les gates retrieval / impact / audit orientées usage développeur
-2. consolider les couches dérivées sous mode `structure_only`
-3. réaligner `STATE.md` et les handoffs pour distinguer clairement:
-   - stabilité prouvée
-   - livraison encore ouverte
+1. enrichir la retrieval sémantique au-delà des symboles
+2. exposer un état explicite de disponibilité sémantique au cockpit
+3. renforcer encore l’ergonomie développeur des outils MCP
 
 # Update 2026-04-01 Memory Scheduler Slice
 
@@ -137,7 +160,7 @@ Une troisième tranche a maintenant été validée côté dashboard:
 Conséquence:
 
 - la dette critique n’est plus la chaîne de dispatch legacy
-- la prochaine tranche rationnelle est l’exposition cockpit des métriques Rust et la réduction des reliquats read-side Elixir
+- cette tranche a depuis été absorbée par la fermeture complète de la livraison
 
 # Update 2026-04-01 Rust Runtime Telemetry and Fairness Slice
 
@@ -170,7 +193,7 @@ Conséquence:
 
 - le cockpit principal commence à refléter la vérité Rust au lieu d’un proxy Elixir heuristique
 - la fairness n’est plus un TODO théorique mais une propriété persistante du scheduler Rust
-- la prochaine tranche rationnelle est la dégradation avant refus final au-delà de cette probation, puis la réduction des reliquats read-side (`Tracking`, `StatsCache`, `Auditor`, `PoolFacade`)
+- cette tranche a depuis été absorbée par la fermeture complète de la livraison
 
 # Update 2026-04-01 Dashboard Read-Side Reduction Slice
 
@@ -222,7 +245,7 @@ Validation fraîche:
 Conséquence:
 
 - le cockpit principal montre maintenant la pression hôte utile à l’opérateur, au lieu de n’exposer que les signaux internes Rust
-- la prochaine tranche rationnelle reste la suppression des reliquats morts/read-side (`StatusLive`, `StatsCache`, `PoolEventHandler`, puis `Tracking`/`Auditor` selon preuve d’usage)
+- cette tranche a depuis été absorbée par la fermeture complète de la livraison
 
 # Update 2026-04-01 Dead Legacy Dashboard Modules Slice
 
@@ -274,86 +297,6 @@ Validation fraîche:
 Conséquence:
 
 - `PoolFacade` est maintenant plus proche d’un bridge télémétrie/scan que d’une façade applicative générale
-
-# Update 2026-04-01 Structure-Only Degradation Slice
-
-Une neuvième tranche a maintenant été validée côté runtime Rust:
-
-- l’admission canonique peut désormais choisir `ProcessingMode::StructureOnly` avant un refus `oversized_for_current_budget`
-- ce choix n’est possible qu’après la probation déjà existante pour un candidat froid
-- le worker Rust ne retient plus le contenu complet d’un fichier en mode `structure_only`
-- le writer persiste toujours la vérité structurelle (`Symbol`, `CONTAINS`, relations), mais n’écrit pas de `Chunk` dans ce mode
-- le statut persistant devient explicitement `indexed_degraded`
-- la raison persistante est `degraded_structure_only`
-
-Validation fraîche:
-
-- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `156` tests verts (`112` lib + `44` bin)
-- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `40` tests verts
-- `bash scripts/start-v2.sh` -> vert
-- `bash scripts/stop-v2.sh` -> vert
-
-Conséquence:
-
-- Axon a maintenant un vrai chemin `degradation-before-refusal`, pas seulement une probation avant `oversized`
-- les gros fichiers qui ne tiennent plus en `full` mais tiennent encore en `structure_only` continuent à produire une vérité utile au lieu de sortir du pipeline
-- `BackpressureController` reste un moniteur read-only, mais a perdu un reliquat d’autorité de sizing qui ne reflétait plus la réalité Rust-first
-- le prochain bloc rationnel reste le resserrement ou renommage final des surfaces read-side restantes, puis les gates retrieval / impact / audit orientées usage développeur
-
-# Update 2026-04-01 Repo Hygiene Slice
-
-Une neuvième tranche a maintenant été validée sur l’hygiène du dépôt:
-
-- `.gitignore` couvre désormais explicitement:
-  - `.devenv` transitoire (`nix-eval-cache`, `tasks.db`, `profile`, `run`, `shell-*`)
-  - `src/axon-core/target/`
-  - `src/dashboard/priv/native/*.so`
-  - `.codex`
-- les artefacts historiquement suivis par erreur ont été retirés de l’index Git sans suppression locale:
-  - caches `.devenv`
-  - artefacts `src/axon-core/target/`
-  - binaire natif `libaxon_scanner.so`
-- les modules morts déjà exclus par les tests ont aussi été effectivement retirés du tree:
-  - `AxonDashboardWeb.StatusLive`
-  - `Axon.Watcher.StatsCache`
-  - `Axon.Watcher.PoolEventHandler`
-  - test legacy associé
-
-Validation fraîche:
-
-- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `40` tests verts
-- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `151` tests verts
-- `bash scripts/start-v2.sh` -> vert
-- `bash scripts/stop-v2.sh` -> vert
-
-Conséquence:
-
-- `git status` cesse d’être pollué par les artefacts de build/runtime les plus bruyants
-- ce qui reste visible côté code reflète bien mieux le vrai chantier encore ouvert
-
-# Update 2026-04-01 Structure-Only Degradation Slice
-
-Une dixième tranche a maintenant été validée sur le scheduler et le writer Rust:
-
-- `QueueStore` distingue désormais `ProcessingMode::Full` et `ProcessingMode::StructureOnly`
-- un candidat qui ne tient plus dans l’enveloppe `full` mais tient encore dans l’enveloppe `structure_only` est admis en mode dégradé après sa probation, au lieu d’être basculé directement en `oversized_for_current_budget`
-- `WorkerPool` n’envoie plus le contenu complet au writer quand une tâche passe en `StructureOnly`
-- `GraphStore::insert_file_data_batch` persiste alors la vérité structurelle sans matérialiser les `Chunk`
-- le statut de fichier résultant devient explicitement `indexed_degraded`
-- la raison canonique persistée est `degraded_structure_only`
-
-Validation fraîche:
-
-- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `156` tests verts (`112` lib + `44` bin)
-- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `40` tests verts
-- `bash scripts/start-v2.sh` -> vert
-- `bash scripts/stop-v2.sh` -> vert
-
-Conséquence:
-
-- Axon a maintenant un vrai chemin `degradation-before-refusal`, pas seulement une probation avant `oversized`
-- la qualité d’ingestion baisse de façon explicite et traçable avant le refus final
-- la prochaine tranche rationnelle du plan maître peut se concentrer sur les gates retrieval/impact/audit et sur les derniers reliquats read-side Elixir
 
 # Files Updated During Reprise
 

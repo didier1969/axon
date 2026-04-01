@@ -1,8 +1,9 @@
 use crate::graph::GraphStore;
 use crate::queue::QueueStore;
 use crate::service_guard::{self, ServicePressure};
+use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, info};
@@ -15,10 +16,20 @@ const MODEL_VERSION: &str = "1";
 const CHUNK_BATCH_SIZE: usize = 16;
 const SYMBOL_BATCH_SIZE: usize = 32;
 const GRAPH_BATCH_SIZE: usize = 6;
+const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
 
 // NEXUS v10.5: Sovereign Semantic Engine
 // We isolate the ONNX runtime inside a pure OS thread to prevent Tokio/jemalloc aborts.
-// No Lazy statics, no global Mutex. The model is owned by the background worker.
+// The model stays owned by the background worker; global state only holds a channel
+// sender so synchronous MCP queries can reuse the already-loaded model safely.
+
+struct QueryEmbeddingRequest {
+    texts: Vec<String>,
+    reply: Sender<anyhow::Result<Vec<Vec<f32>>>>,
+}
+
+static QUERY_EMBEDDING_SENDER: OnceLock<Mutex<Option<Sender<QueryEmbeddingRequest>>>> =
+    OnceLock::new();
 
 pub struct SemanticWorkerPool {
     _worker: thread::JoinHandle<()>,
@@ -49,6 +60,9 @@ impl SemanticWorkerPool {
                 return;
             }
         };
+
+        let (query_tx, query_rx) = unbounded();
+        register_query_embedding_sender(query_tx);
 
         if let Err(e) = graph_store.ensure_embedding_model(
             SYMBOL_MODEL_ID,
@@ -90,10 +104,14 @@ impl SemanticWorkerPool {
         info!("Semantic Worker: Hunting for unembedded symbols...");
 
         loop {
+            if handle_pending_query_requests(&mut model, &query_rx, 8) {
+                continue;
+            }
+
             let policy =
                 semantic_policy(queue_store.common_len(), service_guard::current_pressure());
             if policy.pause {
-                thread::sleep(policy.sleep);
+                wait_for_query_request(&mut model, &query_rx, policy.sleep);
                 continue;
             }
 
@@ -161,10 +179,10 @@ impl SemanticWorkerPool {
                         }
                     }
                 }
-                Ok(_) => thread::sleep(policy.idle_sleep),
+                Ok(_) => wait_for_query_request(&mut model, &query_rx, policy.idle_sleep),
                 Err(e) => {
                     error!("Semantic Worker: DB Fetch error: {:?}", e);
-                    thread::sleep(policy.idle_sleep);
+                    wait_for_query_request(&mut model, &query_rx, policy.idle_sleep);
                 }
             }
 
@@ -230,13 +248,93 @@ impl SemanticWorkerPool {
                         }
                     }
                 }
-                Ok(_) => thread::sleep(policy.idle_sleep),
+                Ok(_) => wait_for_query_request(&mut model, &query_rx, policy.idle_sleep),
                 Err(e) => {
                     error!("Semantic Worker: Graph DB Fetch error: {:?}", e);
-                    thread::sleep(policy.idle_sleep);
+                    wait_for_query_request(&mut model, &query_rx, policy.idle_sleep);
                 }
             }
         }
+    }
+}
+
+fn query_embedding_sender_slot() -> &'static Mutex<Option<Sender<QueryEmbeddingRequest>>> {
+    QUERY_EMBEDDING_SENDER.get_or_init(|| Mutex::new(None))
+}
+
+fn register_query_embedding_sender(sender: Sender<QueryEmbeddingRequest>) {
+    let mut slot = query_embedding_sender_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    *slot = Some(sender);
+}
+
+fn current_query_embedding_sender() -> Option<Sender<QueryEmbeddingRequest>> {
+    query_embedding_sender_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+}
+
+fn wait_for_query_request(
+    model: &mut TextEmbedding,
+    query_rx: &Receiver<QueryEmbeddingRequest>,
+    timeout: Duration,
+) {
+    match query_rx.recv_timeout(timeout) {
+        Ok(request) => serve_query_embedding_request(model, request),
+        Err(RecvTimeoutError::Timeout) => {}
+        Err(RecvTimeoutError::Disconnected) => {}
+    }
+}
+
+fn handle_pending_query_requests(
+    model: &mut TextEmbedding,
+    query_rx: &Receiver<QueryEmbeddingRequest>,
+    limit: usize,
+) -> bool {
+    let mut handled = 0;
+
+    while handled < limit {
+        match query_rx.try_recv() {
+            Ok(request) => {
+                serve_query_embedding_request(model, request);
+                handled += 1;
+            }
+            Err(_) => break,
+        }
+    }
+
+    handled > 0
+}
+
+fn serve_query_embedding_request(model: &mut TextEmbedding, request: QueryEmbeddingRequest) {
+    let result = model.embed(request.texts, None).map_err(anyhow::Error::from);
+    let _ = request.reply.send(result);
+}
+
+fn request_query_embedding(
+    sender: &Sender<QueryEmbeddingRequest>,
+    texts: Vec<String>,
+) -> anyhow::Result<Vec<Vec<f32>>> {
+    let (reply_tx, reply_rx) = bounded(1);
+    sender
+        .send(QueryEmbeddingRequest {
+            texts,
+            reply: reply_tx,
+        })
+        .map_err(|_| {
+            anyhow::anyhow!("MCP real-time embedding worker unavailable. Use structural search.")
+        })?;
+
+    match reply_rx.recv_timeout(QUERY_EMBED_TIMEOUT) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => Err(anyhow::anyhow!(
+            "MCP real-time embedding timed out. Use structural search."
+        )),
+        Err(RecvTimeoutError::Disconnected) => Err(anyhow::anyhow!(
+            "MCP real-time embedding worker disconnected. Use structural search."
+        )),
     }
 }
 
@@ -408,6 +506,13 @@ struct SemanticPolicy {
     idle_sleep: Duration,
 }
 
+fn query_embedding_allowed(service_pressure: ServicePressure) -> bool {
+    matches!(
+        service_pressure,
+        ServicePressure::Healthy | ServicePressure::Recovering
+    )
+}
+
 fn semantic_policy(queue_len: usize, service_pressure: ServicePressure) -> SemanticPolicy {
     if service_pressure == ServicePressure::Critical || queue_len >= 3_000 {
         return SemanticPolicy {
@@ -447,18 +552,35 @@ fn is_fatal_embedding_error<E: std::fmt::Debug>(err: &E) -> bool {
         || rendered.contains("onnxruntime")
 }
 
-// STUB for MCP compatibility without crashing
-pub fn batch_embed(_texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
-    // In v10.5, we disable synchronous MCP embedding to protect the runtime.
-    // MCP semantic search will be temporarily bypassed until we build a safe bridge.
-    Err(anyhow::anyhow!(
-        "MCP Real-time embedding is disabled in safe mode. Use structural search."
-    ))
+pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let pressure = service_guard::current_pressure();
+    if !query_embedding_allowed(pressure) {
+        return Err(anyhow::anyhow!(
+            "MCP real-time embedding paused under {:?} service pressure. Use structural search.",
+            pressure
+        ));
+    }
+
+    let Some(sender) = current_query_embedding_sender() else {
+        return Err(anyhow::anyhow!(
+            "MCP real-time embedding worker not ready. Use structural search."
+        ));
+    };
+
+    request_query_embedding(&sender, texts)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_fatal_embedding_error, semantic_policy};
+    use super::{
+        is_fatal_embedding_error, query_embedding_allowed, request_query_embedding,
+        semantic_policy, QueryEmbeddingRequest,
+    };
+    use crossbeam_channel::unbounded;
     use crate::service_guard::ServicePressure;
     use std::time::Duration;
 
@@ -505,5 +627,40 @@ mod tests {
         assert!(policy.pause);
         assert_eq!(policy.sleep, Duration::from_secs(2));
         assert_eq!(policy.idle_sleep, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_query_embedding_allowed_while_healthy_or_recovering() {
+        assert!(query_embedding_allowed(ServicePressure::Healthy));
+        assert!(query_embedding_allowed(ServicePressure::Recovering));
+    }
+
+    #[test]
+    fn test_query_embedding_disallowed_under_degraded_or_critical_pressure() {
+        assert!(!query_embedding_allowed(ServicePressure::Degraded));
+        assert!(!query_embedding_allowed(ServicePressure::Critical));
+    }
+
+    #[test]
+    fn test_request_query_embedding_round_trips_through_registered_worker() {
+        let (tx, rx) = unbounded::<QueryEmbeddingRequest>();
+        std::thread::spawn(move || {
+            let request = rx.recv().unwrap();
+            request.reply.send(Ok(vec![vec![0.42, 0.24]])).unwrap();
+        });
+
+        let embeddings = request_query_embedding(&tx, vec!["hello".to_string()]).unwrap();
+        assert_eq!(embeddings, vec![vec![0.42, 0.24]]);
+    }
+
+    #[test]
+    fn test_request_query_embedding_returns_worker_disconnect_error() {
+        let (tx, rx) = unbounded::<QueryEmbeddingRequest>();
+        drop(rx);
+
+        let err = request_query_embedding(&tx, vec!["hello".to_string()]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("MCP real-time embedding worker unavailable"));
     }
 }

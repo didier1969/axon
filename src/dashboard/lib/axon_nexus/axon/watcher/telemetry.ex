@@ -14,28 +14,12 @@ defmodule Axon.Watcher.Telemetry do
 
   def init(:ok) do
     :ets.new(:axon_telemetry, [:set, :public, :named_table])
-    :ets.insert(:axon_telemetry, {:active_workers, %{}})
-    :ets.insert(:axon_telemetry, {:last_files, []})
-    # {dir_name => %{total, completed, failed, last_update}}
-    :ets.insert(:axon_telemetry, {:directories, %{}})
-    :ets.insert(:axon_telemetry, {:target_pressure, 100})
-    :ets.insert(:axon_telemetry, {:t4_ema, 0.0})
-    :ets.insert(:axon_telemetry, {:flux_reel, 0.0})
-    :ets.insert(:axon_telemetry, {:total_ingested, 0})
-    :ets.insert(:axon_telemetry, {:budget_bytes, 0})
-    :ets.insert(:axon_telemetry, {:reserved_bytes, 0})
-    :ets.insert(:axon_telemetry, {:exhaustion_ratio, 0.0})
-    :ets.insert(:axon_telemetry, {:queue_depth, 0})
-    :ets.insert(:axon_telemetry, {:claim_mode, "unknown"})
-    :ets.insert(:axon_telemetry, {:service_pressure, "healthy"})
-    :ets.insert(:axon_telemetry, {:oversized_refusals_total, 0})
-    :ets.insert(:axon_telemetry, {:degraded_mode_entries_total, 0})
-    :ets.insert(:axon_telemetry, {:cpu_load, 0.0})
-    :ets.insert(:axon_telemetry, {:ram_load, 0.0})
-    :ets.insert(:axon_telemetry, {:io_wait, 0.0})
-    :ets.insert(:axon_telemetry, {:host_state, "healthy"})
-    :ets.insert(:axon_telemetry, {:host_guidance_slots, 0})
+    reset()
     {:ok, %{}}
+  end
+
+  def reset! do
+    reset()
   end
 
   def update_backpressure(pressure, ema) do
@@ -158,6 +142,30 @@ defmodule Axon.Watcher.Telemetry do
       host_state: get_val(:host_state),
       host_guidance_slots: get_val(:host_guidance_slots)
     }
+  end
+
+  defp reset do
+    :ets.insert(:axon_telemetry, {:active_workers, %{}})
+    :ets.insert(:axon_telemetry, {:last_files, []})
+    # {dir_name => %{total, completed, failed, last_update}}
+    :ets.insert(:axon_telemetry, {:directories, %{}})
+    :ets.insert(:axon_telemetry, {:target_pressure, 100})
+    :ets.insert(:axon_telemetry, {:t4_ema, 0.0})
+    :ets.insert(:axon_telemetry, {:flux_reel, 0.0})
+    :ets.insert(:axon_telemetry, {:total_ingested, 0})
+    :ets.insert(:axon_telemetry, {:budget_bytes, 0})
+    :ets.insert(:axon_telemetry, {:reserved_bytes, 0})
+    :ets.insert(:axon_telemetry, {:exhaustion_ratio, 0.0})
+    :ets.insert(:axon_telemetry, {:queue_depth, 0})
+    :ets.insert(:axon_telemetry, {:claim_mode, "unknown"})
+    :ets.insert(:axon_telemetry, {:service_pressure, "healthy"})
+    :ets.insert(:axon_telemetry, {:oversized_refusals_total, 0})
+    :ets.insert(:axon_telemetry, {:degraded_mode_entries_total, 0})
+    :ets.insert(:axon_telemetry, {:cpu_load, 0.0})
+    :ets.insert(:axon_telemetry, {:ram_load, 0.0})
+    :ets.insert(:axon_telemetry, {:io_wait, 0.0})
+    :ets.insert(:axon_telemetry, {:host_state, "healthy"})
+    :ets.insert(:axon_telemetry, {:host_guidance_slots, 0})
   end
 
   defp get_val(key) do

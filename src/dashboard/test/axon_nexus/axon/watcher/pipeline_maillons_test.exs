@@ -8,9 +8,11 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
     case Process.whereis(Axon.Watcher.Telemetry) do
       nil ->
         {:ok, pid} = Axon.Watcher.Telemetry.start_link([])
+        Axon.Watcher.Telemetry.reset!()
         %{telemetry_pid: pid}
 
       pid ->
+        Axon.Watcher.Telemetry.reset!()
         %{telemetry_pid: pid}
     end
   end
