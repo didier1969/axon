@@ -1,6 +1,6 @@
 use super::{ExtractionResult, Parser};
-use std::process::Command;
 use std::io::Write;
+use std::process::Command;
 use tempfile::NamedTempFile;
 use tracing::error;
 
@@ -27,13 +27,24 @@ impl Parser for TypeQLParser {
             Ok(f) => f,
             Err(e) => {
                 error!("Failed to create temp file for TypeQL parser: {}", e);
-                return ExtractionResult { project_slug: None, symbols, relations };
+                return ExtractionResult {
+                    project_slug: None,
+                    symbols,
+                    relations,
+                };
             }
         };
 
         if let Err(e) = temp_file.write_all(content.as_bytes()) {
-            error!("Failed to write content to temp file for TypeQL parser: {}", e);
-            return ExtractionResult { project_slug: None, symbols, relations };
+            error!(
+                "Failed to write content to temp file for TypeQL parser: {}",
+                e
+            );
+            return ExtractionResult {
+                project_slug: None,
+                symbols,
+                relations,
+            };
         }
 
         let current_dir = std::env::current_dir().unwrap_or_default();
@@ -57,14 +68,21 @@ impl Parser for TypeQLParser {
                 }
             }
             Ok(out) => {
-                error!("TypeQL python parser script failed: {}", String::from_utf8_lossy(&out.stderr));
+                error!(
+                    "TypeQL python parser script failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
             Err(e) => {
                 error!("Failed to execute python TypeQL parser: {}", e);
             }
         }
 
-        ExtractionResult { project_slug: None, symbols, relations }
+        ExtractionResult {
+            project_slug: None,
+            symbols,
+            relations,
+        }
     }
 }
 
@@ -92,15 +110,30 @@ mod tests {
             $p has name "Parent";
         };
         "#;
-        
+
         let parser = TypeQLParser::new();
         let result = parser.parse(code);
-        
-        assert!(result.symbols.iter().any(|s| s.name == "person" && s.kind == "entity_type"));
-        assert!(result.symbols.iter().any(|s| s.name == "parentship" && s.kind == "relation_type"));
-        assert!(result.symbols.iter().any(|s| s.name == "rule-people-are-parents" && s.kind == "rule"));
-        assert!(result.symbols.iter().any(|s| s.name == "name" && s.kind == "attribute"));
-        
-        assert!(result.relations.iter().any(|r| r.from == "person" && r.to == "name" && r.rel_type == "owns"));
+
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "person" && s.kind == "entity_type"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "parentship" && s.kind == "relation_type"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "rule-people-are-parents" && s.kind == "rule"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "name" && s.kind == "attribute"));
+
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "person" && r.to == "name" && r.rel_type == "owns"));
     }
 }

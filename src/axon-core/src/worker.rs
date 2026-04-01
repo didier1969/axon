@@ -1,10 +1,10 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
+use crossbeam_channel::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
-use tracing::{info, error};
-use crossbeam_channel::{Sender, Receiver};
+use tracing::{error, info};
 
 use crate::graph::GraphStore;
 use crate::parser;
@@ -18,13 +18,18 @@ pub enum DbWriteTask {
         extraction: crate::parser::ExtractionResult,
         processing_mode: ProcessingMode,
         trace_id: String,
-        t0: i64, t1: i64, t2: i64, t3: i64,
+        t0: i64,
+        t1: i64,
+        t2: i64,
+        t3: i64,
     },
     FileSkipped {
         path: String,
         reason: String,
         trace_id: String,
-        t0: i64, t1: i64, t2: i64,
+        t0: i64,
+        t1: i64,
+        t2: i64,
     },
     ExecuteCypher {
         query: String,
@@ -37,8 +42,8 @@ pub struct WorkerPool {
 
 impl WorkerPool {
     fn infer_project_slug(path: &str) -> Option<String> {
-        let projects_root =
-            std::env::var("AXON_PROJECTS_ROOT").unwrap_or_else(|_| "/home/dstadel/projects".to_string());
+        let projects_root = std::env::var("AXON_PROJECTS_ROOT")
+            .unwrap_or_else(|_| "/home/dstadel/projects".to_string());
         let path = std::path::Path::new(path);
         let relative = path.strip_prefix(&projects_root).ok()?;
         let first = relative.components().next()?;
@@ -64,7 +69,7 @@ impl WorkerPool {
             let gs = graph_store.clone();
             let d_tx = db_sender.clone();
             let r_tx = result_sender.clone();
-            
+
             // NEXUS v8.17: Instant Ignition (Shared Model)
             info!("WorkerPool: Spawning worker {}/{}...", i + 1, count);
             workers.push(thread::spawn(move || {
@@ -83,7 +88,7 @@ impl WorkerPool {
     ) {
         info!("Worker {} online. (Prefetching enabled)", id);
         let mut local_buffer = Vec::with_capacity(2);
-        
+
         loop {
             // 1. Refill local buffer if needed
             while local_buffer.len() < 2 {
@@ -97,7 +102,8 @@ impl WorkerPool {
             // 2. Process first task if available
             if !local_buffer.is_empty() {
                 let task = local_buffer.remove(0);
-                let observed_cost_bytes = Self::process_one_task(id, &task, &db_sender, &result_sender);
+                let observed_cost_bytes =
+                    Self::process_one_task(id, &task, &db_sender, &result_sender);
                 let _ = queue.mark_done(&task, observed_cost_bytes);
             } else {
                 // If really empty, wait a bit longer to save CPU
@@ -113,17 +119,24 @@ impl WorkerPool {
         _result_sender: &tokio::sync::broadcast::Sender<String>,
     ) -> Option<u64> {
         let _span = tracing::info_span!("worker_task", path = %task.path).entered();
-        let t2 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+        let t2 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
         let started_at = Instant::now();
 
         match std::fs::read_to_string(&task.path) {
             Ok(content) => {
-                if let Some(parser) = parser::get_parser_for_file(std::path::Path::new(&task.path)) {
+                if let Some(parser) = parser::get_parser_for_file(std::path::Path::new(&task.path))
+                {
                     let mut extraction = parser.parse(&content);
                     if extraction.project_slug.is_none() {
                         extraction.project_slug = Self::infer_project_slug(&task.path);
                     }
-                    let t3 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+                    let t3 = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_micros() as i64;
                     let observed_cost_bytes = estimate_observed_cost_bytes(
                         &task.path,
                         task.size_bytes.max(content.len() as u64),
@@ -134,14 +147,17 @@ impl WorkerPool {
                         ProcessingMode::Full => Some(content),
                         ProcessingMode::StructureOnly => None,
                     };
-                    
+
                     let _ = db_sender.send(DbWriteTask::FileExtraction {
                         path: task.path.clone(),
                         content: content_for_writer,
                         extraction,
                         processing_mode: task.mode,
                         trace_id: task.trace_id.clone(),
-                        t0: task.t0, t1: task.t1, t2, t3
+                        t0: task.t0,
+                        t1: task.t1,
+                        t2,
+                        t3,
                     });
                     return Some(observed_cost_bytes);
                 } else {
@@ -150,17 +166,21 @@ impl WorkerPool {
                         path: task.path.clone(),
                         reason: "No parser found".to_string(),
                         trace_id: task.trace_id.clone(),
-                        t0: task.t0, t1: task.t1, t2
+                        t0: task.t0,
+                        t1: task.t1,
+                        t2,
                     });
                     return Some(task.estimated_cost_bytes);
                 }
-            },
+            }
             Err(e) => {
                 let _ = db_sender.send(DbWriteTask::FileSkipped {
                     path: task.path.clone(),
                     reason: format!("Read Error: {:?}", e),
                     trace_id: task.trace_id.clone(),
-                    t0: task.t0, t1: task.t1, t2
+                    t0: task.t0,
+                    t1: task.t1,
+                    t2,
                 });
                 return None;
             }
@@ -168,26 +188,60 @@ impl WorkerPool {
     }
 
     pub fn spawn_writer_actor(
-        graph_store: Arc<GraphStore>, 
+        graph_store: Arc<GraphStore>,
         db_receiver: Receiver<DbWriteTask>,
-        result_sender: tokio::sync::broadcast::Sender<String>
+        result_sender: tokio::sync::broadcast::Sender<String>,
     ) {
         thread::spawn(move || {
             info!("DB Writer Actor online. Transactional pipeline ready.");
             let mut batch = Vec::new();
-            
+
             loop {
                 // 1. BLOCKING WAIT for first message
                 match db_receiver.recv() {
-                    Ok(DbWriteTask::FileExtraction { path, content, extraction, processing_mode, trace_id, t0, t1, t2, t3 }) => {
-                        batch.push(DbWriteTask::FileExtraction { path, content, extraction, processing_mode, trace_id, t0, t1, t2, t3 });
-                    },
-                    Ok(DbWriteTask::FileSkipped { path, reason, trace_id, t0, t1, t2 }) => {
-                        batch.push(DbWriteTask::FileSkipped { path, reason, trace_id, t0, t1, t2 });
-                    },
+                    Ok(DbWriteTask::FileExtraction {
+                        path,
+                        content,
+                        extraction,
+                        processing_mode,
+                        trace_id,
+                        t0,
+                        t1,
+                        t2,
+                        t3,
+                    }) => {
+                        batch.push(DbWriteTask::FileExtraction {
+                            path,
+                            content,
+                            extraction,
+                            processing_mode,
+                            trace_id,
+                            t0,
+                            t1,
+                            t2,
+                            t3,
+                        });
+                    }
+                    Ok(DbWriteTask::FileSkipped {
+                        path,
+                        reason,
+                        trace_id,
+                        t0,
+                        t1,
+                        t2,
+                    }) => {
+                        batch.push(DbWriteTask::FileSkipped {
+                            path,
+                            reason,
+                            trace_id,
+                            t0,
+                            t1,
+                            t2,
+                        });
+                    }
                     Ok(DbWriteTask::ExecuteCypher { query }) => {
                         let _ = graph_store.execute(&query);
-                    },
+                    }
                     Err(_) => break,
                 }
 
@@ -203,8 +257,22 @@ impl WorkerPool {
                 if !batch.is_empty() {
                     let mut combined_feedback = String::new();
                     for task in &batch {
-                        if let DbWriteTask::FileExtraction { path, extraction, processing_mode, trace_id, t0, t1, t2, t3, .. } = task {
-                            let t4 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+                        if let DbWriteTask::FileExtraction {
+                            path,
+                            extraction,
+                            processing_mode,
+                            trace_id,
+                            t0,
+                            t1,
+                            t2,
+                            t3,
+                            ..
+                        } = task
+                        {
+                            let t4 = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_micros() as i64;
                             let msg = serde_json::json!({
                                 "FileIndexed": {
                                     "path": path,
@@ -220,8 +288,19 @@ impl WorkerPool {
                             });
                             combined_feedback.push_str(&serde_json::to_string(&msg).unwrap());
                             combined_feedback.push('\n');
-                        } else if let DbWriteTask::FileSkipped { path, reason, trace_id, t0, t1, t2 } = task {
-                            let t4 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+                        } else if let DbWriteTask::FileSkipped {
+                            path,
+                            reason,
+                            trace_id,
+                            t0,
+                            t1,
+                            t2,
+                        } = task
+                        {
+                            let t4 = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_micros() as i64;
                             let msg = serde_json::json!({
                                 "FileIndexed": {
                                     "path": path, "status": "skipped", "error_reason": reason,
@@ -250,8 +329,8 @@ impl WorkerPool {
 #[cfg(test)]
 mod tests {
     use super::{DbWriteTask, WorkerPool};
-    use crate::queue::{ProcessingMode, Task};
     use crate::queue::TaskLane;
+    use crate::queue::{ProcessingMode, Task};
 
     #[test]
     fn test_large_file_is_not_skipped_when_budget_admitted_it() {
@@ -281,12 +360,20 @@ mod tests {
         assert!(observed.is_some());
 
         match db_receiver.recv().unwrap() {
-            DbWriteTask::FileExtraction { path, extraction, .. } => {
+            DbWriteTask::FileExtraction {
+                path, extraction, ..
+            } => {
                 assert!(path.ends_with("large.txt"));
-                assert!(!extraction.symbols.is_empty(), "large file should still be parsed when budget admitted it");
+                assert!(
+                    !extraction.symbols.is_empty(),
+                    "large file should still be parsed when budget admitted it"
+                );
             }
             DbWriteTask::FileSkipped { reason, .. } => {
-                panic!("large file should no longer be skipped by a fixed size gate: {}", reason);
+                panic!(
+                    "large file should no longer be skipped by a fixed size gate: {}",
+                    reason
+                );
             }
             DbWriteTask::ExecuteCypher { .. } => {
                 panic!("unexpected cypher task");
@@ -333,7 +420,10 @@ mod tests {
                 assert_eq!(processing_mode, ProcessingMode::StructureOnly);
             }
             DbWriteTask::FileSkipped { reason, .. } => {
-                panic!("structure-only mode should still parse the file: {}", reason);
+                panic!(
+                    "structure-only mode should still parse the file: {}",
+                    reason
+                );
             }
             DbWriteTask::ExecuteCypher { .. } => {
                 panic!("unexpected cypher task");

@@ -17,10 +17,10 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
 ## Validation fraîche connue
 
 - `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'`
-  - `156` tests passés (`112` lib + `44` bin)
+  - `169` tests passés (`125` lib + `44` bin)
   - `0` échec
 - `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
-  - `29` tests passés
+  - `31` tests passés
   - `0` échec
 - `bash scripts/start-v2.sh`
   - dashboard prêt
@@ -51,6 +51,13 @@ Les gros fichiers différés accumulent aussi maintenant une dette de fairness p
 Avant un refus `oversized` final, Axon accorde désormais une courte probation de déferrement aux candidats encore froids pour éviter qu’une estimation initiale trop conservatrice ne les exclue trop tôt.
 Si l’enveloppe `full` ne passe pas mais qu’une enveloppe `structure_only` passe encore, Axon admet désormais le fichier en mode dégradé au lieu de le refuser immédiatement.
 Un commit `structure_only` persiste la vérité structurelle (`Symbol`, `CONTAINS`, relations) sans matérialiser les `Chunk`, et marque explicitement le fichier `indexed_degraded` avec la raison `degraded_structure_only`.
+Les outils MCP et le cockpit Phoenix rendent maintenant cette dégradation explicitement:
+- `axon_query`, `axon_inspect`, `axon_impact`, `axon_audit` et `axon_health` annoncent une `verite partielle` quand le scope demandé contient des fichiers `indexed_degraded`
+- `indexed_degraded` est compté comme succès dégradé dans le cockpit, pas comme erreur
+- `Progress` ne garde plus d'overlay mutable local; la progression affichée reste dérivée de SQL
+- `GraphProjection` inclut maintenant `CALLS_NIF`
+- les tombstones et réindexations invalident désormais les projections, états de projection et embeddings graphe dépendants
+- `axon_query` scope désormais les recherches projet sur `project_slug`, pas sur une sous-chaîne de chemin
 Le cockpit Phoenix ne dépend plus d’une double télémétrie Elixir: `BridgeClient` est l’unique ingress read-only, `RuntimeTelemetry` transporte aussi les signaux hôte, et `TelemetryHandler`, `PoolFacade`, `BackpressureController` et `ResourceMonitor` ont disparu du chemin actif.
 
 ## Dette encore ouverte

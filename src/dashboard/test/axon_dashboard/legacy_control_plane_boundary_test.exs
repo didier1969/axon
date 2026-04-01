@@ -18,6 +18,11 @@ defmodule AxonDashboard.LegacyControlPlaneBoundaryTest do
     refute function_exported?(Axon.Watcher.PoolProtocol, :ack_targets, 2)
   end
 
+  test "progress dashboard does not expose local mutable overlays anymore" do
+    refute function_exported?(Axon.Watcher.Progress, :update_status, 2)
+    refute function_exported?(Axon.Watcher.Progress, :purge_repo, 1)
+  end
+
   test "dead read-side legacy modules are no longer compiled into the dashboard" do
     assert :non_existing == :code.which(Axon.Watcher.PoolFacade)
     assert :non_existing == :code.which(Axon.BackpressureController)

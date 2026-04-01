@@ -143,8 +143,7 @@ defmodule AxonDashboard.BridgeClient do
 
   defp handle_bridge_event(%{"type" => "WatcherFileIndexed", "payload" => payload}, state) do
     path = payload["path"] || "unknown"
-    status_str = payload["status"] || "unknown"
-    status = if status_str == "ok", do: :ok, else: :error
+    status = bridge_file_status(payload["status"] || "unknown")
 
     Axon.Watcher.Telemetry.report_finish("bridge:#{path}", path, status)
     Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", {:file_indexed, path, status})
@@ -155,7 +154,7 @@ defmodule AxonDashboard.BridgeClient do
 
   defp record_file_indexed(payload) do
     worker_id = "bridge:#{payload["trace_id"] || payload["path"] || "unknown"}"
-    status = if payload["status"] == "ok", do: :ok, else: :error
+    status = bridge_file_status(payload["status"] || "ok")
 
     if path = payload["path"] do
       Axon.Watcher.Telemetry.report_finish(worker_id, path, status)
@@ -173,4 +172,8 @@ defmodule AxonDashboard.BridgeClient do
       )
     end
   end
+
+  defp bridge_file_status("ok"), do: :ok
+  defp bridge_file_status("indexed_degraded"), do: :degraded
+  defp bridge_file_status(_), do: :error
 end

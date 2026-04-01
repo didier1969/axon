@@ -1,4 +1,4 @@
-use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
+use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
 use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Query, QueryCursor};
 
@@ -25,7 +25,14 @@ impl TypeScriptParser {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 let c_kind = child.kind();
-                if ["function_declaration", "class_declaration", "interface_declaration", "type_alias_declaration"].contains(&c_kind) {
+                if [
+                    "function_declaration",
+                    "class_declaration",
+                    "interface_declaration",
+                    "type_alias_declaration",
+                ]
+                .contains(&c_kind)
+                {
                     if let Some(name_node) = child.child_by_field_name("name") {
                         if let Ok(name) = name_node.utf8_text(source) {
                             exports.insert(name.to_string());
@@ -59,7 +66,10 @@ impl TypeScriptParser {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if child.kind() == "assignment_expression" {
-                    if let (Some(left), Some(right)) = (child.child_by_field_name("left"), child.child_by_field_name("right")) {
+                    if let (Some(left), Some(right)) = (
+                        child.child_by_field_name("left"),
+                        child.child_by_field_name("right"),
+                    ) {
                         if let Ok(left_text) = left.utf8_text(source) {
                             if left_text == "module.exports" || left_text == "exports" {
                                 if right.kind() == "identifier" {
@@ -74,7 +84,8 @@ impl TypeScriptParser {
                                                 exports.insert(name.to_string());
                                             }
                                         } else if prop.kind() == "pair" {
-                                            if let Some(key_node) = prop.child_by_field_name("key") {
+                                            if let Some(key_node) = prop.child_by_field_name("key")
+                                            {
                                                 if let Ok(name) = key_node.utf8_text(source) {
                                                     exports.insert(name.to_string());
                                                 }
@@ -112,7 +123,13 @@ impl Parser for TypeScriptParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let tree = match parse_with_wasm_safe("tsx", self.wasm_bytes, content) {
             Some(t) => t,
-            None => return ExtractionResult { project_slug: None, symbols: Vec::new(), relations: Vec::new() },
+            None => {
+                return ExtractionResult {
+                    project_slug: None,
+                    symbols: Vec::new(),
+                    relations: Vec::new(),
+                }
+            }
         };
         let language = tree.language();
 
@@ -166,13 +183,17 @@ impl Parser for TypeScriptParser {
             Ok(q) => q,
             Err(e) => {
                 log::warn!("Failed to create TSX query: {}", e);
-                return ExtractionResult { project_slug: None, symbols: Vec::new(), relations: Vec::new() };
+                return ExtractionResult {
+                    project_slug: None,
+                    symbols: Vec::new(),
+                    relations: Vec::new(),
+                };
             }
         };
         let mut cursor = QueryCursor::new();
         let mut symbols = Vec::new();
         let mut relations = Vec::new();
-        
+
         let mut seen_nodes = HashSet::new();
 
         for m in cursor.matches(&query, tree.root_node(), source) {
@@ -209,14 +230,25 @@ impl Parser for TypeScriptParser {
                                 if child.kind() == "class_heritage" {
                                     let mut h_cursor = child.walk();
                                     for sub in child.children(&mut h_cursor) {
-                                        let rel_type = if sub.kind() == "extends_clause" { "extends" } else { "implements" };
-                                        if sub.kind() == "extends_clause" || sub.kind() == "implements_clause" {
+                                        let rel_type = if sub.kind() == "extends_clause" {
+                                            "extends"
+                                        } else {
+                                            "implements"
+                                        };
+                                        if sub.kind() == "extends_clause"
+                                            || sub.kind() == "implements_clause"
+                                        {
                                             let mut s_cursor = sub.walk();
                                             for type_node in sub.children(&mut s_cursor) {
-                                                if type_node.kind() == "identifier" || type_node.kind() == "type_identifier" {
+                                                if type_node.kind() == "identifier"
+                                                    || type_node.kind() == "type_identifier"
+                                                {
                                                     relations.push(Relation {
                                                         from: text.clone(),
-                                                        to: type_node.utf8_text(source).unwrap_or("").to_string(),
+                                                        to: type_node
+                                                            .utf8_text(source)
+                                                            .unwrap_or("")
+                                                            .to_string(),
                                                         rel_type: rel_type.to_string(),
                                                         properties: HashMap::new(),
                                                     });
@@ -250,7 +282,9 @@ impl Parser for TypeScriptParser {
                                 if child.kind() == "extends_type_clause" {
                                     let mut c_cursor = child.walk();
                                     for sub in child.children(&mut c_cursor) {
-                                        if sub.kind() == "identifier" || sub.kind() == "type_identifier" {
+                                        if sub.kind() == "identifier"
+                                            || sub.kind() == "type_identifier"
+                                        {
                                             relations.push(Relation {
                                                 from: text.clone(),
                                                 to: sub.utf8_text(source).unwrap_or("").to_string(),
@@ -281,9 +315,11 @@ impl Parser for TypeScriptParser {
                     }
                     "function.name" | "arrow.name" => {
                         let lower_name = text.to_lowercase();
-                        let is_entry = exports.contains(&text) && 
-                            ["handler", "route", "get", "post", "put", "delete"].iter().any(|&k| lower_name.contains(k));
-                        
+                        let is_entry = exports.contains(&text)
+                            && ["handler", "route", "get", "post", "put", "delete"]
+                                .iter()
+                                .any(|&k| lower_name.contains(k));
+
                         let mut is_unsafe = false;
                         if let Some(parent) = node.parent() {
                             let body = parent.utf8_text(source).unwrap_or("");
@@ -348,7 +384,11 @@ impl Parser for TypeScriptParser {
                 }
             }
         }
-        
-        ExtractionResult { project_slug: None, symbols, relations }
+
+        ExtractionResult {
+            project_slug: None,
+            symbols,
+            relations,
+        }
     }
 }

@@ -95,6 +95,8 @@ Already completed in this phase:
 - cold oversized candidates are first deferred during a bounded probation window instead of being refused on first sight
 - the Rust scheduler can now choose `ProcessingMode::StructureOnly` before a final oversized refusal
 - the writer persists `indexed_degraded` / `degraded_structure_only` explicitly and skips chunk materialization in that mode
+- project-scoped risk/governance queries now resolve symbols against `project_slug`, not path substrings
+- retrieval and audit surfaces now announce `verite partielle` when the requested scope contains `indexed_degraded` files
 
 ## Phase 2: Retire Residual Elixir Ingestion Authority
 
@@ -123,6 +125,8 @@ Already completed in this phase:
 - removed dead Ecto read-side modules `Axon.Watcher.IndexedProject` and `Axon.Watcher.IndexedFile`
 - removed `Axon.Watcher.PoolFacade`, `Axon.BackpressureController`, `Axon.ResourceMonitor`, and `AxonDashboard.TelemetryHandler` from the active dashboard path
 - removed runtime command methods from `AxonDashboard.BridgeClient`; the cockpit is now read-only
+- removed the mutable local overlay from `Axon.Watcher.Progress`; dashboard progress is now SQL-derived only
+- `indexed_degraded` is now rendered as controlled degradation in the cockpit, not as an error
 
 Target state:
 
@@ -163,6 +167,7 @@ Already completed in this phase:
 - runtime telemetry bridge exports `budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`, `oversized_refusals_total`, and `degraded_mode_entries_total`
 - Phoenix cockpit displays these Rust-origin signals without regaining scheduling authority
 - Phoenix cockpit also reflects host-pressure telemetry (`cpu`, `ram`, `io_wait`, `host_state`, `host_guidance_slots`) from the same Rust payload
+- start-up verification has been re-run end-to-end after these slices: `start-v2.sh` reaches internal `Dashboard`, `SQL` and `MCP` checks, then `stop-v2.sh` stops cleanly
 
 ## Phase 4: Retrieval and Developer Utility
 
@@ -179,6 +184,13 @@ Tasks:
 Exit criteria:
 - Axon can answer development queries reliably enough to support everyday work
 
+Already completed in this phase:
+
+- `axon_query` now scopes by `project_slug` instead of path substring heuristics
+- `axon_inspect` respects project scope for duplicate symbol names
+- `axon_impact` respects project scope for duplicate symbol names
+- `axon_audit` and `axon_health` respect project scope even when file paths do not contain the project name
+
 ## Phase 5: Derived Layers and Semantic Consolidation
 
 Goal:
@@ -193,6 +205,11 @@ Tasks:
 
 Exit criteria:
 - derived layers remain reconstructible, coherent, and subordinate to structural truth
+
+Already completed in this phase:
+
+- `GraphProjection` now includes `CALLS_NIF` in symbol neighborhoods
+- tombstones and reindex cleanup now invalidate dependent `GraphProjection`, `GraphProjectionState`, and `GraphEmbedding` rows instead of leaving stale derivations behind
 
 ## Phase 6: Operator Surface and Observability
 

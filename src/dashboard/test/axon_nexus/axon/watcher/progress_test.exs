@@ -1,44 +1,68 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule Axon.Watcher.ProgressTest do
   use ExUnit.Case, async: false
 
   alias Axon.Watcher.Progress
 
-  setup do
-    repo_slug = "progress-test-#{System.unique_integer([:positive])}"
+  test "indexed_degraded counts as synced progress" do
+    with_sql_gateway_rows([["indexed", 2], ["indexed_degraded", 1], ["pending", 1]], fn ->
+      status = Progress.get_status("progress-test")
 
-    on_exit(fn ->
-      Progress.purge_repo(repo_slug)
+      assert status["status"] == "live"
+      assert status["synced"] == 3
+      assert status["total"] == 4
+      assert status["progress"] == 75
     end)
-
-    {:ok, repo_slug: repo_slug}
   end
 
-  test "transient operator status survives without SQL gateway", %{repo_slug: repo_slug} do
-    Progress.update_status(repo_slug, %{status: "indexing", progress: 42})
+  test "directory stats count indexed_degraded as completed" do
+    with_sql_gateway_rows(
+      [
+        ["alpha", "indexed", 2],
+        ["alpha", "indexed_degraded", 1],
+        ["alpha", "pending", 1],
+        ["beta", "indexed_degraded", 2]
+      ],
+      fn ->
+        stats = Progress.get_directory_stats("progress-test")
 
-    status = Progress.get_status(repo_slug)
-
-    assert status["status"] == "indexing"
-    assert status["progress"] == 42
+        assert stats["alpha"].completed == 3
+        assert stats["alpha"].total == 4
+        assert stats["beta"].completed == 2
+        assert stats["beta"].total == 2
+      end
+    )
   end
 
-  test "live status can be restored after completion", %{repo_slug: repo_slug} do
-    Progress.update_status(repo_slug, %{status: "indexing", progress: 0})
-    Progress.update_status(repo_slug, %{status: "live", progress: 100})
+  defp with_sql_gateway_rows(rows, fun) do
+    :inets.start()
+    :ssl.start()
+    body = Jason.encode!(rows)
+    {:ok, listener} = :gen_tcp.listen(44_129, [:binary, packet: :raw, active: false, reuseaddr: true])
 
-    status = Progress.get_status(repo_slug)
+    task =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener)
+        {:ok, _request} = :gen_tcp.recv(socket, 0, 5_000)
 
-    assert status["status"] == "live"
-    assert status["progress"] == 100
-  end
+        response = [
+          "HTTP/1.1 200 OK\r\n",
+          "content-type: application/json\r\n",
+          "content-length: #{byte_size(body)}\r\n",
+          "connection: close\r\n\r\n",
+          body
+        ]
 
-  test "purge_repo removes transient overlay", %{repo_slug: repo_slug} do
-    Progress.update_status(repo_slug, %{status: "indexing", progress: 10})
-    Progress.purge_repo(repo_slug)
+        :ok = :gen_tcp.send(socket, response)
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listener)
+      end)
 
-    status = Progress.get_status(repo_slug)
-
-    assert status["status"] in ["connecting", "live"]
-    refute status["progress"] == 10
+    try do
+      fun.()
+    after
+      Task.await(task, 5_000)
+    end
   end
 end

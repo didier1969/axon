@@ -50,7 +50,10 @@ pub(crate) fn start_runtime_services(
                 info!("✅ SQL Gateway/MCP: Listening on 0.0.0.0:44129");
                 let _ = axum::serve(listener, app).await;
             }
-            Err(e) => error!("❌ SQL Gateway Failure: Could not bind to port 44129: {:?}", e),
+            Err(e) => error!(
+                "❌ SQL Gateway Failure: Could not bind to port 44129: {:?}",
+                e
+            ),
         }
     });
 

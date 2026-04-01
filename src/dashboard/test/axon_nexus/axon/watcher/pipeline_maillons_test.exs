@@ -69,6 +69,43 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
     assert [%{path: "/tmp/test.ex", status: :ok} | _] = stats[:last_files]
   end
 
+  test "indexed_degraded events stay visible as degraded success, not error" do
+    pid = Process.whereis(BridgeClient)
+    assert pid
+
+    send(
+      pid,
+      {:tcp, nil,
+       Jason.encode!(%{
+         "FileIndexed" => %{
+           "path" => "/tmp/degraded.ex",
+           "status" => "indexed_degraded",
+           "trace_id" => "trace-degraded",
+           "t0" => 1,
+           "t1" => 2,
+           "t2" => 3,
+           "t3" => 4,
+           "t4" => 5
+         }
+       }) <> "\n"}
+    )
+
+    stats =
+      wait_for(fn ->
+        stats = Axon.Watcher.Telemetry.get_stats()
+
+        case stats[:last_files] do
+          [%{path: "/tmp/degraded.ex", status: :degraded} | _] ->
+            if stats[:total_ingested] >= 1, do: stats, else: nil
+
+          _ ->
+            nil
+        end
+      end)
+
+    assert [%{path: "/tmp/degraded.ex", status: :degraded} | _] = stats[:last_files]
+  end
+
   test "runtime status updates telemetry store from canonical Rust payload" do
     pid = Process.whereis(BridgeClient)
     assert pid

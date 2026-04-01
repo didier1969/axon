@@ -1,8 +1,8 @@
-use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use anyhow::Result;
 use crate::graph::GraphStore;
+use anyhow::Result;
+use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 mod catalog;
 mod dispatch;
 mod format;
@@ -38,14 +38,14 @@ impl McpServer {
             if bytes_read == 0 {
                 break;
             }
-            
+
             match serde_json::from_str::<JsonRpcRequest>(&line) {
                 Ok(request) => {
                     let response = self.handle_request(request);
                     let mut response_str = serde_json::to_string(&response)?;
                     response_str.push('\n');
                     let _ = stdout.write_all(response_str.as_bytes()).await;
-                },
+                }
                 Err(e) => {
                     let error_response = JsonRpcResponse {
                         jsonrpc: "2.0".to_string(),

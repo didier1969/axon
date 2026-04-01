@@ -1,3 +1,5 @@
+use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpServer};
+use crate::service_guard::{record_latency, ServiceKind};
 use axum::{
     extract::Extension,
     response::sse::{Event, Sse},
@@ -5,12 +7,10 @@ use axum::{
     Json, Router,
 };
 use futures_util::stream::{self, Stream};
-use tokio_stream::StreamExt;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Instant;
-use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpServer};
-use crate::service_guard::{record_latency, ServiceKind};
+use tokio_stream::StreamExt;
 
 use tracing::Instrument;
 
@@ -32,12 +32,10 @@ async fn handle_sql_post(
     Json(payload): Json<SqlRequest>,
 ) -> Json<serde_json::Value> {
     let span = tracing::info_span!("sql_gateway", query = %payload.query);
-    
+
     async move {
         let t0 = Instant::now();
-        match tokio::task::spawn_blocking(move || {
-            server.execute_raw_sql(&payload.query)
-        }).await {
+        match tokio::task::spawn_blocking(move || server.execute_raw_sql(&payload.query)).await {
             Ok(Ok(res)) => {
                 record_latency(ServiceKind::Sql, t0.elapsed().as_millis() as u64);
                 Json(serde_json::from_str(&res).unwrap_or(serde_json::json!([])))
@@ -51,7 +49,9 @@ async fn handle_sql_post(
                 Json(serde_json::json!({"error": format!("Task Panic: {:?}", e)}))
             }
         }
-    }.instrument(span).await
+    }
+    .instrument(span)
+    .await
 }
 
 async fn handle_mcp_post(
@@ -59,40 +59,41 @@ async fn handle_mcp_post(
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<Option<JsonRpcResponse>> {
     let span = tracing::info_span!("mcp_request", method = %payload.method);
-    
+
     async move {
         let t0 = Instant::now();
         // Offload C-FFI / DB work to a blocking thread pool safely
         // No more mcp_active_flag: Zero-Sleep MVCC architecture handles concurrency.
-        let response = match tokio::task::spawn_blocking(move || {
-            server.handle_request(payload)
-        }).await {
-            Ok(res) => {
-                record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
-                res
-            }
-            Err(e) => {
-                record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
-                tracing::error!("MCP Blocking Task Panicked: {:?}", e);
-                None
-            }
-        };
-        
+        let response =
+            match tokio::task::spawn_blocking(move || server.handle_request(payload)).await {
+                Ok(res) => {
+                    record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
+                    res
+                }
+                Err(e) => {
+                    record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
+                    tracing::error!("MCP Blocking Task Panicked: {:?}", e);
+                    None
+                }
+            };
+
         Json(response)
-    }.instrument(span).await
+    }
+    .instrument(span)
+    .await
 }
 
 /// Compliant MCP SSE Endpoint
 async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // 1. Send the initial endpoint event as per MCP spec
-    let endpoint_event = stream::once(async {
-        Ok(Event::default().event("endpoint").data("/mcp"))
-    });
+    let endpoint_event =
+        stream::once(async { Ok(Event::default().event("endpoint").data("/mcp")) });
 
     // 2. Keep-alive heartbeat every 15 seconds to prevent proxy timeouts
-    let heartbeat = tokio_stream::wrappers::IntervalStream::new(
-        tokio::time::interval(std::time::Duration::from_secs(15))
-    ).map(|_| Ok(Event::default().comment("heartbeat")));
+    let heartbeat = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
+        std::time::Duration::from_secs(15),
+    ))
+    .map(|_| Ok(Event::default().comment("heartbeat")));
 
     let stream = endpoint_event.chain(heartbeat);
     Sse::new(stream)
@@ -100,21 +101,24 @@ async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible>>> 
 
 #[cfg(test)]
 mod tests {
+    use crate::graph::GraphStore;
+    use crate::mcp::McpServer;
+    use crate::mcp_http::app_router;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
-    use tower::ServiceExt; 
     use serde_json::{json, Value};
-    use crate::mcp_http::app_router;
-    use crate::graph::GraphStore;
-    use crate::mcp::McpServer;
     use std::sync::Arc;
+    use tower::ServiceExt;
 
     #[tokio::test]
     async fn test_mcp_http_endpoint_tools_list() {
         // Updated test server creation to use direct Arc (Zéro-Sleep)
-        let store = Arc::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db_http").unwrap()));
+        let store = Arc::new(
+            GraphStore::new(":memory:")
+                .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_http").unwrap()),
+        );
         let mcp_server = Arc::new(McpServer::new(store));
         let app = app_router(mcp_server);
 
@@ -138,7 +142,9 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let body_json: Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(body_json["jsonrpc"], "2.0");

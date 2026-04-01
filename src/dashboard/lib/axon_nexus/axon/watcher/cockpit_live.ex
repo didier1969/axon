@@ -301,8 +301,8 @@ defmodule Axon.Watcher.CockpitLive do
               <span style="color: var(--text-dim);">
                 {String.slice(DateTime.to_iso8601(file.time), 11, 8)}
               </span>
-              <span style={"color: #{if file.status == :ok, do: "var(--neon-green)", else: "var(--neon-red)"}"}>
-                [{if file.status == :ok, do: "SUCCESS", else: "ERROR"}]
+              <span style={"color: #{file_status_color(file.status)}"}>
+                [{file_status_label(file.status)}]
               </span>
               <span style="color: #fff;">{file.path}</span>
             </div>
@@ -378,7 +378,7 @@ defmodule Axon.Watcher.CockpitLive do
 
   defp apply_bridge_event(socket, %{"FileIndexed" => payload}) do
     path = Map.get(payload, "path", "unknown")
-    status = if Map.get(payload, "status", "ok") == "ok", do: :ok, else: :error
+    status = file_status(Map.get(payload, "status", "ok"))
 
     live =
       socket.assigns.live
@@ -429,4 +429,16 @@ defmodule Axon.Watcher.CockpitLive do
   defp host_state_color("constrained"), do: "var(--warning)"
   defp host_state_color("watch"), do: "var(--warning)"
   defp host_state_color(_state), do: "var(--neon-green)"
+
+  defp file_status("ok"), do: :ok
+  defp file_status("indexed_degraded"), do: :degraded
+  defp file_status(_), do: :error
+
+  defp file_status_color(:ok), do: "var(--neon-green)"
+  defp file_status_color(:degraded), do: "var(--warning)"
+  defp file_status_color(_), do: "var(--neon-red)"
+
+  defp file_status_label(:ok), do: "SUCCESS"
+  defp file_status_label(:degraded), do: "DEGRADED"
+  defp file_status_label(_), do: "ERROR"
 end

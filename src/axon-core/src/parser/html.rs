@@ -1,4 +1,4 @@
-use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
+use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -19,9 +19,15 @@ impl HtmlParser {
         }
     }
 
-    fn walk<'a>(&self, node: Node<'a>, source: &[u8], symbols: &mut Vec<Symbol>, relations: &mut Vec<Relation>) {
+    fn walk<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        symbols: &mut Vec<Symbol>,
+        relations: &mut Vec<Relation>,
+    ) {
         let kind = node.kind();
-        
+
         if kind == "element" || kind == "script_element" || kind == "style_element" {
             self.process_element(node, source, symbols, relations);
         }
@@ -32,7 +38,13 @@ impl HtmlParser {
         }
     }
 
-    fn process_element<'a>(&self, node: Node<'a>, source: &[u8], symbols: &mut Vec<Symbol>, relations: &mut Vec<Relation>) {
+    fn process_element<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        symbols: &mut Vec<Symbol>,
+        relations: &mut Vec<Relation>,
+    ) {
         let mut start_tag = None;
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -77,7 +89,7 @@ impl HtmlParser {
             let mut props = HashMap::new();
             props.insert("tag".to_string(), tag_name.clone());
             props.insert("classes".to_string(), cls.clone());
-            
+
             let first_class = cls.split_whitespace().next().unwrap_or("").to_string();
             if !first_class.is_empty() {
                 symbols.push(Symbol {
@@ -98,11 +110,21 @@ impl HtmlParser {
         }
 
         if ["input", "textarea", "select", "form"].contains(&tag_name.as_str()) {
-            let name = attrs.get("name").or(attrs.get("id")).cloned().unwrap_or_else(|| tag_name.clone());
+            let name = attrs
+                .get("name")
+                .or(attrs.get("id"))
+                .cloned()
+                .unwrap_or_else(|| tag_name.clone());
             let mut props = HashMap::new();
             props.insert("tag".to_string(), tag_name.clone());
-            props.insert("type".to_string(), attrs.get("type").cloned().unwrap_or_else(|| "text".to_string()));
-            
+            props.insert(
+                "type".to_string(),
+                attrs
+                    .get("type")
+                    .cloned()
+                    .unwrap_or_else(|| "text".to_string()),
+            );
+
             symbols.push(Symbol {
                 name,
                 kind: "field".to_string(),
@@ -210,9 +232,18 @@ impl Parser for HtmlParser {
         let mut relations = Vec::new();
 
         if let Some(tree) = parse_with_wasm_safe("html", self.wasm_bytes, content) {
-            self.walk(tree.root_node(), content.as_bytes(), &mut symbols, &mut relations);
+            self.walk(
+                tree.root_node(),
+                content.as_bytes(),
+                &mut symbols,
+                &mut relations,
+            );
         }
 
-        ExtractionResult { project_slug: None, symbols, relations }
+        ExtractionResult {
+            project_slug: None,
+            symbols,
+            relations,
+        }
     }
 }

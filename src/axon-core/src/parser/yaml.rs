@@ -1,4 +1,4 @@
-use super::{ExtractionResult, Parser, Symbol, parse_with_wasm_safe};
+use super::{parse_with_wasm_safe, ExtractionResult, Parser, Symbol};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -35,11 +35,11 @@ impl Parser for YamlParser {
                 if kind == "block_mapping_pair" || kind == "flow_mapping_pair" {
                     if let Some(key_node) = node.child_by_field_name("key") {
                         let mut key_name = String::new();
-                        
+
                         if let Ok(text) = key_node.utf8_text(source_bytes) {
                             key_name = text.trim().to_string();
                         }
-                        
+
                         if !key_name.is_empty() {
                             let full_name = if current_path.is_empty() {
                                 key_name.clone()
@@ -47,7 +47,8 @@ impl Parser for YamlParser {
                                 format!("{}.{}", current_path, key_name)
                             };
 
-                            let is_sensitive = ["secret", "password", "token", "key"].iter()
+                            let is_sensitive = ["secret", "password", "token", "key"]
+                                .iter()
                                 .any(|s| key_name.to_lowercase().contains(s));
 
                             let mut properties = HashMap::new();
@@ -91,6 +92,10 @@ impl Parser for YamlParser {
             traverse(root_node, source_bytes, &mut symbols, "", 0);
         }
 
-        ExtractionResult { project_slug: None, symbols, relations }
+        ExtractionResult {
+            project_slug: None,
+            symbols,
+            relations,
+        }
     }
 }

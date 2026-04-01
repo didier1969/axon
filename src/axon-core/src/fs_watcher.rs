@@ -10,7 +10,12 @@ use crate::watcher_probe;
 
 pub const HOT_PRIORITY: i64 = 900;
 
-pub fn stage_hot_delta(store: &GraphStore, watch_root: &Path, path: &Path, priority: i64) -> Result<bool> {
+pub fn stage_hot_delta(
+    store: &GraphStore,
+    watch_root: &Path,
+    path: &Path,
+    priority: i64,
+) -> Result<bool> {
     Ok(stage_hot_path_delta_count(store, watch_root, path, priority)? > 0)
 }
 
@@ -41,7 +46,10 @@ fn stage_hot_path_delta_count(
 
     if metadata.is_dir() {
         let mut staged = 0usize;
-        for entry in WalkDir::new(path).into_iter().filter_map(|entry| entry.ok()) {
+        for entry in WalkDir::new(path)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
             let candidate = entry.path();
             if !entry.file_type().is_file() || !scanner.should_process_path(candidate) {
                 continue;
@@ -89,7 +97,11 @@ fn stage_single_file_delta(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let tombstoned = store.tombstone_missing_path(path)?;
             if tombstoned == 0 {
-                watcher_probe::record("watcher.missing", Some(path), "reason=single_file_not_found");
+                watcher_probe::record(
+                    "watcher.missing",
+                    Some(path),
+                    "reason=single_file_not_found",
+                );
             }
             return Ok(tombstoned > 0);
         }
@@ -97,7 +109,11 @@ fn stage_single_file_delta(
     };
 
     if !metadata.is_file() || !scanner.should_process_path(path) {
-        watcher_probe::record("watcher.filtered", Some(path), "reason=single_file_not_processable");
+        watcher_probe::record(
+            "watcher.filtered",
+            Some(path),
+            "reason=single_file_not_processable",
+        );
         return Ok(false);
     }
 
@@ -123,7 +139,10 @@ fn stage_single_file_delta(
     watcher_probe::record(
         "watcher.staged",
         Some(&absolute),
-        format!("project={} priority={} size={} mtime={}", project_slug, priority, size, mtime),
+        format!(
+            "project={} priority={} size={} mtime={}",
+            project_slug, priority, size, mtime
+        ),
     );
 
     Ok(true)

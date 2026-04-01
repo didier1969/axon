@@ -1,4 +1,4 @@
-use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
+use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -19,7 +19,12 @@ impl MarkdownParser {
         }
     }
 
-    fn collect_headings<'a>(&self, node: Node<'a>, source: &[u8], headings: &mut Vec<(usize, usize, String)>) {
+    fn collect_headings<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        headings: &mut Vec<(usize, usize, String)>,
+    ) {
         let kind = node.kind();
         if kind == "atx_heading" {
             let mut level = 0;
@@ -38,7 +43,7 @@ impl MarkdownParser {
             }
             return;
         }
-        
+
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             self.collect_headings(child, source, headings);
@@ -62,7 +67,11 @@ impl MarkdownParser {
         for (i, line) in lines[1..end_idx].iter().enumerate() {
             if let Some(colon_pos) = line.find(':') {
                 let key = line[..colon_pos].trim();
-                if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.') {
+                if !key.is_empty()
+                    && key
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+                {
                     symbols.push(Symbol {
                         name: format!("frontmatter:{}", key),
                         kind: "config_key".to_string(),
@@ -99,9 +108,13 @@ impl MarkdownParser {
                 }
                 if j - table_start >= 2 {
                     let header = lines[table_start];
-                    let cells: Vec<&str> = header.split('|').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                    let cells: Vec<&str> = header
+                        .split('|')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                     let first_header = if cells.is_empty() { "table" } else { cells[0] };
-                    
+
                     symbols.push(Symbol {
                         name: format!("table:{}", first_header),
                         kind: "section".to_string(),
@@ -128,7 +141,9 @@ impl MarkdownParser {
 
     fn is_fence(&self, line: &str) -> Option<String> {
         let trimmed = line.trim_start();
-        trimmed.strip_prefix("```").map(|stripped| stripped.trim().to_string())
+        trimmed
+            .strip_prefix("```")
+            .map(|stripped| stripped.trim().to_string())
     }
 
     fn extract_links(&self, line: &str, relations: &mut Vec<Relation>) {
@@ -157,7 +172,12 @@ impl MarkdownParser {
         }
     }
 
-    fn extract_links_and_fences(&self, lines: &[&str], symbols: &mut Vec<Symbol>, relations: &mut Vec<Relation>) {
+    fn extract_links_and_fences(
+        &self,
+        lines: &[&str],
+        symbols: &mut Vec<Symbol>,
+        relations: &mut Vec<Relation>,
+    ) {
         let mut in_code_block = false;
         let mut lang_tag = String::new();
         let mut block_start = 0;
@@ -212,14 +232,14 @@ impl Parser for MarkdownParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut symbols = Vec::new();
         let mut relations = Vec::new();
-        
+
         let lines: Vec<&str> = content.lines().collect();
         self.extract_frontmatter(&lines, &mut symbols);
 
         if let Some(tree) = parse_with_wasm_safe("markdown", self.wasm_bytes, content) {
             let mut headings = Vec::new();
             self.collect_headings(tree.root_node(), content.as_bytes(), &mut headings);
-            
+
             let total_lines = lines.len();
             for (idx, &(start_line, level, ref name)) in headings.iter().enumerate() {
                 let end_line = if idx + 1 < headings.len() {
@@ -248,6 +268,10 @@ impl Parser for MarkdownParser {
         self.extract_tables(&lines, &mut symbols);
         self.extract_links_and_fences(&lines, &mut symbols, &mut relations);
 
-        ExtractionResult { project_slug: None, symbols, relations }
+        ExtractionResult {
+            project_slug: None,
+            symbols,
+            relations,
+        }
     }
 }

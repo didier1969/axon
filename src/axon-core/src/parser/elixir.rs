@@ -1,9 +1,14 @@
-use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
+use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
 const OTP_ENTRY_POINTS: &[&str] = &[
-    "handle_call", "handle_cast", "handle_info", "handle_continue", "init", "start_link",
+    "handle_call",
+    "handle_cast",
+    "handle_info",
+    "handle_continue",
+    "init",
+    "start_link",
 ];
 
 const IMPORT_DIRECTIVES: &[&str] = &["alias", "import", "use", "require"];
@@ -81,7 +86,9 @@ impl ElixirParser {
     ) {
         if let Some(identifier) = Self::call_identifier(node, source_bytes) {
             match identifier.as_str() {
-                "defmodule" => Self::extract_module(node, source_bytes, content, result, pending_attrs),
+                "defmodule" => {
+                    Self::extract_module(node, source_bytes, content, result, pending_attrs)
+                }
                 "def" | "defp" => Self::extract_function(
                     node,
                     source_bytes,
@@ -182,9 +189,10 @@ impl ElixirParser {
         };
 
         let mut properties = HashMap::new();
-        
+
         let node_content = node.utf8_text(source_bytes).unwrap_or("");
-        let is_nif = node_content.contains(":erlang.nif_error") || node_content.contains(":nif_not_loaded");
+        let is_nif =
+            node_content.contains(":erlang.nif_error") || node_content.contains(":nif_not_loaded");
         if node_content.contains("load_nif") {
             properties.insert("nif_loader".to_string(), "true".to_string());
         }
@@ -307,8 +315,15 @@ impl ElixirParser {
         for child in node.named_children(&mut cursor) {
             if child.kind() == "call" {
                 if let Some(ident) = Self::call_identifier(child, source_bytes) {
-                    if ["def", "defp", "defmodule", "defmacro", "defmacrop", "defstruct"]
-                        .contains(&ident.as_str())
+                    if [
+                        "def",
+                        "defp",
+                        "defmodule",
+                        "defmacro",
+                        "defmacrop",
+                        "defstruct",
+                    ]
+                    .contains(&ident.as_str())
                     {
                         continue;
                     }
@@ -332,7 +347,7 @@ impl ElixirParser {
         if let Some(dot_node) = Self::find_child_by_type(node, "dot") {
             let mut receiver = String::new();
             let mut func_name = String::new();
-            
+
             let mut cursor = dot_node.walk();
             for child in dot_node.named_children(&mut cursor) {
                 if child.kind() == "alias" {
@@ -346,7 +361,8 @@ impl ElixirParser {
                 let mut target_module = receiver.clone();
                 let mut rel_type = "CALLS".to_string();
 
-                let is_genserver = receiver == "GenServer" && (func_name == "call" || func_name == "cast");
+                let is_genserver =
+                    receiver == "GenServer" && (func_name == "call" || func_name == "cast");
                 if is_genserver {
                     rel_type = "CALLS_OTP".to_string();
                     // Attempt to extract the target module from the first argument
@@ -354,7 +370,8 @@ impl ElixirParser {
                         let mut arg_cursor = args_node.walk();
                         for arg_child in args_node.named_children(&mut arg_cursor) {
                             if arg_child.kind() == "alias" {
-                                target_module = arg_child.utf8_text(source_bytes).unwrap_or("").to_string();
+                                target_module =
+                                    arg_child.utf8_text(source_bytes).unwrap_or("").to_string();
                                 break;
                             }
                         }
@@ -362,7 +379,11 @@ impl ElixirParser {
                 }
 
                 // Skip generic calls to standard library unless it's an OTP boundary we want to track
-                if receiver != "Enum" && receiver != "String" && receiver != "Map" && receiver != "List" {
+                if receiver != "Enum"
+                    && receiver != "String"
+                    && receiver != "Map"
+                    && receiver != "List"
+                {
                     let mut props = HashMap::new();
                     if is_genserver {
                         props.insert("otp_boundary".to_string(), "true".to_string());
@@ -435,7 +456,8 @@ impl ElixirParser {
                     if ident == "behaviour" {
                         if let Some(args) = Self::find_child_by_type(child, "arguments") {
                             if let Some(alias) = Self::find_child_by_type(args, "alias") {
-                                let behaviour_name = alias.utf8_text(source_bytes).unwrap_or("").to_string();
+                                let behaviour_name =
+                                    alias.utf8_text(source_bytes).unwrap_or("").to_string();
                                 result.relations.push(Relation {
                                     from: module_name.to_string(),
                                     to: behaviour_name,
@@ -465,7 +487,9 @@ impl ElixirParser {
 
     fn find_child_by_type<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
         let mut cursor = node.walk();
-        let res = node.named_children(&mut cursor).find(|&child| child.kind() == kind);
+        let res = node
+            .named_children(&mut cursor)
+            .find(|&child| child.kind() == kind);
         res
     }
 
@@ -489,7 +513,13 @@ impl Parser for ElixirParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let tree = match parse_with_wasm_safe("elixir", self.wasm_bytes, content) {
             Some(t) => t,
-            None => return ExtractionResult { project_slug: None, symbols: Vec::new(), relations: Vec::new() },
+            None => {
+                return ExtractionResult {
+                    project_slug: None,
+                    symbols: Vec::new(),
+                    relations: Vec::new(),
+                }
+            }
         };
 
         let mut result = ExtractionResult {
@@ -534,12 +564,19 @@ mod tests {
 
         let result = parser.parse(content);
 
-        assert!(result.symbols.iter().any(|sym| sym.name == "Axon.Sample.trigger_scan"));
-        assert!(result.symbols.iter().any(|sym| sym.name == "Axon.Sample.parse_batch"));
-        assert!(result.relations.iter().any(|rel|
-            rel.from == "Axon.Sample.trigger_scan"
+        assert!(result
+            .symbols
+            .iter()
+            .any(|sym| sym.name == "Axon.Sample.trigger_scan"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|sym| sym.name == "Axon.Sample.parse_batch"));
+        assert!(result
+            .relations
+            .iter()
+            .any(|rel| rel.from == "Axon.Sample.trigger_scan"
                 && rel.to == "Axon.Sample.parse_batch"
-                && rel.rel_type == "CALLS"
-        ));
+                && rel.rel_type == "CALLS"));
     }
 }

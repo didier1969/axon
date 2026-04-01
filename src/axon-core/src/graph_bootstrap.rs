@@ -73,9 +73,16 @@ impl GraphStore {
             if !is_memory {
                 let mut soll_path = PathBuf::from(db_root);
                 soll_path.push("sanctuary/soll.db");
-                let attach_q = format!("ATTACH '{}' AS soll;", soll_path.to_string_lossy().replace("'", "''"));
+                let attach_q = format!(
+                    "ATTACH '{}' AS soll;",
+                    soll_path.to_string_lossy().replace("'", "''")
+                );
                 {
-                    let w_guard = store.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+                    let w_guard = store
+                        .pool
+                        .writer_ctx
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     store.setup_session(*w_guard, &attach_q)?;
                 }
             } else {
@@ -99,15 +106,26 @@ impl GraphStore {
             };
 
             {
-                let mut reader_guard = store.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+                let mut reader_guard = store
+                    .pool
+                    .reader_ctx
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 *reader_guard = reader_ptr;
             }
 
             if !is_memory {
                 let mut soll_path = PathBuf::from(db_root);
                 soll_path.push("sanctuary/soll.db");
-                let attach_q = format!("ATTACH '{}' AS soll;", soll_path.to_string_lossy().replace("'", "''"));
-                let r_guard = store.pool.reader_ctx.lock().unwrap_or_else(|p| p.into_inner());
+                let attach_q = format!(
+                    "ATTACH '{}' AS soll;",
+                    soll_path.to_string_lossy().replace("'", "''")
+                );
+                let r_guard = store
+                    .pool
+                    .reader_ctx
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 store.setup_session(*r_guard, &attach_q)?;
             }
 
@@ -119,7 +137,10 @@ impl GraphStore {
         unsafe {
             let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
             exec_fn(ctx, CString::new("INSTALL json; LOAD json;")?.as_ptr());
-            exec_fn(ctx, CString::new("SET checkpoint_threshold = '1GB';")?.as_ptr());
+            exec_fn(
+                ctx,
+                CString::new("SET checkpoint_threshold = '1GB';")?.as_ptr(),
+            );
             if !attach_query.is_empty() {
                 exec_fn(ctx, CString::new(attach_query)?.as_ptr());
             }
@@ -142,8 +163,10 @@ impl GraphStore {
         ];
 
         if let Ok(cwd) = std::env::current_dir() {
-            candidates.push(cwd.join("src/axon-plugin-duckdb/target/release/libaxon_plugin_duckdb.so"));
-            candidates.push(cwd.join("src/axon-plugin-duckdb/target/debug/libaxon_plugin_duckdb.so"));
+            candidates
+                .push(cwd.join("src/axon-plugin-duckdb/target/release/libaxon_plugin_duckdb.so"));
+            candidates
+                .push(cwd.join("src/axon-plugin-duckdb/target/debug/libaxon_plugin_duckdb.so"));
             candidates.push(cwd.join("bin/libaxon_plugin_duckdb.so"));
         }
 
@@ -156,7 +179,9 @@ impl GraphStore {
     }
 
     fn init_schema(&self, _is_memory: bool) -> Result<()> {
-        self.execute("CREATE TABLE IF NOT EXISTS RuntimeMetadata (key VARCHAR PRIMARY KEY, value VARCHAR)")?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS RuntimeMetadata (key VARCHAR PRIMARY KEY, value VARCHAR)",
+        )?;
         self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384])")?;
         self.execute("CREATE TABLE IF NOT EXISTS Chunk (id VARCHAR PRIMARY KEY, source_type VARCHAR, source_id VARCHAR, project_slug VARCHAR, kind VARCHAR, content VARCHAR, content_hash VARCHAR, start_line BIGINT, end_line BIGINT)")?;
@@ -170,9 +195,13 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS Project (name VARCHAR PRIMARY KEY)")?;
         self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS CALLS (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS CALLS_NIF (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS CALLS_NIF (source_id VARCHAR, target_id VARCHAR)",
+        )?;
         self.execute("CREATE TABLE IF NOT EXISTS IMPACTS (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR)",
+        )?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Vision (id VARCHAR PRIMARY KEY DEFAULT 'VIS-AXO-001', title VARCHAR, description VARCHAR, goal VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Pillar (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, metadata VARCHAR)")?;
@@ -182,21 +211,43 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.Validation (id VARCHAR PRIMARY KEY, method VARCHAR, result VARCHAR, timestamp BIGINT, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Concept (name VARCHAR PRIMARY KEY, explanation VARCHAR, rationale VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Stakeholder (name VARCHAR PRIMARY KEY, role VARCHAR, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.EPITOMIZES (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.BELONGS_TO (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.EXPLAINS (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.SOLVES (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.TARGETS (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.VERIFIES (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.ORIGINATES (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.SUPERSEDES (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.CONTRIBUTES_TO (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.REFINES (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS soll.EPITOMIZES (source_id VARCHAR, target_id VARCHAR)",
+        )?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS soll.BELONGS_TO (source_id VARCHAR, target_id VARCHAR)",
+        )?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS soll.EXPLAINS (source_id VARCHAR, target_id VARCHAR)",
+        )?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS soll.SOLVES (source_id VARCHAR, target_id VARCHAR)",
+        )?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS soll.TARGETS (source_id VARCHAR, target_id VARCHAR)",
+        )?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS soll.VERIFIES (source_id VARCHAR, target_id VARCHAR)",
+        )?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS soll.ORIGINATES (source_id VARCHAR, target_id VARCHAR)",
+        )?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS soll.SUPERSEDES (source_id VARCHAR, target_id VARCHAR)",
+        )?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS soll.CONTRIBUTES_TO (source_id VARCHAR, target_id VARCHAR)",
+        )?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS soll.REFINES (source_id VARCHAR, target_id VARCHAR)",
+        )?;
         Ok(())
     }
 
     fn ensure_additive_schema(&self) -> Result<()> {
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS needs_reindex BOOLEAN DEFAULT FALSE")?;
+        self.execute(
+            "ALTER TABLE File ADD COLUMN IF NOT EXISTS needs_reindex BOOLEAN DEFAULT FALSE",
+        )?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_error_reason VARCHAR")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS defer_count BIGINT DEFAULT 0")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_deferred_at_ms BIGINT")?;
@@ -211,7 +262,9 @@ impl GraphStore {
         ];
 
         let current = self.load_runtime_metadata()?;
-        let schema_matches = current.get("schema_version").is_some_and(|v| v == IST_SCHEMA_VERSION);
+        let schema_matches = current
+            .get("schema_version")
+            .is_some_and(|v| v == IST_SCHEMA_VERSION);
         let ingestion_matches = current
             .get("ingestion_version")
             .is_some_and(|v| v == IST_INGESTION_VERSION);
@@ -222,7 +275,11 @@ impl GraphStore {
         let mut applied = Vec::new();
 
         if !schema_matches {
-            if self.is_known_additive_schema_repair(&current, ingestion_matches, embedding_matches)? {
+            if self.is_known_additive_schema_repair(
+                &current,
+                ingestion_matches,
+                embedding_matches,
+            )? {
                 info!("IST schema drift detected but preserved via additive repair.");
                 applied.push(IstCompatibilityAction::AdditiveRepair);
             } else {
@@ -237,7 +294,9 @@ impl GraphStore {
             self.soft_invalidate_derived_state()?;
             applied.push(IstCompatibilityAction::SoftDerivedInvalidation);
         } else if !embedding_matches && !applied.contains(&IstCompatibilityAction::HardRebuild) {
-            warn!("IST embedding drift detected. Soft-invalidating semantic embedding layers only.");
+            warn!(
+                "IST embedding drift detected. Soft-invalidating semantic embedding layers only."
+            );
             self.soft_invalidate_embedding_state()?;
             applied.push(IstCompatibilityAction::SoftEmbeddingInvalidation);
         }
@@ -263,7 +322,8 @@ impl GraphStore {
             return Ok(());
         }
 
-        let interrupted = self.query_count("SELECT count(*) FROM File WHERE status = 'indexing'")?;
+        let interrupted =
+            self.query_count("SELECT count(*) FROM File WHERE status = 'indexing'")?;
         if interrupted > 0 {
             warn!(
                 "Recovering {} interrupted indexing claim(s) back to pending during startup.",

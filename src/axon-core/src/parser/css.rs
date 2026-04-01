@@ -1,4 +1,4 @@
-use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
+use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -19,9 +19,15 @@ impl CssParser {
         }
     }
 
-    fn walk<'a>(&self, node: Node<'a>, source: &[u8], symbols: &mut Vec<Symbol>, relations: &mut Vec<Relation>) {
+    fn walk<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        symbols: &mut Vec<Symbol>,
+        relations: &mut Vec<Relation>,
+    ) {
         let kind = node.kind();
-        
+
         match kind {
             "id_selector" => self.extract_id_selector(node, source, symbols),
             "class_selector" => self.extract_class_selector(node, source, symbols),
@@ -165,9 +171,18 @@ impl Parser for CssParser {
         let mut relations = Vec::new();
 
         if let Some(tree) = parse_with_wasm_safe("css", self.wasm_bytes, content) {
-            self.walk(tree.root_node(), content.as_bytes(), &mut symbols, &mut relations);
+            self.walk(
+                tree.root_node(),
+                content.as_bytes(),
+                &mut symbols,
+                &mut relations,
+            );
         }
 
-        ExtractionResult { project_slug: None, symbols, relations }
+        ExtractionResult {
+            project_slug: None,
+            symbols,
+            relations,
+        }
     }
 }

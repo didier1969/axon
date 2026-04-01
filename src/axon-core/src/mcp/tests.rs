@@ -7,8 +7,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 fn create_test_server() -> McpServer {
-    let store =
-        Arc::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap()));
+    let store = Arc::new(
+        GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap()),
+    );
     McpServer::new(store)
 }
 
@@ -72,7 +73,9 @@ fn test_axon_architectural_drift() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::executeSQL', 'executeSQL', 'function', false, true, false, 'global')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('ui/app.js', 'global::fetchData')")
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('ui/app.js', 'global::fetchData')",
+        )
         .unwrap();
     server
         .graph_store
@@ -95,10 +98,17 @@ fn test_axon_architectural_drift() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    println!("AUDIT_ALPHA_CONTENT={content}");
 
     assert!(
-        content.contains("VIOLATION") || content.contains("Détectée") || content.contains("détectée")
+        content.contains("VIOLATION")
+            || content.contains("Détectée")
+            || content.contains("détectée")
     );
 }
 
@@ -131,7 +141,12 @@ fn test_axon_query_with_project() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    println!("HEALTH_BETA_CONTENT={content}");
 
     assert!(content.contains("auth_func"));
 }
@@ -151,14 +166,20 @@ fn test_axon_fs_read() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
     assert!(content.contains("L2 Detail") || content.contains("Erreur"));
 }
 
 #[test]
 fn test_send_notification() {
-    let store =
-        Arc::new(GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db_notif").unwrap()));
+    let store = Arc::new(
+        GraphStore::new(":memory:")
+            .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_notif").unwrap()),
+    );
     let server = McpServer::new(store);
     let notif = server.send_notification("notifications/tools/list_changed", None);
     assert_eq!(notif.method, "notifications/tools/list_changed");
@@ -193,7 +214,11 @@ fn test_axon_inspect() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
     assert!(content.contains("Inspection du Symbole"));
     assert!(content.contains("core_func"));
 }
@@ -236,7 +261,11 @@ fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("check_token_chain"));
     assert!(content.contains("derive du graphe"));
@@ -280,7 +309,11 @@ fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(!content.contains("derive du graphe"));
     assert!(!content.contains("check_token_chain"));
@@ -311,7 +344,9 @@ fn test_axon_audit_taint_analysis() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('global::run_task', 'global::eval')")
+        .execute(
+            "INSERT INTO CALLS (source_id, target_id) VALUES ('global::run_task', 'global::eval')",
+        )
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -328,7 +363,11 @@ fn test_axon_audit_taint_analysis() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
     assert!(content.contains("user_input"));
     assert!(content.contains("user_input"));
     assert!(content.contains("eval"));
@@ -366,7 +405,11 @@ fn test_axon_audit_technical_debt() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("Dette Technique"));
     assert!(content.contains("unwrap"));
@@ -383,7 +426,9 @@ fn test_axon_audit_technical_debt_comments() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::todo1', '// TODO: Fix this', 'TODO', false, true, false, 'global')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/todo.rs', 'global::todo1')")
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/todo.rs', 'global::todo1')",
+        )
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -400,7 +445,11 @@ fn test_axon_audit_technical_debt_comments() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("Dette Technique"));
     assert!(content.contains("TODO"));
@@ -434,7 +483,11 @@ fn test_axon_audit_secrets_detection() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("Dette Technique"));
     assert!(content.contains("SECRET_API_KEY"));
@@ -483,7 +536,11 @@ fn test_axon_audit_cross_language_taint() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(!content.contains("Score 100/100"));
     assert!(content.contains("elixir_func"));
@@ -504,7 +561,9 @@ fn test_axon_health_god_objects() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::GodClass', 'GodClass', 'class', false, true, false, 'global')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/god.rs', 'global::GodClass')")
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/god.rs', 'global::GodClass')",
+        )
         .unwrap();
 
     for i in 0..10 {
@@ -529,9 +588,272 @@ fn test_axon_health_god_objects() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("God Object detected") || content.contains("GodClass"));
+}
+
+#[test]
+fn test_axon_audit_respects_project_scope() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_slug) VALUES ('apps/alpha/lib/input.rs', 'alpha')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('apps/beta/lib/unsafe.rs', 'beta')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES ('alpha::safe_entry', 'safe_entry', 'function', true, true, false, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES ('beta::beta_entry', 'beta_entry', 'function', false, true, false, false, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES ('beta::eval', 'eval', 'function', false, true, false, true, 'beta')").unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('apps/alpha/lib/input.rs', 'alpha::safe_entry')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('apps/beta/lib/unsafe.rs', 'beta::beta_entry')")
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO CALLS (source_id, target_id) VALUES ('beta::beta_entry', 'beta::eval')",
+        )
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_audit",
+            "arguments": {
+                "project": "alpha"
+            }
+        })),
+        id: Some(json!(14)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Sécurité : 100/100"), "{}", content);
+    assert!(!content.contains("beta_entry"), "{}", content);
+    assert!(!content.contains("eval"), "{}", content);
+}
+
+#[test]
+fn test_axon_health_respects_project_scope() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_slug) VALUES ('apps/alpha/lib/covered.rs', 'alpha')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('apps/beta/lib/god.rs', 'beta')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::covered', 'covered', 'function', true, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('beta::GodClass', 'GodClass', 'class', false, true, false, 'beta')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('apps/alpha/lib/covered.rs', 'alpha::covered')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('apps/beta/lib/god.rs', 'beta::GodClass')")
+        .unwrap();
+
+    for i in 0..6 {
+        server
+            .graph_store
+            .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('beta::dep{}', 'dep{}', 'function', false, true, false, 'beta')", i, i))
+            .unwrap();
+        server
+            .graph_store
+            .execute(&format!(
+                "INSERT INTO CALLS (source_id, target_id) VALUES ('beta::dep{}', 'beta::GodClass')",
+                i
+            ))
+            .unwrap();
+    }
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_health",
+            "arguments": {
+                "project": "alpha"
+            }
+        })),
+        id: Some(json!(15)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Coverage 100%"), "{}", content);
+    assert!(!content.contains("God Object"), "{}", content);
+    assert!(!content.contains("GodClass"), "{}", content);
+}
+
+#[test]
+fn test_axon_audit_uses_project_slug_even_when_path_does_not_contain_project_name() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/shared/api.rs', 'alpha')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/shared/safe.rs', 'beta')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES ('alpha::entrypoint', 'entrypoint', 'function', false, true, false, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES ('alpha::eval', 'eval', 'function', false, true, false, true, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES ('beta::safe_fn', 'safe_fn', 'function', true, true, false, false, 'beta')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/shared/api.rs', 'alpha::entrypoint')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/shared/api.rs', 'alpha::eval')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/shared/safe.rs', 'beta::safe_fn')")
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO CALLS (source_id, target_id) VALUES ('alpha::entrypoint', 'alpha::eval')",
+        )
+        .unwrap();
+    assert_eq!(
+        server
+            .graph_store
+            .query_count_param(
+                "SELECT count(*) FROM File WHERE project_slug = $proj OR path LIKE '%' || $proj || '%'",
+                &json!({"proj": "alpha"})
+            )
+            .unwrap(),
+        1
+    );
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_audit",
+            "arguments": {
+                "project": "alpha"
+            }
+        })),
+        id: Some(json!(94)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Audit de Conformité : alpha"));
+    assert!(content.contains("eval"));
+    assert!(!content.contains("seems unindexed"));
+}
+
+#[test]
+fn test_axon_health_uses_project_slug_even_when_path_does_not_contain_project_name() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_slug) VALUES ('src/shared/alpha_core.rs', 'alpha')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/shared/beta_core.rs', 'beta')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::GodClass', 'GodClass', 'class', false, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('beta::stable_api', 'stable_api', 'function', true, true, false, 'beta')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/shared/alpha_core.rs', 'alpha::GodClass')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/shared/beta_core.rs', 'beta::stable_api')")
+        .unwrap();
+
+    for i in 0..5 {
+        server
+            .graph_store
+            .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::dep{}', 'dep{}', 'function', false, true, false, 'alpha')", i, i))
+            .unwrap();
+        server
+            .graph_store
+            .execute(&format!("INSERT INTO CALLS (source_id, target_id) VALUES ('alpha::dep{}', 'alpha::GodClass')", i))
+            .unwrap();
+    }
+    assert_eq!(
+        server
+            .graph_store
+            .query_count_param(
+                "SELECT count(*) FROM File WHERE project_slug = $proj OR path LIKE '%' || $proj || '%'",
+                &json!({"proj": "beta"})
+            )
+            .unwrap(),
+        1
+    );
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_health",
+            "arguments": {
+                "project": "beta"
+            }
+        })),
+        id: Some(json!(95)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Health Report for beta"));
+    assert!(content.contains("Coverage 100%"));
+    assert!(!content.contains("GodClass"));
+    assert!(!content.contains("seems unindexed"));
 }
 
 #[test]
@@ -549,7 +871,11 @@ fn test_axon_query_global_default() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
     assert!(content.contains("Resultats de recherche"));
     assert!(content.contains("Mode:"));
 }
@@ -583,7 +909,11 @@ fn test_axon_soll_manager_auto_id() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.unwrap();
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("CPT-AXO-011"));
 
@@ -612,7 +942,11 @@ fn test_axon_export_soll() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.unwrap();
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("# SOLL Extraction"));
     assert!(content.contains("Test Vision"));
@@ -649,7 +983,11 @@ fn test_axon_export_soll_resolves_repo_root_docs_vision() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.unwrap();
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
     let export_path = content
         .lines()
         .find_map(|line| line.strip_prefix("✅ Exported to "))
@@ -657,8 +995,11 @@ fn test_axon_export_soll_resolves_repo_root_docs_vision() {
         .trim()
         .to_string();
 
-    let expected_dir = super::soll::canonical_soll_export_dir().expect("expected canonical export dir");
-    let export_parent = Path::new(&export_path).parent().expect("expected export parent");
+    let expected_dir =
+        super::soll::canonical_soll_export_dir().expect("expected canonical export dir");
+    let export_parent = Path::new(&export_path)
+        .parent()
+        .expect("expected export parent");
 
     assert_eq!(export_parent, expected_dir.as_path());
     assert!(!export_path.contains("src/axon-core/docs/vision/SOLL_EXPORT_"));
@@ -718,17 +1059,63 @@ fn test_axon_restore_soll() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.unwrap();
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("Restauration SOLL terminee"));
     assert!(content.contains("Vision: 1"));
-    assert_eq!(server.graph_store.query_count("SELECT count(*) FROM soll.Vision").unwrap(), 1);
-    assert_eq!(server.graph_store.query_count("SELECT count(*) FROM soll.Pillar").unwrap(), 1);
-    assert_eq!(server.graph_store.query_count("SELECT count(*) FROM soll.Concept").unwrap(), 1);
-    assert_eq!(server.graph_store.query_count("SELECT count(*) FROM soll.Milestone").unwrap(), 1);
-    assert_eq!(server.graph_store.query_count("SELECT count(*) FROM soll.Requirement").unwrap(), 1);
-    assert_eq!(server.graph_store.query_count("SELECT count(*) FROM soll.Decision").unwrap(), 1);
-    assert_eq!(server.graph_store.query_count("SELECT count(*) FROM soll.Validation").unwrap(), 1);
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Vision")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Pillar")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Concept")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Milestone")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Requirement")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Decision")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Validation")
+            .unwrap(),
+        1
+    );
 
     let _ = std::fs::remove_file(export_path);
 }
@@ -761,7 +1148,11 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("3 violation"));
     assert!(content.contains("REQ-AXO-001"));
@@ -798,7 +1189,9 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.SOLVES (source_id, target_id) VALUES ('DEC-AXO-001', 'REQ-AXO-001')")
+        .execute(
+            "INSERT INTO soll.SOLVES (source_id, target_id) VALUES ('DEC-AXO-001', 'REQ-AXO-001')",
+        )
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -813,7 +1206,11 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("0 violation"));
     assert!(content.contains("cohérence minimale"));
@@ -853,7 +1250,11 @@ fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("trigger_scan"));
     assert!(content.contains("trigger_global_scan"));
@@ -889,7 +1290,11 @@ fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() 
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("opaque_worker"));
     assert!(content.contains("chunk body") || content.contains("chunk metadata"));
@@ -938,7 +1343,11 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("worker_alpha"));
     assert!(content.contains("requeue claimed file back to pending"));
@@ -1000,7 +1409,11 @@ fn test_vcr1_chunk_retrieval_uses_ingested_docstring_content() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("opaque_gate"));
     assert!(content.contains("fake indexing overlay"));
@@ -1049,11 +1462,22 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
-    let truth_pos = content.find("truth_probe").expect("truth probe should appear");
-    let path_pos = content.find("path_only_probe").expect("path-only probe should appear");
-    assert!(truth_pos < path_pos, "content-backed match should rank ahead of path-only match");
+    let truth_pos = content
+        .find("truth_probe")
+        .expect("truth probe should appear");
+    let path_pos = content
+        .find("path_only_probe")
+        .expect("path-only probe should appear");
+    assert!(
+        truth_pos < path_pos,
+        "content-backed match should rank ahead of path-only match"
+    );
     assert!(content.contains("docstring"));
     assert!(content.contains("file path"));
 }
@@ -1078,7 +1502,11 @@ fn test_axon_query_falls_back_when_contains_is_absent() {
 
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
-    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(content.contains("degrade structurel sans ancrage fichier"));
     assert!(content.contains("trigger_scan"));
@@ -1135,7 +1563,11 @@ fn test_vcr2_impact_before_change_on_public_api() {
 
     let impact_response = server.handle_request(impact_req);
     let impact_result = impact_response.unwrap().result.expect("Expected result");
-    let impact_text = impact_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let impact_text = impact_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(impact_text.contains("parse_batch"));
     assert!(impact_text.contains("consumer_a"));
@@ -1154,7 +1586,11 @@ fn test_vcr2_impact_before_change_on_public_api() {
 
     let api_break_response = server.handle_request(api_break_req);
     let api_break_result = api_break_response.unwrap().result.expect("Expected result");
-    let api_break_text = api_break_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let api_break_text = api_break_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(api_break_text.contains("RISQUE DE RUPTURE D'API"));
     assert!(api_break_text.contains("consumer_a"));
@@ -1181,10 +1617,358 @@ fn test_axon_impact_reports_missing_call_graph_truthfully() {
 
     let impact_response = server.handle_request(impact_req);
     let impact_result = impact_response.unwrap().result.expect("Expected result");
-    let impact_text = impact_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let impact_text = impact_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(impact_text.contains("le graphe d'appel n'est pas encore disponible"));
     assert!(impact_text.contains("parse_batch"));
+}
+
+#[test]
+fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/alpha/api.rs', 'alpha')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/alpha/consumer.rs', 'alpha')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/beta/api.rs', 'beta')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('src/beta/consumer.rs', 'beta')")
+        .unwrap();
+
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::consumer_alpha', 'consumer_alpha', 'function', false, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('beta::parse_batch', 'parse_batch', 'function', true, true, false, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('beta::consumer_beta', 'consumer_beta', 'function', false, true, false, 'beta')").unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/api.rs', 'alpha::parse_batch')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/consumer.rs', 'alpha::consumer_alpha')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/beta/api.rs', 'beta::parse_batch')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/beta/consumer.rs', 'beta::consumer_beta')")
+        .unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('alpha::consumer_alpha', 'alpha::parse_batch')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('beta::consumer_beta', 'beta::parse_batch')")
+        .unwrap();
+
+    let impact_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_impact",
+            "arguments": {
+                "symbol": "parse_batch",
+                "project": "alpha",
+                "depth": 2
+            }
+        })),
+        id: Some(json!(199)),
+    };
+
+    let impact_response = server.handle_request(impact_req);
+    let impact_result = impact_response.unwrap().result.expect("Expected result");
+    let impact_text = impact_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(impact_text.contains("consumer_alpha"), "{}", impact_text);
+    assert!(!impact_text.contains("consumer_beta"), "{}", impact_text);
+}
+
+#[test]
+fn test_axon_query_reports_partial_truth_when_project_is_degraded() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_slug, status, last_error_reason) VALUES ('src/alpha/large.rs', 'alpha', 'indexed_degraded', 'degraded_structure_only')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_slug, status) VALUES ('src/beta/worker.rs', 'beta', 'indexed')",
+        )
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('beta::worker_loop', 'worker_loop', 'function', true, true, false, 'beta')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/large.rs', 'alpha::parse_batch')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/beta/worker.rs', 'beta::worker_loop')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_query",
+            "arguments": { "query": "rare docstring phrase", "project": "alpha" }
+        })),
+        id: Some(json!(301)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("verite partielle"), "{}", content);
+    assert!(content.contains("indexed_degraded"), "{}", content);
+}
+
+#[test]
+fn test_axon_inspect_warns_when_symbol_is_degraded() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_slug, status, last_error_reason) VALUES ('src/alpha/large.rs', 'alpha', 'indexed_degraded', 'degraded_structure_only')",
+        )
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/large.rs', 'alpha::parse_batch')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_inspect",
+            "arguments": { "symbol": "parse_batch", "project": "alpha" }
+        })),
+        id: Some(json!(302)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Inspection du Symbole"), "{}", content);
+    assert!(content.contains("verite partielle"), "{}", content);
+    assert!(content.contains("indexed_degraded"), "{}", content);
+}
+
+#[test]
+fn test_axon_impact_reports_partial_truth_for_degraded_symbol() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_slug, status, last_error_reason) VALUES ('src/alpha/large.rs', 'alpha', 'indexed_degraded', 'degraded_structure_only')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug, status) VALUES ('src/beta/live.rs', 'beta', 'indexed')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('beta::caller', 'caller', 'function', false, true, false, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('beta::callee', 'callee', 'function', true, true, false, 'beta')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/large.rs', 'alpha::parse_batch')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/beta/live.rs', 'beta::caller')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/beta/live.rs', 'beta::callee')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('beta::caller', 'beta::callee')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_impact",
+            "arguments": { "symbol": "parse_batch", "project": "alpha", "depth": 2 }
+        })),
+        id: Some(json!(303)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("verite partielle"), "{}", content);
+    assert!(content.contains("structure_only"), "{}", content);
+}
+
+#[test]
+fn test_axon_health_warns_when_project_contains_degraded_files() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_slug, status, last_error_reason) VALUES ('src/alpha/large.rs', 'alpha', 'indexed_degraded', 'degraded_structure_only')",
+        )
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/large.rs', 'alpha::parse_batch')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_health",
+            "arguments": { "project": "alpha" }
+        })),
+        id: Some(json!(304)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Health Report for alpha"), "{}", content);
+    assert!(content.contains("verite partielle"), "{}", content);
+    assert!(content.contains("indexed_degraded"), "{}", content);
+}
+
+#[test]
+fn test_axon_query_project_scope_uses_project_slug_not_path_substring() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug, status) VALUES ('/tmp/shared/api.rs', 'alpha', 'indexed')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug, status) VALUES ('/tmp/shared/worker.rs', 'beta', 'indexed')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('beta::parse_batch', 'parse_batch', 'function', true, true, false, 'beta')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/shared/api.rs', 'alpha::parse_batch')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/shared/worker.rs', 'beta::parse_batch')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_query",
+            "arguments": { "query": "parse_batch", "project": "alpha" }
+        })),
+        id: Some(json!(305)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("/tmp/shared/api.rs"), "{}", content);
+    assert!(!content.contains("/tmp/shared/worker.rs"), "{}", content);
+}
+
+#[test]
+fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug, status) VALUES ('/tmp/shared/api.rs', 'alpha', 'indexed')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug, status) VALUES ('/tmp/shared/worker.rs', 'beta', 'indexed')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('beta::parse_batch', 'parse_batch', 'module', false, true, false, 'beta')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/shared/api.rs', 'alpha::parse_batch')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/shared/worker.rs', 'beta::parse_batch')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_inspect",
+            "arguments": { "symbol": "parse_batch", "project": "alpha" }
+        })),
+        id: Some(json!(306)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("| parse_batch | function | true |"), "{}", content);
+    assert!(!content.contains("| parse_batch | module | false |"), "{}", content);
 }
 
 #[test]
@@ -1282,8 +2066,15 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
             id: Some(json!(100 + idx)),
         };
         let response = source_server.handle_request(req);
-        let result = response.unwrap().result.expect("Expected SOLL creation result");
-        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        let result = response
+            .unwrap()
+            .result
+            .expect("Expected SOLL creation result");
+        let content = result.get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert!(content.contains("Entité SOLL créée"));
     }
 
@@ -1298,8 +2089,15 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
     };
 
     let export_response = source_server.handle_request(export_req);
-    let export_result = export_response.unwrap().result.expect("Expected SOLL export result");
-    let export_text = export_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let export_result = export_response
+        .unwrap()
+        .result
+        .expect("Expected SOLL export result");
+    let export_text = export_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
     assert!(export_text.contains("docs/vision/SOLL_EXPORT_"));
 
     let export_path = export_text
@@ -1321,8 +2119,15 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
     };
 
     let restore_response = restore_server.handle_request(restore_req);
-    let restore_result = restore_response.unwrap().result.expect("Expected SOLL restore result");
-    let restore_text = restore_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let restore_result = restore_response
+        .unwrap()
+        .result
+        .expect("Expected SOLL restore result");
+    let restore_text = restore_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(restore_text.contains("Restauration SOLL terminee"));
     assert!(restore_text.contains("Vision: 1"));
@@ -1333,13 +2138,55 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
     assert!(restore_text.contains("Decisions: 1"));
     assert!(restore_text.contains("Validations: 1"));
 
-    assert_eq!(restore_server.graph_store.query_count("SELECT count(*) FROM soll.Vision").unwrap(), 1);
-    assert_eq!(restore_server.graph_store.query_count("SELECT count(*) FROM soll.Pillar").unwrap(), 1);
-    assert_eq!(restore_server.graph_store.query_count("SELECT count(*) FROM soll.Concept").unwrap(), 1);
-    assert_eq!(restore_server.graph_store.query_count("SELECT count(*) FROM soll.Milestone").unwrap(), 1);
-    assert_eq!(restore_server.graph_store.query_count("SELECT count(*) FROM soll.Requirement").unwrap(), 1);
-    assert_eq!(restore_server.graph_store.query_count("SELECT count(*) FROM soll.Decision").unwrap(), 1);
-    assert_eq!(restore_server.graph_store.query_count("SELECT count(*) FROM soll.Validation").unwrap(), 1);
+    assert_eq!(
+        restore_server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Vision")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        restore_server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Pillar")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        restore_server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Concept")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        restore_server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Milestone")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        restore_server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Requirement")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        restore_server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Decision")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        restore_server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Validation")
+            .unwrap(),
+        1
+    );
 
     let _ = std::fs::remove_file(&export_path);
 }
@@ -1419,8 +2266,15 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
             id: Some(json!(300 + idx)),
         };
         let response = source_server.handle_request(req);
-        let result = response.unwrap().result.expect("Expected SOLL creation result");
-        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        let result = response
+            .unwrap()
+            .result
+            .expect("Expected SOLL creation result");
+        let content = result.get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert!(content.contains("Entité SOLL créée"));
         created_ids.push(
             content
@@ -1484,7 +2338,11 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
         };
         let response = source_server.handle_request(req);
         let result = response.unwrap().result.expect("Expected SOLL link result");
-        let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+        let content = result.get("content").unwrap()[0]
+            .get("text")
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert!(content.contains("Liaison établie"));
     }
 
@@ -1499,8 +2357,15 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
     };
 
     let export_response = source_server.handle_request(export_req);
-    let export_result = export_response.unwrap().result.expect("Expected SOLL export result");
-    let export_text = export_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let export_result = export_response
+        .unwrap()
+        .result
+        .expect("Expected SOLL export result");
+    let export_text = export_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
     let export_path = export_text
         .lines()
         .find_map(|line| line.strip_prefix("✅ Exported to "))
@@ -1527,51 +2392,83 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
     };
 
     let restore_response = restore_server.handle_request(restore_req);
-    let restore_result = restore_response.unwrap().result.expect("Expected SOLL restore result");
-    let restore_text = restore_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let restore_result = restore_response
+        .unwrap()
+        .result
+        .expect("Expected SOLL restore result");
+    let restore_text = restore_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
 
     assert!(restore_text.contains("Restauration SOLL terminee"));
     assert_eq!(
-        restore_server.graph_store.query_count(&format!(
-            "SELECT count(*) FROM soll.BELONGS_TO WHERE source_id = '{}' AND target_id = '{}'",
-            requirement_id, pillar_id
-        )).unwrap(),
+        restore_server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.BELONGS_TO WHERE source_id = '{}' AND target_id = '{}'",
+                requirement_id, pillar_id
+            ))
+            .unwrap(),
         1
     );
     assert_eq!(
-        restore_server.graph_store.query_count(&format!(
-            "SELECT count(*) FROM soll.SOLVES WHERE source_id = '{}' AND target_id = '{}'",
-            decision_id, requirement_id
-        )).unwrap(),
+        restore_server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.SOLVES WHERE source_id = '{}' AND target_id = '{}'",
+                decision_id, requirement_id
+            ))
+            .unwrap(),
         1
     );
     assert_eq!(
-        restore_server.graph_store.query_count(&format!(
-            "SELECT count(*) FROM soll.VERIFIES WHERE source_id = '{}' AND target_id = '{}'",
-            validation_id, requirement_id
-        )).unwrap(),
+        restore_server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.VERIFIES WHERE source_id = '{}' AND target_id = '{}'",
+                validation_id, requirement_id
+            ))
+            .unwrap(),
         1
     );
 
     let pillar_metadata = restore_server
         .graph_store
-        .query_json(&format!("SELECT metadata FROM soll.Pillar WHERE id = '{}'", pillar_id))
+        .query_json(&format!(
+            "SELECT metadata FROM soll.Pillar WHERE id = '{}'",
+            pillar_id
+        ))
         .unwrap();
     let requirement_metadata = restore_server
         .graph_store
-        .query_json(&format!("SELECT metadata FROM soll.Requirement WHERE id = '{}'", requirement_id))
+        .query_json(&format!(
+            "SELECT metadata FROM soll.Requirement WHERE id = '{}'",
+            requirement_id
+        ))
         .unwrap();
     let decision_metadata = restore_server
         .graph_store
-        .query_json(&format!("SELECT metadata FROM soll.Decision WHERE id = '{}'", decision_id))
+        .query_json(&format!(
+            "SELECT metadata FROM soll.Decision WHERE id = '{}'",
+            decision_id
+        ))
         .unwrap();
     let validation_metadata = restore_server
         .graph_store
-        .query_json(&format!("SELECT metadata FROM soll.Validation WHERE id = '{}'", validation_id))
+        .query_json(&format!(
+            "SELECT metadata FROM soll.Validation WHERE id = '{}'",
+            validation_id
+        ))
         .unwrap();
 
     assert!(pillar_metadata.contains("platform"));
-    assert!(requirement_metadata.contains("high"), "{}", requirement_metadata);
+    assert!(
+        requirement_metadata.contains("high"),
+        "{}",
+        requirement_metadata
+    );
     assert!(decision_metadata.contains("restore"));
     assert!(validation_metadata.contains("test"));
 
@@ -1584,13 +2481,19 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
         })),
         id: Some(json!(502)),
     });
-    second_restore_response.unwrap().result.expect("Expected second restore result");
+    second_restore_response
+        .unwrap()
+        .result
+        .expect("Expected second restore result");
 
     assert_eq!(
-        restore_server.graph_store.query_count(&format!(
-            "SELECT count(*) FROM soll.BELONGS_TO WHERE source_id = '{}' AND target_id = '{}'",
-            requirement_id, pillar_id
-        )).unwrap(),
+        restore_server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.BELONGS_TO WHERE source_id = '{}' AND target_id = '{}'",
+                requirement_id, pillar_id
+            ))
+            .unwrap(),
         1
     );
 

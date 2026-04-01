@@ -1,6 +1,6 @@
 use super::{ExtractionResult, Parser};
-use std::process::Command;
 use std::io::Write;
+use std::process::Command;
 use tempfile::NamedTempFile;
 use tracing::error;
 
@@ -27,13 +27,24 @@ impl Parser for DatalogParser {
             Ok(f) => f,
             Err(e) => {
                 error!("Failed to create temp file for Datalog parser: {}", e);
-                return ExtractionResult { project_slug: None, symbols, relations };
+                return ExtractionResult {
+                    project_slug: None,
+                    symbols,
+                    relations,
+                };
             }
         };
 
         if let Err(e) = temp_file.write_all(content.as_bytes()) {
-            error!("Failed to write content to temp file for Datalog parser: {}", e);
-            return ExtractionResult { project_slug: None, symbols, relations };
+            error!(
+                "Failed to write content to temp file for Datalog parser: {}",
+                e
+            );
+            return ExtractionResult {
+                project_slug: None,
+                symbols,
+                relations,
+            };
         }
 
         let current_dir = std::env::current_dir().unwrap_or_default();
@@ -57,14 +68,21 @@ impl Parser for DatalogParser {
                 }
             }
             Ok(out) => {
-                error!("Datalog python parser script failed: {}", String::from_utf8_lossy(&out.stderr));
+                error!(
+                    "Datalog python parser script failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
             Err(e) => {
                 error!("Failed to execute python Datalog parser: {}", e);
             }
         }
 
-        ExtractionResult { project_slug: None, symbols, relations }
+        ExtractionResult {
+            project_slug: None,
+            symbols,
+            relations,
+        }
     }
 }
 
@@ -81,15 +99,24 @@ mod tests {
         ancestor(x, y) :- parent(x, y).
         ancestor(x, y) :- parent(x, z), ancestor(z, y).
         "#;
-        
+
         let parser = DatalogParser::new();
         let result = parser.parse(code);
-        
+
         // Assert symbols
-        assert!(result.symbols.iter().any(|s| s.name == "parent" && s.kind == "datalog_relation"));
-        assert!(result.symbols.iter().any(|s| s.name == "ancestor" && s.kind == "datalog_relation"));
-        
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "parent" && s.kind == "datalog_relation"));
+        assert!(result
+            .symbols
+            .iter()
+            .any(|s| s.name == "ancestor" && s.kind == "datalog_relation"));
+
         // Assert relations
-        assert!(result.relations.iter().any(|r| r.from == "ancestor" && r.to == "parent" && r.rel_type == "depends_on"));
+        assert!(result
+            .relations
+            .iter()
+            .any(|r| r.from == "ancestor" && r.to == "parent" && r.rel_type == "depends_on"));
     }
 }

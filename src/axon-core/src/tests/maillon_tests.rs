@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use crate::graph::GraphStore;
-use crate::queue::QueueStore;
-use crate::queue::ProcessingMode;
-use crate::worker::DbWriteTask;
 use crate::parser;
 use crate::parser::elixir::ElixirParser;
 use crate::parser::Parser;
+use crate::queue::ProcessingMode;
+use crate::queue::QueueStore;
+use crate::worker::DbWriteTask;
 
 #[cfg(test)]
 mod tests {
@@ -21,9 +21,14 @@ mod tests {
         // Simuler un scan manuel
         let files = vec![("/tmp/test.rs".to_string(), "proj".to_string(), 100, 12345)];
         store.bulk_insert_files(&files).expect("Maillon 1 failed");
-        
-        let count = store.query_count("SELECT count(*) FROM File WHERE status = 'pending'").unwrap();
-        assert_eq!(count, 1, "Le scanner doit insérer les fichiers en status 'pending'");
+
+        let count = store
+            .query_count("SELECT count(*) FROM File WHERE status = 'pending'")
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "Le scanner doit insérer les fichiers en status 'pending'"
+        );
     }
 
     #[test]
@@ -39,7 +44,11 @@ mod tests {
         std::fs::write(root.join("kept.rs"), "fn kept() {}").unwrap();
         std::fs::write(root.join("progress.md"), "keep me").unwrap();
         std::fs::write(root.join("ignored").join("lost.rs"), "fn lost() {}").unwrap();
-        std::fs::write(root.join("docs").join(".axonignore"), "*.md\n!open/keep.md\n").unwrap();
+        std::fs::write(
+            root.join("docs").join(".axonignore"),
+            "*.md\n!open/keep.md\n",
+        )
+        .unwrap();
         std::fs::write(root.join("docs").join("drop.md"), "# hidden").unwrap();
         std::fs::write(root.join("docs").join("open").join("keep.md"), "# visible").unwrap();
 
@@ -51,34 +60,68 @@ mod tests {
             .query_json("SELECT path FROM File ORDER BY path")
             .unwrap();
 
-        assert!(files.contains("kept.rs"), "Le scanner doit garder les fichiers autorisés");
-        assert!(files.contains("progress.md"), "Une ré-inclusion !pattern doit être respectée");
-        assert!(files.contains("keep.md"), "Une ré-ouverture locale doit être respectée");
-        assert!(!files.contains("lost.rs"), "Un répertoire ignoré par Axon Ignore ne doit pas être indexé");
-        assert!(!files.contains("drop.md"), "Une règle locale .axonignore doit exclure le fichier");
+        assert!(
+            files.contains("kept.rs"),
+            "Le scanner doit garder les fichiers autorisés"
+        );
+        assert!(
+            files.contains("progress.md"),
+            "Une ré-inclusion !pattern doit être respectée"
+        );
+        assert!(
+            files.contains("keep.md"),
+            "Une ré-ouverture locale doit être respectée"
+        );
+        assert!(
+            !files.contains("lost.rs"),
+            "Un répertoire ignoré par Axon Ignore ne doit pas être indexé"
+        );
+        assert!(
+            !files.contains("drop.md"),
+            "Une règle locale .axonignore doit exclure le fichier"
+        );
     }
 
     // --- MAILLON 2: LE SÉLECTEUR (The Pull) ---
     #[test]
     fn test_maillon_2_selector_pull() {
         let store = GraphStore::new(":memory:").unwrap();
-        store.bulk_insert_files(&[("/tmp/a.rs".to_string(), "p".to_string(), 10, 1)]).unwrap();
-        
+        store
+            .bulk_insert_files(&[("/tmp/a.rs".to_string(), "p".to_string(), 10, 1)])
+            .unwrap();
+
         let batch = store.fetch_pending_batch(10).expect("Maillon 2 failed");
-        assert_eq!(batch.len(), 1, "Le sélecteur doit être capable de tirer les fichiers pending");
+        assert_eq!(
+            batch.len(),
+            1,
+            "Le sélecteur doit être capable de tirer les fichiers pending"
+        );
     }
 
     #[test]
     fn test_maillon_2b_rescan_requeues_changed_file() {
         let store = GraphStore::new(":memory:").unwrap();
-        store.bulk_insert_files(&[("/tmp/a.rs".to_string(), "p".to_string(), 10, 1)]).unwrap();
+        store
+            .bulk_insert_files(&[("/tmp/a.rs".to_string(), "p".to_string(), 10, 1)])
+            .unwrap();
         let _ = store.fetch_pending_batch(10).unwrap();
-        store.execute("UPDATE File SET status = 'indexed', worker_id = NULL WHERE path = '/tmp/a.rs'").unwrap();
+        store
+            .execute(
+                "UPDATE File SET status = 'indexed', worker_id = NULL WHERE path = '/tmp/a.rs'",
+            )
+            .unwrap();
 
-        store.bulk_insert_files(&[("/tmp/a.rs".to_string(), "p".to_string(), 20, 2)]).unwrap();
+        store
+            .bulk_insert_files(&[("/tmp/a.rs".to_string(), "p".to_string(), 20, 2)])
+            .unwrap();
 
-        let status = store.query_json("SELECT status, size, mtime FROM File WHERE path = '/tmp/a.rs'").unwrap();
-        assert!(status.contains("pending"), "Un fichier modifié doit être remis en pending");
+        let status = store
+            .query_json("SELECT status, size, mtime FROM File WHERE path = '/tmp/a.rs'")
+            .unwrap();
+        assert!(
+            status.contains("pending"),
+            "Un fichier modifié doit être remis en pending"
+        );
         assert!(status.contains("20"), "La taille doit être mise à jour");
         assert!(status.contains("2"), "Le mtime doit être mis à jour");
     }
@@ -97,16 +140,28 @@ mod tests {
         let store = GraphStore::new(&db_root_str).unwrap();
 
         store
-            .bulk_insert_files(&[("/tmp/reader_writer.ex".to_string(), "proj".to_string(), 100, 12345)])
+            .bulk_insert_files(&[(
+                "/tmp/reader_writer.ex".to_string(),
+                "proj".to_string(),
+                100,
+                12345,
+            )])
             .unwrap();
 
         let pending = store.fetch_pending_batch(10).unwrap();
-        assert_eq!(pending.len(), 1, "Le writer doit voir immédiatement le fichier pending");
+        assert_eq!(
+            pending.len(),
+            1,
+            "Le writer doit voir immédiatement le fichier pending"
+        );
 
         let visible_now = store
             .query_count("SELECT count(*) FROM File WHERE path = '/tmp/reader_writer.ex'")
             .unwrap();
-        assert_eq!(visible_now, 1, "Le reader doit voir immédiatement l'écriture");
+        assert_eq!(
+            visible_now, 1,
+            "Le reader doit voir immédiatement l'écriture"
+        );
 
         drop(store);
 
@@ -114,7 +169,10 @@ mod tests {
         let visible_after_restart = reopened
             .query_count("SELECT count(*) FROM File WHERE path = '/tmp/reader_writer.ex'")
             .unwrap();
-        assert_eq!(visible_after_restart, 1, "La donnée doit survivre au redémarrage");
+        assert_eq!(
+            visible_after_restart, 1,
+            "La donnée doit survivre au redémarrage"
+        );
 
         let _ = std::fs::remove_dir_all(&db_root);
     }
@@ -132,9 +190,7 @@ mod tests {
         let db_root_str = db_root.to_string_lossy().to_string();
         let store = GraphStore::new(&db_root_str).unwrap();
 
-        store
-            .execute("DROP TABLE File;")
-            .unwrap();
+        store.execute("DROP TABLE File;").unwrap();
         store
             .execute(
                 "CREATE TABLE File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR)"
@@ -145,9 +201,7 @@ mod tests {
                 "INSERT INTO File (path, project_slug, status, size, priority, mtime, worker_id, trace_id) VALUES ('/tmp/legacy_reopen.ex', 'proj', 'indexed', 100, 1, 1, NULL, 'trace-legacy')"
             )
             .unwrap();
-        store
-            .execute("DELETE FROM RuntimeMetadata;")
-            .unwrap();
+        store.execute("DELETE FROM RuntimeMetadata;").unwrap();
         store
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '1')")
             .unwrap();
@@ -162,10 +216,15 @@ mod tests {
         let reopened = GraphStore::new(&db_root_str).unwrap();
 
         let row = reopened
-            .query_json("SELECT status, needs_reindex FROM File WHERE path = '/tmp/legacy_reopen.ex'")
+            .query_json(
+                "SELECT status, needs_reindex FROM File WHERE path = '/tmp/legacy_reopen.ex'",
+            )
             .unwrap();
         assert!(row.contains("indexed"));
-        assert!(row.contains("false"), "La colonne needs_reindex doit etre disponible apres reopen");
+        assert!(
+            row.contains("false"),
+            "La colonne needs_reindex doit etre disponible apres reopen"
+        );
 
         let _ = std::fs::remove_dir_all(&db_root);
     }
@@ -184,7 +243,12 @@ mod tests {
         let store = GraphStore::new(&db_root_str).unwrap();
 
         store
-            .bulk_insert_files(&[("/tmp/embed_reset.ex".to_string(), "proj".to_string(), 100, 1)])
+            .bulk_insert_files(&[(
+                "/tmp/embed_reset.ex".to_string(),
+                "proj".to_string(),
+                100,
+                1,
+            )])
             .unwrap();
         store
             .execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES ('sym-embed-reset', 'embed_reset', 'function', 'proj')")
@@ -198,9 +262,7 @@ mod tests {
         store
             .execute("INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash) VALUES ('chunk-embed-reset', 'model-embed-reset', 'hash-1')")
             .unwrap();
-        store
-            .execute("DELETE FROM RuntimeMetadata;")
-            .unwrap();
+        store.execute("DELETE FROM RuntimeMetadata;").unwrap();
         store
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '2')")
             .unwrap();
@@ -236,7 +298,9 @@ mod tests {
             "Le drift embedding ne doit pas purger Chunk"
         );
         assert_eq!(
-            reopened.query_count("SELECT count(*) FROM ChunkEmbedding").unwrap(),
+            reopened
+                .query_count("SELECT count(*) FROM ChunkEmbedding")
+                .unwrap(),
             0,
             "Le drift embedding doit purger uniquement ChunkEmbedding"
         );
@@ -258,7 +322,12 @@ mod tests {
         let store = GraphStore::new(&db_root_str).unwrap();
 
         store
-            .bulk_insert_files(&[("/tmp/ingestion_reset.ex".to_string(), "proj".to_string(), 100, 1)])
+            .bulk_insert_files(&[(
+                "/tmp/ingestion_reset.ex".to_string(),
+                "proj".to_string(),
+                100,
+                1,
+            )])
             .unwrap();
         store
             .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/ingestion_reset.ex'")
@@ -269,9 +338,7 @@ mod tests {
         store
             .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/ingestion_reset.ex', 'sym-ingestion-reset')")
             .unwrap();
-        store
-            .execute("DELETE FROM RuntimeMetadata;")
-            .unwrap();
+        store.execute("DELETE FROM RuntimeMetadata;").unwrap();
         store
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('schema_version', '2')")
             .unwrap();
@@ -307,7 +374,9 @@ mod tests {
             "Le drift ingestion doit purger les dérivés structurels"
         );
         assert_eq!(
-            reopened.query_count("SELECT count(*) FROM CONTAINS").unwrap(),
+            reopened
+                .query_count("SELECT count(*) FROM CONTAINS")
+                .unwrap(),
             0,
             "Le drift ingestion doit purger les relations dérivées"
         );
@@ -413,8 +482,14 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(row.contains("pending"), "Le delta doit remettre le fichier en pending");
-        assert!(row.contains("900"), "Le delta chaud doit imposer une priorité élevée");
+        assert!(
+            row.contains("pending"),
+            "Le delta doit remettre le fichier en pending"
+        );
+        assert!(
+            row.contains("900"),
+            "Le delta chaud doit imposer une priorité élevée"
+        );
         assert!(row.contains("proj"), "Le slug projet doit être conservé");
     }
 
@@ -438,7 +513,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!staged, "Un chemin ignoré par Axon Ignore ne doit pas être staged");
+        assert!(
+            !staged,
+            "Un chemin ignoré par Axon Ignore ne doit pas être staged"
+        );
 
         let count = store
             .query_count(&format!(
@@ -446,7 +524,10 @@ mod tests {
                 file_path.to_string_lossy().replace('\'', "''")
             ))
             .unwrap();
-        assert_eq!(count, 0, "Le fichier ignoré ne doit pas apparaître dans IST");
+        assert_eq!(
+            count, 0,
+            "Le fichier ignoré ne doit pas apparaître dans IST"
+        );
     }
 
     #[test]
@@ -494,7 +575,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(staged, 1, "Une rafale d'evenements identiques ne doit stager qu'une fois");
+        assert_eq!(
+            staged, 1,
+            "Une rafale d'evenements identiques ne doit stager qu'une fois"
+        );
 
         let count = store
             .query_count(&format!(
@@ -524,7 +608,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(staged, "Un evenement de repertoire doit pouvoir remonter un fichier imbrique");
+        assert!(
+            staged,
+            "Un evenement de repertoire doit pouvoir remonter un fichier imbrique"
+        );
 
         let row = store
             .query_json(&format!(
@@ -558,7 +645,11 @@ mod tests {
             .unwrap();
 
         let first_batch = store.fetch_pending_batch(10).unwrap();
-        assert_eq!(first_batch.len(), 1, "Le premier claim doit prendre le fichier");
+        assert_eq!(
+            first_batch.len(),
+            1,
+            "Le premier claim doit prendre le fichier"
+        );
 
         store
             .upsert_hot_file(
@@ -583,8 +674,14 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(row.contains("indexing"), "Le fichier doit rester en cours d'indexation");
-        assert!(!row.contains("null"), "Le worker actif doit rester attache au fichier");
+        assert!(
+            row.contains("indexing"),
+            "Le fichier doit rester en cours d'indexation"
+        );
+        assert!(
+            !row.contains("null"),
+            "Le worker actif doit rester attache au fichier"
+        );
     }
 
     #[test]
@@ -607,7 +704,11 @@ mod tests {
             .unwrap();
 
         let first_batch = store.fetch_pending_batch(10).unwrap();
-        assert_eq!(first_batch.len(), 1, "Le premier claim doit prendre le fichier");
+        assert_eq!(
+            first_batch.len(),
+            1,
+            "Le premier claim doit prendre le fichier"
+        );
 
         store
             .upsert_hot_file(
@@ -669,7 +770,10 @@ mod tests {
             row.contains("pending"),
             "Le fichier doit etre replanifie apres le commit si un vrai changement est arrive pendant indexing"
         );
-        assert!(row.contains("900"), "La priorite chaude doit etre preservee pour la seconde passe");
+        assert!(
+            row.contains("900"),
+            "La priorite chaude doit etre preservee pour la seconde passe"
+        );
     }
 
     #[test]
@@ -742,8 +846,14 @@ mod tests {
                 file_path.to_string_lossy().replace('\'', "''")
             ))
             .unwrap();
-        assert!(row.contains("deleted"), "Le fichier supprimé doit être tombstoné");
-        assert!(row.contains("null"), "Le worker doit être libéré après tombstone");
+        assert!(
+            row.contains("deleted"),
+            "Le fichier supprimé doit être tombstoné"
+        );
+        assert!(
+            row.contains("null"),
+            "Le worker doit être libéré après tombstone"
+        );
 
         let contains_count = store
             .query_count(&format!(
@@ -751,10 +861,16 @@ mod tests {
                 file_path.to_string_lossy().replace('\'', "''")
             ))
             .unwrap();
-        assert_eq!(contains_count, 0, "Le lien CONTAINS du fichier supprimé doit disparaître");
+        assert_eq!(
+            contains_count, 0,
+            "Le lien CONTAINS du fichier supprimé doit disparaître"
+        );
 
         let symbol_count = store.query_count("SELECT count(*) FROM Symbol").unwrap();
-        assert_eq!(symbol_count, 0, "Les symboles du fichier supprimé doivent disparaître");
+        assert_eq!(
+            symbol_count, 0,
+            "Les symboles du fichier supprimé doivent disparaître"
+        );
     }
 
     #[test]
@@ -820,7 +936,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(staged, 2, "Un rename doit tombstoner l'ancien chemin et stager le nouveau");
+        assert_eq!(
+            staged, 2,
+            "Un rename doit tombstoner l'ancien chemin et stager le nouveau"
+        );
 
         let old_row = store
             .query_json(&format!(
@@ -828,7 +947,10 @@ mod tests {
                 old_path.to_string_lossy().replace('\'', "''")
             ))
             .unwrap();
-        assert!(old_row.contains("deleted"), "L'ancien chemin doit être tombstoné");
+        assert!(
+            old_row.contains("deleted"),
+            "L'ancien chemin doit être tombstoné"
+        );
 
         let new_row = store
             .query_json(&format!(
@@ -836,8 +958,14 @@ mod tests {
                 new_path.to_string_lossy().replace('\'', "''")
             ))
             .unwrap();
-        assert!(new_row.contains("pending"), "Le nouveau chemin doit être staged en pending");
-        assert!(new_row.contains("900"), "Le nouveau chemin doit garder la priorité chaude");
+        assert!(
+            new_row.contains("pending"),
+            "Le nouveau chemin doit être staged en pending"
+        );
+        assert!(
+            new_row.contains("900"),
+            "Le nouveau chemin doit garder la priorité chaude"
+        );
 
         let old_contains_count = store
             .query_count(&format!(
@@ -845,7 +973,10 @@ mod tests {
                 old_path.to_string_lossy().replace('\'', "''")
             ))
             .unwrap();
-        assert_eq!(old_contains_count, 0, "L'ancien chemin ne doit pas garder de vérité dérivée");
+        assert_eq!(
+            old_contains_count, 0,
+            "L'ancien chemin ne doit pas garder de vérité dérivée"
+        );
     }
 
     #[test]
@@ -874,7 +1005,11 @@ mod tests {
             .unwrap();
 
         let claimed = store.fetch_pending_batch(10).unwrap();
-        assert_eq!(claimed.len(), 1, "Le fichier doit d'abord être pris par un claim actif");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "Le fichier doit d'abord être pris par un claim actif"
+        );
 
         let indexing_row = store
             .query_json(&format!(
@@ -898,10 +1033,17 @@ mod tests {
             replay_row.contains("pending"),
             "Un fichier resté indexing après crash doit être rejoué au redémarrage"
         );
-        assert!(replay_row.contains("null"), "Le worker orphelin doit être libéré au redémarrage");
+        assert!(
+            replay_row.contains("null"),
+            "Le worker orphelin doit être libéré au redémarrage"
+        );
 
         let replay_batch = reopened.fetch_pending_batch(10).unwrap();
-        assert_eq!(replay_batch.len(), 1, "Le fichier doit redevenir claimable après redémarrage");
+        assert_eq!(
+            replay_batch.len(),
+            1,
+            "Le fichier doit redevenir claimable après redémarrage"
+        );
 
         let _ = std::fs::remove_dir_all(&db_root);
     }
@@ -914,9 +1056,7 @@ mod tests {
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10_000, 1)])
             .unwrap();
 
-        store
-            .mark_file_oversized_for_current_budget(&path)
-            .unwrap();
+        store.mark_file_oversized_for_current_budget(&path).unwrap();
 
         let oversized_row = store
             .query_json("SELECT status FROM File WHERE path = '/tmp/oversized_file.rs'")
@@ -979,7 +1119,9 @@ mod tests {
             .unwrap();
 
         let row = store
-            .query_json("SELECT status, last_error_reason FROM File WHERE path = '/tmp/degraded_file.rs'")
+            .query_json(
+                "SELECT status, last_error_reason FROM File WHERE path = '/tmp/degraded_file.rs'",
+            )
             .unwrap();
         assert!(
             row.contains("indexed_degraded"),
@@ -991,12 +1133,16 @@ mod tests {
         let symbol_count = store
             .query_count("SELECT count(*) FROM Symbol WHERE project_slug = 'proj'")
             .unwrap();
-        assert_eq!(symbol_count, 1, "degraded mode must still preserve the structural symbol truth");
+        assert_eq!(
+            symbol_count, 1,
+            "degraded mode must still preserve the structural symbol truth"
+        );
 
-        let chunk_count = store
-            .query_count("SELECT count(*) FROM Chunk")
-            .unwrap();
-        assert_eq!(chunk_count, 0, "degraded mode must avoid heavy chunk materialization");
+        let chunk_count = store.query_count("SELECT count(*) FROM Chunk").unwrap();
+        assert_eq!(
+            chunk_count, 0,
+            "degraded mode must avoid heavy chunk materialization"
+        );
     }
 
     #[test]
@@ -1017,8 +1163,14 @@ mod tests {
         let deferred_row = store
             .query_json("SELECT defer_count, last_deferred_at_ms FROM File WHERE path = '/tmp/deferred_file.rs'")
             .unwrap();
-        assert!(deferred_row.contains("2"), "Le déferrement doit construire une dette de fairness persistante");
-        assert!(!deferred_row.contains("null"), "Le timestamp de dernier déferrement doit être renseigné");
+        assert!(
+            deferred_row.contains("2"),
+            "Le déferrement doit construire une dette de fairness persistante"
+        );
+        assert!(
+            !deferred_row.contains("null"),
+            "Le timestamp de dernier déferrement doit être renseigné"
+        );
 
         let claimed = store
             .claim_pending_paths(std::slice::from_ref(&path))
@@ -1029,8 +1181,14 @@ mod tests {
             .query_json("SELECT status, defer_count, last_deferred_at_ms FROM File WHERE path = '/tmp/deferred_file.rs'")
             .unwrap();
         assert!(claimed_row.contains("indexing"));
-        assert!(claimed_row.contains("0"), "Une claim effective doit remettre à zéro la dette de fairness");
-        assert!(claimed_row.contains("null"), "Le timestamp de déferrement doit être purgé après claim");
+        assert!(
+            claimed_row.contains("0"),
+            "Une claim effective doit remettre à zéro la dette de fairness"
+        );
+        assert!(
+            claimed_row.contains("null"),
+            "Le timestamp de déferrement doit être purgé après claim"
+        );
     }
 
     #[test]
@@ -1063,7 +1221,10 @@ mod tests {
             crate::fs_watcher::HOT_PRIORITY,
         )
         .unwrap();
-        assert!(staged, "Le delete doit tombstoner pendant qu'un worker est encore en vol");
+        assert!(
+            staged,
+            "Le delete doit tombstoner pendant qu'un worker est encore en vol"
+        );
 
         let extraction = parser::ExtractionResult {
             project_slug: Some("proj".to_string()),
@@ -1104,34 +1265,47 @@ mod tests {
                 file_path.to_string_lossy().replace('\'', "''")
             ))
             .unwrap();
-        assert!(row.contains("deleted"), "Un commit tardif ne doit pas ressusciter un tombstone");
+        assert!(
+            row.contains("deleted"),
+            "Un commit tardif ne doit pas ressusciter un tombstone"
+        );
 
         let symbol_count = store.query_count("SELECT count(*) FROM Symbol").unwrap();
-        assert_eq!(symbol_count, 0, "Aucune vérité dérivée ne doit réapparaître après tombstone");
+        assert_eq!(
+            symbol_count, 0,
+            "Aucune vérité dérivée ne doit réapparaître après tombstone"
+        );
     }
 
     // --- MAILLON 3: LA SOCKET (Le Protocole) ---
     #[tokio::test]
     async fn test_maillon_3_socket_protocol() {
-        use tokio::net::{UnixListener, UnixStream};
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use std::fs;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::{UnixListener, UnixStream};
 
         let sock_path = "/tmp/test-maillon-3.sock";
-        if std::path::Path::new(sock_path).exists() { let _ = fs::remove_file(sock_path); }
-        
+        if std::path::Path::new(sock_path).exists() {
+            let _ = fs::remove_file(sock_path);
+        }
+
         let listener = match UnixListener::bind(sock_path) {
             Ok(listener) => listener,
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!("Skipping socket protocol test in sandboxed environment: {}", err);
+                eprintln!(
+                    "Skipping socket protocol test in sandboxed environment: {}",
+                    err
+                );
                 return;
             }
             Err(err) => panic!("Failed to bind unix socket: {}", err),
         };
         let store = Arc::new(GraphStore::new(":memory:").unwrap());
-        
+
         // Simuler un fichier en attente
-        store.bulk_insert_files(&[("/tmp/test.ex".to_string(), "proj".to_string(), 10, 1)]).unwrap();
+        store
+            .bulk_insert_files(&[("/tmp/test.ex".to_string(), "proj".to_string(), 10, 1)])
+            .unwrap();
 
         // Spawn Server Loop (Simulé de main.rs)
         let server_store = store.clone();
@@ -1140,17 +1314,24 @@ mod tests {
             let (reader, mut writer) = socket.into_split();
             let mut buf_reader = BufReader::new(reader);
             let mut line = String::new();
-            
+
             // Welcome
-            writer.write_all(b"Axon Telemetry Ready\n{\"SystemReady\":{}}\n").await.unwrap();
+            writer
+                .write_all(b"Axon Telemetry Ready\n{\"SystemReady\":{}}\n")
+                .await
+                .unwrap();
 
             if let Ok(_) = buf_reader.read_line(&mut line).await {
                 let command = line.trim();
                 if command.starts_with("PULL_PENDING ") {
                     let count = command[13..].parse::<usize>().unwrap_or(1);
                     let files = server_store.fetch_pending_batch(count).unwrap();
-                    let response = serde_json::json!({"event": "PENDING_BATCH_READY", "files": files});
-                    writer.write_all((serde_json::to_string(&response).unwrap() + "\n").as_bytes()).await.unwrap();
+                    let response =
+                        serde_json::json!({"event": "PENDING_BATCH_READY", "files": files});
+                    writer
+                        .write_all((serde_json::to_string(&response).unwrap() + "\n").as_bytes())
+                        .await
+                        .unwrap();
                 }
             }
         });
@@ -1159,7 +1340,7 @@ mod tests {
         let client = UnixStream::connect(sock_path).await.unwrap();
         let mut client_reader = BufReader::new(client);
         let mut response = String::new();
-        
+
         // Skip welcome
         client_reader.read_line(&mut response).await.unwrap(); // Axon Ready
         response.clear();
@@ -1169,13 +1350,19 @@ mod tests {
         // Send Command
         let mut stream = client_reader.into_inner();
         stream.write_all(b"PULL_PENDING 1\n").await.unwrap();
-        
+
         let mut reader = BufReader::new(stream);
         reader.read_line(&mut response).await.unwrap();
-        
-        assert!(response.contains("PENDING_BATCH_READY"), "Le serveur doit répondre avec le batch de fichiers");
-        assert!(response.contains("/tmp/test.ex"), "Le batch doit contenir le fichier attendu");
-        
+
+        assert!(
+            response.contains("PENDING_BATCH_READY"),
+            "Le serveur doit répondre avec le batch de fichiers"
+        );
+        assert!(
+            response.contains("/tmp/test.ex"),
+            "Le batch doit contenir le fichier attendu"
+        );
+
         let _ = fs::remove_file(sock_path);
     }
 
@@ -1185,8 +1372,11 @@ mod tests {
         let content = "defmodule T, do: def h, do: :ok";
         let parser = ElixirParser::new();
         let result = parser.parse(content);
-        
-        assert!(result.symbols.len() > 0, "Le parser doit extraire au moins un symbole");
+
+        assert!(
+            result.symbols.len() > 0,
+            "Le parser doit extraire au moins un symbole"
+        );
         let sym = &result.symbols[0];
         // Test de la rigueur des 9 colonnes
         assert!(sym.is_public, "La métadonnée is_public doit être extraite");
@@ -1199,10 +1389,16 @@ mod tests {
         let path = temp.path().join("test.rs");
         std::fs::write(&path, "fn test() {}").unwrap();
         let queue = QueueStore::new(10);
-        queue.push(path.to_string_lossy().as_ref(), 1, "trace", 0, 0, false).unwrap();
-        
+        queue
+            .push(path.to_string_lossy().as_ref(), 1, "trace", 0, 0, false)
+            .unwrap();
+
         let task = queue.pop().expect("Maillon 6 failed");
-        assert_eq!(task.path, path.to_string_lossy(), "La queue doit restituer les tâches dans l'ordre");
+        assert_eq!(
+            task.path,
+            path.to_string_lossy(),
+            "La queue doit restituer les tâches dans l'ordre"
+        );
     }
 
     // --- MAILLON 7: LE COMMITTER (Writer Actor) ---
@@ -1210,19 +1406,29 @@ mod tests {
     fn test_maillon_7_writer_commit() {
         let store = GraphStore::new(":memory:").unwrap();
         let path = "/tmp/test.rs".to_string();
-        store.bulk_insert_files(&[(path.clone(), "proj".to_string(), 100, 12345)]).unwrap();
-        
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 100, 12345)])
+            .unwrap();
+
         let extraction = parser::ExtractionResult {
             project_slug: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
-                name: "test".to_string(), kind: "func".to_string(), start_line: 1, end_line: 1,
-                docstring: None, is_entry_point: false, is_public: true, tested: false,
-                is_nif: false, is_unsafe: false, properties: std::collections::HashMap::new(),
-                embedding: None
+                name: "test".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
             }],
-            relations: vec![]
+            relations: vec![],
         };
-        
+
         let task = DbWriteTask::FileExtraction {
             path: path.clone(),
             content: Some("fn test() {}".to_string()),
@@ -1232,33 +1438,51 @@ mod tests {
             t0: 0,
             t1: 0,
             t2: 0,
-            t3: 0
+            t3: 0,
         };
-        
-        store.insert_file_data_batch(&[task]).expect("Maillon 7 failed");
-        
+
+        store
+            .insert_file_data_batch(&[task])
+            .expect("Maillon 7 failed");
+
         let status_json = store.query_json("SELECT status FROM File").unwrap();
-        assert!(status_json.contains("indexed"), "Le committer doit passer le statut à 'indexed'");
+        assert!(
+            status_json.contains("indexed"),
+            "Le committer doit passer le statut à 'indexed'"
+        );
 
         let chunk_count = store.query_count("SELECT count(*) FROM Chunk").unwrap();
-        assert_eq!(chunk_count, 1, "Le committer doit aussi matérialiser un chunk dérivé");
+        assert_eq!(
+            chunk_count, 1,
+            "Le committer doit aussi matérialiser un chunk dérivé"
+        );
     }
 
     #[test]
     fn test_maillon_7b_chunk_embedding_storage() {
         let store = GraphStore::new(":memory:").unwrap();
         let path = "/tmp/test.rs".to_string();
-        store.bulk_insert_files(&[(path.clone(), "proj".to_string(), 100, 12345)]).unwrap();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 100, 12345)])
+            .unwrap();
 
         let extraction = parser::ExtractionResult {
             project_slug: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
-                name: "test".to_string(), kind: "func".to_string(), start_line: 1, end_line: 1,
-                docstring: None, is_entry_point: false, is_public: true, tested: false,
-                is_nif: false, is_unsafe: false, properties: std::collections::HashMap::new(),
-                embedding: None
+                name: "test".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
             }],
-            relations: vec![]
+            relations: vec![],
         };
 
         let task = DbWriteTask::FileExtraction {
@@ -1270,24 +1494,46 @@ mod tests {
             t0: 0,
             t1: 0,
             t2: 0,
-            t3: 0
+            t3: 0,
         };
 
-        store.insert_file_data_batch(&[task]).expect("Chunk setup failed");
-        store.ensure_embedding_model("chunk-bge-small-en-v1.5-384", "chunk", "BAAI/bge-small-en-v1.5", 384, "1").unwrap();
+        store
+            .insert_file_data_batch(&[task])
+            .expect("Chunk setup failed");
+        store
+            .ensure_embedding_model(
+                "chunk-bge-small-en-v1.5-384",
+                "chunk",
+                "BAAI/bge-small-en-v1.5",
+                384,
+                "1",
+            )
+            .unwrap();
 
-        let pending = store.fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10).unwrap();
-        assert_eq!(pending.len(), 1, "Le store doit détecter le chunk non vectorisé");
+        let pending = store
+            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
+            .unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "Le store doit détecter le chunk non vectorisé"
+        );
 
         let vector = vec![0.0_f32; 384];
-        store.update_chunk_embeddings("chunk-bge-small-en-v1.5-384", &[(
-            pending[0].0.clone(),
-            pending[0].2.clone(),
-            vector
-        )]).unwrap();
+        store
+            .update_chunk_embeddings(
+                "chunk-bge-small-en-v1.5-384",
+                &[(pending[0].0.clone(), pending[0].2.clone(), vector)],
+            )
+            .unwrap();
 
-        let stored = store.query_count("SELECT count(*) FROM ChunkEmbedding").unwrap();
-        assert_eq!(stored, 1, "Le vector store dérivé doit persister l'embedding du chunk");
+        let stored = store
+            .query_count("SELECT count(*) FROM ChunkEmbedding")
+            .unwrap();
+        assert_eq!(
+            stored, 1,
+            "Le vector store dérivé doit persister l'embedding du chunk"
+        );
     }
 
     #[test]
@@ -1304,23 +1550,25 @@ mod tests {
             ])
             .unwrap();
 
-        let extraction_for = |project: &str, name: &str, _body: &str, docstring: Option<&str>| parser::ExtractionResult {
-            project_slug: Some(project.to_string()),
-            symbols: vec![parser::Symbol {
-                name: name.to_string(),
-                kind: "function".to_string(),
-                start_line: 1,
-                end_line: 3,
-                docstring: docstring.map(|value| value.to_string()),
-                is_entry_point: false,
-                is_public: true,
-                tested: false,
-                is_nif: false,
-                is_unsafe: false,
-                properties: std::collections::HashMap::new(),
-                embedding: None,
-            }],
-            relations: vec![],
+        let extraction_for = |project: &str, name: &str, _body: &str, docstring: Option<&str>| {
+            parser::ExtractionResult {
+                project_slug: Some(project.to_string()),
+                symbols: vec![parser::Symbol {
+                    name: name.to_string(),
+                    kind: "function".to_string(),
+                    start_line: 1,
+                    end_line: 3,
+                    docstring: docstring.map(|value| value.to_string()),
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: std::collections::HashMap::new(),
+                    embedding: None,
+                }],
+                relations: vec![],
+            }
         };
 
         store
@@ -1362,13 +1610,23 @@ mod tests {
             .unwrap();
 
         store
-            .ensure_embedding_model("chunk-bge-small-en-v1.5-384", "chunk", "BAAI/bge-small-en-v1.5", 384, "1")
+            .ensure_embedding_model(
+                "chunk-bge-small-en-v1.5-384",
+                "chunk",
+                "BAAI/bge-small-en-v1.5",
+                384,
+                "1",
+            )
             .unwrap();
 
         let initial_pending = store
             .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
             .unwrap();
-        assert_eq!(initial_pending.len(), 3, "Tous les chunks initiaux doivent etre vectorisables");
+        assert_eq!(
+            initial_pending.len(),
+            3,
+            "Tous les chunks initiaux doivent etre vectorisables"
+        );
 
         let alpha_chunk_id = initial_pending
             .iter()
@@ -1383,7 +1641,12 @@ mod tests {
         store
             .update_chunk_embeddings("chunk-bge-small-en-v1.5-384", &updates)
             .unwrap();
-        assert_eq!(store.query_count("SELECT count(*) FROM ChunkEmbedding").unwrap(), 3);
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM ChunkEmbedding")
+                .unwrap(),
+            3
+        );
 
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
@@ -1405,7 +1668,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            store.query_count("SELECT count(*) FROM ChunkEmbedding").unwrap(),
+            store
+                .query_count("SELECT count(*) FROM ChunkEmbedding")
+                .unwrap(),
             2,
             "Seul le chunk du fichier change doit perdre son embedding derive"
         );
@@ -1413,7 +1678,11 @@ mod tests {
         let pending = store
             .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
             .unwrap();
-        assert_eq!(pending.len(), 1, "Le delta ne doit revectoriser que le chunk modifie");
+        assert_eq!(
+            pending.len(),
+            1,
+            "Le delta ne doit revectoriser que le chunk modifie"
+        );
         assert_eq!(pending[0].0, alpha_chunk_id);
         assert!(pending[0].1.contains("new_body") || pending[0].1.contains("new behavior"));
     }
@@ -1425,7 +1694,13 @@ mod tests {
             .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('chunk-drift', 'symbol', 'sym-drift', 'proj', 'function', 'fresh content', 'hash-fresh', 1, 1)")
             .unwrap();
         store
-            .ensure_embedding_model("chunk-bge-small-en-v1.5-384", "chunk", "BAAI/bge-small-en-v1.5", 384, "1")
+            .ensure_embedding_model(
+                "chunk-bge-small-en-v1.5-384",
+                "chunk",
+                "BAAI/bge-small-en-v1.5",
+                384,
+                "1",
+            )
             .unwrap();
         store
             .execute("INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash) VALUES ('chunk-drift', 'chunk-bge-small-en-v1.5-384', 'hash-stale')")
@@ -1434,7 +1709,11 @@ mod tests {
         let pending = store
             .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
             .unwrap();
-        assert_eq!(pending.len(), 1, "Un hash derive stale doit etre revectorise");
+        assert_eq!(
+            pending.len(),
+            1,
+            "Un hash derive stale doit etre revectorise"
+        );
         assert_eq!(pending[0].0, "chunk-drift");
         assert_eq!(pending[0].2, "hash-fresh");
     }
@@ -1611,11 +1890,13 @@ mod tests {
                 ('proj::X', 'X', 'function', true, true, false, false, 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES \
+            .execute(
+                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
                 ('/tmp/graph/a.rs', 'proj::A'), \
                 ('/tmp/graph/a.rs', 'proj::B'), \
                 ('/tmp/graph/other.rs', 'proj::C'), \
-                ('/tmp/graph/other.rs', 'proj::X')")
+                ('/tmp/graph/other.rs', 'proj::X')",
+            )
             .unwrap();
         store
             .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::B'), ('proj::B', 'proj::C'), ('proj::X', 'proj::C')")
@@ -1650,11 +1931,13 @@ mod tests {
                 ('proj::X', 'X', 'function', true, true, false, false, 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES \
+            .execute(
+                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
                 ('/tmp/graph/a.rs', 'proj::A'), \
                 ('/tmp/graph/a.rs', 'proj::B'), \
                 ('/tmp/graph/other.rs', 'proj::C'), \
-                ('/tmp/graph/other.rs', 'proj::X')")
+                ('/tmp/graph/other.rs', 'proj::X')",
+            )
             .unwrap();
         store
             .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::B'), ('proj::B', 'proj::C'), ('proj::X', 'proj::C')")
@@ -1688,10 +1971,12 @@ mod tests {
                 ('proj::Helper', 'Helper', 'function', true, true, false, false, 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES \
+            .execute(
+                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
                 ('/tmp/graph/file_anchor.rs', 'proj::FileAlpha'), \
                 ('/tmp/graph/file_anchor.rs', 'proj::FileBeta'), \
-                ('/tmp/graph/helper.rs', 'proj::Helper')")
+                ('/tmp/graph/helper.rs', 'proj::Helper')",
+            )
             .unwrap();
         store
             .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::FileAlpha', 'proj::Helper')")
@@ -1701,20 +1986,22 @@ mod tests {
         let first_count = store
             .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'file' AND anchor_id = '/tmp/graph/file_anchor.rs' AND radius = 2")
             .unwrap();
-        let first_projection = store
-            .query_graph_projection("file", file_path, 2)
-            .unwrap();
+        let first_projection = store.query_graph_projection("file", file_path, 2).unwrap();
 
         store.refresh_file_projection(file_path, 2).unwrap();
         let second_count = store
             .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'file' AND anchor_id = '/tmp/graph/file_anchor.rs' AND radius = 2")
             .unwrap();
-        let second_projection = store
-            .query_graph_projection("file", file_path, 2)
-            .unwrap();
+        let second_projection = store.query_graph_projection("file", file_path, 2).unwrap();
 
-        assert_eq!(first_count, second_count, "La projection dérivée ne doit pas se dupliquer");
-        assert_eq!(first_projection, second_projection, "La même ancre et le même rayon doivent rester stables");
+        assert_eq!(
+            first_count, second_count,
+            "La projection dérivée ne doit pas se dupliquer"
+        );
+        assert_eq!(
+            first_projection, second_projection,
+            "La même ancre et le même rayon doivent rester stables"
+        );
         assert!(second_projection.contains("contains"));
         assert!(second_projection.contains("proj::FileAlpha"));
         assert!(second_projection.contains("proj::FileBeta"));
@@ -1745,7 +2032,10 @@ mod tests {
         let first_state = store
             .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
             .unwrap();
-        assert_ne!(first_state, "[]", "L'etat de projection doit etre materialise");
+        assert_ne!(
+            first_state, "[]",
+            "L'etat de projection doit etre materialise"
+        );
         let first_projection_count = store
             .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
             .unwrap();
@@ -1758,7 +2048,10 @@ mod tests {
         let second_state = store
             .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
             .unwrap();
-        assert_ne!(second_state, "[]", "L'etat de projection doit rester disponible");
+        assert_ne!(
+            second_state, "[]",
+            "L'etat de projection doit rester disponible"
+        );
         let second_projection_count = store
             .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
             .unwrap();
@@ -1799,7 +2092,10 @@ mod tests {
         let before_d_state = store
             .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::D' AND radius = 2")
             .unwrap();
-        assert_ne!(before_d_state, "[]", "Le voisinage non touche doit avoir un etat materialise");
+        assert_ne!(
+            before_d_state, "[]",
+            "Le voisinage non touche doit avoir un etat materialise"
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(2));
         store
@@ -1817,7 +2113,10 @@ mod tests {
         let after_d_state = store
             .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::D' AND radius = 2")
             .unwrap();
-        assert_ne!(after_d_state, "[]", "Le voisinage non touche doit rester materialise");
+        assert_ne!(
+            after_d_state, "[]",
+            "Le voisinage non touche doit rester materialise"
+        );
 
         assert!(projection_a.contains("proj::C"));
         assert!(!projection_a.contains("proj::B"));
@@ -1825,5 +2124,107 @@ mod tests {
             before_d_state, after_d_state,
             "Le refresh d'une ancre modifiée ne doit pas réécrire les voisinages non touchés"
         );
+    }
+
+    #[test]
+    fn test_graph_projection_symbol_includes_calls_nif_edges() {
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/b.rs', 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+                ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
+                ('proj::B', 'B', 'function', true, true, true, false, 'proj')")
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
+                ('/tmp/graph/a.rs', 'proj::A'), \
+                ('/tmp/graph/b.rs', 'proj::B')",
+            )
+            .unwrap();
+        store
+            .execute("INSERT INTO CALLS_NIF (source_id, target_id) VALUES ('proj::A', 'proj::B')")
+            .unwrap();
+
+        let anchor_id = store
+            .refresh_symbol_projection("A", 1)
+            .unwrap()
+            .expect("anchor should resolve");
+        let projection = store
+            .query_graph_projection("symbol", &anchor_id, 1)
+            .unwrap();
+
+        assert!(projection.contains("proj::A"));
+        assert!(projection.contains("proj::B"));
+    }
+
+    #[test]
+    fn test_tombstone_missing_path_invalidates_dependent_graph_derivations() {
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/deleted.rs', 'proj'), ('/tmp/graph/keeper.rs', 'proj')")
+            .unwrap();
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+                ('proj::Deleted', 'Deleted', 'function', true, true, false, false, 'proj'), \
+                ('proj::Keeper', 'Keeper', 'function', true, true, false, false, 'proj')")
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
+                ('/tmp/graph/deleted.rs', 'proj::Deleted'), \
+                ('/tmp/graph/keeper.rs', 'proj::Keeper')",
+            )
+            .unwrap();
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::Keeper', 'proj::Deleted')")
+            .unwrap();
+
+        let keeper_anchor = store
+            .refresh_symbol_projection("Keeper", 1)
+            .unwrap()
+            .expect("anchor should resolve");
+        store
+            .execute(&format!(
+                "INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) \
+                 VALUES ('symbol', '{}', 1, 'graph-bge-small-en-v1.5-384', 'sig-keeper', '1', CAST([1.0] || repeat([0.0], 383) AS FLOAT[384]), 1000)",
+                keeper_anchor
+            ))
+            .unwrap();
+
+        let projection_before = store
+            .query_graph_projection("symbol", &keeper_anchor, 1)
+            .unwrap();
+        assert!(projection_before.contains("proj::Deleted"));
+
+        let affected = store
+            .tombstone_missing_path(std::path::Path::new("/tmp/graph/deleted.rs"))
+            .unwrap();
+        assert_eq!(affected, 1);
+
+        let projection_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = '{}'",
+                keeper_anchor
+            ))
+            .unwrap();
+        let state_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = '{}'",
+                keeper_anchor
+            ))
+            .unwrap();
+        let embedding_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM GraphEmbedding WHERE anchor_type = 'symbol' AND anchor_id = '{}'",
+                keeper_anchor
+            ))
+            .unwrap();
+
+        assert_eq!(projection_count, 0);
+        assert_eq!(state_count, 0);
+        assert_eq!(embedding_count, 0);
     }
 }

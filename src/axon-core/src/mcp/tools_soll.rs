@@ -1,8 +1,10 @@
 use anyhow::anyhow;
 use serde_json::{json, Value};
 
+use super::soll::{
+    canonical_soll_export_dir, find_latest_soll_export, parse_soll_export, SollRestoreCounts,
+};
 use super::McpServer;
-use super::soll::{canonical_soll_export_dir, find_latest_soll_export, parse_soll_export, SollRestoreCounts};
 
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
     ("EPITOMIZES", "soll.EPITOMIZES"),
@@ -27,7 +29,10 @@ impl McpServer {
 
         match action {
             "create" => {
-                let project_slug = data.get("project_slug").and_then(|v| v.as_str()).unwrap_or("AXO");
+                let project_slug = data
+                    .get("project_slug")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("AXO");
                 let reg_col = match entity {
                     "pillar" | "requirement" => "last_req",
                     "concept" => "last_cpt",
@@ -72,16 +77,25 @@ impl McpServer {
                                 let desc = data.get("description")?.as_str()?;
                                 let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                                 let q = "INSERT INTO soll.Pillar (id, title, description, metadata) VALUES (?, ?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([formatted_id, title, desc, meta.to_string()]))
-                            },
+                                self.graph_store.execute_param(
+                                    q,
+                                    &json!([formatted_id, title, desc, meta.to_string()]),
+                                )
+                            }
                             "requirement" => {
                                 let title = data.get("title")?.as_str()?;
                                 let desc = data.get("description")?.as_str()?;
-                                let prio = data.get("priority").and_then(|v| v.as_str()).unwrap_or("P2");
+                                let prio = data
+                                    .get("priority")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("P2");
                                 let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                                 let q = "INSERT INTO soll.Requirement (id, title, description, priority, metadata) VALUES (?, ?, ?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([formatted_id, title, desc, prio, meta.to_string()]))
-                            },
+                                self.graph_store.execute_param(
+                                    q,
+                                    &json!([formatted_id, title, desc, prio, meta.to_string()]),
+                                )
+                            }
                             "concept" => {
                                 let name = data.get("name")?.as_str()?;
                                 let expl = data.get("explanation")?.as_str()?;
@@ -89,39 +103,68 @@ impl McpServer {
                                 let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                                 let final_name = format!("{}: {}", formatted_id, name);
                                 let q = "INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES (?, ?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([final_name, expl, rat, meta.to_string()]))
-                            },
+                                self.graph_store.execute_param(
+                                    q,
+                                    &json!([final_name, expl, rat, meta.to_string()]),
+                                )
+                            }
                             "decision" => {
                                 let title = data.get("title")?.as_str()?;
                                 let ctx = data.get("context")?.as_str()?;
                                 let rat = data.get("rationale")?.as_str()?;
-                                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("accepted");
+                                let status = data
+                                    .get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("accepted");
                                 let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                                 let q = "INSERT INTO soll.Decision (id, title, context, rationale, status, metadata) VALUES (?, ?, ?, ?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([formatted_id, title, ctx, rat, status, meta.to_string()]))
-                            },
+                                self.graph_store.execute_param(
+                                    q,
+                                    &json!([
+                                        formatted_id,
+                                        title,
+                                        ctx,
+                                        rat,
+                                        status,
+                                        meta.to_string()
+                                    ]),
+                                )
+                            }
                             "milestone" => {
                                 let title = data.get("title")?.as_str()?;
-                                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("planned");
+                                let status = data
+                                    .get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("planned");
                                 let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                                 let q = "INSERT INTO soll.Milestone (id, title, status, metadata) VALUES (?, ?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([formatted_id, title, status, meta.to_string()]))
-                            },
+                                self.graph_store.execute_param(
+                                    q,
+                                    &json!([formatted_id, title, status, meta.to_string()]),
+                                )
+                            }
                             "stakeholder" => {
                                 let name = data.get("name")?.as_str()?;
                                 let role = data.get("role")?.as_str()?;
                                 let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                                 let q = "INSERT INTO soll.Stakeholder (name, role, metadata) VALUES (?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([name, role, meta.to_string()]))
-                            },
+                                self.graph_store
+                                    .execute_param(q, &json!([name, role, meta.to_string()]))
+                            }
                             "validation" => {
                                 let method = data.get("method")?.as_str()?;
                                 let result = data.get("result")?.as_str()?;
                                 let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                                let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs() as i64;
                                 let q = "INSERT INTO soll.Validation (id, method, result, timestamp, metadata) VALUES (?, ?, ?, ?, ?)";
-                                self.graph_store.execute_param(q, &json!([formatted_id, method, result, ts, meta.to_string()]))
-                            },
+                                self.graph_store.execute_param(
+                                    q,
+                                    &json!([formatted_id, method, result, ts, meta.to_string()]),
+                                )
+                            }
                             _ => Err(anyhow!("Unknown entity")),
                         };
 
@@ -129,13 +172,17 @@ impl McpServer {
                             Ok(_) => {
                                 let report = format!("✅ Entité SOLL créée : `{}`", formatted_id);
                                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
-                            },
-                            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'insertion: {}", e) }], "isError": true }))
+                            }
+                            Err(e) => Some(
+                                json!({ "content": [{ "type": "text", "text": format!("Erreur d'insertion: {}", e) }], "isError": true }),
+                            ),
                         }
-                    },
-                    Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }))
+                    }
+                    Err(e) => Some(
+                        json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }),
+                    ),
                 }
-            },
+            }
             "update" => {
                 let id = data.get("id")?.as_str()?;
                 let update_res = match entity {
@@ -144,42 +191,51 @@ impl McpServer {
                         let desc = data.get("description")?.as_str()?;
                         let q = "UPDATE soll.Pillar SET title = ?, description = ? WHERE id = ?";
                         self.graph_store.execute_param(q, &json!([title, desc, id]))
-                    },
+                    }
                     "requirement" => {
                         let title = data.get("title")?.as_str()?;
                         let desc = data.get("description")?.as_str()?;
-                        let q = "UPDATE soll.Requirement SET title = ?, description = ? WHERE id = ?";
+                        let q =
+                            "UPDATE soll.Requirement SET title = ?, description = ? WHERE id = ?";
                         self.graph_store.execute_param(q, &json!([title, desc, id]))
-                    },
+                    }
                     "concept" => {
                         let expl = data.get("explanation")?.as_str()?;
                         let rat = data.get("rationale")?.as_str()?;
                         let q = "UPDATE soll.Concept SET explanation = ?, rationale = ? WHERE name LIKE ?";
-                        self.graph_store.execute_param(q, &json!([expl, rat, format!("{}%", id)]))
-                    },
+                        self.graph_store
+                            .execute_param(q, &json!([expl, rat, format!("{}%", id)]))
+                    }
                     "decision" => {
                         let status = data.get("status")?.as_str()?;
                         let q = "UPDATE soll.Decision SET status = ? WHERE id = ?";
                         self.graph_store.execute_param(q, &json!([status, id]))
-                    },
+                    }
                     "stakeholder" => {
                         let role = data.get("role")?.as_str()?;
                         let q = "UPDATE soll.Stakeholder SET role = ? WHERE name = ?";
                         self.graph_store.execute_param(q, &json!([role, id]))
-                    },
+                    }
                     "validation" => {
                         let result = data.get("result")?.as_str()?;
-                        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64;
                         let q = "UPDATE soll.Validation SET result = ?, timestamp = ? WHERE id = ?";
                         self.graph_store.execute_param(q, &json!([result, ts, id]))
-                    },
+                    }
                     _ => Err(anyhow!("Unknown entity")),
                 };
                 match update_res {
-                    Ok(_) => Some(json!({ "content": [{ "type": "text", "text": format!("✅ Mise à jour réussie pour `{}`", id) }] })),
-                    Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur update: {}", e) }], "isError": true }))
+                    Ok(_) => Some(
+                        json!({ "content": [{ "type": "text", "text": format!("✅ Mise à jour réussie pour `{}`", id) }] }),
+                    ),
+                    Err(e) => Some(
+                        json!({ "content": [{ "type": "text", "text": format!("Erreur update: {}", e) }], "isError": true }),
+                    ),
                 }
-            },
+            }
             "link" => {
                 let src = data.get("source_id")?.as_str()?;
                 let tgt = data.get("target_id")?.as_str()?;
@@ -199,10 +255,17 @@ impl McpServer {
                         "REFINES" => "soll.REFINES",
                         "IMPACTS" => "IMPACTS",
                         "SUBSTANTIATES" => "SUBSTANTIATES",
-                        _ => return Some(json!({ "content": [{ "type": "text", "text": format!("Erreur: Type de relation inconnu '{}'", r) }], "isError": true })),
+                        _ => {
+                            return Some(
+                                json!({ "content": [{ "type": "text", "text": format!("Erreur: Type de relation inconnu '{}'", r) }], "isError": true }),
+                            )
+                        }
                     }
                 } else {
-                    match (src.split('-').next().unwrap_or(""), tgt.split('-').next().unwrap_or("")) {
+                    match (
+                        src.split('-').next().unwrap_or(""),
+                        tgt.split('-').next().unwrap_or(""),
+                    ) {
                         ("PIL", "REQ") | ("REQ", "PIL") => "soll.BELONGS_TO",
                         ("CPT", "REQ") | ("REQ", "CPT") => "soll.EXPLAINS",
                         ("PIL", "AXO") | ("AXO", "PIL") => "soll.EPITOMIZES",
@@ -215,10 +278,17 @@ impl McpServer {
                     }
                 };
 
-                let q = format!("INSERT INTO {} (source_id, target_id) VALUES (?, ?)", rel_table);
+                let q = format!(
+                    "INSERT INTO {} (source_id, target_id) VALUES (?, ?)",
+                    rel_table
+                );
                 match self.graph_store.execute_param(&q, &json!([src, tgt])) {
-                    Ok(_) => Some(json!({ "content": [{ "type": "text", "text": format!("✅ Liaison établie : `{}` -> `{}` (via {})", src, tgt, rel_table) }] })),
-                    Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }], "isError": true }))
+                    Ok(_) => Some(
+                        json!({ "content": [{ "type": "text", "text": format!("✅ Liaison établie : `{}` -> `{}` (via {})", src, tgt, rel_table) }] }),
+                    ),
+                    Err(e) => Some(
+                        json!({ "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }], "isError": true }),
+                    ),
                 }
             }
             _ => None,
@@ -234,16 +304,25 @@ impl McpServer {
         markdown.push_str(&format!("*Généré le : {}*\n\n", timestamp_str));
 
         markdown.push_str("## 1. Vision & Objectifs Stratégiques\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT title, description, goal, metadata FROM soll.Vision") {
+        if let Ok(res) = self
+            .graph_store
+            .query_json("SELECT title, description, goal, metadata FROM soll.Vision")
+        {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
                 let meta = r.get(3).cloned().unwrap_or_default();
-                markdown.push_str(&format!("### {}\n**Description:** {}\n**Goal:** {}\n**Meta:** `{}`\n\n", r[0], r[1], r[2], meta));
+                markdown.push_str(&format!(
+                    "### {}\n**Description:** {}\n**Goal:** {}\n**Meta:** `{}`\n\n",
+                    r[0], r[1], r[2], meta
+                ));
             }
         }
 
         markdown.push_str("## 2. Piliers d'Architecture\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, description, metadata FROM soll.Pillar") {
+        if let Ok(res) = self
+            .graph_store
+            .query_json("SELECT id, title, description, metadata FROM soll.Pillar")
+        {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
                 markdown.push_str(&format!("* **{}** : {} ({})\n", r[0], r[1], r[2]));
@@ -254,7 +333,10 @@ impl McpServer {
         }
 
         markdown.push_str("\n## 2b. Concepts\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT name, explanation, rationale, metadata FROM soll.Concept") {
+        if let Ok(res) = self
+            .graph_store
+            .query_json("SELECT name, explanation, rationale, metadata FROM soll.Concept")
+        {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
                 markdown.push_str(&format!("* **{}** : {} ({})\n", r[0], r[1], r[2]));
@@ -265,10 +347,16 @@ impl McpServer {
         }
 
         markdown.push_str("\n## 3. Jalons & Roadmap (Milestones)\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status, metadata FROM soll.Milestone") {
+        if let Ok(res) = self
+            .graph_store
+            .query_json("SELECT id, title, status, metadata FROM soll.Milestone")
+        {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {} : {}\n*Statut :* `{}`\n\n", r[0], r[1], r[2]));
+                markdown.push_str(&format!(
+                    "### {} : {}\n*Statut :* `{}`\n\n",
+                    r[0], r[1], r[2]
+                ));
                 if let Some(meta) = r.get(3).filter(|m| !m.is_empty() && *m != "{}") {
                     markdown.push_str(&format!("*Meta :* `{}`\n", meta));
                 }
@@ -277,11 +365,15 @@ impl McpServer {
         }
 
         markdown.push_str("## 4. Exigences & Rayon d'Impact (Requirements)\n");
-        let req_query = "SELECT id, title, priority, description, status, metadata FROM soll.Requirement";
+        let req_query =
+            "SELECT id, title, priority, description, status, metadata FROM soll.Requirement";
         if let Ok(res) = self.graph_store.query_json(req_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("### {} - {}\n*Priorité :* `{}`\n*Description :* {}\n", r[0], r[1], r[2], r[3]));
+                markdown.push_str(&format!(
+                    "### {} - {}\n*Priorité :* `{}`\n*Description :* {}\n",
+                    r[0], r[1], r[2], r[3]
+                ));
                 if let Some(status) = r.get(4).filter(|m| !m.is_empty()) {
                     markdown.push_str(&format!("*Statut :* `{}`\n", status));
                 }
@@ -312,10 +404,16 @@ impl McpServer {
         }
 
         markdown.push_str("## 6. Preuves de Validation & Witness\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, method, result, timestamp, metadata FROM soll.Validation") {
+        if let Ok(res) = self
+            .graph_store
+            .query_json("SELECT id, method, result, timestamp, metadata FROM soll.Validation")
+        {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("*   `{}` : **{}** via `{}` (Certifié le {})\n", r[0], r[2], r[1], r[3]));
+                markdown.push_str(&format!(
+                    "*   `{}` : **{}** via `{}` (Certifié le {})\n",
+                    r[0], r[2], r[1], r[3]
+                ));
                 if let Some(meta) = r.get(4).filter(|m| !m.is_empty() && *m != "{}") {
                     markdown.push_str(&format!("  Meta: `{}`\n", meta));
                 }
@@ -324,14 +422,17 @@ impl McpServer {
 
         markdown.push_str("\n## 7. Liens de Traçabilité SOLL\n");
         for (relation_type, table_name) in SOLL_RELATION_EXPORTS {
-            if let Ok(res) = self
-                .graph_store
-                .query_json(&format!("SELECT source_id, target_id FROM {} ORDER BY source_id, target_id", table_name))
-            {
+            if let Ok(res) = self.graph_store.query_json(&format!(
+                "SELECT source_id, target_id FROM {} ORDER BY source_id, target_id",
+                table_name
+            )) {
                 let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
                 for row in rows {
                     if row.len() >= 2 {
-                        markdown.push_str(&format!("* `{}`: `{}` -> `{}`\n", relation_type, row[0], row[1]));
+                        markdown.push_str(&format!(
+                            "* `{}`: `{}` -> `{}`\n",
+                            relation_type, row[0], row[1]
+                        ));
                     }
                 }
             }
@@ -362,8 +463,10 @@ impl McpServer {
                     markdown.chars().take(300).collect::<String>()
                 );
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
-            },
-            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture: {}", e) }], "isError": true }))
+            }
+            Err(e) => Some(
+                json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture: {}", e) }], "isError": true }),
+            ),
         }
     }
 
@@ -400,8 +503,9 @@ impl McpServer {
             )
             .ok()?;
 
-        let violation_count =
-            orphan_requirements.len() + validations_without_verifies.len() + decisions_without_links.len();
+        let violation_count = orphan_requirements.len()
+            + validations_without_verifies.len()
+            + decisions_without_links.len();
 
         let mut report = format!(
             "Validation SOLL: {} violation(s) de cohérence minimale détectée(s).\n",
@@ -439,7 +543,9 @@ impl McpServer {
     }
 
     pub(crate) fn axon_restore_soll(&self, args: &Value) -> Option<Value> {
-        let path = args.get("path").and_then(|v| v.as_str())
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .or_else(find_latest_soll_export)?;
 
@@ -491,9 +597,11 @@ impl McpServer {
                     "description": vision.description,
                     "goal": vision.goal,
                     "metadata": metadata
-                })
+                }),
             ) {
-                return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore vision error: {}", e) }], "isError": true }));
+                return Some(
+                    json!({ "content": [{ "type": "text", "text": format!("SOLL restore vision error: {}", e) }], "isError": true }),
+                );
             }
             restored.vision += 1;
         }
@@ -609,7 +717,9 @@ impl McpServer {
                 &relation.source_id,
                 &relation.target_id,
             ) {
-                return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore relation error: {}", e) }], "isError": true }));
+                return Some(
+                    json!({ "content": [{ "type": "text", "text": format!("SOLL restore relation error: {}", e) }], "isError": true }),
+                );
             }
             restored.relations += 1;
         }

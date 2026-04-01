@@ -1,4 +1,4 @@
-use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
+use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -41,9 +41,8 @@ impl GoParser {
             let end_line = node.end_position().row + 1;
 
             let name_lower = name.to_lowercase();
-            let is_entry = name == "main"
-                || name_lower.contains("handler")
-                || name_lower.contains("route");
+            let is_entry =
+                name == "main" || name_lower.contains("handler") || name_lower.contains("route");
 
             let is_public = name.chars().next().is_some_and(|c| c.is_uppercase());
             let mut is_unsafe = false;
@@ -91,10 +90,16 @@ impl GoParser {
                 for child in param_list.named_children(&mut cursor) {
                     if child.kind() == "parameter_declaration" {
                         if let Some(t_node) = Self::find_child_by_type(child, "type_identifier") {
-                            receiver_type = t_node.utf8_text(source_bytes).unwrap_or("").to_string();
-                        } else if let Some(ptr_type) = Self::find_child_by_type(child, "pointer_type") {
-                            if let Some(inner) = Self::find_child_by_type(ptr_type, "type_identifier") {
-                                receiver_type = inner.utf8_text(source_bytes).unwrap_or("").to_string();
+                            receiver_type =
+                                t_node.utf8_text(source_bytes).unwrap_or("").to_string();
+                        } else if let Some(ptr_type) =
+                            Self::find_child_by_type(child, "pointer_type")
+                        {
+                            if let Some(inner) =
+                                Self::find_child_by_type(ptr_type, "type_identifier")
+                            {
+                                receiver_type =
+                                    inner.utf8_text(source_bytes).unwrap_or("").to_string();
                             }
                         }
                     }
@@ -194,7 +199,11 @@ impl GoParser {
             } else if child.kind() == "import_spec" {
                 Self::extract_import_spec(child, source_bytes, result);
             } else if child.kind() == "interpreted_string_literal" {
-                let path = child.utf8_text(source_bytes).unwrap_or("").trim_matches('"').to_string();
+                let path = child
+                    .utf8_text(source_bytes)
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .to_string();
                 let properties = HashMap::new();
                 result.relations.push(Relation {
                     from: "".to_string(),
@@ -215,7 +224,11 @@ impl GoParser {
             if child.kind() == "package_identifier" {
                 alias = child.utf8_text(source_bytes).unwrap_or("").to_string();
             } else if child.kind() == "interpreted_string_literal" {
-                path = child.utf8_text(source_bytes).unwrap_or("").trim_matches('"').to_string();
+                path = child
+                    .utf8_text(source_bytes)
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .to_string();
             } else if child.kind() == "dot" {
                 alias = ".".to_string();
             }
@@ -292,7 +305,9 @@ impl GoParser {
 
     fn find_child_by_type<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
         let mut cursor = node.walk();
-        let res = node.named_children(&mut cursor).find(|&child| child.kind() == kind);
+        let res = node
+            .named_children(&mut cursor)
+            .find(|&child| child.kind() == kind);
         res
     }
 }

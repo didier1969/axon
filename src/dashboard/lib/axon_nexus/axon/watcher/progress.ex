@@ -6,9 +6,7 @@ defmodule Axon.Watcher.Progress do
   require Logger
   alias Axon.Watcher.SqlGateway
 
-  @overlay_prefix {:axon, :watcher, :progress}
-
-  def get_status(repo_slug) do
+  def get_status(_repo_slug) do
     query = "SELECT status, count(*) as count FROM File GROUP BY status;"
 
     db_status =
@@ -35,7 +33,8 @@ defmodule Axon.Watcher.Progress do
                 {status, parsed_count}
               end)
               total = Enum.sum(Map.values(stats))
-              indexed = Map.get(stats, "indexed", 0)
+              indexed =
+                Map.get(stats, "indexed", 0) + Map.get(stats, "indexed_degraded", 0)
 
               progress = if total > 0, do: round((indexed / total) * 100), else: 0
 
@@ -55,7 +54,7 @@ defmodule Axon.Watcher.Progress do
           default_status()
       end
 
-    merge_overlay_status(repo_slug, db_status)
+    db_status
   end
 
   def get_directory_stats(_repo_slug) do
@@ -71,9 +70,9 @@ defmodule Axon.Watcher.Progress do
             |> Enum.into(%{}, fn {slug, project_rows} ->
               total = Enum.sum(Enum.map(project_rows, fn [_, _, c] -> c end))
               completed =
-                Enum.find_value(project_rows, 0, fn
-                  [_, "indexed", c] -> c
-                  _ -> false
+                Enum.reduce(project_rows, 0, fn
+                  [_, status, c], acc when status in ["indexed", "indexed_degraded"] -> acc + c
+                  _, acc -> acc
                 end)
 
               {slug,
@@ -104,45 +103,6 @@ defmodule Axon.Watcher.Progress do
     }
   end
 
-  def update_status(repo_slug, attrs) when is_binary(repo_slug) and is_map(attrs) do
-    previous = read_overlay(repo_slug)
-
-    merged =
-      previous
-      |> Map.merge(stringify_keys(attrs))
-      |> Map.put("last_update", DateTime.utc_now() |> DateTime.to_iso8601())
-
-    :persistent_term.put(overlay_key(repo_slug), merged)
-    :ok
-  end
-
-  def purge_repo(repo_slug) when is_binary(repo_slug) do
-    :persistent_term.erase(overlay_key(repo_slug))
-    :ok
-  end
-
   def get_file_mtime(_, _), do: 0
   def save_file_mtime(_, _, _), do: :ok
-
-  defp merge_overlay_status(repo_slug, db_status) do
-    overlay = read_overlay(repo_slug)
-
-    case overlay do
-      %{} = overlay when map_size(overlay) > 0 ->
-        Map.merge(db_status, overlay)
-
-      _ ->
-        db_status
-    end
-  end
-
-  defp read_overlay(repo_slug) do
-    :persistent_term.get(overlay_key(repo_slug), %{})
-  end
-
-  defp overlay_key(repo_slug), do: {@overlay_prefix, repo_slug}
-
-  defp stringify_keys(map) do
-    Enum.into(map, %{}, fn {key, value} -> {to_string(key), value} end)
-  end
 end

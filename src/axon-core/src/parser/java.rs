@@ -1,4 +1,4 @@
-use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
+use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
 use tree_sitter::Node;
 
 pub struct JavaParser {
@@ -114,7 +114,8 @@ impl JavaParser {
                 if let Some(modifiers) = modifiers_node {
                     let mut cursor = modifiers.walk();
                     for mod_node in modifiers.children(&mut cursor) {
-                        if mod_node.kind() == "marker_annotation" || mod_node.kind() == "annotation" {
+                        if mod_node.kind() == "marker_annotation" || mod_node.kind() == "annotation"
+                        {
                             if let Some(ann_name) = mod_node.child_by_field_name("name") {
                                 if let Ok(ann_text) = ann_name.utf8_text(content) {
                                     decorators.push(ann_text.to_string());
@@ -193,7 +194,10 @@ impl JavaParser {
                 };
 
                 let mut properties = std::collections::HashMap::new();
-                properties.insert("line".to_string(), (node.start_position().row + 1).to_string());
+                properties.insert(
+                    "line".to_string(),
+                    (node.start_position().row + 1).to_string(),
+                );
 
                 relations.push(Relation {
                     from: "method".to_string(),
@@ -221,6 +225,10 @@ impl Parser for JavaParser {
             );
         }
 
-        ExtractionResult { project_slug: None, symbols, relations }
+        ExtractionResult {
+            project_slug: None,
+            symbols,
+            relations,
+        }
     }
 }

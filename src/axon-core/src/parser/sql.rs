@@ -39,9 +39,13 @@ impl Parser for SqlParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut symbols = Vec::new();
         let mut relations = Vec::new();
-        
+
         if content.is_empty() {
-            return ExtractionResult { project_slug: None, symbols, relations };
+            return ExtractionResult {
+                project_slug: None,
+                symbols,
+                relations,
+            };
         }
 
         let lines: Vec<&str> = content.lines().collect();
@@ -56,7 +60,7 @@ impl Parser for SqlParser {
                 let start_byte = cap.get(0).unwrap().start();
                 let line_no = get_line_no(start_byte);
                 let end_line = Self::find_statement_end(&lines, line_no.saturating_sub(1));
-                
+
                 symbols.push(Symbol {
                     name,
                     kind: "table".to_string(),
@@ -80,7 +84,7 @@ impl Parser for SqlParser {
                 let start_byte = cap.get(0).unwrap().start();
                 let line_no = get_line_no(start_byte);
                 let end_line = Self::find_statement_end(&lines, line_no.saturating_sub(1));
-                
+
                 symbols.push(Symbol {
                     name,
                     kind: "view".to_string(),
@@ -104,7 +108,7 @@ impl Parser for SqlParser {
                 let start_byte = cap.get(0).unwrap().start();
                 let line_no = get_line_no(start_byte);
                 let end_line = Self::find_statement_end(&lines, line_no.saturating_sub(1));
-                
+
                 symbols.push(Symbol {
                     name,
                     kind: "function".to_string(),
@@ -125,9 +129,13 @@ impl Parser for SqlParser {
         for cap in self.dml_re.captures_iter(content) {
             if let (Some(m1), Some(m2)) = (cap.get(1), cap.get(2)) {
                 let action_raw = m1.as_str().to_uppercase();
-                let action = action_raw.split_whitespace().next().unwrap_or("").to_string();
+                let action = action_raw
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 let table = m2.as_str().to_string();
-                
+
                 let is_dangerous = action.contains("DELETE") || action.contains("UPDATE");
                 let mut props = HashMap::new();
                 if is_dangerous {
@@ -143,6 +151,10 @@ impl Parser for SqlParser {
             }
         }
 
-        ExtractionResult { project_slug: None, symbols, relations }
+        ExtractionResult {
+            project_slug: None,
+            symbols,
+            relations,
+        }
     }
 }

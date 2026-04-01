@@ -1,6 +1,6 @@
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::fs;
-use once_cell::sync::Lazy;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -16,14 +16,30 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| {
     load_config().unwrap_or_else(|_| Config {
         indexing: IndexingConfig {
             supported_extensions: vec![
-                "py".to_string(), "ex".to_string(), "exs".to_string(), "rs".to_string(), 
-                "go".to_string(), "java".to_string(), "c".to_string(), "cpp".to_string(), "h".to_string(),
-                "js".to_string(), "jsx".to_string(), "ts".to_string(), "tsx".to_string(), "sql".to_string(), 
-                "md".to_string(), "markdown".to_string(),
-                "yml".to_string(), "yaml".to_string(), "toml".to_string(), "conf".to_string(), 
-                "html".to_string(), "css".to_string()
-            ]
-        }
+                "py".to_string(),
+                "ex".to_string(),
+                "exs".to_string(),
+                "rs".to_string(),
+                "go".to_string(),
+                "java".to_string(),
+                "c".to_string(),
+                "cpp".to_string(),
+                "h".to_string(),
+                "js".to_string(),
+                "jsx".to_string(),
+                "ts".to_string(),
+                "tsx".to_string(),
+                "sql".to_string(),
+                "md".to_string(),
+                "markdown".to_string(),
+                "yml".to_string(),
+                "yaml".to_string(),
+                "toml".to_string(),
+                "conf".to_string(),
+                "html".to_string(),
+                "css".to_string(),
+            ],
+        },
     })
 });
 
@@ -37,7 +53,9 @@ fn load_config() -> anyhow::Result<Config> {
             let config: Config = toml::from_str(&content)?;
             return Ok(config);
         }
-        if !path.pop() { break; }
+        if !path.pop() {
+            break;
+        }
     }
     anyhow::bail!("Config not found")
 }

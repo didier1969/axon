@@ -1,16 +1,38 @@
+// Copyright (c) Didier Stadelmann. All rights reserved.
+
 use serde_json::{json, Value};
 
 use super::format::format_table_from_json;
 use super::McpServer;
 
 impl McpServer {
-    fn impact_target_filter() -> &'static str {
-        "target_id IN (SELECT id FROM Symbol WHERE name = $sym OR id = $sym)"
+    fn resolve_scoped_symbol_id(&self, symbol: &str, project: Option<&str>) -> Option<String> {
+        let (query, params) = if let Some(project) = project {
+            (
+                "SELECT id FROM Symbol \
+                 WHERE (name = $sym OR id = $sym) AND project_slug = $project \
+                 LIMIT 1",
+                json!({ "sym": symbol, "project": project }),
+            )
+        } else {
+            (
+                "SELECT id FROM Symbol WHERE name = $sym OR id = $sym LIMIT 1",
+                json!({ "sym": symbol }),
+            )
+        };
+        let res = self.graph_store.query_json_param(query, &params).ok()?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        rows.first()?.first()?.as_str().map(|value| value.to_string())
     }
 
-    fn build_local_projection_section(&self, symbol: &str, depth: u64) -> Option<String> {
+    fn build_local_projection_section(
+        &self,
+        _symbol: &str,
+        anchor: &str,
+        depth: u64,
+    ) -> Option<String> {
         let radius = depth.max(1).min(2);
-        let anchor_id = self.graph_store.refresh_symbol_projection(symbol, radius).ok()??;
+        let anchor_id = self.graph_store.refresh_symbol_projection(anchor, radius).ok()??;
         let projection_res = self
             .graph_store
             .query_graph_projection("symbol", &anchor_id, radius)
@@ -31,11 +53,15 @@ impl McpServer {
 
     pub(crate) fn axon_impact(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
+        let project = args.get("project").and_then(|v| v.as_str());
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
+        let Some(target_id) = self.resolve_scoped_symbol_id(symbol, project) else {
+            return self.axon_impact_without_calls(symbol, project, depth);
+        };
 
         let query = format!(
             "WITH RECURSIVE traverse(caller, callee, depth) AS (
-                SELECT source_id, target_id, 1 as depth FROM CALLS WHERE {}
+                SELECT source_id, target_id, 1 as depth FROM CALLS WHERE target_id = $target_id
                 UNION ALL
                 SELECT c.source_id, c.target_id, t.depth + 1
                 FROM CALLS c JOIN traverse t ON c.target_id = t.caller
@@ -46,25 +72,24 @@ impl McpServer {
             JOIN Symbol s ON t.caller = s.id
             LEFT JOIN CONTAINS con ON s.id = con.target_id
             LEFT JOIN File f ON f.path = con.source_id",
-            Self::impact_target_filter(),
             depth
         );
-        let params = json!({ "sym": symbol });
+        let params = json!({ "target_id": target_id });
 
         match self.graph_store.query_json_param(&query, &params) {
             Ok(res) => {
                 let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-                let table = format_table_from_json(&res, &["Fichier / Projet", "Symbole Impacté", "Type"]);
+                let table =
+                    format_table_from_json(&res, &["Fichier / Projet", "Symbole Impacté", "Type"]);
                 let count_query = format!(
                     "WITH RECURSIVE traverse(caller, callee, depth) AS (
-                        SELECT source_id, target_id, 1 as depth FROM CALLS WHERE {}
+                        SELECT source_id, target_id, 1 as depth FROM CALLS WHERE target_id = $target_id
                         UNION ALL
                         SELECT c.source_id, c.target_id, t.depth + 1
                         FROM CALLS c JOIN traverse t ON c.target_id = t.caller
                         WHERE t.depth < {}
                     )
                     SELECT count(DISTINCT caller) FROM traverse",
-                    Self::impact_target_filter(),
                     depth
                 );
                 let impact_radius = self
@@ -73,7 +98,7 @@ impl McpServer {
                     .unwrap_or(0);
 
                 if rows.is_empty() && impact_radius == 0 {
-                    return self.axon_impact_without_calls(symbol, depth);
+                    return self.axon_impact_without_calls(symbol, project, depth);
                 }
 
                 let mut report = format!("## 💥 Analyse d'Impact Transversale : {}\n\n", symbol);
@@ -82,23 +107,45 @@ impl McpServer {
                     depth, impact_radius
                 ));
                 report.push_str(&table);
-                if let Some(section) = self.build_local_projection_section(symbol, depth) {
+                if let Some(section) = self.build_local_projection_section(symbol, &target_id, depth)
+                {
                     report.push_str(&section);
                 }
 
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
-            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Impact Analysis Error: {}", e) }], "isError": true })),
+            Err(e) => Some(
+                json!({ "content": [{ "type": "text", "text": format!("Impact Analysis Error: {}", e) }], "isError": true }),
+            ),
         }
     }
 
-    fn axon_impact_without_calls(&self, symbol: &str, depth: u64) -> Option<Value> {
+    fn axon_impact_without_calls(
+        &self,
+        symbol: &str,
+        project: Option<&str>,
+        depth: u64,
+    ) -> Option<Value> {
+        let (query, params) = if let Some(project) = project {
+            (
+                "SELECT name, kind, COALESCE(project_slug, 'unknown') \
+                 FROM Symbol \
+                 WHERE (name = $sym OR id = $sym) AND project_slug = $project \
+                 LIMIT 5",
+                json!({ "sym": symbol, "project": project }),
+            )
+        } else {
+            (
+                "SELECT name, kind, COALESCE(project_slug, 'unknown') \
+                 FROM Symbol \
+                 WHERE name = $sym OR id = $sym \
+                 LIMIT 5",
+                json!({ "sym": symbol }),
+            )
+        };
         let symbol_res = self
             .graph_store
-            .query_json_param(
-                "SELECT name, kind, COALESCE(project_slug, 'unknown') FROM Symbol WHERE name = $sym OR id = $sym LIMIT 5",
-                &json!({"sym": symbol}),
-            )
+            .query_json_param(query, &params)
             .unwrap_or_else(|_| "[]".to_string());
         let symbol_rows: Vec<Vec<Value>> = serde_json::from_str(&symbol_res).unwrap_or_default();
         if symbol_rows.is_empty() {
@@ -109,15 +156,21 @@ impl McpServer {
                 }]
             }));
         }
+        let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
 
-        let calls_count = self.graph_store.query_count("SELECT count(*) FROM CALLS").unwrap_or(0);
+        let calls_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM CALLS")
+            .unwrap_or(0);
         if calls_count > 0 {
             return Some(json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "## 💥 Analyse d'Impact Transversale : {}\n\nAucun impact n'a ete calcule a la profondeur {}.",
-                        symbol, depth
+                        "## 💥 Analyse d'Impact Transversale : {}\n\n{}Aucun impact n'a ete calcule a la profondeur {}.",
+                        symbol,
+                        degraded_note.clone().unwrap_or_default(),
+                        depth
                     )
                 }]
             }));
@@ -127,8 +180,9 @@ impl McpServer {
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "## 💥 Analyse d'Impact Transversale : {}\n\nLe symbole existe, mais le graphe d'appel n'est pas encore disponible dans cette base live.\n\n{}\n\n**Etat:** CALLS est vide; le rayon d'impact ne peut pas encore etre calcule de maniere fiable.",
+                    "## 💥 Analyse d'Impact Transversale : {}\n\n{}Le symbole existe, mais le graphe d'appel n'est pas encore disponible dans cette base live.\n\n{}\n\n**Etat:** CALLS est vide; le rayon d'impact ne peut pas encore etre calcule de maniere fiable.",
                     symbol,
+                    degraded_note.unwrap_or_default(),
                     format_table_from_json(&symbol_res, &["Nom", "Type", "Projet"])
                 )
             }]
@@ -163,20 +217,21 @@ impl McpServer {
 
     pub(crate) fn axon_simulate_mutation(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
+        let project = args.get("project").and_then(|v| v.as_str());
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2);
+        let target_id = self.resolve_scoped_symbol_id(symbol, project)?;
         let query = format!(
             "WITH RECURSIVE traverse(caller, callee, depth) AS ( \
-                SELECT source_id, target_id, 1 as depth FROM CALLS WHERE {} \
+                SELECT source_id, target_id, 1 as depth FROM CALLS WHERE target_id = $target_id \
                 UNION ALL \
                 SELECT c.source_id, c.target_id, t.depth + 1 \
                 FROM CALLS c JOIN traverse t ON c.target_id = t.caller \
                 WHERE t.depth < {} \
             ) \
             SELECT count(DISTINCT caller) FROM traverse",
-            Self::impact_target_filter(),
             depth
         );
-        let params = json!({"sym": symbol});
+        let params = json!({"target_id": target_id});
 
         match self.graph_store.query_json_param(&query, &params) {
             Ok(res) => {
@@ -187,7 +242,9 @@ impl McpServer {
                 );
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
-            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Simulation Error: {}", e) }], "isError": true })),
+            Err(e) => Some(
+                json!({ "content": [{ "type": "text", "text": format!("Simulation Error: {}", e) }], "isError": true }),
+            ),
         }
     }
 }

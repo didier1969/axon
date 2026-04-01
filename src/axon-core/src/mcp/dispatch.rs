@@ -29,7 +29,9 @@ impl McpServer {
             "axon_api_break_check" => self.axon_api_break_check(arguments),
             "axon_simulate_mutation" => self.axon_simulate_mutation(arguments),
             "axon_debug" => self.axon_debug(),
-            _ => Some(json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true })),
+            _ => Some(
+                json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true }),
+            ),
         }
     }
 }

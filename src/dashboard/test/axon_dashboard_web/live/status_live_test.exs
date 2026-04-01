@@ -31,6 +31,26 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     assert render(view) =~ "lib/core.ex"
   end
 
+  test "renders degraded file events as controlled degradation, not error", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/")
+
+    send(
+      view.pid,
+      {:bridge_event,
+       %{
+         "FileIndexed" => %{
+           "path" => "lib/degraded.ex",
+           "status" => "indexed_degraded"
+         }
+       }}
+    )
+
+    html = render(view)
+    assert html =~ "lib/degraded.ex"
+    assert html =~ "[DEGRADED]"
+    refute html =~ "[ERROR]"
+  end
+
   test "completes on scan complete event", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
 

@@ -1,11 +1,11 @@
-use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
-use tracing::{info, error, debug};
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
 use crate::graph::GraphStore;
 use crate::queue::QueueStore;
 use crate::service_guard::{self, ServicePressure};
+use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+use tracing::{debug, error, info};
 
 const SYMBOL_MODEL_ID: &str = "sym-bge-small-en-v1.5-384";
 const CHUNK_MODEL_ID: &str = "chunk-bge-small-en-v1.5-384";
@@ -43,27 +43,55 @@ impl SemanticWorkerPool {
             Ok(m) => {
                 info!("✅ Semantic Worker: BGE-Small Model loaded successfully.");
                 m
-            },
+            }
             Err(e) => {
                 error!("❌ Semantic Worker: FATAL ONNX INIT ERROR: {:?}", e);
                 return;
             }
         };
 
-        if let Err(e) = graph_store.ensure_embedding_model(SYMBOL_MODEL_ID, "symbol", MODEL_NAME, 384, MODEL_VERSION) {
-            error!("Semantic Worker: failed to register symbol embedding model: {:?}", e);
+        if let Err(e) = graph_store.ensure_embedding_model(
+            SYMBOL_MODEL_ID,
+            "symbol",
+            MODEL_NAME,
+            384,
+            MODEL_VERSION,
+        ) {
+            error!(
+                "Semantic Worker: failed to register symbol embedding model: {:?}",
+                e
+            );
         }
-        if let Err(e) = graph_store.ensure_embedding_model(CHUNK_MODEL_ID, "chunk", MODEL_NAME, 384, MODEL_VERSION) {
-            error!("Semantic Worker: failed to register chunk embedding model: {:?}", e);
+        if let Err(e) = graph_store.ensure_embedding_model(
+            CHUNK_MODEL_ID,
+            "chunk",
+            MODEL_NAME,
+            384,
+            MODEL_VERSION,
+        ) {
+            error!(
+                "Semantic Worker: failed to register chunk embedding model: {:?}",
+                e
+            );
         }
-        if let Err(e) = graph_store.ensure_embedding_model(GRAPH_MODEL_ID, "graph", MODEL_NAME, 384, MODEL_VERSION) {
-            error!("Semantic Worker: failed to register graph embedding model: {:?}", e);
+        if let Err(e) = graph_store.ensure_embedding_model(
+            GRAPH_MODEL_ID,
+            "graph",
+            MODEL_NAME,
+            384,
+            MODEL_VERSION,
+        ) {
+            error!(
+                "Semantic Worker: failed to register graph embedding model: {:?}",
+                e
+            );
         }
 
         info!("Semantic Worker: Hunting for unembedded symbols...");
-        
+
         loop {
-            let policy = semantic_policy(queue_store.common_len(), service_guard::current_pressure());
+            let policy =
+                semantic_policy(queue_store.common_len(), service_guard::current_pressure());
             if policy.pause {
                 thread::sleep(policy.sleep);
                 continue;
@@ -74,15 +102,21 @@ impl SemanticWorkerPool {
                 Ok(chunks) if !chunks.is_empty() => {
                     chunk_backlog_active = true;
                     debug!("Semantic Worker: Embedding {} chunks...", chunks.len());
-                    let texts: Vec<String> = chunks.iter().map(|(_, content, _)| content.clone()).collect();
+                    let texts: Vec<String> = chunks
+                        .iter()
+                        .map(|(_, content, _)| content.clone())
+                        .collect();
                     match model.embed(texts, None) {
                         Ok(embeddings) => {
-                            let updates: Vec<(String, String, Vec<f32>)> = chunks.into_iter()
+                            let updates: Vec<(String, String, Vec<f32>)> = chunks
+                                .into_iter()
                                 .zip(embeddings.into_iter())
                                 .map(|((id, _, hash), emb)| (id, hash, emb))
                                 .collect();
 
-                            if let Err(e) = graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, &updates) {
+                            if let Err(e) =
+                                graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, &updates)
+                            {
                                 error!("Semantic Worker: Chunk DB Write Error: {:?}", e);
                             }
                         }
@@ -104,28 +138,29 @@ impl SemanticWorkerPool {
                 Ok(symbols) if !symbols.is_empty() => {
                     symbol_backlog_active = true;
                     debug!("Semantic Worker: Embedding {} symbols...", symbols.len());
-                    
+
                     let texts: Vec<String> = symbols.iter().map(|s| s.1.clone()).collect();
                     match model.embed(texts, None) {
                         Ok(embeddings) => {
-                            let updates: Vec<(String, Vec<f32>)> = symbols.into_iter()
+                            let updates: Vec<(String, Vec<f32>)> = symbols
+                                .into_iter()
                                 .zip(embeddings.into_iter())
                                 .map(|((id, _), emb)| (id, emb))
                                 .collect();
-                            
+
                             if let Err(e) = graph_store.update_symbol_embeddings(&updates) {
                                 error!("Semantic Worker: DB Write Error: {:?}", e);
                             }
-                        },
+                        }
                         Err(e) => {
                             if is_fatal_embedding_error(&e) {
                                 error!("Semantic Worker: fatal symbol embedding error, disabling semantic worker: {:?}", e);
                                 return;
                             }
                             error!("Semantic Worker: Embedding failed: {:?}", e);
-                        },
+                        }
                     }
-                },
+                }
                 Ok(_) => thread::sleep(policy.idle_sleep),
                 Err(e) => {
                     error!("Semantic Worker: DB Fetch error: {:?}", e);
@@ -142,19 +177,47 @@ impl SemanticWorkerPool {
 
             match graph_store.fetch_unembedded_graph_projections(GRAPH_MODEL_ID, GRAPH_BATCH_SIZE) {
                 Ok(graphs) if !graphs.is_empty() => {
-                    debug!("Semantic Worker: Embedding {} graph projections...", graphs.len());
-                    let texts: Vec<String> = graphs.iter().map(|(_, _, _, _, _, content)| content.clone()).collect();
+                    debug!(
+                        "Semantic Worker: Embedding {} graph projections...",
+                        graphs.len()
+                    );
+                    let texts: Vec<String> = graphs
+                        .iter()
+                        .map(|(_, _, _, _, _, content)| content.clone())
+                        .collect();
                     match model.embed(texts, None) {
                         Ok(embeddings) => {
-                            let updates: Vec<(String, String, i64, String, String, Vec<f32>)> = graphs
-                                .into_iter()
-                                .zip(embeddings.into_iter())
-                                .map(|((anchor_type, anchor_id, radius, source_signature, projection_version, _), emb)| {
-                                    (anchor_type, anchor_id, radius, source_signature, projection_version, emb)
-                                })
-                                .collect();
+                            let updates: Vec<(String, String, i64, String, String, Vec<f32>)> =
+                                graphs
+                                    .into_iter()
+                                    .zip(embeddings.into_iter())
+                                    .map(
+                                        |(
+                                            (
+                                                anchor_type,
+                                                anchor_id,
+                                                radius,
+                                                source_signature,
+                                                projection_version,
+                                                _,
+                                            ),
+                                            emb,
+                                        )| {
+                                            (
+                                                anchor_type,
+                                                anchor_id,
+                                                radius,
+                                                source_signature,
+                                                projection_version,
+                                                emb,
+                                            )
+                                        },
+                                    )
+                                    .collect();
 
-                            if let Err(e) = graph_store.update_graph_embeddings(GRAPH_MODEL_ID, &updates) {
+                            if let Err(e) =
+                                graph_store.update_graph_embeddings(GRAPH_MODEL_ID, &updates)
+                            {
                                 error!("Semantic Worker: Graph DB Write Error: {:?}", e);
                             }
                         }
@@ -182,9 +245,15 @@ impl GraphStore {
         value.replace('\'', "''")
     }
 
-    fn graph_projection_embedding_text(&self, anchor_type: &str, anchor_id: &str, radius: i64) -> anyhow::Result<String> {
+    fn graph_projection_embedding_text(
+        &self,
+        anchor_type: &str,
+        anchor_id: &str,
+        radius: i64,
+    ) -> anyhow::Result<String> {
         let projection = self.query_graph_projection(anchor_type, anchor_id, radius as u64)?;
-        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&projection).unwrap_or_default();
+        let rows: Vec<Vec<serde_json::Value>> =
+            serde_json::from_str(&projection).unwrap_or_default();
         let mut lines = vec![
             format!("anchor_type: {}", anchor_type),
             format!("anchor_id: {}", anchor_id),
@@ -192,11 +261,23 @@ impl GraphStore {
         ];
 
         for row in rows {
-            let target_type = row.first().and_then(|value| value.as_str()).unwrap_or("unknown");
-            let target_id = row.get(1).and_then(|value| value.as_str()).unwrap_or("unknown");
-            let edge_kind = row.get(2).and_then(|value| value.as_str()).unwrap_or("unknown");
+            let target_type = row
+                .first()
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let target_id = row
+                .get(1)
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let edge_kind = row
+                .get(2)
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
             let distance = row.get(3).and_then(|value| value.as_i64()).unwrap_or(0);
-            let label = row.get(4).and_then(|value| value.as_str()).unwrap_or(target_id);
+            let label = row
+                .get(4)
+                .and_then(|value| value.as_str())
+                .unwrap_or(target_id);
             lines.push(format!(
                 "target_type: {} | target_id: {} | edge_kind: {} | distance: {} | label: {}",
                 target_type, target_id, edge_kind, distance, label
@@ -227,7 +308,11 @@ impl GraphStore {
             Self::escape_embedding_sql(model_id),
             count
         );
-        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let res = self.query_on_ctx(&query, *guard)?;
         drop(guard);
 
@@ -288,19 +373,21 @@ impl GraphStore {
         let now = chrono::Utc::now().timestamp_millis();
         let values: Vec<String> = updates
             .iter()
-            .map(|(anchor_type, anchor_id, radius, source_signature, projection_version, vector)| {
-                format!(
-                    "('{}', '{}', {}, '{}', '{}', '{}', CAST({:?} AS FLOAT[384]), {})",
-                    Self::escape_embedding_sql(anchor_type),
-                    Self::escape_embedding_sql(anchor_id),
-                    radius,
-                    Self::escape_embedding_sql(model_id),
-                    Self::escape_embedding_sql(source_signature),
-                    Self::escape_embedding_sql(projection_version),
-                    vector,
-                    now
-                )
-            })
+            .map(
+                |(anchor_type, anchor_id, radius, source_signature, projection_version, vector)| {
+                    format!(
+                        "('{}', '{}', {}, '{}', '{}', '{}', CAST({:?} AS FLOAT[384]), {})",
+                        Self::escape_embedding_sql(anchor_type),
+                        Self::escape_embedding_sql(anchor_id),
+                        radius,
+                        Self::escape_embedding_sql(model_id),
+                        Self::escape_embedding_sql(source_signature),
+                        Self::escape_embedding_sql(projection_version),
+                        vector,
+                        now
+                    )
+                },
+            )
             .collect();
 
         for chunk in values.chunks(100) {
@@ -364,7 +451,9 @@ fn is_fatal_embedding_error<E: std::fmt::Debug>(err: &E) -> bool {
 pub fn batch_embed(_texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
     // In v10.5, we disable synchronous MCP embedding to protect the runtime.
     // MCP semantic search will be temporarily bypassed until we build a safe bridge.
-    Err(anyhow::anyhow!("MCP Real-time embedding is disabled in safe mode. Use structural search."))
+    Err(anyhow::anyhow!(
+        "MCP Real-time embedding is disabled in safe mode. Use structural search."
+    ))
 }
 
 #[cfg(test)]
@@ -375,7 +464,9 @@ mod tests {
 
     #[test]
     fn test_fatal_embedding_error_detection() {
-        assert!(is_fatal_embedding_error(&"GetElementType is not implemented"));
+        assert!(is_fatal_embedding_error(
+            &"GetElementType is not implemented"
+        ));
         assert!(is_fatal_embedding_error(&"onnxruntime failure"));
         assert!(!is_fatal_embedding_error(&"temporary timeout"));
     }

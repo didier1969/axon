@@ -1,4 +1,4 @@
-use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
+use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -21,20 +21,31 @@ impl RustParser {
 
     fn find_child_by_type<'a>(&self, node: Node<'a>, kind: &str) -> Option<Node<'a>> {
         let mut cursor = node.walk();
-        let res = node.children(&mut cursor).find(|&child| child.kind() == kind);
+        let res = node
+            .children(&mut cursor)
+            .find(|&child| child.kind() == kind);
         res
     }
 
     fn has_visibility(&self, node: Node) -> bool {
-        self.find_child_by_type(node, "visibility_modifier").is_some()
+        self.find_child_by_type(node, "visibility_modifier")
+            .is_some()
     }
 
-    fn walk<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, class_name: &str) {
+    fn walk<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        class_name: &str,
+    ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             match child.kind() {
                 "function_item" => self.extract_function(child, source, result, class_name),
-                "function_signature_item" => self.extract_function_signature(child, source, result, class_name),
+                "function_signature_item" => {
+                    self.extract_function_signature(child, source, result, class_name)
+                }
                 "struct_item" => self.extract_struct(child, source, result),
                 "enum_item" => self.extract_enum(child, source, result),
                 "trait_item" => self.extract_trait(child, source, result),
@@ -54,7 +65,11 @@ impl RustParser {
     fn extract_comment<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {
         if let Ok(text) = node.utf8_text(source) {
             if text.contains("TODO") || text.contains("FIXME") {
-                let kind = if text.contains("TODO") { "TODO" } else { "FIXME" };
+                let kind = if text.contains("TODO") {
+                    "TODO"
+                } else {
+                    "FIXME"
+                };
                 result.symbols.push(Symbol {
                     name: text.trim().to_string(),
                     kind: kind.to_string(),
@@ -73,7 +88,13 @@ impl RustParser {
         }
     }
 
-    fn extract_function<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, class_name: &str) {
+    fn extract_function<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        class_name: &str,
+    ) {
         let name_node = self.find_child_by_type(node, "identifier");
         let name = if let Some(n) = name_node {
             n.utf8_text(source).unwrap_or("").to_string()
@@ -99,7 +120,7 @@ impl RustParser {
                     }
                 }
             };
-            
+
             check_node(child);
             if child.kind() == "function_modifiers" {
                 let mut mod_cursor = child.walk();
@@ -111,10 +132,18 @@ impl RustParser {
 
         let start_line = node.start_position().row + 1;
         let end_line = node.end_position().row + 1;
-        let kind = if class_name.is_empty() { "function" } else { "method" };
+        let kind = if class_name.is_empty() {
+            "function"
+        } else {
+            "method"
+        };
 
         let lower_name = name.to_lowercase();
-        let is_entry = is_extern_c || (is_pub && (lower_name.contains("main") || lower_name.contains("handler") || lower_name.contains("nif_")));
+        let is_entry = is_extern_c
+            || (is_pub
+                && (lower_name.contains("main")
+                    || lower_name.contains("handler")
+                    || lower_name.contains("nif_")));
 
         let mut props = HashMap::new();
         if !class_name.is_empty() {
@@ -160,7 +189,13 @@ impl RustParser {
         }
     }
 
-    fn extract_function_signature<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, class_name: &str) {
+    fn extract_function_signature<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        class_name: &str,
+    ) {
         let name_node = self.find_child_by_type(node, "identifier");
         let name = if let Some(n) = name_node {
             n.utf8_text(source).unwrap_or("").to_string()
@@ -168,7 +203,11 @@ impl RustParser {
             return;
         };
 
-        let kind = if class_name.is_empty() { "function" } else { "method" };
+        let kind = if class_name.is_empty() {
+            "function"
+        } else {
+            "method"
+        };
         let mut props = HashMap::new();
         if !class_name.is_empty() {
             props.insert("class_name".to_string(), class_name.to_string());
@@ -357,14 +396,24 @@ impl RustParser {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             let k = child.kind();
-            if k == "scoped_identifier" || k == "scoped_use_list" || k == "identifier" || k == "use_wildcard" {
+            if k == "scoped_identifier"
+                || k == "scoped_use_list"
+                || k == "identifier"
+                || k == "use_wildcard"
+            {
                 self.process_use_node(child, "", source, result);
                 return;
             }
         }
     }
 
-    fn process_use_node<'a>(&self, node: Node<'a>, prefix: &str, source: &[u8], result: &mut ExtractionResult) {
+    fn process_use_node<'a>(
+        &self,
+        node: Node<'a>,
+        prefix: &str,
+        source: &[u8],
+        result: &mut ExtractionResult,
+    ) {
         match node.kind() {
             "scoped_identifier" => {
                 let full_path = node.utf8_text(source).unwrap_or("").to_string();
@@ -399,7 +448,11 @@ impl RustParser {
             }
             "identifier" => {
                 let node_text = node.utf8_text(source).unwrap_or("").to_string();
-                let full_path = if prefix.is_empty() { node_text.clone() } else { format!("{}::{}", prefix, node_text) };
+                let full_path = if prefix.is_empty() {
+                    node_text.clone()
+                } else {
+                    format!("{}::{}", prefix, node_text)
+                };
                 result.relations.push(Relation {
                     from: "".to_string(),
                     to: node_text,
@@ -415,13 +468,23 @@ impl RustParser {
         }
     }
 
-    fn process_use_list<'a>(&self, node: Node<'a>, prefix: &str, source: &[u8], result: &mut ExtractionResult) {
+    fn process_use_list<'a>(
+        &self,
+        node: Node<'a>,
+        prefix: &str,
+        source: &[u8],
+        result: &mut ExtractionResult,
+    ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             let k = child.kind();
             if k == "identifier" {
                 let node_text = child.utf8_text(source).unwrap_or("").to_string();
-                let full_path = if prefix.is_empty() { node_text.clone() } else { format!("{}::{}", prefix, node_text) };
+                let full_path = if prefix.is_empty() {
+                    node_text.clone()
+                } else {
+                    format!("{}::{}", prefix, node_text)
+                };
                 result.relations.push(Relation {
                     from: "".to_string(),
                     to: node_text,
@@ -438,8 +501,15 @@ impl RustParser {
         }
     }
 
-    fn extract_call_expression<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {
-        if node.child_count() == 0 { return; }
+    fn extract_call_expression<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+    ) {
+        if node.child_count() == 0 {
+            return;
+        }
         if let Some(func_node) = node.child(0) {
             match func_node.kind() {
                 "identifier" => {
@@ -457,8 +527,12 @@ impl RustParser {
                         let receiver = if func_node.child_count() > 0 {
                             if let Some(obj) = func_node.child(0) {
                                 obj.utf8_text(source).unwrap_or("").to_string()
-                            } else { "".to_string() }
-                        } else { "".to_string() };
+                            } else {
+                                "".to_string()
+                            }
+                        } else {
+                            "".to_string()
+                        };
                         let mut props = HashMap::new();
                         if !receiver.is_empty() {
                             props.insert("receiver".to_string(), receiver);
@@ -475,7 +549,11 @@ impl RustParser {
                     let full = func_node.utf8_text(source).unwrap_or("").to_string();
                     let parts: Vec<&str> = full.split("::").collect();
                     if let Some(&name) = parts.last() {
-                        let receiver = if parts.len() > 1 { parts[..parts.len()-1].join("::") } else { "".to_string() };
+                        let receiver = if parts.len() > 1 {
+                            parts[..parts.len() - 1].join("::")
+                        } else {
+                            "".to_string()
+                        };
                         let mut props = HashMap::new();
                         if !receiver.is_empty() {
                             props.insert("receiver".to_string(), receiver);
@@ -491,11 +569,16 @@ impl RustParser {
                 _ => {}
             }
         }
-        
+
         self.walk_for_calls(node, source, result, true);
     }
 
-    fn extract_method_call<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {
+    fn extract_method_call<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+    ) {
         if let Some(name_node) = self.find_child_by_type(node, "field_identifier") {
             let name = name_node.utf8_text(source).unwrap_or("").to_string();
             let mut receiver = "".to_string();
@@ -518,7 +601,12 @@ impl RustParser {
         self.walk_for_calls(node, source, result, false);
     }
 
-    fn extract_macro_invocation<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult) {
+    fn extract_macro_invocation<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+    ) {
         if let Some(name_node) = self.find_child_by_type(node, "identifier") {
             let name = format!("{}!", name_node.utf8_text(source).unwrap_or(""));
             result.relations.push(Relation {
@@ -530,7 +618,13 @@ impl RustParser {
         }
     }
 
-    fn walk_for_calls<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, skip_first: bool) {
+    fn walk_for_calls<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        skip_first: bool,
+    ) {
         let mut cursor = node.walk();
         let mut children: Vec<Node> = node.children(&mut cursor).collect();
         if skip_first && !children.is_empty() {
@@ -551,17 +645,23 @@ impl Parser for RustParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let tree = match parse_with_wasm_safe("rust", self.wasm_bytes, content) {
             Some(t) => t,
-            None => return ExtractionResult { project_slug: None, symbols: Vec::new(), relations: Vec::new() },
+            None => {
+                return ExtractionResult {
+                    project_slug: None,
+                    symbols: Vec::new(),
+                    relations: Vec::new(),
+                }
+            }
         };
-        
+
         let mut result = ExtractionResult {
             project_slug: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };
-        
+
         self.walk(tree.root_node(), content.as_bytes(), &mut result, "");
-        
+
         result
     }
 }

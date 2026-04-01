@@ -112,6 +112,7 @@ pub(crate) fn tools_catalog() -> Value {
                     "type": "object",
                     "properties": {
                         "depth": { "type": "integer" },
+                        "project": { "type": "string" },
                         "symbol": { "type": "string" }
                     },
                     "required": ["symbol"]
@@ -212,6 +213,7 @@ pub(crate) fn tools_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "project": { "type": "string" },
                         "symbol": { "type": "string" },
                         "depth": { "type": "integer", "description": "Profondeur d'impact (optionnel)" }
                     },

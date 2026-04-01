@@ -28,7 +28,9 @@ impl McpServer {
                 };
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
-            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Refiner Error: {}", e) }], "isError": true })),
+            Err(e) => Some(
+                json!({ "content": [{ "type": "text", "text": format!("Refiner Error: {}", e) }], "isError": true }),
+            ),
         }
     }
 
@@ -80,7 +82,9 @@ impl McpServer {
         let cypher = args.get("cypher")?.as_str()?;
         match self.graph_store.query_json(cypher) {
             Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
-            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Cypher Error: {}", e) }], "isError": true })),
+            Err(e) => Some(
+                json!({ "content": [{ "type": "text", "text": format!("Cypher Error: {}", e) }], "isError": true }),
+            ),
         }
     }
 
@@ -107,6 +111,8 @@ impl McpServer {
             }
         }
 
-        Some(json!({ "content": [{ "type": "text", "text": serde_json::to_string(&all_results).unwrap_or_default() }] }))
+        Some(
+            json!({ "content": [{ "type": "text", "text": serde_json::to_string(&all_results).unwrap_or_default() }] }),
+        )
     }
 }

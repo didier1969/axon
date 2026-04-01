@@ -81,7 +81,11 @@ impl GraphStore {
                 call_edges(source_id, target_id) AS ( \
                     SELECT source_id, target_id FROM CALLS \
                     UNION ALL \
+                    SELECT source_id, target_id FROM CALLS_NIF \
+                    UNION ALL \
                     SELECT target_id, source_id FROM CALLS \
+                    UNION ALL \
+                    SELECT target_id, source_id FROM CALLS_NIF \
                 ), \
                 traverse(node_id, distance) AS ( \
                     SELECT $anchor AS node_id, 0 AS distance \
@@ -98,7 +102,10 @@ impl GraphStore {
         let created_at = chrono::Utc::now().timestamp_millis();
         let anchor_escaped = anchor_id.replace('\'', "''");
         let version = Self::graph_projection_version();
-        let mut signature_entries = vec![format!("symbol|{}|symbol|{}|anchor|0", anchor_id, anchor_id)];
+        let mut signature_entries = vec![format!(
+            "symbol|{}|symbol|{}|anchor|0",
+            anchor_id, anchor_id
+        )];
 
         for row in &rows {
             let Some(node_id) = row.first().and_then(|value| value.as_str()) else {
@@ -194,7 +201,11 @@ impl GraphStore {
                 continue;
             };
             let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(1);
-            let edge_kind = if distance == 1 { "contains" } else { "call-neighborhood" };
+            let edge_kind = if distance == 1 {
+                "contains"
+            } else {
+                "call-neighborhood"
+            };
             signature_entries.push(format!(
                 "file|{}|symbol|{}|{}|{}",
                 file_path, node_id, edge_kind, distance
@@ -225,7 +236,11 @@ impl GraphStore {
                 continue;
             };
             let distance = row.get(1).and_then(|value| value.as_i64()).unwrap_or(1);
-            let edge_kind = if distance == 1 { "contains" } else { "call-neighborhood" };
+            let edge_kind = if distance == 1 {
+                "contains"
+            } else {
+                "call-neighborhood"
+            };
             queries.push(format!(
                 "INSERT INTO GraphProjection (anchor_type, anchor_id, target_type, target_id, edge_kind, distance, radius, projection_version, created_at) VALUES ('file', '{}', 'symbol', '{}', '{}', {}, {}, '{}', {});",
                 file_escaped,
@@ -245,7 +260,12 @@ impl GraphStore {
         self.execute_batch(&queries)
     }
 
-    pub fn query_graph_projection(&self, anchor_type: &str, anchor_id: &str, radius: u64) -> Result<String> {
+    pub fn query_graph_projection(
+        &self,
+        anchor_type: &str,
+        anchor_id: &str,
+        radius: u64,
+    ) -> Result<String> {
         let query = "SELECT gp.target_type, gp.target_id, gp.edge_kind, gp.distance, \
                             COALESCE(s.name, gp.target_id) AS label, \
                             COALESCE(f.path, contain.source_id, '') AS uri \
@@ -266,7 +286,11 @@ impl GraphStore {
     }
 
     pub fn execute(&self, query: &str) -> Result<()> {
-        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         unsafe {
             let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
             if !exec_fn(*guard, CString::new(query)?.as_ptr()) {
@@ -282,18 +306,30 @@ impl GraphStore {
     }
 
     pub fn query_json(&self, query: &str) -> Result<String> {
-        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         self.query_on_ctx(query, *guard)
     }
 
     pub fn query_json_param(&self, query: &str, params: &serde_json::Value) -> Result<String> {
         let expanded = Self::expand_named_params(query, params)?;
-        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         self.query_on_ctx(&expanded, *guard)
     }
 
     pub fn query_count(&self, query: &str) -> Result<i64> {
-        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         unsafe {
             let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
             Ok(count_fn(*guard, CString::new(query)?.as_ptr()))
@@ -305,7 +341,12 @@ impl GraphStore {
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res).unwrap_or_default();
         if let Some(row) = rows.get(0) {
             if let Some(val) = row.get(0) {
-                return Ok(val.as_i64().unwrap_or(0));
+                if let Some(number) = val.as_i64() {
+                    return Ok(number);
+                }
+                if let Some(text) = val.as_str() {
+                    return Ok(text.parse::<i64>().unwrap_or(0));
+                }
             }
         }
         Ok(0)
@@ -316,7 +357,11 @@ impl GraphStore {
             return Ok(());
         }
 
-        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
 
         unsafe {
             let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
@@ -386,7 +431,13 @@ impl GraphStore {
                 serde_json::Value::Bool(v) => v.to_string(),
                 serde_json::Value::Number(v) => v.to_string(),
                 serde_json::Value::String(v) => format!("'{}'", v.replace('\'', "''")),
-                _ => return Err(anyhow!("Unsupported parameter type for ${}: {}", key, value)),
+                _ => {
+                    return Err(anyhow!(
+                        "Unsupported parameter type for ${}: {}",
+                        key,
+                        value
+                    ))
+                }
             };
             expanded = expanded.replace(&format!("${}", key), &replacement);
         }

@@ -72,13 +72,17 @@ fn current_pressure_at(now_ms: u64) -> ServicePressure {
         } else if peak >= 500 {
             ServicePressure::Degraded
         } else {
-            if last_degraded != 0 && now_ms.saturating_sub(last_degraded) <= SERVICE_RECOVERY_WINDOW_MS {
+            if last_degraded != 0
+                && now_ms.saturating_sub(last_degraded) <= SERVICE_RECOVERY_WINDOW_MS
+            {
                 ServicePressure::Recovering
             } else {
                 ServicePressure::Healthy
             }
         }
-    } else if last_degraded != 0 && now_ms.saturating_sub(last_degraded) <= SERVICE_RECOVERY_WINDOW_MS {
+    } else if last_degraded != 0
+        && now_ms.saturating_sub(last_degraded) <= SERVICE_RECOVERY_WINDOW_MS
+    {
         if peak >= 500 || age_ms <= SERVICE_SAMPLE_TTL_MS * 3 {
             ServicePressure::Recovering
         } else {

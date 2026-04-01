@@ -1,10 +1,10 @@
-use std::path::{Path, PathBuf};
-use std::fs;
 use crate::graph::GraphStore;
 use crate::service_guard;
+use ignore::{gitignore::Gitignore, WalkBuilder};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{info, error};
-use ignore::{WalkBuilder, gitignore::Gitignore};
+use tracing::{error, info};
 
 struct ProjectDependency {
     path: String,
@@ -28,9 +28,15 @@ impl Scanner {
     }
 
     pub fn scan(&self, graph: Arc<GraphStore>) {
-        info!("Lattice Engine: Initializing recursive traversal on {:?}", self.root);
+        info!(
+            "Lattice Engine: Initializing recursive traversal on {:?}",
+            self.root
+        );
         let total_files = self.scan_path(graph, &self.root);
-        info!("🏁 Nexus Scan Complete: {} files mapped to DuckDB (status: pending).", total_files);
+        info!(
+            "🏁 Nexus Scan Complete: {} files mapped to DuckDB (status: pending).",
+            total_files
+        );
     }
 
     pub fn scan_subtree(&self, graph: Arc<GraphStore>, subtree: &Path) {
@@ -41,8 +47,7 @@ impl Scanner {
         let total_files = self.scan_path(graph, subtree);
         info!(
             "🔥 Hot subtree scan complete: {} files mapped from {:?}.",
-            total_files,
-            subtree
+            total_files, subtree
         );
     }
 
@@ -115,33 +120,38 @@ impl Scanner {
 
     fn is_supported(&self, path: &Path) -> bool {
         let path_str = path.to_string_lossy().to_lowercase();
-        
+
         // 1. DIRECTORY NOISE FILTER (Strict)
-        if path_str.contains("/.git/") || 
-           path_str.contains("/.mypy_cache/") || 
-           path_str.contains("/.pytest_cache/") ||
-           path_str.contains("/__pycache__/") ||
-           path_str.contains("/.venv/") ||
-           path_str.contains("/.fastembed_cache/") ||
-           path_str.contains("/.devenv/") ||
-           path_str.contains("/node_modules/") ||
-           path_str.contains("/target/") ||
-           path_str.contains("/_build/") ||
-           path_str.contains("/deps/") {
+        if path_str.contains("/.git/")
+            || path_str.contains("/.mypy_cache/")
+            || path_str.contains("/.pytest_cache/")
+            || path_str.contains("/__pycache__/")
+            || path_str.contains("/.venv/")
+            || path_str.contains("/.fastembed_cache/")
+            || path_str.contains("/.devenv/")
+            || path_str.contains("/node_modules/")
+            || path_str.contains("/target/")
+            || path_str.contains("/_build/")
+            || path_str.contains("/deps/")
+        {
             return false;
         }
 
         // 2. HIDDEN FILE FILTER
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with('.') && name != ".env" { 
-                return false; 
+            if name.starts_with('.') && name != ".env" {
+                return false;
             }
         }
 
         // 3. EXTENSION FILTER
         if let Some(ext) = path.extension() {
             let ext_str = ext.to_string_lossy().to_lowercase();
-            crate::config::CONFIG.indexing.supported_extensions.iter().any(|e| e.to_lowercase() == ext_str)
+            crate::config::CONFIG
+                .indexing
+                .supported_extensions
+                .iter()
+                .any(|e| e.to_lowercase() == ext_str)
         } else {
             false
         }
@@ -167,7 +177,11 @@ impl Scanner {
                         if let Ok(content) = fs::read_to_string(path) {
                             let deps = extract_toml_dependencies(&content);
                             for dep in deps {
-                                let _ = graph.insert_project_dependency(&project_name, &dep.to, &dep.path);
+                                let _ = graph.insert_project_dependency(
+                                    &project_name,
+                                    &dep.to,
+                                    &dep.path,
+                                );
                             }
                         }
                     }
@@ -181,7 +195,9 @@ impl Scanner {
 
                 let metadata = fs::metadata(path);
                 let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
-                let mtime = metadata.as_ref().ok()
+                let mtime = metadata
+                    .as_ref()
+                    .ok()
                     .and_then(|m| m.modified().ok())
                     .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
                     .unwrap_or(0);
@@ -298,19 +314,34 @@ mod tests {
 
     #[test]
     fn test_discovery_policy_is_fast_when_backlog_is_low() {
-        let policy = discovery_policy(1_000, Some(2 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024, 0);
+        let policy = discovery_policy(
+            1_000,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            0,
+        );
         assert_eq!(policy.sleep, std::time::Duration::from_millis(50));
     }
 
     #[test]
     fn test_discovery_policy_slows_when_backlog_grows() {
-        let policy = discovery_policy(6_000, Some(2 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024, 0);
+        let policy = discovery_policy(
+            6_000,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            0,
+        );
         assert_eq!(policy.sleep, std::time::Duration::from_millis(150));
     }
 
     #[test]
     fn test_discovery_policy_enters_guard_mode_when_service_is_degraded() {
-        let policy = discovery_policy(2_000, Some(2 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024, 700);
+        let policy = discovery_policy(
+            2_000,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            700,
+        );
         assert_eq!(policy.sleep, std::time::Duration::from_millis(500));
     }
 

@@ -1,4 +1,4 @@
-use super::{ExtractionResult, Parser, Relation, Symbol, parse_with_wasm_safe};
+use super::{parse_with_wasm_safe, ExtractionResult, Parser, Relation, Symbol};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -15,12 +15,14 @@ impl PythonParser {
 
     fn walk<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, scope: &str) {
         let kind = node.kind();
-        
+
         match kind {
             "class_definition" => self.extract_class(node, source, result, scope),
             "function_definition" => self.extract_function(node, source, result, scope),
             "call" => self.extract_call(node, source, result, scope),
-            "import_statement" | "import_from_statement" => self.extract_import(node, source, result),
+            "import_statement" | "import_from_statement" => {
+                self.extract_import(node, source, result)
+            }
             _ => {
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
@@ -40,7 +42,13 @@ impl PythonParser {
         None
     }
 
-    fn extract_class<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, _scope: &str) {
+    fn extract_class<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        _scope: &str,
+    ) {
         let name_node = self.find_child_by_type(node, "identifier");
         let name = if let Some(n) = name_node {
             n.utf8_text(source).unwrap_or("").to_string()
@@ -84,7 +92,13 @@ impl PythonParser {
         }
     }
 
-    fn extract_function<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, scope: &str) {
+    fn extract_function<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        scope: &str,
+    ) {
         let name_node = self.find_child_by_type(node, "identifier");
         let func_name = if let Some(n) = name_node {
             n.utf8_text(source).unwrap_or("").to_string()
@@ -94,7 +108,7 @@ impl PythonParser {
 
         // If it's in a class, it's a method
         let is_method = !scope.is_empty();
-        
+
         let mut props = HashMap::new();
         if is_method {
             props.insert("parent_class".to_string(), scope.to_string());
@@ -108,7 +122,7 @@ impl PythonParser {
 
         // Determine if it's a test function
         let is_test = func_name.starts_with("test_");
-        
+
         // Find decorators
         if let Some(parent) = node.parent() {
             if parent.kind() == "decorated_definition" {
@@ -127,13 +141,21 @@ impl PythonParser {
         // --- UNSAFE DETECTION ---
         let mut is_unsafe = false;
         let body_text = node.utf8_text(source).unwrap_or("");
-        if body_text.contains("eval(") || body_text.contains("exec(") || body_text.contains("os.system(") || body_text.contains("subprocess.run(") {
+        if body_text.contains("eval(")
+            || body_text.contains("exec(")
+            || body_text.contains("os.system(")
+            || body_text.contains("subprocess.run(")
+        {
             is_unsafe = true;
         }
 
         result.symbols.push(Symbol {
             name: full_name.clone(),
-            kind: if is_method { "method".to_string() } else { "function".to_string() },
+            kind: if is_method {
+                "method".to_string()
+            } else {
+                "function".to_string()
+            },
             start_line: node.start_position().row + 1,
             end_line: node.end_position().row + 1,
             docstring: None,
@@ -162,7 +184,13 @@ impl PythonParser {
         }
     }
 
-    fn extract_call<'a>(&self, node: Node<'a>, source: &[u8], result: &mut ExtractionResult, scope: &str) {
+    fn extract_call<'a>(
+        &self,
+        node: Node<'a>,
+        source: &[u8],
+        result: &mut ExtractionResult,
+        scope: &str,
+    ) {
         if scope.is_empty() {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
@@ -171,12 +199,13 @@ impl PythonParser {
             return;
         }
 
-        let func_node = self.find_child_by_type(node, "identifier")
+        let func_node = self
+            .find_child_by_type(node, "identifier")
             .or_else(|| self.find_child_by_type(node, "attribute"));
 
         if let Some(n) = func_node {
             let call_name = n.utf8_text(source).unwrap_or("").to_string();
-            
+
             result.relations.push(Relation {
                 from: scope.to_string(),
                 to: call_name,
@@ -198,7 +227,7 @@ impl PythonParser {
         for child in node.children(&mut cursor) {
             if child.kind() == "dotted_name" || child.kind() == "aliased_import" {
                 let import_name = child.utf8_text(source).unwrap_or("").to_string();
-                
+
                 result.relations.push(Relation {
                     from: "module".to_string(),
                     to: import_name,
@@ -221,7 +250,7 @@ impl Parser for PythonParser {
         if let Some(tree) = parse_with_wasm_safe("python", self.wasm_bytes, content) {
             self.walk(tree.root_node(), content.as_bytes(), &mut result, "");
         }
-        
+
         result
     }
 }

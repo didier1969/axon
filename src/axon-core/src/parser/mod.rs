@@ -1,12 +1,12 @@
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::panic::catch_unwind;
 use std::path::Path;
 use tree_sitter::wasmtime::Engine;
-use once_cell::sync::Lazy;
-use std::panic::catch_unwind;
-use std::collections::HashMap;
-use std::cell::RefCell;
 
-use tracing::{warn, debug};
+use tracing::{debug, warn};
 
 pub static WASM_ENGINE: Lazy<Engine> = Lazy::new(|| Engine::default());
 
@@ -34,7 +34,9 @@ pub fn parse_with_wasm_safe(
                 if let Ok(mut store) = tree_sitter::WasmStore::new(engine) {
                     if let Ok(language) = store.load_language(&lang_name_str, &wasm_bytes_vec) {
                         let mut parser = tree_sitter::Parser::new();
-                        if parser.set_wasm_store(store).is_ok() && parser.set_language(&language).is_ok() {
+                        if parser.set_wasm_store(store).is_ok()
+                            && parser.set_language(&language).is_ok()
+                        {
                             cache.insert(lang_name_str.clone(), parser);
                         }
                     }
@@ -54,9 +56,12 @@ pub fn parse_with_wasm_safe(
     match result {
         Ok(Some(tree)) => Some(tree),
         Ok(None) => {
-            warn!("WASM parsing failed to produce a tree for {}", language_name);
+            warn!(
+                "WASM parsing failed to produce a tree for {}",
+                language_name
+            );
             None
-        },
+        }
         Err(e) => {
             let msg = if let Some(s) = e.downcast_ref::<&str>() {
                 s.to_string()
@@ -116,11 +121,17 @@ pub trait Parser: Send + Sync {
 
 pub fn scan_secrets(content: &str, result: &mut ExtractionResult) {
     use regex::Regex;
-    
+
     let patterns = [
-        ("SECRET_API_KEY", r#"(?i)(?:key|api|token|secret|password|passwd|auth)[\s:='\"\[\{]+[a-z0-9\/+]{32,45}"#),
+        (
+            "SECRET_API_KEY",
+            r#"(?i)(?:key|api|token|secret|password|passwd|auth)[\s:='\"\[\{]+[a-z0-9\/+]{32,45}"#,
+        ),
         ("SECRET_AWS_KEY", r#"AKIA[0-9A-Z]{16}"#),
-        ("SECRET_PRIVATE_KEY", r#"-----BEGIN [A-Z ]+ PRIVATE KEY-----"#),
+        (
+            "SECRET_PRIVATE_KEY",
+            r#"-----BEGIN [A-Z ]+ PRIVATE KEY-----"#,
+        ),
         ("SECRET_DB_URL", r#"[a-zA-Z]+://[^:]+:[^@]+@[^/]+/[^?]+"#),
     ];
 
@@ -147,20 +158,20 @@ pub fn scan_secrets(content: &str, result: &mut ExtractionResult) {
     }
 }
 
-pub mod python;
-pub mod elixir;
-pub mod rust;
-pub mod typescript;
-pub mod go;
-pub mod java;
-pub mod yaml;
-pub mod html;
 pub mod css;
-pub mod markdown;
-pub mod sql;
-pub mod typeql;
 pub mod datalog;
+pub mod elixir;
+pub mod go;
+pub mod html;
+pub mod java;
+pub mod markdown;
+pub mod python;
+pub mod rust;
+pub mod sql;
 pub mod text;
+pub mod typeql;
+pub mod typescript;
+pub mod yaml;
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
     let ext = path.extension()?.to_str()?.to_lowercase();

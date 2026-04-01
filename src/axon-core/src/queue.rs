@@ -121,8 +121,24 @@ impl QueueStore {
         }
     }
 
-    pub fn push(&self, path: &str, _mtime: i64, trace_id: &str, t0: i64, t1: i64, priority: bool) -> Result<(), String> {
-        self.push_with_mode(path, _mtime, trace_id, t0, t1, priority, ProcessingMode::Full)
+    pub fn push(
+        &self,
+        path: &str,
+        _mtime: i64,
+        trace_id: &str,
+        t0: i64,
+        t1: i64,
+        priority: bool,
+    ) -> Result<(), String> {
+        self.push_with_mode(
+            path,
+            _mtime,
+            trace_id,
+            t0,
+            t1,
+            priority,
+            ProcessingMode::Full,
+        )
     }
 
     pub fn push_with_mode(
@@ -135,12 +151,16 @@ impl QueueStore {
         priority: bool,
         mode: ProcessingMode,
     ) -> Result<(), String> {
-        let t2 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+        let t2 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as i64;
         let metadata = std::fs::metadata(path)
             .map_err(|err| format!("Unable to stat file for admission: {:?}", err))?;
         let size_bytes = metadata.len();
         let parser_key = parser_key_for_path(path);
-        let estimated_cost_bytes = self.reserve_memory_budget(trace_id, &parser_key, size_bytes, mode)?;
+        let estimated_cost_bytes =
+            self.reserve_memory_budget(trace_id, &parser_key, size_bytes, mode)?;
         let lane = if priority {
             TaskLane::Hot
         } else {
@@ -153,7 +173,9 @@ impl QueueStore {
             size_bytes,
             estimated_cost_bytes,
             parser_key,
-            t0, t1, t2,
+            t0,
+            t1,
+            t2,
             mode,
         };
 
@@ -250,7 +272,13 @@ impl QueueStore {
             .unwrap_or_else(|_| {
                 let estimation_key = estimation_key_for(&parser_key, size_bytes, mode);
                 let fallback_state = MemoryBudgetState::new(DEFAULT_MEMORY_BUDGET_BYTES);
-                estimate_cost_bytes_with_key(&fallback_state, &estimation_key, &parser_key, size_bytes, mode)
+                estimate_cost_bytes_with_key(
+                    &fallback_state,
+                    &estimation_key,
+                    &parser_key,
+                    size_bytes,
+                    mode,
+                )
             })
     }
 
@@ -265,7 +293,9 @@ impl QueueStore {
 
     pub fn remaining_budget_bytes(&self) -> u64 {
         let snapshot = self.memory_budget_snapshot();
-        snapshot.budget_bytes.saturating_sub(snapshot.reserved_bytes)
+        snapshot
+            .budget_bytes
+            .saturating_sub(snapshot.reserved_bytes)
     }
 
     fn reserve_memory_budget(
@@ -417,17 +447,22 @@ fn estimate_cost_bytes_with_key(
     let learned_multiplier = learned_model
         .map(|model| model.observed_multiplier)
         .unwrap_or_else(|| default_parser_multiplier(parser_key) * mode.envelope_ratio());
-    let confidence_multiplier = confidence_safety_multiplier(
-        learned_model.map(|model| model.sample_count).unwrap_or(0),
-    );
+    let confidence_multiplier =
+        confidence_safety_multiplier(learned_model.map(|model| model.sample_count).unwrap_or(0));
 
     let base_bytes = size_bytes.max(1) as f64;
-    let estimated = base_bytes * learned_multiplier * DEFAULT_SAFETY_MULTIPLIER * confidence_multiplier;
+    let estimated =
+        base_bytes * learned_multiplier * DEFAULT_SAFETY_MULTIPLIER * confidence_multiplier;
     estimated.ceil() as u64
 }
 
 fn estimation_key_for(parser_key: &str, size_bytes: u64, mode: ProcessingMode) -> String {
-    format!("{}:{}:{}", parser_key, size_bucket_for(size_bytes), mode_key(mode))
+    format!(
+        "{}:{}:{}",
+        parser_key,
+        size_bucket_for(size_bytes),
+        mode_key(mode)
+    )
 }
 
 fn size_bucket_for(size_bytes: u64) -> &'static str {
@@ -474,7 +509,9 @@ fn default_parser_multiplier(parser_key: &str) -> f64 {
 mod tests {
     use std::time::Duration;
 
-    use super::{estimate_observed_cost_bytes, parser_key_for_path, ProcessingMode, QueueStore, TaskLane};
+    use super::{
+        estimate_observed_cost_bytes, parser_key_for_path, ProcessingMode, QueueStore, TaskLane,
+    };
 
     #[test]
     fn test_hot_lane_never_starves_behind_bulk_work() {
@@ -486,9 +523,15 @@ mod tests {
         std::fs::write(&bulk_b, "defmodule BulkB do end").unwrap();
         std::fs::write(&hot, "defmodule Hot do end").unwrap();
         let queue = QueueStore::new(10);
-        queue.push(bulk_a.to_string_lossy().as_ref(), 0, "bulk-a", 0, 0, false).unwrap();
-        queue.push(bulk_b.to_string_lossy().as_ref(), 0, "bulk-b", 0, 0, false).unwrap();
-        queue.push(hot.to_string_lossy().as_ref(), 0, "hot", 0, 0, true).unwrap();
+        queue
+            .push(bulk_a.to_string_lossy().as_ref(), 0, "bulk-a", 0, 0, false)
+            .unwrap();
+        queue
+            .push(bulk_b.to_string_lossy().as_ref(), 0, "bulk-b", 0, 0, false)
+            .unwrap();
+        queue
+            .push(hot.to_string_lossy().as_ref(), 0, "hot", 0, 0, true)
+            .unwrap();
 
         let first = queue.pop().expect("hot lane should be served first");
         assert_eq!(first.trace_id, "hot");
@@ -503,20 +546,43 @@ mod tests {
             let path = temp.path().join(format!("bulk_{}.ex", idx));
             std::fs::write(&path, "defmodule Bulk do end").unwrap();
             queue
-                .push(path.to_string_lossy().as_ref(), 0, &format!("bulk-{}", idx), 0, 0, false)
+                .push(
+                    path.to_string_lossy().as_ref(),
+                    0,
+                    &format!("bulk-{}", idx),
+                    0,
+                    0,
+                    false,
+                )
                 .unwrap();
         }
 
         let overflow_path = temp.path().join("bulk_overflow.ex");
         std::fs::write(&overflow_path, "defmodule BulkOverflow do end").unwrap();
-        let overflow =
-            queue.push(overflow_path.to_string_lossy().as_ref(), 0, "bulk-overflow", 0, 0, false);
-        assert!(overflow.is_err(), "bulk lane should saturate before borrowing hot capacity");
+        let overflow = queue.push(
+            overflow_path.to_string_lossy().as_ref(),
+            0,
+            "bulk-overflow",
+            0,
+            0,
+            false,
+        );
+        assert!(
+            overflow.is_err(),
+            "bulk lane should saturate before borrowing hot capacity"
+        );
 
         let hot_reserved = temp.path().join("hot_reserved.ex");
         std::fs::write(&hot_reserved, "defmodule HotReserved do end").unwrap();
         queue
-            .push(hot_reserved.to_string_lossy().as_ref(), 0, "hot-reserved", 0, 0, true)
+            .push(
+                hot_reserved.to_string_lossy().as_ref(),
+                0,
+                "hot-reserved",
+                0,
+                0,
+                true,
+            )
             .expect("hot lane must retain reserved capacity under bulk pressure");
     }
 
@@ -528,12 +594,19 @@ mod tests {
 
         let queue = QueueStore::with_memory_budget(10, 2 * 1024 * 1024 * 1024);
         queue
-            .push(large_path.to_string_lossy().as_ref(), 0, "large", 0, 0, false)
+            .push(
+                large_path.to_string_lossy().as_ref(),
+                0,
+                "large",
+                0,
+                0,
+                false,
+            )
             .unwrap();
 
-        let task = queue
-            .pop()
-            .expect("large file should still be admitted through the common lane when budget allows it");
+        let task = queue.pop().expect(
+            "large file should still be admitted through the common lane when budget allows it",
+        );
         assert_eq!(task.trace_id, "large");
         assert_eq!(task.lane, TaskLane::Bulk);
     }
@@ -547,15 +620,32 @@ mod tests {
             let path = temp.path().join(format!("small_{}.rs", idx));
             std::fs::write(&path, vec![b'x'; 1024]).unwrap();
             queue
-                .push(path.to_string_lossy().as_ref(), 0, &format!("small-{}", idx), 0, 0, false)
+                .push(
+                    path.to_string_lossy().as_ref(),
+                    0,
+                    &format!("small-{}", idx),
+                    0,
+                    0,
+                    false,
+                )
                 .unwrap();
         }
 
         let fourth = temp.path().join("small_3.rs");
         std::fs::write(&fourth, vec![b'x'; 1024]).unwrap();
-        let overflow = queue.push(fourth.to_string_lossy().as_ref(), 0, "small-overflow", 0, 0, false);
+        let overflow = queue.push(
+            fourth.to_string_lossy().as_ref(),
+            0,
+            "small-overflow",
+            0,
+            0,
+            false,
+        );
 
-        assert!(overflow.is_err(), "memory budget should stop over-admission even with free channel slots");
+        assert!(
+            overflow.is_err(),
+            "memory budget should stop over-admission even with free channel slots"
+        );
         assert!(queue.memory_budget_snapshot().reserved_bytes > 0);
     }
 
@@ -577,9 +667,19 @@ mod tests {
 
         let second_large = temp.path().join("second_large.rs");
         std::fs::write(&second_large, vec![b'x'; 8 * 1024]).unwrap();
-        let blocked = queue.push(second_large.to_string_lossy().as_ref(), 0, "second-large", 0, 0, false);
+        let blocked = queue.push(
+            second_large.to_string_lossy().as_ref(),
+            0,
+            "second-large",
+            0,
+            0,
+            false,
+        );
 
-        assert!(blocked.is_err(), "a second large file should wait until budget is released");
+        assert!(
+            blocked.is_err(),
+            "a second large file should wait until budget is released"
+        );
     }
 
     #[test]
@@ -631,8 +731,7 @@ mod tests {
         queue
             .push(cold_a.to_string_lossy().as_ref(), 0, "cold-a", 0, 0, false)
             .unwrap();
-        let cold_overflow =
-            queue.push(cold_b.to_string_lossy().as_ref(), 0, "cold-b", 0, 0, false);
+        let cold_overflow = queue.push(cold_b.to_string_lossy().as_ref(), 0, "cold-b", 0, 0, false);
         assert!(
             cold_overflow.is_err(),
             "cold-start admission should stay conservative before this parser bucket is known"
@@ -655,7 +754,14 @@ mod tests {
             let path = temp.path().join(format!("warm_{}.ex", idx));
             std::fs::write(&path, vec![b'x'; 1024]).unwrap();
             queue
-                .push(path.to_string_lossy().as_ref(), 0, &format!("warm-{}", idx), 0, 0, false)
+                .push(
+                    path.to_string_lossy().as_ref(),
+                    0,
+                    &format!("warm-{}", idx),
+                    0,
+                    0,
+                    false,
+                )
                 .unwrap();
             let task = queue.pop().unwrap();
             queue
@@ -677,10 +783,24 @@ mod tests {
         std::fs::write(&known_b, vec![b'x'; 1024]).unwrap();
 
         queue
-            .push(known_a.to_string_lossy().as_ref(), 0, "known-a", 0, 0, false)
+            .push(
+                known_a.to_string_lossy().as_ref(),
+                0,
+                "known-a",
+                0,
+                0,
+                false,
+            )
             .unwrap();
         queue
-            .push(known_b.to_string_lossy().as_ref(), 0, "known-b", 0, 0, false)
+            .push(
+                known_b.to_string_lossy().as_ref(),
+                0,
+                "known-b",
+                0,
+                0,
+                false,
+            )
             .expect("known parser bucket should admit more work after warm observations");
     }
 
@@ -692,19 +812,34 @@ mod tests {
 
     #[test]
     fn test_estimate_observed_cost_penalizes_slow_parses() {
-        let fast =
-            estimate_observed_cost_bytes("/tmp/file.rs", 1024, Duration::from_millis(50), ProcessingMode::Full);
-        let slow =
-            estimate_observed_cost_bytes("/tmp/file.rs", 1024, Duration::from_millis(1200), ProcessingMode::Full);
+        let fast = estimate_observed_cost_bytes(
+            "/tmp/file.rs",
+            1024,
+            Duration::from_millis(50),
+            ProcessingMode::Full,
+        );
+        let slow = estimate_observed_cost_bytes(
+            "/tmp/file.rs",
+            1024,
+            Duration::from_millis(1200),
+            ProcessingMode::Full,
+        );
         assert!(slow > fast);
     }
 
     #[test]
     fn test_structure_only_estimate_is_lower_than_full_estimate() {
         let queue = QueueStore::with_memory_budget(10, 16 * 1024 * 1024);
-        let full = queue.estimate_cost_for_path_in_mode("/tmp/example.rs", 16 * 1024, ProcessingMode::Full);
-        let structure_only = queue
-            .estimate_cost_for_path_in_mode("/tmp/example.rs", 16 * 1024, ProcessingMode::StructureOnly);
+        let full = queue.estimate_cost_for_path_in_mode(
+            "/tmp/example.rs",
+            16 * 1024,
+            ProcessingMode::Full,
+        );
+        let structure_only = queue.estimate_cost_for_path_in_mode(
+            "/tmp/example.rs",
+            16 * 1024,
+            ProcessingMode::StructureOnly,
+        );
 
         assert!(structure_only < full);
     }
@@ -724,9 +859,7 @@ mod tests {
                 .push(path.to_string_lossy().as_ref(), 0, &trace_id, 0, 0, false)
                 .unwrap();
             let task = queue.pop().unwrap();
-            queue
-                .mark_done(&task, Some(32 * 1024))
-                .unwrap();
+            queue.mark_done(&task, Some(32 * 1024)).unwrap();
         }
 
         let learned = queue.estimate_cost_for_path(path.to_string_lossy().as_ref(), 4096);

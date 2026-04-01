@@ -76,8 +76,8 @@ impl GraphStore {
 
     fn symbol_path_namespace(path: &str) -> String {
         let path = Path::new(path);
-        let projects_root =
-            std::env::var("AXON_PROJECTS_ROOT").unwrap_or_else(|_| "/home/dstadel/projects".to_string());
+        let projects_root = std::env::var("AXON_PROJECTS_ROOT")
+            .unwrap_or_else(|_| "/home/dstadel/projects".to_string());
         let relative = path
             .strip_prefix(&projects_root)
             .unwrap_or(path)
@@ -116,6 +116,42 @@ impl GraphStore {
         format!("{:016x}", hasher.finish())
     }
 
+    fn derived_cleanup_queries(source_selector: &str) -> Vec<String> {
+        let affected_symbols = format!(
+            "SELECT target_id FROM CONTAINS WHERE source_id IN ({})",
+            source_selector
+        );
+        let affected_symbol_anchors = format!(
+            "SELECT DISTINCT anchor_id FROM GraphProjection WHERE anchor_type = 'symbol' AND target_id IN ({})",
+            affected_symbols
+        );
+
+        vec![
+            format!(
+                "DELETE FROM GraphEmbedding WHERE \
+                 (anchor_type = 'file' AND anchor_id IN ({})) \
+                 OR (anchor_type = 'symbol' AND anchor_id IN ({})) \
+                 OR (anchor_type = 'symbol' AND anchor_id IN ({}));",
+                source_selector, affected_symbols, affected_symbol_anchors
+            ),
+            format!(
+                "DELETE FROM GraphProjectionState WHERE \
+                 (anchor_type = 'file' AND anchor_id IN ({})) \
+                 OR (anchor_type = 'symbol' AND anchor_id IN ({})) \
+                 OR (anchor_type = 'symbol' AND anchor_id IN ({}));",
+                source_selector, affected_symbols, affected_symbol_anchors
+            ),
+            format!(
+                "DELETE FROM GraphProjection WHERE \
+                 (anchor_type = 'file' AND anchor_id IN ({})) \
+                 OR (anchor_type = 'symbol' AND anchor_id IN ({})) \
+                 OR (anchor_type = 'symbol' AND anchor_id IN ({})) \
+                 OR target_id IN ({});",
+                source_selector, affected_symbols, affected_symbol_anchors, affected_symbols
+            ),
+        ]
+    }
+
     pub fn bulk_insert_files(&self, file_paths: &[(String, String, i64, i64)]) -> Result<()> {
         let mut queries = Vec::new();
         for (path, project, size, mtime) in file_paths {
@@ -124,13 +160,23 @@ impl GraphStore {
         self.execute_batch(&queries)
     }
 
-    pub fn upsert_hot_file(&self, path: &str, project: &str, size: i64, mtime: i64, priority: i64) -> Result<()> {
+    pub fn upsert_hot_file(
+        &self,
+        path: &str,
+        project: &str,
+        size: i64,
+        mtime: i64,
+        priority: i64,
+    ) -> Result<()> {
         let queries = Self::upsert_file_queries(path, project, size, mtime, priority);
         self.execute_batch(&queries)?;
         watcher_probe::record(
             "watcher.db_upsert",
             Some(Path::new(path)),
-            format!("project={} priority={} size={} mtime={}", project, priority, size, mtime),
+            format!(
+                "project={} priority={} size={} mtime={}",
+                project, priority, size, mtime
+            ),
         );
         Ok(())
     }
@@ -139,45 +185,50 @@ impl GraphStore {
         let path = path.to_string_lossy().to_string();
         let escaped = Self::escape_sql(&path);
         let prefix = Self::escape_sql(&format!("{}/%", path.trim_end_matches('/')));
-        let selector = format!("SELECT path FROM File WHERE path = '{}' OR path LIKE '{}'", escaped, prefix);
-        let affected = self.query_count(&format!("SELECT count(*) FROM ({}) AS tombstone_paths", selector))?;
+        let selector = format!(
+            "SELECT path FROM File WHERE path = '{}' OR path LIKE '{}'",
+            escaped, prefix
+        );
+        let affected = self.query_count(&format!(
+            "SELECT count(*) FROM ({}) AS tombstone_paths",
+            selector
+        ))?;
 
         if affected == 0 {
             return Ok(0);
         }
 
-        let queries = vec![
-            format!(
+        let mut queries = Self::derived_cleanup_queries(&selector);
+        queries.push(format!(
                 "DELETE FROM CALLS WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) \
                  OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 selector, selector
-            ),
-            format!(
+            ));
+        queries.push(format!(
                 "DELETE FROM CALLS_NIF WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) \
                  OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 selector, selector
-            ),
-            format!(
+            ));
+        queries.push(format!(
                 "DELETE FROM ChunkEmbedding WHERE chunk_id IN (SELECT id FROM Chunk WHERE source_type = 'symbol' \
                  AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})));",
                 selector
-            ),
-            format!(
+            ));
+        queries.push(format!(
                 "DELETE FROM Chunk WHERE source_type = 'symbol' \
                  AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 selector
-            ),
-            format!(
+            ));
+        queries.push(format!(
                 "DELETE FROM Symbol WHERE id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 selector
-            ),
-            format!("DELETE FROM CONTAINS WHERE source_id IN ({});", selector),
-            format!(
+            ));
+        queries.push(format!("DELETE FROM CONTAINS WHERE source_id IN ({});", selector));
+        queries.push(format!(
                 "UPDATE File SET status = 'deleted', worker_id = NULL, needs_reindex = FALSE \
                  WHERE path IN ({});",
                 selector
-            ),
-        ];
+            ));
 
         self.execute_batch(&queries)?;
         watcher_probe::record(
@@ -310,6 +361,7 @@ impl GraphStore {
 
         if !processed_paths.is_empty() {
             let indexed_filter = processed_paths.join(",");
+            queries.extend(Self::derived_cleanup_queries(&indexed_filter));
             queries.push(format!(
                 "DELETE FROM CALLS WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 indexed_filter, indexed_filter
@@ -409,7 +461,11 @@ impl GraphStore {
     }
 
     pub fn fetch_pending_batch(&self, count: usize) -> Result<Vec<PendingFile>> {
-        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let claim_id = chrono::Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| chrono::Utc::now().timestamp_micros());
@@ -479,7 +535,10 @@ impl GraphStore {
         }
 
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)?;
-        Ok(rows.into_iter().filter_map(parse_pending_file_row).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(parse_pending_file_row)
+            .collect())
     }
 
     pub fn claim_pending_paths(&self, paths: &[String]) -> Result<Vec<PendingFile>> {
@@ -487,7 +546,11 @@ impl GraphStore {
             return Ok(vec![]);
         }
 
-        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let claim_id = chrono::Utc::now()
             .timestamp_nanos_opt()
             .unwrap_or_else(|| chrono::Utc::now().timestamp_micros());
@@ -592,8 +655,15 @@ impl GraphStore {
     }
 
     pub fn fetch_unembedded_symbols(&self, count: usize) -> Result<Vec<(String, String)>> {
-        let query = format!("SELECT id, name || ': ' || kind FROM Symbol WHERE embedding IS NULL LIMIT {}", count);
-        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let query = format!(
+            "SELECT id, name || ': ' || kind FROM Symbol WHERE embedding IS NULL LIMIT {}",
+            count
+        );
+        let guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let res = self.query_on_ctx(&query, *guard)?;
         drop(guard);
 
@@ -644,7 +714,11 @@ impl GraphStore {
         ))
     }
 
-    pub fn fetch_unembedded_chunks(&self, model_id: &str, count: usize) -> Result<Vec<(String, String, String)>> {
+    pub fn fetch_unembedded_chunks(
+        &self,
+        model_id: &str,
+        count: usize,
+    ) -> Result<Vec<(String, String, String)>> {
         let query = format!(
             "SELECT c.id, c.content, c.content_hash \
              FROM Chunk c \
@@ -654,7 +728,11 @@ impl GraphStore {
             Self::escape_sql(model_id),
             count
         );
-        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let res = self.query_on_ctx(&query, *guard)?;
         drop(guard);
 
@@ -699,7 +777,11 @@ impl GraphStore {
         self.execute_batch(&queries)
     }
 
-    pub fn update_chunk_embeddings(&self, model_id: &str, updates: &[(String, String, Vec<f32>)]) -> Result<()> {
+    pub fn update_chunk_embeddings(
+        &self,
+        model_id: &str,
+        updates: &[(String, String, Vec<f32>)],
+    ) -> Result<()> {
         if updates.is_empty() {
             return Ok(());
         }
@@ -748,7 +830,13 @@ impl GraphStore {
 }
 
 impl GraphStore {
-    fn upsert_file_queries(path: &str, project: &str, size: i64, mtime: i64, priority: i64) -> Vec<String> {
+    fn upsert_file_queries(
+        path: &str,
+        project: &str,
+        size: i64,
+        mtime: i64,
+        priority: i64,
+    ) -> Vec<String> {
         vec![
             format!(
                 "INSERT INTO Project (name) VALUES ('{}') ON CONFLICT DO NOTHING;",

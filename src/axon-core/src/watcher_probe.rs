@@ -51,7 +51,11 @@ mod tests {
     #[test]
     fn test_record_keeps_recent_probe_events() {
         clear();
-        record("watcher.received", Some(Path::new("/tmp/probe.ex")), "count=1");
+        record(
+            "watcher.received",
+            Some(Path::new("/tmp/probe.ex")),
+            "count=1",
+        );
         let events = recent();
         assert_eq!(events.len(), 1);
         assert!(events[0].contains("checkpoint=watcher.received"));

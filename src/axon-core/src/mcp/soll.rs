@@ -145,26 +145,53 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
         match section {
             "## 1. Vision & Objectifs Stratégiques" if trimmed.starts_with("### ") => {
                 let title = trimmed.trim_start_matches("### ").trim().to_string();
-                let description = lines.next().unwrap_or("").trim().trim_start_matches("**Description:**").trim().to_string();
-                let goal = lines.next().unwrap_or("").trim().trim_start_matches("**Goal:**").trim().to_string();
+                let description = lines
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches("**Description:**")
+                    .trim()
+                    .to_string();
+                let goal = lines
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches("**Goal:**")
+                    .trim()
+                    .to_string();
                 let metadata_line = lines.next().unwrap_or("").trim();
                 let metadata = metadata_line
                     .strip_prefix("**Meta:**")
                     .map(|s| s.trim().trim_matches('`').to_string());
-                parsed.vision.push(ParsedVision { title, description, goal, metadata });
+                parsed.vision.push(ParsedVision {
+                    title,
+                    description,
+                    goal,
+                    metadata,
+                });
             }
             "## 2. Piliers d'Architecture" if trimmed.starts_with("* **") => {
                 if let Some((id, rest)) = parse_bold_bullet(trimmed) {
                     let (title, description) = split_title_paren(rest);
                     let metadata = parse_optional_metadata_line(&mut lines, "Meta:");
-                    parsed.pillars.push(ParsedPillar { id, title, description, metadata });
+                    parsed.pillars.push(ParsedPillar {
+                        id,
+                        title,
+                        description,
+                        metadata,
+                    });
                 }
             }
             "## 2b. Concepts" if trimmed.starts_with("* **") => {
                 if let Some((name, rest)) = parse_bold_bullet(trimmed) {
                     let (explanation, rationale) = split_title_paren(rest);
                     let metadata = parse_optional_metadata_line(&mut lines, "Meta:");
-                    parsed.concepts.push(ParsedConcept { name, explanation, rationale, metadata });
+                    parsed.concepts.push(ParsedConcept {
+                        name,
+                        explanation,
+                        rationale,
+                        metadata,
+                    });
                 }
             }
             "## 3. Jalons & Roadmap (Milestones)" if trimmed.starts_with("### ") => {
@@ -179,7 +206,12 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
                     .trim_matches('`')
                     .to_string();
                 let metadata = parse_optional_metadata_line(&mut lines, "*Meta :*");
-                parsed.milestones.push(ParsedMilestone { id, title, status, metadata });
+                parsed.milestones.push(ParsedMilestone {
+                    id,
+                    title,
+                    status,
+                    metadata,
+                });
             }
             "## 4. Exigences & Rayon d'Impact (Requirements)" if trimmed.starts_with("### ") => {
                 let raw = trimmed.trim_start_matches("### ").trim();
@@ -199,22 +231,59 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
                     .to_string();
                 let status = parse_optional_backticked_line(&mut lines, "*Statut :*");
                 let metadata = parse_optional_metadata_line(&mut lines, "*Meta :*");
-                parsed.requirements.push(ParsedRequirement { id, title, priority, description, status, metadata });
+                parsed.requirements.push(ParsedRequirement {
+                    id,
+                    title,
+                    priority,
+                    description,
+                    status,
+                    metadata,
+                });
             }
             "## 5. Registre des Décisions (ADR)" if trimmed.starts_with("### ") => {
                 let id = trimmed.trim_start_matches("### ").trim().to_string();
-                let title = lines.next().unwrap_or("").trim().trim_start_matches("**Titre :**").trim().to_string();
-                let status = lines.next().unwrap_or("").trim().trim_start_matches("**Statut :**").trim().trim_matches('`').to_string();
+                let title = lines
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches("**Titre :**")
+                    .trim()
+                    .to_string();
+                let status = lines
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches("**Statut :**")
+                    .trim()
+                    .trim_matches('`')
+                    .to_string();
                 let context = parse_optional_plain_line(&mut lines, "**Contexte :**");
                 let description = parse_optional_plain_line(&mut lines, "**Description :**");
-                let rationale = lines.next().unwrap_or("").trim().trim_start_matches("**Rationnel :**").trim().to_string();
+                let rationale = lines
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches("**Rationnel :**")
+                    .trim()
+                    .to_string();
                 let metadata = parse_optional_metadata_line(&mut lines, "**Meta :**");
-                parsed.decisions.push(ParsedDecision { id, title, status, description, context, rationale, metadata });
+                parsed.decisions.push(ParsedDecision {
+                    id,
+                    title,
+                    status,
+                    description,
+                    context,
+                    rationale,
+                    metadata,
+                });
             }
             "## 6. Preuves de Validation & Witness" if trimmed.starts_with('*') => {
                 if let Some(validation) = parse_validation_line(trimmed) {
                     let metadata = parse_optional_metadata_line(&mut lines, "Meta:");
-                    parsed.validations.push(ParsedValidation { metadata, ..validation });
+                    parsed.validations.push(ParsedValidation {
+                        metadata,
+                        ..validation
+                    });
                 }
             }
             "## 7. Liens de Traçabilité SOLL" if trimmed.starts_with('*') => {
@@ -283,7 +352,13 @@ fn parse_validation_line(line: &str) -> Option<ParsedValidation> {
         .and_then(|s| s.trim_end_matches(')').parse::<i64>().ok())
         .unwrap_or(0);
 
-    Some(ParsedValidation { id, result, method, timestamp, metadata: None })
+    Some(ParsedValidation {
+        id,
+        result,
+        method,
+        timestamp,
+        metadata: None,
+    })
 }
 
 fn parse_relation_line(line: &str) -> Option<ParsedRelation> {
@@ -302,7 +377,11 @@ fn parse_relation_line(line: &str) -> Option<ParsedRelation> {
     let target_end = after_target_tick.find('`')?;
     let target_id = after_target_tick[..target_end].trim().to_string();
 
-    Some(ParsedRelation { relation_type, source_id, target_id })
+    Some(ParsedRelation {
+        relation_type,
+        source_id,
+        target_id,
+    })
 }
 
 fn parse_optional_metadata_line<'a, I>(
@@ -335,10 +414,7 @@ where
     parse_optional_line(lines, prefix)
 }
 
-fn parse_optional_line<'a, I>(
-    lines: &mut std::iter::Peekable<I>,
-    prefix: &str,
-) -> Option<String>
+fn parse_optional_line<'a, I>(lines: &mut std::iter::Peekable<I>, prefix: &str) -> Option<String>
 where
     I: Iterator<Item = &'a str>,
 {

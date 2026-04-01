@@ -1,9 +1,27 @@
+// Copyright (c) Didier Stadelmann. All rights reserved.
+
 use serde_json::{json, Value};
 
 use super::format::format_table_from_json;
 use super::McpServer;
 
 impl McpServer {
+    fn file_count_for_project(&self, project: &str) -> i64 {
+        if project == "*" {
+            self.graph_store
+                .query_count("SELECT count(*) FROM File")
+                .unwrap_or(0)
+        } else {
+            let escaped = project.replace('\'', "''");
+            self.graph_store
+                .query_count(&format!(
+                    "SELECT count(*) FROM File WHERE project_slug = '{}' OR path LIKE '%{}%'",
+                    escaped, escaped
+                ))
+                .unwrap_or(0)
+        }
+    }
+
     fn build_graph_clone_section(&self, symbol: &str) -> Option<String> {
         let anchor_res = self
             .graph_store
@@ -42,7 +60,10 @@ impl McpServer {
               AND array_cosine_distance(anchor.embedding, peer.embedding) < 0.05
             ORDER BY score ASC
             LIMIT 5";
-        let res = self.graph_store.query_json_param(query, &json!({"anchor": anchor_id})).ok()?;
+        let res = self
+            .graph_store
+            .query_json_param(query, &json!({"anchor": anchor_id}))
+            .ok()?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
         if rows.is_empty() {
             return None;
@@ -58,15 +79,7 @@ impl McpServer {
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         let project = requested_project;
 
-        let file_count = if project == "*" {
-            self.graph_store.query_count("SELECT count(*) FROM File").unwrap_or(0)
-        } else {
-            let count_query = "SELECT count(*) FROM File WHERE path LIKE '%' || $proj || '%'".to_string();
-            let params = json!({"proj": project});
-            self.graph_store
-                .query_count_param(&count_query, &params)
-                .unwrap_or(0)
-        };
+        let file_count = self.file_count_for_project(project);
 
         if file_count < 1 {
             let warning = format!(
@@ -81,9 +94,16 @@ impl McpServer {
             .get_security_audit(project)
             .unwrap_or((100, "[]".to_string()));
         let cov_score = self.graph_store.get_coverage_score(project).unwrap_or(0);
-        let tech_debt = self.graph_store.get_technical_debt(project).unwrap_or_default();
+        let tech_debt = self
+            .graph_store
+            .get_technical_debt(project)
+            .unwrap_or_default();
 
         let mut report = format!("## 🛡️ Audit de Conformité : {}\n\n", project);
+        if let Some(note) = self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project))) {
+            report.push_str(&note);
+            report.push('\n');
+        }
         report.push_str(&format!("### 🔒 Sécurité : {}/100\n", sec_score));
 
         if sec_score < 100 {
@@ -100,7 +120,10 @@ impl McpServer {
                 report.push_str(&format!("*   `{}` dans `{}`\n", issue, file));
             }
             if tech_debt.len() > 10 {
-                report.push_str(&format!("*... et {} autres points détectés.*\n", tech_debt.len() - 10));
+                report.push_str(&format!(
+                    "*... et {} autres points détectés.*\n",
+                    tech_debt.len() - 10
+                ));
             }
         }
 
@@ -112,15 +135,7 @@ impl McpServer {
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         let project = requested_project;
 
-        let file_count = if project == "*" {
-            self.graph_store.query_count("SELECT count(*) FROM File").unwrap_or(0)
-        } else {
-            let count_query = "SELECT count(*) FROM File WHERE path LIKE '%' || $proj || '%'".to_string();
-            let params = json!({"proj": project});
-            self.graph_store
-                .query_count_param(&count_query, &params)
-                .unwrap_or(0)
-        };
+        let file_count = self.file_count_for_project(project);
 
         if file_count < 1 {
             let warning = format!(
@@ -131,9 +146,20 @@ impl McpServer {
         }
 
         let coverage = self.graph_store.get_coverage_score(project).unwrap_or(0);
-        let god_objects = self.graph_store.get_god_objects(project).unwrap_or_default();
+        let god_objects = self
+            .graph_store
+            .get_god_objects(project)
+            .unwrap_or_default();
 
-        let mut report = format!("🏥 Health Report for {}: Coverage {}%. Stability high.", project, coverage);
+        let mut report = format!(
+            "🏥 Health Report for {}: Coverage {}%. Stability high.",
+            project, coverage
+        );
+        if let Some(note) =
+            self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)))
+        {
+            report.push_str(&format!("\n{}", note));
+        }
         if !god_objects.is_empty() {
             let god_list: Vec<String> = god_objects
                 .iter()
@@ -164,14 +190,19 @@ impl McpServer {
                         format_table_from_json(&res, &["Nom", "Type", "Similitude"])
                     )
                 } else {
-                    format!("✅ Aucun clone sémantique évident (similitude > 95%) trouvé pour '{}'.", symbol)
+                    format!(
+                        "✅ Aucun clone sémantique évident (similitude > 95%) trouvé pour '{}'.",
+                        symbol
+                    )
                 };
                 if let Some(section) = self.build_graph_clone_section(symbol) {
                     report.push_str(&section);
                 }
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
-            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Cloning Error: {}", e) }], "isError": true })),
+            Err(e) => Some(
+                json!({ "content": [{ "type": "text", "text": format!("Cloning Error: {}", e) }], "isError": true }),
+            ),
         }
     }
 
@@ -189,7 +220,8 @@ impl McpServer {
             JOIN CONTAINS c2 ON s2.id = c2.target_id
             JOIN File f2 ON f2.path = c2.source_id
             WHERE f1.path LIKE '%' || $s_layer || '%' AND f2.path LIKE '%' || $t_layer || '%'
-        ".to_string();
+        "
+        .to_string();
 
         let params = json!({
             "s_layer": source_layer,
@@ -213,7 +245,9 @@ impl McpServer {
                 };
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
-            Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Drift Analysis Error: {}", e) }], "isError": true })),
+            Err(e) => Some(
+                json!({ "content": [{ "type": "text", "text": format!("Drift Analysis Error: {}", e) }], "isError": true }),
+            ),
         }
     }
 }

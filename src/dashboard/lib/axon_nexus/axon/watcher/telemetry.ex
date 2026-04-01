@@ -123,7 +123,7 @@ defmodule Axon.Watcher.Telemetry do
 
     if Map.has_key?(dirs, dir) do
       updated_dir =
-        if status == :ok do
+        if status in [:ok, :degraded] do
           %{dirs[dir] | completed: dirs[dir].completed + 1, last_update: now}
         else
           %{dirs[dir] | failed: dirs[dir].failed + 1, last_update: now}
