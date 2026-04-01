@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::main_background;
 use axon_core::bridge::BridgeEvent;
 use axon_core::graph::GraphStore;
 use axon_core::queue::QueueStore;
 use axon_core::scanner;
-use crate::main_background;
 use crossbeam_channel::Sender;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -33,6 +33,11 @@ pub(crate) fn spawn_runtime_telemetry(
                 service_pressure: snapshot.service_pressure,
                 oversized_refusals_total: snapshot.oversized_refusals_total,
                 degraded_mode_entries_total: snapshot.degraded_mode_entries_total,
+                cpu_load: snapshot.cpu_load,
+                ram_load: snapshot.ram_load,
+                io_wait: snapshot.io_wait,
+                host_state: snapshot.host_state,
+                host_guidance_slots: snapshot.host_guidance_slots,
             };
 
             if let Ok(message) = serde_json::to_string(&event) {
@@ -137,7 +142,10 @@ pub(crate) async fn handle_telemetry_command(
             let new_id = data["boot_id"].as_str().unwrap_or("unknown").to_string();
             let mut active_id = boot_id_lock.lock().await;
             if new_id != *active_id {
-                info!("🔄 New Elixir Session: {}. Maintaining current pipeline state.", new_id);
+                info!(
+                    "🔄 New Elixir Session: {}. Maintaining current pipeline state.",
+                    new_id
+                );
                 *active_id = new_id;
             }
         }
@@ -156,7 +164,10 @@ pub(crate) async fn handle_telemetry_command(
             if let Some(files) = files_value.as_array() {
                 for file_data in files {
                     let path = file_data["path"].as_str().unwrap_or("unknown").to_string();
-                    let trace_id = file_data["trace_id"].as_str().unwrap_or("unknown").to_string();
+                    let trace_id = file_data["trace_id"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string();
                     let t0 = file_data["t0"].as_i64().unwrap_or(0);
                     let t1 = file_data["t1"].as_i64().unwrap_or(0);
                     let mtime = std::fs::metadata(&path)
@@ -184,7 +195,8 @@ pub(crate) async fn handle_telemetry_command(
         tokio::spawn(async move {
             if let Ok(files) = store.fetch_pending_batch(count) {
                 if !files.is_empty() {
-                    let response = serde_json::json!({"event": "PENDING_BATCH_READY", "files": files});
+                    let response =
+                        serde_json::json!({"event": "PENDING_BATCH_READY", "files": files});
                     if let Ok(msg) = serde_json::to_string(&response) {
                         let _ = results_tx.send(msg + "\n");
                     }

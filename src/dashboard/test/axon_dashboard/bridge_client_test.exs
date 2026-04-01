@@ -1,3 +1,5 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule AxonDashboard.BridgeClientTest do
   use ExUnit.Case, async: false
 
@@ -56,25 +58,37 @@ defmodule AxonDashboard.BridgeClientTest do
     assert Process.alive?(pid)
   end
 
-  test "trigger_scan does not fabricate indexing state before runtime confirmation" do
+  test "runtime telemetry updates cockpit telemetry store directly" do
+    Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
     pid = Process.whereis(BridgeClient)
     assert pid
 
-    :ok = GenServer.cast(pid, :trigger_scan)
+    send(
+      pid,
+      {:tcp, nil,
+       Jason.encode!(%{
+         "RuntimeTelemetry" => %{
+           "budget_bytes" => 4_096,
+           "reserved_bytes" => 2_048,
+           "exhaustion_ratio" => 0.5,
+           "queue_depth" => 8,
+           "claim_mode" => "slow",
+           "service_pressure" => "recovering",
+           "oversized_refusals_total" => 2,
+           "degraded_mode_entries_total" => 1,
+           "cpu_load" => 12.5,
+           "ram_load" => 33.0,
+           "io_wait" => 1.5,
+           "host_state" => "healthy",
+           "host_guidance_slots" => 6
+         }
+       }) <> "\n"}
+    )
 
-    state = BridgeClient.get_state()
-    assert state.engine_state == :idle
-  end
-
-  test "stop_scan does not override runtime state locally" do
-    pid = Process.whereis(BridgeClient)
-    assert pid
-
-    send(pid, {:tcp, nil, Jason.encode!(%{"ScanStarted" => %{}}) <> "\n"})
-    assert BridgeClient.get_state().engine_state == :indexing
-
-    :ok = GenServer.cast(pid, :stop_scan)
-
-    assert BridgeClient.get_state().engine_state == :indexing
+    assert_receive {:bridge_event, %{"RuntimeTelemetry" => %{"budget_bytes" => 4_096}}}, 1000
+    stats = Axon.Watcher.Telemetry.get_stats()
+    assert stats[:budget_bytes] == 4_096
+    assert stats[:host_state] == "healthy"
+    assert stats[:host_guidance_slots] == 6
   end
 end

@@ -23,7 +23,6 @@ defmodule Axon.Watcher.Application do
       Axon.Watcher.Repo,
       Axon.Watcher.Telemetry,
       Axon.Watcher.Tracer,
-      Axon.Watcher.PoolFacade,
       {Phoenix.PubSub, name: Axon.PubSub},
       Axon.Watcher.Endpoint
     ]

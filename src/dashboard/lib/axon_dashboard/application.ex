@@ -14,11 +14,7 @@ defmodule AxonDashboard.Application do
       {Phoenix.PubSub, name: AxonDashboard.PubSub},
       Axon.Watcher.Tracer,
       Axon.Watcher.Telemetry,
-      AxonDashboard.TelemetryHandler,
       Axon.Watcher.Repo,
-      Axon.Watcher.PoolFacade,
-      Axon.ResourceMonitor,
-      Axon.BackpressureController,
       {DNSCluster, query: Application.get_env(:axon_dashboard, :dns_cluster_query) || :ignore},
       # Start a worker by calling: AxonDashboard.Worker.start_link(arg)
       # {AxonDashboard.Worker, arg},

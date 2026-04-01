@@ -2,7 +2,7 @@
 
 defmodule Axon.Watcher.PipelineMaillonsTest do
   use ExUnit.Case, async: false
-  alias Axon.Watcher.PoolFacade
+  alias AxonDashboard.BridgeClient
 
   setup do
     case Process.whereis(Axon.Watcher.Telemetry) do
@@ -15,20 +15,13 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
     end
   end
 
-  test "legacy parse batches are no longer exported in visualization-only mode" do
-    refute function_exported?(PoolFacade, :parse_batch, 1)
+  test "bridge client is the sole telemetry ingress for the cockpit" do
+    refute function_exported?(BridgeClient, :trigger_scan, 0)
   end
 
-  test "bridge telemetry still survives file indexed events without traffic guardian" do
-    pid =
-      case Process.whereis(PoolFacade) do
-        nil ->
-          {:ok, started} = PoolFacade.start_link([])
-          started
-
-        started ->
-          started
-      end
+  test "bridge telemetry still survives file indexed events without pool facade" do
+    pid = Process.whereis(BridgeClient)
+    assert pid
 
     line = ~s({"FileIndexed": {"path": "/tmp/test.ex", "status": "ok", "t4": 500}})
     send(pid, {:tcp, nil, line <> "\n"})
@@ -36,16 +29,9 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
     assert Process.alive?(pid)
   end
 
-  test "file indexed events update live telemetry without stats cache" do
-    pid =
-      case Process.whereis(PoolFacade) do
-        nil ->
-          {:ok, started} = PoolFacade.start_link([])
-          started
-
-        started ->
-          started
-      end
+  test "file indexed events update live telemetry without pool facade" do
+    pid = Process.whereis(BridgeClient)
+    assert pid
 
     send(
       pid,
@@ -74,7 +60,8 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
           [%{path: "/tmp/test.ex", status: :ok} | _] ->
             if stats[:total_ingested] >= 1, do: stats, else: nil
 
-          _ -> nil
+          _ ->
+            nil
         end
       end)
 
@@ -83,15 +70,8 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
   end
 
   test "runtime status updates telemetry store from canonical Rust payload" do
-    pid =
-      case Process.whereis(PoolFacade) do
-        nil ->
-          {:ok, started} = PoolFacade.start_link([])
-          started
-
-        started ->
-          started
-      end
+    pid = Process.whereis(BridgeClient)
+    assert pid
 
     send(
       pid,
@@ -105,7 +85,12 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
            "claim_mode" => "guarded",
            "service_pressure" => "degraded",
            "oversized_refusals_total" => 4,
-           "degraded_mode_entries_total" => 9
+           "degraded_mode_entries_total" => 9,
+           "cpu_load" => 44.5,
+           "ram_load" => 55.5,
+           "io_wait" => 6.5,
+           "host_state" => "watch",
+           "host_guidance_slots" => 4
          }
        }) <> "\n"}
     )
@@ -126,6 +111,11 @@ defmodule Axon.Watcher.PipelineMaillonsTest do
     assert stats[:service_pressure] == "degraded"
     assert stats[:oversized_refusals_total] == 4
     assert stats[:degraded_mode_entries_total] == 9
+    assert stats[:cpu_load] == 44.5
+    assert stats[:ram_load] == 55.5
+    assert stats[:io_wait] == 6.5
+    assert stats[:host_state] == "watch"
+    assert stats[:host_guidance_slots] == 4
   end
 
   defp wait_for(fun, attempts \\ 50)

@@ -33,8 +33,8 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:cpu_load, 0.0})
     :ets.insert(:axon_telemetry, {:ram_load, 0.0})
     :ets.insert(:axon_telemetry, {:io_wait, 0.0})
-    :ets.insert(:axon_telemetry, {:queues_paused, false})
-    :ets.insert(:axon_telemetry, {:indexing_limit, 0})
+    :ets.insert(:axon_telemetry, {:host_state, "healthy"})
+    :ets.insert(:axon_telemetry, {:host_guidance_slots, 0})
     {:ok, %{}}
   end
 
@@ -53,10 +53,12 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:exhaustion_ratio, Map.get(payload, "exhaustion_ratio", 0.0)})
     :ets.insert(:axon_telemetry, {:queue_depth, Map.get(payload, "queue_depth", 0)})
     :ets.insert(:axon_telemetry, {:claim_mode, Map.get(payload, "claim_mode", "unknown")})
+
     :ets.insert(
       :axon_telemetry,
       {:oversized_refusals_total, Map.get(payload, "oversized_refusals_total", 0)}
     )
+
     :ets.insert(
       :axon_telemetry,
       {:degraded_mode_entries_total, Map.get(payload, "degraded_mode_entries_total", 0)}
@@ -66,20 +68,16 @@ defmodule Axon.Watcher.Telemetry do
       :axon_telemetry,
       {:service_pressure, Map.get(payload, "service_pressure", "healthy")}
     )
-  end
 
-  def update_host_pressure(cpu, ram, io_wait) do
-    :ets.insert(:axon_telemetry, {:cpu_load, cpu})
-    :ets.insert(:axon_telemetry, {:ram_load, ram})
-    :ets.insert(:axon_telemetry, {:io_wait, io_wait})
-  end
+    :ets.insert(:axon_telemetry, {:cpu_load, Map.get(payload, "cpu_load", 0.0)})
+    :ets.insert(:axon_telemetry, {:ram_load, Map.get(payload, "ram_load", 0.0)})
+    :ets.insert(:axon_telemetry, {:io_wait, Map.get(payload, "io_wait", 0.0)})
+    :ets.insert(:axon_telemetry, {:host_state, Map.get(payload, "host_state", "healthy")})
 
-  def update_queue_constraint(paused) when is_boolean(paused) do
-    :ets.insert(:axon_telemetry, {:queues_paused, paused})
-  end
-
-  def update_indexing_limit(limit) when is_integer(limit) do
-    :ets.insert(:axon_telemetry, {:indexing_limit, limit})
+    :ets.insert(
+      :axon_telemetry,
+      {:host_guidance_slots, Map.get(payload, "host_guidance_slots", 0)}
+    )
   end
 
   def init_directories(files) do
@@ -157,8 +155,8 @@ defmodule Axon.Watcher.Telemetry do
       cpu_load: get_val(:cpu_load),
       ram_load: get_val(:ram_load),
       io_wait: get_val(:io_wait),
-      queues_paused: get_val(:queues_paused),
-      indexing_limit: get_val(:indexing_limit)
+      host_state: get_val(:host_state),
+      host_guidance_slots: get_val(:host_guidance_slots)
     }
   end
 

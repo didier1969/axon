@@ -8,7 +8,6 @@ defmodule Axon.Watcher.CockpitLive do
   def mount(_params, _session, socket) do
     if connected?(socket) do
       :timer.send_interval(500, self(), :tick)
-      Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "telemetry_events")
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
     end
 
@@ -39,74 +38,10 @@ defmodule Axon.Watcher.CockpitLive do
          cpu_load: 0.0,
          ram_load: 0.0,
          io_wait: 0.0,
-         queues_paused: false,
-         indexing_limit: 0
+         host_state: "healthy",
+         host_guidance_slots: 0
        }
      )}
-  end
-
-  @impl true
-  def handle_info({:backpressure_update, data}, socket) do
-    live = Map.merge(socket.assigns.live, %{target_pressure: data.pressure, t4_ema: data.t4_ema})
-    {:noreply, assign(socket, live: live)}
-  end
-
-  @impl true
-  def handle_info(
-        {:telemetry_event, [:axon, :backpressure, :pressure_computed], _measurements, metadata},
-        socket
-      ) do
-    cpu = Map.get(metadata, :cpu, 0.0)
-    ram = Map.get(metadata, :ram, 0.0)
-    io_wait = Map.get(metadata, :io, 0.0)
-    Axon.Watcher.Telemetry.update_host_pressure(cpu, ram, io_wait)
-
-    {:noreply,
-     assign(socket,
-       live:
-         socket.assigns.live
-         |> Map.put(:cpu_load, cpu)
-         |> Map.put(:ram_load, ram)
-         |> Map.put(:io_wait, io_wait)
-     )}
-  end
-
-  @impl true
-  def handle_info(
-        {:telemetry_event, [:axon, :backpressure, :queues_paused], _measurements, _metadata},
-        socket
-      ) do
-    Axon.Watcher.Telemetry.update_queue_constraint(true)
-
-    {:noreply,
-     assign(socket,
-       live:
-         socket.assigns.live
-         |> Map.put(:queues_paused, true)
-         |> Map.put(:indexing_limit, 0)
-     )}
-  end
-
-  @impl true
-  def handle_info(
-        {:telemetry_event, [:axon, :backpressure, :queues_resumed], _measurements, _metadata},
-        socket
-      ) do
-    Axon.Watcher.Telemetry.update_queue_constraint(false)
-
-    {:noreply,
-     assign(socket, live: Map.put(socket.assigns.live, :queues_paused, false))}
-  end
-
-  @impl true
-  def handle_info(
-        {:telemetry_event, [:axon, :backpressure, :limit_adjusted], measurements, _metadata},
-        socket
-      ) do
-    limit = Map.get(measurements, :limit, 0)
-    Axon.Watcher.Telemetry.update_indexing_limit(limit)
-
-    {:noreply, assign(socket, live: Map.put(socket.assigns.live, :indexing_limit, limit))}
   end
 
   @impl true
@@ -225,7 +160,7 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
       </div>
       
-      <!-- Unit 03: Monitoring Control -->
+    <!-- Unit 03: Monitoring Control -->
       <div class="card" style="border-color: var(--neon-blue);">
         <div class="card-title" style="color: var(--neon-blue);">
           <svg style="width:18px;height:18px" viewBox="0 0 24 24">
@@ -246,41 +181,55 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
       </div>
 
-      <!-- Unit 04: Runtime Pressure -->
+    <!-- Unit 04: Runtime Pressure -->
       <div class="card" style="border-color: var(--warning);">
         <div class="card-title" style="color: var(--warning);">
           <svg style="width:18px;height:18px" viewBox="0 0 24 24">
-            <path fill="currentColor" d="M12,2L1,21H23L12,2M12,6L19.53,19H4.47L12,6M11,10V14H13V10H11M11,16V18H13V16H11Z" />
+            <path
+              fill="currentColor"
+              d="M12,2L1,21H23L12,2M12,6L19.53,19H4.47L12,6M11,10V14H13V10H11M11,16V18H13V16H11Z"
+            />
           </svg>
           UNIT 04: RUNTIME PRESSURE
         </div>
-        <div class="stat"><label>RUST_GUIDANCE</label> <span style="color: var(--neon-green);">{@live.target_pressure} slots</span></div>
+        <div class="stat">
+          <label>RUST_GUIDANCE</label>
+          <span style="color: var(--neon-green);">{@live.target_pressure} slots</span>
+        </div>
         <div class="stat">
           <label>HOST_CPU</label>
-          <span style="color: var(--neon-blue);">{Float.round(Map.get(@live, :cpu_load, 0.0), 1)}%</span>
+          <span style="color: var(--neon-blue);">
+            {Float.round(Map.get(@live, :cpu_load, 0.0), 1)}%
+          </span>
         </div>
         <div class="stat">
           <label>HOST_RAM</label>
-          <span style="color: var(--neon-blue);">{Float.round(Map.get(@live, :ram_load, 0.0), 1)}%</span>
+          <span style="color: var(--neon-blue);">
+            {Float.round(Map.get(@live, :ram_load, 0.0), 1)}%
+          </span>
         </div>
         <div class="stat">
           <label>HOST_IO_WAIT</label>
-          <span style="color: var(--neon-blue);">{Float.round(Map.get(@live, :io_wait, 0.0), 1)}%</span>
+          <span style="color: var(--neon-blue);">
+            {Float.round(Map.get(@live, :io_wait, 0.0), 1)}%
+          </span>
         </div>
         <div class="stat">
           <label>HOST_STATE</label>
-          <span style={"color: #{if Map.get(@live, :queues_paused, false), do: "var(--warning)", else: "var(--neon-green)"};"}>
-            {if Map.get(@live, :queues_paused, false), do: "CONSTRAINED", else: "HEALTHY"}
+          <span style={"color: #{host_state_color(Map.get(@live, :host_state, "healthy"))};"}>
+            {String.upcase(Map.get(@live, :host_state, "healthy"))}
           </span>
         </div>
         <div class="stat">
           <label>HOST_GUIDANCE</label>
-          <span style="color: var(--warning);">{Map.get(@live, :indexing_limit, 0)} slots</span>
+          <span style="color: var(--warning);">{Map.get(@live, :host_guidance_slots, 0)} slots</span>
         </div>
         <div class="stat">
           <label>MEMORY_BUDGET</label>
           <span style="color: var(--neon-blue);">
-            {format_mebibytes(Map.get(@live, :reserved_bytes, 0))} MB / {format_mebibytes(Map.get(@live, :budget_bytes, 0))} MB
+            {format_mebibytes(Map.get(@live, :reserved_bytes, 0))} MB / {format_mebibytes(
+              Map.get(@live, :budget_bytes, 0)
+            )} MB
           </span>
         </div>
         <div class="stat">
@@ -295,11 +244,15 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
         <div class="stat">
           <label>CLAIM_MODE</label>
-          <span style="color: var(--neon-green);">{String.upcase(Map.get(@live, :claim_mode, "unknown"))}</span>
+          <span style="color: var(--neon-green);">
+            {String.upcase(Map.get(@live, :claim_mode, "unknown"))}
+          </span>
         </div>
         <div class="stat">
           <label>SERVICE_PRESSURE</label>
-          <span style="color: var(--warning);">{String.upcase(Map.get(@live, :service_pressure, "unknown"))}</span>
+          <span style="color: var(--warning);">
+            {String.upcase(Map.get(@live, :service_pressure, "unknown"))}
+          </span>
         </div>
         <div class="stat">
           <label>Oversized Refusals</label>
@@ -307,7 +260,9 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
         <div class="stat">
           <label>Degraded Entries</label>
-          <span style="color: var(--warning);">{Map.get(@live, :degraded_mode_entries_total, 0)}</span>
+          <span style="color: var(--warning);">
+            {Map.get(@live, :degraded_mode_entries_total, 0)}
+          </span>
         </div>
         <div class="stat">
           <label>T4_LATENCY</label>
@@ -319,9 +274,13 @@ defmodule Axon.Watcher.CockpitLive do
           <label>REAL_FLUX</label>
           <span style="color: var(--neon-blue);">{Float.round(@live.flux_reel, 1)} f/s</span>
         </div>
-        
+
         <div class="progress-bar" style="background: rgba(217, 119, 6, 0.1);">
-          <div class="progress-fill" style={"width: #{Map.get(@live, :exhaustion_ratio, 0.0) * 100}%; background: var(--warning);"}></div>
+          <div
+            class="progress-fill"
+            style={"width: #{Map.get(@live, :exhaustion_ratio, 0.0) * 100}%; background: var(--warning);"}
+          >
+          </div>
         </div>
       </div>
       
@@ -353,7 +312,10 @@ defmodule Axon.Watcher.CockpitLive do
               SYSTEM_IDLE: AWAITING_INGESTION_DATA
             </div>
           <% end %>
-          <div :if={Map.get(@live, :scan_complete, false)} style="color: var(--neon-green); text-align: center; margin-top: 12px;">
+          <div
+            :if={Map.get(@live, :scan_complete, false)}
+            style="color: var(--neon-green); text-align: center; margin-top: 12px;"
+          >
             Runtime reported scan completion
           </div>
         </div>
@@ -420,9 +382,13 @@ defmodule Axon.Watcher.CockpitLive do
 
     live =
       socket.assigns.live
-      |> Map.update(:last_files, [%{path: path, status: status, time: DateTime.utc_now()}], fn files ->
-        [%{path: path, status: status, time: DateTime.utc_now()} | Enum.take(files, 14)]
-      end)
+      |> Map.update(
+        :last_files,
+        [%{path: path, status: status, time: DateTime.utc_now()}],
+        fn files ->
+          [%{path: path, status: status, time: DateTime.utc_now()} | Enum.take(files, 14)]
+        end
+      )
       |> Map.update(:total_ingested, 1, &(&1 + 1))
       |> Map.put(:scan_complete, false)
 
@@ -445,6 +411,11 @@ defmodule Axon.Watcher.CockpitLive do
       |> Map.put(:service_pressure, Map.get(payload, "service_pressure", "unknown"))
       |> Map.put(:oversized_refusals_total, Map.get(payload, "oversized_refusals_total", 0))
       |> Map.put(:degraded_mode_entries_total, Map.get(payload, "degraded_mode_entries_total", 0))
+      |> Map.put(:cpu_load, Map.get(payload, "cpu_load", 0.0))
+      |> Map.put(:ram_load, Map.get(payload, "ram_load", 0.0))
+      |> Map.put(:io_wait, Map.get(payload, "io_wait", 0.0))
+      |> Map.put(:host_state, Map.get(payload, "host_state", "healthy"))
+      |> Map.put(:host_guidance_slots, Map.get(payload, "host_guidance_slots", 0))
 
     assign(socket, live: live)
   end
@@ -454,4 +425,8 @@ defmodule Axon.Watcher.CockpitLive do
   defp format_mebibytes(bytes) when is_integer(bytes) do
     div(bytes, 1024 * 1024)
   end
+
+  defp host_state_color("constrained"), do: "var(--warning)"
+  defp host_state_color("watch"), do: "var(--warning)"
+  defp host_state_color(_state), do: "var(--neon-green)"
 end

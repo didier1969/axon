@@ -15,15 +15,12 @@ config :axon_dashboard,
 config :axon_dashboard, Axon.Watcher.Repo,
   adapter: Ecto.Adapters.SQLite3,
   database: "axon_nexus.db",
-  pool_size: 1, # SERIALIZED WRITES to avoid 'Database busy'
+  # SERIALIZED WRITES to avoid 'Database busy'
+  pool_size: 1,
   journal_mode: :wal,
   busy_timeout: 5000,
-  synchronous: :normal # High performance mode for WAL
-
-config :axon_dashboard, Axon.BackpressureController,
-  cpu_hard_limit: 70.0,
-  ram_hard_limit: 70.0,
-  io_hard_limit: 20.0
+  # High performance mode for WAL
+  synchronous: :normal
 
 # Configure the endpoint
 config :axon_dashboard, AxonDashboardWeb.Endpoint,

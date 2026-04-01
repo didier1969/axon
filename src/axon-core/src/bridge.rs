@@ -4,9 +4,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum BridgeEvent {
-    SystemReady { start_time_utc: String },
-    ScanStarted { total_files: usize },
-    ProjectScanStarted { project: String, total_files: usize },
+    SystemReady {
+        start_time_utc: String,
+    },
+    ScanStarted {
+        total_files: usize,
+    },
+    ProjectScanStarted {
+        project: String,
+        total_files: usize,
+    },
     FileIndexed {
         path: String,
         status: String,
@@ -35,8 +42,16 @@ pub enum BridgeEvent {
         service_pressure: String,
         oversized_refusals_total: u64,
         degraded_mode_entries_total: u64,
+        cpu_load: f64,
+        ram_load: f64,
+        io_wait: f64,
+        host_state: String,
+        host_guidance_slots: usize,
     },
-    ScanComplete { total_files: usize, duration_ms: u64 },
+    ScanComplete {
+        total_files: usize,
+        duration_ms: u64,
+    },
     Heartbeat,
 }
 
@@ -55,6 +70,11 @@ mod tests {
             service_pressure: "degraded".to_string(),
             oversized_refusals_total: 7,
             degraded_mode_entries_total: 3,
+            cpu_load: 61.5,
+            ram_load: 47.0,
+            io_wait: 12.2,
+            host_state: "constrained".to_string(),
+            host_guidance_slots: 2,
         };
 
         let json = serde_json::to_string(&payload).expect("bridge event serializes");
@@ -68,5 +88,10 @@ mod tests {
         assert!(json.contains("\"service_pressure\":\"degraded\""));
         assert!(json.contains("\"oversized_refusals_total\":7"));
         assert!(json.contains("\"degraded_mode_entries_total\":3"));
+        assert!(json.contains("\"cpu_load\":61.5"));
+        assert!(json.contains("\"ram_load\":47.0"));
+        assert!(json.contains("\"io_wait\":12.2"));
+        assert!(json.contains("\"host_state\":\"constrained\""));
+        assert!(json.contains("\"host_guidance_slots\":2"));
     }
 }

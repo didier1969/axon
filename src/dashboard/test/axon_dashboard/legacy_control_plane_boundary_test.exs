@@ -6,21 +6,23 @@ defmodule AxonDashboard.LegacyControlPlaneBoundaryTest do
     assert Application.get_env(:axon_dashboard, Oban) == nil
   end
 
-  test "pool facade no longer exposes legacy batch admission commands" do
-    refute function_exported?(Axon.Watcher.PoolFacade, :parse_batch, 1)
-    refute function_exported?(Axon.Watcher.PoolFacade, :pull_pending, 1)
-    refute function_exported?(Axon.Watcher.PoolFacade, :query_json, 1)
+  test "dashboard bridge no longer exposes runtime command surface" do
+    refute function_exported?(AxonDashboard.BridgeClient, :trigger_scan, 0)
+    refute function_exported?(AxonDashboard.BridgeClient, :trigger_scan, 1)
+    refute function_exported?(AxonDashboard.BridgeClient, :stop_scan, 0)
+    refute function_exported?(AxonDashboard.BridgeClient, :reset_db, 0)
+    refute function_exported?(AxonDashboard.BridgeClient, :trigger_async_audit, 1)
   end
 
   test "pool protocol no longer exposes legacy batch acknowledgements" do
     refute function_exported?(Axon.Watcher.PoolProtocol, :ack_targets, 2)
   end
 
-  test "backpressure controller no longer exposes legacy chunk sizing guidance" do
-    refute function_exported?(Axon.BackpressureController, :get_chunk_size, 1)
-  end
-
   test "dead read-side legacy modules are no longer compiled into the dashboard" do
+    assert :non_existing == :code.which(Axon.Watcher.PoolFacade)
+    assert :non_existing == :code.which(Axon.BackpressureController)
+    assert :non_existing == :code.which(Axon.ResourceMonitor)
+    assert :non_existing == :code.which(AxonDashboard.TelemetryHandler)
     assert :non_existing == :code.which(AxonDashboardWeb.StatusLive)
     assert :non_existing == :code.which(Axon.Watcher.StatsCache)
     assert :non_existing == :code.which(Axon.Watcher.PoolEventHandler)

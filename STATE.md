@@ -20,7 +20,7 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
   - `156` tests passés (`112` lib + `44` bin)
   - `0` échec
 - `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
-  - `40` tests passés
+  - `29` tests passés
   - `0` échec
 - `bash scripts/start-v2.sh`
   - dashboard prêt
@@ -40,10 +40,10 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
   - surfaces `MCP` et `SQL`
 - **Elixir/Phoenix**
   - visualisation
-  - télémétrie opérateur
+  - télémétrie opérateur read-only issue du bridge Rust
   - projections et surface cockpit
   - affichage du budget Rust courant, des réservations en vol, du taux d’épuisement, de la profondeur de queue, du mode runtime, des refus `oversized` et des entrées en mode dégradé
-  - affichage de la pression hôte observée (`HOST_CPU`, `HOST_RAM`, `HOST_IO_WAIT`) et de l’état contraint/repris des queues, sans reprendre l’autorité de scheduling
+  - affichage de la pression hôte observée (`HOST_CPU`, `HOST_RAM`, `HOST_IO_WAIT`) et d’un état hôte dérivé du runtime Rust, sans reprendre l’autorité de scheduling
 
 Il n’existe plus de voie canonique `Titan` dans le runtime Rust.
 Les gros fichiers sont désormais traités par budget, packing et refus explicite `oversized_for_current_budget`, pas par un seuil métier fixe.
@@ -51,7 +51,7 @@ Les gros fichiers différés accumulent aussi maintenant une dette de fairness p
 Avant un refus `oversized` final, Axon accorde désormais une courte probation de déferrement aux candidats encore froids pour éviter qu’une estimation initiale trop conservatrice ne les exclue trop tôt.
 Si l’enveloppe `full` ne passe pas mais qu’une enveloppe `structure_only` passe encore, Axon admet désormais le fichier en mode dégradé au lieu de le refuser immédiatement.
 Un commit `structure_only` persiste la vérité structurelle (`Symbol`, `CONTAINS`, relations) sans matérialiser les `Chunk`, et marque explicitement le fichier `indexed_degraded` avec la raison `degraded_structure_only`.
-`StatsCache` n’est plus supervisé sur le chemin actif du dashboard, `PoolFacade` alimente désormais `Telemetry` directement pour les événements `FileIndexed` et `RuntimeTelemetry`, et la lecture SQL du cockpit passe désormais directement par `SqlGateway` au lieu d’une façade `PoolFacade.query_json/1`.
+Le cockpit Phoenix ne dépend plus d’une double télémétrie Elixir: `BridgeClient` est l’unique ingress read-only, `RuntimeTelemetry` transporte aussi les signaux hôte, et `TelemetryHandler`, `PoolFacade`, `BackpressureController` et `ResourceMonitor` ont disparu du chemin actif.
 
 ## Dette encore ouverte
 
@@ -59,8 +59,9 @@ Le socle exécutable est sain, mais la migration `Rust-first` n’est pas totale
 
 Les zones de dette encore visibles sont principalement:
 
-- `Axon.Watcher.PoolFacade` comme pont encore trop large malgré la suppression de sa façade SQL
-- `Axon.BackpressureController`
+- la finition des gates retrieval / impact / audit
+- la consolidation finale des couches dérivées et sémantiques
+- l’alignement documentaire final de livraison
 
 La chaîne legacy suivante a déjà été retirée du dashboard:
 
@@ -73,6 +74,10 @@ La chaîne legacy suivante a déjà été retirée du dashboard:
 - API Elixir de lot `PoolFacade.parse_batch/1` et `PoolFacade.pull_pending/1`
 - façade SQL `PoolFacade.query_json/1`
 - `Axon.Watcher.TrafficGuardian`
+- `Axon.Watcher.PoolFacade`
+- `Axon.BackpressureController`
+- `Axon.ResourceMonitor`
+- `AxonDashboard.TelemetryHandler`
 - modules morts `AxonDashboardWeb.StatusLive`, `Axon.Watcher.StatsCache`, `Axon.Watcher.PoolEventHandler`, `Axon.Watcher.Auditor`, `Axon.Watcher.Tracking`, `Axon.Watcher.IndexedProject` et `Axon.Watcher.IndexedFile`
 
 ## Comment lire le repo sans se tromper

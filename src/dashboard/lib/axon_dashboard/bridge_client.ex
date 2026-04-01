@@ -1,35 +1,17 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule AxonDashboard.BridgeClient do
   use GenServer
   require Logger
 
-  @socket_path "/tmp/axon-v2.sock"
+  @socket_path "/tmp/axon-telemetry.sock"
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  def trigger_scan do
-    GenServer.cast(__MODULE__, :trigger_scan)
-  end
-
-  def trigger_scan(project_name) do
-    GenServer.cast(__MODULE__, {:trigger_scan, project_name})
-  end
-
-  def stop_scan do
-    GenServer.cast(__MODULE__, :stop_scan)
-  end
-
-  def reset_db do
-    GenServer.cast(__MODULE__, :reset_db)
-  end
-
   def get_state do
     GenServer.call(__MODULE__, :get_state)
-  end
-
-  def trigger_async_audit(project_name) do
-    GenServer.cast(__MODULE__, {:async_audit, project_name})
   end
 
   def init(_opts) do
@@ -51,56 +33,7 @@ defmodule AxonDashboard.BridgeClient do
     {:reply, state, state}
   end
 
-  def handle_cast(:trigger_scan, state) do
-    if state.socket != nil do
-      Logger.info("[BRIDGE] Sending SCAN_ALL command")
-      :gen_tcp.send(state.socket, "SCAN_ALL\n")
-    end
-
-    {:noreply, state}
-  end
-
-  def handle_cast({:trigger_scan, project_name}, state) do
-    if state.socket != nil do
-      Logger.info("[BRIDGE] Sending SCAN_PROJECT #{project_name} command")
-      :gen_tcp.send(state.socket, "SCAN_PROJECT #{project_name}\n")
-    end
-
-    {:noreply, state}
-  end
-
-  def handle_cast(:stop_scan, state) do
-    Logger.info("[BRIDGE] Ignoring STOP command because Elixir is visualization-only.")
-    {:noreply, state}
-  end
-
-  def handle_cast(:reset_db, state) do
-    Logger.info("[BRIDGE] Ignoring RESET command because Elixir is visualization-only.")
-    {:noreply, state}
-  end
-
-  def handle_cast({:async_audit, project_name}, %{socket: socket} = state)
-      when not is_nil(socket) do
-    # Keep request ids distinct from file telemetry traces.
-    id = System.unique_integer([:positive]) + 10000
-
-    request = %{
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: %{
-        name: "axon_audit",
-        arguments: %{"project" => project_name}
-      },
-      id: id
-    }
-
-    json_payload = Jason.encode!(request) <> "\n"
-    :gen_tcp.send(socket, json_payload)
-
-    {:noreply, state}
-  end
-
-  def handle_cast({:async_audit, _}, state), do: {:noreply, state}
+  def handle_cast(_message, state), do: {:noreply, state}
 
   def handle_info(:connect, state) do
     case :gen_tcp.connect({:local, @socket_path}, 0, [:binary, active: true]) do
@@ -165,6 +98,8 @@ defmodule AxonDashboard.BridgeClient do
   end
 
   defp handle_bridge_event(%{"FileIndexed" => payload}, state) do
+    record_file_indexed(payload)
+
     project = Map.get(payload, "path")
     new_score = Map.get(payload, "security_score", 100)
     paths_json = Map.get(payload, "taint_paths", "[]")
@@ -201,14 +136,41 @@ defmodule AxonDashboard.BridgeClient do
     end
   end
 
+  defp handle_bridge_event(%{"RuntimeTelemetry" => payload}, state) do
+    Axon.Watcher.Telemetry.update_runtime_telemetry(payload)
+    state
+  end
+
   defp handle_bridge_event(%{"type" => "WatcherFileIndexed", "payload" => payload}, state) do
     path = payload["path"] || "unknown"
     status_str = payload["status"] || "unknown"
     status = if status_str == "ok", do: :ok, else: :error
 
+    Axon.Watcher.Telemetry.report_finish("bridge:#{path}", path, status)
     Phoenix.PubSub.broadcast(AxonDashboard.PubSub, "bridge_events", {:file_indexed, path, status})
     state
   end
 
   defp handle_bridge_event(_, state), do: state
+
+  defp record_file_indexed(payload) do
+    worker_id = "bridge:#{payload["trace_id"] || payload["path"] || "unknown"}"
+    status = if payload["status"] == "ok", do: :ok, else: :error
+
+    if path = payload["path"] do
+      Axon.Watcher.Telemetry.report_finish(worker_id, path, status)
+    end
+
+    if (payload["t0"] || 0) > 0 do
+      Axon.Watcher.Tracer.record_trace(
+        payload["trace_id"] || "none",
+        payload["path"] || "unknown",
+        payload["t0"] || 0,
+        payload["t1"] || 0,
+        payload["t2"] || 0,
+        payload["t3"] || 0,
+        payload["t4"] || 0
+      )
+    end
+  end
 end

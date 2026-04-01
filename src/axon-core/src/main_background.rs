@@ -1,21 +1,21 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
-use std::path::{Path, PathBuf};
 
+use axon_core::fs_watcher::{self, HOT_PRIORITY};
 use axon_core::graph::GraphStore;
 use axon_core::graph::PendingFile;
 use axon_core::queue::{ProcessingMode, QueueStore};
-use axon_core::service_guard;
 use axon_core::scanner::Scanner;
-use axon_core::fs_watcher::{self, HOT_PRIORITY};
+use axon_core::service_guard;
 use axon_core::service_guard::ServicePressure;
 use axon_core::watcher_probe;
-use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use notify_debouncer_full::notify::RecursiveMode;
+use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
@@ -45,6 +45,8 @@ const OVERSIZED_PROBATION_DEFER_THRESHOLD: u32 = 3;
 static OVERSIZED_REFUSALS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DEGRADED_MODE_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static LAST_REPORTED_CLAIM_MODE: AtomicU8 = AtomicU8::new(CLAIM_MODE_SENTINEL);
+static HOST_PRESSURE_SAMPLER: LazyLock<Mutex<HostPressureSampler>> =
+    LazyLock::new(|| Mutex::new(HostPressureSampler::default()));
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeTelemetrySnapshot {
@@ -56,6 +58,30 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub service_pressure: String,
     pub oversized_refusals_total: u64,
     pub degraded_mode_entries_total: u64,
+    pub cpu_load: f64,
+    pub ram_load: f64,
+    pub io_wait: f64,
+    pub host_state: String,
+    pub host_guidance_slots: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct HostPressureSnapshot {
+    cpu_load: f64,
+    ram_load: f64,
+    io_wait: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcStatSample {
+    total: u64,
+    idle: u64,
+    iowait: u64,
+}
+
+#[derive(Debug, Default)]
+struct HostPressureSampler {
+    previous: Option<ProcStatSample>,
 }
 
 pub(crate) fn start_memory_watchdog() {
@@ -89,10 +115,7 @@ pub(crate) fn start_memory_watchdog() {
     });
 }
 
-pub(crate) fn spawn_autonomous_ingestor(
-    store: Arc<GraphStore>,
-    queue: Arc<QueueStore>,
-) {
+pub(crate) fn spawn_autonomous_ingestor(store: Arc<GraphStore>, queue: Arc<QueueStore>) {
     tokio::spawn(async move {
         info!("Autonomous Ingestor: Ignition. Monitoring DuckDB for work...");
         let memory_limit = memory_limit_bytes();
@@ -118,7 +141,9 @@ pub(crate) fn spawn_autonomous_ingestor(
                 last_mode = Some(policy.mode);
             }
             if policy.claim_count > 0 {
-                if let Ok(candidates) = store.fetch_pending_candidates(policy.claim_count.saturating_mul(4).max(policy.claim_count)) {
+                if let Ok(candidates) = store.fetch_pending_candidates(
+                    policy.claim_count.saturating_mul(4).max(policy.claim_count),
+                ) {
                     let plan = plan_admissions(&queue, candidates, policy.claim_count);
 
                     if !plan.deferred.is_empty() {
@@ -128,13 +153,18 @@ pub(crate) fn spawn_autonomous_ingestor(
                             .map(|file| file.path.clone())
                             .collect::<Vec<_>>();
                         if let Err(err) = store.mark_pending_files_deferred(&deferred_paths) {
-                            warn!("Autonomous Ingestor failed to record deferred fairness debt: {}", err);
+                            warn!(
+                                "Autonomous Ingestor failed to record deferred fairness debt: {}",
+                                err
+                            );
                         }
                     }
 
                     for oversized in &plan.oversized {
                         record_oversized_refusal();
-                        if let Err(err) = store.mark_file_oversized_for_current_budget(&oversized.path) {
+                        if let Err(err) =
+                            store.mark_file_oversized_for_current_budget(&oversized.path)
+                        {
                             warn!(
                                 "Autonomous Ingestor failed to mark {} as oversized: {}",
                                 oversized.path, err
@@ -148,9 +178,18 @@ pub(crate) fn spawn_autonomous_ingestor(
                         .map(|selection| (selection.file.path.clone(), selection.mode))
                         .collect::<std::collections::HashMap<_, _>>();
 
-                    if let Ok(files) = store.claim_pending_paths(&plan.selected.iter().map(|selection| selection.file.path.clone()).collect::<Vec<_>>()) {
+                    if let Ok(files) = store.claim_pending_paths(
+                        &plan
+                            .selected
+                            .iter()
+                            .map(|selection| selection.file.path.clone())
+                            .collect::<Vec<_>>(),
+                    ) {
                         if !files.is_empty() {
-                            debug!("Autonomous Ingestor: Feeding {} tasks to workers.", files.len());
+                            debug!(
+                                "Autonomous Ingestor: Feeding {} tasks to workers.",
+                                files.len()
+                            );
                             enqueue_claimed_files(&store, &queue, files, &selected_modes);
                         }
                     } else if !plan.selected.is_empty() {
@@ -174,6 +213,7 @@ pub(crate) fn runtime_telemetry_snapshot(queue: &QueueStore) -> RuntimeTelemetry
         memory_limit_bytes(),
         service_pressure,
     );
+    let host_pressure = sample_host_pressure();
 
     RuntimeTelemetrySnapshot {
         budget_bytes: budget.budget_bytes,
@@ -184,10 +224,135 @@ pub(crate) fn runtime_telemetry_snapshot(queue: &QueueStore) -> RuntimeTelemetry
         service_pressure: service_pressure_label(service_pressure).to_string(),
         oversized_refusals_total: OVERSIZED_REFUSALS_TOTAL.load(Ordering::Relaxed),
         degraded_mode_entries_total: DEGRADED_MODE_ENTRIES_TOTAL.load(Ordering::Relaxed),
+        cpu_load: host_pressure.cpu_load,
+        ram_load: host_pressure.ram_load,
+        io_wait: host_pressure.io_wait,
+        host_state: host_state_label(policy.mode, budget.exhaustion_ratio, service_pressure)
+            .to_string(),
+        host_guidance_slots: policy.claim_count,
     }
 }
 
-fn plan_admissions(queue: &QueueStore, candidates: Vec<PendingFile>, max_count: usize) -> AdmissionPlan {
+fn sample_host_pressure() -> HostPressureSnapshot {
+    let cpu_sample = read_proc_stat_sample();
+    let ram_load = read_ram_load_percent();
+
+    match HOST_PRESSURE_SAMPLER.lock() {
+        Ok(mut sampler) => {
+            let previous = sampler.previous;
+            sampler.previous = cpu_sample;
+
+            let (cpu_load, io_wait) = match (previous, cpu_sample) {
+                (Some(previous), Some(current)) => compute_cpu_and_io_percent(previous, current),
+                _ => (0.0, 0.0),
+            };
+
+            HostPressureSnapshot {
+                cpu_load,
+                ram_load,
+                io_wait,
+            }
+        }
+        Err(_) => HostPressureSnapshot {
+            cpu_load: 0.0,
+            ram_load,
+            io_wait: 0.0,
+        },
+    }
+}
+
+fn read_proc_stat_sample() -> Option<ProcStatSample> {
+    let content = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = content.lines().find(|line| line.starts_with("cpu "))?;
+    let mut values = line.split_whitespace().skip(1);
+    let user = values.next()?.parse::<u64>().ok()?;
+    let nice = values.next()?.parse::<u64>().ok()?;
+    let system = values.next()?.parse::<u64>().ok()?;
+    let idle = values.next()?.parse::<u64>().ok()?;
+    let iowait = values.next()?.parse::<u64>().ok()?;
+    let irq = values
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let softirq = values
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let steal = values
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    let total = user + nice + system + idle + iowait + irq + softirq + steal;
+
+    Some(ProcStatSample {
+        total,
+        idle,
+        iowait,
+    })
+}
+
+fn compute_cpu_and_io_percent(previous: ProcStatSample, current: ProcStatSample) -> (f64, f64) {
+    let total_delta = current.total.saturating_sub(previous.total);
+    if total_delta == 0 {
+        return (0.0, 0.0);
+    }
+
+    let idle_delta = current.idle.saturating_sub(previous.idle);
+    let iowait_delta = current.iowait.saturating_sub(previous.iowait);
+    let busy_delta = total_delta.saturating_sub(idle_delta);
+    let cpu_load = ((busy_delta as f64) / (total_delta as f64) * 100.0).clamp(0.0, 100.0);
+    let io_wait = ((iowait_delta as f64) / (total_delta as f64) * 100.0).clamp(0.0, 100.0);
+
+    (cpu_load, io_wait)
+}
+
+fn read_ram_load_percent() -> f64 {
+    let content = match std::fs::read_to_string("/proc/meminfo") {
+        Ok(content) => content,
+        Err(_) => return 0.0,
+    };
+
+    let mut total_kb = None;
+    let mut available_kb = None;
+    let mut free_kb = None;
+    let mut buffers_kb = None;
+    let mut cached_kb = None;
+
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        let key = parts.next().unwrap_or_default();
+        let value = parts
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        match key {
+            "MemTotal:" => total_kb = Some(value),
+            "MemAvailable:" => available_kb = Some(value),
+            "MemFree:" => free_kb = Some(value),
+            "Buffers:" => buffers_kb = Some(value),
+            "Cached:" => cached_kb = Some(value),
+            _ => {}
+        }
+    }
+
+    let total_kb = total_kb.unwrap_or(0);
+    if total_kb == 0 {
+        return 0.0;
+    }
+
+    let available_kb = available_kb
+        .unwrap_or(free_kb.unwrap_or(0) + buffers_kb.unwrap_or(0) + cached_kb.unwrap_or(0));
+    let used_kb = total_kb.saturating_sub(available_kb);
+
+    ((used_kb as f64) / (total_kb as f64) * 100.0).clamp(0.0, 100.0)
+}
+
+fn plan_admissions(
+    queue: &QueueStore,
+    candidates: Vec<PendingFile>,
+    max_count: usize,
+) -> AdmissionPlan {
     if max_count == 0 || candidates.is_empty() {
         return AdmissionPlan::default();
     }
@@ -205,9 +370,21 @@ fn plan_admissions(queue: &QueueStore, candidates: Vec<PendingFile>, max_count: 
         }
     }
 
-    fill_admission_plan(queue, &mut remaining_budget, max_count, &mut plan, hot_candidates);
+    fill_admission_plan(
+        queue,
+        &mut remaining_budget,
+        max_count,
+        &mut plan,
+        hot_candidates,
+    );
     if plan.selected.len() < max_count {
-        fill_admission_plan(queue, &mut remaining_budget, max_count, &mut plan, normal_candidates);
+        fill_admission_plan(
+            queue,
+            &mut remaining_budget,
+            max_count,
+            &mut plan,
+            normal_candidates,
+        );
     } else {
         plan.deferred.extend(normal_candidates);
     }
@@ -228,7 +405,11 @@ fn fill_admission_plan(
             .cmp(&left.priority)
             .then_with(|| fairness_bucket(right).cmp(&fairness_bucket(left)))
             .then_with(|| right.defer_count.cmp(&left.defer_count))
-            .then_with(|| left.last_deferred_at_ms.unwrap_or(i64::MAX).cmp(&right.last_deferred_at_ms.unwrap_or(i64::MAX)))
+            .then_with(|| {
+                left.last_deferred_at_ms
+                    .unwrap_or(i64::MAX)
+                    .cmp(&right.last_deferred_at_ms.unwrap_or(i64::MAX))
+            })
             .then_with(|| left.size_bytes.cmp(&right.size_bytes))
             .then_with(|| left.path.cmp(&right.path))
     });
@@ -250,9 +431,13 @@ fn fill_admission_plan(
             ProcessingMode::StructureOnly,
         );
 
-        if !queue.can_fit_alone_in_mode(&candidate.path, candidate.size_bytes, ProcessingMode::Full) {
-            if queue.can_fit_alone_in_mode(&candidate.path, candidate.size_bytes, ProcessingMode::StructureOnly)
-                && candidate.defer_count >= OVERSIZED_PROBATION_DEFER_THRESHOLD
+        if !queue.can_fit_alone_in_mode(&candidate.path, candidate.size_bytes, ProcessingMode::Full)
+        {
+            if queue.can_fit_alone_in_mode(
+                &candidate.path,
+                candidate.size_bytes,
+                ProcessingMode::StructureOnly,
+            ) && candidate.defer_count >= OVERSIZED_PROBATION_DEFER_THRESHOLD
                 && degraded_cost <= *remaining_budget
             {
                 *remaining_budget = remaining_budget.saturating_sub(degraded_cost);
@@ -263,7 +448,11 @@ fn fill_admission_plan(
                 });
             } else if candidate.defer_count < OVERSIZED_PROBATION_DEFER_THRESHOLD {
                 plan.deferred.push(candidate);
-            } else if queue.can_fit_alone_in_mode(&candidate.path, candidate.size_bytes, ProcessingMode::StructureOnly) {
+            } else if queue.can_fit_alone_in_mode(
+                &candidate.path,
+                candidate.size_bytes,
+                ProcessingMode::StructureOnly,
+            ) {
                 plan.deferred.push(candidate);
             } else {
                 plan.oversized.push(candidate);
@@ -294,7 +483,11 @@ fn enqueue_claimed_files(
 
         if !queue.can_fit_alone_in_mode(&file.path, file.size_bytes, mode) {
             if mode == ProcessingMode::Full
-                && queue.can_fit_alone_in_mode(&file.path, file.size_bytes, ProcessingMode::StructureOnly)
+                && queue.can_fit_alone_in_mode(
+                    &file.path,
+                    file.size_bytes,
+                    ProcessingMode::StructureOnly,
+                )
             {
                 mode = ProcessingMode::StructureOnly;
             } else {
@@ -308,8 +501,7 @@ fn enqueue_claimed_files(
                 if let Err(err) = store.mark_file_oversized_for_current_budget(&file.path) {
                     error!(
                         "Autonomous Ingestor failed to mark oversized claimed file {}: {}",
-                        file.path,
-                        err
+                        file.path, err
                     );
                 }
                 continue;
@@ -359,9 +551,7 @@ pub(crate) fn spawn_initial_scan(store: Arc<GraphStore>, projects_root: String) 
 pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: String) {
     std::thread::spawn(move || {
         let watch_root = PathBuf::from(projects_root);
-        let preferred_project_root = std::env::var("AXON_PROJECT_ROOT")
-            .ok()
-            .map(PathBuf::from);
+        let preferred_project_root = std::env::var("AXON_PROJECT_ROOT").ok().map(PathBuf::from);
         let watcher_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             info!(
                 "Rust FS watcher preparing targets under {}",
@@ -377,17 +567,21 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
             let callback_cold_arm_completed_at = cold_arm_completed_at.clone();
             let watcher_started_at = Instant::now();
 
-            let mut debouncer = match new_debouncer(Duration::from_millis(750), None, move |result: DebounceEventResult| {
-                handle_watcher_events(
-                    callback_store.clone(),
-                    callback_root.clone(),
-                    callback_active_project_root.clone(),
-                    callback_rescan_guard.clone(),
-                    callback_cold_arm_completed_at.clone(),
-                    watcher_started_at,
-                    result,
-                );
-            }) {
+            let mut debouncer = match new_debouncer(
+                Duration::from_millis(750),
+                None,
+                move |result: DebounceEventResult| {
+                    handle_watcher_events(
+                        callback_store.clone(),
+                        callback_root.clone(),
+                        callback_active_project_root.clone(),
+                        callback_rescan_guard.clone(),
+                        callback_cold_arm_completed_at.clone(),
+                        watcher_started_at,
+                        result,
+                    );
+                },
+            ) {
                 Ok(debouncer) => debouncer,
                 Err(err) => {
                     error!("Rust FS watcher initialization failed: {}", err);
@@ -421,7 +615,11 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
                         info!(
                             "Rust FS watcher armed hot target {} ({}) after {} ms",
                             target.path.display(),
-                            if target.recursive { "recursive" } else { "non-recursive" },
+                            if target.recursive {
+                                "recursive"
+                            } else {
+                                "non-recursive"
+                            },
                             hot_started_at.elapsed().as_millis()
                         );
                     }
@@ -456,7 +654,11 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
                         debug!(
                             "Rust FS watcher armed target {} ({})",
                             target.path.display(),
-                            if target.recursive { "recursive" } else { "non-recursive" }
+                            if target.recursive {
+                                "recursive"
+                            } else {
+                                "non-recursive"
+                            }
                         );
                     }
                     Err(err) => {
@@ -503,7 +705,10 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
 }
 
 fn parse_rss_from_statm(content: &str) -> Option<u64> {
-    content.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok())
+    content
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u64>().ok())
 }
 
 fn current_rss_bytes() -> Option<u64> {
@@ -740,8 +945,8 @@ fn claim_policy(
 }
 
 fn dynamic_claim_count(pressure: f64, mode: ClaimMode) -> usize {
-    let base = ((2_000.0 * (1.0 - pressure.clamp(0.0, 1.0)).powi(2)).round() as usize)
-        .clamp(25, 2_000);
+    let base =
+        ((2_000.0 * (1.0 - pressure.clamp(0.0, 1.0)).powi(2)).round() as usize).clamp(25, 2_000);
 
     match mode {
         ClaimMode::Fast => base,
@@ -758,6 +963,29 @@ fn service_pressure_label(service_pressure: ServicePressure) -> &'static str {
         ServicePressure::Recovering => "recovering",
         ServicePressure::Degraded => "degraded",
         ServicePressure::Critical => "critical",
+    }
+}
+
+fn host_state_label(
+    mode: ClaimMode,
+    exhaustion_ratio: f64,
+    service_pressure: ServicePressure,
+) -> &'static str {
+    if matches!(mode, ClaimMode::Paused)
+        || matches!(service_pressure, ServicePressure::Critical)
+        || exhaustion_ratio >= 1.0
+    {
+        "constrained"
+    } else if matches!(mode, ClaimMode::Slow | ClaimMode::Guarded)
+        || matches!(
+            service_pressure,
+            ServicePressure::Degraded | ServicePressure::Recovering
+        )
+        || exhaustion_ratio >= 0.75
+    {
+        "watch"
+    } else {
+        "healthy"
     }
 }
 
@@ -827,10 +1055,7 @@ fn handle_watcher_events(
                 paths.extend(event.paths.iter().cloned());
             }
 
-            let cold_arm_completed_at = cold_arm_completed_at
-                .lock()
-                .ok()
-                .and_then(|guard| *guard);
+            let cold_arm_completed_at = cold_arm_completed_at.lock().ok().and_then(|guard| *guard);
 
             if should_suppress_bootstrap_event_storm(
                 paths.len(),
@@ -849,7 +1074,12 @@ fn handle_watcher_events(
                     format!("paths={} salvaged={}", paths.len(), salvaged.len()),
                 );
                 if !salvaged.is_empty() {
-                    match fs_watcher::stage_hot_deltas(&store, &watch_root, salvaged.clone(), HOT_PRIORITY) {
+                    match fs_watcher::stage_hot_deltas(
+                        &store,
+                        &watch_root,
+                        salvaged.clone(),
+                        HOT_PRIORITY,
+                    ) {
                         Ok(staged) if staged > 0 => {
                             info!(
                                 "Rust FS watcher salvaged {} hot delta(s) from bootstrap storm.",
@@ -890,10 +1120,13 @@ fn handle_watcher_events(
                 watcher_probe::record("watcher.received", None, format!("paths={}", paths.len()));
             }
 
-            if rescan_requested
-            {
+            if rescan_requested {
                 if !rescan_guard.swap(true, Ordering::SeqCst) {
-                    watcher_probe::record("watcher.rescan_requested", None, format!("paths={}", paths.len()));
+                    watcher_probe::record(
+                        "watcher.rescan_requested",
+                        None,
+                        format!("paths={}", paths.len()),
+                    );
                     let rescan_store = store.clone();
                     let rescan_root = watch_root.clone();
                     let rescan_guard_release = rescan_guard.clone();
@@ -923,7 +1156,11 @@ fn handle_watcher_events(
             match fs_watcher::stage_hot_deltas(&store, &watch_root, paths, HOT_PRIORITY) {
                 Ok(staged) if staged > 0 => {
                     info!("Rust FS watcher staged {} hot delta(s).", staged);
-                    watcher_probe::record("watcher.staged_batch", None, format!("staged={}", staged));
+                    watcher_probe::record(
+                        "watcher.staged_batch",
+                        None,
+                        format!("staged={}", staged),
+                    );
                 }
                 Ok(_) => {
                     info!("Rust FS watcher received event(s) but staged no hot delta.");
@@ -979,7 +1216,8 @@ fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>
         return Vec::new();
     };
 
-    paths.iter()
+    paths
+        .iter()
         .filter_map(|path| {
             let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
             let metadata = std::fs::metadata(&absolute).ok()?;
@@ -994,33 +1232,44 @@ fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>
 
 #[cfg(test)]
 mod tests {
-    use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files, handle_watcher_events, memory_limit_bytes, plan_admissions, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets, RescanGuardReset, OVERSIZED_PROBATION_DEFER_THRESHOLD};
+    use super::{
+        active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files,
+        handle_watcher_events, memory_limit_bytes, plan_admissions,
+        should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets,
+        RescanGuardReset, OVERSIZED_PROBATION_DEFER_THRESHOLD,
+    };
     use axon_core::graph::{GraphStore, PendingFile};
     use axon_core::queue::QueueStore;
     use axon_core::service_guard::ServicePressure;
     use axon_core::watcher_probe;
-    use notify_debouncer_full::notify::{Event, EventKind};
     use notify_debouncer_full::notify::event::{Flag, ModifyKind};
     use notify_debouncer_full::notify::Error;
+    use notify_debouncer_full::notify::{Event, EventKind};
     use notify_debouncer_full::DebouncedEvent;
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     #[test]
     fn test_memory_limit_uses_default_when_env_missing() {
-        unsafe { std::env::remove_var("AXON_MEMORY_LIMIT_GB"); }
+        unsafe {
+            std::env::remove_var("AXON_MEMORY_LIMIT_GB");
+        }
         assert_eq!(memory_limit_bytes(), 14 * 1024 * 1024 * 1024);
     }
 
     #[test]
     fn test_memory_limit_uses_env_when_valid() {
-        unsafe { std::env::set_var("AXON_MEMORY_LIMIT_GB", "10"); }
+        unsafe {
+            std::env::set_var("AXON_MEMORY_LIMIT_GB", "10");
+        }
         assert_eq!(memory_limit_bytes(), 10 * 1024 * 1024 * 1024);
-        unsafe { std::env::remove_var("AXON_MEMORY_LIMIT_GB"); }
+        unsafe {
+            std::env::remove_var("AXON_MEMORY_LIMIT_GB");
+        }
     }
 
     #[test]
@@ -1239,7 +1488,9 @@ mod tests {
         let store = Arc::new(GraphStore::new(":memory:").unwrap());
         let event = DebouncedEvent::new(
             Event {
-                kind: EventKind::Modify(ModifyKind::Data(notify_debouncer_full::notify::event::DataChange::Any)),
+                kind: EventKind::Modify(ModifyKind::Data(
+                    notify_debouncer_full::notify::event::DataChange::Any,
+                )),
                 paths: vec![file_path.clone()],
                 attrs: Default::default(),
             },
@@ -1288,7 +1539,9 @@ mod tests {
             };
             events.push(DebouncedEvent::new(
                 Event {
-                    kind: EventKind::Modify(ModifyKind::Data(notify_debouncer_full::notify::event::DataChange::Any)),
+                    kind: EventKind::Modify(ModifyKind::Data(
+                        notify_debouncer_full::notify::event::DataChange::Any,
+                    )),
                     paths: vec![path],
                     attrs: Default::default(),
                 },
@@ -1317,8 +1570,12 @@ mod tests {
         assert!(row.contains("900"));
 
         let events = watcher_probe::recent();
-        assert!(events.iter().any(|line| line.contains("watcher.storm_suppressed")));
-        assert!(events.iter().any(|line| line.contains("watcher.storm_salvaged")));
+        assert!(events
+            .iter()
+            .any(|line| line.contains("watcher.storm_suppressed")));
+        assert!(events
+            .iter()
+            .any(|line| line.contains("watcher.storm_salvaged")));
     }
 
     #[test]
@@ -1333,7 +1590,10 @@ mod tests {
         std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
         std::fs::write(&outside, "x").unwrap();
 
-        let salvaged = bootstrap_salvage_paths(&[file_path.clone(), outside.clone()], Some(project.as_path()));
+        let salvaged = bootstrap_salvage_paths(
+            &[file_path.clone(), outside.clone()],
+            Some(project.as_path()),
+        );
 
         assert_eq!(salvaged.len(), 1);
         assert_eq!(salvaged[0], std::fs::canonicalize(file_path).unwrap());
@@ -1349,7 +1609,10 @@ mod tests {
         let file_path = src_dir.join("watch.ex");
         std::fs::write(&file_path, "defmodule Watch do\nend\n").unwrap();
 
-        let salvaged = bootstrap_salvage_paths(&[src_dir.clone(), file_path.clone()], Some(project.as_path()));
+        let salvaged = bootstrap_salvage_paths(
+            &[src_dir.clone(), file_path.clone()],
+            Some(project.as_path()),
+        );
 
         assert_eq!(salvaged.len(), 1);
         assert_eq!(salvaged[0], std::fs::canonicalize(file_path).unwrap());
@@ -1369,7 +1632,9 @@ mod tests {
         let store = Arc::new(GraphStore::new(":memory:").unwrap());
         let event = DebouncedEvent::new(
             Event {
-                kind: EventKind::Modify(ModifyKind::Data(notify_debouncer_full::notify::event::DataChange::Any)),
+                kind: EventKind::Modify(ModifyKind::Data(
+                    notify_debouncer_full::notify::event::DataChange::Any,
+                )),
                 paths: vec![file_path.clone()],
                 attrs: Default::default(),
             },
@@ -1388,7 +1653,9 @@ mod tests {
 
         let events = watcher_probe::recent();
         assert!(events.iter().any(|line| line.contains("watcher.filtered")));
-        assert!(events.iter().any(|line| line.contains("watcher.staged_none")));
+        assert!(events
+            .iter()
+            .any(|line| line.contains("watcher.staged_none")));
     }
 
     #[test]
@@ -1426,8 +1693,12 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let events = watcher_probe::recent();
-            let requested = events.iter().any(|line| line.contains("watcher.rescan_requested"));
-            let completed = events.iter().any(|line| line.contains("watcher.rescan_completed"));
+            let requested = events
+                .iter()
+                .any(|line| line.contains("watcher.rescan_requested"));
+            let completed = events
+                .iter()
+                .any(|line| line.contains("watcher.rescan_completed"));
             if requested && completed {
                 break;
             }
@@ -1471,7 +1742,9 @@ mod tests {
         );
 
         let events = watcher_probe::recent();
-        assert!(events.iter().any(|line| line.contains("watcher.rescan_skipped")));
+        assert!(events
+            .iter()
+            .any(|line| line.contains("watcher.rescan_skipped")));
     }
 
     #[test]
@@ -1517,7 +1790,14 @@ mod tests {
             let fill_bulk = temp.path().join(format!("fill-bulk-{}.ex", idx));
             std::fs::write(&fill_bulk, "defmodule FillBulk do\nend\n").unwrap();
             queue
-                .push(fill_bulk.to_string_lossy().as_ref(), 0, &format!("fill-bulk-{}", idx), 0, 0, false)
+                .push(
+                    fill_bulk.to_string_lossy().as_ref(),
+                    0,
+                    &format!("fill-bulk-{}", idx),
+                    0,
+                    0,
+                    false,
+                )
                 .unwrap();
         }
 
@@ -1619,10 +1899,16 @@ mod tests {
         }];
 
         let plan = plan_admissions(&queue, candidates, 1);
-        assert!(plan.oversized.is_empty(), "a file that fits the degraded envelope should not be marked oversized");
+        assert!(
+            plan.oversized.is_empty(),
+            "a file that fits the degraded envelope should not be marked oversized"
+        );
         assert_eq!(plan.selected.len(), 1);
         assert_eq!(plan.selected[0].file.trace_id, "candidate");
-        assert_eq!(plan.selected[0].mode, axon_core::queue::ProcessingMode::StructureOnly);
+        assert_eq!(
+            plan.selected[0].mode,
+            axon_core::queue::ProcessingMode::StructureOnly
+        );
     }
 
     #[test]
@@ -1665,11 +1951,22 @@ mod tests {
         }];
 
         let plan = plan_admissions(&queue, candidates, 1);
-        assert_eq!(plan.selected.len(), 1, "the candidate should still be admitted through the degraded envelope");
+        assert_eq!(
+            plan.selected.len(),
+            1,
+            "the candidate should still be admitted through the degraded envelope"
+        );
         assert_eq!(plan.selected[0].file.trace_id, "oversized");
-        assert_eq!(plan.degraded.len(), 1, "the degraded admission should be recorded explicitly");
+        assert_eq!(
+            plan.degraded.len(),
+            1,
+            "the degraded admission should be recorded explicitly"
+        );
         assert_eq!(plan.degraded[0], oversized.to_string_lossy());
-        assert!(plan.oversized.is_empty(), "degraded admission must win before definitive oversized refusal");
+        assert!(
+            plan.oversized.is_empty(),
+            "degraded admission must win before definitive oversized refusal"
+        );
     }
 
     #[test]
@@ -1714,7 +2011,10 @@ mod tests {
 
         let plan = plan_admissions(&queue, candidates(0), 2);
         assert_eq!(
-            plan.selected.iter().map(|selection| selection.file.trace_id.as_str()).collect::<Vec<_>>(),
+            plan.selected
+                .iter()
+                .map(|selection| selection.file.trace_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["small", "medium"],
             "before aging kicks in, the scheduler should keep picking the better-fitting pair"
         );
@@ -1722,7 +2022,9 @@ mod tests {
 
         let aged = plan_admissions(&queue, candidates(3), 2);
         assert_eq!(
-            aged.selected.first().map(|selection| selection.file.trace_id.as_str()),
+            aged.selected
+                .first()
+                .map(|selection| selection.file.trace_id.as_str()),
             Some("large"),
             "after repeated deferrals, the large file should gain enough fairness to pass first"
         );
@@ -1831,15 +2133,24 @@ mod tests {
             .collect();
 
         assert!(
-            rendered.iter().any(|(path, recursive): &(String, bool)| path == &root.to_string_lossy() && !*recursive),
+            rendered
+                .iter()
+                .any(
+                    |(path, recursive): &(String, bool)| path == &root.to_string_lossy()
+                        && !*recursive
+                ),
             "La racine doit etre surveillee en non-recursif"
         );
         assert!(
-            rendered.iter().any(|(path, recursive): &(String, bool)| path.ends_with("proj_a") && *recursive),
+            rendered
+                .iter()
+                .any(|(path, recursive): &(String, bool)| path.ends_with("proj_a") && *recursive),
             "Chaque projet accessible doit etre surveille recursivement"
         );
         assert!(
-            rendered.iter().any(|(path, recursive): &(String, bool)| path.ends_with("proj_b") && *recursive),
+            rendered
+                .iter()
+                .any(|(path, recursive): &(String, bool)| path.ends_with("proj_b") && *recursive),
             "Chaque projet accessible doit etre surveille recursivement"
         );
     }
@@ -1862,7 +2173,9 @@ mod tests {
             .collect();
 
         assert!(
-            !rendered.iter().any(|path: &String| path.ends_with("locked")),
+            !rendered
+                .iter()
+                .any(|path: &String| path.ends_with("locked")),
             "Un sous-arbre illisible ne doit pas bloquer l'armement global du watcher"
         );
 
@@ -1884,8 +2197,16 @@ mod tests {
             .map(|target| target.path.to_string_lossy().to_string())
             .collect();
 
-        assert_eq!(rendered[0], root.to_string_lossy(), "La racine doit rester observee en premier");
-        assert_eq!(rendered[1], proj_b.to_string_lossy(), "Le projet actif doit etre arme avant les autres");
+        assert_eq!(
+            rendered[0],
+            root.to_string_lossy(),
+            "La racine doit rester observee en premier"
+        );
+        assert_eq!(
+            rendered[1],
+            proj_b.to_string_lossy(),
+            "Le projet actif doit etre arme avant les autres"
+        );
     }
 
     #[test]
@@ -1909,10 +2230,18 @@ mod tests {
             .map(|target| target.path.to_string_lossy().to_string())
             .collect();
 
-        assert_eq!(hot_paths.len(), 1, "Le split universel ne garde que la racine chaude; le projet actif est detaille a part");
+        assert_eq!(
+            hot_paths.len(),
+            1,
+            "Le split universel ne garde que la racine chaude; le projet actif est detaille a part"
+        );
         assert_eq!(hot_paths[0], root.to_string_lossy());
-        assert!(cold_paths.iter().any(|path| path == &proj_a.to_string_lossy()));
-        assert!(!cold_paths.iter().any(|path| path == &proj_b.to_string_lossy()));
+        assert!(cold_paths
+            .iter()
+            .any(|path| path == &proj_a.to_string_lossy()));
+        assert!(!cold_paths
+            .iter()
+            .any(|path| path == &proj_b.to_string_lossy()));
     }
 
     #[test]
@@ -1925,7 +2254,11 @@ mod tests {
         let targets = watch_targets(root, None);
         let (hot, cold) = split_watch_targets(targets, None);
 
-        assert_eq!(hot.len(), 1, "Sans projet actif, seul le watcher de racine doit etre chaud");
+        assert_eq!(
+            hot.len(),
+            1,
+            "Sans projet actif, seul le watcher de racine doit etre chaud"
+        );
         assert_eq!(hot[0].path, root);
         assert!(cold.iter().any(|target| target.path == proj_a));
     }
@@ -1946,8 +2279,12 @@ mod tests {
 
         assert_eq!(rendered[0].0, root.to_string_lossy());
         assert!(!rendered[0].1);
-        assert!(rendered.iter().any(|(path, recursive)| path.ends_with("/src") && *recursive));
-        assert!(rendered.iter().any(|(path, recursive)| path.ends_with("/docs") && *recursive));
+        assert!(rendered
+            .iter()
+            .any(|(path, recursive)| path.ends_with("/src") && *recursive));
+        assert!(rendered
+            .iter()
+            .any(|(path, recursive)| path.ends_with("/docs") && *recursive));
         assert!(!rendered.iter().any(|(path, _)| path.ends_with("/.git")));
     }
 
@@ -1961,7 +2298,11 @@ mod tests {
     fn test_bootstrap_event_storm_is_not_suppressed_late_or_small() {
         let started = Instant::now() - Duration::from_secs(180);
         assert!(!should_suppress_bootstrap_event_storm(6_000, started, None));
-        assert!(!should_suppress_bootstrap_event_storm(100, Instant::now(), None));
+        assert!(!should_suppress_bootstrap_event_storm(
+            100,
+            Instant::now(),
+            None
+        ));
     }
 
     #[test]

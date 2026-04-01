@@ -37,8 +37,8 @@ Already true as of 2026-04-01:
 - `Titan` has been removed from the canonical Rust runtime path
 - fixed `>1MB => skip` behavior has been removed
 - the legacy Elixir control chain `Server/Staging/PathPolicy/Oban/IndexingWorker/BatchDispatch` has been removed from the dashboard code path
-- `PoolFacade` no longer exposes batch admission or pull APIs on the Elixir side
-- the Rust bridge now emits runtime telemetry consumed by the Phoenix cockpit (`budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`, `oversized_refusals_total`, `degraded_mode_entries_total`)
+- the Rust bridge is now the only cockpit telemetry ingress on the Elixir side
+- the Rust bridge now emits runtime telemetry consumed by the Phoenix cockpit (`budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`, `oversized_refusals_total`, `degraded_mode_entries_total`, `cpu_load`, `ram_load`, `io_wait`, `host_state`, `host_guidance_slots`)
 - fairness debt now persists in `IST` (`defer_count`, `last_deferred_at_ms`) so repeatedly deferred large files can eventually outrank newer packable work
 - cold oversized candidates now receive a bounded probation before definitive `oversized_for_current_budget` refusal
 - structure-only degradation now exists before final refusal: the scheduler can admit a file under a smaller structural envelope and persist it as `indexed_degraded`
@@ -103,11 +103,9 @@ Goal:
 
 Primary modules to retire or reduce:
 
-- `Axon.Watcher.PoolFacade`
 - `Axon.Watcher.PoolEventHandler`
 - `Axon.Watcher.TrafficGuardian`
 - `Axon.Watcher.StatsCache`
-- residual control semantics around `Axon.BackpressureController`
 
 Already completed in this phase:
 
@@ -123,11 +121,13 @@ Already completed in this phase:
 - removed legacy batch telemetry from the dashboard bus
 - removed dead compiled dashboard modules `AxonDashboardWeb.StatusLive`, `Axon.Watcher.StatsCache`, `Axon.Watcher.PoolEventHandler`, `Axon.Watcher.Auditor`, and `Axon.Watcher.Tracking`
 - removed dead Ecto read-side modules `Axon.Watcher.IndexedProject` and `Axon.Watcher.IndexedFile`
+- removed `Axon.Watcher.PoolFacade`, `Axon.BackpressureController`, `Axon.ResourceMonitor`, and `AxonDashboard.TelemetryHandler` from the active dashboard path
+- removed runtime command methods from `AxonDashboard.BridgeClient`; the cockpit is now read-only
 
 Target state:
 
 - Elixir may show pressure
-- Elixir may relay operator intent
+- Elixir must not relay operator intent from the cockpit
 - Elixir must not own backlog, scheduling, retries, or canonical throttling
 
 Exit criteria:
@@ -162,7 +162,7 @@ Already completed in this phase:
 
 - runtime telemetry bridge exports `budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`, `oversized_refusals_total`, and `degraded_mode_entries_total`
 - Phoenix cockpit displays these Rust-origin signals without regaining scheduling authority
-- Phoenix cockpit also reflects host-pressure telemetry (`cpu`, `ram`, `io_wait`, queue constrained/resumed state, indexing guidance) as read-side operator signals
+- Phoenix cockpit also reflects host-pressure telemetry (`cpu`, `ram`, `io_wait`, `host_state`, `host_guidance_slots`) from the same Rust payload
 
 ## Phase 4: Retrieval and Developer Utility
 

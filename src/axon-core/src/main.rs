@@ -12,7 +12,7 @@ use std::fs;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
-use tracing::{info, error};
+use tracing::{error, info};
 
 fn main() -> anyhow::Result<()> {
     let profile = RuntimeProfile::detect();
@@ -73,12 +73,12 @@ fn main() -> anyhow::Result<()> {
             ));
             let tel_socket_path = "/tmp/axon-telemetry.sock";
             let mcp_socket_path = "/tmp/axon-mcp.sock";
-            
+
             if std::path::Path::new(tel_socket_path).exists() { let _ = fs::remove_file(tel_socket_path); }
             if std::path::Path::new(mcp_socket_path).exists() { let _ = fs::remove_file(mcp_socket_path); }
 
             let tel_listener = UnixListener::bind(tel_socket_path)?;
-            
+
             info!("Telemetry Server listening on {}", tel_socket_path);
             info!("MCP HTTP/SSE Server listening on 127.0.0.1:44129");
 
@@ -100,7 +100,7 @@ fn main() -> anyhow::Result<()> {
 
             let projects_root_str = projects_root.to_string();
             let current_boot_id = Arc::new(tokio::sync::Mutex::new(String::new()));
-            
+
             main_background::spawn_autonomous_ingestor(graph_store.clone(), queue_store.clone());
 
             main_background::spawn_hot_delta_watcher(graph_store.clone(), projects_root_str.clone());
@@ -113,7 +113,7 @@ fn main() -> anyhow::Result<()> {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                
+
                 info!("New Telemetry connection from {:?}", addr);
 
                 let ready_event = BridgeEvent::SystemReady { start_time_utc: boot_time.clone() };

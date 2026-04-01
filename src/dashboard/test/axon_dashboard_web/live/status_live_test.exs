@@ -48,7 +48,8 @@ defmodule AxonDashboardWeb.StatusLiveTest do
 
     send(
       view.pid,
-      {:telemetry_event, [:axon, :watcher, :batch_enqueued], %{count: 2}, %{queue: :indexing_default}}
+      {:telemetry_event, [:axon, :watcher, :batch_enqueued], %{count: 2},
+       %{queue: :indexing_default}}
     )
 
     refute render(view) =~ "Legacy path"
@@ -83,18 +84,21 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     assert html =~ "2"
   end
 
-  test "renders host pressure telemetry in the cockpit", %{conn: conn} do
+  test "renders host pressure telemetry from runtime telemetry only", %{conn: conn} do
     {:ok, view, _html} = live(conn, "/")
 
     send(
       view.pid,
-      {:telemetry_event, [:axon, :backpressure, :pressure_computed], %{pressure: 0.82},
-       %{cpu: 61.5, ram: 47.0, io: 12.2}}
-    )
-
-    send(
-      view.pid,
-      {:telemetry_event, [:axon, :backpressure, :queues_paused], %{pressure: 1.02}, %{}}
+      {:bridge_event,
+       %{
+         "RuntimeTelemetry" => %{
+           "cpu_load" => 61.5,
+           "ram_load" => 47.0,
+           "io_wait" => 12.2,
+           "host_state" => "constrained",
+           "host_guidance_slots" => 2
+         }
+       }}
     )
 
     html = render(view)
@@ -106,5 +110,25 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     assert html =~ "12.2%"
     assert html =~ "HOST_STATE"
     assert html =~ "CONSTRAINED"
+    assert html =~ "HOST_GUIDANCE"
+    assert html =~ "2 slots"
+  end
+
+  test "ignores local backpressure telemetry because cockpit reads Rust runtime only", %{
+    conn: conn
+  } do
+    {:ok, view, _html} = live(conn, "/")
+
+    send(
+      view.pid,
+      {:telemetry_event, [:axon, :backpressure, :pressure_computed], %{pressure: 0.82},
+       %{cpu: 61.5, ram: 47.0, io: 12.2}}
+    )
+
+    html = render(view)
+    assert html =~ "HOST_CPU"
+    assert html =~ "0.0%"
+    assert html =~ "HOST_STATE"
+    assert html =~ "HEALTHY"
   end
 end

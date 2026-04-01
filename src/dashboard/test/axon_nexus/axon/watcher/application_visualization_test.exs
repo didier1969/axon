@@ -12,5 +12,6 @@ defmodule Axon.Watcher.ApplicationVisualizationTest do
     refute Oban in child_ids
     refute Axon.Watcher.Server in child_ids
     refute Axon.Watcher.TrafficGuardian in child_ids
+    refute Axon.Watcher.PoolFacade in child_ids
   end
 end
