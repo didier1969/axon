@@ -208,6 +208,33 @@ Conséquence:
 - le cockpit principal montre maintenant la pression hôte utile à l’opérateur, au lieu de n’exposer que les signaux internes Rust
 - la prochaine tranche rationnelle reste la suppression des reliquats morts/read-side (`StatusLive`, `StatsCache`, `PoolEventHandler`, puis `Tracking`/`Auditor` selon preuve d’usage)
 
+# Update 2026-04-01 Dead Legacy Dashboard Modules Slice
+
+Une septième tranche a maintenant été validée côté dashboard:
+
+- `AxonDashboardWeb.StatusLive` a été retiré du code compilé
+- `Axon.Watcher.StatsCache` a été retiré du code compilé
+- `Axon.Watcher.PoolEventHandler` a été retiré du code compilé
+- `Axon.Watcher.Auditor` a été retiré du code compilé
+- `Axon.Watcher.Tracking` a été retiré du code compilé
+- `Axon.Watcher.IndexedProject` a été retiré du code compilé
+- `Axon.Watcher.IndexedFile` a été retiré du code compilé
+- le commentaire résiduel de `BridgeClient` ne présuppose plus l’existence d’un auditor legacy
+- la frontière de tests dashboard prouve désormais explicitement que ces modules ne sont plus chargés
+
+Validation fraîche:
+
+- `devenv shell -- bash -lc 'cd src/dashboard && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && mix test test/axon_dashboard/legacy_control_plane_boundary_test.exs'` -> `4` tests verts
+- `devenv shell -- bash -lc 'cd src/dashboard && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && mix test'` -> `40` tests verts
+- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `151` tests verts (`109` lib + `42` bin)
+- `bash scripts/start-v2.sh` -> vert
+- `bash scripts/stop-v2.sh` -> vert
+
+Conséquence:
+
+- la dette read-side visible n’est plus polluée par des modules morts simplement encore compilés
+- le prochain reliquat legacy rationnel est désormais `PoolFacade`, puis la clarification du rôle exact de `BackpressureController`
+
 # Files Updated During Reprise
 
 - `/home/dstadel/projects/axon/task_plan.md`

@@ -81,7 +81,7 @@ defmodule AxonDashboard.BridgeClient do
 
   def handle_cast({:async_audit, project_name}, %{socket: socket} = state)
       when not is_nil(socket) do
-    # Using a unique ID pattern that the Auditor can recognize (e.g., above 10000)
+    # Keep request ids distinct from file telemetry traces.
     id = System.unique_integer([:positive]) + 10000
 
     request = %{

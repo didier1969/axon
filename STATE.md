@@ -57,11 +57,7 @@ Le socle exécutable est sain, mais la migration `Rust-first` n’est pas totale
 
 Les zones de dette encore visibles sont principalement:
 
-- `Axon.Watcher.Tracking`
-- `Axon.Watcher.StatsCache`
-- `Axon.Watcher.Auditor`
 - `Axon.Watcher.PoolFacade` comme pont encore trop large
-- `Axon.Watcher.PoolEventHandler.process_pending/1`
 - `Axon.BackpressureController`
 
 La chaîne legacy suivante a déjà été retirée du dashboard:
@@ -74,6 +70,7 @@ La chaîne legacy suivante a déjà été retirée du dashboard:
 - configuration `Oban` d’indexation
 - API Elixir de lot `PoolFacade.parse_batch/1` et `PoolFacade.pull_pending/1`
 - `Axon.Watcher.TrafficGuardian`
+- modules morts `AxonDashboardWeb.StatusLive`, `Axon.Watcher.StatsCache`, `Axon.Watcher.PoolEventHandler`, `Axon.Watcher.Auditor`, `Axon.Watcher.Tracking`, `Axon.Watcher.IndexedProject` et `Axon.Watcher.IndexedFile`
 
 ## Comment lire le repo sans se tromper
 

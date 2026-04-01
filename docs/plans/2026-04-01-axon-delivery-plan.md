@@ -103,9 +103,7 @@ Primary modules to retire or reduce:
 - `Axon.Watcher.PoolFacade`
 - `Axon.Watcher.PoolEventHandler`
 - `Axon.Watcher.TrafficGuardian`
-- `Axon.Watcher.Tracking`
 - `Axon.Watcher.StatsCache`
-- `Axon.Watcher.Auditor`
 - residual control semantics around `Axon.BackpressureController`
 
 Already completed in this phase:
@@ -119,6 +117,8 @@ Already completed in this phase:
 - removed legacy dashboard `Oban` ingestion configuration
 - removed Elixir batch APIs `PoolFacade.parse_batch/1` and `PoolFacade.pull_pending/1`
 - removed legacy batch telemetry from the dashboard bus
+- removed dead compiled dashboard modules `AxonDashboardWeb.StatusLive`, `Axon.Watcher.StatsCache`, `Axon.Watcher.PoolEventHandler`, `Axon.Watcher.Auditor`, and `Axon.Watcher.Tracking`
+- removed dead Ecto read-side modules `Axon.Watcher.IndexedProject` and `Axon.Watcher.IndexedFile`
 
 Target state:
 

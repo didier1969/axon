@@ -14,4 +14,14 @@ defmodule AxonDashboard.LegacyControlPlaneBoundaryTest do
   test "pool protocol no longer exposes legacy batch acknowledgements" do
     refute function_exported?(Axon.Watcher.PoolProtocol, :ack_targets, 2)
   end
+
+  test "dead read-side legacy modules are no longer compiled into the dashboard" do
+    assert :non_existing == :code.which(AxonDashboardWeb.StatusLive)
+    assert :non_existing == :code.which(Axon.Watcher.StatsCache)
+    assert :non_existing == :code.which(Axon.Watcher.PoolEventHandler)
+    assert :non_existing == :code.which(Axon.Watcher.Auditor)
+    assert :non_existing == :code.which(Axon.Watcher.Tracking)
+    assert :non_existing == :code.which(Axon.Watcher.IndexedProject)
+    assert :non_existing == :code.which(Axon.Watcher.IndexedFile)
+  end
 end
