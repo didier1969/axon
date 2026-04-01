@@ -1,5 +1,6 @@
-use std::sync::Arc;
 // Copyright (c) Didier Stadelmann. All rights reserved.
+
+use std::sync::Arc;
 
 use crate::graph::GraphStore;
 use crate::queue::QueueStore;
