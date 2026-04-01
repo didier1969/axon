@@ -178,42 +178,6 @@ Conséquence:
 - le cockpit actif dépend encore moins d’un read-side Elixir parallèle
 - la dette read-side restante est désormais plus concentrée dans `Tracking`, `Auditor`, les restes morts comme `StatusLive`, et l’étroitesse encore insuffisante de `PoolFacade`
 
-# Update 2026-04-01 Cockpit Host Pressure Slice
-
-Une sixième tranche a maintenant été validée côté cockpit actif:
-
-- `Axon.Watcher.Telemetry` persiste aussi les signaux de pression hôte reçus via télémétrie Elixir:
-  - `cpu_load`
-  - `ram_load`
-  - `io_wait`
-  - `queues_paused`
-  - `indexing_limit`
-- `Axon.Watcher.CockpitLive` n’ignore plus totalement les événements `:axon, :backpressure, ...`:
-  - `pressure_computed`
-  - `queues_paused`
-  - `queues_resumed`
-  - `limit_adjusted`
-- le cockpit racine affiche désormais en lecture seule:
-  - `HOST_CPU`
-  - `HOST_RAM`
-  - `HOST_IO_WAIT`
-  - `HOST_STATE`
-  - `HOST_GUIDANCE`
-- cette visibilité reste read-side uniquement: Elixir reflète la contrainte hôte, mais ne redevient pas plan de contrôle canonique
-
-Validation fraîche:
-
-- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `40` tests verts
-- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `151` tests verts (`109` lib + `42` bin)
-- `bash scripts/start-v2.sh` -> vert
-- `bash scripts/stop-v2.sh` -> vert
-
-Conséquence:
-
-- le cockpit principal montre maintenant la pression hôte utile à l’opérateur, pas seulement l’état interne du scheduler Rust
-- `BackpressureController` devient plus défendable comme source de télémétrie read-side tant qu’il n’a pas d’autorité canonique sur l’ingestion
-- la prochaine tranche rationnelle reste la réduction des reliquats morts ou trop larges (`StatusLive`, `StatsCache`, `PoolEventHandler`, `Tracking`, `Auditor`, puis resserrement de `PoolFacade`)
-
 # Update 2026-04-01 Cockpit Host-Pressure Slice
 
 Une sixième tranche a maintenant été validée sur le cockpit actif:

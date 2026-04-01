@@ -159,7 +159,6 @@ Already completed in this phase:
 - runtime telemetry bridge exports `budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`, `oversized_refusals_total`, and `degraded_mode_entries_total`
 - Phoenix cockpit displays these Rust-origin signals without regaining scheduling authority
 - Phoenix cockpit also reflects host-pressure telemetry (`cpu`, `ram`, `io_wait`, queue constrained/resumed state, indexing guidance) as read-side operator signals
-- Phoenix cockpit also displays host-pressure telemetry observed from backpressure events (`cpu`, `ram`, `io_wait`, constrained/resumed queue state) without turning Elixir back into a scheduler
 
 ## Phase 4: Retrieval and Developer Utility
 
