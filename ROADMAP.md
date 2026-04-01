@@ -7,10 +7,10 @@ Le plan maître d’exécution jusqu’à livraison est désormais [docs/plans/2
 
 ## Maintenant
 
-1. Finir la désautorisation Elixir sur le chemin d’ingestion
-2. Exposer au dashboard les métriques Rust de budget, réservations, `oversized` et modes de throttling
-3. Réduire le dashboard à un rôle de visualisation, télémétrie et projection opérateur
-4. Ajouter la fairness restante pour éviter l’affamement des gros fichiers différés
+1. Exposer au dashboard les métriques Rust de budget, réservations, `oversized` et modes de throttling
+2. Ajouter la fairness restante pour éviter l’affamement des gros fichiers différés
+3. Ajouter la dégradation avant refus final pour les fichiers trop coûteux
+4. Réduire les reliquats read-side Elixir (`Tracking`, `StatsCache`, `Auditor`, pont `PoolFacade`) à un cockpit fidèle à Rust
 
 ## Ensuite
 

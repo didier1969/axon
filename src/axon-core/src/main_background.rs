@@ -1,3 +1,5 @@
+// Copyright (c) Didier Stadelmann. All rights reserved.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -27,6 +29,16 @@ struct AdmissionPlan {
     selected: Vec<PendingFile>,
     deferred: Vec<PendingFile>,
     oversized: Vec<PendingFile>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeTelemetrySnapshot {
+    pub budget_bytes: u64,
+    pub reserved_bytes: u64,
+    pub exhaustion_ratio: f64,
+    pub queue_depth: usize,
+    pub claim_mode: String,
+    pub service_pressure: String,
 }
 
 pub(crate) fn start_memory_watchdog() {
@@ -113,6 +125,28 @@ pub(crate) fn spawn_autonomous_ingestor(
             tokio::time::sleep(policy.sleep).await;
         }
     });
+}
+
+pub(crate) fn runtime_telemetry_snapshot(queue: &QueueStore) -> RuntimeTelemetrySnapshot {
+    let budget = queue.memory_budget_snapshot();
+    let queue_depth = queue.common_len();
+    let service_pressure = service_guard::current_pressure();
+    let policy = claim_policy(
+        queue_depth,
+        budget.exhaustion_ratio,
+        current_rss_bytes(),
+        memory_limit_bytes(),
+        service_pressure,
+    );
+
+    RuntimeTelemetrySnapshot {
+        budget_bytes: budget.budget_bytes,
+        reserved_bytes: budget.reserved_bytes,
+        exhaustion_ratio: budget.exhaustion_ratio,
+        queue_depth,
+        claim_mode: policy.mode.label().to_string(),
+        service_pressure: service_pressure_label(service_pressure).to_string(),
+    }
 }
 
 fn plan_admissions(queue: &QueueStore, candidates: Vec<PendingFile>, max_count: usize) -> AdmissionPlan {
@@ -623,6 +657,15 @@ fn dynamic_claim_count(pressure: f64, mode: ClaimMode) -> usize {
         ClaimMode::Paused => 0,
     }
     .clamp(25, 2_000)
+}
+
+fn service_pressure_label(service_pressure: ServicePressure) -> &'static str {
+    match service_pressure {
+        ServicePressure::Healthy => "healthy",
+        ServicePressure::Recovering => "recovering",
+        ServicePressure::Degraded => "degraded",
+        ServicePressure::Critical => "critical",
+    }
 }
 
 fn dynamic_claim_sleep(pressure: f64, mode: ClaimMode) -> std::time::Duration {

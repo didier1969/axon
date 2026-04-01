@@ -1,3 +1,5 @@
+// Copyright (c) Didier Stadelmann. All rights reserved.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -5,7 +7,7 @@ pub enum BridgeEvent {
     SystemReady { start_time_utc: String },
     ScanStarted { total_files: usize },
     ProjectScanStarted { project: String, total_files: usize },
-    FileIndexed { 
+    FileIndexed {
         path: String,
         status: String,
         error_reason: String,
@@ -24,6 +26,41 @@ pub enum BridgeEvent {
         t3: i64,
         t4: i64,
     },
+    RuntimeTelemetry {
+        budget_bytes: u64,
+        reserved_bytes: u64,
+        exhaustion_ratio: f64,
+        queue_depth: usize,
+        claim_mode: String,
+        service_pressure: String,
+    },
     ScanComplete { total_files: usize, duration_ms: u64 },
     Heartbeat,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BridgeEvent;
+
+    #[test]
+    fn runtime_telemetry_bridge_event_serializes_with_expected_shape() {
+        let payload = BridgeEvent::RuntimeTelemetry {
+            budget_bytes: 1_024,
+            reserved_bytes: 256,
+            exhaustion_ratio: 0.25,
+            queue_depth: 3,
+            claim_mode: "guarded".to_string(),
+            service_pressure: "degraded".to_string(),
+        };
+
+        let json = serde_json::to_string(&payload).expect("bridge event serializes");
+
+        assert!(json.contains("\"RuntimeTelemetry\""));
+        assert!(json.contains("\"budget_bytes\":1024"));
+        assert!(json.contains("\"reserved_bytes\":256"));
+        assert!(json.contains("\"exhaustion_ratio\":0.25"));
+        assert!(json.contains("\"queue_depth\":3"));
+        assert!(json.contains("\"claim_mode\":\"guarded\""));
+        assert!(json.contains("\"service_pressure\":\"degraded\""));
+    }
 }

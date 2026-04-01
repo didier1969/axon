@@ -1,3 +1,5 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule Axon.Watcher.Telemetry do
   @moduledoc """
   In-memory store for live cockpit metrics.
@@ -20,6 +22,12 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:t4_ema, 0.0})
     :ets.insert(:axon_telemetry, {:flux_reel, 0.0})
     :ets.insert(:axon_telemetry, {:total_ingested, 0})
+    :ets.insert(:axon_telemetry, {:budget_bytes, 0})
+    :ets.insert(:axon_telemetry, {:reserved_bytes, 0})
+    :ets.insert(:axon_telemetry, {:exhaustion_ratio, 0.0})
+    :ets.insert(:axon_telemetry, {:queue_depth, 0})
+    :ets.insert(:axon_telemetry, {:claim_mode, "unknown"})
+    :ets.insert(:axon_telemetry, {:service_pressure, "healthy"})
     {:ok, %{}}
   end
 
@@ -30,6 +38,19 @@ defmodule Axon.Watcher.Telemetry do
 
   def update_flux(flux) do
     :ets.insert(:axon_telemetry, {:flux_reel, flux})
+  end
+
+  def update_runtime_telemetry(payload) when is_map(payload) do
+    :ets.insert(:axon_telemetry, {:budget_bytes, Map.get(payload, "budget_bytes", 0)})
+    :ets.insert(:axon_telemetry, {:reserved_bytes, Map.get(payload, "reserved_bytes", 0)})
+    :ets.insert(:axon_telemetry, {:exhaustion_ratio, Map.get(payload, "exhaustion_ratio", 0.0)})
+    :ets.insert(:axon_telemetry, {:queue_depth, Map.get(payload, "queue_depth", 0)})
+    :ets.insert(:axon_telemetry, {:claim_mode, Map.get(payload, "claim_mode", "unknown")})
+
+    :ets.insert(
+      :axon_telemetry,
+      {:service_pressure, Map.get(payload, "service_pressure", "healthy")}
+    )
   end
 
   def init_directories(files) do
@@ -95,7 +116,13 @@ defmodule Axon.Watcher.Telemetry do
       target_pressure: get_val(:target_pressure),
       t4_ema: get_val(:t4_ema),
       flux_reel: get_val(:flux_reel),
-      total_ingested: get_val(:total_ingested)
+      total_ingested: get_val(:total_ingested),
+      budget_bytes: get_val(:budget_bytes),
+      reserved_bytes: get_val(:reserved_bytes),
+      exhaustion_ratio: get_val(:exhaustion_ratio),
+      queue_depth: get_val(:queue_depth),
+      claim_mode: get_val(:claim_mode),
+      service_pressure: get_val(:service_pressure)
     }
   end
 

@@ -1,3 +1,4 @@
+// Copyright (c) Didier Stadelmann. All rights reserved.
 // NEXUS v10.7: Removed jemallocator. Using default system allocator for FFI/ONNX stability.
 mod main_background;
 mod main_services;
@@ -85,6 +86,7 @@ fn main() -> anyhow::Result<()> {
 
             // --- BROADCAST SYSTEM for Telemetry ---
             let (results_tx, _) = tokio::sync::broadcast::channel::<String>(100000);
+            main_telemetry::spawn_runtime_telemetry(queue_store.clone(), results_tx.clone());
 
             let num_workers = profile.recommended_workers;
             info!("Power Scaling: Sizing worker pool growth to {} threads.", num_workers);

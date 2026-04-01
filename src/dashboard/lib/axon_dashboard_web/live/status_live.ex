@@ -1,3 +1,5 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule AxonDashboardWeb.StatusLive do
   use AxonDashboardWeb, :live_view
   require Logger
@@ -172,31 +174,6 @@ defmodule AxonDashboardWeb.StatusLive do
         socket
       ) do
     {:noreply, assign(socket, indexing_limit: measurements.limit)}
-  end
-
-  def handle_info(
-        {:telemetry_event, [:axon, :watcher, :batch_enqueued], measurements, metadata},
-        socket
-      ) do
-    msg = "[Legacy path] Observed enqueue of #{measurements.count} file(s) to #{metadata.queue}"
-    {:noreply, assign(socket, last_event: msg)}
-  end
-
-  def handle_info(
-        {:telemetry_event, [:axon, :watcher, :batch_failed], _measurements, metadata},
-        socket
-      ) do
-    alert = "LEGACY_PATH_ERROR: enqueue observation failed: #{metadata.error}"
-    new_alerts = [alert | socket.assigns.alerts] |> Enum.take(3)
-    {:noreply, assign(socket, alerts: new_alerts)}
-  end
-
-  def handle_info(
-        {:telemetry_event, [:axon, :watcher, :pending_batch_ignored], measurements, _metadata},
-        socket
-      ) do
-    msg = "[Rust canonical] Ignored #{measurements.count} pending file(s) from legacy watcher path"
-    {:noreply, assign(socket, last_event: msg)}
   end
 
   def handle_info({:bridge_event, event}, socket) do

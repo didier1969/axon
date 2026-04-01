@@ -1,3 +1,5 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule AxonDashboard.ApplicationVisualizationTest do
   use ExUnit.Case, async: false
 
@@ -9,5 +11,7 @@ defmodule AxonDashboard.ApplicationVisualizationTest do
 
     refute Oban in child_ids
     refute Axon.Watcher.Server in child_ids
+    refute Axon.Watcher.TrafficGuardian in child_ids
+    refute Axon.Watcher.Auditor in child_ids
   end
 end

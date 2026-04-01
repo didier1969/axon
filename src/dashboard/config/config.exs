@@ -1,3 +1,4 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
 # This file is responsible for configuring your application
 # and its dependencies with the aid of the Config module.
 #
@@ -18,19 +19,6 @@ config :axon_dashboard, Axon.Watcher.Repo,
   journal_mode: :wal,
   busy_timeout: 5000,
   synchronous: :normal # High performance mode for WAL
-
-config :axon_dashboard, Oban,
-  repo: Axon.Watcher.Repo,
-  engine: Oban.Engines.Lite,
-  # Prune less frequently to avoid lock contention during massive ingestion
-  plugins: [{Oban.Plugins.Pruner, interval: 300_000}], 
-  queues: [
-    indexing_critical: [limit: 10],
-    indexing_hot: [limit: 5],
-    indexing_default: [limit: 10],
-    # Historical compatibility queue only; Rust now owns canonical memory admission.
-    indexing_titan: [limit: 1]
-  ]
 
 config :axon_dashboard, Axon.BackpressureController,
   cpu_hard_limit: 70.0,

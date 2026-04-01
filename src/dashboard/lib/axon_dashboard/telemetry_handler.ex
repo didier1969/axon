@@ -1,3 +1,5 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule AxonDashboard.TelemetryHandler do
   @moduledoc """
   Bridges :telemetry events to Phoenix.PubSub for live dashboard updates.
@@ -23,9 +25,6 @@ defmodule AxonDashboard.TelemetryHandler do
         [:axon, :backpressure, :queues_paused],
         [:axon, :backpressure, :queues_resumed],
         [:axon, :backpressure, :limit_adjusted],
-        [:axon, :watcher, :batch_enqueued],
-        [:axon, :watcher, :batch_failed],
-        [:axon, :watcher, :pending_batch_ignored],
         [:axon, :watcher, :file_indexed]
       ],
       &__MODULE__.handle_event/4,

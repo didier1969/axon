@@ -1,13 +1,44 @@
-use std::sync::Arc;
+// Copyright (c) Didier Stadelmann. All rights reserved.
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use axon_core::bridge::BridgeEvent;
 use axon_core::graph::GraphStore;
 use axon_core::queue::QueueStore;
 use axon_core::scanner;
+use crate::main_background;
 use crossbeam_channel::Sender;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, error, info, warn};
+
+pub(crate) fn spawn_runtime_telemetry(
+    queue: Arc<QueueStore>,
+    results_tx: broadcast::Sender<String>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+
+        loop {
+            interval.tick().await;
+            let snapshot = main_background::runtime_telemetry_snapshot(&queue);
+            let event = BridgeEvent::RuntimeTelemetry {
+                budget_bytes: snapshot.budget_bytes,
+                reserved_bytes: snapshot.reserved_bytes,
+                exhaustion_ratio: snapshot.exhaustion_ratio,
+                queue_depth: snapshot.queue_depth,
+                claim_mode: snapshot.claim_mode,
+                service_pressure: snapshot.service_pressure,
+            };
+
+            if let Ok(message) = serde_json::to_string(&event) {
+                let _ = results_tx.send(message + "\n");
+            }
+        }
+    });
+}
 
 pub(crate) fn spawn_telemetry_connection(
     socket: UnixStream,

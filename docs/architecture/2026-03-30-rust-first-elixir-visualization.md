@@ -215,9 +215,10 @@ This means the canonical startup path no longer boots an Elixir-owned ingestion 
 
 What still remains transitional:
 
-- the historical modules `Axon.Watcher.Server`, `Axon.Watcher.Staging`, `Axon.Watcher.BatchDispatch`, `Axon.Watcher.IndexingWorker`, and `Axon.Watcher.PoolFacade` still exist in the tree
-- `Axon.Watcher.Application` is still a historical entrypoint even though its helper child list now excludes `Staging`, `Oban`, and `Server`
-- `Axon.Watcher.PoolFacade` still exists as a bridge module and must continue shrinking toward read/telemetry-only responsibilities
+- the historical modules `Axon.Watcher.Server`, `Axon.Watcher.Staging`, `Axon.Watcher.BatchDispatch`, `Axon.Watcher.IndexingWorker`, and `Axon.Watcher.PathPolicy` have now been removed from the dashboard tree
+- `Axon.Watcher.Application` is still a historical entrypoint even though its helper child list excludes ingestion children
+- `Axon.Watcher.PoolFacade` still exists as a bridge module, but no longer exposes `parse_batch/1` or `pull_pending/1`
+- read-side SQLite-oriented modules (`Tracking`, `StatsCache`, `Auditor`) still need to shrink behind Rust truth
 
 So the safe statement is:
 

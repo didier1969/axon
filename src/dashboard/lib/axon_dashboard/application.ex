@@ -1,3 +1,5 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule AxonDashboard.Application do
   # See https://hexdocs.pm/elixir/Application.html
   # for more information on OTP Applications
@@ -15,9 +17,7 @@ defmodule AxonDashboard.Application do
       AxonDashboard.TelemetryHandler,
       Axon.Watcher.Repo,
       Axon.Watcher.StatsCache,
-      Axon.Watcher.Auditor,
       Axon.Watcher.PoolFacade,
-      Axon.Watcher.TrafficGuardian,
       Axon.ResourceMonitor,
       Axon.BackpressureController,
       {DNSCluster, query: Application.get_env(:axon_dashboard, :dns_cluster_query) || :ignore},

@@ -1,3 +1,4 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
 defmodule Axon.BackpressureController do
   @moduledoc """
   Observes system load (CPU, RAM, IO) and publishes pressure guidance for the UI.
@@ -26,14 +27,12 @@ defmodule Axon.BackpressureController do
   def init(opts) do
     poll_interval = Keyword.get(opts, :poll_interval, 2_000)
     monitor_mod = Keyword.get(opts, :monitor_mod, Axon.ResourceMonitor)
-    oban_mod = Keyword.get(opts, :oban_mod, Oban)
 
     state = %{
       paused: false,
       last_limit: nil,
       poll_interval: poll_interval,
-      monitor_mod: monitor_mod,
-      oban_mod: oban_mod
+      monitor_mod: monitor_mod
     }
 
     if poll_interval > 0 do
@@ -124,7 +123,7 @@ defmodule Axon.BackpressureController do
 
         if state.last_limit != limit do
           Logger.info(
-            "Adjusting indexing_default limit to #{limit} (Pressure: #{Float.round(pressure * 100, 1)}%)"
+            "Adjusting Rust guidance limit to #{limit} (Pressure: #{Float.round(pressure * 100, 1)}%)"
           )
 
           :telemetry.execute([:axon, :backpressure, :limit_adjusted], %{limit: limit}, %{

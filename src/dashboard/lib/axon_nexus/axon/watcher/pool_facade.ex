@@ -1,3 +1,4 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
 defmodule Axon.Watcher.PoolFacade do
   @moduledoc """
   Nexus v8.3 - Convergence Bridge.
@@ -18,14 +19,6 @@ defmodule Axon.Watcher.PoolFacade do
     GenServer.cast(__MODULE__, :trigger_global_scan)
   end
 
-  def pull_pending(count) do
-    GenServer.cast(__MODULE__, {:pull_pending, count})
-  end
-
-  def parse_batch(files) when is_list(files) do
-    GenServer.call(__MODULE__, {:parse_batch, files}, 60_000)
-  end
-
   def query_json(query) do
     Axon.Watcher.SqlGateway.query_json(query)
   end
@@ -36,7 +29,7 @@ defmodule Axon.Watcher.PoolFacade do
     Logger.info("[PoolFacade] IDENTITY PROBE: Nexus v8.3 (Convergence) Starting...")
     boot_id = Ecto.UUID.generate()
     Process.send_after(self(), :connect, 500)
-    {:ok, %{socket: nil, requests: %{}, batches: %{}, boot_id: boot_id, buffer: ""}}
+    {:ok, %{socket: nil, boot_id: boot_id, buffer: ""}}
   end
 
   def handle_cast(:trigger_global_scan, state) do
@@ -45,29 +38,6 @@ defmodule Axon.Watcher.PoolFacade do
     })
     if state.socket, do: :gen_tcp.send(state.socket, "SCAN_ALL\n")
     {:noreply, state}
-  end
-
-  def handle_cast({:pull_pending, count}, state) do
-    if state.socket, do: :gen_tcp.send(state.socket, "PULL_PENDING #{count}\n")
-    {:noreply, state}
-  end
-
-  def handle_call({:parse_batch, files}, from, state) do
-    if state.socket do
-      batch_id = Ecto.UUID.generate()
-      payload = Jason.encode!(%{"batch_id" => batch_id, "files" => files})
-
-      case :gen_tcp.send(state.socket, "PARSE_BATCH #{payload}\n") do
-        :ok ->
-          new_batches = Map.put(state.batches, batch_id, {from, length(files), []})
-          {:noreply, %{state | batches: new_batches}}
-
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
-      end
-    else
-      {:reply, {:error, :not_connected}, state}
-    end
   end
 
   def handle_call({:query_json, query}, _from, state) do
@@ -94,9 +64,7 @@ defmodule Axon.Watcher.PoolFacade do
     new_state = Enum.reduce(lines, state, fn line, acc ->
       case Jason.decode(line) do
         {:ok, %{"FileIndexed" => payload}} -> process_indexed(payload, acc)
-        {:ok, %{"event" => "PENDING_BATCH_READY", "files" => files}} -> process_pending(files, acc)
-        {:ok, %{"event" => "BATCH_ACCEPTED", "batch_id" => batch_id}} -> process_ack(acc, batch_id)
-        {:ok, %{"event" => "BATCH_ACCEPTED"}} -> process_ack(acc, nil)
+        {:ok, %{"RuntimeTelemetry" => payload}} -> process_runtime_telemetry(payload, acc)
         _ -> acc
       end
     end)
@@ -110,33 +78,13 @@ defmodule Axon.Watcher.PoolFacade do
   end
 
   # --- Internal Helpers ---
-
-  defp process_pending(batch_files, state) do
-    Axon.Watcher.PoolEventHandler.process_pending(batch_files)
-    state
-  end
-
   defp process_indexed(p, state) do
     Axon.Watcher.PoolEventHandler.process_indexed(p)
     state
   end
 
-  defp process_ack(state, batch_id) do
-    case Axon.Watcher.PoolProtocol.ack_targets(state.batches, batch_id) do
-      [] ->
-        state
-
-      targets ->
-        Enum.each(targets, fn {_id, {from, _, _}} ->
-          GenServer.reply(from, :ok)
-        end)
-
-        remaining =
-          Enum.reduce(targets, state.batches, fn {id, _batch}, batches ->
-            Map.delete(batches, id)
-          end)
-
-        %{state | batches: remaining}
-    end
+  defp process_runtime_telemetry(payload, state) do
+    Axon.Watcher.Telemetry.update_runtime_telemetry(payload)
+    state
   end
 end

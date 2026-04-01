@@ -1,3 +1,4 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
 defmodule Axon.BackpressureControllerTest do
   use ExUnit.Case, async: false
 
@@ -11,12 +12,6 @@ defmodule Axon.BackpressureControllerTest do
     def set_load(cpu, ram, io \\ 0.0) do
       Agent.update(__MODULE__, fn _ -> %{cpu: cpu, ram: ram, io: io} end)
     end
-  end
-
-  defmodule MockOban do
-    def pause_queue(queue: q), do: send(:test_pid, {:oban_pause, q})
-    def resume_queue(queue: q), do: send(:test_pid, {:oban_resume, q})
-    def scale_queue(queue: q, limit: l), do: send(:test_pid, {:oban_scale, q, l})
   end
 
   setup do
@@ -67,8 +62,7 @@ defmodule Axon.BackpressureControllerTest do
       BackpressureController.start_link(
         name: :test_controller_1,
         poll_interval: 0,
-        monitor_mod: MockResourceMonitor,
-        oban_mod: MockOban
+        monitor_mod: MockResourceMonitor
       )
 
     GenServer.call(pid, :trigger_poll)
@@ -87,8 +81,7 @@ defmodule Axon.BackpressureControllerTest do
       BackpressureController.start_link(
         name: :test_controller_2,
         poll_interval: 0,
-        monitor_mod: MockResourceMonitor,
-        oban_mod: MockOban
+        monitor_mod: MockResourceMonitor
       )
 
     GenServer.call(pid, :trigger_poll)
@@ -107,8 +100,7 @@ defmodule Axon.BackpressureControllerTest do
       BackpressureController.start_link(
         name: :test_controller_3,
         poll_interval: 0,
-        monitor_mod: MockResourceMonitor,
-        oban_mod: MockOban
+        monitor_mod: MockResourceMonitor
       )
 
     GenServer.call(pid, :trigger_poll)
@@ -127,8 +119,7 @@ defmodule Axon.BackpressureControllerTest do
       BackpressureController.start_link(
         name: :test_controller_4,
         poll_interval: 0,
-        monitor_mod: MockResourceMonitor,
-        oban_mod: MockOban
+        monitor_mod: MockResourceMonitor
       )
 
     GenServer.call(pid, :trigger_poll)
@@ -147,8 +138,7 @@ defmodule Axon.BackpressureControllerTest do
       BackpressureController.start_link(
         name: :test_controller_5,
         poll_interval: 0,
-        monitor_mod: MockResourceMonitor,
-        oban_mod: MockOban
+        monitor_mod: MockResourceMonitor
       )
 
     GenServer.call(pid, :trigger_poll)

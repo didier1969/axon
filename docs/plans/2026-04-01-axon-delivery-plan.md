@@ -36,6 +36,8 @@ Already true as of 2026-04-01:
 - explicit `oversized_for_current_budget` handling now exists in Rust
 - `Titan` has been removed from the canonical Rust runtime path
 - fixed `>1MB => skip` behavior has been removed
+- the legacy Elixir control chain `Server/Staging/PathPolicy/Oban/IndexingWorker/BatchDispatch` has been removed from the dashboard code path
+- `PoolFacade` no longer exposes batch admission or pull APIs on the Elixir side
 - no external scheduling crate has been adopted; current direction is a Rust-native Axon scheduler because existing FIFO semaphore/queue crates are a poor fit for budget packing
 
 ## Delivery Definition
@@ -90,15 +92,23 @@ Goal:
 
 Primary modules to retire or reduce:
 
-- `Axon.Watcher.Server`
-- `Axon.Watcher.Staging`
-- `Axon.Watcher.PathPolicy`
-- `Axon.Watcher.IndexingWorker`
-- `Axon.Watcher.BatchDispatch`
 - `Axon.Watcher.PoolFacade`
 - `Axon.Watcher.PoolEventHandler`
 - `Axon.Watcher.TrafficGuardian`
+- `Axon.Watcher.Tracking`
+- `Axon.Watcher.StatsCache`
+- `Axon.Watcher.Auditor`
 - residual control semantics around `Axon.BackpressureController`
+
+Already completed in this phase:
+
+- retired `Axon.Watcher.Server`
+- retired `Axon.Watcher.Staging`
+- retired `Axon.Watcher.PathPolicy`
+- retired `Axon.Watcher.IndexingWorker`
+- retired `Axon.Watcher.BatchDispatch`
+- removed legacy dashboard `Oban` ingestion configuration
+- removed Elixir batch APIs `PoolFacade.parse_batch/1` and `PoolFacade.pull_pending/1`
 
 Target state:
 
@@ -258,6 +268,7 @@ Already done:
 - first Rust memory-budget scheduler slice
 - confidence-aware dynamic admission slice
 - budget-aware candidate packing slice
+- removal of the Elixir legacy dispatch chain from the dashboard tree
 - removal of fixed-size skip
 - removal of canonical `Titan` behavior in Rust
 - initial Elixir de-authoring slice

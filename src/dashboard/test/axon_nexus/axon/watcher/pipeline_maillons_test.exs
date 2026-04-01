@@ -1,44 +1,95 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule Axon.Watcher.PipelineMaillonsTest do
   use ExUnit.Case, async: false
-  require Logger
-
-  alias Axon.Watcher.TrafficGuardian
   alias Axon.Watcher.PoolFacade
 
-  # --- MAILLON 4: L'ORCHESTRATEUR (Traffic Guardian) ---
-  test "maillon 4: Traffic Guardian should increase pressure when load is low" do
-    # On récupère le PID existant ou on le démarre
-    pid = case TrafficGuardian.start_link() do
-      {:ok, p} -> p
-      {:error, {:already_started, p}} -> p
+  setup do
+    case Process.whereis(Axon.Watcher.Telemetry) do
+      nil ->
+        {:ok, pid} = Axon.Watcher.Telemetry.start_link([])
+        %{telemetry_pid: pid}
+
+      pid ->
+        %{telemetry_pid: pid}
     end
-    
-    # On force un check de pression
-    send(pid, :check_pressure)
-    
-    # On vérifie que le process est toujours en vie
-    assert Process.alive?(pid)
   end
 
-  # --- MAILLON 8: LA BOUCLE DE RÉTROACTION (Feedback) ---
-  test "maillon 8: PoolFacade should process indexed events without crashing" do
-    # On vérifie si PoolFacade est lancé par l'application de test
-    # Sinon on le démarre
-    pid = case Process.whereis(PoolFacade) do
-      nil -> 
-        {:ok, p} = PoolFacade.start_link([])
-        p
-      p -> p
-    end
+  test "legacy parse batches are no longer exported in visualization-only mode" do
+    refute function_exported?(PoolFacade, :parse_batch, 1)
+  end
 
-    # Simuler l'arrivée d'une ligne JSON sur la socket via handle_info
-    # Cet événement doit être traité par PoolFacade et redirigé vers le Guardian
+  test "bridge telemetry still survives file indexed events without traffic guardian" do
+    pid =
+      case Process.whereis(PoolFacade) do
+        nil ->
+          {:ok, started} = PoolFacade.start_link([])
+          started
+
+        started ->
+          started
+      end
+
     line = ~s({"FileIndexed": {"path": "/tmp/test.ex", "status": "ok", "t4": 500}})
-    
-    # On envoie le message au GenServer PoolFacade
-    send(PoolFacade, {:tcp, nil, line <> "\n"})
-    
-    # On vérifie que PoolFacade survit au décodage
+    send(pid, {:tcp, nil, line <> "\n"})
+
     assert Process.alive?(pid)
   end
+
+  test "runtime status updates telemetry store from canonical Rust payload" do
+    pid =
+      case Process.whereis(PoolFacade) do
+        nil ->
+          {:ok, started} = PoolFacade.start_link([])
+          started
+
+        started ->
+          started
+      end
+
+    send(
+      pid,
+      {:tcp, nil,
+       Jason.encode!(%{
+         "RuntimeTelemetry" => %{
+           "budget_bytes" => 2_048,
+           "reserved_bytes" => 1_024,
+           "exhaustion_ratio" => 0.5,
+           "queue_depth" => 17,
+           "claim_mode" => "guarded",
+           "service_pressure" => "degraded"
+         }
+       }) <> "\n"}
+    )
+
+    assert Process.alive?(pid)
+
+    stats =
+      wait_for(fn ->
+        stats = Axon.Watcher.Telemetry.get_stats()
+        if stats[:budget_bytes] == 2_048, do: stats, else: nil
+      end)
+
+    assert stats[:budget_bytes] == 2_048
+    assert stats[:reserved_bytes] == 1_024
+    assert stats[:exhaustion_ratio] == 0.5
+    assert stats[:queue_depth] == 17
+    assert stats[:claim_mode] == "guarded"
+    assert stats[:service_pressure] == "degraded"
+  end
+
+  defp wait_for(fun, attempts \\ 50)
+
+  defp wait_for(fun, attempts) when attempts > 0 do
+    case fun.() do
+      nil ->
+        Process.sleep(10)
+        wait_for(fun, attempts - 1)
+
+      value ->
+        value
+    end
+  end
+
+  defp wait_for(_fun, 0), do: flunk("timed out waiting for runtime telemetry update")
 end

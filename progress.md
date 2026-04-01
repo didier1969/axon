@@ -72,3 +72,26 @@
   - résolution: rerun en commandes ciblées séparées puis suite complète
 - `mix test` a initialement échoué car `Hex` n'était pas préinstallé dans cette session shell
   - résolution: rerun avec `mix local.hex --force` et `mix local.rebar --force` avant `mix test`
+
+## 2026-04-01 - Retrait de la chaîne legacy Elixir d’ingestion
+- TDD de frontière ajouté côté dashboard:
+  - `src/dashboard/test/axon_dashboard/legacy_control_plane_boundary_test.exs`
+  - objectif: verrouiller l'absence de configuration `Oban` et d'API batch legacy côté `PoolFacade/PoolProtocol`
+- Tranche de suppression exécutée:
+  - suppression de `Axon.Watcher.Server`
+  - suppression de `Axon.Watcher.Staging`
+  - suppression de `Axon.Watcher.PathPolicy`
+  - suppression de `Axon.Watcher.IndexingWorker`
+  - suppression de `Axon.Watcher.BatchDispatch`
+  - suppression de la migration `Oban` historique
+  - retrait de la dépendance `Oban` du dashboard
+  - réduction de `PoolFacade` au scan explicite, à la télémétrie entrante et aux requêtes SQL
+  - réduction de `PoolProtocol` à `split_lines/1`
+- Réalignement read-side:
+  - `BackpressureController` ne garde plus de faux point d’extension `oban_mod`
+  - tests dashboard mis à jour pour refléter la frontière visualization-only
+- Validation fraîche:
+  - `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `38` tests verts
+  - `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `147` tests verts
+  - `bash scripts/start-v2.sh` -> vert
+  - `bash scripts/stop-v2.sh` -> vert

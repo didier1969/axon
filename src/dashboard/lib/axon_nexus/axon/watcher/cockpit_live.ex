@@ -1,3 +1,5 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule Axon.Watcher.CockpitLive do
   use Phoenix.LiveView, layout: {Axon.Watcher.Layouts, :root}
   alias Axon.Watcher.Progress
@@ -18,7 +20,21 @@ defmodule Axon.Watcher.CockpitLive do
        stats: %{},
        dir_stats: %{},
        monitoring_active: true,
-       live: %{active_workers: %{}, last_files: [], total_ingested: 0, directories: %{}, target_pressure: 100, t4_ema: 0.0, flux_reel: 0.0}
+       live: %{
+         active_workers: %{},
+         last_files: [],
+         total_ingested: 0,
+         directories: %{},
+         target_pressure: 100,
+         t4_ema: 0.0,
+         flux_reel: 0.0,
+         budget_bytes: 0,
+         reserved_bytes: 0,
+         exhaustion_ratio: 0.0,
+         queue_depth: 0,
+         claim_mode: "unknown",
+         service_pressure: "unknown"
+       }
      )}
   end
 
@@ -47,7 +63,8 @@ defmodule Axon.Watcher.CockpitLive do
     dir_stats = Progress.get_directory_stats(socket.assigns.repo_slug)
 
     live =
-      Axon.Watcher.Telemetry.get_stats()
+      socket.assigns.live
+      |> Map.merge(Axon.Watcher.Telemetry.get_stats())
       |> Map.merge(%{
         total_files: stats["total"] || 0,
         total_ingested: stats["synced"] || 0,
@@ -177,6 +194,30 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
         <div class="stat"><label>RUST_GUIDANCE</label> <span style="color: var(--neon-green);">{@live.target_pressure} slots</span></div>
         <div class="stat">
+          <label>MEMORY_BUDGET</label>
+          <span style="color: var(--neon-blue);">
+            {format_mebibytes(Map.get(@live, :reserved_bytes, 0))} MB / {format_mebibytes(Map.get(@live, :budget_bytes, 0))} MB
+          </span>
+        </div>
+        <div class="stat">
+          <label>BUDGET_EXHAUSTION</label>
+          <span style="color: var(--warning);">
+            {Float.round(Map.get(@live, :exhaustion_ratio, 0.0) * 100, 1)}%
+          </span>
+        </div>
+        <div class="stat">
+          <label>Queue Depth</label>
+          <span style="color: var(--neon-blue);">{Map.get(@live, :queue_depth, 0)}</span>
+        </div>
+        <div class="stat">
+          <label>CLAIM_MODE</label>
+          <span style="color: var(--neon-green);">{String.upcase(Map.get(@live, :claim_mode, "unknown"))}</span>
+        </div>
+        <div class="stat">
+          <label>SERVICE_PRESSURE</label>
+          <span style="color: var(--warning);">{String.upcase(Map.get(@live, :service_pressure, "unknown"))}</span>
+        </div>
+        <div class="stat">
           <label>T4_LATENCY</label>
           <span style={"color: #{if @live.t4_ema > 200, do: "var(--neon-red)", else: "var(--neon-blue)"};"}>
             {Float.round(@live.t4_ema, 2)}ms
@@ -188,7 +229,7 @@ defmodule Axon.Watcher.CockpitLive do
         </div>
         
         <div class="progress-bar" style="background: rgba(217, 119, 6, 0.1);">
-          <div class="progress-fill" style={"width: #{(@live.target_pressure / 1000) * 100}%; background: var(--warning);"}></div>
+          <div class="progress-fill" style={"width: #{Map.get(@live, :exhaustion_ratio, 0.0) * 100}%; background: var(--warning);"}></div>
         </div>
       </div>
       
@@ -301,5 +342,22 @@ defmodule Axon.Watcher.CockpitLive do
     socket |> assign(live: live) |> put_flash(:info, "Runtime reported scan completion")
   end
 
+  defp apply_bridge_event(socket, %{"RuntimeTelemetry" => payload}) do
+    live =
+      socket.assigns.live
+      |> Map.put(:budget_bytes, Map.get(payload, "budget_bytes", 0))
+      |> Map.put(:reserved_bytes, Map.get(payload, "reserved_bytes", 0))
+      |> Map.put(:exhaustion_ratio, Map.get(payload, "exhaustion_ratio", 0.0))
+      |> Map.put(:queue_depth, Map.get(payload, "queue_depth", 0))
+      |> Map.put(:claim_mode, Map.get(payload, "claim_mode", "unknown"))
+      |> Map.put(:service_pressure, Map.get(payload, "service_pressure", "unknown"))
+
+    assign(socket, live: live)
+  end
+
   defp apply_bridge_event(socket, _event), do: socket
+
+  defp format_mebibytes(bytes) when is_integer(bytes) do
+    div(bytes, 1024 * 1024)
+  end
 end

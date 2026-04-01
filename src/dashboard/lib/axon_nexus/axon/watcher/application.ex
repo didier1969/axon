@@ -1,3 +1,5 @@
+# Copyright (c) Didier Stadelmann. All rights reserved.
+
 defmodule Axon.Watcher.Application do
   @moduledoc """
   The entry point for the Axon Watcher application.
@@ -22,7 +24,6 @@ defmodule Axon.Watcher.Application do
       Axon.Watcher.Telemetry,
       Axon.Watcher.Tracer,
       Axon.Watcher.PoolFacade,
-      Axon.Watcher.TrafficGuardian,
       {Phoenix.PubSub, name: Axon.PubSub},
       Axon.Watcher.Endpoint
     ]

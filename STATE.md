@@ -20,7 +20,7 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
   - `146` tests passés (`107` lib + `39` bin)
   - `0` échec
 - `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
-  - `35` tests passés
+  - `38` tests passés
   - `0` échec
 - `bash scripts/start-v2.sh`
   - dashboard prêt
@@ -50,14 +50,23 @@ Le socle exécutable est sain, mais la migration `Rust-first` n’est pas totale
 
 Les zones de dette encore visibles sont principalement:
 
-- `Axon.Watcher.Server`
-- `Axon.Watcher.Staging`
-- `Axon.Watcher.IndexingWorker`
-- `Axon.Watcher.PoolFacade.parse_batch`
 - `Axon.Watcher.Tracking`
-- queues `Oban` d’indexation legacy
+- `Axon.Watcher.StatsCache`
+- `Axon.Watcher.Auditor`
+- `Axon.Watcher.PoolFacade` comme pont encore trop large
+- `Axon.Watcher.PoolEventHandler.process_pending/1`
 - `Axon.BackpressureController`
 - `Axon.Watcher.TrafficGuardian`
+
+La chaîne legacy suivante a déjà été retirée du dashboard:
+
+- `Axon.Watcher.Server`
+- `Axon.Watcher.Staging`
+- `Axon.Watcher.PathPolicy`
+- `Axon.Watcher.IndexingWorker`
+- `Axon.Watcher.BatchDispatch`
+- configuration `Oban` d’indexation
+- API Elixir de lot `PoolFacade.parse_batch/1` et `PoolFacade.pull_pending/1`
 
 ## Comment lire le repo sans se tromper
 
