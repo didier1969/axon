@@ -95,3 +95,19 @@
   - `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `147` tests verts
   - `bash scripts/start-v2.sh` -> vert
   - `bash scripts/stop-v2.sh` -> vert
+
+## 2026-04-01 - Télémétrie runtime Rust visible dans le cockpit
+- Nouveau flux bridge `RuntimeTelemetry` ajouté côté Rust:
+  - budget mémoire courant
+  - mémoire réservée en vol
+  - taux d’épuisement
+  - profondeur de queue
+  - `claim_mode`
+  - `service_pressure`
+- Le cockpit Phoenix affiche maintenant ces signaux Rust en lecture seule sur la route `/cockpit`.
+- `PoolFacade` met aussi à jour `Axon.Watcher.Telemetry` à partir de `RuntimeTelemetry`, ce qui évite de dépendre de `TrafficGuardian`.
+- Régression couverte par TDD:
+  - test Rust de sérialisation `BridgeEvent::RuntimeTelemetry`
+  - test LiveView du cockpit racine
+  - test dashboard de frontière legacy
+  - test watcher `pipeline_maillons`

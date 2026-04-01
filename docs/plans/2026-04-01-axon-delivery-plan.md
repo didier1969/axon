@@ -38,6 +38,7 @@ Already true as of 2026-04-01:
 - fixed `>1MB => skip` behavior has been removed
 - the legacy Elixir control chain `Server/Staging/PathPolicy/Oban/IndexingWorker/BatchDispatch` has been removed from the dashboard code path
 - `PoolFacade` no longer exposes batch admission or pull APIs on the Elixir side
+- the Rust bridge now emits runtime telemetry consumed by the Phoenix cockpit (`budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`)
 - no external scheduling crate has been adopted; current direction is a Rust-native Axon scheduler because existing FIFO semaphore/queue crates are a poor fit for budget packing
 
 ## Delivery Definition
@@ -107,8 +108,10 @@ Already completed in this phase:
 - retired `Axon.Watcher.PathPolicy`
 - retired `Axon.Watcher.IndexingWorker`
 - retired `Axon.Watcher.BatchDispatch`
+- retired `Axon.Watcher.TrafficGuardian`
 - removed legacy dashboard `Oban` ingestion configuration
 - removed Elixir batch APIs `PoolFacade.parse_batch/1` and `PoolFacade.pull_pending/1`
+- removed legacy batch telemetry from the dashboard bus
 
 Target state:
 
@@ -143,6 +146,11 @@ Tasks:
 
 Exit criteria:
 - Axon degrades in a controlled way instead of driving the host into pathological thrash
+
+Already completed in this phase:
+
+- runtime telemetry bridge exports `budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, and `service_pressure`
+- Phoenix cockpit displays these Rust-origin signals without regaining scheduling authority
 
 ## Phase 4: Retrieval and Developer Utility
 

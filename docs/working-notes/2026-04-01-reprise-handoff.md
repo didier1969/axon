@@ -123,6 +123,32 @@ Conséquence:
 - la dette critique n’est plus la chaîne de dispatch legacy
 - la prochaine tranche rationnelle est l’exposition cockpit des métriques Rust et la réduction des reliquats read-side Elixir
 
+# Update 2026-04-01 Rust Runtime Telemetry Slice
+
+Une quatrième tranche a maintenant été validée entre Rust et Phoenix:
+
+- le runtime Rust émet périodiquement `RuntimeTelemetry` sur le bridge
+- le payload exporte désormais:
+  - `budget_bytes`
+  - `reserved_bytes`
+  - `exhaustion_ratio`
+  - `queue_depth`
+  - `claim_mode`
+  - `service_pressure`
+- le cockpit racine Phoenix affiche ces métriques en lecture seule
+- `PoolFacade` reflète aussi `RuntimeTelemetry` dans `Axon.Watcher.Telemetry`, sans recréer d’autorité de scheduling côté Elixir
+
+Validation fraîche:
+
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `38` tests verts
+- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `147` tests verts
+- `bash scripts/start-v2.sh` puis `bash scripts/stop-v2.sh` -> verts
+
+Conséquence:
+
+- le cockpit principal commence à refléter la vérité Rust au lieu d’un proxy Elixir heuristique
+- la prochaine tranche rationnelle est l’exposition des refus `oversized`, des dégradations avant refus final, puis la réduction des reliquats read-side (`Tracking`, `StatsCache`, `Auditor`, `PoolFacade`)
+
 # Files Updated During Reprise
 
 - `/home/dstadel/projects/axon/task_plan.md`

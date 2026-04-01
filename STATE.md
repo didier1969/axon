@@ -17,7 +17,7 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
 ## Validation fraîche connue
 
 - `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'`
-  - `146` tests passés (`107` lib + `39` bin)
+  - `147` tests passés (`108` lib + `39` bin)
   - `0` échec
 - `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
   - `38` tests passés
@@ -40,6 +40,7 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
   - visualisation
   - télémétrie opérateur
   - projections et surface cockpit
+  - affichage du budget Rust courant, des réservations en vol, du taux d’épuisement, de la profondeur de queue et du mode runtime
 
 Il n’existe plus de voie canonique `Titan` dans le runtime Rust.
 Les gros fichiers sont désormais traités par budget, packing et refus explicite `oversized_for_current_budget`, pas par un seuil métier fixe.
@@ -56,7 +57,6 @@ Les zones de dette encore visibles sont principalement:
 - `Axon.Watcher.PoolFacade` comme pont encore trop large
 - `Axon.Watcher.PoolEventHandler.process_pending/1`
 - `Axon.BackpressureController`
-- `Axon.Watcher.TrafficGuardian`
 
 La chaîne legacy suivante a déjà été retirée du dashboard:
 
@@ -67,6 +67,7 @@ La chaîne legacy suivante a déjà été retirée du dashboard:
 - `Axon.Watcher.BatchDispatch`
 - configuration `Oban` d’indexation
 - API Elixir de lot `PoolFacade.parse_batch/1` et `PoolFacade.pull_pending/1`
+- `Axon.Watcher.TrafficGuardian`
 
 ## Comment lire le repo sans se tromper
 

@@ -7,7 +7,7 @@ Le plan maître d’exécution jusqu’à livraison est désormais [docs/plans/2
 
 ## Maintenant
 
-1. Exposer au dashboard les métriques Rust de budget, réservations, `oversized` et modes de throttling
+1. Exposer encore au cockpit les refus `oversized` et les compteurs de dégradation, en plus des métriques Rust déjà visibles (`budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`)
 2. Ajouter la fairness restante pour éviter l’affamement des gros fichiers différés
 3. Ajouter la dégradation avant refus final pour les fichiers trop coûteux
 4. Réduire les reliquats read-side Elixir (`Tracking`, `StatsCache`, `Auditor`, pont `PoolFacade`) à un cockpit fidèle à Rust
