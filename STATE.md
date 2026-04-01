@@ -49,7 +49,7 @@ Il n’existe plus de voie canonique `Titan` dans le runtime Rust.
 Les gros fichiers sont désormais traités par budget, packing et refus explicite `oversized_for_current_budget`, pas par un seuil métier fixe.
 Les gros fichiers différés accumulent aussi maintenant une dette de fairness persistante (`defer_count`) afin d’éviter leur affamement derrière des vagues infinies de petits fichiers.
 Avant un refus `oversized` final, Axon accorde désormais une courte probation de déferrement aux candidats encore froids pour éviter qu’une estimation initiale trop conservatrice ne les exclue trop tôt.
-`StatsCache` n’est plus supervisé sur le chemin actif du dashboard, et `PoolFacade` alimente désormais `Telemetry` directement pour les événements `FileIndexed` et `RuntimeTelemetry`.
+`StatsCache` n’est plus supervisé sur le chemin actif du dashboard, `PoolFacade` alimente désormais `Telemetry` directement pour les événements `FileIndexed` et `RuntimeTelemetry`, et la lecture SQL du cockpit passe désormais directement par `SqlGateway` au lieu d’une façade `PoolFacade.query_json/1`.
 
 ## Dette encore ouverte
 
@@ -57,7 +57,7 @@ Le socle exécutable est sain, mais la migration `Rust-first` n’est pas totale
 
 Les zones de dette encore visibles sont principalement:
 
-- `Axon.Watcher.PoolFacade` comme pont encore trop large
+- `Axon.Watcher.PoolFacade` comme pont encore trop large malgré la suppression de sa façade SQL
 - `Axon.BackpressureController`
 
 La chaîne legacy suivante a déjà été retirée du dashboard:
@@ -69,6 +69,7 @@ La chaîne legacy suivante a déjà été retirée du dashboard:
 - `Axon.Watcher.BatchDispatch`
 - configuration `Oban` d’indexation
 - API Elixir de lot `PoolFacade.parse_batch/1` et `PoolFacade.pull_pending/1`
+- façade SQL `PoolFacade.query_json/1`
 - `Axon.Watcher.TrafficGuardian`
 - modules morts `AxonDashboardWeb.StatusLive`, `Axon.Watcher.StatsCache`, `Axon.Watcher.PoolEventHandler`, `Axon.Watcher.Auditor`, `Axon.Watcher.Tracking`, `Axon.Watcher.IndexedProject` et `Axon.Watcher.IndexedFile`
 

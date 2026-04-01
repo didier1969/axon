@@ -19,10 +19,6 @@ defmodule Axon.Watcher.PoolFacade do
     GenServer.cast(__MODULE__, :trigger_global_scan)
   end
 
-  def query_json(query) do
-    Axon.Watcher.SqlGateway.query_json(query)
-  end
-
   # --- Callbacks ---
 
   def init(_opts) do
@@ -38,11 +34,6 @@ defmodule Axon.Watcher.PoolFacade do
     })
     if state.socket, do: :gen_tcp.send(state.socket, "SCAN_ALL\n")
     {:noreply, state}
-  end
-
-  def handle_call({:query_json, query}, _from, state) do
-    # Fallback handle_call for legacy callers
-    {:reply, query_json(query), state}
   end
 
   def handle_info(:connect, state) do

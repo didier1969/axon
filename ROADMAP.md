@@ -8,7 +8,7 @@ Le plan maître d’exécution jusqu’à livraison est désormais [docs/plans/2
 ## Maintenant
 
 1. Renforcer la dégradation avant refus final au-delà de la probation actuelle, pour les fichiers trop coûteux quand cela peut se faire sans mentir sur le budget mémoire réel
-2. Réduire les reliquats read-side Elixir (`Tracking`, `Auditor`, legacy morts comme `StatusLive`, et le pont `PoolFacade`) à un cockpit fidèle à Rust
+2. Réduire les reliquats read-side Elixir encore actifs (`PoolFacade` n’est plus une façade SQL, il reste à le ramener à un bridge minimal; puis `BackpressureController` si sa surface n’est plus utile) à un cockpit fidèle à Rust
 3. Renforcer le signal de pression hôte globale en plus du budget Axon (`RSS`, latence service, et plus tard mémoire/disque hôte si nécessaire)
 
 ## Ensuite

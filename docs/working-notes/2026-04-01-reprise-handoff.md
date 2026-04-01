@@ -235,6 +235,32 @@ Conséquence:
 - la dette read-side visible n’est plus polluée par des modules morts simplement encore compilés
 - le prochain reliquat legacy rationnel est désormais `PoolFacade`, puis la clarification du rôle exact de `BackpressureController`
 
+# Update 2026-04-01 PoolFacade Narrowing Slice
+
+Une huitième tranche a maintenant été validée côté dashboard:
+
+- `Axon.Watcher.PoolFacade` n’expose plus `query_json/1`
+- `Axon.Watcher.Progress` lit désormais `Axon.Watcher.SqlGateway` directement
+- `Axon.BackpressureController` n’expose plus `get_chunk_size/1`, reliquat de guidage legacy qui n’avait plus de consommateur réel
+- la frontière dashboard interdit maintenant explicitement:
+  - `PoolFacade.parse_batch/1`
+  - `PoolFacade.pull_pending/1`
+  - `PoolFacade.query_json/1`
+  - `BackpressureController.get_chunk_size/1`
+
+Validation fraîche:
+
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test test/axon_dashboard/legacy_control_plane_boundary_test.exs'` -> `5` tests verts
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `40` tests verts
+- `bash scripts/start-v2.sh` -> vert
+- `bash scripts/stop-v2.sh` -> vert
+
+Conséquence:
+
+- `PoolFacade` est maintenant plus proche d’un bridge télémétrie/scan que d’une façade applicative générale
+- `BackpressureController` reste un moniteur read-only, mais a perdu un reliquat d’autorité de sizing qui ne reflétait plus la réalité Rust-first
+- le prochain bloc rationnel reste la dégradation avant refus final côté Rust, plus le resserrement ou renommage final des surfaces read-side restantes
+
 # Files Updated During Reprise
 
 - `/home/dstadel/projects/axon/task_plan.md`

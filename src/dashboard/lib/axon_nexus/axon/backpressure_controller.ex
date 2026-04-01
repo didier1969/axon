@@ -11,18 +11,6 @@ defmodule Axon.BackpressureController do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  def get_chunk_size(monitor_mod \\ Axon.ResourceMonitor) do
-    load = monitor_mod.get_system_load()
-    pressure = compute_pressure(load)
-
-    cond do
-      pressure < 0.50 -> 100
-      pressure < 0.75 -> 50
-      pressure < 1.00 -> 10
-      true -> 5
-    end
-  end
-
   @impl true
   def init(opts) do
     poll_interval = Keyword.get(opts, :poll_interval, 2_000)

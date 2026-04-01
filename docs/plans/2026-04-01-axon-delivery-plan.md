@@ -116,6 +116,7 @@ Already completed in this phase:
 - retired `Axon.Watcher.TrafficGuardian`
 - removed legacy dashboard `Oban` ingestion configuration
 - removed Elixir batch APIs `PoolFacade.parse_batch/1` and `PoolFacade.pull_pending/1`
+- removed the SQL façade `PoolFacade.query_json/1`; dashboard progress now reads `SqlGateway` directly
 - removed legacy batch telemetry from the dashboard bus
 - removed dead compiled dashboard modules `AxonDashboardWeb.StatusLive`, `Axon.Watcher.StatsCache`, `Axon.Watcher.PoolEventHandler`, `Axon.Watcher.Auditor`, and `Axon.Watcher.Tracking`
 - removed dead Ecto read-side modules `Axon.Watcher.IndexedProject` and `Axon.Watcher.IndexedFile`

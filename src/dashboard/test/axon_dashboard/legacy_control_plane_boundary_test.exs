@@ -9,10 +9,15 @@ defmodule AxonDashboard.LegacyControlPlaneBoundaryTest do
   test "pool facade no longer exposes legacy batch admission commands" do
     refute function_exported?(Axon.Watcher.PoolFacade, :parse_batch, 1)
     refute function_exported?(Axon.Watcher.PoolFacade, :pull_pending, 1)
+    refute function_exported?(Axon.Watcher.PoolFacade, :query_json, 1)
   end
 
   test "pool protocol no longer exposes legacy batch acknowledgements" do
     refute function_exported?(Axon.Watcher.PoolProtocol, :ack_targets, 2)
+  end
+
+  test "backpressure controller no longer exposes legacy chunk sizing guidance" do
+    refute function_exported?(Axon.BackpressureController, :get_chunk_size, 1)
   end
 
   test "dead read-side legacy modules are no longer compiled into the dashboard" do

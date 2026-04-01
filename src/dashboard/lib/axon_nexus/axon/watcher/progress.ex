@@ -4,7 +4,7 @@ defmodule Axon.Watcher.Progress do
   v6.0 Consolidation - Replaces SQLite and HydraDB reporting.
   """
   require Logger
-  alias Axon.Watcher.PoolFacade
+  alias Axon.Watcher.SqlGateway
 
   @overlay_prefix {:axon, :watcher, :progress}
 
@@ -12,7 +12,7 @@ defmodule Axon.Watcher.Progress do
     query = "SELECT status, count(*) as count FROM File GROUP BY status;"
 
     db_status =
-      case PoolFacade.query_json(query) do
+      case SqlGateway.query_json(query) do
         {:ok, json} ->
           case Jason.decode(json) do
           {:ok, rows} ->
@@ -62,7 +62,7 @@ defmodule Axon.Watcher.Progress do
     # On agrège les stats par projet directement depuis DuckDB
     query = "SELECT project_slug, status, count(*) as count FROM File GROUP BY project_slug, status;"
 
-    case PoolFacade.query_json(query) do
+    case SqlGateway.query_json(query) do
       {:ok, json} ->
         case Jason.decode(json) do
           {:ok, rows} ->

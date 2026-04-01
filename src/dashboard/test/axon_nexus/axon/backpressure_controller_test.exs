@@ -156,22 +156,4 @@ defmodule Axon.BackpressureControllerTest do
 
     GenServer.stop(pid)
   end
-
-  test "get_chunk_size returns correct size based on pressure" do
-    # Pressure 0.25 (< 0.50) -> 100
-    MockResourceMonitor.set_load(10.0, 10.0, 5.0)
-    assert BackpressureController.get_chunk_size(MockResourceMonitor) == 100
-
-    # Pressure 0.60 (< 0.75) -> 50
-    MockResourceMonitor.set_load(10.0, 10.0, 12.0)
-    assert BackpressureController.get_chunk_size(MockResourceMonitor) == 50
-
-    # Pressure 0.85 (< 1.00) -> 10
-    MockResourceMonitor.set_load(60.0, 10.0, 5.0)
-    assert BackpressureController.get_chunk_size(MockResourceMonitor) == 10
-
-    # Pressure 1.0 (>= 1.00) -> 5
-    MockResourceMonitor.set_load(10.0, 10.0, 20.0)
-    assert BackpressureController.get_chunk_size(MockResourceMonitor) == 5
-  end
 end
