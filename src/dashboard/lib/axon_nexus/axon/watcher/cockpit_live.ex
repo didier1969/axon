@@ -35,7 +35,12 @@ defmodule Axon.Watcher.CockpitLive do
          claim_mode: "unknown",
          service_pressure: "unknown",
          oversized_refusals_total: 0,
-         degraded_mode_entries_total: 0
+         degraded_mode_entries_total: 0,
+         cpu_load: 0.0,
+         ram_load: 0.0,
+         io_wait: 0.0,
+         queues_paused: false,
+         indexing_limit: 0
        }
      )}
   end
@@ -46,9 +51,64 @@ defmodule Axon.Watcher.CockpitLive do
     {:noreply, assign(socket, live: live)}
   end
 
-  # NEXUS V5.6: We no longer handle individual telemetry events in LiveView
-  # to prevent rendering saturation during high-speed ingestion (> 100 f/s).
-  # The 500ms :tick is enough to keep the UI fresh without killing the BEAM scheduler.
+  @impl true
+  def handle_info(
+        {:telemetry_event, [:axon, :backpressure, :pressure_computed], _measurements, metadata},
+        socket
+      ) do
+    cpu = Map.get(metadata, :cpu, 0.0)
+    ram = Map.get(metadata, :ram, 0.0)
+    io_wait = Map.get(metadata, :io, 0.0)
+    Axon.Watcher.Telemetry.update_host_pressure(cpu, ram, io_wait)
+
+    {:noreply,
+     assign(socket,
+       live:
+         socket.assigns.live
+         |> Map.put(:cpu_load, cpu)
+         |> Map.put(:ram_load, ram)
+         |> Map.put(:io_wait, io_wait)
+     )}
+  end
+
+  @impl true
+  def handle_info(
+        {:telemetry_event, [:axon, :backpressure, :queues_paused], _measurements, _metadata},
+        socket
+      ) do
+    Axon.Watcher.Telemetry.update_queue_constraint(true)
+
+    {:noreply,
+     assign(socket,
+       live:
+         socket.assigns.live
+         |> Map.put(:queues_paused, true)
+         |> Map.put(:indexing_limit, 0)
+     )}
+  end
+
+  @impl true
+  def handle_info(
+        {:telemetry_event, [:axon, :backpressure, :queues_resumed], _measurements, _metadata},
+        socket
+      ) do
+    Axon.Watcher.Telemetry.update_queue_constraint(false)
+
+    {:noreply,
+     assign(socket, live: Map.put(socket.assigns.live, :queues_paused, false))}
+  end
+
+  @impl true
+  def handle_info(
+        {:telemetry_event, [:axon, :backpressure, :limit_adjusted], measurements, _metadata},
+        socket
+      ) do
+    limit = Map.get(measurements, :limit, 0)
+    Axon.Watcher.Telemetry.update_indexing_limit(limit)
+
+    {:noreply, assign(socket, live: Map.put(socket.assigns.live, :indexing_limit, limit))}
+  end
+
   @impl true
   def handle_info({:telemetry_event, _event, _measurements, _metadata}, socket) do
     {:noreply, socket}
@@ -195,6 +255,28 @@ defmodule Axon.Watcher.CockpitLive do
           UNIT 04: RUNTIME PRESSURE
         </div>
         <div class="stat"><label>RUST_GUIDANCE</label> <span style="color: var(--neon-green);">{@live.target_pressure} slots</span></div>
+        <div class="stat">
+          <label>HOST_CPU</label>
+          <span style="color: var(--neon-blue);">{Float.round(Map.get(@live, :cpu_load, 0.0), 1)}%</span>
+        </div>
+        <div class="stat">
+          <label>HOST_RAM</label>
+          <span style="color: var(--neon-blue);">{Float.round(Map.get(@live, :ram_load, 0.0), 1)}%</span>
+        </div>
+        <div class="stat">
+          <label>HOST_IO_WAIT</label>
+          <span style="color: var(--neon-blue);">{Float.round(Map.get(@live, :io_wait, 0.0), 1)}%</span>
+        </div>
+        <div class="stat">
+          <label>HOST_STATE</label>
+          <span style={"color: #{if Map.get(@live, :queues_paused, false), do: "var(--warning)", else: "var(--neon-green)"};"}>
+            {if Map.get(@live, :queues_paused, false), do: "CONSTRAINED", else: "HEALTHY"}
+          </span>
+        </div>
+        <div class="stat">
+          <label>HOST_GUIDANCE</label>
+          <span style="color: var(--warning);">{Map.get(@live, :indexing_limit, 0)} slots</span>
+        </div>
         <div class="stat">
           <label>MEMORY_BUDGET</label>
           <span style="color: var(--neon-blue);">

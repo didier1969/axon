@@ -17,15 +17,17 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
 ## Validation fraîche connue
 
 - `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'`
-  - `147` tests passés (`108` lib + `39` bin)
+  - `151` tests passés (`109` lib + `42` bin)
   - `0` échec
 - `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
-  - `38` tests passés
+  - `40` tests passés
   - `0` échec
 - `bash scripts/start-v2.sh`
   - dashboard prêt
   - SQL prêt
   - MCP prêt
+- `bash scripts/stop-v2.sh`
+  - arrêt propre
 
 ## Contrat d’architecture actuel
 
@@ -41,6 +43,7 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
   - télémétrie opérateur
   - projections et surface cockpit
   - affichage du budget Rust courant, des réservations en vol, du taux d’épuisement, de la profondeur de queue, du mode runtime, des refus `oversized` et des entrées en mode dégradé
+  - affichage de la pression hôte observée (`HOST_CPU`, `HOST_RAM`, `HOST_IO_WAIT`) et de l’état contraint/repris des queues, sans reprendre l’autorité de scheduling
 
 Il n’existe plus de voie canonique `Titan` dans le runtime Rust.
 Les gros fichiers sont désormais traités par budget, packing et refus explicite `oversized_for_current_budget`, pas par un seuil métier fixe.

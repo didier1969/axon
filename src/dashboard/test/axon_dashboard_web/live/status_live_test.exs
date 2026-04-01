@@ -82,4 +82,29 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     assert html =~ "Degraded Entries"
     assert html =~ "2"
   end
+
+  test "renders host pressure telemetry in the cockpit", %{conn: conn} do
+    {:ok, view, _html} = live(conn, "/")
+
+    send(
+      view.pid,
+      {:telemetry_event, [:axon, :backpressure, :pressure_computed], %{pressure: 0.82},
+       %{cpu: 61.5, ram: 47.0, io: 12.2}}
+    )
+
+    send(
+      view.pid,
+      {:telemetry_event, [:axon, :backpressure, :queues_paused], %{pressure: 1.02}, %{}}
+    )
+
+    html = render(view)
+    assert html =~ "HOST_CPU"
+    assert html =~ "61.5%"
+    assert html =~ "HOST_RAM"
+    assert html =~ "47.0%"
+    assert html =~ "HOST_IO_WAIT"
+    assert html =~ "12.2%"
+    assert html =~ "HOST_STATE"
+    assert html =~ "CONSTRAINED"
+  end
 end

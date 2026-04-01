@@ -30,6 +30,11 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:service_pressure, "healthy"})
     :ets.insert(:axon_telemetry, {:oversized_refusals_total, 0})
     :ets.insert(:axon_telemetry, {:degraded_mode_entries_total, 0})
+    :ets.insert(:axon_telemetry, {:cpu_load, 0.0})
+    :ets.insert(:axon_telemetry, {:ram_load, 0.0})
+    :ets.insert(:axon_telemetry, {:io_wait, 0.0})
+    :ets.insert(:axon_telemetry, {:queues_paused, false})
+    :ets.insert(:axon_telemetry, {:indexing_limit, 0})
     {:ok, %{}}
   end
 
@@ -61,6 +66,20 @@ defmodule Axon.Watcher.Telemetry do
       :axon_telemetry,
       {:service_pressure, Map.get(payload, "service_pressure", "healthy")}
     )
+  end
+
+  def update_host_pressure(cpu, ram, io_wait) do
+    :ets.insert(:axon_telemetry, {:cpu_load, cpu})
+    :ets.insert(:axon_telemetry, {:ram_load, ram})
+    :ets.insert(:axon_telemetry, {:io_wait, io_wait})
+  end
+
+  def update_queue_constraint(paused) when is_boolean(paused) do
+    :ets.insert(:axon_telemetry, {:queues_paused, paused})
+  end
+
+  def update_indexing_limit(limit) when is_integer(limit) do
+    :ets.insert(:axon_telemetry, {:indexing_limit, limit})
   end
 
   def init_directories(files) do
@@ -134,7 +153,12 @@ defmodule Axon.Watcher.Telemetry do
       claim_mode: get_val(:claim_mode),
       service_pressure: get_val(:service_pressure),
       oversized_refusals_total: get_val(:oversized_refusals_total),
-      degraded_mode_entries_total: get_val(:degraded_mode_entries_total)
+      degraded_mode_entries_total: get_val(:degraded_mode_entries_total),
+      cpu_load: get_val(:cpu_load),
+      ram_load: get_val(:ram_load),
+      io_wait: get_val(:io_wait),
+      queues_paused: get_val(:queues_paused),
+      indexing_limit: get_val(:indexing_limit)
     }
   end
 
