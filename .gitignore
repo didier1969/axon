@@ -32,3 +32,6 @@ logs/
 target/
 bin/
 .fastembed_cache/
+
+# Misplaced generated SOLL exports
+src/axon-core/docs/vision/SOLL_EXPORT_*.md

@@ -1,5 +1,6 @@
 use super::*;
 use crate::graph::GraphStore;
+use std::path::Path;
 use std::sync::Arc;
 
 fn create_test_server() -> McpServer {
@@ -613,7 +614,53 @@ fn test_axon_export_soll() {
     assert!(content.contains("# SOLL Extraction"));
     assert!(content.contains("Test Vision"));
     assert!(content.contains("CPT-AXO-001"));
-    assert!(content.contains("Exported to"));
+    assert!(content.contains("docs/vision/SOLL_EXPORT_"));
+
+    let export_path = content
+        .lines()
+        .find_map(|line| line.strip_prefix("✅ Exported to "))
+        .expect("Expected export path line")
+        .trim()
+        .to_string();
+
+    let export_body = std::fs::read_to_string(&export_path).expect("export file should exist");
+    assert!(export_body.contains("## 1. Vision & Objectifs Stratégiques"));
+    assert!(export_body.contains("## 7. Liens de Traçabilité SOLL"));
+
+    let _ = std::fs::remove_file(export_path);
+}
+
+#[test]
+fn test_axon_export_soll_resolves_repo_root_docs_vision() {
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_export_soll",
+            "arguments": {}
+        })),
+        id: Some(json!(401)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    let export_path = content
+        .lines()
+        .find_map(|line| line.strip_prefix("✅ Exported to "))
+        .expect("Expected export path line")
+        .trim()
+        .to_string();
+
+    let expected_dir = super::soll::canonical_soll_export_dir().expect("expected canonical export dir");
+    let export_parent = Path::new(&export_path).parent().expect("expected export parent");
+
+    assert_eq!(export_parent, expected_dir.as_path());
+    assert!(!export_path.contains("src/axon-core/docs/vision/SOLL_EXPORT_"));
+
+    let _ = std::fs::remove_file(export_path);
 }
 
 #[test]
@@ -1249,7 +1296,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
     let export_response = source_server.handle_request(export_req);
     let export_result = export_response.unwrap().result.expect("Expected SOLL export result");
     let export_text = export_result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-    assert!(export_text.contains("Exported to docs/vision/SOLL_EXPORT_"));
+    assert!(export_text.contains("docs/vision/SOLL_EXPORT_"));
 
     let export_path = export_text
         .lines()

@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use serde_json::{json, Value};
 
 use super::McpServer;
-use super::soll::{find_latest_soll_export, parse_soll_export, SollRestoreCounts};
+use super::soll::{canonical_soll_export_dir, find_latest_soll_export, parse_soll_export, SollRestoreCounts};
 
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
     ("EPITOMIZES", "soll.EPITOMIZES"),
@@ -337,13 +337,30 @@ impl McpServer {
             }
         }
 
-        let file_name = format!("SOLL_EXPORT_{}.md", datetime.format("%Y-%m-%d_%H%M%S_%3f"));
-        let file_path = format!("docs/vision/{}", file_name);
+        let export_dir = match canonical_soll_export_dir() {
+            Some(path) => path,
+            None => {
+                return Some(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": "Erreur d'écriture: impossible de résoudre le répertoire canonique docs/vision du dépôt"
+                    }],
+                    "isError": true
+                }))
+            }
+        };
 
-        let _ = std::fs::create_dir_all("docs/vision");
+        let file_name = format!("SOLL_EXPORT_{}.md", datetime.format("%Y-%m-%d_%H%M%S_%3f"));
+        let file_path = export_dir.join(file_name);
+
+        let _ = std::fs::create_dir_all(&export_dir);
         match std::fs::write(&file_path, &markdown) {
             Ok(_) => {
-                let report = format!("✅ Exported to {}\n\n---\n\n{}", file_path, markdown.chars().take(300).collect::<String>());
+                let report = format!(
+                    "✅ Exported to {}\n\n---\n\n{}",
+                    file_path.display(),
+                    markdown.chars().take(300).collect::<String>()
+                );
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             },
             Err(e) => Some(json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture: {}", e) }], "isError": true }))

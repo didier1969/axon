@@ -1,22 +1,82 @@
-# Findings: Architecture "Nexus Seal" (Zéro-Sleep)
+# Findings
 
-## Décision Architecturale (2026-03-27)
-Après audit par le collège d'experts, nous avons identifié que la congestion massive provient d'un **verrouillage applicatif artificiel** (`RwLock<GraphStore>`) qui sature le runtime Tokio et affame le serveur MCP.
+## 2026-04-01 - Reprise
 
-### Piliers de la solution :
-1.  **MVCC (Multi-Version Concurrency Control) :** Utilisation des capacités natives de KuzuDB. Le `RwLock` est supprimé au profit d'un `Arc<GraphStore>`. Les lecteurs (MCP) et l'écrivain (Actor) opèrent sur des connexions distinctes.
-2.  **Writer Actor & Micro-Batching :** Un thread unique gère les écritures. Il accumule les tâches dans un canal borné (`crossbeam::bounded`) et les insère par lots de 50 pour optimiser les I/O.
-3.  **Contre-pression Mécanique (Zero-Sleep) :** Suppression de tous les `sleep` manuels. La régulation de vitesse est assurée par la saturation physique du canal borné et du socket UNIX, qui bloque naturellement Elixir (Oban) en cas de surcharge Rust.
-4.  **Persistance SQLite :** Conservation d'Oban (SQLite WAL) pour la gestion de l'état de la file d'attente, garantissant un redémarrage sans perte après crash.
+### 1. Environnement réel vs shell courant
+- Le shell courant n'est pas l'environnement officiel du projet.
+- Hors `devenv shell`, les toolchains actives proviennent de `mise` et du système (`cargo`, `rustc`, `mix`, `elixir`, `uv`), avec plusieurs variables critiques absentes.
+- Dans `devenv shell`, les variables clés et les toolchains Rust/Elixir/Python sont cohérentes avec le contrat du projet.
 
-## Maestria Finale : Zero-SELECT & TCP Buffering (2026-03-27)
-Le dernier goulot d'étranglement a été éradiqué. Le système est désormais capable d'absorber le débit maximal de Rust sans saturer SQLite ni perdre d'événements.
+### 2. Git reality
+- La branche active est `feat/rust-first-control-plane`.
+- Le worktree est massivement sale, mais `git diff --stat` montre surtout des artefacts `.devenv` et des binaires générés.
+- Aucun changement n'est staged au moment de la reprise.
 
-### Blindage Industriel Final :
-1.  **TCP Line Buffering (PoolFacade) :** Implémentation d'un buffer de flux pour reconstituer les messages JSON fragmentés. Plus aucune perte d'acquittement lors des rafales de Rust.
-2.  **Zero-SELECT Feedback Loop :** Suppression totale des requêtes `SELECT` unitaires dans la boucle de retour. L'identification des projets se fait en mémoire vive (via le chemin), et la mise à jour des statistiques utilise un **Full-Metrics Batch UPSERT**.
-3.  **Alignement Sémantique :** Rétablissement du statut `"indexed"` pour une cohérence totale avec les outils de monitoring.
-4.  **Débit Validé :** Progression continue observée (80 fichiers par 30s sous charge initiale), avec une synchronisation parfaite entre les jobs Oban et les enregistrements SQLite.
+### 3. Divergence documentation / réalité
+- `README.md` décrit un workflow Rust-first via DuckDB + dashboard Phoenix comme surface opérateur.
+- `docs/working-notes/reality-first-stabilization-handoff.md` affirme que le "Final Gate" de stabilisation est passé et active de nouveaux objectifs `A/B/C`.
+- `task_plan.md`, `progress.md` et `STATE.md` précédents racontent une stabilisation largement terminée, sans preuve exécutable récente attachée à cette reprise.
+- Conclusion provisoire: le récit documentaire est plus avancé que la preuve terrain actuellement revalidée.
 
-### Conclusion :
-Le cycle de vérité physique est bouclé. Axon v2.2 est désormais une infrastructure de classe production, résiliente aux fragmentations réseau et aux contentions de base de données.
+### 4. Risque dominant de reprise
+- Le risque principal n'est pas encore un bug métier identifié.
+- Le risque dominant est la confiance excessive dans un récit de stabilité qui n'a pas encore été revalidé dans l'environnement officiel au moment de cette reprise.
+
+### 5. Validation exécutable réelle
+- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` est vert.
+- Résultat Rust: `127` tests exécutés, `127` passés.
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` est vert.
+- Résultat dashboard: `35` tests exécutés, `35` passés.
+- `bash scripts/start-v2.sh` monte correctement les surfaces canoniques:
+  - dashboard prêt
+  - SQL prêt
+  - MCP prêt
+- Probes directes post-démarrage:
+  - `/sql` retourne les tables attendues (`File`, `Symbol`, `RuntimeMetadata`, `Chunk`, `GraphProjection`, etc.)
+  - `/mcp` retourne une liste d'outils cohérente avec la couche DX/gouvernance/SOLL
+
+### 6. Autorité résiduelle Elixir encore présente
+- La dette de migration documentée dans le handoff existe toujours dans le code.
+- Les modules suivants sont encore présents et référencés:
+  - `Axon.Watcher.Server`
+  - `Axon.Watcher.Staging`
+  - `Axon.Watcher.IndexingWorker`
+  - `Axon.Watcher.BatchDispatch`
+  - `Axon.Watcher.PoolFacade`
+  - `Axon.Watcher.PoolEventHandler`
+  - `Axon.BackpressureController`
+  - `Axon.Watcher.TrafficGuardian`
+- Conclusion: la narration "Rust-first" est exécutable et crédible, mais la désautorisation complète d'Elixir n'est pas terminée.
+
+### 7. Objectifs `A/B/C` du handoff
+- Observation directe:
+  - `A` existe partiellement et de manière crédible via les outils MCP de retrieval/DX (`axon_query`, `axon_inspect`, `axon_fs_read`, `axon_bidi_trace`) et leurs tests.
+  - `B` existe partiellement via les outils/primitives de garde-fou (`axon_impact`, `axon_diff`, `axon_audit`, `axon_health`, `axon_api_break_check`, `axon_simulate_mutation`).
+  - `C` existe partiellement via `SOLL` (`axon_soll_manager`, `axon_export_soll`, `axon_restore_soll`, `axon_validate_soll`) et les tests de continuité.
+- Inférence: les objectifs `A/B/C` ne sont pas absents, mais ils cohabitent encore avec une dette structurelle de migration du plan d'exécution.
+
+### 8. Nettoyage documentaire exécuté
+- Les snapshots `SOLL_EXPORT_*.md` mal placés ont été déplacés de `src/axon-core/docs/vision/` vers `docs/archive/soll-exports/`.
+- Le runtime Rust résout désormais le chemin canonique des exports `SOLL` vers `docs/vision/` au niveau racine du dépôt, indépendamment du `cwd`.
+- Les documents obsolètes mais historiquement utiles ont été déplacés vers `docs/archive/`:
+  - anciennes docs `v1.0`
+  - anciennes docs `v2`
+  - anciens documents racine non canoniques
+- Les docs canoniques ont été réalignées pour réduire l'ambiguïté de reprise:
+  - `README.md`
+  - `docs/getting-started.md`
+  - `STATE.md`
+  - `ROADMAP.md`
+  - `docs/working-notes/reality-first-stabilization-handoff.md`
+
+### 9. Point de vérité documentaire après nettoyage
+- Un nouveau repreneur doit désormais pouvoir distinguer plus facilement:
+  - la documentation canonique courante
+  - l'archive historique
+  - les snapshots générés
+- Les références historiques à `KuzuDB` sont désormais reléguées à l'historique ou explicitement qualifiées comme telles.
+- Le backend nominal courant est documenté comme **Canard DB** (`DuckDB`).
+
+## Legacy Context Preserved
+- Une ancienne note de findings affirmait une architecture "Zero-Sleep / MVCC / Zero-SELECT".
+- Cette direction reste utile comme contexte historique, mais elle ne doit pas être traitée comme preuve de stabilité actuelle sans revalidation exécutable.

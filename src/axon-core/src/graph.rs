@@ -2,11 +2,12 @@ use std::ffi::c_void;
 use libloading::{Library, Symbol as LibSymbol};
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingFile {
     pub path: String,
     pub trace_id: String,
     pub priority: i64,
+    pub size_bytes: u64,
 }
 
 // FFI Types

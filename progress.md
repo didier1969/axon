@@ -1,15 +1,74 @@
 # Progress Log
 
-## Session Start
-- Initialized `task_plan.md`, `findings.md`, and `progress.md` based on `planning-with-files` protocol.
-- Received user directive to prioritize MCP server and ingestion reliability over adding new language parsers.
-- Starting Phase 1: Root Cause Investigation (following `systematic-debugging` principles).
+## 2026-04-01 - Reprise Reality-First
+- Relecture des documents de reprise existants: `README.md`, `STATE.md`, `docs/working-notes/reality-first-stabilization-handoff.md`, `docs/plans/2026-03-30-rust-first-stabilization-execution-plan.md`.
+- Audit Git initial:
+  - branche active `feat/rust-first-control-plane`
+  - aucun changement staged
+  - diff non staged dominé par `.devenv/*`, `src/axon-core/target/release/axon-core.d`, et `src/dashboard/priv/native/libaxon_scanner.so`
+  - nombreux fichiers non trackés sous `.devenv/` et exports `src/axon-core/docs/vision/SOLL_EXPORT_*`
+- Validation environnement:
+  - `./scripts/validate-devenv.sh` échoue dans le shell courant
+  - `devenv shell -- bash -lc './scripts/validate-devenv.sh'` réussit
+- Mise à jour des fichiers de pilotage:
+  - `task_plan.md` réaligné sur la reprise actuelle
+  - `findings.md` réinitialisé pour distinguer héritage documentaire et réalité terrain
 
-## Maestria Execution (Apollo Phase)
-- **Refactoring Ingestion:** Reduced memory bloat by sending paths only to Oban and reading JIT in workers.
-- **MCP Reliability:** Fixed Tokio starvation via `spawn_blocking`, resolved KuzuDB duplicate key errors, and implemented batch transactions.
-- **Vision Realignment:** Promulgated the "Lattice Manifesto" and updated Roadmap/State docs to reflect the "Oracle" vision.
-- **Semantic Synthesis:** Refactored `axon_inspect`, `axon_query`, `axon_audit`, and `axon_bidi_trace` to provide high-signal Markdown reports instead of raw JSON.
-- **Global Federation:** Modified Cypher queries to support cross-project analysis (removed mandatory filters).
-- **Proactive Notifications:** Implemented JSON-RPC notifications (`notifications/initialized`, `notifications/ingestion_complete`) and updated the proxy to route them to stderr.
-- **Validation:** 100% of MCP tools (13/13) verified and stable under load. E2E tests passing.
+## Next Immediate Action
+- Prendre un premier signal exécutable côté Rust et côté dashboard dans l'environnement Devenv officiel.
+
+## 2026-04-01 - Validation exécutable
+- Core Rust validé dans l'environnement officiel:
+  - commande: `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'`
+  - résultat: `127` tests passés, `0` échec
+- Dashboard validé dans l'environnement officiel:
+  - commande: `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
+  - résultat: `35` tests passés, `0` échec
+- Runtime canonique validé:
+  - commande: `bash scripts/start-v2.sh`
+  - résultat: dashboard, SQL et MCP prêts
+  - probes directes:
+    - `/sql` répond avec les tables métier attendues
+    - `/mcp` répond avec la liste d'outils attendue
+- Vérification de dette structurelle:
+  - recherche `rg -n "BackpressureController|PoolFacade|IndexingWorker|BatchDispatch|Watcher" src/dashboard/lib/axon_nexus/axon`
+  - conclusion: l'autorité résiduelle Elixir est toujours présente dans le code
+- Runtime refermé proprement après validation:
+  - commande: `bash scripts/stop-v2.sh`
+  - résultat: session `tmux` fermée, sockets/locks nettoyés
+
+## Current Resume Point
+- Le projet n'est pas "à reprendre depuis zéro".
+- Le socle exécutable actuel est sain.
+- La prochaine tranche rationnelle est de traiter la migration incomplète Rust-first côté dashboard/Watcher et d'aligner les documents de statut sur cette réalité.
+
+## 2026-04-01 - Nettoyage documentaire et vérité de reprise
+- Plan d'implémentation ajouté:
+  - `docs/plans/2026-04-01-document-truth-cleanup-plan.md`
+- Durcissement code:
+  - export/restore `SOLL` réaligné sur `docs/vision/` au niveau racine du dépôt, indépendamment du `cwd`
+  - test Rust ajouté pour éviter le retour des faux exports sous `src/axon-core/docs/vision/`
+- Nettoyage documentaire:
+  - création de `docs/archive/README.md`
+  - déplacement des anciennes docs `v1.0` et `v2` sous `docs/archive/`
+  - déplacement de `INSTALL_AUDIT.md` et `expert_prompt.md` sous `docs/archive/root-docs/`
+  - déplacement de `80` exports `SOLL` vers `docs/archive/soll-exports/`
+  - ajout d'une règle `.gitignore` pour les exports `SOLL` mal placés sous `src/axon-core/docs/vision/`
+- Réalignement docs canoniques:
+  - `README.md`
+  - `docs/getting-started.md`
+  - `STATE.md`
+  - `ROADMAP.md`
+  - `docs/working-notes/reality-first-stabilization-handoff.md`
+- Vérifications:
+  - `cargo test` Rust complet vert
+  - `mix test` dashboard vert
+  - contrôle filesystem:
+    - `src/axon-core/docs/vision/` vide
+    - `docs/archive/soll-exports/` contient `80` fichiers
+
+## Errors Encountered
+- `cargo test` initialement appelé avec plusieurs noms de tests dans une seule commande
+  - résolution: rerun en commandes ciblées séparées puis suite complète
+- `mix test` a initialement échoué car `Hex` n'était pas préinstallé dans cette session shell
+  - résolution: rerun avec `mix local.hex --force` et `mix local.rebar --force` avant `mix test`

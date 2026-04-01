@@ -46,7 +46,8 @@ fn test_full_pipeline_loop() {
     // 7. Run Worker logic for one task (Manual single-threaded execution)
     println!("[TEST] Step 7: Pop and Process task...");
     let task = queue.pop().expect("Queue should have 1 task");
-    WorkerPool::process_one_task(0, task, &db_sender, &results_tx);
+    let observed_cost = WorkerPool::process_one_task(0, &task, &db_sender, &results_tx);
+    queue.mark_done(&task, observed_cost).expect("Failed to release queue reservation");
     
     // 8. Verify Worker sent a write task to the Actor (with timeout to avoid hangs)
     println!("[TEST] Step 8: Receive write task...");

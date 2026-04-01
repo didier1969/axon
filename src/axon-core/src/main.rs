@@ -33,10 +33,11 @@ fn main() -> anyhow::Result<()> {
             info!("Starting Axon Core v2.2 (Nexus Seal - Zero-Sleep Edition)");
             info!("Engine Boot Time: {}", boot_time);
             info!(
-                "Runtime Profile: cpu_cores={}, ram_total_gb={}, ram_budget_gb={}, gpu_present={}, workers={}, max_blocking_threads={}, queue_capacity={}",
+                "Runtime Profile: cpu_cores={}, ram_total_gb={}, ram_budget_gb={}, ingestion_memory_budget_gb={}, gpu_present={}, workers={}, max_blocking_threads={}, queue_capacity={}",
                 profile.cpu_cores,
                 profile.ram_total_gb,
                 profile.ram_budget_gb,
+                profile.ingestion_memory_budget_gb,
                 profile.gpu_present,
                 profile.recommended_workers,
                 profile.max_blocking_threads,
@@ -45,6 +46,13 @@ fn main() -> anyhow::Result<()> {
 
             unsafe {
                 std::env::set_var("AXON_MEMORY_LIMIT_GB", profile.ram_budget_gb.to_string());
+                std::env::set_var(
+                    "AXON_QUEUE_MEMORY_BUDGET_BYTES",
+                    profile
+                        .ingestion_memory_budget_gb
+                        .saturating_mul(1024 * 1024 * 1024)
+                        .to_string(),
+                );
             }
 
             // Initialize KuzuDB (No RwLock needed: MVCC Snapshot Isolation handles concurrency)
@@ -56,7 +64,12 @@ fn main() -> anyhow::Result<()> {
                 }
             };
 
-            let queue_store = Arc::new(QueueStore::new(profile.queue_capacity));
+            let queue_store = Arc::new(QueueStore::with_memory_budget(
+                profile.queue_capacity,
+                profile
+                    .ingestion_memory_budget_gb
+                    .saturating_mul(1024 * 1024 * 1024),
+            ));
             let tel_socket_path = "/tmp/axon-telemetry.sock";
             let mcp_socket_path = "/tmp/axon-mcp.sock";
             

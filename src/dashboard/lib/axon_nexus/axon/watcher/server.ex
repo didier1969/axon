@@ -264,15 +264,7 @@ defmodule Axon.Watcher.Server do
 
   defp route_discovered_file(project_name, str_path, current_mtime) do
     priority = Axon.Watcher.PathPolicy.calculate_priority(str_path)
-
-    case File.stat(str_path) do
-      {:ok, %{size: size}} when size > 1_048_576 ->
-        Axon.Watcher.Tracking.upsert_file!(project_name, str_path, current_mtime, "pending")
-        Axon.Watcher.BatchDispatch.dispatch([str_path], :indexing_titan)
-
-      _ ->
-        Axon.Watcher.Staging.stage_file(project_name, str_path, current_mtime, priority)
-    end
+    Axon.Watcher.Staging.stage_file(project_name, str_path, current_mtime, priority)
   end
 
 end

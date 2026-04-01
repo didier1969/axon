@@ -12,11 +12,6 @@ pub static WASM_ENGINE: Lazy<Engine> = Lazy::new(|| Engine::default());
 
 thread_local! {
     static PARSER_CACHE: RefCell<HashMap<String, tree_sitter::Parser>> = RefCell::new(HashMap::new());
-    pub static IS_TITAN_MODE: std::cell::Cell<bool> = std::cell::Cell::new(false);
-}
-
-pub fn set_titan_mode(is_titan: bool) {
-    IS_TITAN_MODE.with(|mode| mode.set(is_titan));
 }
 
 pub fn parse_with_wasm_safe(
@@ -30,22 +25,8 @@ pub fn parse_with_wasm_safe(
 
     debug!("[WASM] Starting parse for {}", lang_name_str);
 
-    let is_titan = IS_TITAN_MODE.with(|mode| mode.get());
-
     let result = catch_unwind(move || {
         let engine = &*WASM_ENGINE;
-        if is_titan {
-            if let Ok(mut store) = tree_sitter::WasmStore::new(engine) {
-                if let Ok(language) = store.load_language(&lang_name_str, &wasm_bytes_vec) {
-                    let mut parser = tree_sitter::Parser::new();
-                    if parser.set_wasm_store(store).is_ok() && parser.set_language(&language).is_ok() {
-                        return parser.parse(&content_string, None);
-                    }
-                }
-            }
-            return None;
-        }
-
         PARSER_CACHE.with(|cache_cell| {
             let mut cache = cache_cell.borrow_mut();
 

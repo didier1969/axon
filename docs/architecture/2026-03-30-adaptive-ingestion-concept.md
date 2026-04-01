@@ -181,15 +181,21 @@ Bootstrap suppression must not discard the active project's real hot deltas.
 During a storm, Axon now salvages only file paths that belong to the active project, instead of recursively restaging whole directories from that batch.
 This keeps the watcher callback responsive and preserves the operator-visible delta path.
 
-## Stage 4. Worker Lanes
+## Stage 4. Budgeted Worker Admission
 
-Work is dispatched into explicit lanes:
+Work is now admitted according to a Rust-owned memory budget first, and only secondarily ordered by the `hot` priority path.
 
-- `hot`: recent changes and user-driven work
-- `bulk`: background universe scan
-- `titan`: unusually large or expensive files
+The canonical rule is:
 
-The system always protects a minimum service capacity for `hot` work.
+- `memory_reserved_bytes + estimated_cost_bytes <= effective_budget_bytes`
+
+Operational consequences:
+
+- many small files may run concurrently
+- a large file naturally reduces concurrency because it occupies more of the budget
+- `hot` work keeps ordering priority, but it does not bypass the budget
+- `Titan` is no longer a canonical runtime concept in Rust
+- the runtime no longer applies a fixed `>1MB => skip` rule; refusal must now be justified by budget exhaustion or parser unavailability
 
 ## Stage 5. Single Structural Commit Path
 

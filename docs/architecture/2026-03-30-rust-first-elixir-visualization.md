@@ -114,6 +114,7 @@ They are no longer target ownership. They are transitional and must be retired i
   - stages paths into Elixir-side backlog
   - can still trigger `SCAN_ALL`
   - still performs purge and retry actions
+  - no longer classifies large files into a canonical `indexing_titan` path
 - `Axon.Watcher.Staging`
   - owns an ETS-backed discovery buffer
   - writes pending rows and enqueues jobs transactionally
@@ -134,8 +135,8 @@ These modules are marked `to retire` as ingestion authorities.
 ### Tier 2. Canonical pressure/control authority still active
 
 - `Axon.BackpressureController`
-  - pauses/resumes/scales Oban queues from Elixir
-  - still acts as a circuit breaker over active ingestion queues
+  - now publishes pressure guidance for the UI only
+  - must not pause/resume/scale canonical ingestion from Elixir
 - `Axon.Watcher.TrafficGuardian`
   - no longer pulls from Rust actively
   - is now mostly telemetry-oriented
@@ -207,6 +208,8 @@ The canonical dashboard runtime now enforces a narrower boundary:
 - `AxonDashboard.BridgeClient` no longer fabricates local engine state on `trigger_scan`, `stop_scan`, or `reset_db`
 - `Axon.Watcher.PoolEventHandler.process_pending/1` no longer re-enqueues canonical work through Oban and now emits an explicit `pending_batch_ignored` checkpoint
 - `Axon.Watcher.CockpitLive` no longer exposes pause/resume or purge controls and presents Elixir as visualization + diagnostics only
+- `Axon.Watcher.Server` no longer routes large files into an Elixir-owned `indexing_titan` lane
+- `Axon.Watcher.IndexingWorker` now tags historical Oban batches as `compat`, not as canonical scheduling lanes
 
 This means the canonical startup path no longer boots an Elixir-owned ingestion queue or an Elixir filesystem watcher.
 

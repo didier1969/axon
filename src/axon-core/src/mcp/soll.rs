@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub(crate) struct SollRestoreCounts {
@@ -85,8 +85,36 @@ pub(crate) struct ParsedRelation {
     pub target_id: String,
 }
 
+fn is_repo_root(path: &Path) -> bool {
+    path.join("README.md").is_file()
+        && path.join("docs").is_dir()
+        && path.join("src/axon-core/Cargo.toml").is_file()
+}
+
+pub(crate) fn resolve_repo_root_from(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|ancestor| is_repo_root(ancestor))
+        .map(Path::to_path_buf)
+}
+
+pub(crate) fn resolve_repo_root() -> Option<PathBuf> {
+    if let Ok(current_dir) = std::env::current_dir() {
+        if let Some(repo_root) = resolve_repo_root_from(&current_dir) {
+            return Some(repo_root);
+        }
+    }
+
+    resolve_repo_root_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+pub(crate) fn canonical_soll_export_dir() -> Option<PathBuf> {
+    resolve_repo_root().map(|root| root.join("docs/vision"))
+}
+
 pub(crate) fn find_latest_soll_export() -> Option<String> {
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir("docs/vision")
+    let export_dir = canonical_soll_export_dir()?;
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(export_dir)
         .ok()?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| {

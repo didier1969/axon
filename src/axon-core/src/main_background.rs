@@ -22,6 +22,13 @@ struct WatchTarget {
     recursive: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct AdmissionPlan {
+    selected: Vec<PendingFile>,
+    deferred: Vec<PendingFile>,
+    oversized: Vec<PendingFile>,
+}
+
 pub(crate) fn start_memory_watchdog() {
     std::thread::spawn(|| {
         let page_size = 4096;
@@ -64,6 +71,7 @@ pub(crate) fn spawn_autonomous_ingestor(
         loop {
             let policy = claim_policy(
                 queue.common_len(),
+                queue.memory_budget_snapshot().exhaustion_ratio,
                 current_rss_bytes(),
                 memory_limit,
                 service_guard::current_pressure(),
@@ -80,10 +88,25 @@ pub(crate) fn spawn_autonomous_ingestor(
                 last_mode = Some(policy.mode);
             }
             if policy.claim_count > 0 {
-                if let Ok(files) = store.fetch_pending_batch(policy.claim_count) {
-                    if !files.is_empty() {
-                        debug!("Autonomous Ingestor: Feeding {} tasks to workers.", files.len());
-                        enqueue_claimed_files(&store, &queue, files);
+                if let Ok(candidates) = store.fetch_pending_candidates(policy.claim_count.saturating_mul(4).max(policy.claim_count)) {
+                    let plan = plan_admissions(&queue, candidates, policy.claim_count);
+
+                    for oversized in &plan.oversized {
+                        if let Err(err) = store.mark_file_oversized_for_current_budget(&oversized.path) {
+                            warn!(
+                                "Autonomous Ingestor failed to mark {} as oversized: {}",
+                                oversized.path, err
+                            );
+                        }
+                    }
+
+                    if let Ok(files) = store.claim_pending_paths(&plan.selected.iter().map(|file| file.path.clone()).collect::<Vec<_>>()) {
+                        if !files.is_empty() {
+                            debug!("Autonomous Ingestor: Feeding {} tasks to workers.", files.len());
+                            enqueue_claimed_files(&store, &queue, files);
+                        }
+                    } else if !plan.selected.is_empty() {
+                        warn!("Autonomous Ingestor failed to claim selected pending files.");
                     }
                 }
             }
@@ -92,8 +115,86 @@ pub(crate) fn spawn_autonomous_ingestor(
     });
 }
 
+fn plan_admissions(queue: &QueueStore, candidates: Vec<PendingFile>, max_count: usize) -> AdmissionPlan {
+    if max_count == 0 || candidates.is_empty() {
+        return AdmissionPlan::default();
+    }
+
+    let mut remaining_budget = queue.remaining_budget_bytes();
+    let mut plan = AdmissionPlan::default();
+    let mut hot_candidates = Vec::new();
+    let mut normal_candidates = Vec::new();
+
+    for candidate in candidates {
+        if candidate.priority >= HOT_PRIORITY {
+            hot_candidates.push(candidate);
+        } else {
+            normal_candidates.push(candidate);
+        }
+    }
+
+    fill_admission_plan(queue, &mut remaining_budget, max_count, &mut plan, hot_candidates);
+    if plan.selected.len() < max_count {
+        fill_admission_plan(queue, &mut remaining_budget, max_count, &mut plan, normal_candidates);
+    } else {
+        plan.deferred.extend(normal_candidates);
+    }
+
+    plan
+}
+
+fn fill_admission_plan(
+    queue: &QueueStore,
+    remaining_budget: &mut u64,
+    max_count: usize,
+    plan: &mut AdmissionPlan,
+    mut candidates: Vec<PendingFile>,
+) {
+    candidates.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.size_bytes.cmp(&right.size_bytes))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    for candidate in candidates {
+        if plan.selected.len() >= max_count {
+            plan.deferred.push(candidate);
+            continue;
+        }
+
+        let estimated_cost = queue.estimate_cost_for_path(&candidate.path, candidate.size_bytes);
+        if !queue.can_fit_alone(&candidate.path, candidate.size_bytes) {
+            plan.oversized.push(candidate);
+        } else if estimated_cost <= *remaining_budget {
+            *remaining_budget = remaining_budget.saturating_sub(estimated_cost);
+            plan.selected.push(candidate);
+        } else {
+            plan.deferred.push(candidate);
+        }
+    }
+}
+
 fn enqueue_claimed_files(store: &GraphStore, queue: &QueueStore, files: Vec<PendingFile>) {
     for file in files {
+        if !queue.can_fit_alone(&file.path, file.size_bytes) {
+            warn!(
+                "Autonomous Ingestor marked {} as oversized for current budget (priority={}, size={}).",
+                file.path,
+                file.priority,
+                file.size_bytes
+            );
+            if let Err(err) = store.mark_file_oversized_for_current_budget(&file.path) {
+                error!(
+                    "Autonomous Ingestor failed to mark oversized claimed file {}: {}",
+                    file.path,
+                    err
+                );
+            }
+            continue;
+        }
+
         let is_hot = file.priority >= HOT_PRIORITY;
         if let Err(err) = queue.push(&file.path, 0, &file.trace_id, 0, 0, is_hot) {
             warn!(
@@ -443,6 +544,7 @@ impl ClaimMode {
 
 fn claim_policy(
     queue_len: usize,
+    budget_exhaustion_ratio: f64,
     rss_bytes: Option<u64>,
     memory_limit: u64,
     service_pressure: ServicePressure,
@@ -450,8 +552,24 @@ fn claim_policy(
     let rss_ratio = rss_bytes
         .map(|rss| rss as f64 / memory_limit.max(1) as f64)
         .unwrap_or(0.0);
+    let queue_pressure = (queue_len as f64 / 6_000.0).clamp(0.0, 1.0);
+    let service_pressure_score = match service_pressure {
+        ServicePressure::Healthy => 0.0,
+        ServicePressure::Recovering => 0.35,
+        ServicePressure::Degraded => 0.70,
+        ServicePressure::Critical => 1.0,
+    };
+    let dynamic_pressure = ((queue_pressure * 0.35)
+        + (budget_exhaustion_ratio.clamp(0.0, 1.0) * 0.25)
+        + (rss_ratio.clamp(0.0, 1.0) * 0.30)
+        + (service_pressure_score * 0.40))
+        .clamp(0.0, 1.0);
 
-    if service_pressure == ServicePressure::Critical || rss_ratio >= 0.92 || queue_len >= 6_000 {
+    if service_pressure == ServicePressure::Critical
+        || rss_ratio >= 0.92
+        || budget_exhaustion_ratio >= 0.98
+        || queue_len >= 6_000
+    {
         return ClaimPolicy {
             mode: ClaimMode::Paused,
             claim_count: 0,
@@ -459,35 +577,63 @@ fn claim_policy(
         };
     }
 
-    if service_pressure == ServicePressure::Degraded || rss_ratio >= 0.82 || queue_len >= 3_000 {
+    if service_pressure == ServicePressure::Degraded
+        || rss_ratio >= 0.82
+        || budget_exhaustion_ratio >= 0.88
+        || queue_len >= 3_000
+    {
         return ClaimPolicy {
             mode: ClaimMode::Guarded,
-            claim_count: 100,
-            sleep: std::time::Duration::from_millis(500),
+            claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Guarded),
+            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Guarded),
         };
     }
 
     if service_pressure == ServicePressure::Recovering {
         return ClaimPolicy {
             mode: ClaimMode::Slow,
-            claim_count: 500,
-            sleep: std::time::Duration::from_millis(250),
+            claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Slow),
+            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Slow),
         };
     }
 
-    if queue_len >= 1_500 {
+    if budget_exhaustion_ratio >= 0.72 || queue_len >= 1_500 {
         return ClaimPolicy {
             mode: ClaimMode::Slow,
-            claim_count: 500,
-            sleep: std::time::Duration::from_millis(250),
+            claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Slow),
+            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Slow),
         };
     }
 
     ClaimPolicy {
         mode: ClaimMode::Fast,
-        claim_count: 2_000,
-        sleep: std::time::Duration::from_millis(100),
+        claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Fast),
+        sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Fast),
     }
+}
+
+fn dynamic_claim_count(pressure: f64, mode: ClaimMode) -> usize {
+    let base = ((2_000.0 * (1.0 - pressure.clamp(0.0, 1.0)).powi(2)).round() as usize)
+        .clamp(25, 2_000);
+
+    match mode {
+        ClaimMode::Fast => base,
+        ClaimMode::Slow => ((base as f64) * 0.60).round() as usize,
+        ClaimMode::Guarded => ((base as f64) * 0.20).round() as usize,
+        ClaimMode::Paused => 0,
+    }
+    .clamp(25, 2_000)
+}
+
+fn dynamic_claim_sleep(pressure: f64, mode: ClaimMode) -> std::time::Duration {
+    let pressure = pressure.clamp(0.0, 1.0);
+    let sleep_ms = match mode {
+        ClaimMode::Fast => 100 + (pressure * 200.0).round() as u64,
+        ClaimMode::Slow => 250 + (pressure * 300.0).round() as u64,
+        ClaimMode::Guarded => 500 + (pressure * 400.0).round() as u64,
+        ClaimMode::Paused => 1_000,
+    };
+    std::time::Duration::from_millis(sleep_ms)
 }
 
 fn handle_watcher_events(
@@ -678,8 +824,8 @@ fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>
 
 #[cfg(test)]
 mod tests {
-    use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files, handle_watcher_events, memory_limit_bytes, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets, RescanGuardReset};
-    use axon_core::graph::GraphStore;
+    use super::{active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files, handle_watcher_events, memory_limit_bytes, plan_admissions, should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets, RescanGuardReset};
+    use axon_core::graph::{GraphStore, PendingFile};
     use axon_core::queue::QueueStore;
     use axon_core::service_guard::ServicePressure;
     use axon_core::watcher_probe;
@@ -711,42 +857,78 @@ mod tests {
     fn test_claim_policy_is_fast_when_system_is_healthy() {
         let policy = claim_policy(
             200,
+            0.10,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             ServicePressure::Healthy,
         );
-        assert_eq!(policy.claim_count, 2_000);
-        assert_eq!(policy.sleep, std::time::Duration::from_millis(100));
+        assert_eq!(policy.mode.label(), "fast");
+        assert!(policy.claim_count > 1_500);
+        assert!(policy.sleep <= std::time::Duration::from_millis(200));
     }
 
     #[test]
     fn test_claim_policy_slows_when_queue_grows() {
         let policy = claim_policy(
             2_000,
+            0.10,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             ServicePressure::Healthy,
         );
-        assert_eq!(policy.claim_count, 500);
-        assert_eq!(policy.sleep, std::time::Duration::from_millis(250));
+        assert_eq!(policy.mode.label(), "slow");
+        assert!(policy.claim_count < 1_500);
+        assert!(policy.sleep > std::time::Duration::from_millis(200));
+    }
+
+    #[test]
+    fn test_claim_policy_reduces_work_progressively_before_mode_switch() {
+        let lighter = claim_policy(
+            200,
+            0.10,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            ServicePressure::Healthy,
+        );
+        let heavier = claim_policy(
+            1_200,
+            0.10,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            ServicePressure::Healthy,
+        );
+
+        assert_eq!(lighter.mode.label(), "fast");
+        assert_eq!(heavier.mode.label(), "fast");
+        assert!(
+            heavier.claim_count < lighter.claim_count,
+            "claim count should decrease progressively as pressure rises, even before switching modes"
+        );
+        assert!(
+            heavier.sleep > lighter.sleep,
+            "sleep should increase progressively as pressure rises"
+        );
     }
 
     #[test]
     fn test_claim_policy_enters_guard_mode_when_queue_is_high() {
         let policy = claim_policy(
             3_500,
+            0.10,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             ServicePressure::Healthy,
         );
-        assert_eq!(policy.claim_count, 100);
-        assert_eq!(policy.sleep, std::time::Duration::from_millis(500));
+        assert_eq!(policy.mode.label(), "guarded");
+        assert!(policy.claim_count < 600);
+        assert!(policy.sleep >= std::time::Duration::from_millis(500));
     }
 
     #[test]
     fn test_claim_policy_pauses_claiming_when_pressure_is_critical() {
         let policy = claim_policy(
             500,
+            0.10,
             Some(95 * 1024 * 1024),
             100 * 1024 * 1024,
             ServicePressure::Healthy,
@@ -759,18 +941,22 @@ mod tests {
     fn test_claim_policy_enters_guarded_mode_when_service_is_degraded() {
         let policy = claim_policy(
             200,
+            0.10,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             ServicePressure::Degraded,
         );
-        assert_eq!(policy.claim_count, 100);
-        assert_eq!(policy.sleep, std::time::Duration::from_millis(500));
+        assert_eq!(policy.mode.label(), "guarded");
+        assert!(policy.claim_count > 0);
+        assert!(policy.claim_count < 1_000);
+        assert!(policy.sleep > std::time::Duration::from_millis(400));
     }
 
     #[test]
     fn test_claim_policy_pauses_when_live_service_is_critical() {
         let policy = claim_policy(
             200,
+            0.10,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             ServicePressure::Critical,
@@ -783,19 +969,22 @@ mod tests {
     fn test_claim_policy_recovers_gradually_after_service_pressure() {
         let policy = claim_policy(
             200,
+            0.10,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             ServicePressure::Recovering,
         );
         assert_eq!(policy.mode.label(), "slow");
-        assert_eq!(policy.claim_count, 500);
-        assert_eq!(policy.sleep, std::time::Duration::from_millis(250));
+        assert!(policy.claim_count > 500);
+        assert!(policy.claim_count < 1_500);
+        assert!(policy.sleep > std::time::Duration::from_millis(250));
     }
 
     #[test]
     fn test_claim_policy_reports_fast_mode() {
         let policy = claim_policy(
             200,
+            0.10,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             ServicePressure::Healthy,
@@ -807,6 +996,7 @@ mod tests {
     fn test_claim_policy_reports_guarded_mode() {
         let policy = claim_policy(
             3_500,
+            0.10,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             ServicePressure::Healthy,
@@ -818,11 +1008,53 @@ mod tests {
     fn test_claim_policy_reports_paused_mode() {
         let policy = claim_policy(
             200,
+            0.10,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             ServicePressure::Critical,
         );
         assert_eq!(policy.mode.label(), "paused");
+    }
+
+    #[test]
+    fn test_claim_policy_slows_when_memory_budget_is_warming_up() {
+        let policy = claim_policy(
+            200,
+            0.75,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            ServicePressure::Healthy,
+        );
+        assert_eq!(policy.mode.label(), "slow");
+        assert!(policy.claim_count > 0);
+        assert!(policy.claim_count < 900);
+    }
+
+    #[test]
+    fn test_claim_policy_guards_when_memory_budget_is_nearly_full() {
+        let policy = claim_policy(
+            200,
+            0.90,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            ServicePressure::Healthy,
+        );
+        assert_eq!(policy.mode.label(), "guarded");
+        assert!(policy.claim_count > 0);
+        assert!(policy.claim_count < 250);
+    }
+
+    #[test]
+    fn test_claim_policy_pauses_when_memory_budget_is_exhausted() {
+        let policy = claim_policy(
+            200,
+            0.99,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            ServicePressure::Healthy,
+        );
+        assert_eq!(policy.mode.label(), "paused");
+        assert_eq!(policy.claim_count, 0);
     }
 
     #[test]
@@ -1111,7 +1343,13 @@ mod tests {
         assert_eq!(claimed.len(), 1);
 
         let queue = QueueStore::new(3);
-        queue.push("/tmp/fill-bulk.ex", 0, "fill-bulk", 0, 0, false).unwrap();
+        for idx in 0..2 {
+            let fill_bulk = temp.path().join(format!("fill-bulk-{}.ex", idx));
+            std::fs::write(&fill_bulk, "defmodule FillBulk do\nend\n").unwrap();
+            queue
+                .push(fill_bulk.to_string_lossy().as_ref(), 0, &format!("fill-bulk-{}", idx), 0, 0, false)
+                .unwrap();
+        }
 
         enqueue_claimed_files(&store, &queue, claimed);
 
@@ -1122,6 +1360,100 @@ mod tests {
             ))
             .unwrap();
         assert!(row.contains("pending"));
+        assert!(row.contains("null"));
+    }
+
+    #[test]
+    fn test_plan_admissions_prefers_packable_candidates_over_single_blocking_large_file() {
+        let temp = tempdir().unwrap();
+        let large = temp.path().join("large.txt");
+        let medium = temp.path().join("medium.txt");
+        let small = temp.path().join("small.txt");
+        std::fs::write(&large, vec![b'x'; 8 * 1024]).unwrap();
+        std::fs::write(&medium, vec![b'x'; 2 * 1024]).unwrap();
+        std::fs::write(&small, vec![b'x'; 1024]).unwrap();
+
+        let queue = QueueStore::with_memory_budget(100, 3_200_000);
+        let candidates = vec![
+            PendingFile {
+                path: large.to_string_lossy().to_string(),
+                trace_id: "large".to_string(),
+                priority: 100,
+                size_bytes: 8 * 1024,
+            },
+            PendingFile {
+                path: medium.to_string_lossy().to_string(),
+                trace_id: "medium".to_string(),
+                priority: 100,
+                size_bytes: 2 * 1024,
+            },
+            PendingFile {
+                path: small.to_string_lossy().to_string(),
+                trace_id: "small".to_string(),
+                priority: 100,
+                size_bytes: 1024,
+            },
+        ];
+
+        let plan = plan_admissions(&queue, candidates, 3);
+        assert_eq!(
+            plan.selected.iter().map(|file| file.trace_id.as_str()).collect::<Vec<_>>(),
+            vec!["small", "medium"],
+            "the scheduler should admit the better-fitting small+medium pair instead of blocking on the large candidate"
+        );
+        assert!(plan.deferred.iter().any(|file| file.trace_id == "large"));
+    }
+
+    #[test]
+    fn test_plan_admissions_marks_candidate_oversized_when_it_cannot_fit_even_alone() {
+        let temp = tempdir().unwrap();
+        let oversized = temp.path().join("oversized.rs");
+        std::fs::write(&oversized, vec![b'x'; 16 * 1024]).unwrap();
+
+        let queue = QueueStore::with_memory_budget(100, 2 * 1024 * 1024);
+        let candidates = vec![PendingFile {
+            path: oversized.to_string_lossy().to_string(),
+            trace_id: "oversized".to_string(),
+            priority: 100,
+            size_bytes: 16 * 1024,
+        }];
+
+        let plan = plan_admissions(&queue, candidates, 1);
+        assert!(plan.selected.is_empty());
+        assert_eq!(plan.oversized.len(), 1);
+        assert_eq!(plan.oversized[0].trace_id, "oversized");
+    }
+
+    #[test]
+    fn test_enqueue_claimed_files_marks_oversized_when_file_cannot_fit_alone() {
+        let temp = tempdir().unwrap();
+        let file_path = temp.path().join("oversized.rs");
+        std::fs::write(&file_path, vec![b'x'; 16 * 1024]).unwrap();
+
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[(
+                file_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                16 * 1024,
+                1,
+            )])
+            .unwrap();
+
+        let claimed = store.fetch_pending_batch(10).unwrap();
+        let queue = QueueStore::with_memory_budget(10, 2 * 1024 * 1024);
+
+        enqueue_claimed_files(&store, &queue, claimed);
+
+        let row = store
+            .query_json(&format!(
+                "SELECT status, last_error_reason, worker_id FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        assert!(row.contains("oversized"));
+        assert!(row.contains("current budget"));
         assert!(row.contains("null"));
     }
 

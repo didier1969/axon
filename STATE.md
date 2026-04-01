@@ -1,35 +1,66 @@
-# État du Projet : Axon (Industrial Nexus Grade - Phase Apollo)
+# État du Projet : Axon
 
-## Référence Projet
-**Vision :** Souveraineté Sémantique Totale (The Living Lattice).
-**Statut :** 🚀 MAESTRIA ENGAGÉE (Phase v2.5).
+## Snapshot vérifié
 
-## État des piliers Apollo
+Date de référence: `2026-04-01`
 
-### 1. Ingestion "Fantôme" (Ghost Ingestion)
-- **Status :** 🚀 REFONTE "ZERO-SLEEP".
-- **Objectif :** Migration vers MVCC et Backpressure mécanique pour supprimer les latences de lecture.
+Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
 
-### 2. Système Nerveux (MCP)
-- **Status :** 🚀 PRIORITÉ ABSOLUE.
-- **Objectif :** Latence < 100ms garantie via isolation des flux.
+## Ce qui est vérifié
 
-### 3. Réconciliateur Sémantique (Lattice Refiner)
-- **Status :** 🚀 DÉVELOPPEMENT INITIAL (Branche `feat/lattice-refiner`).
-- **Objectif :** Unifier les concepts sémantiques entre projets via RapidFuzz et L2-Similarity.
+- environnement officiel: `devenv shell`
+- core Rust: tests verts
+- dashboard Elixir: tests verts
+- runtime canonique: `scripts/start-v2.sh` monte correctement dashboard, SQL et MCP
+- backend nominal courant: **Canard DB** (`DuckDB`)
 
-### 4. Vérité Sémantique (Witness)
-- **Status :** 🟢 CERTIFIÉ.
-- **Réalisations :** Boucle de vérité sémantique DOM/Shadow-DOM fonctionnelle. Certification physique du rendu.
+## Validation fraîche connue
 
-## Statistiques du Treillis (Live)
-- **Fichiers indexés :** ~35 000 (Workspace Global).
-- **Stabilité MCP :** 100% (Aucun timeout sous charge d'ingestion).
-- **Intégrité Base :** 100% (Zero duplication primary key errors).
+- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'`
+  - `146` tests passés (`107` lib + `39` bin)
+  - `0` échec
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
+  - `35` tests passés
+  - `0` échec
+- `bash scripts/start-v2.sh`
+  - dashboard prêt
+  - SQL prêt
+  - MCP prêt
 
-## Loop Position (Apollo Mode)
-```
-[INTENTION] ──▶ [STREAMING DATA PLANE] ──▶ [ELIXIR ORCHESTRATION] ──▶ [PROACTIVE MCP]
-      ●                    ●                         ●                      ●
- (Omniscience)        (Lattice Mirror)          (Soft Ingestion)        (Decision Output)
-```
+## Contrat d’architecture actuel
+
+- **Rust**
+  - autorité de runtime
+  - ingestion canonique
+  - admission canonique par budget mémoire dynamique
+  - estimation par `parser class + size bucket + confiance observée`
+  - vérité `IST`
+  - surfaces `MCP` et `SQL`
+- **Elixir/Phoenix**
+  - visualisation
+  - télémétrie opérateur
+  - projections et surface cockpit
+
+Il n’existe plus de voie canonique `Titan` dans le runtime Rust.
+Les gros fichiers sont désormais traités par budget, packing et refus explicite `oversized_for_current_budget`, pas par un seuil métier fixe.
+
+## Dette encore ouverte
+
+Le socle exécutable est sain, mais la migration `Rust-first` n’est pas totalement terminée côté dashboard.
+
+Les zones de dette encore visibles sont principalement:
+
+- `Axon.Watcher.Server`
+- `Axon.Watcher.Staging`
+- `Axon.Watcher.IndexingWorker`
+- `Axon.Watcher.PoolFacade.parse_batch`
+- `Axon.Watcher.Tracking`
+- queues `Oban` d’indexation legacy
+- `Axon.BackpressureController`
+- `Axon.Watcher.TrafficGuardian`
+
+## Comment lire le repo sans se tromper
+
+- lire `README.md` et `docs/getting-started.md` avant toute autre doc
+- traiter `docs/archive/` comme historique
+- traiter les anciens récits `KuzuDB`, Triple-Pod, HydraDB ou `v1/v2` comme contexte de migration, pas comme contrat courant

@@ -10,6 +10,24 @@ status: final-gate-passed
 This handoff exists to preserve exact working state across context compaction.
 Do not rely on conversational memory before resuming work. Re-read this file, then verify the repository state with Git and tests.
 
+## Read This Before Using The File
+
+This handoff remains useful, but it is no longer sufficient on its own as the project entrypoint.
+
+Start first with:
+
+1. `/home/dstadel/projects/axon/README.md`
+2. `/home/dstadel/projects/axon/docs/getting-started.md`
+3. `/home/dstadel/projects/axon/STATE.md`
+4. `/home/dstadel/projects/axon/ROADMAP.md`
+5. `/home/dstadel/projects/axon/docs/working-notes/2026-04-01-reprise-handoff.md`
+
+Important clarification:
+
+- historical references in this file to `KuzuDB` describe migration history
+- the nominal backend in the current daily path is now **Canard DB** (`DuckDB`)
+- documents moved under `docs/archive/` are historical context, not the current contract
+
 # Current Objective
 
 The rust-first stabilization plan has passed its Final Gate.

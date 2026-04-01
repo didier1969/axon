@@ -9,7 +9,7 @@ defmodule Axon.Watcher.IndexingWorker do
       "[Oban] Processing batch of #{length(batch)} files (Job #{job_id}) on queue #{queue_name}"
     )
 
-    lane = if queue_name == "indexing_titan", do: "titan", else: "fast"
+    lane = "compat"
 
     # Optimization: Filter out ignored extensions
     {ignored, valid} = Enum.split_with(batch, fn file ->

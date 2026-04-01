@@ -282,7 +282,8 @@ impl GraphStore {
                 "UPDATE File \
                  SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed' END, \
                      worker_id = NULL, \
-                     needs_reindex = FALSE \
+                     needs_reindex = FALSE, \
+                     last_error_reason = NULL \
                  WHERE path IN ({});",
                 indexed_filter
             ));
@@ -292,7 +293,8 @@ impl GraphStore {
                 "UPDATE File \
                  SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'skipped' END, \
                      worker_id = NULL, \
-                     needs_reindex = FALSE \
+                     needs_reindex = FALSE, \
+                     last_error_reason = 'worker_skipped_file' \
                  WHERE path IN ({});",
                 skipped_paths.join(",")
             ));
@@ -363,7 +365,7 @@ impl GraphStore {
         }
 
         let fetch_query = format!(
-            "SELECT path, COALESCE(trace_id, 'none'), priority
+            "SELECT path, COALESCE(trace_id, 'none'), priority, COALESCE(size, 0)
              FROM File
              WHERE status = 'indexing' AND worker_id = {}
              ORDER BY priority DESC",
@@ -386,14 +388,20 @@ impl GraphStore {
         let files: Vec<PendingFile> = raw
             .into_iter()
             .filter_map(|row| {
-                if row.len() >= 3 {
+                if row.len() >= 4 {
                     let priority = row[2]
                         .as_i64()
                         .or_else(|| row[2].as_str().and_then(|s| s.parse::<i64>().ok()))?;
+                    let size_bytes = row[3]
+                        .as_u64()
+                        .or_else(|| row[3].as_i64().map(|value| value.max(0) as u64))
+                        .or_else(|| row[3].as_str().and_then(|s| s.parse::<u64>().ok()))
+                        .unwrap_or(0);
                     Some(PendingFile {
                         path: row[0].as_str()?.to_string(),
                         trace_id: row[1].as_str()?.to_string(),
                         priority,
+                        size_bytes,
                     })
                 } else {
                     None
@@ -403,9 +411,140 @@ impl GraphStore {
         Ok(files)
     }
 
+    pub fn fetch_pending_candidates(&self, count: usize) -> Result<Vec<PendingFile>> {
+        let query = format!(
+            "SELECT path, COALESCE(trace_id, 'none'), priority, COALESCE(size, 0)
+             FROM File
+             WHERE status = 'pending'
+             ORDER BY priority DESC, size ASC
+             LIMIT {}",
+            count
+        );
+        let raw = self.query_json(&query)?;
+        if raw == "[]" || raw.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                if row.len() < 4 {
+                    return None;
+                }
+                let priority = row[2]
+                    .as_i64()
+                    .or_else(|| row[2].as_str().and_then(|s| s.parse::<i64>().ok()))?;
+                let size_bytes = row[3]
+                    .as_u64()
+                    .or_else(|| row[3].as_i64().map(|value| value.max(0) as u64))
+                    .or_else(|| row[3].as_str().and_then(|s| s.parse::<u64>().ok()))
+                    .unwrap_or(0);
+                Some(PendingFile {
+                    path: row[0].as_str()?.to_string(),
+                    trace_id: row[1].as_str()?.to_string(),
+                    priority,
+                    size_bytes,
+                })
+            })
+            .collect())
+    }
+
+    pub fn claim_pending_paths(&self, paths: &[String]) -> Result<Vec<PendingFile>> {
+        if paths.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let guard = self.pool.writer_ctx.lock().unwrap_or_else(|p| p.into_inner());
+        let claim_id = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_micros());
+        let path_list = paths
+            .iter()
+            .map(|path| format!("'{}'", Self::escape_sql(path)))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        unsafe {
+            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+
+            if !exec_fn(*guard, CString::new("BEGIN TRANSACTION;")?.as_ptr()) {
+                return Err(anyhow!("Claim Paths Error: BEGIN TRANSACTION failed"));
+            }
+
+            let claim_query = format!(
+                "UPDATE File
+                 SET status = 'indexing', worker_id = {}
+                 WHERE status = 'pending' AND path IN ({});",
+                claim_id, path_list
+            );
+
+            if !exec_fn(*guard, CString::new(claim_query)?.as_ptr()) {
+                let _ = exec_fn(*guard, CString::new("ROLLBACK;")?.as_ptr());
+                return Err(anyhow!("Claim Paths Error: claim update failed"));
+            }
+        }
+
+        let fetch_query = format!(
+            "SELECT path, COALESCE(trace_id, 'none'), priority, COALESCE(size, 0)
+             FROM File
+             WHERE status = 'indexing' AND worker_id = {}
+             ORDER BY priority DESC, size ASC",
+            claim_id
+        );
+        let res = self.query_on_ctx(&fetch_query, *guard)?;
+
+        unsafe {
+            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            if !exec_fn(*guard, CString::new("COMMIT;")?.as_ptr()) {
+                return Err(anyhow!("Claim Paths Error: COMMIT failed"));
+            }
+        }
+        drop(guard);
+
+        if res == "[]" || res.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res)?;
+        Ok(raw
+            .into_iter()
+            .filter_map(|row| {
+                if row.len() < 4 {
+                    return None;
+                }
+                let priority = row[2]
+                    .as_i64()
+                    .or_else(|| row[2].as_str().and_then(|s| s.parse::<i64>().ok()))?;
+                let size_bytes = row[3]
+                    .as_u64()
+                    .or_else(|| row[3].as_i64().map(|value| value.max(0) as u64))
+                    .or_else(|| row[3].as_str().and_then(|s| s.parse::<u64>().ok()))
+                    .unwrap_or(0);
+                Some(PendingFile {
+                    path: row[0].as_str()?.to_string(),
+                    trace_id: row[1].as_str()?.to_string(),
+                    priority,
+                    size_bytes,
+                })
+            })
+            .collect())
+    }
+
+    pub fn mark_file_oversized_for_current_budget(&self, path: &str) -> Result<()> {
+        self.execute(&format!(
+            "UPDATE File \
+             SET status = 'oversized_for_current_budget', \
+                 worker_id = NULL, \
+                 last_error_reason = 'estimated cost exceeds current budget envelope' \
+             WHERE path = '{}';",
+            Self::escape_sql(path)
+        ))
+    }
+
     pub fn requeue_claimed_file(&self, path: &str) -> Result<()> {
         self.execute(&format!(
-            "UPDATE File SET status = 'pending', worker_id = NULL WHERE path = '{}' AND status = 'indexing';",
+            "UPDATE File SET status = 'pending', worker_id = NULL, last_error_reason = NULL WHERE path = '{}' AND status = 'indexing';",
             Self::escape_sql(path)
         ))
     }
@@ -574,7 +713,7 @@ impl GraphStore {
                 Self::escape_sql(project)
             ),
             format!(
-                "INSERT INTO File (path, project_slug, size, mtime, status, priority, needs_reindex) VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE) \
+                "INSERT INTO File (path, project_slug, size, mtime, status, priority, needs_reindex, last_error_reason) VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE, NULL) \
                  ON CONFLICT(path) DO UPDATE SET \
                     project_slug=EXCLUDED.project_slug, \
                     size=EXCLUDED.size, \
@@ -586,6 +725,10 @@ impl GraphStore {
                     priority = EXCLUDED.priority, \
                     worker_id = CASE \
                         WHEN File.status = 'indexing' THEN File.worker_id \
+                        ELSE NULL \
+                    END, \
+                    last_error_reason = CASE \
+                        WHEN File.status = 'indexing' THEN File.last_error_reason \
                         ELSE NULL \
                     END, \
                     needs_reindex = CASE \

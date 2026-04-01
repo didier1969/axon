@@ -900,6 +900,37 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_2o_oversized_file_status_is_explicit_and_reversible_on_new_scan() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/oversized_file.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10_000, 1)])
+            .unwrap();
+
+        store
+            .mark_file_oversized_for_current_budget(&path)
+            .unwrap();
+
+        let oversized_row = store
+            .query_json("SELECT status FROM File WHERE path = '/tmp/oversized_file.rs'")
+            .unwrap();
+        assert!(
+            oversized_row.contains("oversized_for_current_budget"),
+            "an oversized file must keep an explicit status instead of a generic skip"
+        );
+
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10_000, 2)])
+            .unwrap();
+
+        let replay_row = store
+            .query_json("SELECT status, mtime FROM File WHERE path = '/tmp/oversized_file.rs'")
+            .unwrap();
+        assert!(replay_row.contains("pending"));
+        assert!(replay_row.contains("2"));
+    }
+
+    #[test]
     fn test_maillon_2n_late_commit_does_not_resurrect_tombstoned_file() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1060,11 +1091,14 @@ mod tests {
     // --- MAILLON 6: LE BUFFER INTERNE (Hopper) ---
     #[test]
     fn test_maillon_6_hopper_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("test.rs");
+        std::fs::write(&path, "fn test() {}").unwrap();
         let queue = QueueStore::new(10);
-        queue.push("/tmp/test.rs", 1, "trace", 0, 0, false).unwrap();
+        queue.push(path.to_string_lossy().as_ref(), 1, "trace", 0, 0, false).unwrap();
         
         let task = queue.pop().expect("Maillon 6 failed");
-        assert_eq!(task.path, "/tmp/test.rs", "La queue doit restituer les tâches dans l'ordre");
+        assert_eq!(task.path, path.to_string_lossy(), "La queue doit restituer les tâches dans l'ordre");
     }
 
     // --- MAILLON 7: LE COMMITTER (Writer Actor) ---

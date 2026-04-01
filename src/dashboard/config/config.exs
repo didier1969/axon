@@ -28,7 +28,7 @@ config :axon_dashboard, Oban,
     indexing_critical: [limit: 10],
     indexing_hot: [limit: 5],
     indexing_default: [limit: 10],
-    # Strict single-thread isolation for massive >1MB files
+    # Historical compatibility queue only; Rust now owns canonical memory admission.
     indexing_titan: [limit: 1]
   ]
 
