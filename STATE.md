@@ -17,7 +17,7 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
 ## Validation fraîche connue
 
 - `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'`
-  - `151` tests passés (`109` lib + `42` bin)
+  - `156` tests passés (`112` lib + `44` bin)
   - `0` échec
 - `devenv shell -- bash -lc 'cd src/dashboard && mix test'`
   - `40` tests passés
@@ -49,6 +49,8 @@ Il n’existe plus de voie canonique `Titan` dans le runtime Rust.
 Les gros fichiers sont désormais traités par budget, packing et refus explicite `oversized_for_current_budget`, pas par un seuil métier fixe.
 Les gros fichiers différés accumulent aussi maintenant une dette de fairness persistante (`defer_count`) afin d’éviter leur affamement derrière des vagues infinies de petits fichiers.
 Avant un refus `oversized` final, Axon accorde désormais une courte probation de déferrement aux candidats encore froids pour éviter qu’une estimation initiale trop conservatrice ne les exclue trop tôt.
+Si l’enveloppe `full` ne passe pas mais qu’une enveloppe `structure_only` passe encore, Axon admet désormais le fichier en mode dégradé au lieu de le refuser immédiatement.
+Un commit `structure_only` persiste la vérité structurelle (`Symbol`, `CONTAINS`, relations) sans matérialiser les `Chunk`, et marque explicitement le fichier `indexed_degraded` avec la raison `degraded_structure_only`.
 `StatsCache` n’est plus supervisé sur le chemin actif du dashboard, `PoolFacade` alimente désormais `Telemetry` directement pour les événements `FileIndexed` et `RuntimeTelemetry`, et la lecture SQL du cockpit passe désormais directement par `SqlGateway` au lieu d’une façade `PoolFacade.query_json/1`.
 
 ## Dette encore ouverte

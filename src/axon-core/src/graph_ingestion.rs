@@ -1,3 +1,5 @@
+// Copyright (c) Didier Stadelmann. All rights reserved.
+
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -6,6 +8,7 @@ use anyhow::{anyhow, Result};
 use libloading::Symbol as LibSymbol;
 
 use crate::graph::{ExecFunc, GraphStore, PendingFile};
+use crate::queue::ProcessingMode;
 use crate::watcher_probe;
 
 fn parse_i64_field(value: &serde_json::Value) -> Option<i64> {
@@ -192,6 +195,7 @@ impl GraphStore {
         let mut queries = Vec::new();
         let mut deleted_paths = Vec::new();
         let mut indexed_paths = Vec::new();
+        let mut degraded_paths = Vec::new();
         let mut skipped_paths = Vec::new();
         let mut symbol_values = Vec::new();
         let mut chunk_values = Vec::new();
@@ -201,12 +205,22 @@ impl GraphStore {
 
         for task in tasks {
             match task {
-                crate::worker::DbWriteTask::FileExtraction { path, content, extraction, .. } => {
+                crate::worker::DbWriteTask::FileExtraction {
+                    path,
+                    content,
+                    extraction,
+                    processing_mode,
+                    ..
+                } => {
                     if self.is_file_tombstoned(path)? {
                         deleted_paths.push(format!("'{}'", Self::escape_sql(path)));
                         continue;
                     }
-                    indexed_paths.push(format!("'{}'", Self::escape_sql(path)));
+                    let escaped_path = format!("'{}'", Self::escape_sql(path));
+                    match processing_mode {
+                        ProcessingMode::Full => indexed_paths.push(escaped_path.clone()),
+                        ProcessingMode::StructureOnly => degraded_paths.push(escaped_path.clone()),
+                    }
                     let slug = extraction.project_slug.as_deref().unwrap_or("global");
                     for sym in &extraction.symbols {
                         let symbol_id = Self::symbol_id(slug, path, &sym.name);
@@ -216,9 +230,6 @@ impl GraphStore {
                         } else {
                             "NULL".to_string()
                         };
-                        let chunk_content = Self::build_chunk_content(path, sym, content);
-                        let chunk_hash = Self::stable_content_hash(&chunk_content);
-
                         symbol_values.push(format!(
                             "('{}', '{}', '{}', {}, {}, {}, {}, '{}', {})",
                             Self::escape_sql(&symbol_id),
@@ -238,17 +249,25 @@ impl GraphStore {
                             Self::escape_sql(&symbol_id)
                         ));
 
-                        chunk_values.push(format!(
-                            "('{}', 'symbol', '{}', '{}', '{}', '{}', '{}', {}, {})",
-                            Self::escape_sql(&chunk_id),
-                            Self::escape_sql(&symbol_id),
-                            Self::escape_sql(slug),
-                            Self::escape_sql(&sym.kind),
-                            Self::escape_sql(&chunk_content),
-                            Self::escape_sql(&chunk_hash),
-                            sym.start_line,
-                            sym.end_line
-                        ));
+                        if matches!(processing_mode, ProcessingMode::Full) {
+                            let chunk_content = Self::build_chunk_content(
+                                path,
+                                sym,
+                                content.as_deref().unwrap_or_default(),
+                            );
+                            let chunk_hash = Self::stable_content_hash(&chunk_content);
+                            chunk_values.push(format!(
+                                "('{}', 'symbol', '{}', '{}', '{}', '{}', '{}', {}, {})",
+                                Self::escape_sql(&chunk_id),
+                                Self::escape_sql(&symbol_id),
+                                Self::escape_sql(slug),
+                                Self::escape_sql(&sym.kind),
+                                Self::escape_sql(&chunk_content),
+                                Self::escape_sql(&chunk_hash),
+                                sym.start_line,
+                                sym.end_line
+                            ));
+                        }
                     }
 
                     for relation in &extraction.relations {
@@ -286,8 +305,11 @@ impl GraphStore {
                 deleted_paths.join(",")
             ));
         }
-        if !indexed_paths.is_empty() {
-            let indexed_filter = indexed_paths.join(",");
+        let mut processed_paths = indexed_paths.clone();
+        processed_paths.extend(degraded_paths.clone());
+
+        if !processed_paths.is_empty() {
+            let indexed_filter = processed_paths.join(",");
             queries.push(format!(
                 "DELETE FROM CALLS WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 indexed_filter, indexed_filter
@@ -312,6 +334,8 @@ impl GraphStore {
                 "DELETE FROM CONTAINS WHERE source_id IN ({});",
                 indexed_filter
             ));
+        }
+        if !indexed_paths.is_empty() {
             queries.push(format!(
                 "UPDATE File \
                  SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed' END, \
@@ -321,7 +345,20 @@ impl GraphStore {
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
-                indexed_filter
+                indexed_paths.join(",")
+            ));
+        }
+        if !degraded_paths.is_empty() {
+            queries.push(format!(
+                "UPDATE File \
+                 SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed_degraded' END, \
+                     worker_id = NULL, \
+                     needs_reindex = FALSE, \
+                     last_error_reason = 'degraded_structure_only', \
+                     defer_count = 0, \
+                     last_deferred_at_ms = NULL \
+                 WHERE path IN ({});",
+                degraded_paths.join(",")
             ));
         }
         if !skipped_paths.is_empty() {

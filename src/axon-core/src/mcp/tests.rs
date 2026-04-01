@@ -1,5 +1,8 @@
+// Copyright (c) Didier Stadelmann. All rights reserved.
+
 use super::*;
 use crate::graph::GraphStore;
+use crate::queue::ProcessingMode;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -974,8 +977,9 @@ fn test_vcr1_chunk_retrieval_uses_ingested_docstring_content() {
         .graph_store
         .insert_file_data_batch(&[crate::worker::DbWriteTask::FileExtraction {
             path: path.clone(),
-            content: "fn opaque_gate() {\n    notify_runtime();\n}\n".to_string(),
+            content: Some("fn opaque_gate() {\n    notify_runtime();\n}\n".to_string()),
             extraction,
+            processing_mode: ProcessingMode::Full,
             trace_id: "docstring-trace".to_string(),
             t0: 0,
             t1: 0,

@@ -1,3 +1,5 @@
+// Copyright (c) Didier Stadelmann. All rights reserved.
+
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -6,14 +8,15 @@ use crossbeam_channel::{Sender, Receiver};
 
 use crate::graph::GraphStore;
 use crate::parser;
-use crate::queue::{estimate_observed_cost_bytes, QueueStore};
+use crate::queue::{estimate_observed_cost_bytes, ProcessingMode, QueueStore};
 
 // Payload for the Writer Actor
 pub enum DbWriteTask {
     FileExtraction {
         path: String,
-        content: String,
+        content: Option<String>,
         extraction: crate::parser::ExtractionResult,
+        processing_mode: ProcessingMode,
         trace_id: String,
         t0: i64, t1: i64, t2: i64, t3: i64,
     },
@@ -125,12 +128,18 @@ impl WorkerPool {
                         &task.path,
                         task.size_bytes.max(content.len() as u64),
                         started_at.elapsed(),
+                        task.mode,
                     );
+                    let content_for_writer = match task.mode {
+                        ProcessingMode::Full => Some(content),
+                        ProcessingMode::StructureOnly => None,
+                    };
                     
                     let _ = db_sender.send(DbWriteTask::FileExtraction {
                         path: task.path.clone(),
-                        content,
+                        content: content_for_writer,
                         extraction,
+                        processing_mode: task.mode,
                         trace_id: task.trace_id.clone(),
                         t0: task.t0, t1: task.t1, t2, t3
                     });
@@ -170,8 +179,8 @@ impl WorkerPool {
             loop {
                 // 1. BLOCKING WAIT for first message
                 match db_receiver.recv() {
-                    Ok(DbWriteTask::FileExtraction { path, content, extraction, trace_id, t0, t1, t2, t3 }) => {
-                        batch.push(DbWriteTask::FileExtraction { path, content, extraction, trace_id, t0, t1, t2, t3 });
+                    Ok(DbWriteTask::FileExtraction { path, content, extraction, processing_mode, trace_id, t0, t1, t2, t3 }) => {
+                        batch.push(DbWriteTask::FileExtraction { path, content, extraction, processing_mode, trace_id, t0, t1, t2, t3 });
                     },
                     Ok(DbWriteTask::FileSkipped { path, reason, trace_id, t0, t1, t2 }) => {
                         batch.push(DbWriteTask::FileSkipped { path, reason, trace_id, t0, t1, t2 });
@@ -194,11 +203,17 @@ impl WorkerPool {
                 if !batch.is_empty() {
                     let mut combined_feedback = String::new();
                     for task in &batch {
-                        if let DbWriteTask::FileExtraction { path, extraction, trace_id, t0, t1, t2, t3, .. } = task {
+                        if let DbWriteTask::FileExtraction { path, extraction, processing_mode, trace_id, t0, t1, t2, t3, .. } = task {
                             let t4 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
                             let msg = serde_json::json!({
                                 "FileIndexed": {
-                                    "path": path, "status": "ok", "symbol_count": extraction.symbols.len(),
+                                    "path": path,
+                                    "status": if matches!(processing_mode, ProcessingMode::StructureOnly) { "indexed_degraded" } else { "ok" },
+                                    "processing_mode": match processing_mode {
+                                        ProcessingMode::Full => "full",
+                                        ProcessingMode::StructureOnly => "structure_only",
+                                    },
+                                    "symbol_count": extraction.symbols.len(),
                                     "relation_count": extraction.relations.len(), "trace_id": trace_id,
                                     "t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4
                                 }
@@ -235,7 +250,7 @@ impl WorkerPool {
 #[cfg(test)]
 mod tests {
     use super::{DbWriteTask, WorkerPool};
-    use crate::queue::Task;
+    use crate::queue::{ProcessingMode, Task};
     use crate::queue::TaskLane;
 
     #[test]
@@ -256,6 +271,7 @@ mod tests {
             t0: 0,
             t1: 0,
             t2: 0,
+            mode: ProcessingMode::Full,
         };
 
         let (db_sender, db_receiver) = crossbeam_channel::unbounded();
@@ -271,6 +287,53 @@ mod tests {
             }
             DbWriteTask::FileSkipped { reason, .. } => {
                 panic!("large file should no longer be skipped by a fixed size gate: {}", reason);
+            }
+            DbWriteTask::ExecuteCypher { .. } => {
+                panic!("unexpected cypher task");
+            }
+        }
+    }
+
+    #[test]
+    fn test_structure_only_mode_avoids_sending_full_content_to_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("large_structure_only.txt");
+        let mut content = String::from("header\n");
+        content.push_str(&"x".repeat(128_000));
+        std::fs::write(&path, content).unwrap();
+
+        let task = Task {
+            path: path.to_string_lossy().to_string(),
+            trace_id: "trace-structure-only".to_string(),
+            lane: TaskLane::Bulk,
+            size_bytes: 128_007,
+            estimated_cost_bytes: 50 * 1024 * 1024,
+            parser_key: "txt".to_string(),
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            mode: ProcessingMode::StructureOnly,
+        };
+
+        let (db_sender, db_receiver) = crossbeam_channel::unbounded();
+        let (results_tx, _) = tokio::sync::broadcast::channel::<String>(16);
+
+        let observed = WorkerPool::process_one_task(0, &task, &db_sender, &results_tx);
+        assert!(observed.is_some());
+
+        match db_receiver.recv().unwrap() {
+            DbWriteTask::FileExtraction {
+                path,
+                content,
+                processing_mode,
+                ..
+            } => {
+                assert!(path.ends_with("large_structure_only.txt"));
+                assert!(content.is_none(), "structure-only degradation should not retain full file contents for downstream writes");
+                assert_eq!(processing_mode, ProcessingMode::StructureOnly);
+            }
+            DbWriteTask::FileSkipped { reason, .. } => {
+                panic!("structure-only mode should still parse the file: {}", reason);
             }
             DbWriteTask::ExecuteCypher { .. } => {
                 panic!("unexpected cypher task");

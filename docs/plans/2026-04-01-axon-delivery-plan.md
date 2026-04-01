@@ -41,6 +41,7 @@ Already true as of 2026-04-01:
 - the Rust bridge now emits runtime telemetry consumed by the Phoenix cockpit (`budget`, `reserved`, `exhaustion`, `queue_depth`, `claim_mode`, `service_pressure`, `oversized_refusals_total`, `degraded_mode_entries_total`)
 - fairness debt now persists in `IST` (`defer_count`, `last_deferred_at_ms`) so repeatedly deferred large files can eventually outrank newer packable work
 - cold oversized candidates now receive a bounded probation before definitive `oversized_for_current_budget` refusal
+- structure-only degradation now exists before final refusal: the scheduler can admit a file under a smaller structural envelope and persist it as `indexed_degraded`
 - no external scheduling crate has been adopted; current direction is a Rust-native Axon scheduler because existing FIFO semaphore/queue crates are a poor fit for budget packing
 
 ## Delivery Definition
@@ -92,6 +93,8 @@ Already completed in this phase:
 - fairness / anti-starvation now exists through persistent defer debt recorded in `File.defer_count`
 - Phoenix cockpit shows `oversized_refusals_total` and `degraded_mode_entries_total`
 - cold oversized candidates are first deferred during a bounded probation window instead of being refused on first sight
+- the Rust scheduler can now choose `ProcessingMode::StructureOnly` before a final oversized refusal
+- the writer persists `indexed_degraded` / `degraded_structure_only` explicitly and skips chunk materialization in that mode
 
 ## Phase 2: Retire Residual Elixir Ingestion Authority
 

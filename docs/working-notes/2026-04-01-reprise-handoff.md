@@ -292,6 +292,30 @@ Conséquence:
 - `git status` cesse d’être pollué par les artefacts de build/runtime les plus bruyants
 - ce qui reste visible côté code reflète bien mieux le vrai chantier encore ouvert
 
+# Update 2026-04-01 Structure-Only Degradation Slice
+
+Une dixième tranche a maintenant été validée sur le scheduler et le writer Rust:
+
+- `QueueStore` distingue désormais `ProcessingMode::Full` et `ProcessingMode::StructureOnly`
+- un candidat qui ne tient plus dans l’enveloppe `full` mais tient encore dans l’enveloppe `structure_only` est admis en mode dégradé après sa probation, au lieu d’être basculé directement en `oversized_for_current_budget`
+- `WorkerPool` n’envoie plus le contenu complet au writer quand une tâche passe en `StructureOnly`
+- `GraphStore::insert_file_data_batch` persiste alors la vérité structurelle sans matérialiser les `Chunk`
+- le statut de fichier résultant devient explicitement `indexed_degraded`
+- la raison canonique persistée est `degraded_structure_only`
+
+Validation fraîche:
+
+- `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `156` tests verts (`112` lib + `44` bin)
+- `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `40` tests verts
+- `bash scripts/start-v2.sh` -> vert
+- `bash scripts/stop-v2.sh` -> vert
+
+Conséquence:
+
+- Axon a maintenant un vrai chemin `degradation-before-refusal`, pas seulement une probation avant `oversized`
+- la qualité d’ingestion baisse de façon explicite et traçable avant le refus final
+- la prochaine tranche rationnelle du plan maître peut se concentrer sur les gates retrieval/impact/audit et sur les derniers reliquats read-side Elixir
+
 # Files Updated During Reprise
 
 - `/home/dstadel/projects/axon/task_plan.md`

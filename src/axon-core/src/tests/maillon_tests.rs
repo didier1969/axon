@@ -1,6 +1,9 @@
 use std::sync::Arc;
+// Copyright (c) Didier Stadelmann. All rights reserved.
+
 use crate::graph::GraphStore;
 use crate::queue::QueueStore;
+use crate::queue::ProcessingMode;
 use crate::worker::DbWriteTask;
 use crate::parser;
 use crate::parser::elixir::ElixirParser;
@@ -643,8 +646,9 @@ mod tests {
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
                 path: file_path.to_string_lossy().to_string(),
-                content: "defmodule LiveChanged do\nend\n".to_string(),
+                content: Some("defmodule LiveChanged do\nend\n".to_string()),
                 extraction,
+                processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
                 t0: 0,
                 t1: 0,
@@ -708,8 +712,9 @@ mod tests {
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
                 path: file_path.to_string_lossy().to_string(),
-                content: "defmodule DeletedLive do\nend\n".to_string(),
+                content: Some("defmodule DeletedLive do\nend\n".to_string()),
                 extraction,
+                processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
                 t0: 0,
                 t1: 0,
@@ -793,8 +798,9 @@ mod tests {
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
                 path: old_path.to_string_lossy().to_string(),
-                content: "defmodule RenameOld do\nend\n".to_string(),
+                content: Some("defmodule RenameOld do\nend\n".to_string()),
                 extraction,
+                processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
                 t0: 0,
                 t1: 0,
@@ -931,6 +937,68 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_2q_degraded_commit_preserves_structure_without_chunk_materialization() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/degraded_file.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .unwrap();
+
+        let extraction = parser::ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "degraded_file".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                path: path.clone(),
+                content: None,
+                extraction,
+                processing_mode: ProcessingMode::StructureOnly,
+                trace_id: "trace".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        let row = store
+            .query_json("SELECT status, last_error_reason FROM File WHERE path = '/tmp/degraded_file.rs'")
+            .unwrap();
+        assert!(
+            row.contains("indexed_degraded"),
+            "unexpected degraded row payload: {}",
+            row
+        );
+        assert!(row.contains("degraded_structure_only"));
+
+        let symbol_count = store
+            .query_count("SELECT count(*) FROM Symbol WHERE project_slug = 'proj'")
+            .unwrap();
+        assert_eq!(symbol_count, 1, "degraded mode must still preserve the structural symbol truth");
+
+        let chunk_count = store
+            .query_count("SELECT count(*) FROM Chunk")
+            .unwrap();
+        assert_eq!(chunk_count, 0, "degraded mode must avoid heavy chunk materialization");
+    }
+
+    #[test]
     fn test_maillon_2p_deferred_pending_file_builds_aging_debt_and_claim_reset() {
         let store = GraphStore::new(":memory:").unwrap();
         let path = "/tmp/deferred_file.rs".to_string();
@@ -1018,8 +1086,9 @@ mod tests {
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
                 path: file_path.to_string_lossy().to_string(),
-                content: "defmodule LateDeleted do\nend\n".to_string(),
+                content: Some("defmodule LateDeleted do\nend\n".to_string()),
                 extraction,
+                processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
                 t0: 0,
                 t1: 0,
@@ -1154,7 +1223,15 @@ mod tests {
         };
         
         let task = DbWriteTask::FileExtraction {
-            path: path.clone(), content: "fn test() {}".to_string(), extraction, trace_id: "t".to_string(), t0: 0, t1: 0, t2: 0, t3: 0
+            path: path.clone(),
+            content: Some("fn test() {}".to_string()),
+            extraction,
+            processing_mode: ProcessingMode::Full,
+            trace_id: "t".to_string(),
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            t3: 0
         };
         
         store.insert_file_data_batch(&[task]).expect("Maillon 7 failed");
@@ -1184,7 +1261,15 @@ mod tests {
         };
 
         let task = DbWriteTask::FileExtraction {
-            path: path.clone(), content: "fn test() {}".to_string(), extraction, trace_id: "t".to_string(), t0: 0, t1: 0, t2: 0, t3: 0
+            path: path.clone(),
+            content: Some("fn test() {}".to_string()),
+            extraction,
+            processing_mode: ProcessingMode::Full,
+            trace_id: "t".to_string(),
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            t3: 0
         };
 
         store.insert_file_data_batch(&[task]).expect("Chunk setup failed");
@@ -1241,8 +1326,9 @@ mod tests {
             .insert_file_data_batch(&[
                 DbWriteTask::FileExtraction {
                     path: path_a.clone(),
-                    content: "fn alpha() {\n    old_body();\n}\n".to_string(),
+                    content: Some("fn alpha() {\n    old_body();\n}\n".to_string()),
                     extraction: extraction_for("proj", "alpha", "old_body", None),
+                    processing_mode: ProcessingMode::Full,
                     trace_id: "alpha-1".to_string(),
                     t0: 0,
                     t1: 0,
@@ -1251,8 +1337,9 @@ mod tests {
                 },
                 DbWriteTask::FileExtraction {
                     path: path_b.clone(),
-                    content: "fn beta() {\n    stable_body();\n}\n".to_string(),
+                    content: Some("fn beta() {\n    stable_body();\n}\n".to_string()),
                     extraction: extraction_for("proj", "beta", "stable_body", None),
+                    processing_mode: ProcessingMode::Full,
                     trace_id: "beta-1".to_string(),
                     t0: 0,
                     t1: 0,
@@ -1261,8 +1348,9 @@ mod tests {
                 },
                 DbWriteTask::FileExtraction {
                     path: path_c.clone(),
-                    content: "fn gamma() {\n    foreign_project();\n}\n".to_string(),
+                    content: Some("fn gamma() {\n    foreign_project();\n}\n".to_string()),
                     extraction: extraction_for("other", "gamma", "foreign_project", None),
+                    processing_mode: ProcessingMode::Full,
                     trace_id: "gamma-1".to_string(),
                     t0: 0,
                     t1: 0,
@@ -1299,13 +1387,14 @@ mod tests {
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
                 path: path_a.clone(),
-                content: "fn alpha() {\n    new_body();\n}\n".to_string(),
+                content: Some("fn alpha() {\n    new_body();\n}\n".to_string()),
                 extraction: extraction_for(
                     "proj",
                     "alpha",
                     "new_body",
                     Some("routes the new behavior without replaying all semantic work"),
                 ),
+                processing_mode: ProcessingMode::Full,
                 trace_id: "alpha-2".to_string(),
                 t0: 0,
                 t1: 0,
@@ -1403,8 +1492,9 @@ mod tests {
             .insert_file_data_batch(&[
                 DbWriteTask::FileExtraction {
                     path: path_a.clone(),
-                    content: "def send_cypher(query):\n    return query\n".to_string(),
+                    content: Some("def send_cypher(query):\n    return query\n".to_string()),
                     extraction: extraction_a,
+                    processing_mode: ProcessingMode::Full,
                     trace_id: "a".to_string(),
                     t0: 0,
                     t1: 0,
@@ -1413,8 +1503,9 @@ mod tests {
                 },
                 DbWriteTask::FileExtraction {
                     path: path_b.clone(),
-                    content: "def send_cypher(query):\n    return query\n".to_string(),
+                    content: Some("def send_cypher(query):\n    return query\n".to_string()),
                     extraction: extraction_b,
+                    processing_mode: ProcessingMode::Full,
                     trace_id: "b".to_string(),
                     t0: 0,
                     t1: 0,
@@ -1483,8 +1574,9 @@ mod tests {
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
                 path: path.clone(),
-                content: "defmodule AxonDashboardWeb.StatusLive do\nend\n".to_string(),
+                content: Some("defmodule AxonDashboardWeb.StatusLive do\nend\n".to_string()),
                 extraction,
+                processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
                 t0: 0,
                 t1: 0,

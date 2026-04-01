@@ -1,3 +1,5 @@
+// Copyright (c) Didier Stadelmann. All rights reserved.
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -7,6 +9,7 @@ use tracing::{info, info_span};
 
 const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_SAFETY_MULTIPLIER: f64 = 2.0;
+const STRUCTURE_ONLY_ENVELOPE_RATIO: f64 = 0.28;
 
 #[derive(Debug, Clone)]
 struct ReservedTask {
@@ -61,6 +64,21 @@ pub enum TaskLane {
     Bulk,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessingMode {
+    Full,
+    StructureOnly,
+}
+
+impl ProcessingMode {
+    fn envelope_ratio(self) -> f64 {
+        match self {
+            ProcessingMode::Full => 1.0,
+            ProcessingMode::StructureOnly => STRUCTURE_ONLY_ENVELOPE_RATIO,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Task {
     pub path: String,
@@ -72,6 +90,7 @@ pub struct Task {
     pub t0: i64,
     pub t1: i64,
     pub t2: i64,
+    pub mode: ProcessingMode,
 }
 
 pub struct QueueStore {
@@ -103,12 +122,25 @@ impl QueueStore {
     }
 
     pub fn push(&self, path: &str, _mtime: i64, trace_id: &str, t0: i64, t1: i64, priority: bool) -> Result<(), String> {
+        self.push_with_mode(path, _mtime, trace_id, t0, t1, priority, ProcessingMode::Full)
+    }
+
+    pub fn push_with_mode(
+        &self,
+        path: &str,
+        _mtime: i64,
+        trace_id: &str,
+        t0: i64,
+        t1: i64,
+        priority: bool,
+        mode: ProcessingMode,
+    ) -> Result<(), String> {
         let t2 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
         let metadata = std::fs::metadata(path)
             .map_err(|err| format!("Unable to stat file for admission: {:?}", err))?;
         let size_bytes = metadata.len();
         let parser_key = parser_key_for_path(path);
-        let estimated_cost_bytes = self.reserve_memory_budget(trace_id, &parser_key, size_bytes)?;
+        let estimated_cost_bytes = self.reserve_memory_budget(trace_id, &parser_key, size_bytes, mode)?;
         let lane = if priority {
             TaskLane::Hot
         } else {
@@ -122,6 +154,7 @@ impl QueueStore {
             estimated_cost_bytes,
             parser_key,
             t0, t1, t2,
+            mode,
         };
 
         let send_result = match lane {
@@ -201,19 +234,32 @@ impl QueueStore {
     }
 
     pub fn estimate_cost_for_path(&self, path: &str, size_bytes: u64) -> u64 {
+        self.estimate_cost_for_path_in_mode(path, size_bytes, ProcessingMode::Full)
+    }
+
+    pub fn estimate_cost_for_path_in_mode(
+        &self,
+        path: &str,
+        size_bytes: u64,
+        mode: ProcessingMode,
+    ) -> u64 {
         let parser_key = parser_key_for_path(path);
         self.memory_budget
             .lock()
-            .map(|state| estimate_cost_bytes(&state, &parser_key, size_bytes))
+            .map(|state| estimate_cost_bytes(&state, &parser_key, size_bytes, mode))
             .unwrap_or_else(|_| {
-                let estimation_key = estimation_key_for(&parser_key, size_bytes);
+                let estimation_key = estimation_key_for(&parser_key, size_bytes, mode);
                 let fallback_state = MemoryBudgetState::new(DEFAULT_MEMORY_BUDGET_BYTES);
-                estimate_cost_bytes_with_key(&fallback_state, &estimation_key, &parser_key, size_bytes)
+                estimate_cost_bytes_with_key(&fallback_state, &estimation_key, &parser_key, size_bytes, mode)
             })
     }
 
     pub fn can_fit_alone(&self, path: &str, size_bytes: u64) -> bool {
-        let estimated = self.estimate_cost_for_path(path, size_bytes);
+        self.can_fit_alone_in_mode(path, size_bytes, ProcessingMode::Full)
+    }
+
+    pub fn can_fit_alone_in_mode(&self, path: &str, size_bytes: u64, mode: ProcessingMode) -> bool {
+        let estimated = self.estimate_cost_for_path_in_mode(path, size_bytes, mode);
         self.memory_budget_snapshot().budget_bytes >= estimated
     }
 
@@ -227,14 +273,15 @@ impl QueueStore {
         trace_id: &str,
         parser_key: &str,
         size_bytes: u64,
+        mode: ProcessingMode,
     ) -> Result<u64, String> {
         let mut state = self
             .memory_budget
             .lock()
             .map_err(|_| "Memory budget lock poisoned".to_string())?;
-        let estimation_key = estimation_key_for(parser_key, size_bytes);
+        let estimation_key = estimation_key_for(parser_key, size_bytes, mode);
         let estimated_cost_bytes =
-            estimate_cost_bytes_with_key(&state, &estimation_key, parser_key, size_bytes);
+            estimate_cost_bytes_with_key(&state, &estimation_key, parser_key, size_bytes, mode);
 
         if estimated_cost_bytes > state.budget_bytes {
             return Err(format!(
@@ -312,7 +359,12 @@ pub fn parser_key_for_path(path: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-pub fn estimate_observed_cost_bytes(path: &str, size_bytes: u64, parse_duration: std::time::Duration) -> u64 {
+pub fn estimate_observed_cost_bytes(
+    path: &str,
+    size_bytes: u64,
+    parse_duration: std::time::Duration,
+    mode: ProcessingMode,
+) -> u64 {
     let parser_key = parser_key_for_path(path);
     let base_multiplier = default_parser_multiplier(&parser_key);
     let duration_multiplier = if parse_duration.as_millis() >= 1_000 {
@@ -323,7 +375,8 @@ pub fn estimate_observed_cost_bytes(path: &str, size_bytes: u64, parse_duration:
         1.0
     };
 
-    ((size_bytes.max(1) as f64) * base_multiplier * duration_multiplier).ceil() as u64
+    ((size_bytes.max(1) as f64) * base_multiplier * duration_multiplier * mode.envelope_ratio())
+        .ceil() as u64
 }
 
 fn configured_memory_budget_bytes() -> u64 {
@@ -343,9 +396,14 @@ fn configured_memory_budget_bytes() -> u64 {
     DEFAULT_MEMORY_BUDGET_BYTES
 }
 
-fn estimate_cost_bytes(state: &MemoryBudgetState, parser_key: &str, size_bytes: u64) -> u64 {
-    let estimation_key = estimation_key_for(parser_key, size_bytes);
-    estimate_cost_bytes_with_key(state, &estimation_key, parser_key, size_bytes)
+fn estimate_cost_bytes(
+    state: &MemoryBudgetState,
+    parser_key: &str,
+    size_bytes: u64,
+    mode: ProcessingMode,
+) -> u64 {
+    let estimation_key = estimation_key_for(parser_key, size_bytes, mode);
+    estimate_cost_bytes_with_key(state, &estimation_key, parser_key, size_bytes, mode)
 }
 
 fn estimate_cost_bytes_with_key(
@@ -353,11 +411,12 @@ fn estimate_cost_bytes_with_key(
     estimation_key: &str,
     parser_key: &str,
     size_bytes: u64,
+    mode: ProcessingMode,
 ) -> u64 {
     let learned_model = state.observed_cost_models.get(estimation_key);
     let learned_multiplier = learned_model
         .map(|model| model.observed_multiplier)
-        .unwrap_or_else(|| default_parser_multiplier(parser_key));
+        .unwrap_or_else(|| default_parser_multiplier(parser_key) * mode.envelope_ratio());
     let confidence_multiplier = confidence_safety_multiplier(
         learned_model.map(|model| model.sample_count).unwrap_or(0),
     );
@@ -367,8 +426,8 @@ fn estimate_cost_bytes_with_key(
     estimated.ceil() as u64
 }
 
-fn estimation_key_for(parser_key: &str, size_bytes: u64) -> String {
-    format!("{}:{}", parser_key, size_bucket_for(size_bytes))
+fn estimation_key_for(parser_key: &str, size_bytes: u64, mode: ProcessingMode) -> String {
+    format!("{}:{}:{}", parser_key, size_bucket_for(size_bytes), mode_key(mode))
 }
 
 fn size_bucket_for(size_bytes: u64) -> &'static str {
@@ -395,6 +454,13 @@ fn confidence_safety_multiplier(sample_count: u32) -> f64 {
     }
 }
 
+fn mode_key(mode: ProcessingMode) -> &'static str {
+    match mode {
+        ProcessingMode::Full => "full",
+        ProcessingMode::StructureOnly => "structure_only",
+    }
+}
+
 fn default_parser_multiplier(parser_key: &str) -> f64 {
     match parser_key {
         "rs" | "ex" | "exs" | "ts" | "tsx" | "js" | "jsx" => 192.0,
@@ -408,7 +474,7 @@ fn default_parser_multiplier(parser_key: &str) -> f64 {
 mod tests {
     use std::time::Duration;
 
-    use super::{estimate_observed_cost_bytes, parser_key_for_path, QueueStore, TaskLane};
+    use super::{estimate_observed_cost_bytes, parser_key_for_path, ProcessingMode, QueueStore, TaskLane};
 
     #[test]
     fn test_hot_lane_never_starves_behind_bulk_work() {
@@ -531,7 +597,15 @@ mod tests {
         assert!(snapshot_before.reserved_bytes > 0);
 
         queue
-            .mark_done(&task, Some(estimate_observed_cost_bytes(&task.path, task.size_bytes, Duration::from_millis(400))))
+            .mark_done(
+                &task,
+                Some(estimate_observed_cost_bytes(
+                    &task.path,
+                    task.size_bytes,
+                    Duration::from_millis(400),
+                    task.mode,
+                )),
+            )
             .unwrap();
 
         let snapshot_after = queue.memory_budget_snapshot();
@@ -572,6 +646,7 @@ mod tests {
                     &first.path,
                     first.size_bytes,
                     Duration::from_millis(20),
+                    first.mode,
                 )),
             )
             .unwrap();
@@ -590,6 +665,7 @@ mod tests {
                         &task.path,
                         task.size_bytes,
                         Duration::from_millis(20),
+                        task.mode,
                     )),
                 )
                 .unwrap();
@@ -616,9 +692,21 @@ mod tests {
 
     #[test]
     fn test_estimate_observed_cost_penalizes_slow_parses() {
-        let fast = estimate_observed_cost_bytes("/tmp/file.rs", 1024, Duration::from_millis(50));
-        let slow = estimate_observed_cost_bytes("/tmp/file.rs", 1024, Duration::from_millis(1200));
+        let fast =
+            estimate_observed_cost_bytes("/tmp/file.rs", 1024, Duration::from_millis(50), ProcessingMode::Full);
+        let slow =
+            estimate_observed_cost_bytes("/tmp/file.rs", 1024, Duration::from_millis(1200), ProcessingMode::Full);
         assert!(slow > fast);
+    }
+
+    #[test]
+    fn test_structure_only_estimate_is_lower_than_full_estimate() {
+        let queue = QueueStore::with_memory_budget(10, 16 * 1024 * 1024);
+        let full = queue.estimate_cost_for_path_in_mode("/tmp/example.rs", 16 * 1024, ProcessingMode::Full);
+        let structure_only = queue
+            .estimate_cost_for_path_in_mode("/tmp/example.rs", 16 * 1024, ProcessingMode::StructureOnly);
+
+        assert!(structure_only < full);
     }
 
     #[test]

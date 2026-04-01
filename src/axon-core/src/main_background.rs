@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use axon_core::graph::GraphStore;
 use axon_core::graph::PendingFile;
-use axon_core::queue::QueueStore;
+use axon_core::queue::{ProcessingMode, QueueStore};
 use axon_core::service_guard;
 use axon_core::scanner::Scanner;
 use axon_core::fs_watcher::{self, HOT_PRIORITY};
@@ -26,9 +26,16 @@ struct WatchTarget {
 
 #[derive(Debug, Clone, Default)]
 struct AdmissionPlan {
-    selected: Vec<PendingFile>,
+    selected: Vec<AdmissionSelection>,
     deferred: Vec<PendingFile>,
     oversized: Vec<PendingFile>,
+    degraded: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AdmissionSelection {
+    file: PendingFile,
+    mode: ProcessingMode,
 }
 
 const CLAIM_MODE_SENTINEL: u8 = u8::MAX;
@@ -135,10 +142,16 @@ pub(crate) fn spawn_autonomous_ingestor(
                         }
                     }
 
-                    if let Ok(files) = store.claim_pending_paths(&plan.selected.iter().map(|file| file.path.clone()).collect::<Vec<_>>()) {
+                    let selected_modes = plan
+                        .selected
+                        .iter()
+                        .map(|selection| (selection.file.path.clone(), selection.mode))
+                        .collect::<std::collections::HashMap<_, _>>();
+
+                    if let Ok(files) = store.claim_pending_paths(&plan.selected.iter().map(|selection| selection.file.path.clone()).collect::<Vec<_>>()) {
                         if !files.is_empty() {
                             debug!("Autonomous Ingestor: Feeding {} tasks to workers.", files.len());
-                            enqueue_claimed_files(&store, &queue, files);
+                            enqueue_claimed_files(&store, &queue, files, &selected_modes);
                         }
                     } else if !plan.selected.is_empty() {
                         warn!("Autonomous Ingestor failed to claim selected pending files.");
@@ -226,48 +239,95 @@ fn fill_admission_plan(
             continue;
         }
 
-        let estimated_cost = queue.estimate_cost_for_path(&candidate.path, candidate.size_bytes);
-        if !queue.can_fit_alone(&candidate.path, candidate.size_bytes) {
-            if candidate.defer_count < OVERSIZED_PROBATION_DEFER_THRESHOLD {
+        let estimated_cost = queue.estimate_cost_for_path_in_mode(
+            &candidate.path,
+            candidate.size_bytes,
+            ProcessingMode::Full,
+        );
+        let degraded_cost = queue.estimate_cost_for_path_in_mode(
+            &candidate.path,
+            candidate.size_bytes,
+            ProcessingMode::StructureOnly,
+        );
+
+        if !queue.can_fit_alone_in_mode(&candidate.path, candidate.size_bytes, ProcessingMode::Full) {
+            if queue.can_fit_alone_in_mode(&candidate.path, candidate.size_bytes, ProcessingMode::StructureOnly)
+                && candidate.defer_count >= OVERSIZED_PROBATION_DEFER_THRESHOLD
+                && degraded_cost <= *remaining_budget
+            {
+                *remaining_budget = remaining_budget.saturating_sub(degraded_cost);
+                plan.degraded.push(candidate.path.clone());
+                plan.selected.push(AdmissionSelection {
+                    file: candidate,
+                    mode: ProcessingMode::StructureOnly,
+                });
+            } else if candidate.defer_count < OVERSIZED_PROBATION_DEFER_THRESHOLD {
+                plan.deferred.push(candidate);
+            } else if queue.can_fit_alone_in_mode(&candidate.path, candidate.size_bytes, ProcessingMode::StructureOnly) {
                 plan.deferred.push(candidate);
             } else {
                 plan.oversized.push(candidate);
             }
         } else if estimated_cost <= *remaining_budget {
             *remaining_budget = remaining_budget.saturating_sub(estimated_cost);
-            plan.selected.push(candidate);
+            plan.selected.push(AdmissionSelection {
+                file: candidate,
+                mode: ProcessingMode::Full,
+            });
         } else {
             plan.deferred.push(candidate);
         }
     }
 }
 
-fn enqueue_claimed_files(store: &GraphStore, queue: &QueueStore, files: Vec<PendingFile>) {
+fn enqueue_claimed_files(
+    store: &GraphStore,
+    queue: &QueueStore,
+    files: Vec<PendingFile>,
+    selected_modes: &std::collections::HashMap<String, ProcessingMode>,
+) {
     for file in files {
-        if !queue.can_fit_alone(&file.path, file.size_bytes) {
-            record_oversized_refusal();
-            warn!(
-                "Autonomous Ingestor marked {} as oversized for current budget (priority={}, size={}).",
-                file.path,
-                file.priority,
-                file.size_bytes
-            );
-            if let Err(err) = store.mark_file_oversized_for_current_budget(&file.path) {
-                error!(
-                    "Autonomous Ingestor failed to mark oversized claimed file {}: {}",
+        let mut mode = selected_modes
+            .get(&file.path)
+            .copied()
+            .unwrap_or(ProcessingMode::Full);
+
+        if !queue.can_fit_alone_in_mode(&file.path, file.size_bytes, mode) {
+            if mode == ProcessingMode::Full
+                && queue.can_fit_alone_in_mode(&file.path, file.size_bytes, ProcessingMode::StructureOnly)
+            {
+                mode = ProcessingMode::StructureOnly;
+            } else {
+                record_oversized_refusal();
+                warn!(
+                    "Autonomous Ingestor marked {} as oversized for current budget (priority={}, size={}).",
                     file.path,
-                    err
+                    file.priority,
+                    file.size_bytes
                 );
+                if let Err(err) = store.mark_file_oversized_for_current_budget(&file.path) {
+                    error!(
+                        "Autonomous Ingestor failed to mark oversized claimed file {}: {}",
+                        file.path,
+                        err
+                    );
+                }
+                continue;
             }
-            continue;
         }
 
         let is_hot = file.priority >= HOT_PRIORITY;
-        if let Err(err) = queue.push(&file.path, 0, &file.trace_id, 0, 0, is_hot) {
+        if matches!(mode, ProcessingMode::StructureOnly) {
+            record_structure_only_admission();
+        }
+
+        if let Err(err) = queue.push_with_mode(&file.path, 0, &file.trace_id, 0, 0, is_hot, mode) {
+            record_oversized_refusal();
             warn!(
-                "Autonomous Ingestor failed to enqueue {} (priority={}): {}. Requeueing claim.",
+                "Autonomous Ingestor failed to enqueue {} (priority={}, mode={:?}): {}. Requeueing claim.",
                 file.path,
                 file.priority,
+                mode,
                 err
             );
             if let Err(requeue_err) = store.requeue_claimed_file(&file.path) {
@@ -703,6 +763,10 @@ fn service_pressure_label(service_pressure: ServicePressure) -> &'static str {
 
 fn record_oversized_refusal() {
     OVERSIZED_REFUSALS_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_structure_only_admission() {
+    DEGRADED_MODE_ENTRIES_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
 fn record_claim_mode_transition(mode: ClaimMode) {
@@ -1457,7 +1521,7 @@ mod tests {
                 .unwrap();
         }
 
-        enqueue_claimed_files(&store, &queue, claimed);
+        enqueue_claimed_files(&store, &queue, claimed, &std::collections::HashMap::new());
 
         let row = store
             .query_json(&format!(
@@ -1509,7 +1573,7 @@ mod tests {
 
         let plan = plan_admissions(&queue, candidates, 3);
         assert_eq!(
-            plan.selected.iter().map(|file| file.trace_id.as_str()).collect::<Vec<_>>(),
+            plan.selected.iter().map(|selection| selection.file.trace_id.as_str()).collect::<Vec<_>>(),
             vec!["small", "medium"],
             "the scheduler should admit the better-fitting small+medium pair instead of blocking on the large candidate"
         );
@@ -1539,6 +1603,29 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_admissions_prefers_structure_only_degradation_before_oversized_refusal() {
+        let temp = tempdir().unwrap();
+        let candidate = temp.path().join("candidate.rs");
+        std::fs::write(&candidate, vec![b'x'; 16 * 1024]).unwrap();
+
+        let queue = QueueStore::with_memory_budget(100, 3 * 1024 * 1024);
+        let candidates = vec![PendingFile {
+            path: candidate.to_string_lossy().to_string(),
+            trace_id: "candidate".to_string(),
+            priority: 100,
+            size_bytes: 16 * 1024,
+            defer_count: OVERSIZED_PROBATION_DEFER_THRESHOLD,
+            last_deferred_at_ms: Some(1),
+        }];
+
+        let plan = plan_admissions(&queue, candidates, 1);
+        assert!(plan.oversized.is_empty(), "a file that fits the degraded envelope should not be marked oversized");
+        assert_eq!(plan.selected.len(), 1);
+        assert_eq!(plan.selected[0].file.trace_id, "candidate");
+        assert_eq!(plan.selected[0].mode, axon_core::queue::ProcessingMode::StructureOnly);
+    }
+
+    #[test]
     fn test_plan_admissions_gives_probation_to_cold_oversized_candidate() {
         let temp = tempdir().unwrap();
         let oversized = temp.path().join("oversized.rs");
@@ -1559,6 +1646,30 @@ mod tests {
         assert!(plan.oversized.is_empty(), "a cold oversized candidate should first be deferred while the estimator is still conservative");
         assert_eq!(plan.deferred.len(), 1);
         assert_eq!(plan.deferred[0].trace_id, "oversized");
+    }
+
+    #[test]
+    fn test_plan_admissions_uses_degraded_mode_before_final_oversized_refusal() {
+        let temp = tempdir().unwrap();
+        let oversized = temp.path().join("oversized.rs");
+        std::fs::write(&oversized, vec![b'x'; 16 * 1024]).unwrap();
+
+        let queue = QueueStore::with_memory_budget(100, 4_500_000);
+        let candidates = vec![PendingFile {
+            path: oversized.to_string_lossy().to_string(),
+            trace_id: "oversized".to_string(),
+            priority: 100,
+            size_bytes: 16 * 1024,
+            defer_count: OVERSIZED_PROBATION_DEFER_THRESHOLD,
+            last_deferred_at_ms: Some(1),
+        }];
+
+        let plan = plan_admissions(&queue, candidates, 1);
+        assert_eq!(plan.selected.len(), 1, "the candidate should still be admitted through the degraded envelope");
+        assert_eq!(plan.selected[0].file.trace_id, "oversized");
+        assert_eq!(plan.degraded.len(), 1, "the degraded admission should be recorded explicitly");
+        assert_eq!(plan.degraded[0], oversized.to_string_lossy());
+        assert!(plan.oversized.is_empty(), "degraded admission must win before definitive oversized refusal");
     }
 
     #[test]
@@ -1603,7 +1714,7 @@ mod tests {
 
         let plan = plan_admissions(&queue, candidates(0), 2);
         assert_eq!(
-            plan.selected.iter().map(|file| file.trace_id.as_str()).collect::<Vec<_>>(),
+            plan.selected.iter().map(|selection| selection.file.trace_id.as_str()).collect::<Vec<_>>(),
             vec!["small", "medium"],
             "before aging kicks in, the scheduler should keep picking the better-fitting pair"
         );
@@ -1611,7 +1722,7 @@ mod tests {
 
         let aged = plan_admissions(&queue, candidates(3), 2);
         assert_eq!(
-            aged.selected.first().map(|file| file.trace_id.as_str()),
+            aged.selected.first().map(|selection| selection.file.trace_id.as_str()),
             Some("large"),
             "after repeated deferrals, the large file should gain enough fairness to pass first"
         );
@@ -1657,7 +1768,7 @@ mod tests {
 
         let plan = plan_admissions(&queue, candidates, 2);
         assert!(
-            plan.selected.iter().any(|file| file.trace_id == "large"),
+            plan.selected.iter().any(|selection| selection.file.trace_id == "large"),
             "a repeatedly deferred large file should eventually be promoted ahead of newer packable work"
         );
     }
@@ -1681,7 +1792,7 @@ mod tests {
         let claimed = store.fetch_pending_batch(10).unwrap();
         let queue = QueueStore::with_memory_budget(10, 2 * 1024 * 1024);
 
-        enqueue_claimed_files(&store, &queue, claimed);
+        enqueue_claimed_files(&store, &queue, claimed, &std::collections::HashMap::new());
 
         let row = store
             .query_json(&format!(
