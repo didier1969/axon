@@ -147,6 +147,8 @@ Validation fraîche:
 
 - `devenv shell -- bash -lc 'cd src/dashboard && mix test'` -> `38` tests verts
 - `devenv shell -- bash -lc 'cd src/axon-core && cargo test --manifest-path Cargo.toml'` -> `151` tests verts (`109` lib + `42` bin)
+- `bash scripts/start-v2.sh` -> vert après durcissement du lancement Phoenix pour exécuter `mix local.hex --force` et `mix local.rebar --force` aussi dans le shell tmux réel
+- `bash scripts/stop-v2.sh` -> vert
 
 Conséquence:
 
