@@ -41,6 +41,12 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 - [x] Écrire un plan d'implémentation TDD minimal-risque.
 - [x] Exécuter le plan.
 
+### Phase 7: Investigation mémoire post-pic
+- [ ] Distinguer `RssAnon` / `RssFile` / `RssShmem` dans la télémétrie runtime.
+- [ ] Exposer les métriques DuckDB utiles (`duckdb_memory()`, `duckdb_temporary_files()`, taille DB/WAL).
+- [ ] Vérifier si le pic mémoire est majoritairement allocateur, cache fichier, ou working set DuckDB.
+- [ ] Définir ensuite une expérimentation prudente sur purge/trim/checkpoint/allocateur.
+
 ## Working Assumptions
 - Les modifications Git actuellement visibles sont principalement des artefacts de runtime/devenv et non un signal suffisant de travail produit.
 - Toute conclusion tirée hors `devenv shell` est non fiable pour ce dépôt.
@@ -49,6 +55,7 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 ## Current Priority
 1. Comprendre puis corriger le churn d’ingestion qui remet massivement en `pending` des fichiers déjà matérialisés.
 2. Introduire un `FileIngressGuard` dérivé de `File` pour filtrer scanner/watcher avant DuckDB, sans déplacer la priorisation ni les claims hors de la base.
+3. Ouvrir une tranche dédiée de compréhension mémoire avant toute action sur l’allocateur ou le relâchement post-pic.
 3. Conserver la frontière documentaire maintenant posée:
    - `docs/` = canonique
    - `docs/archive/` = historique

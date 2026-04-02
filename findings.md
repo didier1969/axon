@@ -138,3 +138,15 @@
   - verrou statique partagé autour des tests du guard
 - conclusion:
   - le défaut était dans la suite de tests, pas dans le runtime
+
+### 9. La prochaine tranche mémoire doit commencer par distinguer nature du RSS et leviers réels
+- Axon ne fait actuellement ni `malloc_trim`, ni réglage explicite `DuckDB memory_limit`, ni `temp_directory`, ni instrumentation `RssAnon/RssFile`.
+- DuckDB documente que `memory_limit` ne borne que le `buffer manager`; le RSS réel peut donc dépasser nettement cette limite.
+- `CHECKPOINT` aide surtout le WAL et la persistance disque, pas une baisse garantie du RSS.
+- La bonne première mesure n'est pas de changer l'allocateur, mais de distinguer:
+  - `RssAnon`
+  - `RssFile`
+  - working set DuckDB via `duckdb_memory()`
+  - spill via `duckdb_temporary_files()`
+- Si le pic est surtout `RssAnon`, `malloc_trim` ou un allocateur plus agressif redeviennent de vrais candidats.
+- Si le pic est surtout `RssFile`, il faut viser working set/cache et pas l'allocateur.

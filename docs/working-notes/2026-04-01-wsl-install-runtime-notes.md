@@ -560,6 +560,93 @@ Follow-up:
 - mesurer ce qui reste stable après quiescence
 - décider si Axon a besoin d’un mécanisme explicite de purge / compactage / relâchement du working set
 
+### 21. Investigation mémoire: ce qu'Axon fait aujourd'hui ne permet pas de faire redescendre explicitement le RSS
+
+Constats locaux confirmés:
+
+- Axon utilise aujourd'hui l'allocateur système par défaut, pas `jemalloc`, dans `src/axon-core/src/main.rs`
+- le runtime ne fait actuellement:
+  - ni `malloc_trim`
+  - ni réglage explicite `DuckDB memory_limit`
+  - ni réglage `temp_directory`
+  - ni réglage `max_temp_directory_size`
+  - ni instrumentation fine `RssAnon` / `RssFile`
+- un `CHECKPOINT` est bien exécuté au bootstrap DB dans `src/axon-core/src/graph_bootstrap.rs`
+- ce `CHECKPOINT` de boot ne constitue pas, à lui seul, un mécanisme de relâchement mémoire après pic
+- la base `.axon/graph_v2` pèse actuellement environ `5.5G` sur disque
+
+Documentation officielle DuckDB:
+
+- `memory_limit` existe, mais DuckDB documente explicitement que cette limite ne couvre que le `buffer manager`
+- la consommation réelle peut depasser cette limite car certaines structures vivent hors `buffer manager`
+- DuckDB documente aussi:
+  - `temp_directory`
+  - `max_temp_directory_size`
+  - `duckdb_memory()`
+  - `duckdb_temporary_files()`
+  - `PRAGMA database_size`
+- DuckDB indique que le `buffer manager` garde des pages en cache entre requêtes tant que cet espace n'est pas requis ailleurs ou jusqu'à fermeture de la base
+- `CHECKPOINT` et `checkpoint_on_shutdown` servent surtout la persistance/WAL et la compaction disque, pas une baisse garantie et immédiate du RSS
+
+Retours communauté / pratique prod:
+
+- un RSS élevé après pic n'indique pas forcément une fuite DuckDB
+- les causes récurrentes observées sont plutôt:
+  - rétention allocateur
+  - pages/cache DuckDB encore résidentes
+  - structures allouées hors `buffer manager`
+  - fragmentation et arènes multi-thread
+- les mitigations citées en pratique sont:
+  - `memory_limit` plus conservateur
+  - `temp_directory` explicite pour permettre le spill
+  - réduction des threads sur gros workloads
+  - instrumentation via `duckdb_memory()`
+  - allocateur plus adapté (`jemalloc`) ou trim explicite côté glibc
+
+Lecture opératoire actuelle:
+
+- on ne sait pas encore si les pics Axon viennent majoritairement de:
+  - `RssAnon` (heap/allocateur/process)
+  - `RssFile` (mappings fichiers/page cache)
+  - worker sémantique ONNX
+  - working set DuckDB
+- tant qu'on ne distingue pas `RssAnon` et `RssFile`, changer d'allocateur serait prématuré
+
+Décision provisoire:
+
+- ne pas "réduire la voilure" fonctionnelle pour l'instant
+- commencer par instrumenter correctement la nature du RSS
+- ensuite seulement tester, dans cet ordre:
+  1. visibilité `RssAnon` / `RssFile` + métriques DuckDB
+  2. réglages DuckDB explicites (`memory_limit`, `temp_directory`, `max_temp_directory_size`)
+  3. `malloc_trim(0)` ou équivalent après gros pics si le problème est majoritairement `RssAnon`
+  4. éventuellement retour vers `jemalloc` ou autre allocateur si la mesure le justifie et si l'axe FFI/ONNX reste stable
+
+Corrective follow-up:
+
+- ajouter des sondes runtime pour:
+  - `RssAnon`
+  - `RssFile`
+  - `RssShmem`
+  - taille DB/WAL
+  - `duckdb_memory()`
+  - `duckdb_temporary_files()`
+- vérifier si un `checkpoint_on_shutdown` ou un `CHECKPOINT` périodique réduit au moins le WAL, sans promettre de baisse RSS
+- ouvrir une tranche distincte "relâchement mémoire post-pic" avant tout changement d'allocateur
+
+Sources externes utilisées:
+
+- DuckDB Pragmas: https://duckdb.org/docs/current/configuration/pragmas
+- DuckDB Memory Management: https://duckdb.org/2024/07/09/memory-management
+- DuckDB Out of Memory guide: https://duckdb.org/docs/stable/guides/troubleshooting/oom_errors.html
+- DuckDB Limits: https://duckdb.org/docs/stable/operations_manual/limits
+- DuckDB checkpoint docs: https://duckdb.org/docs/current/sql/statements/checkpoint
+- DuckDB reclaiming space: https://duckdb.org/docs/current/operations_manual/footprint_of_duckdb/reclaiming_space
+- DuckDB performance environment: https://duckdb.org/docs/stable/guides/performance/environment.html
+- GNU `malloc_trim(3)`: https://man7.org/linux/man-pages/man3/malloc_trim.3.html
+- GNU allocator manual: https://sourceware.org/glibc/manual/2.27/html_node/The-GNU-Allocator.html
+- WSL config: https://learn.microsoft.com/windows/wsl/wsl-config
+
 ## Follow-up Corrections to Plan
 
 Si la fin d'indexation initiale ne peut pas être constatée proprement sans heuristique, ouvrir une tranche corrective sur:

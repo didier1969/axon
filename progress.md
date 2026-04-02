@@ -169,3 +169,23 @@
 
 ## Next Immediate Action
 - préparer la prochaine tranche d’observabilité/causalité des requeues et l’investigation mémoire sur relâchement du working set
+
+## 2026-04-02 - Pré-analyse mémoire DuckDB/allocateur/WSL
+- Investigation locale du code:
+  - absence de `malloc_trim`
+  - absence de `DuckDB memory_limit` explicite
+  - absence de `temp_directory` / `max_temp_directory_size`
+  - présence d’un `CHECKPOINT` seulement au bootstrap
+  - allocateur courant = système par défaut, pas `jemalloc`
+- Recherche web croisée:
+  - docs officielles DuckDB
+  - docs GNU/glibc
+  - docs WSL
+  - retours communauté sur RSS DuckDB élevé après pics
+- Conclusion provisoire documentée:
+  - on ne doit pas encore changer l’allocateur à l’aveugle
+  - il faut d’abord séparer `RssAnon` et `RssFile`, puis exposer `duckdb_memory()` et `duckdb_temporary_files()`
+  - `CHECKPOINT`/WAL et relâchement du RSS sont deux sujets distincts
+
+## Next Immediate Action
+- ouvrir une tranche dédiée d’instrumentation mémoire post-pic avant toute tentative de purge ou changement d’allocateur
