@@ -120,6 +120,7 @@ fn main() -> anyhow::Result<()> {
                 file_ingress_guard.clone(),
                 ingress_buffer.clone(),
             );
+            main_background::spawn_memory_reclaimer(queue_store.clone(), ingress_buffer.clone());
 
             main_background::spawn_hot_delta_watcher(
                 graph_store.clone(),

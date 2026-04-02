@@ -406,13 +406,7 @@ impl GraphStore {
             Self::escape_embedding_sql(model_id),
             count
         );
-        let guard = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let res = self.query_on_ctx(&query, *guard)?;
-        drop(guard);
+        let res = self.query_json_on_reader(&query)?;
 
         if res == "[]" || res.is_empty() {
             return Ok(vec![]);

@@ -255,75 +255,105 @@ impl WorkerPool {
 
                 // 3. COMMIT BATCH
                 if !batch.is_empty() {
-                    let mut combined_feedback = String::new();
-                    for task in &batch {
-                        if let DbWriteTask::FileExtraction {
-                            path,
-                            extraction,
-                            processing_mode,
-                            trace_id,
-                            t0,
-                            t1,
-                            t2,
-                            t3,
-                            ..
-                        } = task
-                        {
-                            let t4 = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_micros() as i64;
-                            let msg = serde_json::json!({
-                                "FileIndexed": {
-                                    "path": path,
-                                    "status": if matches!(processing_mode, ProcessingMode::StructureOnly) { "indexed_degraded" } else { "ok" },
-                                    "processing_mode": match processing_mode {
-                                        ProcessingMode::Full => "full",
-                                        ProcessingMode::StructureOnly => "structure_only",
-                                    },
-                                    "symbol_count": extraction.symbols.len(),
-                                    "relation_count": extraction.relations.len(), "trace_id": trace_id,
-                                    "t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4
-                                }
-                            });
-                            combined_feedback.push_str(&serde_json::to_string(&msg).unwrap());
-                            combined_feedback.push('\n');
-                        } else if let DbWriteTask::FileSkipped {
-                            path,
-                            reason,
-                            trace_id,
-                            t0,
-                            t1,
-                            t2,
-                        } = task
-                        {
-                            let t4 = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_micros() as i64;
-                            let msg = serde_json::json!({
-                                "FileIndexed": {
-                                    "path": path, "status": "skipped", "error_reason": reason,
-                                    "trace_id": trace_id, "t0": t0, "t1": t1, "t2": t2, "t3": t2, "t4": t4
-                                }
-                            });
-                            combined_feedback.push_str(&serde_json::to_string(&msg).unwrap());
-                            combined_feedback.push('\n');
-                        }
-                    }
-
                     if let Err(e) = graph_store.insert_file_data_batch(&batch) {
                         error!("Writer Actor: Batch commit failed: {:?}", e);
-                    }
-
-                    if !combined_feedback.is_empty() {
-                        let _ = result_sender.send(combined_feedback);
+                        let claimed_paths = claimed_paths_from_batch(&batch);
+                        if let Err(requeue_err) = graph_store.requeue_claimed_paths_with_reason(
+                            &claimed_paths,
+                            "requeued_after_writer_batch_failure",
+                        ) {
+                            error!(
+                                "Writer Actor: failed to requeue {} claimed files after batch failure: {:?}",
+                                claimed_paths.len(),
+                                requeue_err
+                            );
+                        }
+                    } else {
+                        let combined_feedback = build_feedback_messages(&batch);
+                        if !combined_feedback.is_empty() {
+                            let _ = result_sender.send(combined_feedback);
+                        }
                     }
                     batch.clear();
                 }
             }
         });
     }
+}
+
+fn build_feedback_messages(batch: &[DbWriteTask]) -> String {
+    let mut combined_feedback = String::new();
+    for task in batch {
+        if let DbWriteTask::FileExtraction {
+            path,
+            extraction,
+            processing_mode,
+            trace_id,
+            t0,
+            t1,
+            t2,
+            t3,
+            ..
+        } = task
+        {
+            let t4 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+            let msg = serde_json::json!({
+                "FileIndexed": {
+                    "path": path,
+                    "status": if matches!(processing_mode, ProcessingMode::StructureOnly) { "indexed_degraded" } else { "ok" },
+                    "processing_mode": match processing_mode {
+                        ProcessingMode::Full => "full",
+                        ProcessingMode::StructureOnly => "structure_only",
+                    },
+                    "symbol_count": extraction.symbols.len(),
+                    "relation_count": extraction.relations.len(), "trace_id": trace_id,
+                    "t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4
+                }
+            });
+            combined_feedback.push_str(&serde_json::to_string(&msg).unwrap());
+            combined_feedback.push('\n');
+        } else if let DbWriteTask::FileSkipped {
+            path,
+            reason,
+            trace_id,
+            t0,
+            t1,
+            t2,
+        } = task
+        {
+            let t4 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros() as i64;
+            let msg = serde_json::json!({
+                "FileIndexed": {
+                    "path": path, "status": "skipped", "error_reason": reason,
+                    "trace_id": trace_id, "t0": t0, "t1": t1, "t2": t2, "t3": t2, "t4": t4
+                }
+            });
+            combined_feedback.push_str(&serde_json::to_string(&msg).unwrap());
+            combined_feedback.push('\n');
+        }
+    }
+    combined_feedback
+}
+
+fn claimed_paths_from_batch(batch: &[DbWriteTask]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for task in batch {
+        match task {
+            DbWriteTask::FileExtraction { path, .. } | DbWriteTask::FileSkipped { path, .. } => {
+                if !paths.iter().any(|existing| existing == path) {
+                    paths.push(path.clone());
+                }
+            }
+            DbWriteTask::ExecuteCypher { .. } => {}
+        }
+    }
+    paths
 }
 
 #[cfg(test)]
@@ -429,5 +459,41 @@ mod tests {
                 panic!("unexpected cypher task");
             }
         }
+    }
+
+    #[test]
+    fn claimed_paths_from_batch_deduplicates_file_paths() {
+        let batch = vec![
+            DbWriteTask::FileSkipped {
+                path: "/tmp/a.ex".to_string(),
+                reason: "No parser found".to_string(),
+                trace_id: "trace-a".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+            },
+            DbWriteTask::FileExtraction {
+                path: "/tmp/a.ex".to_string(),
+                content: Some("defmodule A do end".to_string()),
+                extraction: crate::parser::ExtractionResult::default(),
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace-a".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            },
+            DbWriteTask::FileSkipped {
+                path: "/tmp/b.ex".to_string(),
+                reason: "No parser found".to_string(),
+                trace_id: "trace-b".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+            },
+        ];
+
+        let claimed = super::claimed_paths_from_batch(&batch);
+        assert_eq!(claimed, vec!["/tmp/a.ex".to_string(), "/tmp/b.ex".to_string()]);
     }
 }

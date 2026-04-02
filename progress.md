@@ -355,3 +355,31 @@
   - reduction du churn canonique `pending`
   - effet reel sur la disponibilite MCP
   - comportement memoire apres stabilisation de l'ingress
+
+## 2026-04-02 - Fermeture hors dashboard: DB routing, causalite d'echec, relachement memoire
+- Vert:
+  - lectures read-only routées sur `reader_ctx` avec garde de fraicheur tres courte apres write pour eviter une verite stale
+  - helpers read-only réalignés:
+    - `query_json`
+    - `query_count`
+    - `fetch_unembedded_symbols`
+    - `fetch_unembedded_chunks`
+    - chargement des jobs `GraphEmbedding`
+  - gateway SQL brute introduite:
+    - lectures -> chemin read-only
+    - mutations -> writer canonique avec reponse `{\"ok\":true}`
+  - les chemins `RAW_QUERY` et MCP SQL passent par cette gateway
+  - la causalite des echecs de scheduling/commit est maintenant explicite:
+    - `requeued_after_queue_push_failure`
+    - `requeued_after_writer_batch_failure`
+  - le writer n’envoie plus de feedback `FileIndexed` si le commit batch DuckDB echoue
+  - reclaimer memoire Linux ajoute, tres conservateur:
+    - idle-only
+    - activable/desactivable via `AXON_ENABLE_MEMORY_RECLAIMER`
+    - seuil anon via `AXON_MEMORY_RECLAIMER_MIN_ANON_MB`
+- Validation fraiche:
+  - `cargo test --manifest-path src/axon-core/Cargo.toml` vert (`159` + `47`)
+
+## Next Immediate Action
+- valider encore `mix test` dashboard puis `start-v2.sh` / `stop-v2.sh`
+- si vert, geler la doc, commit et push de la tranche finale hors dashboard

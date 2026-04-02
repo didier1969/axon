@@ -238,6 +238,42 @@
 
 ### 18. Le bon amortisseur n'est pas un WAL disque d'ingress mais un tampon memoire
 - la distinction correcte est:
+  - DuckDB = verite canonique durable
+  - IngressBuffer = bruit amorti et reduit en memoire
+- il n'est pas necessaire de persister la file brute watcher/scanner dans le MVP
+- le redemarrage peut reconstruire l'etat transitoire par rescan + watcher + FileIngressGuard
+
+### 19. La separation DB utile n'est pas "reader toujours", mais "reader quand la lecture reste fraiche"
+- un `reader_ctx` DuckDB long-vivant peut observer une verite stale juste apres des ecritures writer
+- une bascule naive de toutes les lectures sur `reader_ctx` casse des invariants de fraicheur
+- la bonne correction retenue est:
+  - lectures pures sur `reader_ctx`
+  - sauf dans une tres courte fenetre post-write, ou la lecture repasse sur le writer pour garantir la fraicheur
+- conclusion:
+  - la separation lecture/ecriture est maintenant reelle sans sacrifier la coherence immediate des tests operatoires
+
+### 20. Le dernier trou majeur de causalite etait le faux succes après echec writer
+- avant correction, le writer actor pouvait:
+  - echouer a commit le batch DB
+  - puis emettre quand meme le feedback succes `FileIndexed`
+- ce trou etait plus grave qu'un simple manque de `status_reason`, car il contaminait la verite runtime
+- correction retenue:
+  - aucun succes emis avant commit DB reussi
+  - requeue explicite des fichiers claims si le commit batch echoue
+  - raison persistée: `requeued_after_writer_batch_failure`
+
+### 21. La strategie memoire active doit rester prudente et conditionnelle
+- le run long a montre un RSS majoritairement `RssAnon`, pas `RssFile`
+- il etait donc defendable d'ajouter un mecanisme de relachement memoire
+- mais pas en permanence et pas en charge
+- la strategie retenue est:
+  - trim system allocator Linux
+  - uniquement en phase idle
+  - uniquement au-dessus d'un seuil anon configurable
+  - kill switch explicite
+- conclusion:
+  - on n'a pas reduit la voilure d'Axon
+  - on a ajoute un mecanisme de relachement opportuniste, pas une politique d'appauvrissement permanent
   - `DuckDB` = vérité canonique des fichiers, statuts, graphes et scheduling
   - `ingress` = événements bruts de découverte produits par watcher et scanner
 - conclusion de design retenue:

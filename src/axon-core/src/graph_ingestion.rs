@@ -1,6 +1,7 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
 use std::ffi::CString;
+use std::sync::atomic::Ordering;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
@@ -619,6 +620,10 @@ impl GraphStore {
                 return Err(anyhow!("Pending Fetch Error: COMMIT failed"));
             }
         }
+        self.recent_write_epoch_ms.store(
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+            Ordering::Relaxed,
+        );
         drop(guard);
 
         if res == "[]" || res.is_empty() {
@@ -704,6 +709,10 @@ impl GraphStore {
                 return Err(anyhow!("Claim Paths Error: COMMIT failed"));
             }
         }
+        self.recent_write_epoch_ms.store(
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
+            Ordering::Relaxed,
+        );
         drop(guard);
 
         if res == "[]" || res.is_empty() {
@@ -751,18 +760,36 @@ impl GraphStore {
     }
 
     pub fn requeue_claimed_file(&self, path: &str) -> Result<()> {
+        self.requeue_claimed_file_with_reason(path, "manual_or_system_requeue")
+    }
+
+    pub fn requeue_claimed_file_with_reason(&self, path: &str, reason: &str) -> Result<()> {
+        self.requeue_claimed_paths_with_reason(&[path.to_string()], reason)
+    }
+
+    pub fn requeue_claimed_paths_with_reason(&self, paths: &[String], reason: &str) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+
         let now_ms = chrono::Utc::now().timestamp_millis();
+        let path_list = paths
+            .iter()
+            .map(|path| format!("'{}'", Self::escape_sql(path)))
+            .collect::<Vec<_>>()
+            .join(",");
         self.execute(&format!(
             "UPDATE File \
              SET status = 'pending', \
                  worker_id = NULL, \
                  last_error_reason = NULL, \
-                 status_reason = 'manual_or_system_requeue', \
+                 status_reason = '{}', \
                  defer_count = COALESCE(defer_count, 0) + 1, \
                  last_deferred_at_ms = {} \
-             WHERE path = '{}' AND status = 'indexing';",
+             WHERE path IN ({}) AND status = 'indexing';",
+            Self::escape_sql(reason),
             now_ms,
-            Self::escape_sql(path)
+            path_list
         ))
     }
 
@@ -771,13 +798,7 @@ impl GraphStore {
             "SELECT id, name || ': ' || kind FROM Symbol WHERE embedding IS NULL LIMIT {}",
             count
         );
-        let guard = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let res = self.query_on_ctx(&query, *guard)?;
-        drop(guard);
+        let res = self.query_json_on_reader(&query)?;
 
         if res == "[]" || res.is_empty() {
             return Ok(vec![]);
@@ -840,13 +861,7 @@ impl GraphStore {
             Self::escape_sql(model_id),
             count
         );
-        let guard = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let res = self.query_on_ctx(&query, *guard)?;
-        drop(guard);
+        let res = self.query_json_on_reader(&query)?;
 
         if res == "[]" || res.is_empty() {
             return Ok(vec![]);

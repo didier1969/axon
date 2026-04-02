@@ -1,5 +1,7 @@
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use libloading::Symbol as LibSymbol;
@@ -8,6 +10,102 @@ use serde_json::Value;
 use crate::graph::{ExecFunc, FreeStrFunc, GraphStore, QueryCountFunc, QueryJsonFunc};
 
 impl GraphStore {
+    fn current_epoch_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn reader_freshness_grace_ms() -> u64 {
+        std::env::var("AXON_READER_FRESHNESS_GRACE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(50)
+    }
+
+    fn should_route_read_to_writer(&self) -> bool {
+        let last_write = self.recent_write_epoch_ms.load(Ordering::Relaxed);
+        if last_write == 0 {
+            return false;
+        }
+
+        Self::current_epoch_ms().saturating_sub(last_write) <= Self::reader_freshness_grace_ms()
+    }
+
+    pub(crate) fn query_json_on_reader(&self, query: &str) -> Result<String> {
+        if self.should_route_read_to_writer() {
+            let writer = self
+                .pool
+                .writer_ctx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            return self.query_on_ctx(query, *writer);
+        }
+
+        let guard = self
+            .pool
+            .reader_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let ctx = if (*guard).is_null() {
+            drop(guard);
+            let writer = self
+                .pool
+                .writer_ctx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            return self.query_on_ctx(query, *writer);
+        } else {
+            *guard
+        };
+        self.query_on_ctx(query, ctx)
+    }
+
+    pub(crate) fn query_count_on_reader(&self, query: &str) -> Result<i64> {
+        if self.should_route_read_to_writer() {
+            let writer = self
+                .pool
+                .writer_ctx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            unsafe {
+                let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
+                return Ok(count_fn(*writer, CString::new(query)?.as_ptr()));
+            }
+        }
+
+        let guard = self
+            .pool
+            .reader_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let ctx = if (*guard).is_null() {
+            drop(guard);
+            let writer = self
+                .pool
+                .writer_ctx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *writer
+        } else {
+            *guard
+        };
+        unsafe {
+            let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
+            Ok(count_fn(ctx, CString::new(query)?.as_ptr()))
+        }
+    }
+
+    pub fn execute_raw_sql_gateway(&self, query: &str) -> Result<String> {
+        if is_read_only_sql(query) {
+            return self.query_json(query);
+        }
+
+        self.execute(query)?;
+        Ok("{\"ok\":true}".to_string())
+    }
+
     fn graph_projection_version() -> &'static str {
         "1"
     }
@@ -297,6 +395,8 @@ impl GraphStore {
                 return Err(anyhow!("Writer Error: {}", query));
             }
         }
+        self.recent_write_epoch_ms
+            .store(Self::current_epoch_ms(), Ordering::Relaxed);
         Ok(())
     }
 
@@ -306,34 +406,16 @@ impl GraphStore {
     }
 
     pub fn query_json(&self, query: &str) -> Result<String> {
-        let guard = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        self.query_on_ctx(query, *guard)
+        self.query_json_on_reader(query)
     }
 
     pub fn query_json_param(&self, query: &str, params: &serde_json::Value) -> Result<String> {
         let expanded = Self::expand_named_params(query, params)?;
-        let guard = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        self.query_on_ctx(&expanded, *guard)
+        self.query_json_on_reader(&expanded)
     }
 
     pub fn query_count(&self, query: &str) -> Result<i64> {
-        let guard = self
-            .pool
-            .writer_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        unsafe {
-            let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
-            Ok(count_fn(*guard, CString::new(query)?.as_ptr()))
-        }
+        self.query_count_on_reader(query)
     }
 
     pub fn query_count_param(&self, query: &str, params: &serde_json::Value) -> Result<i64> {
@@ -381,6 +463,8 @@ impl GraphStore {
                 return Err(anyhow!("Batch Writer Error: COMMIT failed"));
             }
         }
+        self.recent_write_epoch_ms
+            .store(Self::current_epoch_ms(), Ordering::Relaxed);
         Ok(())
     }
 
@@ -443,5 +527,37 @@ impl GraphStore {
         }
 
         Ok(expanded)
+    }
+}
+
+fn is_read_only_sql(query: &str) -> bool {
+    let trimmed = query.trim_start();
+    let lowered = trimmed.to_ascii_lowercase();
+    matches!(
+        lowered.split_whitespace().next(),
+        Some("select" | "with" | "pragma" | "show" | "describe" | "explain")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::graph::GraphStore;
+
+    #[test]
+    fn execute_raw_sql_gateway_supports_read_only_and_mutating_queries() {
+        let store = GraphStore::new(":memory:").unwrap();
+
+        let read = store.execute_raw_sql_gateway("SELECT 1").unwrap();
+        assert!(read.contains("1"), "{read}");
+
+        let write = store
+            .execute_raw_sql_gateway("INSERT INTO File (path, project_slug) VALUES ('/tmp/sql_gateway.ex', 'proj')")
+            .unwrap();
+        assert!(write.contains("\"ok\":true"), "{write}");
+
+        let count = store
+            .query_count("SELECT count(*) FROM File WHERE path = '/tmp/sql_gateway.ex'")
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

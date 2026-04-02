@@ -78,7 +78,7 @@ impl McpServer {
     }
 
     pub fn execute_raw_sql(&self, query: &str) -> anyhow::Result<String> {
-        self.graph_store.query_json(query)
+        self.graph_store.execute_raw_sql_gateway(query)
     }
 
     pub fn handle_request(&self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {

@@ -842,6 +842,61 @@ Impact:
   - la contention lecture/écriture DuckDB
   - ou la seule observabilité
 
+### 30. La séparation DB active doit préserver la fraîcheur immédiate
+
+Constat:
+
+- un `reader_ctx` DuckDB long-vivant peut voir une vérité stale juste après des écritures du writer
+- une séparation naïve "toutes les lectures sur reader" casse des invariants de cohérence immédiate
+
+Impact:
+
+- la correction lecture/écriture doit être plus fine qu’un simple reroutage statique
+- sinon les outils opératoires et les tests de cohérence lisent un état obsolète
+
+Intervention:
+
+- lectures pures déplacées vers `reader_ctx`
+- ajout d’une garde de fraîcheur très courte après write pour repasser temporairement sur le writer si nécessaire
+- les chemins SQL bruts passent désormais par une gateway qui sépare lecture et mutation
+
+### 31. Le faux succès après échec writer était un défaut critique de vérité runtime
+
+Constat:
+
+- le writer actor pouvait auparavant échouer à commit un batch DB puis émettre quand même un feedback `FileIndexed`
+
+Impact:
+
+- l’observabilité runtime pouvait annoncer un succès qui n’existait pas en base
+
+Intervention:
+
+- suppression du feedback succès tant que le commit batch n’a pas réellement réussi
+- requeue explicite des fichiers claimés sur échec writer avec la cause `requeued_after_writer_batch_failure`
+
+### 32. Le relâchement mémoire retenu est opportuniste et idle-only
+
+Constat:
+
+- le run long a montré un RSS surtout `RssAnon`, pas `RssFile`
+- une stratégie de trim devenait donc défendable, mais pas en charge
+
+Impact:
+
+- on peut ajouter un mécanisme de relâchement sans réduire la capacité nominale d’Axon
+
+Intervention:
+
+- ajout d’un reclaimer Linux très conservateur
+- trim du system allocator uniquement quand:
+  - la queue est vide
+  - l’ingress buffer est quiescent
+  - `RssAnon` dépasse un seuil configurable
+- kill switch explicite:
+  - `AXON_ENABLE_MEMORY_RECLAIMER`
+  - `AXON_MEMORY_RECLAIMER_MIN_ANON_MB`
+
 ## Follow-up Corrections to Plan
 
 Si la fin d'indexation initiale ne peut pas être constatée proprement sans heuristique, ouvrir une tranche corrective sur:

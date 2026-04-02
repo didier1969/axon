@@ -149,7 +149,7 @@ pub(crate) async fn handle_telemetry_command(
     if command.starts_with("RAW_QUERY ") {
         let query = command[10..].trim().to_string();
         tokio::spawn(async move {
-            match store.query_json(&query) {
+            match store.execute_raw_sql_gateway(&query) {
                 Ok(res) => {
                     let _ = results_tx.send(res + "\n");
                 }

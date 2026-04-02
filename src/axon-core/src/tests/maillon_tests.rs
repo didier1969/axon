@@ -1818,6 +1818,31 @@ mod tests {
     }
 
     #[test]
+    fn test_requeue_claimed_file_with_specific_reason_updates_status_reason() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/requeue_specific_reason.ex".to_string();
+
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        let claimed = store.claim_pending_paths(std::slice::from_ref(&path)).unwrap();
+        assert_eq!(claimed.len(), 1);
+
+        store
+            .requeue_claimed_file_with_reason(&path, "requeued_after_queue_push_failure")
+            .unwrap();
+
+        let row = store
+            .query_json(&format!(
+                "SELECT status, status_reason FROM File WHERE path = '{}'",
+                path.replace('\'', "''")
+            ))
+            .unwrap();
+        assert!(row.contains("pending"), "{row}");
+        assert!(row.contains("requeued_after_queue_push_failure"), "{row}");
+    }
+
+    #[test]
     fn test_tombstoned_late_writer_update_keeps_deleted_reason() {
         let store = GraphStore::new(":memory:").unwrap();
         let path = "/tmp/tombstoned_late.rs".to_string();

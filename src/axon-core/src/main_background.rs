@@ -54,9 +54,12 @@ const INGRESS_BULK_FLUSH_WINDOW_MS: u64 = 400;
 const INGRESS_HINT_FLUSH_WINDOW_MS: u64 = 150;
 const INGRESS_MAX_BATCH_SIZE: usize = 512;
 const INGRESS_FORCE_BATCH_SIZE: usize = 1_024;
+const MEMORY_RECLAIMER_POLL_INTERVAL_SECS: u64 = 15;
 
 static OVERSIZED_REFUSALS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DEGRADED_MODE_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static MEMORY_TRIM_ATTEMPTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static MEMORY_TRIM_SUCCESSES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static LAST_REPORTED_CLAIM_MODE: AtomicU8 = AtomicU8::new(CLAIM_MODE_SENTINEL);
 static HOST_PRESSURE_SAMPLER: LazyLock<Mutex<HostPressureSampler>> =
     LazyLock::new(|| Mutex::new(HostPressureSampler::default()));
@@ -145,6 +148,46 @@ pub(crate) fn start_memory_watchdog() {
                 }
             }
             std::thread::sleep(std::time::Duration::from_secs(10));
+        }
+    });
+}
+
+pub(crate) fn spawn_memory_reclaimer(
+    queue: Arc<QueueStore>,
+    ingress_buffer: SharedIngressBuffer,
+) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(MEMORY_RECLAIMER_POLL_INTERVAL_SECS));
+
+        if !memory_reclaimer_enabled() {
+            continue;
+        }
+
+        if queue.common_len() > 0 {
+            continue;
+        }
+
+        let ingress_metrics = ingress_buffer
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .metrics_snapshot();
+        if ingress_metrics.buffered_entries > 0 || ingress_metrics.subtree_hints > 0 {
+            continue;
+        }
+
+        let process_memory = process_memory_snapshot();
+        let min_anon_bytes = memory_reclaimer_min_anon_bytes();
+        if process_memory.rss_anon_bytes < min_anon_bytes {
+            continue;
+        }
+
+        MEMORY_TRIM_ATTEMPTS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if axon_core::runtime_observability::malloc_trim_system_allocator() {
+            MEMORY_TRIM_SUCCESSES_TOTAL.fetch_add(1, Ordering::Relaxed);
+            info!(
+                "Memory reclaimer trimmed system allocator after idle period (rss_anon={} MiB).",
+                process_memory.rss_anon_bytes / 1024 / 1024
+            );
         }
     });
 }
@@ -685,7 +728,7 @@ fn enqueue_claimed_files(
             record_structure_only_admission();
         }
 
-        if let Err(err) = queue.push_with_mode(&file.path, 0, &file.trace_id, 0, 0, is_hot, mode) {
+            if let Err(err) = queue.push_with_mode(&file.path, 0, &file.trace_id, 0, 0, is_hot, mode) {
             record_oversized_refusal();
             warn!(
                 "Autonomous Ingestor failed to enqueue {} (priority={}, mode={:?}): {}. Requeueing claim.",
@@ -694,7 +737,9 @@ fn enqueue_claimed_files(
                 mode,
                 err
             );
-            if let Err(requeue_err) = store.requeue_claimed_file(&file.path) {
+            if let Err(requeue_err) =
+                store.requeue_claimed_file_with_reason(&file.path, "requeued_after_queue_push_failure")
+            {
                 error!(
                     "Autonomous Ingestor failed to requeue claimed file {} after queue pressure: {}",
                     file.path,
@@ -957,6 +1002,21 @@ fn current_rss_bytes() -> Option<u64> {
     let content = std::fs::read_to_string("/proc/self/statm").ok()?;
     let rss_pages = parse_rss_from_statm(&content)?;
     Some(rss_pages * page_size)
+}
+
+fn memory_reclaimer_enabled() -> bool {
+    std::env::var("AXON_ENABLE_MEMORY_RECLAIMER")
+        .ok()
+        .map(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"))
+        .unwrap_or(true)
+}
+
+fn memory_reclaimer_min_anon_bytes() -> u64 {
+    std::env::var("AXON_MEMORY_RECLAIMER_MIN_ANON_MB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|mb| mb.saturating_mul(1024 * 1024))
+        .unwrap_or(4 * 1024 * 1024 * 1024)
 }
 
 fn memory_limit_bytes() -> u64 {
@@ -1495,7 +1555,8 @@ fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>
 mod tests {
     use super::{
         active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files,
-        flush_ingress_buffer_once, handle_watcher_events, memory_limit_bytes, plan_admissions,
+        flush_ingress_buffer_once, handle_watcher_events, memory_limit_bytes,
+        memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, plan_admissions,
         should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets,
         RescanGuardReset, OVERSIZED_PROBATION_DEFER_THRESHOLD,
     };
@@ -1540,6 +1601,39 @@ mod tests {
         assert_eq!(memory_limit_bytes(), 10 * 1024 * 1024 * 1024);
         unsafe {
             std::env::remove_var("AXON_MEMORY_LIMIT_GB");
+        }
+    }
+
+    #[test]
+    fn test_memory_reclaimer_enabled_defaults_to_true() {
+        unsafe {
+            std::env::remove_var("AXON_ENABLE_MEMORY_RECLAIMER");
+        }
+        assert!(memory_reclaimer_enabled());
+    }
+
+    #[test]
+    fn test_memory_reclaimer_can_be_disabled_with_env() {
+        unsafe {
+            std::env::set_var("AXON_ENABLE_MEMORY_RECLAIMER", "false");
+        }
+        assert!(!memory_reclaimer_enabled());
+        unsafe {
+            std::env::remove_var("AXON_ENABLE_MEMORY_RECLAIMER");
+        }
+    }
+
+    #[test]
+    fn test_memory_reclaimer_min_anon_bytes_uses_env_override() {
+        unsafe {
+            std::env::set_var("AXON_MEMORY_RECLAIMER_MIN_ANON_MB", "2048");
+        }
+        assert_eq!(
+            memory_reclaimer_min_anon_bytes(),
+            2_048 * 1024 * 1024
+        );
+        unsafe {
+            std::env::remove_var("AXON_MEMORY_RECLAIMER_MIN_ANON_MB");
         }
     }
 

@@ -75,6 +75,20 @@ pub fn duckdb_memory_snapshot(store: &GraphStore) -> DuckDbMemorySnapshot {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub fn malloc_trim_system_allocator() -> bool {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+
+    unsafe { malloc_trim(0) != 0 }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn malloc_trim_system_allocator() -> bool {
+    false
+}
+
 pub fn parse_proc_status_kb(content: &str) -> ProcessMemorySnapshot {
     let mut snapshot = ProcessMemorySnapshot::default();
 
@@ -134,7 +148,7 @@ fn parse_u64_value(value: Option<&serde_json::Value>) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{duckdb_storage_snapshot, parse_proc_status_kb};
+    use super::{duckdb_storage_snapshot, malloc_trim_system_allocator, parse_proc_status_kb};
     use crate::graph::GraphStore;
     use tempfile::tempdir;
 
@@ -164,5 +178,10 @@ mod tests {
             snapshot.db_total_bytes,
             snapshot.db_file_bytes + snapshot.db_wal_bytes
         );
+    }
+
+    #[test]
+    fn malloc_trim_helper_is_callable() {
+        let _ = malloc_trim_system_allocator();
     }
 }

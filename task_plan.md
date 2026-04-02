@@ -45,11 +45,11 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 - [x] Distinguer `RssAnon` / `RssFile` / `RssShmem` dans la télémétrie runtime.
 - [x] Exposer les métriques DuckDB utiles (`duckdb_memory()`, `duckdb_temporary_files()`, taille DB/WAL).
 - [x] Vérifier sur un run réel si le pic mémoire est majoritairement allocateur, cache fichier, ou working set DuckDB.
-- [ ] Définir ensuite une expérimentation prudente sur purge/trim/checkpoint/allocateur.
+- [x] Définir ensuite une expérimentation prudente sur purge/trim/checkpoint/allocateur.
 
 ### Phase 8: Causalité `pending`
 - [x] Ajouter une première vérité persistée sur la cause de retour en `pending`.
-- [ ] Couvrir toutes les transitions `pending/indexing/indexed/...` avec une causalité canonique complète.
+- [x] Couvrir les transitions critiques `pending/indexing/indexed/...` avec une causalité canonique exploitable, y compris les échecs de queue/commit.
 - [x] Exposer ces causes dans les vues opératoires et MCP.
 - [x] Couvrir explicitement les transitions de scheduling `pending -> indexing` et `pending différé`.
 
@@ -62,16 +62,22 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 - [x] Convertir le scanner en producteur d’ingress.
 - [x] Réaligner la vérité MCP/opératoire pour distinguer ingress buffer vs backlog canonique.
 
+### Phase 10: Séparation DB lecture/écriture exploitable
+- [x] Router les lectures pures sur `reader_ctx`.
+- [x] Préserver la fraîcheur immédiate après write avec une garde courte.
+- [x] Faire passer les chemins SQL bruts par une gateway qui sépare lecture et mutation.
+- [x] Rerouter les lectures techniques lourdes hors du writer quand cela est sûr.
+
 ## Working Assumptions
 - Les modifications Git actuellement visibles sont principalement des artefacts de runtime/devenv et non un signal suffisant de travail produit.
 - Toute conclusion tirée hors `devenv shell` est non fiable pour ce dépôt.
 - Les documents `progress.md` et `STATE.md` peuvent surestimer le niveau réel de fermeture.
 
 ## Current Priority
-1. Introduire un tampon mémoire d’ingress entre `Watcher/Scanner` et `DuckDB` pour séparer découverte brute et décision canonique.
-2. Garder `DuckDB` comme vérité de `pending/indexing/indexed` et pousser uniquement des batchs canoniques depuis l’ingress buffer.
-3. Finir ensuite la causalité complète de la machine d’état une fois l’ingress stabilisé.
-4. Ouvrir ensuite une expérimentation mémoire prudente sur la base des mesures `RssAnon`, pas avant.
+1. Geler la tranche finale hors dashboard par validation complète puis commit/push.
+2. Garder `DuckDB` comme vérité de `pending/indexing/indexed` avec ingress amorti en mémoire.
+3. Préserver la causalité explicite pour toute future extension du scheduler ou du writer.
+4. Observer le reclaimer mémoire idle avant toute politique plus agressive.
 5. Conserver la frontière documentaire maintenant posée:
    - `docs/` = canonique
    - `docs/archive/` = historique

@@ -1,5 +1,6 @@
 use std::ffi::{c_void, CString};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -76,6 +77,7 @@ impl GraphStore {
             let store = Self {
                 pool: pool.clone(),
                 db_path,
+                recent_write_epoch_ms: AtomicU64::new(0),
             };
 
             if !is_memory {
