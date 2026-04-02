@@ -35,23 +35,30 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 - [x] Choisir la prochaine tranche de remédiation par ordre de dépendance.
 - [x] Écrire un handoff de reprise durable si la session se termine avant correction.
 
+### Phase 6: Formalisation de la tranche "ingress guard"
+- [x] Documenter la décision d'architecture pour un filtre amont dérivé de `File`.
+- [x] Fixer les invariants non négociables avant toute implémentation.
+- [x] Écrire un plan d'implémentation TDD minimal-risque.
+- [ ] Exécuter le plan.
+
 ## Working Assumptions
 - Les modifications Git actuellement visibles sont principalement des artefacts de runtime/devenv et non un signal suffisant de travail produit.
 - Toute conclusion tirée hors `devenv shell` est non fiable pour ce dépôt.
 - Les documents `progress.md` et `STATE.md` peuvent surestimer le niveau réel de fermeture.
 
 ## Current Priority
-1. Réduire l'autorité résiduelle Elixir encore présente dans `src/dashboard/lib/axon_nexus/axon/watcher/*` et `src/dashboard/lib/axon_nexus/axon/backpressure_controller.ex`.
-2. Conserver la frontière documentaire maintenant posée:
+1. Comprendre puis corriger le churn d’ingestion qui remet massivement en `pending` des fichiers déjà matérialisés.
+2. Introduire un `FileIngressGuard` dérivé de `File` pour filtrer scanner/watcher avant DuckDB, sans déplacer la priorisation ni les claims hors de la base.
+3. Conserver la frontière documentaire maintenant posée:
    - `docs/` = canonique
    - `docs/archive/` = historique
    - `docs/vision/` = exports live
    - `docs/archive/soll-exports/` = snapshots déplacés
-3. Remplacer la logique de seuil fixe par un scheduler mémoire plus intelligent:
+4. Remplacer la logique de seuil fixe par un scheduler mémoire plus intelligent:
    - démarrage prudent par type de parser et bucket de taille tant que la confiance est faible
    - refus explicite des fichiers trop gros même seuls pour le budget courant
    - admission par lot optimisé sous budget au lieu d'un ordre FIFO naïf
-4. Garder les documents de statut alignés sur la preuve runtime, pas sur des formulations aspiratoires.
+5. Garder les documents de statut alignés sur la preuve runtime, pas sur des formulations aspiratoires.
 
 ## Errors Encountered
 | Error | Attempt | Resolution |

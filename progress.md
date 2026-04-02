@@ -111,3 +111,24 @@
   - test LiveView du cockpit racine
   - test dashboard de frontière legacy
   - test watcher `pipeline_maillons`
+
+## 2026-04-02 - Formalisation de la tranche FileIngressGuard
+- Relecture et consolidation des constats runtime sur:
+  - churn massif de `pending`
+  - goulot `writer_ctx`
+  - qualité MCP hétérogène
+  - absence de filtre amont avant `bulk_insert_files` / `upsert_hot_file`
+- Décision documentée:
+  - nouveau composant canonique nommé `FileIngressGuard`
+  - DuckDB reste seule autorité de priorité, claim et statut
+  - pas de hash fichier dans le MVP
+  - pas de favoritisme canonique du repo courant
+- Aide experte consolidée:
+  - invariants non négociables de cohérence DB/cache
+  - séquence TDD minimal-risque pour rollout watcher puis scanner
+- Artefacts produits:
+  - `docs/plans/2026-04-02-file-ingress-guard-design.md`
+  - `docs/plans/2026-04-02-file-ingress-guard-implementation-plan.md`
+
+## Next Immediate Action
+- Relire les deux artefacts avec l'utilisateur, puis passer à l'implémentation TDD de la phase `FileIngressGuard`.

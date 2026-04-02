@@ -80,3 +80,32 @@
 ## Legacy Context Preserved
 - Une ancienne note de findings affirmait une architecture "Zero-Sleep / MVCC / Zero-SELECT".
 - Cette direction reste utile comme contexte historique, mais elle ne doit pas être traitée comme preuve de stabilité actuelle sans revalidation exécutable.
+
+## 2026-04-02 - Ingress Guard
+
+### 1. Le problème dominant n'est pas l'absence de structure, mais le churn de `File.status`
+- Pour le projet `axon`, la matière structurelle existe déjà sur une grande partie des fichiers actuels.
+- Le symptôme dominant est une remise en `pending` de fichiers déjà matérialisés, probablement par le chemin ordinaire scanner/upsert.
+- Le backlog visible est donc contaminé par des retraitements et des reliquats historiques.
+
+### 2. Le bon levier n'est pas une deuxième vérité, mais un filtre amont dérivé
+- Le composant retenu s'appelle `FileIngressGuard`, pas `MemoryIndex`.
+- Son rôle est de filtrer l'ingress avant écriture DB pour éviter les `upsert` inutiles.
+- DuckDB reste la seule vérité canonique pour `status`, `priority`, claims et scheduling.
+
+### 3. Le MVP doit rester étroit
+- Signal d'entrée du guard: `path + mtime + size`.
+- Pas de hash fichier dans le MVP.
+- Pas de priorité canonique en mémoire.
+- Pas de favoritisme canonique du repo courant.
+- Le guard doit `fail-open` et ne jamais bloquer l'ingestion globale si son état est absent ou divergent.
+
+### 4. Les invariants non négociables sont maintenant clairs
+- aucune transition `pending -> indexing` ne vit seulement en mémoire
+- aucune mise à jour du guard avant commit DB réussi
+- toute divergence cache/DB se résout au profit de la DB
+- recovery startup et invalidations globales doivent reconstruire le guard
+
+### 5. Deux artefacts canoniques ont été créés
+- `docs/plans/2026-04-02-file-ingress-guard-design.md`
+- `docs/plans/2026-04-02-file-ingress-guard-implementation-plan.md`
