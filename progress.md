@@ -251,3 +251,17 @@
 ## Next Immediate Action
 - fermer le reste des transitions encore silencieuses de la machine d'etat
 - mesurer ensuite un vrai run long memoire + backlog sur cette base causale plus complete
+
+## 2026-04-02 - Statut final `indexed` rendu explicite
+- Rouge:
+  - test Rust ajoute pour verifier qu'un commit complet pose une raison finale explicite au lieu de `NULL`
+- Vert:
+  - `insert_file_data_batch` renseigne maintenant `status_reason = 'indexed_success_full'` pour un commit complet reussi
+  - le succes `indexing -> indexed` n'est plus un statut final muet
+- Validation fraiche:
+  - `cargo test --manifest-path Cargo.toml` dans `src/axon-core` vert (`148` + `44`)
+  - `mix test` dans `src/dashboard` vert (`31`)
+
+## Next Immediate Action
+- mesurer un vrai run long memoire + backlog sur cette base causale encore plus complete
+- inventorier ce qui reste silencieux dans les transitions rares avant de declarer la machine d'etat quasi fermee

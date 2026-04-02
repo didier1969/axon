@@ -198,3 +198,9 @@
 - conclusion:
   - on sait maintenant distinguer un backlog simplement en attente d'execution d'un backlog volontairement differe
   - la causalité `pending/indexing` reste incomplète, mais le scheduler n'est plus silencieux sur ces deux transitions majeures
+
+### 14. Le succès complet d'indexation est maintenant explicite
+- `insert_file_data_batch` pose maintenant `status_reason = 'indexed_success_full'` sur le chemin nominal complet
+- conclusion:
+  - `indexed` n'est plus un état final sans cause
+  - la lecture opératoire peut désormais distinguer un succès complet d'un état final dégradé ou d'un reliquat historique

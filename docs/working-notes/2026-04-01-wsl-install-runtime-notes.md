@@ -757,6 +757,25 @@ Limite restante:
 - toute la machine d'état n'est toujours pas complètement couverte
 - il reste à qualifier d'autres transitions silencieuses avant de déclarer la causalité fermée
 
+### 26. Le succès complet n'est plus un statut final muet
+
+Constat:
+
+- un commit complet réussi pose maintenant `status_reason = 'indexed_success_full'`
+
+Impact:
+
+- `indexed` n'est plus un état final sans interprétation
+- on distingue mieux:
+  - succès complet
+  - succès dégradé
+  - skipped
+  - oversized
+
+Limite restante:
+
+- la machine d'état est mieux qualifiée, mais il reste encore des transitions rares à inventorier avant fermeture totale
+
 ## Follow-up Corrections to Plan
 
 Si la fin d'indexation initiale ne peut pas être constatée proprement sans heuristique, ouvrir une tranche corrective sur:

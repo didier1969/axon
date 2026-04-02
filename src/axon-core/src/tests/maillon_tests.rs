@@ -1476,6 +1476,54 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_2r_full_commit_records_success_reason() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/full_success.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .unwrap();
+
+        let extraction = parser::ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "full_success".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                path: path.clone(),
+                content: Some("fn full_success() {}".to_string()),
+                extraction,
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        let row = store
+            .query_json("SELECT status, status_reason FROM File WHERE path = '/tmp/full_success.rs'")
+            .unwrap();
+        assert!(row.contains("indexed"), "{row}");
+        assert!(row.contains("indexed_success_full"), "{row}");
+    }
+
+    #[test]
     fn test_maillon_2p_deferred_pending_file_builds_aging_debt_and_claim_reset() {
         let store = GraphStore::new(":memory:").unwrap();
         let path = "/tmp/deferred_file.rs".to_string();

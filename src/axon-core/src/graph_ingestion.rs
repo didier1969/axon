@@ -457,7 +457,7 @@ impl GraphStore {
                      worker_id = NULL, \
                      needs_reindex = FALSE, \
                      last_error_reason = NULL, \
-                     status_reason = CASE WHEN needs_reindex THEN 'needs_reindex_while_indexing' ELSE NULL END, \
+                     status_reason = CASE WHEN needs_reindex THEN 'needs_reindex_while_indexing' ELSE 'indexed_success_full' END, \
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
