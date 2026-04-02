@@ -354,6 +354,48 @@ mod tests {
     }
 
     #[test]
+    fn test_ingress_buffer_partial_drain_keeps_remaining_entries() {
+        let mut buffer = IngressBuffer::default();
+
+        buffer.record_file(IngressFileEvent::new(
+            "/tmp/a.ex",
+            "proj",
+            10,
+            1,
+            100,
+            IngressSource::Scan,
+            IngressCause::Discovered,
+        ));
+        buffer.record_file(IngressFileEvent::new(
+            "/tmp/b.ex",
+            "proj",
+            20,
+            2,
+            100,
+            IngressSource::Scan,
+            IngressCause::Discovered,
+        ));
+        buffer.record_file(IngressFileEvent::new(
+            "/tmp/c.ex",
+            "proj",
+            30,
+            3,
+            100,
+            IngressSource::Scan,
+            IngressCause::Discovered,
+        ));
+
+        let batch = buffer.drain_batch(2);
+
+        assert_eq!(batch.files.len(), 2);
+        assert_eq!(buffer.buffered_entries(), 1);
+
+        let remaining = buffer.drain_batch(10);
+        assert_eq!(remaining.files.len(), 1);
+        assert_eq!(buffer.buffered_entries(), 0);
+    }
+
+    #[test]
     fn test_ingress_promoter_batch_writes_single_canonical_pending_update() {
         let store = GraphStore::new(":memory:").unwrap();
         let mut buffer = IngressBuffer::default();
@@ -798,6 +840,92 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_2c_legacy_soll_reopen_adds_vision_goal_column() {
+        let db_root = std::env::temp_dir().join(format!(
+            "axon-legacy-soll-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&db_root);
+        std::fs::create_dir_all(&db_root).unwrap();
+
+        let db_root_str = db_root.to_string_lossy().to_string();
+        let store = GraphStore::new(&db_root_str).unwrap();
+
+        store.execute("DROP TABLE soll.Vision;").unwrap();
+        store
+            .execute(
+                "CREATE TABLE soll.Vision (id VARCHAR PRIMARY KEY DEFAULT 'VIS-AXO-001', title VARCHAR, description VARCHAR, metadata VARCHAR)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.Vision (id, title, description, metadata) VALUES ('VIS-AXO-001', 'Legacy Vision', 'Desc', '{}')",
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = GraphStore::new(&db_root_str).unwrap();
+        reopened
+            .execute(
+                "UPDATE soll.Vision SET goal = 'Truthful context', metadata = '{\"migrated\":true}' WHERE id = 'VIS-AXO-001'",
+            )
+            .unwrap();
+
+        let row = reopened
+            .query_json("SELECT title, description, goal, metadata FROM soll.Vision WHERE id = 'VIS-AXO-001'")
+            .unwrap();
+        assert!(row.contains("Legacy Vision"), "{row}");
+        assert!(row.contains("Truthful context"), "{row}");
+        assert!(row.contains("migrated"), "{row}");
+
+        let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
+    fn test_maillon_2c_legacy_soll_reopen_adds_decision_rationale_column() {
+        let db_root = std::env::temp_dir().join(format!(
+            "axon-legacy-soll-decision-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&db_root);
+        std::fs::create_dir_all(&db_root).unwrap();
+
+        let db_root_str = db_root.to_string_lossy().to_string();
+        let store = GraphStore::new(&db_root_str).unwrap();
+
+        store.execute("DROP TABLE soll.Decision;").unwrap();
+        store
+            .execute(
+                "CREATE TABLE soll.Decision (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, status VARCHAR, context VARCHAR, metadata VARCHAR)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.Decision (id, title, description, status, context, metadata) VALUES ('DEC-AXO-001', 'Legacy Decision', 'Desc', 'accepted', 'Ctx', '{}')",
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = GraphStore::new(&db_root_str).unwrap();
+        reopened
+            .execute(
+                "UPDATE soll.Decision SET rationale = 'Because truth matters', metadata = '{\"migrated\":true}' WHERE id = 'DEC-AXO-001'",
+            )
+            .unwrap();
+
+        let row = reopened
+            .query_json("SELECT title, description, context, rationale, metadata FROM soll.Decision WHERE id = 'DEC-AXO-001'")
+            .unwrap();
+        assert!(row.contains("Legacy Decision"), "{row}");
+        assert!(row.contains("Because truth matters"), "{row}");
+        assert!(row.contains("migrated"), "{row}");
+
+        let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
     fn test_maillon_2c_embedding_version_drift_resets_only_embedding_layers() {
         let db_root = std::env::temp_dir().join(format!(
             "axon-embedding-soft-reset-{}-{}",
@@ -1191,6 +1319,38 @@ mod tests {
         assert!(row.contains("dir_event.ex"));
         assert!(row.contains("pending"));
         assert!(row.contains("900"));
+    }
+
+    #[test]
+    fn test_maillon_2h2_watcher_ignores_noisy_directory_event_before_subtree_hint() {
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        let noisy = project.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&noisy).unwrap();
+        std::fs::write(noisy.join("ignored.ex"), "defmodule Ignored do\nend\n").unwrap();
+
+        let ingress = shared_ingress_buffer();
+        let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
+
+        let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            root,
+            &project.join("node_modules"),
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+            &ingress,
+        )
+        .unwrap();
+
+        assert!(
+            !staged,
+            "Un repertoire bruité ne doit pas produire de subtree_hint"
+        );
+
+        let locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(locked.subtree_hint_entries(), 0);
+        assert_eq!(locked.buffered_entries(), 0);
     }
 
     #[test]

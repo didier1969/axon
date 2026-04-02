@@ -101,6 +101,7 @@ impl GraphStore {
 
             store.init_schema(is_memory)?;
             store.ensure_additive_schema()?;
+            store.ensure_additive_soll_schema()?;
             store.ensure_runtime_compatibility()?;
             store.recover_interrupted_indexing()?;
             store.execute("CHECKPOINT;")?;
@@ -262,6 +263,25 @@ impl GraphStore {
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS status_reason VARCHAR")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS defer_count BIGINT DEFAULT 0")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_deferred_at_ms BIGINT")?;
+        Ok(())
+    }
+
+    fn ensure_additive_soll_schema(&self) -> Result<()> {
+        self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS goal VARCHAR")?;
+        self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+
+        self.execute("ALTER TABLE soll.Pillar ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS status VARCHAR")?;
+        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS priority VARCHAR")?;
+        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS description VARCHAR")?;
+        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS context VARCHAR")?;
+        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS rationale VARCHAR")?;
+        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Milestone ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Validation ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Concept ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Stakeholder ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
         Ok(())
     }
 

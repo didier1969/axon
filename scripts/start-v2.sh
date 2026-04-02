@@ -10,6 +10,43 @@ cd "$PROJECT_ROOT"
 WATCH_ROOT="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
 PROJECTS_ROOT="${AXON_PROJECTS_ROOT:-$WATCH_ROOT}"
 REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
+RUNTIME_MODE="${AXON_RUNTIME_MODE:-full}"
+START_DASHBOARD=1
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --full)
+            RUNTIME_MODE="full"
+            ;;
+        --read-only|--readonly)
+            RUNTIME_MODE="read_only"
+            ;;
+        --mcp-only|--mcponly)
+            RUNTIME_MODE="mcp_only"
+            START_DASHBOARD=0
+            ;;
+        --no-dashboard)
+            START_DASHBOARD=0
+            ;;
+        --help|-h)
+            cat <<'EOF'
+Usage: ./scripts/start-v2.sh [--full|--read-only|--mcp-only] [--no-dashboard]
+
+Modes:
+  --full        Full runtime: scan + watcher + ingestion + SQL/MCP + dashboard
+  --read-only   SQL/MCP + dashboard only, without scan/watcher/ingestion workers
+  --mcp-only    SQL/MCP only, without dashboard and without scan/watcher/ingestion workers
+EOF
+            exit 0
+            ;;
+        *)
+            echo "❌ Unknown option: $1"
+            echo "   Use --help to list supported modes."
+            exit 1
+            ;;
+    esac
+    shift
+done
 
 if ! command -v tmux >/dev/null 2>&1; then
     echo "❌ tmux is required to start Axon via scripts/start-v2.sh"
@@ -154,6 +191,7 @@ fi
 echo "🚀 Starting Axon in TMUX session 'axon'..."
 echo "📂 Watch root: $WATCH_ROOT"
 echo "🗂️ Projects root: $PROJECTS_ROOT"
+echo "🧭 Runtime mode: $RUNTIME_MODE"
 
 # Configuration
 export PHX_PORT=44127
@@ -180,11 +218,13 @@ tmux new-session -d -s axon -n "core"
 # Start Data Plane
 # We use 'devenv shell' to ensure the runtime matches the pinned project toolchain.
 # NEXUS v10.8: We force fastembed to use the system's libonnxruntime.so to prevent C++ aborts.
-tmux send-keys -t axon:core "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
+tmux send-keys -t axon:core "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
 
-# Start Visualization Plane
-tmux new-window -t axon -n "nexus"
-tmux send-keys -t axon:nexus "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+if [ "$START_DASHBOARD" = "1" ]; then
+    # Start Visualization Plane
+    tmux new-window -t axon -n "nexus"
+    tmux send-keys -t axon:nexus "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+fi
 
 echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 120s)..."
 
@@ -201,12 +241,16 @@ for i in {1..120}; do
         fi
     fi
 
-    if [ "$DASHBOARD_READY" = false ]; then
+    if [ "$START_DASHBOARD" = "1" ] && [ "$DASHBOARD_READY" = false ]; then
         # Dashboard is ready if the Phoenix port is responding
         if nc -z localhost $PHX_PORT 2>/dev/null; then
             echo "✅ Axon Dashboard is Ready."
             DASHBOARD_READY=true
         fi
+    fi
+
+    if [ "$START_DASHBOARD" = "0" ]; then
+        DASHBOARD_READY=true
     fi
 
     if [ "$CORE_READY" = true ] && [ "$DASHBOARD_READY" = true ]; then
@@ -217,7 +261,7 @@ for i in {1..120}; do
 done
 
 if [ "$CORE_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Core."; fi
-if [ "$DASHBOARD_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Dashboard."; fi
+if [ "$START_DASHBOARD" = "1" ] && [ "$DASHBOARD_READY" = false ]; then echo "⚠️ Timeout waiting for Axon Dashboard."; fi
 
 if [ "$CORE_READY" = false ] || [ "$DASHBOARD_READY" = false ]; then
     echo "❌ Axon did not reach a fully ready state within the startup budget."
@@ -258,7 +302,9 @@ if [ -z "$WSL_IP" ]; then WSL_IP="127.0.0.1"; fi
 echo ""
 echo "🛡️ Axon is rising in TMUX session 'axon'."
 echo "To view processes: 'tmux attach -t axon'"
-echo "Dashboard: http://$WSL_IP:44127/cockpit"
+if [ "$START_DASHBOARD" = "1" ]; then
+    echo "Dashboard: http://$WSL_IP:44127/cockpit"
+fi
 echo "SQL Gateway: http://$WSL_IP:44129/sql"
 echo "MCP Server: http://$WSL_IP:44129/mcp"
 echo "Stop services with: ./scripts/stop-v2.sh"

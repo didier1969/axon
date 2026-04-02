@@ -365,3 +365,24 @@
 - conclusion:
   - on ne montre plus seulement des parametres machine
   - on montre enfin la verite d'exploitation du systeme
+
+### 27. `soll.db` derive encore du schema courant
+- fait confirme:
+  - le restore `axon_restore_soll` a d'abord echoue car `soll.Vision` ne portait pas `goal`
+  - apres correction additive, le restore a ensuite echoue car `soll.Decision` ne portait pas `rationale`
+- conclusion:
+  - `CREATE TABLE IF NOT EXISTS` ne suffit pas pour `SOLL`
+  - il faut une migration additive explicite des tables `soll.*` au boot, comme pour `File`
+
+### 28. Les lectures `SOLL` sur `reader_ctx` peuvent etre stale sur la base attachee
+- fait confirme:
+  - `axon_soll_manager` retournait un succes de creation `Stakeholder`
+  - mais `SELECT * FROM soll.Stakeholder` renvoyait `0` ligne via le dataplane
+  - un test file-backed a reproduit le symptome apres expiration de la fenetre de fraicheur writer
+- cause:
+  - `reader_ctx` lisait une vue stale de `sanctuary/soll.db`
+  - les ecritures etaient bien faites par le writer, mais la lecture read-only n'en voyait pas toujours l'etat courant
+- correction:
+  - toute requete `soll.` est maintenant routee vers `writer_ctx`
+- conclusion:
+  - pour `SOLL`, la coherence immediate compte plus que l'isolation lecture seule

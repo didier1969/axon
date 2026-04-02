@@ -16,6 +16,39 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tracing::{error, info};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeMode {
+    Full,
+    ReadOnly,
+    McpOnly,
+}
+
+impl RuntimeMode {
+    fn from_env() -> Self {
+        match std::env::var("AXON_RUNTIME_MODE")
+            .unwrap_or_else(|_| "full".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "read_only" | "readonly" | "read-only" => Self::ReadOnly,
+            "mcp_only" | "mcponly" | "mcp-only" => Self::McpOnly,
+            _ => Self::Full,
+        }
+    }
+
+    fn service_options(self) -> main_services::RuntimeServiceOptions {
+        match self {
+            Self::Full => main_services::RuntimeServiceOptions::full(),
+            Self::ReadOnly | Self::McpOnly => main_services::RuntimeServiceOptions::read_only(),
+        }
+    }
+
+    fn ingestion_enabled(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let profile = RuntimeProfile::detect();
 
@@ -32,9 +65,11 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "/home/dstadel/projects".to_string());
             let projects_root = projects_root_env.leak();
             let db_root = "/home/dstadel/projects/axon/.axon/graph_v2";
+            let runtime_mode = RuntimeMode::from_env();
 
             info!("Starting Axon Core v2.2 (Nexus Seal - Zero-Sleep Edition)");
             info!("Engine Boot Time: {}", boot_time);
+            info!("Runtime Mode: {:?}", runtime_mode);
             info!(
                 "Runtime Profile: cpu_cores={}, ram_total_gb={}, ram_budget_gb={}, ingestion_memory_budget_gb={}, gpu_present={}, workers={}, max_blocking_threads={}, queue_capacity={}",
                 profile.cpu_cores,
@@ -108,33 +143,38 @@ fn main() -> anyhow::Result<()> {
                 queue_store.clone(),
                 results_tx.clone(),
                 num_workers,
+                runtime_mode.service_options(),
             );
 
             let projects_root_str = projects_root.to_string();
             let current_boot_id = Arc::new(tokio::sync::Mutex::new(String::new()));
 
-            main_background::spawn_autonomous_ingestor(graph_store.clone(), queue_store.clone());
-            main_background::spawn_ingress_promoter(
-                graph_store.clone(),
-                projects_root_str.clone(),
-                file_ingress_guard.clone(),
-                ingress_buffer.clone(),
-            );
-            main_background::spawn_memory_reclaimer(queue_store.clone(), ingress_buffer.clone());
+            if runtime_mode.ingestion_enabled() {
+                main_background::spawn_autonomous_ingestor(graph_store.clone(), queue_store.clone());
+                main_background::spawn_ingress_promoter(
+                    graph_store.clone(),
+                    projects_root_str.clone(),
+                    file_ingress_guard.clone(),
+                    ingress_buffer.clone(),
+                );
+                main_background::spawn_memory_reclaimer(queue_store.clone(), ingress_buffer.clone());
 
-            main_background::spawn_hot_delta_watcher(
-                graph_store.clone(),
-                projects_root_str.clone(),
-                file_ingress_guard.clone(),
-                ingress_buffer.clone(),
-            );
+                main_background::spawn_hot_delta_watcher(
+                    graph_store.clone(),
+                    projects_root_str.clone(),
+                    file_ingress_guard.clone(),
+                    ingress_buffer.clone(),
+                );
 
-            main_background::spawn_initial_scan(
-                graph_store.clone(),
-                projects_root_str.clone(),
-                file_ingress_guard.clone(),
-                ingress_buffer.clone(),
-            );
+                main_background::spawn_initial_scan(
+                    graph_store.clone(),
+                    projects_root_str.clone(),
+                    file_ingress_guard.clone(),
+                    ingress_buffer.clone(),
+                );
+            } else {
+                info!("Ingress, watcher, scan and autonomous ingestion disabled by runtime mode.");
+            }
 
             // --- Telemetry Listener Loop (Elixir/Dashboard) ---
             loop {

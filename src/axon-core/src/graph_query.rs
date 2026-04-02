@@ -33,8 +33,12 @@ impl GraphStore {
         Self::current_epoch_ms().saturating_sub(last_write) <= Self::reader_freshness_grace_ms()
     }
 
+    fn query_targets_attached_soll(query: &str) -> bool {
+        query.to_ascii_lowercase().contains("soll.")
+    }
+
     pub(crate) fn query_json_on_reader(&self, query: &str) -> Result<String> {
-        if self.should_route_read_to_writer() {
+        if self.should_route_read_to_writer() || Self::query_targets_attached_soll(query) {
             let writer = self
                 .pool
                 .writer_ctx
@@ -63,7 +67,7 @@ impl GraphStore {
     }
 
     pub(crate) fn query_count_on_reader(&self, query: &str) -> Result<i64> {
-        if self.should_route_read_to_writer() {
+        if self.should_route_read_to_writer() || Self::query_targets_attached_soll(query) {
             let writer = self
                 .pool
                 .writer_ctx

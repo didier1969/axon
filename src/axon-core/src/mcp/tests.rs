@@ -1001,6 +1001,48 @@ fn test_axon_soll_manager_auto_id() {
 }
 
 #[test]
+fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("graph_v2");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let server = McpServer::new(store.clone());
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "stakeholder",
+                "data": {
+                    "name": "Runtime Rust",
+                    "role": "Owns ingestion and canonical persistence"
+                }
+            }
+        })),
+        id: Some(json!(101)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(content.contains("Entité SOLL créée"), "{content}");
+
+    std::thread::sleep(std::time::Duration::from_millis(75));
+
+    let count = store
+        .query_count("SELECT count(*) FROM soll.Stakeholder WHERE name = 'Runtime Rust'")
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
 fn test_axon_export_soll() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO soll.Vision (id, title, description, goal, metadata) VALUES ('VIS-AXO-001', 'Test Vision', 'Desc', 'Goal', '{}')").unwrap();

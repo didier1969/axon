@@ -417,3 +417,35 @@
 ## Next Immediate Action
 - laisser tourner le runtime actuel sans redemarrage tant que la fenetre d'indexation est critique
 - effectuer un unique restart Phoenix plus tard pour exposer la nouvelle UI sur l'instance servie
+
+## 2026-04-03 - Reprise SOLL et derive de schema identifiee
+- Vert:
+  - schema `SOLL` revalide dans `graph_bootstrap.rs` et `tools_soll.rs`
+  - snapshot canonique courant redige dans `docs/vision/SOLL_EXPORT_2026-04-03_002835.md`
+  - derive reelle prouvee sur `soll.db`:
+    - `soll.Vision.goal` absent sur ancienne base
+    - `soll.Decision.rationale` absent sur ancienne base
+  - migration additive `SOLL` ajoutee au boot
+  - tests cibles verts:
+    - legacy `Vision -> goal`
+    - legacy `Decision -> rationale`
+- En cours:
+  - rien sur le schema `SOLL`; le point restant est le suivi du reste du runtime
+
+## 2026-04-03 - SOLL stabilise en mode `mcp_only`
+- Vert:
+  - ajout des modes runtime `full`, `read_only`, `mcp_only`
+  - redemarrage de maintenance valide en `mcp_only`
+  - `axon_restore_soll` restaure correctement:
+    - `Vision=1`
+    - `Pillar=6`
+    - `Concept=6`
+    - `Milestone=5`
+    - `Requirement=7`
+    - `Decision=7`
+    - `Validation=3`
+  - `Stakeholder=3` visibles de nouveau via le dataplane
+  - `axon_validate_soll` retourne `0 violation`
+  - bug de lecture stale identifie puis corrige:
+    - les lectures `soll.*` passent maintenant par `writer_ctx`
+  - test de regression ajoute pour la creation `Stakeholder` sur store file-backed

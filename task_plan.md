@@ -76,6 +76,13 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 - [x] Verrouiller le rendu par tests LiveView.
 - [x] Valider `mix test`, `mix compile` et `mix precommit` sans redemarrer le runtime courant.
 
+### Phase 12: Revalidation et repeuplement SOLL
+- [x] Migrer additivement les tables `soll.*` au boot.
+- [x] Restaurer le snapshot `SOLL_EXPORT_2026-04-03_002835.md`.
+- [x] Completer les stakeholders et verifier les liens minimaux.
+- [x] Valider `axon_validate_soll`.
+- [x] Corriger la lecture stale de `soll.db` sur `reader_ctx`.
+
 ## Working Assumptions
 - Les modifications Git actuellement visibles sont principalement des artefacts de runtime/devenv et non un signal suffisant de travail produit.
 - Toute conclusion tirée hors `devenv shell` est non fiable pour ce dépôt.
