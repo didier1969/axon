@@ -104,6 +104,12 @@ mod tests {
             1,
             "Le sélecteur doit être capable de tirer les fichiers pending"
         );
+
+        let row = store
+            .query_json("SELECT status, status_reason FROM File WHERE path = '/tmp/a.rs'")
+            .unwrap();
+        assert!(row.contains("indexing"), "{row}");
+        assert!(row.contains("claimed_for_indexing"), "{row}");
     }
 
     #[test]
@@ -1485,7 +1491,7 @@ mod tests {
             .unwrap();
 
         let deferred_row = store
-            .query_json("SELECT defer_count, last_deferred_at_ms FROM File WHERE path = '/tmp/deferred_file.rs'")
+            .query_json("SELECT defer_count, last_deferred_at_ms, status_reason FROM File WHERE path = '/tmp/deferred_file.rs'")
             .unwrap();
         assert!(
             deferred_row.contains("2"),
@@ -1495,6 +1501,10 @@ mod tests {
             !deferred_row.contains("null"),
             "Le timestamp de dernier déferrement doit être renseigné"
         );
+        assert!(
+            deferred_row.contains("deferred_by_scheduler"),
+            "Le déferrement doit aussi exposer une cause opératoire"
+        );
 
         let claimed = store
             .claim_pending_paths(std::slice::from_ref(&path))
@@ -1502,7 +1512,7 @@ mod tests {
         assert_eq!(claimed.len(), 1, "Le fichier différé doit rester claimable");
 
         let claimed_row = store
-            .query_json("SELECT status, defer_count, last_deferred_at_ms FROM File WHERE path = '/tmp/deferred_file.rs'")
+            .query_json("SELECT status, defer_count, last_deferred_at_ms, status_reason FROM File WHERE path = '/tmp/deferred_file.rs'")
             .unwrap();
         assert!(claimed_row.contains("indexing"));
         assert!(
@@ -1513,6 +1523,39 @@ mod tests {
             claimed_row.contains("null"),
             "Le timestamp de déferrement doit être purgé après claim"
         );
+        assert!(
+            claimed_row.contains("claimed_for_indexing"),
+            "Une claim effective doit remplacer la raison de backlog par une raison d'exécution"
+        );
+    }
+
+    #[test]
+    fn test_tombstoned_late_writer_update_keeps_deleted_reason() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/tombstoned_late.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .unwrap();
+        store
+            .tombstone_missing_path(Path::new(&path))
+            .expect("tombstone should succeed");
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileSkipped {
+                path: path.clone(),
+                reason: "Read Error: vanished".to_string(),
+                trace_id: "trace-late".to_string(),
+                t0: 0,
+                t1: 0,
+                t2: 0,
+            }])
+            .unwrap();
+
+        let row = store
+            .query_json("SELECT status, status_reason FROM File WHERE path = '/tmp/tombstoned_late.rs'")
+            .unwrap();
+        assert!(row.contains("deleted"), "{row}");
+        assert!(row.contains("tombstoned_missing"), "{row}");
     }
 
     #[test]

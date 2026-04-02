@@ -236,3 +236,18 @@
   - backlog reel
   - backlog historiquement rematerialise
 - mesurer `RssAnon` vs `RssFile` en charge soutenue avant toute action de purge memoire
+
+## 2026-04-02 - Causalite de scheduling: claim + defer explicites
+- Rouge:
+  - test Rust ajoute pour verifier qu'un `fetch_pending_batch` pose une raison `claimed_for_indexing`
+  - test Rust ajoute pour verifier qu'un deferrement pose `deferred_by_scheduler` puis qu'une claim remplace cette raison
+- Vert:
+  - `fetch_pending_batch` et `claim_pending_paths` renseignent maintenant `status_reason = 'claimed_for_indexing'`
+  - `mark_pending_files_deferred` renseigne maintenant `status_reason = 'deferred_by_scheduler'`
+  - les transitions `pending -> indexing` et `pending` differe deviennent enfin explicables sans lecture de code
+- Validation fraiche:
+  - `cargo test --manifest-path Cargo.toml` dans `src/axon-core` vert (`147` + `44`)
+
+## Next Immediate Action
+- fermer le reste des transitions encore silencieuses de la machine d'etat
+- mesurer ensuite un vrai run long memoire + backlog sur cette base causale plus complete

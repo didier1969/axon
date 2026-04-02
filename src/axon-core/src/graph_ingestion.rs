@@ -545,7 +545,7 @@ impl GraphStore {
 
             let claim_query = format!(
                 "UPDATE File
-                 SET status = 'indexing', worker_id = {}, defer_count = 0, last_deferred_at_ms = NULL
+                 SET status = 'indexing', worker_id = {}, status_reason = 'claimed_for_indexing', defer_count = 0, last_deferred_at_ms = NULL
                  WHERE path IN (
                     SELECT path FROM File
                     WHERE status = 'pending'
@@ -635,7 +635,7 @@ impl GraphStore {
 
             let claim_query = format!(
                 "UPDATE File
-                 SET status = 'indexing', worker_id = {}, defer_count = 0, last_deferred_at_ms = NULL
+                 SET status = 'indexing', worker_id = {}, status_reason = 'claimed_for_indexing', defer_count = 0, last_deferred_at_ms = NULL
                  WHERE status = 'pending' AND path IN ({});",
                 claim_id, path_list
             );
@@ -700,7 +700,8 @@ impl GraphStore {
         self.execute(&format!(
             "UPDATE File \
              SET defer_count = COALESCE(defer_count, 0) + 1, \
-                 last_deferred_at_ms = {} \
+                 last_deferred_at_ms = {}, \
+                 status_reason = 'deferred_by_scheduler' \
              WHERE status = 'pending' AND path IN ({});",
             now_ms, path_list
         ))

@@ -738,6 +738,25 @@ Limite restante:
 - ces vues décrivent mieux le churn mais ne ferment pas encore toute la causalité de la machine d'état
 - il faut encore mesurer ces notes sur un vrai run long pour distinguer backlog vivant vs reliquat historique
 
+### 25. Les transitions de scheduling portent maintenant une cause opératoire
+
+Constat:
+
+- une claim effective vers `indexing` pose maintenant `status_reason = 'claimed_for_indexing'`
+- un déferrement volontaire par le scheduler pose maintenant `status_reason = 'deferred_by_scheduler'`
+
+Impact:
+
+- on peut enfin distinguer:
+  - un fichier simplement claimé pour exécution
+  - un fichier en backlog différé pour raisons de scheduling/fairness
+- cela réduit encore l'ambiguïté du `pending` observé pendant les runs longs
+
+Limite restante:
+
+- toute la machine d'état n'est toujours pas complètement couverte
+- il reste à qualifier d'autres transitions silencieuses avant de déclarer la causalité fermée
+
 ## Follow-up Corrections to Plan
 
 Si la fin d'indexation initiale ne peut pas être constatée proprement sans heuristique, ouvrir une tranche corrective sur:

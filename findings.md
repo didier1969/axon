@@ -191,3 +191,10 @@
   - répartition `pending` / `indexing`
   - causes backlog dominantes
 - `axon_audit` et `axon_health` utilisent maintenant `project_slug` comme frontière de scope au lieu d’un `path LIKE` ambigu
+
+### 13. Les transitions de scheduling critiques portent maintenant une cause explicite
+- `fetch_pending_batch` et `claim_pending_paths` posent maintenant `status_reason = 'claimed_for_indexing'`
+- `mark_pending_files_deferred` pose maintenant `status_reason = 'deferred_by_scheduler'`
+- conclusion:
+  - on sait maintenant distinguer un backlog simplement en attente d'execution d'un backlog volontairement differe
+  - la causalité `pending/indexing` reste incomplète, mais le scheduler n'est plus silencieux sur ces deux transitions majeures
