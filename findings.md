@@ -204,3 +204,34 @@
 - conclusion:
   - `indexed` n'est plus un état final sans cause
   - la lecture opératoire peut désormais distinguer un succès complet d'un état final dégradé ou d'un reliquat historique
+
+### 15. Le premier run long invalide l'hypothèse dominante "page cache DuckDB"
+- run réel `90s` mesuré via `scripts/monitor_runtime_v2.py`
+- mesures observées:
+  - `RSS`: ~`6.99 GB` à `7.51 GB`
+  - `RssAnon`: ~`6.93 GB` à `7.44 GB`
+  - `RssFile`: ~`67-68 MB`
+  - base DuckDB totale: ~`6.16 GB`
+- conclusion:
+  - la mémoire occupée par Axon n'est pas majoritairement du cache fichier OS
+  - le problème mémoire est beaucoup plus probablement du côté heap/runtime/allocation/working set anonyme
+
+### 16. Le serveur MCP est disponible, mais sa latence reste instable sous run réel
+- benchmark HTTP réel en `3` passes pendant le run:
+  - `15/16` succès à chaque passage
+  - `axon_simulate_mutation` reste en erreur
+  - latence moyenne observée: `~173 ms`, `~51 ms`, `~178 ms`
+- conclusion:
+  - la disponibilité MCP n'est pas le premier problème sur cette fenêtre
+  - la qualité de service n'est pas encore stable, surtout sur `axon_query`, `axon_audit`, `axon_batch`, parfois `axon_impact`
+
+### 17. Le phénomène `0 indexing` persiste pendant un backlog massif
+- pendant la fenêtre mesurée:
+  - `49_008` fichiers connus
+  - `504` terminés
+  - `48_504` pending
+  - `0` indexing
+  - aucune cause backlog dominante visible (`none`)
+- conclusion:
+  - l'incohérence runtime/statuts n'est pas résolue
+  - c'est maintenant le prochain point causal à investiguer avant de conclure sur le scheduler ou le goulot DB

@@ -776,6 +776,72 @@ Limite restante:
 
 - la machine d'état est mieux qualifiée, mais il reste encore des transitions rares à inventorier avant fermeture totale
 
+### 27. Run long réel: mémoire majoritairement anonyme, pas page cache
+
+Constat:
+
+- run réel `90s` mesuré via `scripts/monitor_runtime_v2.py`
+- échantillons stables sur:
+  - `49_008` fichiers connus
+  - `504` terminés
+  - `48_504` pending
+  - `0` indexing
+- mémoire observée:
+  - `RSS`: `6.99 GB` à `7.51 GB`
+  - `RssAnon`: `6.93 GB` à `7.44 GB`
+  - `RssFile`: `67-68 MB`
+  - `db_total`: `~6.16 GB`
+
+Impact:
+
+- l'hypothèse "la RAM est surtout le cache fichier DuckDB" n'est pas confirmée
+- la mémoire occupée par Axon est très majoritairement anonyme
+- une future stratégie de relâchement mémoire devra donc regarder d'abord:
+  - heap/runtime
+  - allocation
+  - working set anonyme
+  - pas seulement `CHECKPOINT`/WAL/page cache
+
+### 28. Disponibilité MCP: bonne sur la fenêtre, latence instable
+
+Constat:
+
+- benchmark HTTP MCP réel en `3` passes pendant le run
+- résultat:
+  - `15/16` succès à chaque passage
+  - `axon_simulate_mutation` reste en erreur
+  - moyenne par passage:
+    - `~173 ms`
+    - `~51 ms`
+    - `~178 ms`
+
+Impact:
+
+- le serveur MCP reste disponible
+- en revanche la qualité de service n'est pas stable
+- les outils qui fluctuent le plus sont surtout:
+  - `axon_query`
+  - `axon_audit`
+  - `axon_batch`
+  - parfois `axon_impact`
+
+### 29. L'anomalie `0 indexing` reste ouverte
+
+Constat:
+
+- pendant toute la fenêtre mesurée:
+  - backlog massif
+  - aucun fichier visible en `indexing`
+  - aucune cause backlog dominante remontée (`none`)
+
+Impact:
+
+- l'incohérence entre runtime réel et statuts persistés n'est pas résolue
+- c'est maintenant le prochain point causal prioritaire avant de conclure sur:
+  - le scheduler
+  - la contention lecture/écriture DuckDB
+  - ou la seule observabilité
+
 ## Follow-up Corrections to Plan
 
 Si la fin d'indexation initiale ne peut pas être constatée proprement sans heuristique, ouvrir une tranche corrective sur:

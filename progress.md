@@ -265,3 +265,34 @@
 ## Next Immediate Action
 - mesurer un vrai run long memoire + backlog sur cette base causale encore plus complete
 - inventorier ce qui reste silencieux dans les transitions rares avant de declarer la machine d'etat quasi fermee
+
+## 2026-04-02 - Run long V2: memoire reelle + disponibilite MCP
+- Vert:
+  - nouveau script operatoire [scripts/monitor_runtime_v2.py](/home/dstadel/projects/axon/scripts/monitor_runtime_v2.py)
+  - monitoring reel sur `90s` avec export CSV dans `.axon/observability/runtime_monitor_2026-04-02.csv`
+  - benchmark MCP HTTP reel relance en `3` passes pendant le run
+- Resultats observes:
+  - backlog stable et anormalement peu actif pendant la fenetre:
+    - `49_008` fichiers connus
+    - `504` termines
+    - `48_504` pending
+    - `0` indexing
+  - memoire:
+    - `RSS` entre `6.99 GB` et `7.51 GB`
+    - `RssAnon` entre `6.93 GB` et `7.44 GB`
+    - `RssFile` stable autour de `67-68 MB`
+    - base DuckDB totale autour de `6.16 GB`
+  - MCP:
+    - `15/16` succes sur chacun des `3` passages
+    - `axon_simulate_mutation` reste en erreur
+    - latence moyenne observee selon le passage: `~173 ms`, `~51 ms`, `~178 ms`
+    - pics visibles sur `axon_query`, `axon_audit`, `axon_batch`, parfois `axon_impact`
+- Conclusion technique:
+  - la memoire observee n'est pas principalement du cache fichier DuckDB (`RssFile` tres faible)
+  - le gros du RSS est du cote `RssAnon`, donc plutot heap/runtime/allocation que page cache
+  - la disponibilite MCP est bonne sur la fenetre mesuree, mais la latence n'est pas stable
+  - la table `File.status` reste problematique pendant ce run (`0 indexing` malgre un backlog massif)
+
+## Next Immediate Action
+- investiguer pourquoi la fenetre mesuree montre `0 indexing` avec backlog massif
+- ouvrir ensuite la correction architecturale lecture/ecriture DB avec preuves runtime en main

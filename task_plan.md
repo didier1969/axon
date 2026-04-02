@@ -44,7 +44,7 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 ### Phase 7: Investigation mémoire post-pic
 - [x] Distinguer `RssAnon` / `RssFile` / `RssShmem` dans la télémétrie runtime.
 - [x] Exposer les métriques DuckDB utiles (`duckdb_memory()`, `duckdb_temporary_files()`, taille DB/WAL).
-- [ ] Vérifier si le pic mémoire est majoritairement allocateur, cache fichier, ou working set DuckDB.
+- [x] Vérifier sur un run réel si le pic mémoire est majoritairement allocateur, cache fichier, ou working set DuckDB.
 - [ ] Définir ensuite une expérimentation prudente sur purge/trim/checkpoint/allocateur.
 
 ### Phase 8: Causalité `pending`
