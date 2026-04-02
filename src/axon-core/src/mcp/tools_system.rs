@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 
 use super::format::format_table_from_json;
 use super::McpServer;
+use crate::ingress_buffer::ingress_metrics_snapshot;
 use crate::runtime_observability::{
     duckdb_memory_snapshot, duckdb_storage_snapshot, process_memory_snapshot,
 };
@@ -117,6 +118,7 @@ impl McpServer {
         let memory = process_memory_snapshot();
         let storage = duckdb_storage_snapshot(&self.graph_store);
         let duckdb_memory = duckdb_memory_snapshot(&self.graph_store);
+        let ingress = ingress_metrics_snapshot();
         let backlog_reason_rows = self
             .graph_store
             .query_json(
@@ -182,6 +184,14 @@ impl McpServer {
             **Mémoire DuckDB :**\n\
             *   Mémoire allouée : {}\n\
             *   Temporaire/spill : {}\n\n\
+            **Ingress Buffer :**\n\
+            *   Activé : {}\n\
+            *   Entrées bufferisées : {}\n\
+            *   Indices de sous-arbre : {}\n\
+            *   Événements collapsés : {}\n\
+            *   Flushs : {}\n\
+            *   Dernier flush : {} ms\n\
+            *   Dernier lot promu : {}\n\n\
             *Note aux Agents IA : Toute erreur 'TCP auth closed' observée dans des logs Elixir n'est pas liée à ce serveur MCP. Axon Core V2 est 100% autonome.*",
             format_bytes_human(memory.rss_bytes),
             format_bytes_human(memory.rss_anon_bytes),
@@ -204,6 +214,13 @@ impl McpServer {
             format_bytes_human(storage.db_total_bytes),
             format_bytes_human(duckdb_memory.memory_usage_bytes),
             format_bytes_human(duckdb_memory.temporary_storage_bytes),
+            if ingress.enabled { "oui" } else { "non" },
+            ingress.buffered_entries,
+            ingress.subtree_hints,
+            ingress.collapsed_total,
+            ingress.flush_count,
+            ingress.last_flush_duration_ms,
+            ingress.last_promoted_count,
         );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }

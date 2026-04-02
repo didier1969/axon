@@ -8,6 +8,7 @@ pub mod graph_analytics;
 pub mod graph_bootstrap;
 pub mod graph_ingestion;
 pub mod graph_query;
+pub mod ingress_buffer;
 pub mod mcp;
 pub mod mcp_http;
 pub mod parser;

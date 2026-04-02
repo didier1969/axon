@@ -9,6 +9,7 @@ use libloading::Symbol as LibSymbol;
 
 use crate::file_ingress_guard::FileIngressRow;
 use crate::graph::{ExecFunc, GraphStore, PendingFile};
+use crate::ingress_buffer::{IngressDrainBatch, IngressPromotionStats, IngressSource};
 use crate::queue::ProcessingMode;
 use crate::watcher_probe;
 
@@ -215,6 +216,42 @@ impl GraphStore {
         Ok(())
     }
 
+    pub fn promote_ingress_batch(
+        &self,
+        batch: &IngressDrainBatch,
+    ) -> Result<IngressPromotionStats> {
+        let mut queries = Vec::new();
+
+        for file in &batch.files {
+            let source = match file.source {
+                IngressSource::Watcher => FileUpsertSource::HotDelta,
+                IngressSource::Scan => FileUpsertSource::Scan,
+            };
+            queries.extend(Self::upsert_file_queries(
+                &file.path,
+                &file.project_slug,
+                file.size,
+                file.mtime,
+                file.priority,
+                source,
+            ));
+        }
+
+        if !queries.is_empty() {
+            self.execute_batch(&queries)?;
+        }
+
+        let mut promoted_tombstones = 0usize;
+        for path in &batch.tombstones {
+            promoted_tombstones += self.tombstone_missing_path(Path::new(path))?;
+        }
+
+        Ok(IngressPromotionStats {
+            promoted_files: batch.files.len(),
+            promoted_tombstones,
+        })
+    }
+
     pub fn tombstone_missing_path(&self, path: &Path) -> Result<usize> {
         let path = path.to_string_lossy().to_string();
         let escaped = Self::escape_sql(&path);
@@ -249,15 +286,18 @@ impl GraphStore {
                 selector
             ));
         queries.push(format!(
-                "DELETE FROM Chunk WHERE source_type = 'symbol' \
+            "DELETE FROM Chunk WHERE source_type = 'symbol' \
                  AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
-                selector
-            ));
+            selector
+        ));
         queries.push(format!(
                 "DELETE FROM Symbol WHERE id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 selector
             ));
-        queries.push(format!("DELETE FROM CONTAINS WHERE source_id IN ({});", selector));
+        queries.push(format!(
+            "DELETE FROM CONTAINS WHERE source_id IN ({});",
+            selector
+        ));
         queries.push(format!(
                 "UPDATE File SET status = 'deleted', worker_id = NULL, needs_reindex = FALSE, status_reason = 'tombstoned_missing' \
                  WHERE path IN ({});",
@@ -299,7 +339,10 @@ impl GraphStore {
             selector
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        Ok(rows.into_iter().filter_map(parse_file_ingress_row).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(parse_file_ingress_row)
+            .collect())
     }
 
     pub fn insert_file_data_batch(&self, tasks: &[crate::worker::DbWriteTask]) -> Result<()> {

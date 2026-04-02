@@ -47,6 +47,13 @@ pub enum BridgeEvent {
         guard_bypassed_total: u64,
         guard_hydrated_entries: u64,
         guard_hydration_duration_ms: u64,
+        ingress_enabled: bool,
+        ingress_buffered_entries: usize,
+        ingress_subtree_hints: usize,
+        ingress_collapsed_total: u64,
+        ingress_flush_count: u64,
+        ingress_last_flush_duration_ms: u64,
+        ingress_last_promoted_count: u64,
         cpu_load: f64,
         ram_load: f64,
         io_wait: f64,
@@ -89,6 +96,13 @@ mod tests {
             guard_bypassed_total: 2,
             guard_hydrated_entries: 512,
             guard_hydration_duration_ms: 18,
+            ingress_enabled: true,
+            ingress_buffered_entries: 12,
+            ingress_subtree_hints: 2,
+            ingress_collapsed_total: 19,
+            ingress_flush_count: 5,
+            ingress_last_flush_duration_ms: 44,
+            ingress_last_promoted_count: 8,
             cpu_load: 61.5,
             ram_load: 47.0,
             io_wait: 12.2,
@@ -121,6 +135,13 @@ mod tests {
         assert!(json.contains("\"guard_bypassed_total\":2"));
         assert!(json.contains("\"guard_hydrated_entries\":512"));
         assert!(json.contains("\"guard_hydration_duration_ms\":18"));
+        assert!(json.contains("\"ingress_enabled\":true"));
+        assert!(json.contains("\"ingress_buffered_entries\":12"));
+        assert!(json.contains("\"ingress_subtree_hints\":2"));
+        assert!(json.contains("\"ingress_collapsed_total\":19"));
+        assert!(json.contains("\"ingress_flush_count\":5"));
+        assert!(json.contains("\"ingress_last_flush_duration_ms\":44"));
+        assert!(json.contains("\"ingress_last_promoted_count\":8"));
         assert!(json.contains("\"cpu_load\":61.5"));
         assert!(json.contains("\"ram_load\":47.0"));
         assert!(json.contains("\"io_wait\":12.2"));

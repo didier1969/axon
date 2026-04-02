@@ -12,6 +12,10 @@ use crate::worker::DbWriteTask;
 mod tests {
     use super::*;
     use crate::file_ingress_guard::{FileIngressGuard, GuardDecision};
+    use crate::ingress_buffer::{
+        IngressBuffer, IngressCause, IngressDrainBatch, IngressFileEvent, IngressSource,
+        SharedIngressBuffer,
+    };
     use once_cell::sync::Lazy;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
@@ -20,6 +24,10 @@ mod tests {
 
     fn lock_file_ingress_guard_env() -> std::sync::MutexGuard<'static, ()> {
         FILE_INGRESS_GUARD_ENV_LOCK.lock().unwrap()
+    }
+
+    fn shared_ingress_buffer() -> SharedIngressBuffer {
+        Arc::new(Mutex::new(IngressBuffer::default()))
     }
 
     // --- MAILLON 1: LE SCANNER (Discovery) ---
@@ -36,6 +44,43 @@ mod tests {
         assert_eq!(
             count, 1,
             "Le scanner doit insérer les fichiers en status 'pending'"
+        );
+    }
+
+    #[test]
+    fn test_maillon_1c_scanner_with_ingress_buffer_defers_canonical_write_until_promotion() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("buffered.ex");
+        std::fs::write(&file_path, "defmodule Buffered do\nend\n").unwrap();
+
+        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let ingress = shared_ingress_buffer();
+        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy());
+        scanner.scan_with_guard_and_ingress(store.clone(), None, Some(&ingress));
+
+        let pre_flush = store
+            .query_count("SELECT count(*) FROM File WHERE path LIKE '%buffered.ex'")
+            .unwrap();
+        assert_eq!(
+            pre_flush, 0,
+            "Le scanner ne doit plus écrire canoniquement avant promotion"
+        );
+
+        let batch = ingress
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .drain_batch(100);
+        store.promote_ingress_batch(&batch).unwrap();
+
+        let post_flush = store
+            .query_count("SELECT count(*) FROM File WHERE path LIKE '%buffered.ex'")
+            .unwrap();
+        assert_eq!(
+            post_flush, 1,
+            "La promotion doit seule créer l'entrée canonique"
         );
     }
 
@@ -212,6 +257,143 @@ mod tests {
     }
 
     #[test]
+    fn test_ingress_buffer_collapses_repeated_file_events_for_same_path() {
+        let mut buffer = IngressBuffer::default();
+
+        buffer.record_file(IngressFileEvent::new(
+            "/tmp/collapse.ex",
+            "proj",
+            10,
+            1,
+            100,
+            IngressSource::Scan,
+            IngressCause::Discovered,
+        ));
+        buffer.record_file(IngressFileEvent::new(
+            "/tmp/collapse.ex",
+            "proj",
+            12,
+            2,
+            100,
+            IngressSource::Scan,
+            IngressCause::Modified,
+        ));
+
+        let batch = buffer.drain_batch(100);
+
+        assert_eq!(batch.files.len(), 1);
+        assert_eq!(batch.files[0].path, "/tmp/collapse.ex");
+        assert_eq!(batch.files[0].mtime, 2);
+        assert_eq!(batch.files[0].size, 12);
+        assert!(batch.collapsed_events >= 1);
+    }
+
+    #[test]
+    fn test_ingress_buffer_keeps_highest_priority_for_same_path() {
+        let mut buffer = IngressBuffer::default();
+
+        buffer.record_file(IngressFileEvent::new(
+            "/tmp/priority.ex",
+            "proj",
+            10,
+            1,
+            100,
+            IngressSource::Scan,
+            IngressCause::Discovered,
+        ));
+        buffer.record_file(IngressFileEvent::new(
+            "/tmp/priority.ex",
+            "proj",
+            10,
+            1,
+            900,
+            IngressSource::Watcher,
+            IngressCause::Modified,
+        ));
+
+        let batch = buffer.drain_batch(100);
+
+        assert_eq!(batch.files.len(), 1);
+        assert_eq!(batch.files[0].priority, 900);
+        assert_eq!(batch.files[0].source, IngressSource::Watcher);
+    }
+
+    #[test]
+    fn test_ingress_buffer_tombstone_beats_stale_file_observation() {
+        let mut buffer = IngressBuffer::default();
+
+        buffer.record_file(IngressFileEvent::new(
+            "/tmp/deleted.ex",
+            "proj",
+            10,
+            1,
+            100,
+            IngressSource::Scan,
+            IngressCause::Modified,
+        ));
+        buffer.record_tombstone("/tmp/deleted.ex", IngressSource::Watcher);
+
+        let batch = buffer.drain_batch(100);
+
+        assert!(batch.files.is_empty());
+        assert_eq!(batch.tombstones, vec!["/tmp/deleted.ex".to_string()]);
+    }
+
+    #[test]
+    fn test_ingress_buffer_records_subtree_hints_without_staging_files() {
+        let mut buffer = IngressBuffer::default();
+
+        buffer.record_subtree_hint("/tmp/project/tmp", 900, IngressSource::Watcher);
+
+        let batch = buffer.drain_batch(100);
+
+        assert!(batch.files.is_empty());
+        assert!(batch.tombstones.is_empty());
+        assert_eq!(batch.subtree_hints.len(), 1);
+        assert_eq!(batch.subtree_hints[0].path, "/tmp/project/tmp");
+    }
+
+    #[test]
+    fn test_ingress_promoter_batch_writes_single_canonical_pending_update() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let mut buffer = IngressBuffer::default();
+
+        buffer.record_file(IngressFileEvent::new(
+            "/tmp/promote.ex",
+            "proj",
+            10,
+            1,
+            100,
+            IngressSource::Scan,
+            IngressCause::Discovered,
+        ));
+        buffer.record_file(IngressFileEvent::new(
+            "/tmp/promote.ex",
+            "proj",
+            20,
+            2,
+            100,
+            IngressSource::Scan,
+            IngressCause::Modified,
+        ));
+
+        let batch: IngressDrainBatch = buffer.drain_batch(100);
+        let promoted = store.promote_ingress_batch(&batch).unwrap();
+
+        assert_eq!(promoted.promoted_files, 1);
+        assert_eq!(promoted.promoted_tombstones, 0);
+
+        let row = store
+            .query_json(
+                "SELECT status, status_reason, size, mtime FROM File WHERE path = '/tmp/promote.ex'",
+            )
+            .unwrap();
+        assert!(row.contains("pending"), "{row}");
+        assert!(row.contains("20"), "{row}");
+        assert!(row.contains("2"), "{row}");
+    }
+
+    #[test]
     fn test_boot_guard_hydrates_after_indexing_recovery() {
         let _guard = lock_file_ingress_guard_env();
         let db_root = std::env::temp_dir().join(format!(
@@ -225,7 +407,12 @@ mod tests {
         let db_root_str = db_root.to_string_lossy().to_string();
         let store = GraphStore::new(&db_root_str).unwrap();
         store
-            .bulk_insert_files(&[("/tmp/recover_guard.rs".to_string(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[(
+                "/tmp/recover_guard.rs".to_string(),
+                "proj".to_string(),
+                10,
+                1,
+            )])
             .unwrap();
         store
             .execute("UPDATE File SET status = 'indexing', worker_id = 3 WHERE path = '/tmp/recover_guard.rs'")
@@ -304,7 +491,12 @@ mod tests {
         let db_root_str = db_root.to_string_lossy().to_string();
         let store = GraphStore::new(&db_root_str).unwrap();
         store
-            .bulk_insert_files(&[("/tmp/recover_reason.rs".to_string(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[(
+                "/tmp/recover_reason.rs".to_string(),
+                "proj".to_string(),
+                10,
+                1,
+            )])
             .unwrap();
         store
             .execute("UPDATE File SET status = 'indexing', worker_id = 3 WHERE path = '/tmp/recover_reason.rs'")
@@ -358,7 +550,9 @@ mod tests {
             ))
             .unwrap();
 
-        let guard = Arc::new(Mutex::new(FileIngressGuard::hydrate_from_store(&store).unwrap()));
+        let guard = Arc::new(Mutex::new(
+            FileIngressGuard::hydrate_from_store(&store).unwrap(),
+        ));
         let staged = crate::fs_watcher::stage_hot_delta_with_guard(
             &store,
             root,
@@ -378,6 +572,48 @@ mod tests {
             .unwrap();
         assert!(row.contains("indexed"));
         assert!(row.contains("10"));
+    }
+
+    #[test]
+    fn test_maillon_2d3_watcher_ingress_buffer_defers_canonical_write_until_promotion() {
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("buffered_live.ex");
+        std::fs::write(&file_path, "defmodule BufferedLive do\nend\n").unwrap();
+
+        let ingress = shared_ingress_buffer();
+        let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
+
+        let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            root,
+            &file_path,
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+            &ingress,
+        )
+        .unwrap();
+        assert!(staged);
+
+        let store = GraphStore::new(":memory:").unwrap();
+        let pre_flush = store
+            .query_count("SELECT count(*) FROM File WHERE path LIKE '%buffered_live.ex'")
+            .unwrap();
+        assert_eq!(pre_flush, 0);
+
+        let batch = ingress
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .drain_batch(100);
+        store.promote_ingress_batch(&batch).unwrap();
+
+        let row = store
+            .query_json("SELECT status, priority FROM File WHERE path LIKE '%buffered_live.ex'")
+            .unwrap();
+        assert!(row.contains("pending"), "{row}");
+        assert!(row.contains("900"), "{row}");
     }
 
     #[test]
@@ -415,7 +651,9 @@ mod tests {
             ))
             .unwrap();
 
-        let guard = Arc::new(Mutex::new(FileIngressGuard::hydrate_from_store(&store).unwrap()));
+        let guard = Arc::new(Mutex::new(
+            FileIngressGuard::hydrate_from_store(&store).unwrap(),
+        ));
         let scanner = crate::scanner::Scanner::new(&root.to_string_lossy());
         scanner.scan_with_guard(store.clone(), Some(&guard));
 
@@ -1517,7 +1755,9 @@ mod tests {
             .unwrap();
 
         let row = store
-            .query_json("SELECT status, status_reason FROM File WHERE path = '/tmp/full_success.rs'")
+            .query_json(
+                "SELECT status, status_reason FROM File WHERE path = '/tmp/full_success.rs'",
+            )
             .unwrap();
         assert!(row.contains("indexed"), "{row}");
         assert!(row.contains("indexed_success_full"), "{row}");
@@ -1600,7 +1840,9 @@ mod tests {
             .unwrap();
 
         let row = store
-            .query_json("SELECT status, status_reason FROM File WHERE path = '/tmp/tombstoned_late.rs'")
+            .query_json(
+                "SELECT status, status_reason FROM File WHERE path = '/tmp/tombstoned_late.rs'",
+            )
             .unwrap();
         assert!(row.contains("deleted"), "{row}");
         assert!(row.contains("tombstoned_missing"), "{row}");
@@ -2594,7 +2836,9 @@ mod tests {
             )
             .unwrap();
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::Keeper', 'proj::Deleted')")
+            .execute(
+                "INSERT INTO CALLS (source_id, target_id) VALUES ('proj::Keeper', 'proj::Deleted')",
+            )
             .unwrap();
 
         let keeper_anchor = store

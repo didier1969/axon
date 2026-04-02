@@ -7,6 +7,7 @@ mod main_telemetry;
 use axon_core::bridge::BridgeEvent;
 use axon_core::file_ingress_guard::{FileIngressGuard, SharedFileIngressGuard};
 use axon_core::graph::GraphStore;
+use axon_core::ingress_buffer::{IngressBuffer, SharedIngressBuffer};
 use axon_core::queue::QueueStore;
 use axon_core::runtime_profile::RuntimeProfile;
 use std::fs;
@@ -75,6 +76,8 @@ fn main() -> anyhow::Result<()> {
             let file_ingress_guard: SharedFileIngressGuard = Arc::new(Mutex::new(
                 FileIngressGuard::hydrate_from_store(&graph_store).unwrap_or_default(),
             ));
+            let ingress_buffer: SharedIngressBuffer =
+                Arc::new(Mutex::new(IngressBuffer::default()));
             let tel_socket_path = "/tmp/axon-telemetry.sock";
             let mcp_socket_path = "/tmp/axon-mcp.sock";
 
@@ -93,6 +96,7 @@ fn main() -> anyhow::Result<()> {
             main_telemetry::spawn_runtime_telemetry(
                 graph_store.clone(),
                 queue_store.clone(),
+                ingress_buffer.clone(),
                 results_tx.clone(),
             );
 
@@ -110,17 +114,25 @@ fn main() -> anyhow::Result<()> {
             let current_boot_id = Arc::new(tokio::sync::Mutex::new(String::new()));
 
             main_background::spawn_autonomous_ingestor(graph_store.clone(), queue_store.clone());
+            main_background::spawn_ingress_promoter(
+                graph_store.clone(),
+                projects_root_str.clone(),
+                file_ingress_guard.clone(),
+                ingress_buffer.clone(),
+            );
 
             main_background::spawn_hot_delta_watcher(
                 graph_store.clone(),
                 projects_root_str.clone(),
                 file_ingress_guard.clone(),
+                ingress_buffer.clone(),
             );
 
             main_background::spawn_initial_scan(
                 graph_store.clone(),
                 projects_root_str.clone(),
                 file_ingress_guard.clone(),
+                ingress_buffer.clone(),
             );
 
             // --- Telemetry Listener Loop (Elixir/Dashboard) ---

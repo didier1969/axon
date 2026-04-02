@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::main_background;
 use axon_core::bridge::BridgeEvent;
 use axon_core::graph::GraphStore;
+use axon_core::ingress_buffer::SharedIngressBuffer;
 use axon_core::queue::QueueStore;
 use axon_core::scanner;
 use crossbeam_channel::Sender;
@@ -17,6 +18,7 @@ use tracing::{debug, error, info, warn};
 pub(crate) fn spawn_runtime_telemetry(
     store: Arc<GraphStore>,
     queue: Arc<QueueStore>,
+    ingress_buffer: SharedIngressBuffer,
     results_tx: broadcast::Sender<String>,
 ) {
     tokio::spawn(async move {
@@ -24,7 +26,8 @@ pub(crate) fn spawn_runtime_telemetry(
 
         loop {
             interval.tick().await;
-            let snapshot = main_background::runtime_telemetry_snapshot(&store, &queue);
+            let snapshot =
+                main_background::runtime_telemetry_snapshot(&store, &queue, &ingress_buffer);
             let event = BridgeEvent::RuntimeTelemetry {
                 budget_bytes: snapshot.budget_bytes,
                 reserved_bytes: snapshot.reserved_bytes,
@@ -39,6 +42,13 @@ pub(crate) fn spawn_runtime_telemetry(
                 guard_bypassed_total: snapshot.guard_bypassed_total,
                 guard_hydrated_entries: snapshot.guard_hydrated_entries,
                 guard_hydration_duration_ms: snapshot.guard_hydration_duration_ms,
+                ingress_enabled: snapshot.ingress_enabled,
+                ingress_buffered_entries: snapshot.ingress_buffered_entries,
+                ingress_subtree_hints: snapshot.ingress_subtree_hints,
+                ingress_collapsed_total: snapshot.ingress_collapsed_total,
+                ingress_flush_count: snapshot.ingress_flush_count,
+                ingress_last_flush_duration_ms: snapshot.ingress_last_flush_duration_ms,
+                ingress_last_promoted_count: snapshot.ingress_last_promoted_count,
                 cpu_load: snapshot.cpu_load,
                 ram_load: snapshot.ram_load,
                 io_wait: snapshot.io_wait,

@@ -75,7 +75,7 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
              ('src/c.rs', 'axon', 'indexing', 30, 1, 100), \
              ('src/d.rs', 'axon', 'indexed_degraded', 40, 1, 100), \
              ('src/e.rs', 'axon', 'oversized_for_current_budget', 50, 1, 100), \
-             ('src/f.rs', 'axon', 'skipped', 60, 1, 100)"
+             ('src/f.rs', 'axon', 'skipped', 60, 1, 100)",
         )
         .unwrap();
     store
@@ -101,6 +101,7 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     assert!(content.contains("Stockage DuckDB"), "{content}");
     assert!(content.contains("RSS Anon"), "{content}");
     assert!(content.contains("Mémoire DuckDB"), "{content}");
+    assert!(content.contains("Ingress Buffer"), "{content}");
 }
 
 #[test]
@@ -127,7 +128,10 @@ fn test_axon_debug_reports_top_pending_reasons() {
     assert!(content.contains("Causes backlog dominantes"), "{content}");
     assert!(content.contains("metadata_changed_scan"), "{content}");
     assert!(content.contains("2"), "{content}");
-    assert!(content.contains("needs_reindex_while_indexing"), "{content}");
+    assert!(
+        content.contains("needs_reindex_while_indexing"),
+        "{content}"
+    );
 }
 
 #[test]
@@ -2080,8 +2084,16 @@ fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("| parse_batch | function | true |"), "{}", content);
-    assert!(!content.contains("| parse_batch | module | false |"), "{}", content);
+    assert!(
+        content.contains("| parse_batch | function | true |"),
+        "{}",
+        content
+    );
+    assert!(
+        !content.contains("| parse_batch | module | false |"),
+        "{}",
+        content
+    );
 }
 
 #[test]

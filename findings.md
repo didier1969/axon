@@ -235,3 +235,66 @@
 - conclusion:
   - l'incohérence runtime/statuts n'est pas résolue
   - c'est maintenant le prochain point causal à investiguer avant de conclure sur le scheduler ou le goulot DB
+
+### 18. Le bon amortisseur n'est pas un WAL disque d'ingress mais un tampon memoire
+- la distinction correcte est:
+  - `DuckDB` = vérité canonique des fichiers, statuts, graphes et scheduling
+  - `ingress` = événements bruts de découverte produits par watcher et scanner
+- conclusion de design retenue:
+  - les événements bruts n'ont pas besoin d'être persistés dans le MVP
+  - un tampon mémoire suffit car le système peut reconstruire cette pression au redémarrage via scan + watcher + hydratation du `FileIngressGuard`
+  - le vrai manque actuel est une couche de réduction entre découverte et écriture canonique
+
+### 19. Le pipeline cible doit séparer détection brute et décision canonique
+- cible retenue:
+  - `Watcher/Scanner -> IngressBuffer -> IngressPromoter -> DuckDB File -> claim -> QueueStore -> workers`
+- implication:
+  - `Watcher` et `Scanner` deviennent des producteurs d'ingress
+  - `File.status = pending` n'est écrit qu'après promotion batchée
+  - les batchs vers DuckDB sont préférables aux écritures unitaires continues
+
+### 20. Un plan détaillé d'implémentation existe maintenant pour cette tranche
+- nouveaux artefacts:
+  - `docs/plans/2026-04-02-ingress-buffer-design.md`
+  - `docs/plans/2026-04-02-ingress-buffer-implementation-plan.md`
+- la migration prévue reste progressive:
+  - buffer isolé
+  - promoteur batch
+  - watcher producteur
+  - scanner producteur
+  - vérité MCP/opératoire réalignée ensuite
+
+### 21. La tranche `IngressBuffer` est maintenant réellement implémentée
+- nouveau module canonique:
+  - `src/axon-core/src/ingress_buffer.rs`
+- nouvelles responsabilités effectives:
+  - `IngressBuffer` absorbe et fusionne les événements bruts en mémoire
+  - `GraphStore::promote_ingress_batch(...)` pousse les décisions canoniques réduites vers `File`
+  - `spawn_ingress_promoter(...)` vide le buffer par batchs dans le runtime
+- conclusion:
+  - le projet ne repose plus uniquement sur `FileIngressGuard`
+  - il existe maintenant bien une couche séparée entre découverte brute et écriture canonique
+
+### 22. `Watcher` et `Scanner` ne sont plus contraints d'écrire directement dans DuckDB
+- le scanner passe désormais par:
+  - `scan_with_guard_and_ingress`
+  - `scan_subtree_with_guard_and_ingress`
+- le watcher passe désormais par:
+  - `enqueue_hot_delta_with_guard`
+  - `enqueue_hot_deltas_with_guard`
+- les événements de répertoire watcher deviennent des `subtree_hints`, plus des restagings récursifs immédiats
+- conclusion:
+  - la détection reste rapide
+  - mais la canonisation `pending` est maintenant amortie et batchée
+
+### 23. La tranche est validée de bout en bout
+- validations fraîches:
+  - `cargo test --manifest-path src/axon-core/Cargo.toml` vert (`155` + `44`)
+  - `devenv shell -- bash -lc 'cd src/dashboard && mix test'` vert (`31`)
+  - `bash scripts/stop-v2.sh && bash scripts/start-v2.sh && bash scripts/stop-v2.sh` vert
+- surfaces opératoires réalignées:
+  - `RuntimeTelemetry` expose l'état du buffer d’ingress
+  - `axon_debug` affiche désormais aussi l’état du buffer
+- conclusion:
+  - la tranche d’architecture `IngressBuffer` est fermée
+  - les prochaines questions redeviennent des questions de comportement mesuré en run long, pas de design manquant

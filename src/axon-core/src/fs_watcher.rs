@@ -6,6 +6,7 @@ use walkdir::WalkDir;
 
 use crate::file_ingress_guard::{GuardDecision, SharedFileIngressGuard};
 use crate::graph::GraphStore;
+use crate::ingress_buffer::{IngressCause, IngressFileEvent, IngressSource, SharedIngressBuffer};
 use crate::scanner::Scanner;
 use crate::watcher_probe;
 
@@ -28,6 +29,16 @@ pub fn stage_hot_delta_with_guard(
     guard: &SharedFileIngressGuard,
 ) -> Result<bool> {
     Ok(stage_hot_path_delta_count(store, watch_root, path, priority, Some(guard))? > 0)
+}
+
+pub fn enqueue_hot_delta_with_guard(
+    watch_root: &Path,
+    path: &Path,
+    priority: i64,
+    guard: &SharedFileIngressGuard,
+    ingress: &SharedIngressBuffer,
+) -> Result<bool> {
+    Ok(enqueue_hot_path_delta_count(watch_root, path, priority, Some(guard), ingress)? > 0)
 }
 
 fn stage_hot_path_delta_count(
@@ -108,6 +119,19 @@ where
     stage_hot_deltas_inner(store, watch_root, paths, priority, Some(guard))
 }
 
+pub fn enqueue_hot_deltas_with_guard<I>(
+    watch_root: &Path,
+    paths: I,
+    priority: i64,
+    guard: &SharedFileIngressGuard,
+    ingress: &SharedIngressBuffer,
+) -> Result<usize>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    enqueue_hot_deltas_inner(watch_root, paths, priority, Some(guard), ingress)
+}
+
 fn stage_hot_deltas_inner<I>(
     store: &GraphStore,
     watch_root: &Path,
@@ -128,6 +152,31 @@ where
         }
 
         staged += stage_hot_path_delta_count(store, watch_root, &path, priority, guard)?;
+    }
+
+    Ok(staged)
+}
+
+fn enqueue_hot_deltas_inner<I>(
+    watch_root: &Path,
+    paths: I,
+    priority: i64,
+    guard: Option<&SharedFileIngressGuard>,
+    ingress: &SharedIngressBuffer,
+) -> Result<usize>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let mut unique = HashSet::new();
+    let mut staged = 0usize;
+
+    for path in paths {
+        let dedup_key = std::fs::canonicalize(&path).unwrap_or(path.clone());
+        if !unique.insert(dedup_key) {
+            continue;
+        }
+
+        staged += enqueue_hot_path_delta_count(watch_root, &path, priority, guard, ingress)?;
     }
 
     Ok(staged)
@@ -222,4 +271,130 @@ fn stage_single_file_delta(
     );
 
     Ok(true)
+}
+
+fn enqueue_hot_path_delta_count(
+    watch_root: &Path,
+    path: &Path,
+    priority: i64,
+    guard: Option<&SharedFileIngressGuard>,
+    ingress: &SharedIngressBuffer,
+) -> Result<usize> {
+    let scanner = Scanner::new(watch_root.to_string_lossy().as_ref());
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let mut locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
+            locked.record_tombstone(path.to_string_lossy().to_string(), IngressSource::Watcher);
+            watcher_probe::record("watcher.buffered_tombstone", Some(path), "reason=not_found");
+            return Ok(1);
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    if !metadata.is_dir() && !scanner.should_process_path(path) {
+        watcher_probe::record("watcher.filtered", Some(path), "reason=not_processable");
+        return Ok(0);
+    }
+
+    if metadata.is_dir() {
+        let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        ingress
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .record_subtree_hint(
+                absolute.to_string_lossy().to_string(),
+                priority,
+                IngressSource::Watcher,
+            );
+        watcher_probe::record(
+            "watcher.buffered_subtree_hint",
+            Some(&absolute),
+            "reason=directory_event",
+        );
+        return Ok(1);
+    }
+
+    enqueue_single_file_delta(&scanner, path, priority, guard, ingress)
+}
+
+fn enqueue_single_file_delta(
+    scanner: &Scanner,
+    path: &Path,
+    priority: i64,
+    guard: Option<&SharedFileIngressGuard>,
+    ingress: &SharedIngressBuffer,
+) -> Result<usize> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            ingress
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .record_tombstone(path.to_string_lossy().to_string(), IngressSource::Watcher);
+            watcher_probe::record(
+                "watcher.buffered_tombstone",
+                Some(path),
+                "reason=single_file_not_found",
+            );
+            return Ok(1);
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    if !metadata.is_file() || !scanner.should_process_path(path) {
+        watcher_probe::record(
+            "watcher.filtered",
+            Some(path),
+            "reason=single_file_not_processable",
+        );
+        return Ok(0);
+    }
+
+    let size = metadata.len() as i64;
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let project_slug = scanner.project_slug_for_path(&absolute);
+
+    if let Some(shared_guard) = guard {
+        let decision = shared_guard
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .should_stage(&absolute, mtime, size);
+        if decision == GuardDecision::SkipUnchanged {
+            watcher_probe::record("watcher.filtered", Some(&absolute), "reason=guard_skip");
+            return Ok(0);
+        }
+    }
+
+    ingress
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .record_file(IngressFileEvent::new(
+            absolute.to_string_lossy().to_string(),
+            project_slug.clone(),
+            size,
+            mtime,
+            priority,
+            IngressSource::Watcher,
+            IngressCause::Modified,
+        ));
+
+    watcher_probe::record(
+        "watcher.buffered",
+        Some(&absolute),
+        format!(
+            "project={} priority={} size={} mtime={}",
+            project_slug, priority, size, mtime
+        ),
+    );
+
+    Ok(1)
 }

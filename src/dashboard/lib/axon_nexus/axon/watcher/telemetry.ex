@@ -79,6 +79,38 @@ defmodule Axon.Watcher.Telemetry do
       :axon_telemetry,
       {:host_guidance_slots, Map.get(payload, "host_guidance_slots", 0)}
     )
+
+    :ets.insert(:axon_telemetry, {:ingress_enabled, Map.get(payload, "ingress_enabled", false)})
+
+    :ets.insert(
+      :axon_telemetry,
+      {:ingress_buffered_entries, Map.get(payload, "ingress_buffered_entries", 0)}
+    )
+
+    :ets.insert(
+      :axon_telemetry,
+      {:ingress_subtree_hints, Map.get(payload, "ingress_subtree_hints", 0)}
+    )
+
+    :ets.insert(
+      :axon_telemetry,
+      {:ingress_collapsed_total, Map.get(payload, "ingress_collapsed_total", 0)}
+    )
+
+    :ets.insert(
+      :axon_telemetry,
+      {:ingress_flush_count, Map.get(payload, "ingress_flush_count", 0)}
+    )
+
+    :ets.insert(
+      :axon_telemetry,
+      {:ingress_last_flush_duration_ms, Map.get(payload, "ingress_last_flush_duration_ms", 0)}
+    )
+
+    :ets.insert(
+      :axon_telemetry,
+      {:ingress_last_promoted_count, Map.get(payload, "ingress_last_promoted_count", 0)}
+    )
   end
 
   def init_directories(files) do
@@ -166,7 +198,14 @@ defmodule Axon.Watcher.Telemetry do
       db_wal_bytes: get_val(:db_wal_bytes),
       db_total_bytes: get_val(:db_total_bytes),
       duckdb_memory_bytes: get_val(:duckdb_memory_bytes),
-      duckdb_temporary_bytes: get_val(:duckdb_temporary_bytes)
+      duckdb_temporary_bytes: get_val(:duckdb_temporary_bytes),
+      ingress_enabled: get_val(:ingress_enabled),
+      ingress_buffered_entries: get_val(:ingress_buffered_entries),
+      ingress_subtree_hints: get_val(:ingress_subtree_hints),
+      ingress_collapsed_total: get_val(:ingress_collapsed_total),
+      ingress_flush_count: get_val(:ingress_flush_count),
+      ingress_last_flush_duration_ms: get_val(:ingress_last_flush_duration_ms),
+      ingress_last_promoted_count: get_val(:ingress_last_promoted_count)
     }
   end
 
@@ -201,6 +240,13 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:db_total_bytes, 0})
     :ets.insert(:axon_telemetry, {:duckdb_memory_bytes, 0})
     :ets.insert(:axon_telemetry, {:duckdb_temporary_bytes, 0})
+    :ets.insert(:axon_telemetry, {:ingress_enabled, false})
+    :ets.insert(:axon_telemetry, {:ingress_buffered_entries, 0})
+    :ets.insert(:axon_telemetry, {:ingress_subtree_hints, 0})
+    :ets.insert(:axon_telemetry, {:ingress_collapsed_total, 0})
+    :ets.insert(:axon_telemetry, {:ingress_flush_count, 0})
+    :ets.insert(:axon_telemetry, {:ingress_last_flush_duration_ms, 0})
+    :ets.insert(:axon_telemetry, {:ingress_last_promoted_count, 0})
   end
 
   defp get_val(key) do

@@ -1,5 +1,8 @@
 use crate::file_ingress_guard::{GuardDecision, SharedFileIngressGuard};
 use crate::graph::GraphStore;
+use crate::ingress_buffer::{
+    IngressBuffer, IngressCause, IngressFileEvent, IngressSource, SharedIngressBuffer,
+};
 use crate::service_guard;
 use ignore::{gitignore::Gitignore, WalkBuilder};
 use std::fs;
@@ -29,19 +32,24 @@ impl Scanner {
     }
 
     pub fn scan(&self, graph: Arc<GraphStore>) {
-        self.scan_with_guard(graph, None);
+        self.scan_with_guard_and_ingress(graph, None, None);
     }
 
-    pub fn scan_with_guard(
+    pub fn scan_with_guard(&self, graph: Arc<GraphStore>, guard: Option<&SharedFileIngressGuard>) {
+        self.scan_with_guard_and_ingress(graph, guard, None);
+    }
+
+    pub fn scan_with_guard_and_ingress(
         &self,
         graph: Arc<GraphStore>,
         guard: Option<&SharedFileIngressGuard>,
+        ingress: Option<&SharedIngressBuffer>,
     ) {
         info!(
             "Lattice Engine: Initializing recursive traversal on {:?}",
             self.root
         );
-        let total_files = self.scan_path(graph, &self.root, guard);
+        let total_files = self.scan_path(graph, &self.root, guard, ingress);
         info!(
             "🏁 Nexus Scan Complete: {} files mapped to DuckDB (status: pending).",
             total_files
@@ -49,7 +57,7 @@ impl Scanner {
     }
 
     pub fn scan_subtree(&self, graph: Arc<GraphStore>, subtree: &Path) {
-        self.scan_subtree_with_guard(graph, subtree, None);
+        self.scan_subtree_with_guard_and_ingress(graph, subtree, None, None);
     }
 
     pub fn scan_subtree_with_guard(
@@ -58,11 +66,21 @@ impl Scanner {
         subtree: &Path,
         guard: Option<&SharedFileIngressGuard>,
     ) {
+        self.scan_subtree_with_guard_and_ingress(graph, subtree, guard, None);
+    }
+
+    pub fn scan_subtree_with_guard_and_ingress(
+        &self,
+        graph: Arc<GraphStore>,
+        subtree: &Path,
+        guard: Option<&SharedFileIngressGuard>,
+        ingress: Option<&SharedIngressBuffer>,
+    ) {
         info!(
             "Lattice Engine: Prioritizing hot subtree traversal on {:?}",
             subtree
         );
-        let total_files = self.scan_path(graph, subtree, guard);
+        let total_files = self.scan_path(graph, subtree, guard, ingress);
         info!(
             "🔥 Hot subtree scan complete: {} files mapped from {:?}.",
             total_files, subtree
@@ -180,6 +198,7 @@ impl Scanner {
         graph: Arc<GraphStore>,
         start: &Path,
         guard: Option<&SharedFileIngressGuard>,
+        ingress: Option<&SharedIngressBuffer>,
     ) -> usize {
         let mut batch = Vec::new();
         let mut total_files = 0;
@@ -239,18 +258,8 @@ impl Scanner {
 
                 if batch.len() >= 100 {
                     total_files += batch.len();
-                    if let Err(e) = graph.bulk_insert_files(&batch) {
-                        error!("Bulk insert failed: {:?}", e);
-                    } else if let Some(shared_guard) = guard {
-                        let paths = batch.iter().map(|(path, _, _, _)| path.clone()).collect::<Vec<_>>();
-                        if let Ok(rows) = graph.fetch_file_ingress_rows(&paths) {
-                            let mut locked = shared_guard
-                                .lock()
-                                .unwrap_or_else(|poison| poison.into_inner());
-                            for row in rows {
-                                locked.record_committed_row(row);
-                            }
-                        }
+                    if !dispatch_scanner_batch(&graph, &batch, guard, ingress) {
+                        error!("Scanner batch dispatch failed");
                     }
                     batch.clear();
                     info!("... {} files mapped", total_files);
@@ -270,22 +279,63 @@ impl Scanner {
 
         if !batch.is_empty() {
             total_files += batch.len();
-            if graph.bulk_insert_files(&batch).is_ok() {
-                if let Some(shared_guard) = guard {
-                    let paths = batch.iter().map(|(path, _, _, _)| path.clone()).collect::<Vec<_>>();
-                    if let Ok(rows) = graph.fetch_file_ingress_rows(&paths) {
-                        let mut locked = shared_guard
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner());
-                        for row in rows {
-                            locked.record_committed_row(row);
-                        }
-                    }
-                }
-            }
+            let _ = dispatch_scanner_batch(&graph, &batch, guard, ingress);
         }
 
         total_files
+    }
+}
+
+fn dispatch_scanner_batch(
+    graph: &Arc<GraphStore>,
+    batch: &[(String, String, i64, i64)],
+    guard: Option<&SharedFileIngressGuard>,
+    ingress: Option<&SharedIngressBuffer>,
+) -> bool {
+    if let Some(shared_ingress) = ingress {
+        let mut locked = shared_ingress
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if locked.is_enabled() {
+            enqueue_scanner_batch(&mut locked, batch);
+            return true;
+        }
+    }
+
+    if let Err(err) = graph.bulk_insert_files(batch) {
+        error!("Bulk insert failed: {:?}", err);
+        return false;
+    }
+
+    if let Some(shared_guard) = guard {
+        let paths = batch
+            .iter()
+            .map(|(path, _, _, _)| path.clone())
+            .collect::<Vec<_>>();
+        if let Ok(rows) = graph.fetch_file_ingress_rows(&paths) {
+            let mut locked = shared_guard
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            for row in rows {
+                locked.record_committed_row(row);
+            }
+        }
+    }
+
+    true
+}
+
+fn enqueue_scanner_batch(buffer: &mut IngressBuffer, batch: &[(String, String, i64, i64)]) {
+    for (path, project, size, mtime) in batch {
+        buffer.record_file(IngressFileEvent::new(
+            path.clone(),
+            project.clone(),
+            *size,
+            *mtime,
+            100,
+            IngressSource::Scan,
+            IngressCause::Discovered,
+        ));
     }
 }
 

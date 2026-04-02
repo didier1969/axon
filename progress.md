@@ -296,3 +296,62 @@
 ## Next Immediate Action
 - investiguer pourquoi la fenetre mesuree montre `0 indexing` avec backlog massif
 - ouvrir ensuite la correction architecturale lecture/ecriture DB avec preuves runtime en main
+
+## 2026-04-02 - Plan detaille pour le tampon memoire d'ingress
+- Nouvelle decision formalisee:
+  - `Watcher` et `Scanner` doivent devenir des producteurs d'ingress, pas des ecrivains canoniques directs dans `File`
+  - `DuckDB` reste la seule verite canonique pour `pending/indexing/indexed`
+  - le MVP du tampon d'ingress est **memoire seulement**
+  - pas de WAL disque ni de seconde base de donnees pour l'ingress brut dans le MVP
+- Nouveaux artefacts:
+  - `docs/plans/2026-04-02-ingress-buffer-design.md`
+  - `docs/plans/2026-04-02-ingress-buffer-implementation-plan.md`
+- Cible d'architecture:
+  - `Watcher/Scanner -> IngressBuffer -> IngressPromoter -> DuckDB File -> claim -> QueueStore -> workers`
+- Motif principal:
+  - separer detection brute et decision canonique
+  - batcher les ecritures vers DuckDB
+  - reduire le churn artificiel de `pending`
+
+## Next Immediate Action
+- executer le plan `IngressBuffer` en TDD, en gardant le patch local d'exploration watcher hors de la tranche tant qu'il n'est pas requalifie contre ce nouveau design
+
+## 2026-04-02 - Tranche `IngressBuffer` executee et validee
+- Rouge:
+  - contrat `IngressBuffer` gele par tests sur:
+    - collapse multi-evenements pour un meme path
+    - priorite maximale retenue
+    - tombstone prioritaire sur une observation stale
+    - hints de sous-arbre sans restaging recursif direct
+    - promotion batch canonique reduite
+  - invariants additionnels ajoutes:
+    - scanner avec ingress buffer necrit plus canoniquement avant promotion
+    - watcher avec ingress buffer necrit plus canoniquement avant promotion
+- Vert:
+  - nouveau module `src/axon-core/src/ingress_buffer.rs`
+  - ajout du kill switch `AXON_ENABLE_INGRESS_BUFFER`
+  - ajout de `GraphStore::promote_ingress_batch(...)`
+  - `Scanner` converti en producteur d'ingress via `scan_with_guard_and_ingress` / `scan_subtree_with_guard_and_ingress`
+  - `fs_watcher` converti en producteur d'ingress via `enqueue_hot_delta_with_guard` / `enqueue_hot_deltas_with_guard`
+  - les evenements de dossier watcher deviennent des `subtree_hints`, plus des restagings recursifs immediats
+  - boucle runtime `IngressPromoter` ajoutee dans `main_background`
+  - mise a jour du `FileIngressGuard` strictement apres verite committee
+  - `RuntimeTelemetry` et `axon_debug` exposent maintenant l'etat du buffer:
+    - active ou non
+    - entrees bufferisees
+    - subtree hints
+    - evenements collapses
+    - flush count
+    - dernier flush
+    - dernier lot promu
+  - ETS dashboard absorbe aussi ces nouveaux champs read-only
+- Validation fraiche:
+  - `cargo test --manifest-path src/axon-core/Cargo.toml` vert (`155` + `44`)
+  - `devenv shell -- bash -lc 'cd src/dashboard && mix test'` vert (`31`)
+  - `bash scripts/stop-v2.sh && bash scripts/start-v2.sh && bash scripts/stop-v2.sh` vert
+
+## Next Immediate Action
+- exploiter maintenant le buffer en run long pour mesurer:
+  - reduction du churn canonique `pending`
+  - effet reel sur la disponibilite MCP
+  - comportement memoire apres stabilisation de l'ingress
