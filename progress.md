@@ -189,3 +189,28 @@
 
 ## Next Immediate Action
 - ouvrir une tranche dédiée d’instrumentation mémoire post-pic avant toute tentative de purge ou changement d’allocateur
+
+## 2026-04-02 - Observabilité mémoire + première causalité `pending`
+- Rouge:
+  - tests Rust ajoutés pour la forme enrichie de `RuntimeTelemetry`
+  - test MCP ajouté pour `axon_debug` opératoire
+  - test dashboard ajouté pour le bridge mémoire enrichi
+  - tests Rust ajoutés pour `status_reason` sur:
+    - rescan scanner
+    - hot delta watcher
+    - recovery après redémarrage
+- Vert:
+  - nouveau module partagé `runtime_observability`
+  - `GraphStore` conserve maintenant le chemin DB pour calculer `ist.db` / WAL
+  - `RuntimeTelemetry` expose mémoire process + stockage DB + mémoire DuckDB
+  - `axon_debug` affiche backlog réel, mémoire détaillée et stockage DuckDB
+  - ETS dashboard absorbe les nouveaux champs mémoire
+  - `File.status_reason` est ajouté et renseigné sur les premiers chemins critiques
+- Validation fraîche:
+  - `cargo test --manifest-path Cargo.toml` dans `src/axon-core` vert (`144` + `44`)
+  - `mix test` dans `src/dashboard` vert (`31`)
+  - `stop-v2 -> start-v2 -> stop-v2` vert
+
+## Next Immediate Action
+- exploiter `status_reason` pour expliquer le backlog dans les vues opératoires
+- mesurer un snapshot réel `RssAnon` vs `RssFile` sur run long avant toute purge mémoire

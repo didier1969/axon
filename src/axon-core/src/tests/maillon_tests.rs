@@ -240,6 +240,85 @@ mod tests {
     }
 
     #[test]
+    fn test_scanner_requeue_records_metadata_changed_scan_reason() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/requeue_scan.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        store
+            .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/requeue_scan.rs'")
+            .unwrap();
+
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 20, 2)])
+            .unwrap();
+
+        let row = store
+            .query_json(
+                "SELECT status, status_reason FROM File WHERE path = '/tmp/requeue_scan.rs'",
+            )
+            .unwrap();
+
+        assert!(row.contains("pending"), "{row}");
+        assert!(row.contains("metadata_changed_scan"), "{row}");
+    }
+
+    #[test]
+    fn test_hot_delta_requeue_records_metadata_changed_hot_reason() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/requeue_hot.rs";
+        store
+            .bulk_insert_files(&[(path.to_string(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        store
+            .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/requeue_hot.rs'")
+            .unwrap();
+
+        store.upsert_hot_file(path, "proj", 20, 2, 900).unwrap();
+
+        let row = store
+            .query_json("SELECT status, status_reason FROM File WHERE path = '/tmp/requeue_hot.rs'")
+            .unwrap();
+
+        assert!(row.contains("pending"), "{row}");
+        assert!(row.contains("metadata_changed_hot_delta"), "{row}");
+    }
+
+    #[test]
+    fn test_recovery_marks_requeued_reason_on_reopen() {
+        let db_root = std::env::temp_dir().join(format!(
+            "axon-status-reason-recovery-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&db_root);
+        std::fs::create_dir_all(&db_root).unwrap();
+
+        let db_root_str = db_root.to_string_lossy().to_string();
+        let store = GraphStore::new(&db_root_str).unwrap();
+        store
+            .bulk_insert_files(&[("/tmp/recover_reason.rs".to_string(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        store
+            .execute("UPDATE File SET status = 'indexing', worker_id = 3 WHERE path = '/tmp/recover_reason.rs'")
+            .unwrap();
+        drop(store);
+
+        let reopened = GraphStore::new(&db_root_str).unwrap();
+        let row = reopened
+            .query_json(
+                "SELECT status, status_reason FROM File WHERE path = '/tmp/recover_reason.rs'",
+            )
+            .unwrap();
+
+        assert!(row.contains("pending"), "{row}");
+        assert!(row.contains("recovered_interrupted_indexing"), "{row}");
+
+        let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
     fn test_maillon_2d1_rust_watcher_with_guard_skips_unchanged_delta() {
         let _guard = lock_file_ingress_guard_env();
         let temp = tempfile::tempdir().unwrap();

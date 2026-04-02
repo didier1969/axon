@@ -52,6 +52,15 @@ pub enum BridgeEvent {
         io_wait: f64,
         host_state: String,
         host_guidance_slots: usize,
+        rss_bytes: u64,
+        rss_anon_bytes: u64,
+        rss_file_bytes: u64,
+        rss_shmem_bytes: u64,
+        db_file_bytes: u64,
+        db_wal_bytes: u64,
+        db_total_bytes: u64,
+        duckdb_memory_bytes: u64,
+        duckdb_temporary_bytes: u64,
     },
     ScanComplete {
         total_files: usize,
@@ -85,6 +94,15 @@ mod tests {
             io_wait: 12.2,
             host_state: "constrained".to_string(),
             host_guidance_slots: 2,
+            rss_bytes: 7_340,
+            rss_anon_bytes: 5_120,
+            rss_file_bytes: 1_920,
+            rss_shmem_bytes: 300,
+            db_file_bytes: 4_096,
+            db_wal_bytes: 512,
+            db_total_bytes: 4_608,
+            duckdb_memory_bytes: 2_048,
+            duckdb_temporary_bytes: 256,
         };
 
         let json = serde_json::to_string(&payload).expect("bridge event serializes");
@@ -108,5 +126,14 @@ mod tests {
         assert!(json.contains("\"io_wait\":12.2"));
         assert!(json.contains("\"host_state\":\"constrained\""));
         assert!(json.contains("\"host_guidance_slots\":2"));
+        assert!(json.contains("\"rss_bytes\":7340"));
+        assert!(json.contains("\"rss_anon_bytes\":5120"));
+        assert!(json.contains("\"rss_file_bytes\":1920"));
+        assert!(json.contains("\"rss_shmem_bytes\":300"));
+        assert!(json.contains("\"db_file_bytes\":4096"));
+        assert!(json.contains("\"db_wal_bytes\":512"));
+        assert!(json.contains("\"db_total_bytes\":4608"));
+        assert!(json.contains("\"duckdb_memory_bytes\":2048"));
+        assert!(json.contains("\"duckdb_temporary_bytes\":256"));
     }
 }

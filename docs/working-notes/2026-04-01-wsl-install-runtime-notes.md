@@ -647,6 +647,68 @@ Sources externes utilisées:
 - GNU allocator manual: https://sourceware.org/glibc/manual/2.27/html_node/The-GNU-Allocator.html
 - WSL config: https://learn.microsoft.com/windows/wsl/wsl-config
 
+### 22. Observabilité mémoire runtime implémentée
+
+Constat:
+
+- la tranche read-only d'observabilité mémoire est maintenant en place
+- `RuntimeTelemetry` expose désormais:
+  - `rss_bytes`
+  - `rss_anon_bytes`
+  - `rss_file_bytes`
+  - `rss_shmem_bytes`
+  - `db_file_bytes`
+  - `db_wal_bytes`
+  - `db_total_bytes`
+  - `duckdb_memory_bytes`
+  - `duckdb_temporary_bytes`
+- `axon_debug` agrège maintenant:
+  - volume graphe
+  - backlog réel
+  - mémoire runtime détaillée
+  - stockage DuckDB
+  - mémoire DuckDB agrégée
+
+Impact:
+
+- on peut enfin distinguer, dans les prochaines observations réelles, si les pics viennent plutôt:
+  - du heap/process
+  - du cache fichier
+  - du working set DuckDB
+  - du spill temporaire
+
+Limite restante:
+
+- cette tranche n'active encore:
+  - ni purge mémoire
+  - ni `memory_limit` explicite
+  - ni `temp_directory`
+  - ni changement d'allocateur
+
+### 23. Première causalité persistée des retours vers `pending`
+
+Constat:
+
+- la table `File` porte maintenant une colonne `status_reason`
+- premières causes persistées couvertes:
+  - `metadata_changed_scan`
+  - `metadata_changed_hot_delta`
+  - `recovered_interrupted_indexing`
+  - `needs_reindex_while_indexing`
+  - `soft_invalidated`
+  - `manual_or_system_requeue`
+  - `oversized_for_current_budget`
+
+Impact:
+
+- la base ne dit plus seulement "pending", elle commence à dire pourquoi
+- cela améliore fortement la forensique du churn observé sur le premier run
+
+Limite restante:
+
+- toute la machine d'état n'est pas encore qualifiée
+- il faut encore couvrir exhaustivement les transitions restantes et exposer ces causes dans les vues opératoires
+
 ## Follow-up Corrections to Plan
 
 Si la fin d'indexation initiale ne peut pas être constatée proprement sans heuristique, ouvrir une tranche corrective sur:

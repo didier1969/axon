@@ -42,10 +42,15 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 - [x] Exécuter le plan.
 
 ### Phase 7: Investigation mémoire post-pic
-- [ ] Distinguer `RssAnon` / `RssFile` / `RssShmem` dans la télémétrie runtime.
-- [ ] Exposer les métriques DuckDB utiles (`duckdb_memory()`, `duckdb_temporary_files()`, taille DB/WAL).
+- [x] Distinguer `RssAnon` / `RssFile` / `RssShmem` dans la télémétrie runtime.
+- [x] Exposer les métriques DuckDB utiles (`duckdb_memory()`, `duckdb_temporary_files()`, taille DB/WAL).
 - [ ] Vérifier si le pic mémoire est majoritairement allocateur, cache fichier, ou working set DuckDB.
 - [ ] Définir ensuite une expérimentation prudente sur purge/trim/checkpoint/allocateur.
+
+### Phase 8: Causalité `pending`
+- [x] Ajouter une première vérité persistée sur la cause de retour en `pending`.
+- [ ] Couvrir toutes les transitions `pending/indexing/indexed/...` avec une causalité canonique complète.
+- [ ] Exposer ces causes dans les vues opératoires et MCP.
 
 ## Working Assumptions
 - Les modifications Git actuellement visibles sont principalement des artefacts de runtime/devenv et non un signal suffisant de travail produit.

@@ -55,6 +55,11 @@ impl GraphStore {
             p.push("ist.db");
             p.to_string_lossy().to_string()
         };
+        let db_path = if is_memory {
+            None
+        } else {
+            Some(PathBuf::from(&db_path_str))
+        };
         let c_path = CString::new(db_path_str)?;
 
         unsafe {
@@ -68,7 +73,10 @@ impl GraphStore {
                 writer_ctx: Mutex::new(writer_ptr),
                 reader_ctx: Mutex::new(std::ptr::null_mut()),
             });
-            let store = Self { pool: pool.clone() };
+            let store = Self {
+                pool: pool.clone(),
+                db_path,
+            };
 
             if !is_memory {
                 let mut soll_path = PathBuf::from(db_root);
@@ -182,7 +190,7 @@ impl GraphStore {
         self.execute(
             "CREATE TABLE IF NOT EXISTS RuntimeMetadata (key VARCHAR PRIMARY KEY, value VARCHAR)",
         )?;
-        self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384])")?;
         self.execute("CREATE TABLE IF NOT EXISTS Chunk (id VARCHAR PRIMARY KEY, source_type VARCHAR, source_id VARCHAR, project_slug VARCHAR, kind VARCHAR, content VARCHAR, content_hash VARCHAR, start_line BIGINT, end_line BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS EmbeddingModel (id VARCHAR PRIMARY KEY, kind VARCHAR, model_name VARCHAR, dimension BIGINT, version VARCHAR, created_at BIGINT)")?;
@@ -249,6 +257,7 @@ impl GraphStore {
             "ALTER TABLE File ADD COLUMN IF NOT EXISTS needs_reindex BOOLEAN DEFAULT FALSE",
         )?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_error_reason VARCHAR")?;
+        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS status_reason VARCHAR")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS defer_count BIGINT DEFAULT 0")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_deferred_at_ms BIGINT")?;
         Ok(())
@@ -330,7 +339,7 @@ impl GraphStore {
                 interrupted
             );
             self.execute(
-                "UPDATE File SET status = 'pending', worker_id = NULL WHERE status = 'indexing'",
+                "UPDATE File SET status = 'pending', worker_id = NULL, status_reason = 'recovered_interrupted_indexing' WHERE status = 'indexing'",
             )?;
         }
         Ok(())
@@ -435,7 +444,7 @@ impl GraphStore {
             "DELETE FROM EmbeddingModel",
             "DELETE FROM Chunk",
             "DELETE FROM Symbol",
-            "UPDATE File SET status = 'pending', worker_id = NULL, needs_reindex = FALSE",
+            "UPDATE File SET status = 'pending', worker_id = NULL, needs_reindex = FALSE, status_reason = 'soft_invalidated'",
         ];
 
         for query in cleanup_queries {

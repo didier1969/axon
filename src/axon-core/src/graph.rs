@@ -1,5 +1,6 @@
 use libloading::{Library, Symbol as LibSymbol};
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -37,6 +38,7 @@ unsafe impl Sync for LatticePool {}
 
 pub struct GraphStore {
     pub(crate) pool: Arc<LatticePool>,
+    pub(crate) db_path: Option<PathBuf>,
 }
 
 impl Drop for LatticePool {

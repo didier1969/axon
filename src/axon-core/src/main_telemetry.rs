@@ -15,6 +15,7 @@ use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, error, info, warn};
 
 pub(crate) fn spawn_runtime_telemetry(
+    store: Arc<GraphStore>,
     queue: Arc<QueueStore>,
     results_tx: broadcast::Sender<String>,
 ) {
@@ -23,7 +24,7 @@ pub(crate) fn spawn_runtime_telemetry(
 
         loop {
             interval.tick().await;
-            let snapshot = main_background::runtime_telemetry_snapshot(&queue);
+            let snapshot = main_background::runtime_telemetry_snapshot(&store, &queue);
             let event = BridgeEvent::RuntimeTelemetry {
                 budget_bytes: snapshot.budget_bytes,
                 reserved_bytes: snapshot.reserved_bytes,
@@ -43,6 +44,15 @@ pub(crate) fn spawn_runtime_telemetry(
                 io_wait: snapshot.io_wait,
                 host_state: snapshot.host_state,
                 host_guidance_slots: snapshot.host_guidance_slots,
+                rss_bytes: snapshot.rss_bytes,
+                rss_anon_bytes: snapshot.rss_anon_bytes,
+                rss_file_bytes: snapshot.rss_file_bytes,
+                rss_shmem_bytes: snapshot.rss_shmem_bytes,
+                db_file_bytes: snapshot.db_file_bytes,
+                db_wal_bytes: snapshot.db_wal_bytes,
+                db_total_bytes: snapshot.db_total_bytes,
+                duckdb_memory_bytes: snapshot.duckdb_memory_bytes,
+                duckdb_temporary_bytes: snapshot.duckdb_temporary_bytes,
             };
 
             if let Ok(message) = serde_json::to_string(&event) {

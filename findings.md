@@ -150,3 +150,35 @@
   - spill via `duckdb_temporary_files()`
 - Si le pic est surtout `RssAnon`, `malloc_trim` ou un allocateur plus agressif redeviennent de vrais candidats.
 - Si le pic est surtout `RssFile`, il faut viser working set/cache et pas l'allocateur.
+
+### 10. La tranche d’observabilité mémoire est maintenant en place
+- `RuntimeTelemetry` expose désormais:
+  - `rss_bytes`
+  - `rss_anon_bytes`
+  - `rss_file_bytes`
+  - `rss_shmem_bytes`
+  - `db_file_bytes`
+  - `db_wal_bytes`
+  - `db_total_bytes`
+  - `duckdb_memory_bytes`
+  - `duckdb_temporary_bytes`
+- `axon_debug` n’affiche plus seulement le volume du graphe; il agrège maintenant:
+  - volume graphe
+  - backlog réel
+  - mémoire runtime détaillée
+  - stockage DuckDB
+  - mémoire DuckDB agrégée
+
+### 11. La causalité `pending` a une première vérité persistée
+- nouvelle colonne canonique `File.status_reason`
+- causes explicitement persistées sur plusieurs chemins critiques:
+  - `metadata_changed_scan`
+  - `metadata_changed_hot_delta`
+  - `recovered_interrupted_indexing`
+  - `needs_reindex_while_indexing`
+  - `soft_invalidated`
+  - `manual_or_system_requeue`
+  - `oversized_for_current_budget`
+- conclusion:
+  - le problème `pending` n’est pas totalement fermé
+  - mais la base donne maintenant une première explication persistée du churn au lieu d’un simple statut brut

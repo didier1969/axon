@@ -12,6 +12,12 @@ use crate::graph::{ExecFunc, GraphStore, PendingFile};
 use crate::queue::ProcessingMode;
 use crate::watcher_probe;
 
+#[derive(Debug, Clone, Copy)]
+enum FileUpsertSource {
+    Scan,
+    HotDelta,
+}
+
 fn parse_i64_field(value: &serde_json::Value) -> Option<i64> {
     value
         .as_i64()
@@ -169,7 +175,14 @@ impl GraphStore {
     pub fn bulk_insert_files(&self, file_paths: &[(String, String, i64, i64)]) -> Result<()> {
         let mut queries = Vec::new();
         for (path, project, size, mtime) in file_paths {
-            queries.extend(Self::upsert_file_queries(path, project, *size, *mtime, 100));
+            queries.extend(Self::upsert_file_queries(
+                path,
+                project,
+                *size,
+                *mtime,
+                100,
+                FileUpsertSource::Scan,
+            ));
         }
         self.execute_batch(&queries)
     }
@@ -182,7 +195,14 @@ impl GraphStore {
         mtime: i64,
         priority: i64,
     ) -> Result<()> {
-        let queries = Self::upsert_file_queries(path, project, size, mtime, priority);
+        let queries = Self::upsert_file_queries(
+            path,
+            project,
+            size,
+            mtime,
+            priority,
+            FileUpsertSource::HotDelta,
+        );
         self.execute_batch(&queries)?;
         watcher_probe::record(
             "watcher.db_upsert",
@@ -239,7 +259,7 @@ impl GraphStore {
             ));
         queries.push(format!("DELETE FROM CONTAINS WHERE source_id IN ({});", selector));
         queries.push(format!(
-                "UPDATE File SET status = 'deleted', worker_id = NULL, needs_reindex = FALSE \
+                "UPDATE File SET status = 'deleted', worker_id = NULL, needs_reindex = FALSE, status_reason = 'tombstoned_missing' \
                  WHERE path IN ({});",
                 selector
             ));
@@ -437,6 +457,7 @@ impl GraphStore {
                      worker_id = NULL, \
                      needs_reindex = FALSE, \
                      last_error_reason = NULL, \
+                     status_reason = CASE WHEN needs_reindex THEN 'needs_reindex_while_indexing' ELSE NULL END, \
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
@@ -450,6 +471,7 @@ impl GraphStore {
                      worker_id = NULL, \
                      needs_reindex = FALSE, \
                      last_error_reason = 'degraded_structure_only', \
+                     status_reason = CASE WHEN needs_reindex THEN 'needs_reindex_while_indexing' ELSE 'degraded_structure_only' END, \
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
@@ -463,6 +485,7 @@ impl GraphStore {
                      worker_id = NULL, \
                      needs_reindex = FALSE, \
                      last_error_reason = 'worker_skipped_file', \
+                     status_reason = CASE WHEN needs_reindex THEN 'needs_reindex_while_indexing' ELSE 'worker_skipped_file' END, \
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
@@ -654,6 +677,7 @@ impl GraphStore {
              SET status = 'oversized_for_current_budget', \
                  worker_id = NULL, \
                  last_error_reason = 'estimated cost exceeds current budget envelope', \
+                 status_reason = 'oversized_for_current_budget', \
                  defer_count = 0, \
                  last_deferred_at_ms = NULL \
              WHERE path = '{}';",
@@ -689,6 +713,7 @@ impl GraphStore {
              SET status = 'pending', \
                  worker_id = NULL, \
                  last_error_reason = NULL, \
+                 status_reason = 'manual_or_system_requeue', \
                  defer_count = COALESCE(defer_count, 0) + 1, \
                  last_deferred_at_ms = {} \
              WHERE path = '{}' AND status = 'indexing';",
@@ -879,14 +904,20 @@ impl GraphStore {
         size: i64,
         mtime: i64,
         priority: i64,
+        source: FileUpsertSource,
     ) -> Vec<String> {
+        let metadata_changed_reason = match source {
+            FileUpsertSource::Scan => "metadata_changed_scan",
+            FileUpsertSource::HotDelta => "metadata_changed_hot_delta",
+        };
+
         vec![
             format!(
                 "INSERT INTO Project (name) VALUES ('{}') ON CONFLICT DO NOTHING;",
                 Self::escape_sql(project)
             ),
             format!(
-                "INSERT INTO File (path, project_slug, size, mtime, status, priority, needs_reindex, last_error_reason, defer_count, last_deferred_at_ms) VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE, NULL, 0, NULL) \
+                "INSERT INTO File (path, project_slug, size, mtime, status, priority, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms) VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE, NULL, 'discovered_new', 0, NULL) \
                  ON CONFLICT(path) DO UPDATE SET \
                     project_slug=EXCLUDED.project_slug, \
                     size=EXCLUDED.size, \
@@ -903,6 +934,13 @@ impl GraphStore {
                     last_error_reason = CASE \
                         WHEN File.status = 'indexing' THEN File.last_error_reason \
                         ELSE NULL \
+                    END, \
+                    status_reason = CASE \
+                        WHEN File.status = 'indexing' THEN File.status_reason \
+                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size THEN '{}' \
+                        WHEN File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN 'manual_or_system_requeue' \
+                        WHEN File.priority IS DISTINCT FROM EXCLUDED.priority THEN 'manual_or_system_requeue' \
+                        ELSE COALESCE(File.status_reason, 'manual_or_system_requeue') \
                     END, \
                     defer_count = CASE \
                         WHEN File.status = 'indexing' THEN File.defer_count \
@@ -928,7 +966,8 @@ impl GraphStore {
                 Self::escape_sql(project),
                 size,
                 mtime,
-                priority
+                priority,
+                metadata_changed_reason
             ),
         ]
     }

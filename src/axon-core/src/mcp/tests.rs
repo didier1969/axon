@@ -5,6 +5,7 @@ use crate::graph::GraphStore;
 use crate::queue::ProcessingMode;
 use std::path::Path;
 use std::sync::Arc;
+use tempfile::tempdir;
 
 fn create_test_server() -> McpServer {
     let store = Arc::new(
@@ -56,6 +57,50 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"axon_api_break_check"));
     assert!(tool_names.contains(&"axon_simulate_mutation"));
     assert!(tool_names.contains(&"axon_debug"));
+}
+
+#[test]
+fn test_axon_debug_reports_backlog_memory_and_storage_views() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("graph_v2");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let server = McpServer::new(store.clone());
+
+    store
+        .execute(
+            "INSERT INTO File (path, project_slug, status, size, mtime, priority) VALUES \
+             ('src/a.rs', 'axon', 'indexed', 10, 1, 100), \
+             ('src/b.rs', 'axon', 'pending', 20, 1, 100), \
+             ('src/c.rs', 'axon', 'indexing', 30, 1, 100), \
+             ('src/d.rs', 'axon', 'indexed_degraded', 40, 1, 100), \
+             ('src/e.rs', 'axon', 'oversized_for_current_budget', 50, 1, 100), \
+             ('src/f.rs', 'axon', 'skipped', 60, 1, 100)"
+        )
+        .unwrap();
+    store
+        .execute(
+            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+             ('axon::a', 'a', 'function', false, true, false, false, 'axon')"
+        )
+        .unwrap();
+    store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/a.rs', 'axon::a')")
+        .unwrap();
+
+    let response = server.axon_debug().expect("debug response");
+    let content = response["content"][0]["text"].as_str().unwrap_or_default();
+
+    assert!(content.contains("Fichiers connus : 6"), "{content}");
+    assert!(content.contains("Backlog restant : 2"), "{content}");
+    assert!(content.contains("Pending : 1"), "{content}");
+    assert!(content.contains("Indexing : 1"), "{content}");
+    assert!(content.contains("Indexed degraded : 1"), "{content}");
+    assert!(content.contains("Oversized : 1"), "{content}");
+    assert!(content.contains("Skipped : 1"), "{content}");
+    assert!(content.contains("Stockage DuckDB"), "{content}");
+    assert!(content.contains("RSS Anon"), "{content}");
+    assert!(content.contains("Mémoire DuckDB"), "{content}");
 }
 
 #[test]

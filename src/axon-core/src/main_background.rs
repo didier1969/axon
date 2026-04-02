@@ -11,6 +11,9 @@ use axon_core::fs_watcher::{self, HOT_PRIORITY};
 use axon_core::graph::GraphStore;
 use axon_core::graph::PendingFile;
 use axon_core::queue::{ProcessingMode, QueueStore};
+use axon_core::runtime_observability::{
+    duckdb_memory_snapshot, duckdb_storage_snapshot, process_memory_snapshot,
+};
 use axon_core::scanner::Scanner;
 use axon_core::service_guard;
 use axon_core::service_guard::ServicePressure;
@@ -69,6 +72,15 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub io_wait: f64,
     pub host_state: String,
     pub host_guidance_slots: usize,
+    pub rss_bytes: u64,
+    pub rss_anon_bytes: u64,
+    pub rss_file_bytes: u64,
+    pub rss_shmem_bytes: u64,
+    pub db_file_bytes: u64,
+    pub db_wal_bytes: u64,
+    pub db_total_bytes: u64,
+    pub duckdb_memory_bytes: u64,
+    pub duckdb_temporary_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -208,7 +220,10 @@ pub(crate) fn spawn_autonomous_ingestor(store: Arc<GraphStore>, queue: Arc<Queue
     });
 }
 
-pub(crate) fn runtime_telemetry_snapshot(queue: &QueueStore) -> RuntimeTelemetrySnapshot {
+pub(crate) fn runtime_telemetry_snapshot(
+    store: &GraphStore,
+    queue: &QueueStore,
+) -> RuntimeTelemetrySnapshot {
     let budget = queue.memory_budget_snapshot();
     let queue_depth = queue.common_len();
     let service_pressure = service_guard::current_pressure();
@@ -221,6 +236,9 @@ pub(crate) fn runtime_telemetry_snapshot(queue: &QueueStore) -> RuntimeTelemetry
     );
     let host_pressure = sample_host_pressure();
     let guard_metrics = guard_metrics_snapshot();
+    let process_memory = process_memory_snapshot();
+    let storage = duckdb_storage_snapshot(store);
+    let duckdb_memory = duckdb_memory_snapshot(store);
 
     RuntimeTelemetrySnapshot {
         budget_bytes: budget.budget_bytes,
@@ -242,6 +260,15 @@ pub(crate) fn runtime_telemetry_snapshot(queue: &QueueStore) -> RuntimeTelemetry
         host_state: host_state_label(policy.mode, budget.exhaustion_ratio, service_pressure)
             .to_string(),
         host_guidance_slots: policy.claim_count,
+        rss_bytes: process_memory.rss_bytes,
+        rss_anon_bytes: process_memory.rss_anon_bytes,
+        rss_file_bytes: process_memory.rss_file_bytes,
+        rss_shmem_bytes: process_memory.rss_shmem_bytes,
+        db_file_bytes: storage.db_file_bytes,
+        db_wal_bytes: storage.db_wal_bytes,
+        db_total_bytes: storage.db_total_bytes,
+        duckdb_memory_bytes: duckdb_memory.memory_usage_bytes,
+        duckdb_temporary_bytes: duckdb_memory.temporary_storage_bytes,
     }
 }
 

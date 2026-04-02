@@ -80,7 +80,16 @@ defmodule AxonDashboard.BridgeClientTest do
            "ram_load" => 33.0,
            "io_wait" => 1.5,
            "host_state" => "healthy",
-           "host_guidance_slots" => 6
+           "host_guidance_slots" => 6,
+           "rss_bytes" => 7_340,
+           "rss_anon_bytes" => 5_120,
+           "rss_file_bytes" => 1_920,
+           "rss_shmem_bytes" => 300,
+           "db_file_bytes" => 4_096,
+           "db_wal_bytes" => 512,
+           "db_total_bytes" => 4_608,
+           "duckdb_memory_bytes" => 2_048,
+           "duckdb_temporary_bytes" => 256
          }
        }) <> "\n"}
     )
@@ -90,5 +99,8 @@ defmodule AxonDashboard.BridgeClientTest do
     assert stats[:budget_bytes] == 4_096
     assert stats[:host_state] == "healthy"
     assert stats[:host_guidance_slots] == 6
+    assert stats[:rss_anon_bytes] == 5_120
+    assert stats[:db_total_bytes] == 4_608
+    assert stats[:duckdb_memory_bytes] == 2_048
   end
 end

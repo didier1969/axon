@@ -57,6 +57,23 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:ram_load, Map.get(payload, "ram_load", 0.0)})
     :ets.insert(:axon_telemetry, {:io_wait, Map.get(payload, "io_wait", 0.0)})
     :ets.insert(:axon_telemetry, {:host_state, Map.get(payload, "host_state", "healthy")})
+    :ets.insert(:axon_telemetry, {:rss_bytes, Map.get(payload, "rss_bytes", 0)})
+    :ets.insert(:axon_telemetry, {:rss_anon_bytes, Map.get(payload, "rss_anon_bytes", 0)})
+    :ets.insert(:axon_telemetry, {:rss_file_bytes, Map.get(payload, "rss_file_bytes", 0)})
+    :ets.insert(:axon_telemetry, {:rss_shmem_bytes, Map.get(payload, "rss_shmem_bytes", 0)})
+    :ets.insert(:axon_telemetry, {:db_file_bytes, Map.get(payload, "db_file_bytes", 0)})
+    :ets.insert(:axon_telemetry, {:db_wal_bytes, Map.get(payload, "db_wal_bytes", 0)})
+    :ets.insert(:axon_telemetry, {:db_total_bytes, Map.get(payload, "db_total_bytes", 0)})
+
+    :ets.insert(
+      :axon_telemetry,
+      {:duckdb_memory_bytes, Map.get(payload, "duckdb_memory_bytes", 0)}
+    )
+
+    :ets.insert(
+      :axon_telemetry,
+      {:duckdb_temporary_bytes, Map.get(payload, "duckdb_temporary_bytes", 0)}
+    )
 
     :ets.insert(
       :axon_telemetry,
@@ -140,7 +157,16 @@ defmodule Axon.Watcher.Telemetry do
       ram_load: get_val(:ram_load),
       io_wait: get_val(:io_wait),
       host_state: get_val(:host_state),
-      host_guidance_slots: get_val(:host_guidance_slots)
+      host_guidance_slots: get_val(:host_guidance_slots),
+      rss_bytes: get_val(:rss_bytes),
+      rss_anon_bytes: get_val(:rss_anon_bytes),
+      rss_file_bytes: get_val(:rss_file_bytes),
+      rss_shmem_bytes: get_val(:rss_shmem_bytes),
+      db_file_bytes: get_val(:db_file_bytes),
+      db_wal_bytes: get_val(:db_wal_bytes),
+      db_total_bytes: get_val(:db_total_bytes),
+      duckdb_memory_bytes: get_val(:duckdb_memory_bytes),
+      duckdb_temporary_bytes: get_val(:duckdb_temporary_bytes)
     }
   end
 
@@ -166,6 +192,15 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:io_wait, 0.0})
     :ets.insert(:axon_telemetry, {:host_state, "healthy"})
     :ets.insert(:axon_telemetry, {:host_guidance_slots, 0})
+    :ets.insert(:axon_telemetry, {:rss_bytes, 0})
+    :ets.insert(:axon_telemetry, {:rss_anon_bytes, 0})
+    :ets.insert(:axon_telemetry, {:rss_file_bytes, 0})
+    :ets.insert(:axon_telemetry, {:rss_shmem_bytes, 0})
+    :ets.insert(:axon_telemetry, {:db_file_bytes, 0})
+    :ets.insert(:axon_telemetry, {:db_wal_bytes, 0})
+    :ets.insert(:axon_telemetry, {:db_total_bytes, 0})
+    :ets.insert(:axon_telemetry, {:duckdb_memory_bytes, 0})
+    :ets.insert(:axon_telemetry, {:duckdb_temporary_bytes, 0})
   end
 
   defp get_val(key) do

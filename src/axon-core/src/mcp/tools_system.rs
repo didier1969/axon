@@ -2,6 +2,26 @@ use serde_json::{json, Value};
 
 use super::format::format_table_from_json;
 use super::McpServer;
+use crate::runtime_observability::{
+    duckdb_memory_snapshot, duckdb_storage_snapshot, process_memory_snapshot,
+};
+
+fn format_bytes_human(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+    let bytes_f = bytes as f64;
+    if bytes_f >= GIB {
+        format!("{:.2} GB", bytes_f / GIB)
+    } else if bytes_f >= MIB {
+        format!("{:.0} MB", bytes_f / MIB)
+    } else if bytes_f >= KIB {
+        format!("{:.0} KB", bytes_f / KIB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
 
 impl McpServer {
     pub(crate) fn axon_refine_lattice(&self, _args: &Value) -> Option<Value> {
@@ -39,26 +59,45 @@ impl McpServer {
             .graph_store
             .query_count("SELECT count(*) FROM File")
             .unwrap_or(0);
+        let pending_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File WHERE status = 'pending'")
+            .unwrap_or(0);
+        let indexing_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File WHERE status = 'indexing'")
+            .unwrap_or(0);
+        let degraded_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File WHERE status = 'indexed_degraded'")
+            .unwrap_or(0);
+        let oversized_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File WHERE status = 'oversized_for_current_budget'")
+            .unwrap_or(0);
+        let skipped_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File WHERE status = 'skipped'")
+            .unwrap_or(0);
+        let completed_count = (file_count - pending_count - indexing_count).max(0);
+        let completion_rate = if file_count > 0 {
+            (completed_count as f64 / file_count as f64) * 100.0
+        } else {
+            0.0
+        };
         let symbol_count = self
             .graph_store
             .query_count("SELECT count(*) FROM Symbol")
             .unwrap_or(0);
         let edge_count = self
             .graph_store
-            .query_count("SELECT (SELECT count(*) FROM CONTAINS) + (SELECT count(*) FROM CALLS)")
+            .query_count(
+                "SELECT (SELECT count(*) FROM CONTAINS) + (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)",
+            )
             .unwrap_or(0);
-
-        let mut mem_str = "Unknown".to_string();
-        if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
-            if let Some(rss_pages) = content
-                .split_whitespace()
-                .nth(1)
-                .and_then(|s| s.parse::<u64>().ok())
-            {
-                let rss_mb = (rss_pages * 4096) / 1024 / 1024;
-                mem_str = format!("{} MB", rss_mb);
-            }
-        }
+        let memory = process_memory_snapshot();
+        let storage = duckdb_storage_snapshot(&self.graph_store);
+        let duckdb_memory = duckdb_memory_snapshot(&self.graph_store);
 
         let report = format!(
             "## 🤖 Axon Core V2 (Maestria) - Diagnostic Interne\n\n\
@@ -67,13 +106,52 @@ impl McpServer {
             *   **Base de Graphe :** DuckDB (Local, Zero-Copy).\n\
             *   **Parseurs Actifs :** Rust, Elixir, Python, TypeScript, etc.\n\
             *   **Protection OOM :** Option B (Watchdog Process Cycling Actif à 14 Go).\n\n\
-            **État de la Mémoire (RSS) :** {}\n\n\
-            **Volume du Graphe en direct :**\n\
-            *   Fichiers indexés : {}\n\
+            **Mémoire Runtime :**\n\
+            *   RSS total : {}\n\
+            *   RSS Anon : {}\n\
+            *   RSS Fichier : {}\n\
+            *   RSS Shmem : {}\n\n\
+            **Volume du Graphe :**\n\
+            *   Fichiers connus : {}\n\
             *   Symboles extraits : {}\n\
             *   Relations (Edges) : {}\n\n\
+            **État d’Indexation :**\n\
+            *   Fichiers terminés : {}\n\
+            *   Backlog restant : {}\n\
+            *   Pending : {}\n\
+            *   Indexing : {}\n\
+            *   Indexed degraded : {}\n\
+            *   Oversized : {}\n\
+            *   Skipped : {}\n\
+            *   Taux de complétion : {:.2} %\n\n\
+            **Stockage DuckDB :**\n\
+            *   Fichier principal : {}\n\
+            *   WAL : {}\n\
+            *   Total : {}\n\n\
+            **Mémoire DuckDB :**\n\
+            *   Mémoire allouée : {}\n\
+            *   Temporaire/spill : {}\n\n\
             *Note aux Agents IA : Toute erreur 'TCP auth closed' observée dans des logs Elixir n'est pas liée à ce serveur MCP. Axon Core V2 est 100% autonome.*",
-            mem_str, file_count, symbol_count, edge_count
+            format_bytes_human(memory.rss_bytes),
+            format_bytes_human(memory.rss_anon_bytes),
+            format_bytes_human(memory.rss_file_bytes),
+            format_bytes_human(memory.rss_shmem_bytes),
+            file_count,
+            symbol_count,
+            edge_count,
+            completed_count,
+            pending_count + indexing_count,
+            pending_count,
+            indexing_count,
+            degraded_count,
+            oversized_count,
+            skipped_count,
+            completion_rate,
+            format_bytes_human(storage.db_file_bytes),
+            format_bytes_human(storage.db_wal_bytes),
+            format_bytes_human(storage.db_total_bytes),
+            format_bytes_human(duckdb_memory.memory_usage_bytes),
+            format_bytes_human(duckdb_memory.temporary_storage_bytes),
         );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
