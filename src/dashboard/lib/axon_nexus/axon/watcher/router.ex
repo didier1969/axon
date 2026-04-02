@@ -5,7 +5,7 @@ defmodule Axon.Watcher.Router do
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
-    plug :put_root_layout, html: {Axon.Watcher.Layouts, :root}
+    plug :put_root_layout, html: {AxonDashboardWeb.Layouts, :root}
   end
 
   scope "/" do

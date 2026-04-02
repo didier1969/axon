@@ -68,13 +68,21 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 - [x] Faire passer les chemins SQL bruts par une gateway qui sépare lecture et mutation.
 - [x] Rerouter les lectures techniques lourdes hors du writer quand cela est sûr.
 
+### Phase 11: Refonte cockpit LiveView
+- [x] Documenter la refonte cible du cockpit operateur.
+- [x] Supprimer les dependances CDN des layouts dashboard.
+- [x] Refondre `CockpitLive` autour de la valeur operatoire.
+- [x] Exposer backlog, projets, runtime, ingress et memoire dans la page.
+- [x] Verrouiller le rendu par tests LiveView.
+- [x] Valider `mix test`, `mix compile` et `mix precommit` sans redemarrer le runtime courant.
+
 ## Working Assumptions
 - Les modifications Git actuellement visibles sont principalement des artefacts de runtime/devenv et non un signal suffisant de travail produit.
 - Toute conclusion tirée hors `devenv shell` est non fiable pour ce dépôt.
 - Les documents `progress.md` et `STATE.md` peuvent surestimer le niveau réel de fermeture.
 
 ## Current Priority
-1. Geler la tranche finale hors dashboard par validation complète puis commit/push.
+1. Geler maintenant la tranche cockpit par commit/push sans interrompre le runtime en cours.
 2. Garder `DuckDB` comme vérité de `pending/indexing/indexed` avec ingress amorti en mémoire.
 3. Préserver la causalité explicite pour toute future extension du scheduler ou du writer.
 4. Observer le reclaimer mémoire idle avant toute politique plus agressive.

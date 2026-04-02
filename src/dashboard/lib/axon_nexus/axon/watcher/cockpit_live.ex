@@ -1,47 +1,40 @@
 # Copyright (c) Didier Stadelmann. All rights reserved.
 
 defmodule Axon.Watcher.CockpitLive do
-  use Phoenix.LiveView, layout: {Axon.Watcher.Layouts, :root}
+  use Phoenix.LiveView
+
   alias Axon.Watcher.Progress
+  alias Axon.Watcher.Telemetry
+
+  @tick_ms 750
 
   @impl true
   def mount(_params, _session, socket) do
+    repo_slug = System.get_env("AXON_REPO_SLUG") || Path.expand(".") |> Path.basename()
+
     if connected?(socket) do
-      :timer.send_interval(500, self(), :tick)
+      :timer.send_interval(@tick_ms, self(), :tick)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
     end
 
-    repo_slug = System.get_env("AXON_REPO_SLUG") || Path.expand(".") |> Path.basename()
+    socket =
+      socket
+      |> stream_configure(:projects, dom_id: &"project-#{slug_dom_id(&1.slug)}")
+      |> stream_configure(:reasons, dom_id: &"reason-#{slug_dom_id(&1.reason)}")
+      |> assign(
+        repo_slug: repo_slug,
+        monitoring_active: true,
+        workspace: default_workspace(),
+        runtime: default_runtime(),
+        recent_files: [],
+        readiness: default_readiness(),
+        scan_complete: false,
+        project_count: 0,
+        reason_count: 0
+      )
+      |> assign_snapshot(build_snapshot(repo_slug))
 
-    {:ok,
-     assign(socket,
-       repo_slug: repo_slug,
-       stats: %{},
-       dir_stats: %{},
-       monitoring_active: true,
-       live: %{
-         active_workers: %{},
-         last_files: [],
-         total_ingested: 0,
-         directories: %{},
-         target_pressure: 100,
-         t4_ema: 0.0,
-         flux_reel: 0.0,
-         budget_bytes: 0,
-         reserved_bytes: 0,
-         exhaustion_ratio: 0.0,
-         queue_depth: 0,
-         claim_mode: "unknown",
-         service_pressure: "unknown",
-         oversized_refusals_total: 0,
-         degraded_mode_entries_total: 0,
-         cpu_load: 0.0,
-         ram_load: 0.0,
-         io_wait: 0.0,
-         host_state: "healthy",
-         host_guidance_slots: 0
-       }
-     )}
+    {:ok, socket}
   end
 
   @impl true
@@ -56,389 +49,540 @@ defmodule Axon.Watcher.CockpitLive do
 
   @impl true
   def handle_info(:tick, socket) do
-    stats = Progress.get_status(socket.assigns.repo_slug)
-    dir_stats = Progress.get_directory_stats(socket.assigns.repo_slug)
-
-    live =
-      socket.assigns.live
-      |> Map.merge(Axon.Watcher.Telemetry.get_stats())
-      |> Map.merge(%{
-        total_files: stats["total"] || 0,
-        total_ingested: stats["synced"] || 0,
-        indexing_progress: stats["progress"] || 0,
-        directories: dir_stats
-      })
-
-    {:noreply,
-     assign(socket,
-       stats: stats,
-       dir_stats: dir_stats,
-       monitoring_active: true,
-       live: live
-     )}
+    {:noreply, assign_snapshot(socket, build_snapshot(socket.assigns.repo_slug))}
   end
 
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="header">
-      <div class="logo">
-        AXON <span style="font-weight: 400; color: var(--text-dim);">SYSTEMS</span>
-        <div style="font-size: 0.75rem; color: var(--text-dim); margin-top: 4px;">
-          Multi-Project Visualization Plane
-        </div>
-      </div>
-      <div style="display:flex; gap: 12px; align-items: center;">
-        <div class="status-badge status-live">
-          ● RUST RUNTIME OBSERVED
-        </div>
-        <div class="pulse"></div>
-      </div>
-    </div>
-
-    <div class="grid">
-      <!-- Unit 01: Core Watcher -->
-      <div class="card">
-        <div class="card-title">
-          <svg style="width:18px;height:18px" viewBox="0 0 24 24">
-            <path
-              fill="currentColor"
-              d="M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9M12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17M12,4.5C7,4.5 2.73,7.61 1,12C2.73,16.39 7,19.5 12,19.5C17,19.5 21.27,16.39 23,12C21.27,7.61 17,4.5 12,4.5Z"
-            />
-          </svg>
-          UNIT 01: CORE WATCHER
-        </div>
-        <div class="stat"><label>REPOSITORY</label> <span>{@repo_slug}</span></div>
-        <div class="stat">
-          <label>STATUS</label>
-          <span style="color: var(--neon-green);">{String.upcase(@stats["status"] || "live")}</span>
-        </div>
-        <div class="stat">
-          <label>TOTAL_INGESTED</label>
-          <span style="color: var(--neon-blue);">{@live.total_ingested}</span>
+    <div class="cockpit-shell">
+      <header class="cockpit-header">
+        <div>
+          <p class="eyebrow">Workspace Control Plane</p>
+          <h1>Axon Cockpit</h1>
+          <p class="cockpit-subtitle">
+            Read-only operational view over ingestion, backlog causality, project readiness and runtime health.
+          </p>
         </div>
 
-        <div class="progress-bar">
-          <div class="progress-fill" style={"width: #{@stats["progress"] || 0}%"}></div>
+        <div class="header-signals">
+          <.signal_chip label="Rust Runtime" value="Observed" tone={:ok} />
+          <.signal_chip label="MCP" value={mcp_state(@workspace)} tone={mcp_tone(@workspace)} />
+          <.signal_chip
+            label="Truth"
+            value={readiness_badge(@readiness.readiness_state)}
+            tone={readiness_tone(@readiness.readiness_state)}
+          />
         </div>
-        <div style="display:flex; justify-content: space-between; margin-top: 10px; font-size: 0.7rem; font-weight: 700;">
-          <span style="color: var(--text-dim);">PIPELINE_LOAD</span>
-          <span style="color: var(--neon-blue);">{@stats["progress"] || 0}%</span>
-        </div>
-      </div>
-      
-    <!-- Unit 02: Runtime Worker Activity -->
-      <div class="card">
-        <div class="card-title">
-          <svg style="width:18px;height:18px" viewBox="0 0 24 24">
-            <path
-              fill="currentColor"
-              d="M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5Z"
-            />
-          </svg>
-          UNIT 02: RUNTIME WORKER ACTIVITY
-        </div>
-        <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
-          <%= for i <- 1..8 do %>
-            <% worker = @live.active_workers["oban:#{i}"] %>
-            <div style={"height: 40px; border: 1px solid #{if worker, do: "var(--neon-green)", else: "var(--border)"}; background: #{if worker, do: "rgba(0,255,65,0.05)", else: "transparent"}; display: flex; align-items: center; justify-content: center; position: relative;"}>
-              <div :if={worker} class="pulse" style="position: absolute; top: 4px; right: 4px;"></div>
-              <span style="font-size: 0.6rem; color: var(--text-dim);">W{i}</span>
-            </div>
-          <% end %>
-        </div>
-        <div style="margin-top: 15px;">
-          <%= if map_size(@live.active_workers) > 0 do %>
-            <div style="font-size: 0.7rem; color: var(--neon-green); font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-              >> PARSING: {(Map.values(@live.active_workers) |> List.first()).file}
-            </div>
-          <% else %>
-            <div style="font-size: 0.7rem; color: var(--text-dim); font-family: monospace;">
-              RUNTIME_IDLE_WAITING_FOR_WORK
-            </div>
-          <% end %>
-        </div>
-      </div>
-      
-    <!-- Unit 03: Monitoring Control -->
-      <div class="card" style="border-color: var(--neon-blue);">
-        <div class="card-title" style="color: var(--neon-blue);">
-          <svg style="width:18px;height:18px" viewBox="0 0 24 24">
-            <path
-              fill="currentColor"
-              d="M12,15.5A2.5,2.5 0 0,1 14.5,18A2.5,2.5 0 0,1 12,20.5A2.5,2.5 0 0,1 9.5,18A2.5,2.5 0 0,1 12,15.5M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 12,14A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2Z"
-            />
-          </svg>
-          UNIT 03: RUNTIME MODE
-        </div>
-        <div class="stat">
-          <label>CONTROL AUTHORITY</label>
-          <span style="color: var(--neon-blue);">RUST CANONICAL</span>
-        </div>
-        <div class="stat">
-          <label>ELIXIR ROLE</label>
-          <span style="color: var(--text-dim);">VISUALIZATION + DIAGNOSTICS</span>
-        </div>
-      </div>
+      </header>
 
-    <!-- Unit 04: Runtime Pressure -->
-      <div class="card" style="border-color: var(--warning);">
-        <div class="card-title" style="color: var(--warning);">
-          <svg style="width:18px;height:18px" viewBox="0 0 24 24">
-            <path
-              fill="currentColor"
-              d="M12,2L1,21H23L12,2M12,6L19.53,19H4.47L12,6M11,10V14H13V10H11M11,16V18H13V16H11Z"
-            />
-          </svg>
-          UNIT 04: RUNTIME PRESSURE
-        </div>
-        <div class="stat">
-          <label>RUST_GUIDANCE</label>
-          <span style="color: var(--neon-green);">{@live.target_pressure} slots</span>
-        </div>
-        <div class="stat">
-          <label>HOST_CPU</label>
-          <span style="color: var(--neon-blue);">
-            {Float.round(Map.get(@live, :cpu_load, 0.0), 1)}%
-          </span>
-        </div>
-        <div class="stat">
-          <label>HOST_RAM</label>
-          <span style="color: var(--neon-blue);">
-            {Float.round(Map.get(@live, :ram_load, 0.0), 1)}%
-          </span>
-        </div>
-        <div class="stat">
-          <label>HOST_IO_WAIT</label>
-          <span style="color: var(--neon-blue);">
-            {Float.round(Map.get(@live, :io_wait, 0.0), 1)}%
-          </span>
-        </div>
-        <div class="stat">
-          <label>HOST_STATE</label>
-          <span style={"color: #{host_state_color(Map.get(@live, :host_state, "healthy"))};"}>
-            {String.upcase(Map.get(@live, :host_state, "healthy"))}
-          </span>
-        </div>
-        <div class="stat">
-          <label>HOST_GUIDANCE</label>
-          <span style="color: var(--warning);">{Map.get(@live, :host_guidance_slots, 0)} slots</span>
-        </div>
-        <div class="stat">
-          <label>MEMORY_BUDGET</label>
-          <span style="color: var(--neon-blue);">
-            {format_mebibytes(Map.get(@live, :reserved_bytes, 0))} MB / {format_mebibytes(
-              Map.get(@live, :budget_bytes, 0)
-            )} MB
-          </span>
-        </div>
-        <div class="stat">
-          <label>BUDGET_EXHAUSTION</label>
-          <span style="color: var(--warning);">
-            {Float.round(Map.get(@live, :exhaustion_ratio, 0.0) * 100, 1)}%
-          </span>
-        </div>
-        <div class="stat">
-          <label>Queue Depth</label>
-          <span style="color: var(--neon-blue);">{Map.get(@live, :queue_depth, 0)}</span>
-        </div>
-        <div class="stat">
-          <label>CLAIM_MODE</label>
-          <span style="color: var(--neon-green);">
-            {String.upcase(Map.get(@live, :claim_mode, "unknown"))}
-          </span>
-        </div>
-        <div class="stat">
-          <label>SERVICE_PRESSURE</label>
-          <span style="color: var(--warning);">
-            {String.upcase(Map.get(@live, :service_pressure, "unknown"))}
-          </span>
-        </div>
-        <div class="stat">
-          <label>Oversized Refusals</label>
-          <span style="color: var(--neon-red);">{Map.get(@live, :oversized_refusals_total, 0)}</span>
-        </div>
-        <div class="stat">
-          <label>Degraded Entries</label>
-          <span style="color: var(--warning);">
-            {Map.get(@live, :degraded_mode_entries_total, 0)}
-          </span>
-        </div>
-        <div class="stat">
-          <label>T4_LATENCY</label>
-          <span style={"color: #{if @live.t4_ema > 200, do: "var(--neon-red)", else: "var(--neon-blue)"};"}>
-            {Float.round(@live.t4_ema, 2)}ms
-          </span>
-        </div>
-        <div class="stat">
-          <label>REAL_FLUX</label>
-          <span style="color: var(--neon-blue);">{Float.round(@live.flux_reel, 1)} f/s</span>
-        </div>
-
-        <div class="progress-bar" style="background: rgba(217, 119, 6, 0.1);">
-          <div
-            class="progress-fill"
-            style={"width: #{Map.get(@live, :exhaustion_ratio, 0.0) * 100}%; background: var(--warning);"}
-          >
+      <section class="cockpit-band">
+        <div class="band-title-row">
+          <div>
+            <p class="eyebrow">Workspace</p>
+            <h2>Indexation globale</h2>
+          </div>
+          <div class="band-meta">
+            <span>Repo slug: {@repo_slug}</span>
+            <span>Completion: {@workspace["progress"]}%</span>
           </div>
         </div>
-      </div>
-      
-    <!-- Full Width: Real-time Activity Log -->
-      <div class="card" style="grid-column: span 3; background: #000; border-color: #222;">
-        <div class="card-title">
-          <svg style="width:18px;height:18px" viewBox="0 0 24 24">
-            <path
-              fill="currentColor"
-              d="M13,9H11V7H13M13,17H11V11H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z"
-            />
-          </svg>
-          REAL-TIME TELEMETRY STREAM
+
+        <div class="hero-grid">
+          <.metric_card label="Known Files" value={@workspace["known"]} tone={:neutral} />
+          <.metric_card label="Completed" value={@workspace["completed"]} tone={:ok} />
+          <.metric_card label="Indexing" value={@workspace["indexing"]} tone={:info} />
+          <.metric_card label="Pending" value={@workspace["pending"]} tone={:warn} />
+          <.metric_card label="Degraded" value={@workspace["indexed_degraded"]} tone={:warn} />
+          <.metric_card label="Oversized" value={@workspace["oversized"]} tone={:danger} />
+          <.metric_card label="Skipped" value={@workspace["skipped"]} tone={:neutral} />
+          <.metric_card label="Deleted" value={@workspace["deleted"]} tone={:neutral} />
         </div>
-        <div style="font-family: monospace; font-size: 0.75rem; height: 150px; overflow-y: hidden; display: flex; flex-direction: column-reverse;">
-          <%= for file <- @live.last_files do %>
-            <div style="padding: 4px 0; border-bottom: 1px solid #111; display: flex; gap: 15px;">
-              <span style="color: var(--text-dim);">
-                {String.slice(DateTime.to_iso8601(file.time), 11, 8)}
-              </span>
-              <span style={"color: #{file_status_color(file.status)}"}>
-                [{file_status_label(file.status)}]
-              </span>
-              <span style="color: #fff;">{file.path}</span>
+
+        <div class="progress-rail">
+          <div class="progress-rail-fill" style={"width: #{@workspace["progress"]}%"}></div>
+        </div>
+      </section>
+
+      <div class="cockpit-columns">
+        <section class="cockpit-band">
+          <div class="band-title-row">
+            <div>
+              <p class="eyebrow">Backlog</p>
+              <h2>Causes dominantes</h2>
             </div>
-          <% end %>
-          <%= if Enum.empty?(@live.last_files) do %>
-            <div style="color: var(--text-dim); text-align: center; margin-top: 60px;">
-              SYSTEM_IDLE: AWAITING_INGESTION_DATA
-            </div>
-          <% end %>
-          <div
-            :if={Map.get(@live, :scan_complete, false)}
-            style="color: var(--neon-green); text-align: center; margin-top: 12px;"
-          >
-            Runtime reported scan completion
+            <span class="band-kicker">{backlog_summary(@workspace)}</span>
           </div>
-        </div>
-      </div>
-      
-    <!-- Knowledge Distribution Map -->
-      <div class="card" style="grid-column: span 3;">
-        <div class="card-title">
-          <svg style="width:18px;height:18px" viewBox="0 0 24 24">
-            <path
-              fill="currentColor"
-              d="M20,18H4V8H20M20,6H12L10,4H4C2.89,4 2,4.89 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V8C22,6.89 21.1,6 20,6Z"
-            />
-          </svg>
-          KNOWLEDGE DISTRIBUTION MAP (LIVE)
-        </div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px;">
-          <%= if @live.directories == %{} or is_nil(@live.directories) do %>
-            <div
-              class="stat"
-              style="grid-column: span 3; text-align: center; border: 1px dashed var(--border); padding: 20px;"
-            >
-              WAITING FOR RUNTIME DATA...
+
+          <div id="backlog-reasons" phx-update="stream" class="stack-list">
+            <div :if={@reason_count == 0} class="empty-state">
+              No dominant backlog cause is visible yet.
             </div>
-          <% else %>
-            <%= for {dir, d_stats} <- @live.directories do %>
-              <% percent =
-                if d_stats.total > 0, do: trunc(d_stats.completed / d_stats.total * 100), else: 0 %>
-              <div style="border-left: 2px solid var(--neon-blue); padding-left: 12px; background: rgba(0,242,255,0.02); padding-bottom: 8px;">
-                <div style="display: flex; justify-content: space-between; align-items: baseline;">
-                  <div style="font-size: 0.85rem; font-weight: 700; color: #fff; text-transform: uppercase;">
-                    {dir}
-                  </div>
-                  <div style="font-size: 0.65rem; color: var(--text-dim);">
-                    {if d_stats.last_update,
-                      do: String.slice(DateTime.to_iso8601(d_stats.last_update), 11, 8),
-                      else: "PENDING"}
-                  </div>
-                </div>
 
-                <div style="display: flex; justify-content: space-between; margin-top: 8px; font-size: 0.7rem; font-family: monospace;">
-                  <span style="color: var(--neon-green);">{d_stats.completed} DONE</span>
-                  <span style="color: var(--neon-red);">
-                    {if d_stats.failed > 0, do: "#{d_stats.failed} FAIL", else: ""}
-                  </span>
-                  <span style="color: var(--text-dim);">{d_stats.total} TOTAL</span>
-                </div>
-
-                <div class="progress-bar" style="height: 3px; margin-top: 5px;">
-                  <div class="progress-fill" style={"width: #{percent}%"}></div>
-                </div>
+            <div :for={{dom_id, reason} <- @streams.reasons} id={dom_id} class="stack-row">
+              <div>
+                <p class="stack-title">{reason.label}</p>
+                <p class="stack-caption">{reason.reason}</p>
               </div>
-            <% end %>
-          <% end %>
-        </div>
+              <span class="stack-value">{reason.count}</span>
+            </div>
+          </div>
+
+          <div class="mini-grid">
+            <.signal_stat label="Ready Truth" value={readiness_badge(@readiness.readiness_state)} />
+            <.signal_stat label="Coverage" value={"#{@workspace["progress"]}%"} />
+            <.signal_stat label="Visible Scope" value={Integer.to_string(@workspace["known"])} />
+            <.signal_stat label="Hot Backlog" value={Integer.to_string(@workspace["indexing"])} />
+          </div>
+        </section>
+
+        <section class="cockpit-band">
+          <div class="band-title-row">
+            <div>
+              <p class="eyebrow">Projects</p>
+              <h2>Readiness par projet</h2>
+            </div>
+            <span class="band-kicker">{@readiness.project_summary}</span>
+          </div>
+
+          <div id="project-readiness" phx-update="stream" class="stack-list">
+            <div :if={@project_count == 0} class="empty-state">
+              No project snapshot is available yet.
+            </div>
+
+            <div :for={{dom_id, project} <- @streams.projects} id={dom_id} class="project-card">
+              <div class="project-head">
+                <div>
+                  <p class="stack-title">{project.slug}</p>
+                  <p class="stack-caption">{project.readiness |> String.upcase()} readiness</p>
+                </div>
+                <span class={["readiness-pill", readiness_class(project.readiness)]}>
+                  {project.progress}%
+                </span>
+              </div>
+
+              <div class="project-grid">
+                <.signal_stat label="Done" value={Integer.to_string(project.completed)} />
+                <.signal_stat label="Pending" value={Integer.to_string(project.pending)} />
+                <.signal_stat label="Indexing" value={Integer.to_string(project.indexing)} />
+                <.signal_stat label="Degraded" value={Integer.to_string(project.degraded)} />
+              </div>
+
+              <div class="progress-rail compact">
+                <div class="progress-rail-fill" style={"width: #{project.progress}%"}></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="cockpit-columns">
+        <section class="cockpit-band">
+          <div class="band-title-row">
+            <div>
+              <p class="eyebrow">Runtime</p>
+              <h2>Service & scheduling</h2>
+            </div>
+            <span class="band-kicker">{String.upcase(@runtime.claim_mode)}</span>
+          </div>
+
+          <div class="detail-grid">
+            <.signal_stat label="Queue Depth" value={Integer.to_string(@runtime.queue_depth)} />
+            <.signal_stat label="Claim Mode" value={String.upcase(@runtime.claim_mode)} />
+            <.signal_stat
+              label="Service Pressure"
+              value={String.upcase(@runtime.service_pressure)}
+            />
+            <.signal_stat
+              label="Budget Reserved"
+              value={"#{format_mib(@runtime.reserved_bytes)} MB / #{format_mib(@runtime.budget_bytes)} MB"}
+            />
+            <.signal_stat
+              label="Budget Exhaustion"
+              value={"#{Float.round(@runtime.exhaustion_ratio * 100, 1)}%"}
+            />
+            <.signal_stat
+              label="Oversized"
+              value={Integer.to_string(@runtime.oversized_refusals_total)}
+            />
+            <.signal_stat
+              label="Degraded"
+              value={Integer.to_string(@runtime.degraded_mode_entries_total)}
+            />
+            <.signal_stat
+              label="Guidance Slots"
+              value={"#{@runtime.host_guidance_slots} slots"}
+            />
+            <.signal_stat label="Host CPU" value={"#{format_float(@runtime.cpu_load)}%"} />
+            <.signal_stat label="Host RAM" value={"#{format_float(@runtime.ram_load)}%"} />
+            <.signal_stat label="Host IO Wait" value={"#{format_float(@runtime.io_wait)}%"} />
+            <.signal_stat label="Host State" value={String.upcase(@runtime.host_state)} />
+          </div>
+        </section>
+
+        <section class="cockpit-band">
+          <div class="band-title-row">
+            <div>
+              <p class="eyebrow">Ingress</p>
+              <h2>Buffer & promotion</h2>
+            </div>
+            <span class="band-kicker">
+              {if @runtime.ingress_enabled, do: "enabled", else: "disabled"}
+            </span>
+          </div>
+
+          <div class="detail-grid">
+            <.signal_stat
+              label="Buffered Entries"
+              value={Integer.to_string(@runtime.ingress_buffered_entries)}
+            />
+            <.signal_stat
+              label="Subtree Hints"
+              value={Integer.to_string(@runtime.ingress_subtree_hints)}
+            />
+            <.signal_stat
+              label="Collapsed Total"
+              value={Integer.to_string(@runtime.ingress_collapsed_total)}
+            />
+            <.signal_stat
+              label="Flush Count"
+              value={Integer.to_string(@runtime.ingress_flush_count)}
+            />
+            <.signal_stat
+              label="Last Flush"
+              value={"#{@runtime.ingress_last_flush_duration_ms} ms"}
+            />
+            <.signal_stat
+              label="Last Promoted"
+              value={Integer.to_string(@runtime.ingress_last_promoted_count)}
+            />
+          </div>
+        </section>
+      </div>
+
+      <div class="cockpit-columns">
+        <section class="cockpit-band">
+          <div class="band-title-row">
+            <div>
+              <p class="eyebrow">Memory</p>
+              <h2>Heap, file pages & DuckDB</h2>
+            </div>
+            <span class="band-kicker">{memory_dominant(@runtime)}</span>
+          </div>
+
+          <div class="detail-grid">
+            <.signal_stat label="RSS" value={"#{format_mib(@runtime.rss_bytes)} MB"} />
+            <.signal_stat label="RssAnon" value={"#{format_mib(@runtime.rss_anon_bytes)} MB"} />
+            <.signal_stat label="RssFile" value={"#{format_mib(@runtime.rss_file_bytes)} MB"} />
+            <.signal_stat label="RssShmem" value={"#{format_mib(@runtime.rss_shmem_bytes)} MB"} />
+            <.signal_stat label="DuckDB DB" value={"#{format_mib(@runtime.db_file_bytes)} MB"} />
+            <.signal_stat label="DuckDB WAL" value={"#{format_mib(@runtime.db_wal_bytes)} MB"} />
+            <.signal_stat label="DuckDB Total" value={"#{format_mib(@runtime.db_total_bytes)} MB"} />
+            <.signal_stat
+              label="DuckDB Memory"
+              value={"#{format_mib(@runtime.duckdb_memory_bytes)} MB"}
+            />
+            <.signal_stat
+              label="DuckDB Temp"
+              value={"#{format_mib(@runtime.duckdb_temporary_bytes)} MB"}
+            />
+          </div>
+        </section>
+
+        <section class="cockpit-band">
+          <div class="band-title-row">
+            <div>
+              <p class="eyebrow">Recent Activity</p>
+              <h2>Latest confirmed files</h2>
+            </div>
+            <span :if={@scan_complete} class="band-kicker success">
+              Runtime reported scan completion
+            </span>
+          </div>
+
+          <div class="activity-list">
+            <div :if={Enum.empty?(@recent_files)} class="empty-state">
+              Waiting for recent bridge events.
+            </div>
+
+            <div :for={file <- @recent_files} class="activity-row">
+              <span class={["activity-badge", activity_class(file.status)]}>
+                {activity_label(file.status)}
+              </span>
+              <span class="activity-path">{file.path}</span>
+              <span class="activity-time">{String.slice(DateTime.to_iso8601(file.time), 11, 8)}</span>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
     """
   end
 
+  attr :label, :string, required: true
+  attr :value, :string, required: true
+  attr :tone, :atom, default: :neutral
+
+  defp signal_chip(assigns) do
+    ~H"""
+    <div class={["signal-chip", tone_class(@tone)]}>
+      <span class="signal-chip-label">{@label}</span>
+      <strong>{@value}</strong>
+    </div>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :value, :any, required: true
+  attr :tone, :atom, default: :neutral
+
+  defp metric_card(assigns) do
+    ~H"""
+    <article class={["metric-card", tone_class(@tone)]}>
+      <p class="metric-label">{@label}</p>
+      <p class="metric-value">{@value}</p>
+    </article>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :value, :string, required: true
+
+  defp signal_stat(assigns) do
+    ~H"""
+    <div class="signal-stat">
+      <span class="signal-stat-label">{@label}</span>
+      <strong class="signal-stat-value">{@value}</strong>
+    </div>
+    """
+  end
+
+  defp assign_snapshot(socket, snapshot) do
+    socket
+    |> assign(
+      workspace: snapshot.workspace,
+      runtime: snapshot.runtime,
+      readiness: snapshot.readiness,
+      recent_files: snapshot.recent_files,
+      project_count: length(snapshot.projects),
+      reason_count: length(snapshot.reasons)
+    )
+    |> stream(:projects, snapshot.projects, reset: true)
+    |> stream(:reasons, snapshot.reasons, reset: true)
+  end
+
+  defp build_snapshot(repo_slug) do
+    workspace = Progress.get_status(repo_slug)
+    projects = Progress.list_projects(repo_slug)
+    reasons = Progress.list_backlog_reasons(repo_slug)
+    runtime = structify_runtime(Telemetry.get_stats())
+
+    %{
+      workspace: workspace,
+      projects: projects,
+      reasons: reasons,
+      runtime: runtime,
+      readiness: derive_readiness(workspace, projects),
+      recent_files: Map.get(runtime, :last_files, [])
+    }
+  end
+
   defp apply_bridge_event(socket, %{"FileIndexed" => payload}) do
     path = Map.get(payload, "path", "unknown")
     status = file_status(Map.get(payload, "status", "ok"))
+    file = %{path: path, status: status, time: DateTime.utc_now()}
 
-    live =
-      socket.assigns.live
-      |> Map.update(
-        :last_files,
-        [%{path: path, status: status, time: DateTime.utc_now()}],
-        fn files ->
-          [%{path: path, status: status, time: DateTime.utc_now()} | Enum.take(files, 14)]
-        end
-      )
-      |> Map.update(:total_ingested, 1, &(&1 + 1))
-      |> Map.put(:scan_complete, false)
-
-    assign(socket, live: live)
+    assign(socket,
+      recent_files: [file | Enum.take(socket.assigns.recent_files, 11)],
+      scan_complete: false
+    )
   end
 
   defp apply_bridge_event(socket, %{"ScanComplete" => _payload}) do
-    live = Map.put(socket.assigns.live, :scan_complete, true)
-    socket |> assign(live: live) |> put_flash(:info, "Runtime reported scan completion")
+    assign(socket, scan_complete: true)
   end
 
   defp apply_bridge_event(socket, %{"RuntimeTelemetry" => payload}) do
-    live =
-      socket.assigns.live
-      |> Map.put(:budget_bytes, Map.get(payload, "budget_bytes", 0))
-      |> Map.put(:reserved_bytes, Map.get(payload, "reserved_bytes", 0))
-      |> Map.put(:exhaustion_ratio, Map.get(payload, "exhaustion_ratio", 0.0))
-      |> Map.put(:queue_depth, Map.get(payload, "queue_depth", 0))
-      |> Map.put(:claim_mode, Map.get(payload, "claim_mode", "unknown"))
-      |> Map.put(:service_pressure, Map.get(payload, "service_pressure", "unknown"))
-      |> Map.put(:oversized_refusals_total, Map.get(payload, "oversized_refusals_total", 0))
-      |> Map.put(:degraded_mode_entries_total, Map.get(payload, "degraded_mode_entries_total", 0))
-      |> Map.put(:cpu_load, Map.get(payload, "cpu_load", 0.0))
-      |> Map.put(:ram_load, Map.get(payload, "ram_load", 0.0))
-      |> Map.put(:io_wait, Map.get(payload, "io_wait", 0.0))
-      |> Map.put(:host_state, Map.get(payload, "host_state", "healthy"))
-      |> Map.put(:host_guidance_slots, Map.get(payload, "host_guidance_slots", 0))
+    Telemetry.update_runtime_telemetry(payload)
 
-    assign(socket, live: live)
+    runtime =
+      Telemetry.get_stats()
+      |> structify_runtime()
+
+    assign(socket, runtime: runtime)
   end
 
   defp apply_bridge_event(socket, _event), do: socket
 
-  defp format_mebibytes(bytes) when is_integer(bytes) do
-    div(bytes, 1024 * 1024)
+  defp derive_readiness(workspace, projects) do
+    ready =
+      Enum.count(projects, fn project ->
+        project.readiness == "ready"
+      end)
+
+    partial =
+      Enum.count(projects, fn project ->
+        project.readiness in ["partial", "warming"]
+      end)
+
+    queued =
+      Enum.count(projects, fn project ->
+        project.readiness == "queued"
+      end)
+
+    state =
+      cond do
+        workspace["completed"] == 0 -> "cold"
+        workspace["progress"] >= 90 and workspace["indexed_degraded"] == 0 -> "ready"
+        workspace["completed"] > 0 -> "partial"
+        true -> "cold"
+      end
+
+    %{
+      readiness_state: state,
+      project_summary: "#{ready} ready, #{partial} partial, #{queued} queued"
+    }
   end
 
-  defp host_state_color("constrained"), do: "var(--warning)"
-  defp host_state_color("watch"), do: "var(--warning)"
-  defp host_state_color(_state), do: "var(--neon-green)"
+  defp default_workspace do
+    %{
+      "status" => "connecting",
+      "progress" => 0,
+      "synced" => 0,
+      "total" => 0,
+      "indexed" => 0,
+      "indexed_degraded" => 0,
+      "pending" => 0,
+      "indexing" => 0,
+      "oversized" => 0,
+      "skipped" => 0,
+      "deleted" => 0,
+      "known" => 0,
+      "completed" => 0
+    }
+  end
+
+  defp default_runtime do
+    Telemetry.get_stats()
+    |> structify_runtime()
+  end
+
+  defp default_readiness do
+    %{readiness_state: "cold", project_summary: "0 ready, 0 partial, 0 queued"}
+  end
+
+  defp structify_runtime(stats) do
+    %{
+      budget_bytes: Map.get(stats, :budget_bytes, 0) || 0,
+      reserved_bytes: Map.get(stats, :reserved_bytes, 0) || 0,
+      exhaustion_ratio: Map.get(stats, :exhaustion_ratio, 0.0) || 0.0,
+      queue_depth: Map.get(stats, :queue_depth, 0) || 0,
+      claim_mode: Map.get(stats, :claim_mode, "unknown") || "unknown",
+      service_pressure: Map.get(stats, :service_pressure, "healthy") || "healthy",
+      oversized_refusals_total: Map.get(stats, :oversized_refusals_total, 0) || 0,
+      degraded_mode_entries_total: Map.get(stats, :degraded_mode_entries_total, 0) || 0,
+      cpu_load: Map.get(stats, :cpu_load, 0.0) || 0.0,
+      ram_load: Map.get(stats, :ram_load, 0.0) || 0.0,
+      io_wait: Map.get(stats, :io_wait, 0.0) || 0.0,
+      host_state: Map.get(stats, :host_state, "healthy") || "healthy",
+      host_guidance_slots: Map.get(stats, :host_guidance_slots, 0) || 0,
+      rss_bytes: Map.get(stats, :rss_bytes, 0) || 0,
+      rss_anon_bytes: Map.get(stats, :rss_anon_bytes, 0) || 0,
+      rss_file_bytes: Map.get(stats, :rss_file_bytes, 0) || 0,
+      rss_shmem_bytes: Map.get(stats, :rss_shmem_bytes, 0) || 0,
+      db_file_bytes: Map.get(stats, :db_file_bytes, 0) || 0,
+      db_wal_bytes: Map.get(stats, :db_wal_bytes, 0) || 0,
+      db_total_bytes: Map.get(stats, :db_total_bytes, 0) || 0,
+      duckdb_memory_bytes: Map.get(stats, :duckdb_memory_bytes, 0) || 0,
+      duckdb_temporary_bytes: Map.get(stats, :duckdb_temporary_bytes, 0) || 0,
+      ingress_enabled: Map.get(stats, :ingress_enabled, false) || false,
+      ingress_buffered_entries: Map.get(stats, :ingress_buffered_entries, 0) || 0,
+      ingress_subtree_hints: Map.get(stats, :ingress_subtree_hints, 0) || 0,
+      ingress_collapsed_total: Map.get(stats, :ingress_collapsed_total, 0) || 0,
+      ingress_flush_count: Map.get(stats, :ingress_flush_count, 0) || 0,
+      ingress_last_flush_duration_ms: Map.get(stats, :ingress_last_flush_duration_ms, 0) || 0,
+      ingress_last_promoted_count: Map.get(stats, :ingress_last_promoted_count, 0) || 0,
+      last_files: Map.get(stats, :last_files, []) || []
+    }
+  end
+
+  defp backlog_summary(workspace) do
+    "#{workspace["pending"]} pending, #{workspace["indexing"]} indexing"
+  end
+
+  defp mcp_state(workspace) do
+    cond do
+      workspace["completed"] == 0 -> "Cold"
+      workspace["progress"] >= 90 -> "Ready"
+      true -> "Partial"
+    end
+  end
+
+  defp mcp_tone(workspace) do
+    cond do
+      workspace["completed"] == 0 -> :warn
+      workspace["progress"] >= 90 -> :ok
+      true -> :info
+    end
+  end
+
+  defp readiness_badge("ready"), do: "Ready"
+  defp readiness_badge("partial"), do: "Partial"
+  defp readiness_badge("cold"), do: "Cold"
+  defp readiness_badge(_), do: "Warming"
+
+  defp readiness_tone("ready"), do: :ok
+  defp readiness_tone("partial"), do: :info
+  defp readiness_tone("cold"), do: :warn
+  defp readiness_tone(_), do: :neutral
+
+  defp readiness_class("ready"), do: "ready"
+  defp readiness_class("partial"), do: "partial"
+  defp readiness_class("warming"), do: "warming"
+  defp readiness_class(_), do: "queued"
+
+  defp tone_class(:ok), do: "tone-ok"
+  defp tone_class(:info), do: "tone-info"
+  defp tone_class(:warn), do: "tone-warn"
+  defp tone_class(:danger), do: "tone-danger"
+  defp tone_class(_), do: "tone-neutral"
+
+  defp format_mib(bytes) when is_integer(bytes), do: div(bytes, 1_048_576)
+  defp format_mib(bytes) when is_float(bytes), do: round(bytes / 1_048_576)
+  defp format_mib(_bytes), do: 0
+
+  defp format_float(value) when is_float(value), do: Float.round(value, 1)
+  defp format_float(value) when is_integer(value), do: (value * 1.0) |> Float.round(1)
+  defp format_float(_value), do: 0.0
+
+  defp memory_dominant(runtime) do
+    cond do
+      runtime.rss_anon_bytes >= runtime.rss_file_bytes -> "anonymous memory dominates"
+      true -> "file-backed memory dominates"
+    end
+  end
 
   defp file_status("ok"), do: :ok
   defp file_status("indexed_degraded"), do: :degraded
   defp file_status(_), do: :error
 
-  defp file_status_color(:ok), do: "var(--neon-green)"
-  defp file_status_color(:degraded), do: "var(--warning)"
-  defp file_status_color(_), do: "var(--neon-red)"
+  defp activity_label(:ok), do: "SUCCESS"
+  defp activity_label(:degraded), do: "DEGRADED"
+  defp activity_label(_), do: "ERROR"
 
-  defp file_status_label(:ok), do: "SUCCESS"
-  defp file_status_label(:degraded), do: "DEGRADED"
-  defp file_status_label(_), do: "ERROR"
+  defp activity_class(:ok), do: "ok"
+  defp activity_class(:degraded), do: "degraded"
+  defp activity_class(_), do: "error"
+
+  defp slug_dom_id(value) do
+    value
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/[^a-z0-9]+/u, "-")
+    |> String.trim("-")
+    |> case do
+      "" -> "unknown"
+      dom_id -> dom_id
+    end
+  end
 end

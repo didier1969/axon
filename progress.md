@@ -383,3 +383,37 @@
 ## Next Immediate Action
 - valider encore `mix test` dashboard puis `start-v2.sh` / `stop-v2.sh`
 - si vert, geler la doc, commit et push de la tranche finale hors dashboard
+
+## 2026-04-02 - Refonte cockpit LiveView executee et validee
+- Vert:
+  - nouveau cockpit operateur dans `src/dashboard/lib/axon_nexus/axon/watcher/cockpit_live.ex`
+  - hierarchie refondue:
+    - workspace global
+    - backlog et causes
+    - projets et readiness
+    - runtime
+    - ingress
+    - memoire
+    - activite recente
+  - `Progress` enrichi pour exposer:
+    - etat global par statut
+    - readiness par projet
+    - causes dominantes du backlog
+  - dependances CDN retirees:
+    - plus de Google Fonts
+    - plus de scripts `phoenix` / `phoenix_live_view` via jsdelivr
+  - endpoint watcher secondaire réaligné sur le root layout Phoenix standard
+  - `SqlGateway` rendu configurable pour des tests isoles
+  - tests LiveView réécrits pour verrouiller:
+    - sections operatoires
+    - absence de CDN
+    - rendu runtime / ingress / memoire
+- Validation fraiche:
+  - `mix test test/axon_dashboard_web/live/status_live_test.exs` vert (`8`)
+  - `mix test` vert (`31`)
+  - `mix compile` vert
+  - `mix precommit` vert
+
+## Next Immediate Action
+- laisser tourner le runtime actuel sans redemarrage tant que la fenetre d'indexation est critique
+- effectuer un unique restart Phoenix plus tard pour exposer la nouvelle UI sur l'instance servie

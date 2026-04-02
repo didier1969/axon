@@ -9,7 +9,7 @@ defmodule Axon.Watcher.ProgressTest do
     with_sql_gateway_rows([["indexed", 2], ["indexed_degraded", 1], ["pending", 1]], fn ->
       status = Progress.get_status("progress-test")
 
-      assert status["status"] == "live"
+      assert status["status"] == "queued"
       assert status["synced"] == 3
       assert status["total"] == 4
       assert status["progress"] == 75
@@ -39,7 +39,18 @@ defmodule Axon.Watcher.ProgressTest do
     :inets.start()
     :ssl.start()
     body = Jason.encode!(rows)
-    {:ok, listener} = :gen_tcp.listen(44_129, [:binary, packet: :raw, active: false, reuseaddr: true])
+    port = random_port()
+
+    {:ok, listener} =
+      :gen_tcp.listen(port, [:binary, packet: :raw, active: false, reuseaddr: true])
+
+    previous = Application.get_env(:axon_dashboard, Axon.Watcher.SqlGateway, [])
+
+    Application.put_env(
+      :axon_dashboard,
+      Axon.Watcher.SqlGateway,
+      Keyword.put(previous, :url, "http://127.0.0.1:#{port}/sql")
+    )
 
     task =
       Task.async(fn ->
@@ -62,7 +73,12 @@ defmodule Axon.Watcher.ProgressTest do
     try do
       fun.()
     after
+      Application.put_env(:axon_dashboard, Axon.Watcher.SqlGateway, previous)
       Task.await(task, 5_000)
     end
+  end
+
+  defp random_port do
+    45_000 + rem(:erlang.unique_integer([:positive]), 10_000)
   end
 end

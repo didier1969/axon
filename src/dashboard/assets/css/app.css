@@ -45,10 +45,19 @@
 
 /* Premium Industrial Styles */
 body {
-  background-color: oklch(10% 0.01 250);
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background:
+    radial-gradient(circle at top left, oklch(22% 0.05 225 / 0.35), transparent 28%),
+    radial-gradient(circle at top right, oklch(30% 0.04 170 / 0.18), transparent 20%),
+    linear-gradient(180deg, oklch(11% 0.01 250), oklch(8% 0.01 250));
+  font-family: "IBM Plex Sans", "Aptos", "Segoe UI", system-ui, sans-serif;
   color: oklch(90% 0.01 250);
   -webkit-font-smoothing: antialiased;
+}
+
+code,
+pre,
+.mono {
+  font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
 }
 
 .premium-card {
@@ -106,4 +115,411 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: oklch(40% 0.01 250);
+}
+
+.cockpit-shell {
+  max-width: 1580px;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 4rem;
+}
+
+.cockpit-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1.5rem;
+  margin-bottom: 1.75rem;
+}
+
+.cockpit-header h1 {
+  font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  font-size: clamp(2rem, 4vw, 3.3rem);
+  font-weight: 650;
+  letter-spacing: -0.04em;
+  line-height: 0.95;
+  color: oklch(96% 0.01 250);
+}
+
+.cockpit-subtitle {
+  margin-top: 0.75rem;
+  max-width: 56rem;
+  color: oklch(72% 0.015 240);
+  font-size: 0.98rem;
+  line-height: 1.6;
+}
+
+.eyebrow {
+  margin-bottom: 0.45rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.74rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: oklch(73% 0.04 205);
+}
+
+.header-signals {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.signal-chip {
+  min-width: 10rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid oklch(28% 0.015 250);
+  border-radius: 1rem;
+  background: linear-gradient(180deg, oklch(16% 0.01 250 / 0.95), oklch(13% 0.01 250 / 0.95));
+  box-shadow: 0 16px 40px rgb(0 0 0 / 0.18);
+}
+
+.signal-chip-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: oklch(74% 0.015 250);
+}
+
+.cockpit-band {
+  padding: 1.4rem;
+  border: 1px solid oklch(24% 0.015 245);
+  border-radius: 1.5rem;
+  background:
+    linear-gradient(180deg, oklch(15% 0.01 250 / 0.94), oklch(13% 0.01 250 / 0.98)),
+    radial-gradient(circle at top right, oklch(24% 0.03 210 / 0.2), transparent 30%);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 0.18);
+}
+
+.cockpit-band + .cockpit-band {
+  margin-top: 1.25rem;
+}
+
+.cockpit-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+  margin-top: 1.25rem;
+}
+
+.band-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.band-title-row h2 {
+  font-size: 1.25rem;
+  font-weight: 620;
+  letter-spacing: -0.03em;
+  color: oklch(95% 0.01 240);
+}
+
+.band-meta,
+.band-kicker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+  color: oklch(76% 0.015 240);
+  font-size: 0.82rem;
+}
+
+.band-kicker.success {
+  color: oklch(81% 0.12 150);
+}
+
+.hero-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.metric-card {
+  padding: 1rem;
+  border-radius: 1.15rem;
+  border: 1px solid oklch(25% 0.015 250);
+  background: linear-gradient(180deg, oklch(17% 0.01 250), oklch(14% 0.01 250));
+}
+
+.metric-label {
+  color: oklch(74% 0.015 250);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.74rem;
+}
+
+.metric-value {
+  margin-top: 0.55rem;
+  font-size: clamp(1.35rem, 2vw, 2.2rem);
+  font-weight: 650;
+  line-height: 1;
+  color: oklch(96% 0.01 245);
+}
+
+.tone-ok {
+  border-color: oklch(42% 0.11 160 / 0.45);
+}
+
+.tone-info {
+  border-color: oklch(48% 0.08 215 / 0.45);
+}
+
+.tone-warn {
+  border-color: oklch(56% 0.13 80 / 0.45);
+}
+
+.tone-danger {
+  border-color: oklch(54% 0.17 30 / 0.5);
+}
+
+.tone-neutral {
+  border-color: oklch(25% 0.015 250);
+}
+
+.progress-rail {
+  height: 0.5rem;
+  margin-top: 1rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: oklch(20% 0.01 250);
+}
+
+.progress-rail.compact {
+  height: 0.35rem;
+  margin-top: 0.85rem;
+}
+
+.progress-rail-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, oklch(74% 0.11 195), oklch(78% 0.14 150));
+  transition: width 180ms ease-out;
+}
+
+.stack-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.stack-row,
+.project-card,
+.activity-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.95rem 1rem;
+  border-radius: 1rem;
+  border: 1px solid oklch(23% 0.015 250);
+  background: oklch(16% 0.01 250 / 0.85);
+}
+
+.stack-title {
+  font-size: 0.98rem;
+  font-weight: 560;
+  color: oklch(95% 0.01 250);
+}
+
+.stack-caption {
+  margin-top: 0.2rem;
+  color: oklch(70% 0.015 245);
+  font-size: 0.8rem;
+}
+
+.stack-value {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 1rem;
+  font-weight: 700;
+  color: oklch(89% 0.06 195);
+}
+
+.project-card {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.project-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+}
+
+.project-grid,
+.mini-grid,
+.detail-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.project-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 0.9rem;
+}
+
+.mini-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 1rem;
+}
+
+.detail-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.signal-stat {
+  padding: 0.95rem 1rem;
+  border-radius: 1rem;
+  border: 1px solid oklch(23% 0.015 250);
+  background: oklch(15% 0.01 250 / 0.78);
+}
+
+.signal-stat-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: oklch(72% 0.015 250);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.signal-stat-value {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  color: oklch(93% 0.01 250);
+  font-size: 0.98rem;
+}
+
+.readiness-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 4.25rem;
+  padding: 0.45rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.readiness-pill.ready {
+  color: oklch(90% 0.09 150);
+  border-color: oklch(44% 0.11 150 / 0.45);
+  background: oklch(24% 0.06 150 / 0.18);
+}
+
+.readiness-pill.partial,
+.readiness-pill.warming {
+  color: oklch(89% 0.08 210);
+  border-color: oklch(45% 0.08 210 / 0.45);
+  background: oklch(23% 0.04 210 / 0.18);
+}
+
+.readiness-pill.queued {
+  color: oklch(90% 0.08 80);
+  border-color: oklch(50% 0.11 80 / 0.45);
+  background: oklch(24% 0.04 80 / 0.18);
+}
+
+.activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.activity-badge {
+  min-width: 5.75rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 0.72rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.activity-badge.ok {
+  background: oklch(24% 0.06 150 / 0.22);
+  color: oklch(88% 0.11 150);
+}
+
+.activity-badge.degraded {
+  background: oklch(24% 0.05 80 / 0.22);
+  color: oklch(90% 0.12 80);
+}
+
+.activity-badge.error {
+  background: oklch(24% 0.08 30 / 0.22);
+  color: oklch(90% 0.12 30);
+}
+
+.activity-path {
+  flex: 1;
+  color: oklch(91% 0.01 250);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-time {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  color: oklch(66% 0.015 250);
+  font-size: 0.8rem;
+}
+
+.empty-state {
+  padding: 1rem;
+  border-radius: 1rem;
+  border: 1px dashed oklch(28% 0.015 250);
+  color: oklch(69% 0.015 250);
+}
+
+@media (max-width: 1180px) {
+  .hero-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .detail-grid,
+  .mini-grid,
+  .project-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 960px) {
+  .cockpit-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .cockpit-header,
+  .band-title-row {
+    flex-direction: column;
+  }
+
+  .header-signals {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .cockpit-shell {
+    padding: 1.5rem 1rem 3rem;
+  }
+
+  .hero-grid,
+  .detail-grid,
+  .mini-grid,
+  .project-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stack-row,
+  .activity-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }

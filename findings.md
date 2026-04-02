@@ -334,3 +334,34 @@
 - conclusion:
   - la tranche d’architecture `IngressBuffer` est fermée
   - les prochaines questions redeviennent des questions de comportement mesuré en run long, pas de design manquant
+
+### 24. Le cockpit Phoenix devait etre refondu, pas simplement repeint
+- le cockpit precedent restait centre sur une narration "unit/unit" et des signaux machine peu utiles
+- il ne rendait pas assez visibles:
+  - la completude du workspace
+  - les causes du backlog
+  - la readiness par projet
+  - le buffer d'ingress
+  - la decomposition memoire utile
+- conclusion:
+  - la refonte correcte etait une refonte de structure d'information, pas un simple lifting CSS
+
+### 25. Les CDN etaient un defaut reel dans le dashboard
+- `root.html.heex` chargeait encore Google Fonts
+- `Axon.Watcher.Layouts` injectait encore `phoenix` et `phoenix_live_view` depuis jsdelivr
+- conclusion:
+  - le dashboard n'etait pas conforme a la contrainte de souverainete des assets
+  - la refonte devait aussi supprimer ces dependances externes
+
+### 26. Le cockpit doit maintenant montrer l'etat operatoire qu'un humain et un LLM peuvent exploiter
+- vue cible retenue et implementee:
+  - workspace
+  - backlog et causes
+  - projets
+  - runtime
+  - ingress
+  - memoire
+  - activite recente
+- conclusion:
+  - on ne montre plus seulement des parametres machine
+  - on montre enfin la verite d'exploitation du systeme
