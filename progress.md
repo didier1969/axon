@@ -132,3 +132,17 @@
 
 ## Next Immediate Action
 - Relire les deux artefacts avec l'utilisateur, puis passer à l'implémentation TDD de la phase `FileIngressGuard`.
+
+## 2026-04-02 - Durcissement après revue experte
+- Trois experts ont relu le design et le plan.
+- Verdict convergent initial: `valide avec réserves`, pas `100%`.
+- Corrections intégrées dans les deux artefacts:
+  - `kill switch` explicite
+  - update du guard depuis la ligne `File` commitée
+  - shadow state MVP réduit
+  - invariant de boot explicite
+  - cas `indexing + metadata changed` rendu explicite
+  - invalidation/rebuild du guard clarifiée
+
+## Next Immediate Action
+- relancer la revue experte binaire sur la version corrigée

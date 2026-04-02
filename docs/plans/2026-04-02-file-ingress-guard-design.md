@@ -121,6 +121,14 @@ If the guard is absent, stale, partially hydrated, or fails to initialize:
 
 This keeps the first rollout low risk.
 
+The rollout must also include an explicit kill switch.
+
+Canonical requirement:
+
+- a runtime flag such as `AXON_ENABLE_FILE_INGRESS_GUARD`
+- first rollout defaults to conservative behavior
+- disabling the flag must restore the current scanner/watcher path without semantic drift
+
 ### 7. Guard updates happen only after canonical success
 
 The guard may hydrate from DuckDB at boot.
@@ -135,6 +143,19 @@ It must not be updated:
 
 This rule prevents the guard from becoming a phantom truth source.
 
+More precisely:
+
+- the guard learns from the `File` row that actually exists after commit
+- it does not learn from scanner/watcher intent
+- it does not learn from “what we expected SQL to write”
+
+The correct contract is therefore not “record what we tried to insert”.
+
+The correct contract is:
+
+- read or return the committed `File` row
+- update the guard from that committed row only
+
 ### 8. Boot sequence must prefer fast truth, not brute-force churn
 
 Target boot sequence:
@@ -145,6 +166,10 @@ Target boot sequence:
 4. expose MCP/SQL against already persisted truth
 5. arm watcher
 6. run scanner with the guard enabled
+
+This order is an invariant.
+
+The runtime must not expose the guard-backed ingress path before hydration has completed.
 
 This does not eliminate scanning.
 
@@ -171,6 +196,10 @@ Implementation should move toward explicit transition causes for requeue, at lea
 - requeued after write failure
 
 This causality is required for trustworthy operations, even if the first implementation only adds probes before schema changes.
+
+The MVP does not need a new DB column immediately.
+
+But it does need enough probes to prove whether the guard is reducing the dominant cause of churn instead of masking it.
 
 ### 10. MCP needs fast per-project completeness truth
 
@@ -202,7 +231,7 @@ Its minimal API should stay narrow:
 
 - `hydrate_from_store(store) -> guard`
 - `should_stage(path, mtime, size) -> decision`
-- `record_file_commit(path, mtime, size, status)`
+- `record_committed_row(file_row)`
 - `record_tombstone(path)`
 - `invalidate_all()`
 
@@ -212,6 +241,11 @@ The likely decision enum is intentionally small:
 - `StageChanged`
 - `SkipUnchanged`
 - `RetombstoneMissing`
+
+Special rule:
+
+- if the last committed row is `indexing` and a new observation changes `mtime` or `size`, the guard must never suppress the write path
+- it must forward the event so DuckDB can set `needs_reindex = TRUE` canonically
 
 ## Non-Goals
 
@@ -229,21 +263,17 @@ This tranche does not attempt to:
 Minimal shadow entry:
 
 - `path`
-- `project_slug`
 - `status`
 - `size`
 - `mtime`
-- `priority`
-- `needs_reindex`
-- `worker_id`
-- `defer_count`
-- `last_deferred_at_ms`
 
 Derived helper:
 
 - `stat_sig = (mtime, size)`
 
-That is enough for ingress filtering.
+That is enough for ingress filtering in the MVP.
+
+Anything beyond that must be justified by a concrete guard decision need, not by convenience.
 
 It is not a graph cache.
 
@@ -267,11 +297,33 @@ Likely new module:
 Low-risk rollout order:
 
 1. introduce the guard as an isolated component with tests
-2. hydrate it at boot, still unused on the hot path
-3. branch the watcher through it
-4. branch the scanner through it
-5. add telemetry for hit/miss/hydration
-6. only then consider schema changes for explicit requeue cause
+2. add an explicit kill switch
+3. hydrate it at boot, still unused on the hot path
+4. branch the watcher through it
+5. branch the scanner through it
+6. add telemetry for hit/miss/hydration and requeue-cause probes
+7. only then consider schema changes for explicit requeue cause
+
+## Recovery and Invalidation Rules
+
+The current invalidation paths live inside startup compatibility/bootstrap logic.
+
+Therefore, in the MVP:
+
+- `GraphStore::new()` remains pure DB/bootstrap truth
+- `FileIngressGuard` hydrates only after `GraphStore::new()` has completed recovery and compatibility work
+
+This is sufficient for current boot-time invalidations such as:
+
+- interrupted claim recovery
+- soft derived invalidation
+- soft embedding invalidation
+- hard IST reset during compatibility handling
+
+If a future runtime path performs invalidation after boot, it must also:
+
+- invalidate the guard
+- or rebuild it atomically from `File`
 
 ## Open Follow-Up Decisions
 

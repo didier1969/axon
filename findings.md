@@ -109,3 +109,10 @@
 ### 5. Deux artefacts canoniques ont été créés
 - `docs/plans/2026-04-02-file-ingress-guard-design.md`
 - `docs/plans/2026-04-02-file-ingress-guard-implementation-plan.md`
+
+### 6. La première revue experte a resserré le contrat
+- le rollout doit avoir un `kill switch` explicite
+- le guard doit apprendre depuis la ligne `File` réellement commitée, jamais depuis l’intention scanner/watcher
+- le MVP doit réduire son shadow state au strict minimum
+- le cas `indexing + changement de metadata` doit rester explicitement compatible avec `needs_reindex`
+- la règle de rebuild/invalidation du guard doit être claire par rapport au bootstrap DB

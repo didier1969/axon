@@ -4,7 +4,7 @@
 
 **Goal:** Introduce a low-risk `FileIngressGuard` that suppresses redundant filesystem ingress before it rewrites `File`, while keeping DuckDB as the only canonical scheduler and status authority.
 
-**Architecture:** Add a small Rust module that hydrates a derived file-stamp cache from `File` and exposes `should_stage` decisions to scanner and watcher. Keep all claims, priorities, and final status transitions in DuckDB; the guard only filters ingress and updates itself after successful canonical writes.
+**Architecture:** Add a small Rust module that hydrates a derived file-stamp cache from `File` and exposes `should_stage` decisions to scanner and watcher. Keep all claims, priorities, and final status transitions in DuckDB; the guard only filters ingress and updates itself from the `File` row actually committed in DuckDB, never from write intent.
 
 **Tech Stack:** Rust, DuckDB/Canard DB, Axon scanner and watcher runtime, existing Rust test suite.
 
@@ -29,6 +29,8 @@ Add tests that express the contract without integrating the guard yet:
 - unknown path returns stage
 - missing path can be tombstoned and later re-staged if recreated
 - guard failures must fail open, not block scanning
+- `indexing + changed metadata` must never be suppressed because DuckDB must still arm `needs_reindex`
+- rollout kill switch disables the guard path cleanly
 
 **Step 2: Run test to verify it fails**
 
@@ -62,6 +64,7 @@ git commit -m "test: freeze file ingress guard contract"
 **Files:**
 - Create: `src/axon-core/src/file_ingress_guard.rs`
 - Modify: `src/axon-core/src/lib.rs`
+- Modify: `src/axon-core/src/config.rs`
 - Test: `src/axon-core/src/tests/maillon_tests.rs`
 
 **Step 1: Write the minimal implementation**
@@ -69,13 +72,14 @@ git commit -m "test: freeze file ingress guard contract"
 Add a small derived cache with:
 
 - `FileIngressGuard`
-- lightweight entry type holding `path`, `mtime`, `size`, `status`, and minimal metadata
+- lightweight entry type holding only `path`, `mtime`, `size`, and `status`
 - `GuardDecision`
 - `hydrate_from_store`
 - `should_stage`
-- `record_file_commit`
+- `record_committed_row`
 - `record_tombstone`
 - `invalidate_all`
+- explicit kill switch wiring
 
 Do not integrate it into scanner or watcher yet.
 
@@ -91,6 +95,7 @@ Expected:
 
 - new guard tests pass
 - no runtime integration yet
+- guard can be disabled explicitly
 
 **Step 3: Commit**
 
@@ -104,7 +109,6 @@ git commit -m "feat: add isolated file ingress guard"
 **Files:**
 - Modify: `src/axon-core/src/main.rs`
 - Modify: `src/axon-core/src/main_background.rs`
-- Modify: `src/axon-core/src/graph_bootstrap.rs`
 - Test: `src/axon-core/src/tests/maillon_tests.rs`
 
 **Step 1: Write the failing boot-level test**
@@ -113,7 +117,9 @@ Cover:
 
 - startup recovery runs first
 - guard hydrates from recovered `File`
+- hydration happens before the guard-backed ingress path is exposed
 - no claim path is moved out of DuckDB
+- boot invalidation/recovery inside `GraphStore::new()` is reflected in hydration because hydration happens strictly after store initialization
 
 **Step 2: Run targeted test**
 
@@ -129,10 +135,13 @@ Expected:
 
 **Step 3: Wire hydration**
 
-Pass a shared guard handle into background tasks after:
+Pass a shared guard handle into background tasks only after:
 
 - `GraphStore::new`
-- startup recovery
+- startup recovery and compatibility handling implied by store initialization
+- guard hydration
+
+Also wire the kill switch so disabled mode uses the current scanner/watcher path verbatim.
 
 Do not change:
 
@@ -175,6 +184,7 @@ Cover:
 - changed file still stages
 - recreated tombstoned file stages again
 - watcher remains fail-open if guard is unavailable
+- `indexing + changed metadata` still reaches DuckDB so `needs_reindex` can be armed there
 
 **Step 2: Run targeted watcher tests**
 
@@ -197,6 +207,11 @@ Replace direct `upsert_hot_file(...)` calls with:
 - stage only on `StageNew` or `StageChanged`
 
 Update the guard only after successful canonical write or tombstone.
+
+Important:
+
+- do not update from the watcher input tuple
+- update from the `File` row actually committed, read back or returned by the canonical DB path
 
 **Step 4: Re-run watcher tests**
 
@@ -234,6 +249,7 @@ Cover:
 - unknown file is inserted
 - scan keeps current `.axonignore` behavior
 - guard unavailable falls back to current scanner behavior
+- files currently `indexing` with changed metadata are never silently skipped
 
 **Step 2: Run targeted scanner tests**
 
@@ -255,7 +271,9 @@ Before adding a file to the bulk insert batch:
 - ask the guard whether staging is needed
 - only append stage-worthy rows to the batch
 
-Update the guard after successful `bulk_insert_files`.
+Update the guard only from committed `File` rows after successful `bulk_insert_files`.
+
+Do not let the scanner teach the guard from its own intended values.
 
 **Step 4: Re-run scanner tests**
 
@@ -294,6 +312,8 @@ Expose only:
 - `guard_misses`
 - `guard_hydrated_entries`
 - `guard_hydration_duration_ms`
+- `guard_bypassed_total`
+- lightweight probes for why a file is re-opened toward `pending`
 
 Do not expose a second source of truth for priority or status.
 
@@ -305,6 +325,8 @@ Cover:
 - priorities still come from DuckDB
 - guard does not change scheduler order
 - fallback still works when guard is disabled or empty
+- boot order remains `store init -> hydration -> ingress tasks`
+- divergence path is safe: if guard state is missing or stale, DB path still works
 
 **Step 3: Run focused tests**
 
@@ -383,7 +405,10 @@ git commit -m "docs: align runtime truth after file ingress guard"
 
 - accidental duplication of scheduling authority in memory
 - guard updated before DB commit
+- guard updated from write intent instead of committed `File` row
 - stale guard after invalidation or recovery
+- missing kill switch during rollout
+- false `SkipUnchanged` while a file is already `indexing`
 - hidden project favoritism sneaking into the guard path
 - guard becoming required for correctness instead of optional for optimization
 
