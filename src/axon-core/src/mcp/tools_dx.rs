@@ -3,7 +3,130 @@ use serde_json::{json, Value};
 use super::format::format_table_from_json;
 use super::McpServer;
 
+pub(crate) struct ProjectScopeSummary {
+    pub(crate) total_files: i64,
+    pub(crate) completed_files: i64,
+    pub(crate) pending_files: i64,
+    pub(crate) indexing_files: i64,
+    pub(crate) backlog_files: i64,
+    pub(crate) pending_reasons: Vec<(String, i64)>,
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => {
+            if let Some(v) = number.as_i64() {
+                Some(v)
+            } else if let Some(v) = number.as_u64() {
+                i64::try_from(v).ok()
+            } else {
+                number.as_f64().map(|v| v.round() as i64)
+            }
+        }
+        Value::String(s) => s
+            .parse::<i64>()
+            .ok()
+            .or_else(|| s.parse::<f64>().ok().map(|v| v.round() as i64)),
+        _ => None,
+    }
+}
+
 impl McpServer {
+    pub(crate) fn project_scope_summary(&self, project: Option<&str>) -> Option<ProjectScopeSummary> {
+        let project = project?;
+        if project == "*" {
+            return None;
+        }
+
+        let params = json!({ "project": project });
+        let total_files = self
+            .graph_store
+            .query_count_param(
+                "SELECT count(*) FROM File WHERE project_slug = $project",
+                &params,
+            )
+            .unwrap_or(0);
+        let pending_files = self
+            .graph_store
+            .query_count_param(
+                "SELECT count(*) FROM File WHERE project_slug = $project AND status = 'pending'",
+                &params,
+            )
+            .unwrap_or(0);
+        let indexing_files = self
+            .graph_store
+            .query_count_param(
+                "SELECT count(*) FROM File WHERE project_slug = $project AND status = 'indexing'",
+                &params,
+            )
+            .unwrap_or(0);
+        let backlog_files = pending_files + indexing_files;
+        let completed_files = (total_files - backlog_files).max(0);
+
+        let reasons_res = self
+            .graph_store
+            .query_json_param(
+                "SELECT COALESCE(status_reason, 'unknown'), count(*) \
+                 FROM File \
+                 WHERE project_slug = $project AND status IN ('pending', 'indexing') \
+                 GROUP BY 1 \
+                 ORDER BY count(*) DESC, 1 ASC \
+                 LIMIT 3",
+                &params,
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let pending_reasons = serde_json::from_str::<Vec<Vec<Value>>>(&reasons_res)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|row| {
+                let reason = row.first()?.as_str()?.to_string();
+                let count = json_i64(row.get(1)?)?;
+                Some((reason, count))
+            })
+            .collect();
+
+        Some(ProjectScopeSummary {
+            total_files,
+            completed_files,
+            pending_files,
+            indexing_files,
+            backlog_files,
+            pending_reasons,
+        })
+    }
+
+    pub(crate) fn project_scope_truth_note(&self, project: Option<&str>) -> Option<String> {
+        let project = project?;
+        let summary = self.project_scope_summary(Some(project))?;
+        if summary.total_files <= 0 {
+            return None;
+        }
+
+        let reason_note = if summary.pending_reasons.is_empty() {
+            String::new()
+        } else {
+            let reasons = summary
+                .pending_reasons
+                .iter()
+                .map(|(reason, count)| format!("`{reason}`: {count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(" Causes backlog dominantes: {}.", reasons)
+        };
+
+        Some(format!(
+            "**Completude du scope `{}`:** {}/{} fichiers termines; backlog visible {} (`pending`: {}, `indexing`: {}).{}\
+\n",
+            project,
+            summary.completed_files,
+            summary.total_files,
+            summary.backlog_files,
+            summary.pending_files,
+            summary.indexing_files,
+            reason_note
+        ))
+    }
+
     pub(crate) fn degraded_file_count(&self, project: Option<&str>) -> i64 {
         let (query, params) = if let Some(project) = project {
             (
@@ -155,6 +278,8 @@ impl McpServer {
     pub(crate) fn axon_query(&self, args: &Value) -> Option<Value> {
         let query_text = args.get("query")?.as_str()?;
         let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        let project_note = self.project_scope_truth_note((project != "*").then_some(project));
+        let degraded_note = self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));
 
         let embedding = crate::embedder::batch_embed(vec![query_text.to_string()])
             .ok()
@@ -227,7 +352,14 @@ impl McpServer {
                 };
                 let table = format_table_from_json(&res, &headers);
                 Some(
-                    json!({ "content": [{ "type": "text", "text": format!("### 🔎 Resultats de recherche : '{}'\n\n**Mode:** {}\n\n{}", query_text, mode_label, table) }] }),
+                    json!({ "content": [{ "type": "text", "text": format!(
+                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** {}\n\n{}{}{}",
+                        query_text,
+                        mode_label,
+                        project_note.clone().unwrap_or_default(),
+                        degraded_note.clone().unwrap_or_default(),
+                        table
+                    ) }] }),
                 )
             }
             Err(_) => self.axon_query_from_chunks(query_text, project, &params),
@@ -244,6 +376,8 @@ impl McpServer {
         let docstring_match = Self::chunk_docstring_match_expression();
         let body_match = Self::chunk_body_match_expression();
         let path_match = Self::chunk_path_match_expression();
+        let project_note = self.project_scope_truth_note((project != "*").then_some(project));
+        let degraded_note = self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));
         let sql = if project == "*" {
             format!(
                 "WITH chunk_matches AS ( \
@@ -326,8 +460,10 @@ impl McpServer {
                     "content": [{
                         "type": "text",
                         "text": format!(
-                            "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** fallback lexical sur chunk derive\n**Provenance:** chaque resultat precise sa source de match (`docstring`, `chunk body`, `chunk metadata`, `file path`) et reste ancre sur un fichier structurel.\n\n{}",
+                            "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** fallback lexical sur chunk derive\n**Provenance:** chaque resultat precise sa source de match (`docstring`, `chunk body`, `chunk metadata`, `file path`) et reste ancre sur un fichier structurel.\n\n{}{}{}",
                             query_text,
+                            project_note.unwrap_or_default(),
+                            degraded_note.unwrap_or_default(),
                             format_table_from_json(&res, &["Nom", "Type", "URI (Chemin)", "Why it matched", "Evidence"])
                         )
                     }]
@@ -345,6 +481,7 @@ impl McpServer {
     ) -> Option<Value> {
         let degraded_files = self.degraded_file_count((project != "*").then_some(project));
         let degraded_note = self.degraded_truth_note(degraded_files);
+        let project_note = self.project_scope_truth_note((project != "*").then_some(project));
         let contains_count = self
             .graph_store
             .query_count("SELECT count(*) FROM CONTAINS")
@@ -354,8 +491,9 @@ impl McpServer {
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** structurel\n\n{}{}\n",
+                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** structurel\n\n{}{}{}\n",
                         query_text,
+                        project_note.clone().unwrap_or_default(),
                         degraded_note.clone().unwrap_or_default(),
                         "Aucun résultat trouvé."
                     )
@@ -382,8 +520,9 @@ impl McpServer {
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n\n{}{}\n",
+                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n\n{}{}{}\n",
                         query_text,
+                        project_note.unwrap_or_default(),
                         degraded_note.unwrap_or_default(),
                         "Aucun résultat trouvé."
                     )
@@ -399,9 +538,11 @@ impl McpServer {
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n**Etat:** le graphe de containment n'est pas encore disponible; les symboles ci-dessous restent exploitables mais sans URI verifiee ({})\n{}\n{}",
+                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n**Etat:** le graphe de containment n'est pas encore disponible; les symboles ci-dessous restent exploitables mais sans URI verifiee ({})\n{}{}\n{}",
                         query_text,
                         project_note,
+                        self.project_scope_truth_note((project != "*").then_some(project))
+                            .unwrap_or_default(),
                         degraded_note.unwrap_or_default(),
                         format_table_from_json(&fallback_res, &["Nom", "Type", "Projet"])
                     )
@@ -433,6 +574,7 @@ impl McpServer {
         };
         let degraded_note =
             self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
+        let project_note = self.project_scope_truth_note(project);
 
         match self.graph_store.query_json_param(query, &params) {
             Ok(res) => {
@@ -440,8 +582,9 @@ impl McpServer {
                     format_table_from_json(&res, &["Nom", "Type", "Testé", "Appelants", "Appelés"]);
                 Some(
                     json!({ "content": [{ "type": "text", "text": format!(
-                        "### 🔍 Inspection du Symbole : {}\n\n{}{}",
+                        "### 🔍 Inspection du Symbole : {}\n\n{}{}{}",
                         symbol,
+                        project_note.unwrap_or_default(),
                         degraded_note.unwrap_or_default(),
                         table
                     ) }] }),

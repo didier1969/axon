@@ -104,6 +104,33 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
 }
 
 #[test]
+fn test_axon_debug_reports_top_pending_reasons() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("graph_v2");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let server = McpServer::new(store.clone());
+
+    store
+        .execute(
+            "INSERT INTO File (path, project_slug, status, status_reason, size, mtime, priority) VALUES \
+             ('src/a.rs', 'axon', 'pending', 'metadata_changed_scan', 10, 1, 100), \
+             ('src/b.rs', 'axon', 'pending', 'metadata_changed_scan', 20, 1, 100), \
+             ('src/c.rs', 'axon', 'indexing', 'needs_reindex_while_indexing', 30, 1, 100), \
+             ('src/d.rs', 'axon', 'pending', 'manual_or_system_requeue', 40, 1, 100)"
+        )
+        .unwrap();
+
+    let response = server.axon_debug().expect("debug response");
+    let content = response["content"][0]["text"].as_str().unwrap_or_default();
+
+    assert!(content.contains("Causes backlog dominantes"), "{content}");
+    assert!(content.contains("metadata_changed_scan"), "{content}");
+    assert!(content.contains("2"), "{content}");
+    assert!(content.contains("needs_reindex_while_indexing"), "{content}");
+}
+
+#[test]
 fn test_axon_architectural_drift() {
     let server = create_test_server();
     server
@@ -1795,6 +1822,47 @@ fn test_axon_query_reports_partial_truth_when_project_is_degraded() {
 
     assert!(content.contains("verite partielle"), "{}", content);
     assert!(content.contains("indexed_degraded"), "{}", content);
+}
+
+#[test]
+fn test_axon_query_reports_project_completion_when_scope_is_partial() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_slug, status, status_reason) VALUES \
+             ('src/alpha/live.rs', 'alpha', 'indexed', NULL), \
+             ('src/alpha/todo.rs', 'alpha', 'pending', 'metadata_changed_scan')",
+        )
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/live.rs', 'alpha::parse_batch')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_query",
+            "arguments": { "query": "parse_batch", "project": "alpha" }
+        })),
+        id: Some(json!(3011)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Completu"), "{}", content);
+    assert!(content.contains("1/2"), "{}", content);
+    assert!(content.contains("backlog"), "{}", content);
+    assert!(content.contains("metadata_changed_scan"), "{}", content);
 }
 
 #[test]

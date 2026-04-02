@@ -709,6 +709,35 @@ Limite restante:
 - toute la machine d'état n'est pas encore qualifiée
 - il faut encore couvrir exhaustivement les transitions restantes et exposer ces causes dans les vues opératoires
 
+### 24. Les vues MCP expliquent maintenant le backlog et la complétude projet
+
+Constat:
+
+- `axon_debug` expose maintenant les causes dominantes du backlog global
+- les outils MCP scope-projet exposent une note de complétude du scope demandé
+
+Contenu désormais visible:
+
+- fichiers terminés / fichiers connus
+- backlog visible
+- répartition `pending` / `indexing`
+- causes backlog dominantes si présentes
+
+Correction importante:
+
+- `axon_audit` et `axon_health` ne comptent plus un projet via `project_slug OR path LIKE`
+- le scope repose maintenant sur `project_slug` uniquement
+
+Impact:
+
+- un agent MCP peut désormais savoir rapidement si sa réponse projet est quasi complète ou très partielle
+- l'opérateur voit enfin une explication synthétique du backlog sans requête SQL manuelle
+
+Limite restante:
+
+- ces vues décrivent mieux le churn mais ne ferment pas encore toute la causalité de la machine d'état
+- il faut encore mesurer ces notes sur un vrai run long pour distinguer backlog vivant vs reliquat historique
+
 ## Follow-up Corrections to Plan
 
 Si la fin d'indexation initiale ne peut pas être constatée proprement sans heuristique, ouvrir une tranche corrective sur:

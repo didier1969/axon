@@ -50,7 +50,7 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 ### Phase 8: Causalité `pending`
 - [x] Ajouter une première vérité persistée sur la cause de retour en `pending`.
 - [ ] Couvrir toutes les transitions `pending/indexing/indexed/...` avec une causalité canonique complète.
-- [ ] Exposer ces causes dans les vues opératoires et MCP.
+- [x] Exposer ces causes dans les vues opératoires et MCP.
 
 ## Working Assumptions
 - Les modifications Git actuellement visibles sont principalement des artefacts de runtime/devenv et non un signal suffisant de travail produit.

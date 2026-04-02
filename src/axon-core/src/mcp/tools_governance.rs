@@ -12,12 +12,11 @@ impl McpServer {
                 .query_count("SELECT count(*) FROM File")
                 .unwrap_or(0)
         } else {
-            let escaped = project.replace('\'', "''");
             self.graph_store
-                .query_count(&format!(
-                    "SELECT count(*) FROM File WHERE project_slug = '{}' OR path LIKE '%{}%'",
-                    escaped, escaped
-                ))
+                .query_count_param(
+                    "SELECT count(*) FROM File WHERE project_slug = $project",
+                    &json!({ "project": project }),
+                )
                 .unwrap_or(0)
         }
     }
@@ -100,6 +99,10 @@ impl McpServer {
             .unwrap_or_default();
 
         let mut report = format!("## 🛡️ Audit de Conformité : {}\n\n", project);
+        if let Some(note) = self.project_scope_truth_note((project != "*").then_some(project)) {
+            report.push_str(&note);
+            report.push('\n');
+        }
         if let Some(note) = self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project))) {
             report.push_str(&note);
             report.push('\n');
@@ -155,6 +158,9 @@ impl McpServer {
             "🏥 Health Report for {}: Coverage {}%. Stability high.",
             project, coverage
         );
+        if let Some(note) = self.project_scope_truth_note((project != "*").then_some(project)) {
+            report.push_str(&format!("\n{}", note));
+        }
         if let Some(note) =
             self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)))
         {

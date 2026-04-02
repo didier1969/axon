@@ -23,6 +23,25 @@ fn format_bytes_human(bytes: u64) -> String {
     }
 }
 
+fn json_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => {
+            if let Some(v) = number.as_i64() {
+                Some(v)
+            } else if let Some(v) = number.as_u64() {
+                i64::try_from(v).ok()
+            } else {
+                number.as_f64().map(|v| v.round() as i64)
+            }
+        }
+        Value::String(s) => s
+            .parse::<i64>()
+            .ok()
+            .or_else(|| s.parse::<f64>().ok().map(|v| v.round() as i64)),
+        _ => None,
+    }
+}
+
 impl McpServer {
     pub(crate) fn axon_refine_lattice(&self, _args: &Value) -> Option<Value> {
         let store = &self.graph_store;
@@ -98,6 +117,37 @@ impl McpServer {
         let memory = process_memory_snapshot();
         let storage = duckdb_storage_snapshot(&self.graph_store);
         let duckdb_memory = duckdb_memory_snapshot(&self.graph_store);
+        let backlog_reason_rows = self
+            .graph_store
+            .query_json(
+                "SELECT COALESCE(status_reason, 'unknown'), count(*) \
+                 FROM File \
+                 WHERE status IN ('pending', 'indexing') \
+                 GROUP BY 1 \
+                 ORDER BY count(*) DESC, 1 ASC \
+                 LIMIT 5",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let backlog_reasons: Vec<(String, i64)> =
+            serde_json::from_str::<Vec<Vec<Value>>>(&backlog_reason_rows)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|row| {
+                    let reason = row.first()?.as_str()?.to_string();
+                    let count = json_i64(row.get(1)?)?;
+                    Some((reason, count))
+                })
+                .collect();
+        let backlog_reason_section = if backlog_reasons.is_empty() {
+            "*   Causes backlog dominantes : aucune.\n".to_string()
+        } else {
+            let lines = backlog_reasons
+                .iter()
+                .map(|(reason, count)| format!("*   `{}` : {}", reason, count))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("**Causes backlog dominantes :**\n{}\n\n", lines)
+        };
 
         let report = format!(
             "## 🤖 Axon Core V2 (Maestria) - Diagnostic Interne\n\n\
@@ -124,6 +174,7 @@ impl McpServer {
             *   Oversized : {}\n\
             *   Skipped : {}\n\
             *   Taux de complétion : {:.2} %\n\n\
+            {}\
             **Stockage DuckDB :**\n\
             *   Fichier principal : {}\n\
             *   WAL : {}\n\
@@ -147,6 +198,7 @@ impl McpServer {
             oversized_count,
             skipped_count,
             completion_rate,
+            backlog_reason_section,
             format_bytes_human(storage.db_file_bytes),
             format_bytes_human(storage.db_wal_bytes),
             format_bytes_human(storage.db_total_bytes),

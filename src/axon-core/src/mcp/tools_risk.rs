@@ -102,6 +102,15 @@ impl McpServer {
                 }
 
                 let mut report = format!("## 💥 Analyse d'Impact Transversale : {}\n\n", symbol);
+                if let Some(note) = self.project_scope_truth_note(project) {
+                    report.push_str(&note);
+                    report.push('\n');
+                }
+                if let Some(note) = self.degraded_truth_note(self.degraded_symbol_count(symbol, project))
+                {
+                    report.push_str(&note);
+                    report.push('\n');
+                }
                 report.push_str(&format!(
                     "**Rayon d'Impact (profondeur {}) :** {} composants affectés à travers le Treillis.\n\n",
                     depth, impact_radius
@@ -157,6 +166,7 @@ impl McpServer {
             }));
         }
         let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
+        let project_note = self.project_scope_truth_note(project);
 
         let calls_count = self
             .graph_store
@@ -167,8 +177,9 @@ impl McpServer {
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "## 💥 Analyse d'Impact Transversale : {}\n\n{}Aucun impact n'a ete calcule a la profondeur {}.",
+                        "## 💥 Analyse d'Impact Transversale : {}\n\n{}{}Aucun impact n'a ete calcule a la profondeur {}.",
                         symbol,
+                        project_note.clone().unwrap_or_default(),
                         degraded_note.clone().unwrap_or_default(),
                         depth
                     )
@@ -180,8 +191,9 @@ impl McpServer {
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "## 💥 Analyse d'Impact Transversale : {}\n\n{}Le symbole existe, mais le graphe d'appel n'est pas encore disponible dans cette base live.\n\n{}\n\n**Etat:** CALLS est vide; le rayon d'impact ne peut pas encore etre calcule de maniere fiable.",
+                    "## 💥 Analyse d'Impact Transversale : {}\n\n{}{}Le symbole existe, mais le graphe d'appel n'est pas encore disponible dans cette base live.\n\n{}\n\n**Etat:** CALLS est vide; le rayon d'impact ne peut pas encore etre calcule de maniere fiable.",
                     symbol,
+                    project_note.unwrap_or_default(),
                     degraded_note.unwrap_or_default(),
                     format_table_from_json(&symbol_res, &["Nom", "Type", "Projet"])
                 )

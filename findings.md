@@ -182,3 +182,12 @@
 - conclusion:
   - le problème `pending` n’est pas totalement fermé
   - mais la base donne maintenant une première explication persistée du churn au lieu d’un simple statut brut
+
+### 12. Les vues MCP opératoires annoncent maintenant le niveau de vérité du scope projet
+- `axon_debug` expose désormais les causes dominantes du backlog global à partir de `File.status_reason`
+- les outils MCP scope-projet (`axon_query`, `axon_inspect`, `axon_impact`, `axon_audit`, `axon_health`) annoncent la complétude visible du projet demandé:
+  - fichiers terminés / fichiers connus
+  - backlog visible
+  - répartition `pending` / `indexing`
+  - causes backlog dominantes
+- `axon_audit` et `axon_health` utilisent maintenant `project_slug` comme frontière de scope au lieu d’un `path LIKE` ambigu

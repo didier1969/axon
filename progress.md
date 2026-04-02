@@ -214,3 +214,25 @@
 ## Next Immediate Action
 - exploiter `status_reason` pour expliquer le backlog dans les vues opératoires
 - mesurer un snapshot réel `RssAnon` vs `RssFile` sur run long avant toute purge mémoire
+
+## 2026-04-02 - MCP operatoire: backlog explique + completude de scope
+- Rouge:
+  - test MCP ajoute pour les causes dominantes du backlog dans `axon_debug`
+  - test MCP ajoute pour la completude d'un scope projet dans `axon_query`
+- Vert:
+  - `axon_debug` affiche maintenant les causes dominantes du backlog global (`status_reason`)
+  - `axon_query`, `axon_inspect`, `axon_impact`, `axon_audit` et `axon_health` exposent une note de completude du scope projet
+  - la note de completude annonce:
+    - fichiers termines / fichiers connus
+    - backlog visible
+    - repartition `pending` / `indexing`
+    - causes backlog dominantes quand elles existent
+  - `axon_audit` et `axon_health` utilisent maintenant `project_slug` uniquement pour compter le scope, plus de fallback sur un `path LIKE` ambigu
+- Validation fraiche:
+  - `cargo test --manifest-path Cargo.toml` dans `src/axon-core` vert (`146` + `44`)
+
+## Next Immediate Action
+- exploiter ces nouvelles notes operatoires sur un vrai run long pour separer:
+  - backlog reel
+  - backlog historiquement rematerialise
+- mesurer `RssAnon` vs `RssFile` en charge soutenue avant toute action de purge memoire
