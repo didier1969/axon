@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crossbeam_channel::{bounded, select_biased, Receiver, Sender, TrySendError};
@@ -10,9 +11,11 @@ use tracing::{info, info_span};
 const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_SAFETY_MULTIPLIER: f64 = 2.0;
 const STRUCTURE_ONLY_ENVELOPE_RATIO: f64 = 0.28;
+static NEXT_RESERVATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 struct ReservedTask {
+    trace_id: String,
     estimated_cost_bytes: u64,
     estimation_key: String,
     size_bytes: u64,
@@ -29,6 +32,10 @@ pub struct MemoryBudgetSnapshot {
     pub budget_bytes: u64,
     pub reserved_bytes: u64,
     pub exhaustion_ratio: f64,
+    pub reserved_task_count: usize,
+    pub anonymous_trace_reserved_tasks: usize,
+    pub anonymous_trace_admissions_total: u64,
+    pub reservation_release_misses_total: u64,
 }
 
 #[derive(Debug)]
@@ -37,6 +44,8 @@ struct MemoryBudgetState {
     reserved_bytes: u64,
     reserved_tasks: HashMap<String, ReservedTask>,
     observed_cost_models: HashMap<String, CostModel>,
+    anonymous_trace_admissions_total: u64,
+    reservation_release_misses_total: u64,
 }
 
 impl MemoryBudgetState {
@@ -46,6 +55,8 @@ impl MemoryBudgetState {
             reserved_bytes: 0,
             reserved_tasks: HashMap::new(),
             observed_cost_models: HashMap::new(),
+            anonymous_trace_admissions_total: 0,
+            reservation_release_misses_total: 0,
         }
     }
 
@@ -54,6 +65,14 @@ impl MemoryBudgetState {
             budget_bytes: self.budget_bytes,
             reserved_bytes: self.reserved_bytes,
             exhaustion_ratio: self.reserved_bytes as f64 / self.budget_bytes.max(1) as f64,
+            reserved_task_count: self.reserved_tasks.len(),
+            anonymous_trace_reserved_tasks: self
+                .reserved_tasks
+                .values()
+                .filter(|task| is_anonymous_trace_id(&task.trace_id))
+                .count(),
+            anonymous_trace_admissions_total: self.anonymous_trace_admissions_total,
+            reservation_release_misses_total: self.reservation_release_misses_total,
         }
     }
 }
@@ -81,6 +100,7 @@ impl ProcessingMode {
 
 #[derive(Debug, Clone)]
 pub struct Task {
+    pub reservation_id: String,
     pub path: String,
     pub trace_id: String,
     pub lane: TaskLane,
@@ -159,14 +179,21 @@ impl QueueStore {
             .map_err(|err| format!("Unable to stat file for admission: {:?}", err))?;
         let size_bytes = metadata.len();
         let parser_key = parser_key_for_path(path);
-        let estimated_cost_bytes =
-            self.reserve_memory_budget(trace_id, &parser_key, size_bytes, mode)?;
+        let reservation_id = next_reservation_id();
+        let estimated_cost_bytes = self.reserve_memory_budget(
+            &reservation_id,
+            trace_id,
+            &parser_key,
+            size_bytes,
+            mode,
+        )?;
         let lane = if priority {
             TaskLane::Hot
         } else {
             TaskLane::Bulk
         };
         let task = Task {
+            reservation_id: reservation_id.clone(),
             path: path.to_string(),
             trace_id: trace_id.to_string(),
             lane,
@@ -191,7 +218,7 @@ impl QueueStore {
         };
 
         if let Err(err) = send_result {
-            self.release_reservation(trace_id, None);
+            self.release_reservation(&reservation_id, None);
             Err(err)
         } else {
             Ok(())
@@ -220,17 +247,17 @@ impl QueueStore {
     }
 
     pub fn mark_done(&self, task: &Task, observed_cost_bytes: Option<u64>) -> Result<(), String> {
-        self.release_reservation(&task.trace_id, observed_cost_bytes);
+        self.release_reservation(&task.reservation_id, observed_cost_bytes);
         Ok(())
     }
 
     pub fn purge_all(&self) -> Result<(), String> {
         let _span = info_span!("queue_purge").entered();
         while let Ok(task) = self.priority_receiver.try_recv() {
-            self.release_reservation(&task.trace_id, None);
+            self.release_reservation(&task.reservation_id, None);
         }
         while let Ok(task) = self.bulk_receiver.try_recv() {
-            self.release_reservation(&task.trace_id, None);
+            self.release_reservation(&task.reservation_id, None);
         }
         info!("RAM Queues entirely purged for rescan.");
         Ok(())
@@ -252,6 +279,10 @@ impl QueueStore {
                 budget_bytes: DEFAULT_MEMORY_BUDGET_BYTES,
                 reserved_bytes: 0,
                 exhaustion_ratio: 0.0,
+                reserved_task_count: 0,
+                anonymous_trace_reserved_tasks: 0,
+                anonymous_trace_admissions_total: 0,
+                reservation_release_misses_total: 0,
             })
     }
 
@@ -300,6 +331,7 @@ impl QueueStore {
 
     fn reserve_memory_budget(
         &self,
+        reservation_id: &str,
         trace_id: &str,
         parser_key: &str,
         size_bytes: u64,
@@ -329,9 +361,14 @@ impl QueueStore {
         }
 
         state.reserved_bytes = next_reserved;
+        if is_anonymous_trace_id(trace_id) {
+            state.anonymous_trace_admissions_total =
+                state.anonymous_trace_admissions_total.saturating_add(1);
+        }
         state.reserved_tasks.insert(
-            trace_id.to_string(),
+            reservation_id.to_string(),
             ReservedTask {
+                trace_id: trace_id.to_string(),
                 estimated_cost_bytes,
                 estimation_key,
                 size_bytes,
@@ -340,12 +377,12 @@ impl QueueStore {
         Ok(estimated_cost_bytes)
     }
 
-    fn release_reservation(&self, trace_id: &str, observed_cost_bytes: Option<u64>) {
+    fn release_reservation(&self, reservation_id: &str, observed_cost_bytes: Option<u64>) {
         let Ok(mut state) = self.memory_budget.lock() else {
             return;
         };
 
-        if let Some(reserved_task) = state.reserved_tasks.remove(trace_id) {
+        if let Some(reserved_task) = state.reserved_tasks.remove(reservation_id) {
             state.reserved_bytes = state
                 .reserved_bytes
                 .saturating_sub(reserved_task.estimated_cost_bytes);
@@ -370,8 +407,23 @@ impl QueueStore {
                     }
                 }
             }
+        } else {
+            state.reservation_release_misses_total =
+                state.reservation_release_misses_total.saturating_add(1);
         }
     }
+}
+
+fn next_reservation_id() -> String {
+    format!(
+        "res-{}",
+        NEXT_RESERVATION_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn is_anonymous_trace_id(trace_id: &str) -> bool {
+    let normalized = trace_id.trim();
+    normalized.is_empty() || matches!(normalized, "none" | "unknown")
 }
 
 fn format_channel_send_error(channel: &str, err: TrySendError<Task>) -> String {
@@ -716,6 +768,59 @@ mod tests {
         queue
             .push(next.to_string_lossy().as_ref(), 0, "next", 0, 0, false)
             .expect("admission should resume after reservation release");
+    }
+
+    #[test]
+    fn test_reservations_do_not_leak_when_multiple_tasks_share_same_trace_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = QueueStore::with_memory_budget(10, 12_000_000);
+        let first = temp.path().join("first.rs");
+        let second = temp.path().join("second.rs");
+        std::fs::write(&first, vec![b'x'; 4 * 1024]).unwrap();
+        std::fs::write(&second, vec![b'x'; 4 * 1024]).unwrap();
+
+        queue
+            .push(first.to_string_lossy().as_ref(), 0, "none", 0, 0, false)
+            .unwrap();
+        queue
+            .push(second.to_string_lossy().as_ref(), 0, "none", 0, 0, false)
+            .unwrap();
+
+        let snapshot = queue.memory_budget_snapshot();
+        assert_eq!(snapshot.reserved_task_count, 2);
+        assert_eq!(snapshot.anonymous_trace_reserved_tasks, 2);
+        assert_eq!(snapshot.anonymous_trace_admissions_total, 2);
+
+        let first_task = queue.pop().expect("first task available");
+        let second_task = queue.pop().expect("second task available");
+        queue.mark_done(&first_task, None).unwrap();
+        queue.mark_done(&second_task, None).unwrap();
+
+        let released = queue.memory_budget_snapshot();
+        assert_eq!(released.reserved_bytes, 0);
+        assert_eq!(released.reserved_task_count, 0);
+        assert_eq!(released.anonymous_trace_reserved_tasks, 0);
+        assert_eq!(released.reservation_release_misses_total, 0);
+    }
+
+    #[test]
+    fn test_release_miss_is_counted_without_corrupting_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = QueueStore::with_memory_budget(10, 8_000_000);
+        let path = temp.path().join("task.rs");
+        std::fs::write(&path, vec![b'x'; 4 * 1024]).unwrap();
+
+        queue
+            .push(path.to_string_lossy().as_ref(), 0, "trace", 0, 0, false)
+            .unwrap();
+        let task = queue.pop().expect("task available");
+        queue.mark_done(&task, None).unwrap();
+        queue.mark_done(&task, None).unwrap();
+
+        let snapshot = queue.memory_budget_snapshot();
+        assert_eq!(snapshot.reserved_bytes, 0);
+        assert_eq!(snapshot.reserved_task_count, 0);
+        assert_eq!(snapshot.reservation_release_misses_total, 1);
     }
 
     #[test]

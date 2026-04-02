@@ -132,6 +132,15 @@ if [ ! -f "$DEVENV_RELEASE_BIN" ]; then
     rebuild_core_release || exit 1
 fi
 
+if [ -f "$DEVENV_RELEASE_BIN" ] && find "$PROJECT_ROOT/src/axon-core/src" \
+    "$PROJECT_ROOT/src/axon-core/Cargo.toml" \
+    "$PROJECT_ROOT/src/axon-core/Cargo.lock" \
+    -newer "$DEVENV_RELEASE_BIN" -print -quit | grep -q .; then
+    echo "⚠️ Detected newer axon-core sources than $DEVENV_RELEASE_BIN"
+    echo "   Rebuilding authoritative Devenv release..."
+    rebuild_core_release || exit 1
+fi
+
 if [ -f "$DEVENV_RELEASE_BIN" ]; then
     echo "🔄 Updating bin/axon-core safely..."
     install -m 755 "$DEVENV_RELEASE_BIN" bin/axon-core
@@ -156,7 +165,14 @@ export HYDRA_MCP_PORT=44132
 
 # Clean only the sockets used by the active runtime path
 rm -f /tmp/axon-telemetry.sock /tmp/axon-mcp.sock
-rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.wal "$PROJECT_ROOT/.axon/graph_v2/"*.lock 2>/dev/null || true
+rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.lock 2>/dev/null || true
+
+# Never discard DuckDB WAL during a normal restart. WAL replay is required to recover
+# recent committed work when the main database file has not been checkpointed yet.
+if [[ "${AXON_DROP_WAL_ON_START:-0}" == "1" ]]; then
+  echo "⚠️ AXON_DROP_WAL_ON_START=1 set: deleting DuckDB WAL files before start."
+  rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.wal 2>/dev/null || true
+fi
 
 # Create TMUX session
 tmux new-session -d -s axon -n "core" 

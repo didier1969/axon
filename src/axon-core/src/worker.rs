@@ -371,6 +371,7 @@ mod tests {
         std::fs::write(&path, content).unwrap();
 
         let task = Task {
+            reservation_id: "res-large".to_string(),
             path: path.to_string_lossy().to_string(),
             trace_id: "trace-large".to_string(),
             lane: TaskLane::Bulk,
@@ -420,6 +421,7 @@ mod tests {
         std::fs::write(&path, content).unwrap();
 
         let task = Task {
+            reservation_id: "res-structure-only".to_string(),
             path: path.to_string_lossy().to_string(),
             trace_id: "trace-structure-only".to_string(),
             lane: TaskLane::Bulk,

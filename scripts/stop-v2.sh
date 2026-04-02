@@ -54,8 +54,12 @@ fuser -k /tmp/axon-telemetry.sock /tmp/axon-mcp.sock 2>/dev/null || true
 rm -f "/tmp/axon-mcp.sock"
 rm -f "/tmp/axon-telemetry.sock"
 rm -f "/tmp/axon-v2.sock"
-rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.wal
 rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.lock
+
+if [[ "${AXON_DROP_WAL_ON_STOP:-0}" == "1" ]]; then
+    echo "⚠️ AXON_DROP_WAL_ON_STOP=1 set: deleting DuckDB WAL files during stop."
+    rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.wal
+fi
 
 if tmux has-session -t axon 2>/dev/null; then
     echo "⚠️ TMUX session 'axon' still present after cleanup."

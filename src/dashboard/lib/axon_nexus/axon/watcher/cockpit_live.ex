@@ -202,6 +202,22 @@ defmodule Axon.Watcher.CockpitLive do
               value={"#{Float.round(@runtime.exhaustion_ratio * 100, 1)}%"}
             />
             <.signal_stat
+              label="Reserved Tasks"
+              value={Integer.to_string(@runtime.reserved_task_count)}
+            />
+            <.signal_stat
+              label="Anon Trace Reserved"
+              value={Integer.to_string(@runtime.anonymous_trace_reserved_tasks)}
+            />
+            <.signal_stat
+              label="Anon Trace Total"
+              value={Integer.to_string(@runtime.anonymous_trace_admissions_total)}
+            />
+            <.signal_stat
+              label="Release Misses"
+              value={Integer.to_string(@runtime.reservation_release_misses_total)}
+            />
+            <.signal_stat
               label="Oversized"
               value={Integer.to_string(@runtime.oversized_refusals_total)}
             />
@@ -476,6 +492,12 @@ defmodule Axon.Watcher.CockpitLive do
       budget_bytes: Map.get(stats, :budget_bytes, 0) || 0,
       reserved_bytes: Map.get(stats, :reserved_bytes, 0) || 0,
       exhaustion_ratio: Map.get(stats, :exhaustion_ratio, 0.0) || 0.0,
+      reserved_task_count: Map.get(stats, :reserved_task_count, 0) || 0,
+      anonymous_trace_reserved_tasks: Map.get(stats, :anonymous_trace_reserved_tasks, 0) || 0,
+      anonymous_trace_admissions_total:
+        Map.get(stats, :anonymous_trace_admissions_total, 0) || 0,
+      reservation_release_misses_total:
+        Map.get(stats, :reservation_release_misses_total, 0) || 0,
       queue_depth: Map.get(stats, :queue_depth, 0) || 0,
       claim_mode: Map.get(stats, :claim_mode, "unknown") || "unknown",
       service_pressure: Map.get(stats, :service_pressure, "healthy") || "healthy",

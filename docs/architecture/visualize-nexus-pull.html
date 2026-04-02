@@ -287,9 +287,12 @@
                     end
                     Scanner[Scanner Engine + Axon Ignore]
                     Watcher[Native FS Watcher]
+                    Guard[FileIngressGuard]
+                    Buffer[IngressBuffer RAM]
+                    Promoter[IngressPromoter]
                     Planner[Adaptive Claimer]
-                    MCP[Serveur MCP]
-                    Channel(((Hot / Bulk / Titan Queues)))
+                    MCP[Serveur MCP / SQL]
+                    Channel(((QueueStore + Memory Budget)))
                     Writer[DB Writer Actor]
                 end
 
@@ -299,22 +302,25 @@
                     IST -- "ATTACH" --> SOLL
                 end
 
-                Scanner -- "1. Discovery -> pending" --> IST
-                Watcher -- "2. Delta chaud -> pending (priority 900)" --> IST
-                Planner -- "3. Claim atomique / throttle adaptatif" --> Channel
-                IST -- "Backlog durable" --> Planner
-                Channel -- "4. Dispatch lanes" --> Worker1
-                Worker1 -- "5. Results" --> Writer
-                Writer -- "6. Commit IST" --> IST
-                Writer -- "6b. Commit SOLL" --> SOLL
-                MCP -- "Read + Commands" --> IST
+                Scanner -- "1. Discovery events" --> Guard
+                Watcher -- "2. Hot deltas / subtree hints" --> Guard
+                Guard -- "3. Only useful changes" --> Buffer
+                Buffer -- "4. Batch flush" --> Promoter
+                Promoter -- "5. UPSERT File -> pending" --> IST
+                IST -- "6. Backlog durable" --> Planner
+                Planner -- "7. Claim atomique / throttle adaptatif" --> Channel
+                Channel -- "8. Dispatch lanes" --> Worker1
+                Worker1 -- "9. Results" --> Writer
+                Writer -- "10. Commit IST" --> IST
+                Writer -- "10b. Commit SOLL" --> SOLL
+                MCP -- "Read-only queries" --> IST
                 MCP -- "SOLL Commands / Links / Restore" --> SOLL
                 Cockpit -- "Read only / telemetry" --> MCP
                 Telemetry -- "Projections operateur" --> MCP
                 
-                User((Agent IA)) -- "7. axon_query / inspect / audit" --> MCP
-                MCP -- "8. MVCC / writer-backed truth" --> IST
-                User -. "9. create / link / refine / restore SOLL" .-> MCP
+                User((Agent IA)) -- "11. axon_query / inspect / audit" --> MCP
+                MCP -- "12. MVCC / reader_ctx truth" --> IST
+                User -. "13. create / link / refine / restore SOLL" .-> MCP
 
                 style IST fill:#eff6ff,stroke:#0284c7,stroke-width:3px
                 style SOLL fill:#fef3c7,stroke:#d97706,stroke-width:3px
@@ -354,36 +360,151 @@
         <!-- 4. DÉTAIL DES ÉCHANGES & SYNCHRONISATION -->
         <section id="sync-details">
             <h2>Dynamique des Échanges (Séquence Détaillée)</h2>
-            <p>Le cycle de vie réel d'un fichier, de sa découverte à sa validation de traitement. Le point de vérité d'ingestion est désormais Rust; Elixir se contente de refléter l'état opérateur.</p>
+            <p>Le cycle de vie réel d'un fichier, de sa découverte à sa validation de traitement. Le point de vérité d'ingestion est désormais Rust; Elixir se contente de refléter l'état opérateur. Depuis avril 2026, la découverte ne pousse plus directement chaque événement brut dans <code>DuckDB</code> : elle passe d'abord par un garde d'ingress, un buffer mémoire, puis un promoteur batché.</p>
             <div class="mermaid">
             sequenceDiagram
                 autonumber
-                participant F as Native FS Watcher (Rust)
+                participant F as Watcher / Scanner (Rust)
+                participant G as FileIngressGuard
+                participant B as IngressBuffer
+                participant PM as IngressPromoter
                 participant PL as Planner / Claimer (Rust)
+                participant Q as QueueStore
                 participant W as Worker Core X (Rust)
                 participant WR as Writer Actor (Rust)
                 participant K as DuckDB
                 participant UI as Cockpit (Elixir)
 
                 Note over F, K: PHASE 1 : DISCOVERY / DELTA
-                F->>WR: HOT_DELTA {path, priority:900}
-                WR->>K: UPSERT File {status:'pending'}
-                K-->>WR: OK
+                F->>G: event {path, mtime, size, source}
+                G->>B: keep only useful delta
+                B->>PM: batch ready
+                PM->>K: UPSERT File {status:'pending', status_reason}
+                K-->>PM: OK
 
                 Note over PL, K: PHASE 2 : CLAIM ADAPTATIF
                 PL->>K: CLAIM pending -> indexing (atomique)
                 K-->>PL: batch hot / bulk / titan
-                PL->>W: dispatch files
+                PL->>Q: reserve memory per task
+                Q->>W: dispatch files
 
                 W->>W: AST Parsing + AI Embeddings
                 W->>WR: PUSH_DATA {path, extraction_results}
                 WR->>K: COMMIT Transaction
                 K-->>WR: OK
+                WR-->>Q: release reservation
                 WR-->>W: DB_SYNC_COMPLETE / query truth ready
 
                 Note over UI, K: LE RETOUR D'INFORMATION
                 UI->>K: lecture operateur via surfaces Rust
                 K-->>UI: progression / sante / backlog
+            </div>
+        </section>
+
+        <section id="ingestion-reality">
+            <h2>Pipeline d'Ingestion Reel (Avril 2026)</h2>
+            <p>Le comportement reel d'Axon repose sur une separation stricte entre <strong>signaux bruts</strong>, <strong>decisions d'indexation</strong> et <strong>travail effectivement execute</strong>. La file canonique reste dans <code>DuckDB.File</code>, mais la detection passe d'abord par des amortisseurs memoire pour eviter de marteler la base a chaque evenement de watcher ou de scan.</p>
+            <div class="mermaid">
+            flowchart LR
+                FS[Filesystem] --> SC[Scanner]
+                FS --> WT[Watcher]
+
+                SC --> FG[FileIngressGuard]
+                WT --> FG
+
+                FG -->|metadata changed / new path| IB[IngressBuffer RAM]
+                FG -.->|unchanged| DROP[Ignore]
+
+                IB --> IP[IngressPromoter]
+                IP -->|batch UPSERT| FILE[(DuckDB File)]
+
+                FILE -->|status = pending| CP[Claim Scheduler]
+                CP -->|claim_count / claim_mode| QS[QueueStore]
+                QS -->|reservation_id| WK[Workers]
+                WK --> WR[Writer Actor]
+                WR -->|commit graph / chunks / status| IST[(DuckDB IST)]
+
+                IST --> RC[reader_ctx]
+                WR --> WC[writer_ctx]
+                RC --> MCP[SQL / MCP Read-only]
+                IST --> TV[Runtime Telemetry]
+                TV --> PX[Phoenix Cockpit]
+
+                IST --> WAL[(WAL)]
+                WAL -. replay / checkpoint .-> IST
+
+                style IB fill:#ecfeff,stroke:#0891b2,stroke-width:2px
+                style IP fill:#cffafe,stroke:#0e7490,stroke-width:2px
+                style FILE fill:#eff6ff,stroke:#2563eb,stroke-width:3px
+                style QS fill:#fee2e2,stroke:#b91c1c,stroke-width:2px
+                style WAL fill:#fef3c7,stroke:#d97706,stroke-width:2px
+            </div>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>1. FileIngressGuard</h3>
+                    <p>Hydrate depuis <code>DuckDB.File</code> au boot. Il compare <code>path + mtime + size</code> et rejette les evenements triviaux. Il n'est <strong>pas</strong> une seconde base de verite, seulement un filtre amont fail-open.</p>
+                </div>
+                <div class="info-card">
+                    <h3>2. IngressBuffer</h3>
+                    <p>Table tampon <strong>memoire seulement</strong>. Elle absorbe les tempetes du watcher/scanner, deduplique par path, fusionne les deltas, garde les hints de sous-arbre et retarde l'ecriture canonique en base.</p>
+                </div>
+                <div class="info-card">
+                    <h3>3. IngressPromoter</h3>
+                    <p>Vide le buffer par <strong>batchs</strong> au lieu d'ecrire toutes les millisecondes. C'est lui qui transforme les signaux bruts en decisions <code>File.status = 'pending'</code> avec un <code>status_reason</code> explicite.</p>
+                </div>
+                <div class="info-card">
+                    <h3>4. Claim Scheduler + QueueStore</h3>
+                    <p>Le scheduler lit le backlog durable et passe les fichiers de <code>pending</code> a <code>indexing</code>. <code>QueueStore</code> reserve le budget memoire par <code>reservation_id</code> unique, pas par <code>trace_id</code> partage.</p>
+                </div>
+                <div class="info-card">
+                    <h3>5. Writer Actor</h3>
+                    <p>Toutes les ecritures critiques IST passent par le writer. Les lectures MCP/SQL read-only passent par <code>reader_ctx</code>. Les petites ecritures conceptuelles SOLL restent separees du bulk d'ingestion technique.</p>
+                </div>
+                <div class="info-card">
+                    <h3>6. WAL DuckDB</h3>
+                    <p>Le <code>WAL</code> est une partie normale de la verite durable tant qu'un checkpoint n'a pas fusionne les ecritures. Au restart, DuckDB le rejoue automatiquement. Le supprimer avant redemarrage detruit des progres reels.</p>
+                </div>
+            </div>
+            <table style="width:100%; border-collapse: collapse; margin-top: 18px;">
+                <tr style="background: #f1f5f9; text-align: left;">
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Variable / Surface</th>
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Role operatoire</th>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>File.status</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Etat canonique du fichier : <code>pending</code>, <code>indexing</code>, <code>indexed</code>, <code>indexed_degraded</code>, <code>skipped</code>, <code>oversized</code>, <code>deleted</code>.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>File.status_reason</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Cause dominante visible : <code>discovered_new</code>, <code>metadata_changed_scan</code>, <code>metadata_changed_hot_delta</code>, <code>claimed_for_indexing</code>, <code>indexed_success_full</code>, <code>recovered_interrupted_indexing</code>, etc.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>claim_mode</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Mode du scheduler : <code>fast</code>, <code>slow</code>, <code>guarded</code>, <code>paused</code>. Derive de la file, du budget memoire et de la pression service.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>queue_depth</code> / <code>reserved_bytes</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Profondeur de file et budget memoire actuellement reserve pour des taches en vol.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>reservation_id</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Identifiant unique par tache en queue. Sert a reserver puis relacher la memoire sans fuite comptable.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>trace_id</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Champ de tracabilite logique. Il ne doit plus piloter la reservation memoire, car plusieurs fichiers peuvent partager la meme trace.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>RssAnon</code> / <code>RssFile</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Distingue le heap/runtime anonyme du cache fichier. C'est crucial pour savoir si le probleme memoire vient du runtime ou du working set DuckDB.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>ist.db</code> / <code>ist.db.wal</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Mesurent la consolidation DuckDB. Une base petite avec un WAL gros n'implique pas une absence d'ecritures ; cela peut simplement signifier qu'un checkpoint n'a pas encore eu lieu.</td>
+                </tr>
+            </table>
+            <div class="llm-bubble">
+                "La decouverte n'est pas la verite. Le watcher et le scanner produisent des signaux bruts; seul le promoteur decide quand ils deviennent du backlog canonique dans DuckDB."
             </div>
         </section>
 
@@ -530,7 +651,7 @@
             <div class="grid">
                 <div class="info-card">
                     <h3>Backlog Durable</h3>
-                    <p><code>IST</code> reste la source de vérité du travail à faire. La RAM accélère, mais ne décide jamais du backlog canonique.</p>
+                    <p><code>IST</code> reste la source de vérité du travail à faire. La RAM accelere avec <code>IngressBuffer</code> et <code>QueueStore</code>, mais ne decide jamais seule du backlog canonique.</p>
                 </div>
                 <div class="info-card">
                     <h3>Service Guard</h3>
@@ -665,7 +786,7 @@
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">File</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>path</u> VARCHAR, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>path</u> VARCHAR, project_slug VARCHAR, status VARCHAR, status_reason VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN, defer_count BIGINT, last_error_reason VARCHAR</td>
                 </tr>
                 <tr>
                     <td style="padding: 12px; border: 1px solid #e2e8f0;">Symbol</td>

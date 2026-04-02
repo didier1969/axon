@@ -37,6 +37,10 @@ pub enum BridgeEvent {
         budget_bytes: u64,
         reserved_bytes: u64,
         exhaustion_ratio: f64,
+        reserved_task_count: usize,
+        anonymous_trace_reserved_tasks: usize,
+        anonymous_trace_admissions_total: u64,
+        reservation_release_misses_total: u64,
         queue_depth: usize,
         claim_mode: String,
         service_pressure: String,
@@ -86,6 +90,10 @@ mod tests {
             budget_bytes: 1_024,
             reserved_bytes: 256,
             exhaustion_ratio: 0.25,
+            reserved_task_count: 2,
+            anonymous_trace_reserved_tasks: 1,
+            anonymous_trace_admissions_total: 9,
+            reservation_release_misses_total: 3,
             queue_depth: 3,
             claim_mode: "guarded".to_string(),
             service_pressure: "degraded".to_string(),
@@ -125,6 +133,10 @@ mod tests {
         assert!(json.contains("\"budget_bytes\":1024"));
         assert!(json.contains("\"reserved_bytes\":256"));
         assert!(json.contains("\"exhaustion_ratio\":0.25"));
+        assert!(json.contains("\"reserved_task_count\":2"));
+        assert!(json.contains("\"anonymous_trace_reserved_tasks\":1"));
+        assert!(json.contains("\"anonymous_trace_admissions_total\":9"));
+        assert!(json.contains("\"reservation_release_misses_total\":3"));
         assert!(json.contains("\"queue_depth\":3"));
         assert!(json.contains("\"claim_mode\":\"guarded\""));
         assert!(json.contains("\"service_pressure\":\"degraded\""));
