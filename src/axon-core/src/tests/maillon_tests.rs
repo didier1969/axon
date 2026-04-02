@@ -1,7 +1,5 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
-use std::sync::Arc;
-
 use crate::graph::GraphStore;
 use crate::parser;
 use crate::parser::elixir::ElixirParser;
@@ -13,6 +11,16 @@ use crate::worker::DbWriteTask;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_ingress_guard::{FileIngressGuard, GuardDecision};
+    use once_cell::sync::Lazy;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    static FILE_INGRESS_GUARD_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn lock_file_ingress_guard_env() -> std::sync::MutexGuard<'static, ()> {
+        FILE_INGRESS_GUARD_ENV_LOCK.lock().unwrap()
+    }
 
     // --- MAILLON 1: LE SCANNER (Discovery) ---
     #[test]
@@ -96,6 +104,243 @@ mod tests {
             1,
             "Le sélecteur doit être capable de tirer les fichiers pending"
         );
+    }
+
+    #[test]
+    fn test_file_ingress_guard_hydrates_and_skips_unchanged_file() {
+        let _guard = lock_file_ingress_guard_env();
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[("/tmp/unchanged.rs".to_string(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        store
+            .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/unchanged.rs'")
+            .unwrap();
+
+        let guard = FileIngressGuard::hydrate_from_store(&store).unwrap();
+        let decision = guard.should_stage(Path::new("/tmp/unchanged.rs"), 1, 10);
+
+        assert_eq!(decision, GuardDecision::SkipUnchanged);
+    }
+
+    #[test]
+    fn test_file_ingress_guard_stages_changed_file() {
+        let _guard = lock_file_ingress_guard_env();
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[("/tmp/changed.rs".to_string(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        store
+            .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/changed.rs'")
+            .unwrap();
+
+        let guard = FileIngressGuard::hydrate_from_store(&store).unwrap();
+        let decision = guard.should_stage(Path::new("/tmp/changed.rs"), 2, 10);
+
+        assert_eq!(decision, GuardDecision::StageChanged);
+    }
+
+    #[test]
+    fn test_file_ingress_guard_stages_unknown_file() {
+        let _guard = lock_file_ingress_guard_env();
+        let store = GraphStore::new(":memory:").unwrap();
+        let guard = FileIngressGuard::hydrate_from_store(&store).unwrap();
+
+        let decision = guard.should_stage(Path::new("/tmp/new.rs"), 1, 10);
+
+        assert_eq!(decision, GuardDecision::StageNew);
+    }
+
+    #[test]
+    fn test_file_ingress_guard_stages_indexing_file_with_changed_metadata() {
+        let _guard = lock_file_ingress_guard_env();
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[("/tmp/indexing.rs".to_string(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        store
+            .execute(
+                "UPDATE File SET status = 'indexing', worker_id = 7 WHERE path = '/tmp/indexing.rs'",
+            )
+            .unwrap();
+
+        let guard = FileIngressGuard::hydrate_from_store(&store).unwrap();
+        let decision = guard.should_stage(Path::new("/tmp/indexing.rs"), 2, 10);
+
+        assert_eq!(decision, GuardDecision::StageChanged);
+    }
+
+    #[test]
+    fn test_file_ingress_guard_records_committed_tombstone_and_restages_recreated_file() {
+        let _guard = lock_file_ingress_guard_env();
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[("/tmp/recreated.rs".to_string(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        store
+            .execute("UPDATE File SET status = 'deleted' WHERE path = '/tmp/recreated.rs'")
+            .unwrap();
+
+        let mut guard = FileIngressGuard::hydrate_from_store(&store).unwrap();
+        guard.record_tombstone(Path::new("/tmp/recreated.rs"));
+
+        let decision = guard.should_stage(Path::new("/tmp/recreated.rs"), 2, 10);
+
+        assert_eq!(decision, GuardDecision::StageChanged);
+    }
+
+    #[test]
+    fn test_file_ingress_guard_kill_switch_disables_guard_path() {
+        let _guard = FILE_INGRESS_GUARD_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("AXON_ENABLE_FILE_INGRESS_GUARD", "0");
+        }
+        let store = GraphStore::new(":memory:").unwrap();
+        let guard = FileIngressGuard::hydrate_from_store(&store).unwrap();
+
+        assert!(!guard.is_enabled());
+
+        unsafe {
+            std::env::remove_var("AXON_ENABLE_FILE_INGRESS_GUARD");
+        }
+    }
+
+    #[test]
+    fn test_boot_guard_hydrates_after_indexing_recovery() {
+        let _guard = lock_file_ingress_guard_env();
+        let db_root = std::env::temp_dir().join(format!(
+            "axon-file-ingress-boot-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&db_root);
+        std::fs::create_dir_all(&db_root).unwrap();
+
+        let db_root_str = db_root.to_string_lossy().to_string();
+        let store = GraphStore::new(&db_root_str).unwrap();
+        store
+            .bulk_insert_files(&[("/tmp/recover_guard.rs".to_string(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        store
+            .execute("UPDATE File SET status = 'indexing', worker_id = 3 WHERE path = '/tmp/recover_guard.rs'")
+            .unwrap();
+        drop(store);
+
+        let reopened = GraphStore::new(&db_root_str).unwrap();
+        let row = reopened
+            .query_json("SELECT status FROM File WHERE path = '/tmp/recover_guard.rs'")
+            .unwrap();
+        assert!(row.contains("pending"));
+
+        let guard = FileIngressGuard::hydrate_from_store(&reopened).unwrap();
+        let decision = guard.should_stage(Path::new("/tmp/recover_guard.rs"), 1, 10);
+        assert_eq!(decision, GuardDecision::SkipUnchanged);
+
+        let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
+    fn test_maillon_2d1_rust_watcher_with_guard_skips_unchanged_delta() {
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("unchanged_live.ex");
+        std::fs::write(&file_path, "defmodule Live do\nend\n").unwrap();
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        let size = metadata.len() as i64;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let store = GraphStore::new(":memory:").unwrap();
+        store
+            .bulk_insert_files(&[(
+                file_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                size,
+                mtime,
+            )])
+            .unwrap();
+        store
+            .execute(&format!(
+                "UPDATE File SET status = 'indexed', priority = 10 WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        let guard = Arc::new(Mutex::new(FileIngressGuard::hydrate_from_store(&store).unwrap()));
+        let staged = crate::fs_watcher::stage_hot_delta_with_guard(
+            &store,
+            root,
+            &file_path,
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+        )
+        .unwrap();
+
+        assert!(!staged, "Le guard doit filtrer un delta inchangé");
+
+        let row = store
+            .query_json(&format!(
+                "SELECT status, priority FROM File WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert!(row.contains("indexed"));
+        assert!(row.contains("10"));
+    }
+
+    #[test]
+    fn test_maillon_2d2_scanner_with_guard_skips_unchanged_file() {
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("keep.ex");
+        std::fs::write(&file_path, "defmodule Keep do\nend\n").unwrap();
+
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        let size = metadata.len() as i64;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        store
+            .bulk_insert_files(&[(
+                file_path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                size,
+                mtime,
+            )])
+            .unwrap();
+        store
+            .execute(&format!(
+                "UPDATE File SET status = 'indexed' WHERE path = '{}'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        let guard = Arc::new(Mutex::new(FileIngressGuard::hydrate_from_store(&store).unwrap()));
+        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy());
+        scanner.scan_with_guard(store.clone(), Some(&guard));
+
+        let pending = store
+            .query_count(&format!(
+                "SELECT count(*) FROM File WHERE path = '{}' AND status = 'pending'",
+                file_path.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        assert_eq!(pending, 0, "Le scan guardé ne doit pas rouvrir le fichier");
     }
 
     #[test]

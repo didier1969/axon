@@ -535,6 +535,31 @@ Artefacts créés:
 - `docs/plans/2026-04-02-file-ingress-guard-design.md`
 - `docs/plans/2026-04-02-file-ingress-guard-implementation-plan.md`
 
+### 20. Point à investiguer ensuite: relâchement mémoire après pics d'indexation
+
+Constat utilisateur:
+
+- Axon a pu monter autour de `16 GB` de RAM
+- il ne faut pas "réduire la voilure" fonctionnelle
+- mais il faut comprendre si une partie importante correspond à du cache DB / working set libérable
+
+Interprétation:
+
+- il faut distinguer:
+  - mémoire utile et durable du runtime
+  - working set DuckDB / cache pages
+  - buffers temporaires d’ingestion
+  - mémoire du worker sémantique
+- la prochaine investigation mémoire ne doit pas être un simple throttling
+- la bonne question est: "qu’est-ce qu’Axon peut relâcher proprement après un pic sans perdre sa vérité ni casser le débit futur ?"
+
+Follow-up:
+
+- ajouter une tranche dédiée d’analyse mémoire runtime
+- vérifier les mécanismes DuckDB / WAL / checkpoint / cache qui peuvent être relâchés
+- mesurer ce qui reste stable après quiescence
+- décider si Axon a besoin d’un mécanisme explicite de purge / compactage / relâchement du working set
+
 ## Follow-up Corrections to Plan
 
 Si la fin d'indexation initiale ne peut pas être constatée proprement sans heuristique, ouvrir une tranche corrective sur:

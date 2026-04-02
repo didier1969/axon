@@ -7,6 +7,7 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use libloading::Symbol as LibSymbol;
 
+use crate::file_ingress_guard::FileIngressRow;
 use crate::graph::{ExecFunc, GraphStore, PendingFile};
 use crate::queue::ProcessingMode;
 use crate::watcher_probe;
@@ -42,6 +43,19 @@ fn parse_pending_file_row(row: Vec<serde_json::Value>) -> Option<PendingFile> {
         size_bytes,
         defer_count,
         last_deferred_at_ms,
+    })
+}
+
+fn parse_file_ingress_row(row: Vec<serde_json::Value>) -> Option<FileIngressRow> {
+    if row.len() < 4 {
+        return None;
+    }
+
+    Some(FileIngressRow {
+        path: row[0].as_str()?.to_string(),
+        status: row[1].as_str()?.to_string(),
+        mtime: parse_i64_field(&row[2]).unwrap_or_default(),
+        size: parse_i64_field(&row[3]).unwrap_or_default(),
     })
 }
 
@@ -237,6 +251,35 @@ impl GraphStore {
             format!("affected={}", affected),
         );
         Ok(affected as usize)
+    }
+
+    pub fn fetch_file_ingress_row(&self, path: &str) -> Result<Option<FileIngressRow>> {
+        let escaped = Self::escape_sql(path);
+        let raw = self.query_json(&format!(
+            "SELECT path, status, mtime, size FROM File WHERE path = '{}' LIMIT 1",
+            escaped
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows.into_iter().next().and_then(parse_file_ingress_row))
+    }
+
+    pub fn fetch_file_ingress_rows(&self, paths: &[String]) -> Result<Vec<FileIngressRow>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let selector = paths
+            .iter()
+            .map(|path| format!("'{}'", Self::escape_sql(path)))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let raw = self.query_json(&format!(
+            "SELECT path, status, mtime, size FROM File WHERE path IN ({})",
+            selector
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows.into_iter().filter_map(parse_file_ingress_row).collect())
     }
 
     pub fn insert_file_data_batch(&self, tasks: &[crate::worker::DbWriteTask]) -> Result<()> {

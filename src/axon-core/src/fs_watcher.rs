@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use walkdir::WalkDir;
 
+use crate::file_ingress_guard::{GuardDecision, SharedFileIngressGuard};
 use crate::graph::GraphStore;
 use crate::scanner::Scanner;
 use crate::watcher_probe;
@@ -16,7 +17,17 @@ pub fn stage_hot_delta(
     path: &Path,
     priority: i64,
 ) -> Result<bool> {
-    Ok(stage_hot_path_delta_count(store, watch_root, path, priority)? > 0)
+    Ok(stage_hot_path_delta_count(store, watch_root, path, priority, None)? > 0)
+}
+
+pub fn stage_hot_delta_with_guard(
+    store: &GraphStore,
+    watch_root: &Path,
+    path: &Path,
+    priority: i64,
+    guard: &SharedFileIngressGuard,
+) -> Result<bool> {
+    Ok(stage_hot_path_delta_count(store, watch_root, path, priority, Some(guard))? > 0)
 }
 
 fn stage_hot_path_delta_count(
@@ -24,6 +35,7 @@ fn stage_hot_path_delta_count(
     watch_root: &Path,
     path: &Path,
     priority: i64,
+    guard: Option<&SharedFileIngressGuard>,
 ) -> Result<usize> {
     let scanner = Scanner::new(watch_root.to_string_lossy().as_ref());
 
@@ -31,6 +43,14 @@ fn stage_hot_path_delta_count(
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let tombstoned = store.tombstone_missing_path(path)?;
+            if tombstoned > 0 {
+                if let Some(shared_guard) = guard {
+                    shared_guard
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .record_tombstone(path);
+                }
+            }
             if tombstoned == 0 {
                 watcher_probe::record("watcher.missing", Some(path), "reason=not_found");
             }
@@ -54,12 +74,13 @@ fn stage_hot_path_delta_count(
             if !entry.file_type().is_file() || !scanner.should_process_path(candidate) {
                 continue;
             }
-            staged += stage_single_file_delta(store, &scanner, candidate, priority)? as usize;
+            staged +=
+                stage_single_file_delta(store, &scanner, candidate, priority, guard)? as usize;
         }
         return Ok(staged);
     }
 
-    Ok(stage_single_file_delta(store, &scanner, path, priority)? as usize)
+    Ok(stage_single_file_delta(store, &scanner, path, priority, guard)? as usize)
 }
 
 pub fn stage_hot_deltas<I>(
@@ -67,6 +88,32 @@ pub fn stage_hot_deltas<I>(
     watch_root: &Path,
     paths: I,
     priority: i64,
+) -> Result<usize>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    stage_hot_deltas_inner(store, watch_root, paths, priority, None)
+}
+
+pub fn stage_hot_deltas_with_guard<I>(
+    store: &GraphStore,
+    watch_root: &Path,
+    paths: I,
+    priority: i64,
+    guard: &SharedFileIngressGuard,
+) -> Result<usize>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    stage_hot_deltas_inner(store, watch_root, paths, priority, Some(guard))
+}
+
+fn stage_hot_deltas_inner<I>(
+    store: &GraphStore,
+    watch_root: &Path,
+    paths: I,
+    priority: i64,
+    guard: Option<&SharedFileIngressGuard>,
 ) -> Result<usize>
 where
     I: IntoIterator<Item = PathBuf>,
@@ -80,7 +127,7 @@ where
             continue;
         }
 
-        staged += stage_hot_path_delta_count(store, watch_root, &path, priority)?;
+        staged += stage_hot_path_delta_count(store, watch_root, &path, priority, guard)?;
     }
 
     Ok(staged)
@@ -91,11 +138,20 @@ fn stage_single_file_delta(
     scanner: &Scanner,
     path: &Path,
     priority: i64,
+    guard: Option<&SharedFileIngressGuard>,
 ) -> Result<bool> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let tombstoned = store.tombstone_missing_path(path)?;
+            if tombstoned > 0 {
+                if let Some(shared_guard) = guard {
+                    shared_guard
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .record_tombstone(path);
+                }
+            }
             if tombstoned == 0 {
                 watcher_probe::record(
                     "watcher.missing",
@@ -128,6 +184,17 @@ fn stage_single_file_delta(
     let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let project_slug = scanner.project_slug_for_path(&absolute);
 
+    if let Some(shared_guard) = guard {
+        let decision = shared_guard
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .should_stage(&absolute, mtime, size);
+        if decision == GuardDecision::SkipUnchanged {
+            watcher_probe::record("watcher.filtered", Some(&absolute), "reason=guard_skip");
+            return Ok(false);
+        }
+    }
+
     store.upsert_hot_file(
         &absolute.to_string_lossy(),
         &project_slug,
@@ -135,6 +202,15 @@ fn stage_single_file_delta(
         mtime,
         priority,
     )?;
+
+    if let Some(shared_guard) = guard {
+        if let Some(row) = store.fetch_file_ingress_row(&absolute.to_string_lossy())? {
+            shared_guard
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .record_committed_row(row);
+        }
+    }
 
     watcher_probe::record(
         "watcher.staged",

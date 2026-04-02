@@ -5,11 +5,12 @@ mod main_services;
 mod main_telemetry;
 
 use axon_core::bridge::BridgeEvent;
+use axon_core::file_ingress_guard::{FileIngressGuard, SharedFileIngressGuard};
 use axon_core::graph::GraphStore;
 use axon_core::queue::QueueStore;
 use axon_core::runtime_profile::RuntimeProfile;
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tracing::{error, info};
@@ -71,6 +72,9 @@ fn main() -> anyhow::Result<()> {
                     .ingestion_memory_budget_gb
                     .saturating_mul(1024 * 1024 * 1024),
             ));
+            let file_ingress_guard: SharedFileIngressGuard = Arc::new(Mutex::new(
+                FileIngressGuard::hydrate_from_store(&graph_store).unwrap_or_default(),
+            ));
             let tel_socket_path = "/tmp/axon-telemetry.sock";
             let mcp_socket_path = "/tmp/axon-mcp.sock";
 
@@ -103,9 +107,17 @@ fn main() -> anyhow::Result<()> {
 
             main_background::spawn_autonomous_ingestor(graph_store.clone(), queue_store.clone());
 
-            main_background::spawn_hot_delta_watcher(graph_store.clone(), projects_root_str.clone());
+            main_background::spawn_hot_delta_watcher(
+                graph_store.clone(),
+                projects_root_str.clone(),
+                file_ingress_guard.clone(),
+            );
 
-            main_background::spawn_initial_scan(graph_store.clone(), projects_root_str.clone());
+            main_background::spawn_initial_scan(
+                graph_store.clone(),
+                projects_root_str.clone(),
+                file_ingress_guard.clone(),
+            );
 
             // --- Telemetry Listener Loop (Elixir/Dashboard) ---
             loop {

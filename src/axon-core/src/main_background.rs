@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
+use axon_core::file_ingress_guard::{guard_metrics_snapshot, SharedFileIngressGuard};
 use axon_core::fs_watcher::{self, HOT_PRIORITY};
 use axon_core::graph::GraphStore;
 use axon_core::graph::PendingFile;
@@ -58,6 +59,11 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub service_pressure: String,
     pub oversized_refusals_total: u64,
     pub degraded_mode_entries_total: u64,
+    pub guard_hits: u64,
+    pub guard_misses: u64,
+    pub guard_bypassed_total: u64,
+    pub guard_hydrated_entries: u64,
+    pub guard_hydration_duration_ms: u64,
     pub cpu_load: f64,
     pub ram_load: f64,
     pub io_wait: f64,
@@ -214,6 +220,7 @@ pub(crate) fn runtime_telemetry_snapshot(queue: &QueueStore) -> RuntimeTelemetry
         service_pressure,
     );
     let host_pressure = sample_host_pressure();
+    let guard_metrics = guard_metrics_snapshot();
 
     RuntimeTelemetrySnapshot {
         budget_bytes: budget.budget_bytes,
@@ -224,6 +231,11 @@ pub(crate) fn runtime_telemetry_snapshot(queue: &QueueStore) -> RuntimeTelemetry
         service_pressure: service_pressure_label(service_pressure).to_string(),
         oversized_refusals_total: OVERSIZED_REFUSALS_TOTAL.load(Ordering::Relaxed),
         degraded_mode_entries_total: DEGRADED_MODE_ENTRIES_TOTAL.load(Ordering::Relaxed),
+        guard_hits: guard_metrics.hits,
+        guard_misses: guard_metrics.misses,
+        guard_bypassed_total: guard_metrics.bypassed_total,
+        guard_hydrated_entries: guard_metrics.hydrated_entries,
+        guard_hydration_duration_ms: guard_metrics.hydration_duration_ms,
         cpu_load: host_pressure.cpu_load,
         ram_load: host_pressure.ram_load,
         io_wait: host_pressure.io_wait,
@@ -533,22 +545,34 @@ fn enqueue_claimed_files(
     }
 }
 
-pub(crate) fn spawn_initial_scan(store: Arc<GraphStore>, projects_root: String) {
+pub(crate) fn spawn_initial_scan(
+    store: Arc<GraphStore>,
+    projects_root: String,
+    file_ingress_guard: SharedFileIngressGuard,
+) {
     std::thread::spawn(move || {
         info!("🚀 Auto-Ignition: Beginning initial workspace mapping...");
         let scanner = axon_core::scanner::Scanner::new(&projects_root);
         if let Ok(preferred_project_root) = std::env::var("AXON_PROJECT_ROOT") {
             let preferred_path = PathBuf::from(preferred_project_root);
             if preferred_path.starts_with(&projects_root) && preferred_path.is_dir() {
-                scanner.scan_subtree(store.clone(), &preferred_path);
+                scanner.scan_subtree_with_guard(
+                    store.clone(),
+                    &preferred_path,
+                    Some(&file_ingress_guard),
+                );
             }
         }
-        scanner.scan(store);
+        scanner.scan_with_guard(store, Some(&file_ingress_guard));
         info!("✅ Auto-Ignition: Initial mapping sequence complete.");
     });
 }
 
-pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: String) {
+pub(crate) fn spawn_hot_delta_watcher(
+    store: Arc<GraphStore>,
+    projects_root: String,
+    file_ingress_guard: SharedFileIngressGuard,
+) {
     std::thread::spawn(move || {
         let watch_root = PathBuf::from(projects_root);
         let preferred_project_root = std::env::var("AXON_PROJECT_ROOT").ok().map(PathBuf::from);
@@ -560,6 +584,7 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
 
             let callback_root = watch_root.clone();
             let callback_store = store.clone();
+            let callback_guard = file_ingress_guard.clone();
             let callback_active_project_root = preferred_project_root.clone();
             let rescan_guard = Arc::new(AtomicBool::new(false));
             let callback_rescan_guard = rescan_guard.clone();
@@ -574,6 +599,7 @@ pub(crate) fn spawn_hot_delta_watcher(store: Arc<GraphStore>, projects_root: Str
                     handle_watcher_events(
                         callback_store.clone(),
                         callback_root.clone(),
+                        callback_guard.clone(),
                         callback_active_project_root.clone(),
                         callback_rescan_guard.clone(),
                         callback_cold_arm_completed_at.clone(),
@@ -1037,6 +1063,7 @@ fn dynamic_claim_sleep(pressure: f64, mode: ClaimMode) -> std::time::Duration {
 fn handle_watcher_events(
     store: Arc<GraphStore>,
     watch_root: std::path::PathBuf,
+    file_ingress_guard: SharedFileIngressGuard,
     active_project_root: Option<PathBuf>,
     rescan_guard: Arc<AtomicBool>,
     cold_arm_completed_at: Arc<Mutex<Option<Instant>>>,
@@ -1074,11 +1101,12 @@ fn handle_watcher_events(
                     format!("paths={} salvaged={}", paths.len(), salvaged.len()),
                 );
                 if !salvaged.is_empty() {
-                    match fs_watcher::stage_hot_deltas(
+                    match fs_watcher::stage_hot_deltas_with_guard(
                         &store,
                         &watch_root,
                         salvaged.clone(),
                         HOT_PRIORITY,
+                        &file_ingress_guard,
                     ) {
                         Ok(staged) if staged > 0 => {
                             info!(
@@ -1129,6 +1157,7 @@ fn handle_watcher_events(
                     );
                     let rescan_store = store.clone();
                     let rescan_root = watch_root.clone();
+                    let rescan_guard_state = file_ingress_guard.clone();
                     let rescan_guard_release = rescan_guard.clone();
                     std::thread::spawn(move || {
                         let _guard_reset = RescanGuardReset::new(rescan_guard_release);
@@ -1141,7 +1170,8 @@ fn handle_watcher_events(
                             Some(&rescan_root),
                             "reason=notify_rescan",
                         );
-                        Scanner::new(rescan_root.to_string_lossy().as_ref()).scan(rescan_store);
+                        Scanner::new(rescan_root.to_string_lossy().as_ref())
+                            .scan_with_guard(rescan_store, Some(&rescan_guard_state));
                         watcher_probe::record(
                             "watcher.rescan_completed",
                             Some(&rescan_root),
@@ -1153,7 +1183,13 @@ fn handle_watcher_events(
                 }
             }
 
-            match fs_watcher::stage_hot_deltas(&store, &watch_root, paths, HOT_PRIORITY) {
+            match fs_watcher::stage_hot_deltas_with_guard(
+                &store,
+                &watch_root,
+                paths,
+                HOT_PRIORITY,
+                &file_ingress_guard,
+            ) {
                 Ok(staged) if staged > 0 => {
                     info!("Rust FS watcher staged {} hot delta(s).", staged);
                     watcher_probe::record(
@@ -1238,6 +1274,7 @@ mod tests {
         should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets,
         RescanGuardReset, OVERSIZED_PROBATION_DEFER_THRESHOLD,
     };
+    use axon_core::file_ingress_guard::FileIngressGuard;
     use axon_core::graph::{GraphStore, PendingFile};
     use axon_core::queue::QueueStore;
     use axon_core::service_guard::ServicePressure;
@@ -1252,6 +1289,10 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    fn test_file_ingress_guard() -> Arc<Mutex<FileIngressGuard>> {
+        Arc::new(Mutex::new(FileIngressGuard::default()))
+    }
 
     #[test]
     fn test_memory_limit_uses_default_when_env_missing() {
@@ -1500,6 +1541,7 @@ mod tests {
         handle_watcher_events(
             store.clone(),
             root.to_path_buf(),
+            test_file_ingress_guard(),
             Some(project.clone()),
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(None)),
@@ -1552,6 +1594,7 @@ mod tests {
         handle_watcher_events(
             store.clone(),
             root.to_path_buf(),
+            test_file_ingress_guard(),
             Some(project.clone()),
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(None)),
@@ -1644,6 +1687,7 @@ mod tests {
         handle_watcher_events(
             store,
             root.to_path_buf(),
+            test_file_ingress_guard(),
             Some(project),
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(None)),
@@ -1683,6 +1727,7 @@ mod tests {
         handle_watcher_events(
             store,
             root.to_path_buf(),
+            test_file_ingress_guard(),
             Some(project),
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(None)),
@@ -1734,6 +1779,7 @@ mod tests {
         handle_watcher_events(
             store,
             root.to_path_buf(),
+            test_file_ingress_guard(),
             Some(project),
             Arc::new(AtomicBool::new(true)),
             Arc::new(Mutex::new(None)),
@@ -1754,6 +1800,7 @@ mod tests {
         handle_watcher_events(
             Arc::new(GraphStore::new(":memory:").unwrap()),
             PathBuf::from("/tmp"),
+            test_file_ingress_guard(),
             None,
             Arc::new(AtomicBool::new(false)),
             Arc::new(Mutex::new(None)),

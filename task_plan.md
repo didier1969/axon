@@ -39,7 +39,7 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 - [x] Documenter la décision d'architecture pour un filtre amont dérivé de `File`.
 - [x] Fixer les invariants non négociables avant toute implémentation.
 - [x] Écrire un plan d'implémentation TDD minimal-risque.
-- [ ] Exécuter le plan.
+- [x] Exécuter le plan.
 
 ## Working Assumptions
 - Les modifications Git actuellement visibles sont principalement des artefacts de runtime/devenv et non un signal suffisant de travail produit.

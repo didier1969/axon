@@ -146,3 +146,26 @@
 
 ## Next Immediate Action
 - relancer la revue experte binaire sur la version corrigée
+
+## 2026-04-02 - Implémentation TDD du FileIngressGuard
+- Rouge:
+  - tests du contrat `FileIngressGuard` ajoutés dans `src/axon-core/src/tests/maillon_tests.rs`
+  - premier run: échec attendu car le module n’existait pas
+- Vert:
+  - création de `src/axon-core/src/file_ingress_guard.rs`
+  - ajout du kill switch `AXON_ENABLE_FILE_INGRESS_GUARD`
+  - helpers de relecture `File` commitée dans `src/axon-core/src/graph_ingestion.rs`
+  - branchement du scanner et du watcher avec variantes `with_guard`
+  - hydratation au boot dans `src/axon-core/src/main.rs`
+  - passage du guard partagé vers `main_background`
+  - ajout de la télémétrie minimale du guard dans `bridge.rs`, `main_background.rs`, `main_telemetry.rs`
+- Incident de validation:
+  - pollution inter-tests par variable d’environnement du kill switch
+  - corrigée via verrou statique dans les tests
+- Vérifications fraîches:
+  - `cargo test` complet `src/axon-core` vert (`138` + `44` + doctests)
+  - `mix test` complet `src/dashboard` vert (`31`)
+  - `stop-v2 -> start-v2 -> stop-v2` vert
+
+## Next Immediate Action
+- préparer la prochaine tranche d’observabilité/causalité des requeues et l’investigation mémoire sur relâchement du working set

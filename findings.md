@@ -116,3 +116,25 @@
 - le MVP doit réduire son shadow state au strict minimum
 - le cas `indexing + changement de metadata` doit rester explicitement compatible avec `needs_reindex`
 - la règle de rebuild/invalidation du guard doit être claire par rapport au bootstrap DB
+
+### 7. Le FileIngressGuard est maintenant implémenté et validé
+- nouveau module: `src/axon-core/src/file_ingress_guard.rs`
+- hydratation au boot depuis `File` après `GraphStore::new()`
+- intégration runtime:
+  - watcher hot via variantes `stage_hot_delta_with_guard` / `stage_hot_deltas_with_guard`
+  - scanner via `scan_with_guard` / `scan_subtree_with_guard`
+- mise à jour du guard à partir des lignes `File` réellement relues après commit, pas depuis l’intention d’écriture
+- `kill switch` opérationnel via `AXON_ENABLE_FILE_INGRESS_GUARD`
+- télémétrie minimale ajoutée:
+  - `guard_hits`
+  - `guard_misses`
+  - `guard_bypassed_total`
+  - `guard_hydrated_entries`
+  - `guard_hydration_duration_ms`
+
+### 8. Un défaut de test réel a été trouvé pendant la validation complète
+- le test du kill switch manipulait l’environnement global et contaminait les autres tests du guard en exécution parallèle
+- correction appliquée:
+  - verrou statique partagé autour des tests du guard
+- conclusion:
+  - le défaut était dans la suite de tests, pas dans le runtime

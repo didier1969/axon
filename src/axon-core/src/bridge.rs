@@ -42,6 +42,11 @@ pub enum BridgeEvent {
         service_pressure: String,
         oversized_refusals_total: u64,
         degraded_mode_entries_total: u64,
+        guard_hits: u64,
+        guard_misses: u64,
+        guard_bypassed_total: u64,
+        guard_hydrated_entries: u64,
+        guard_hydration_duration_ms: u64,
         cpu_load: f64,
         ram_load: f64,
         io_wait: f64,
@@ -70,6 +75,11 @@ mod tests {
             service_pressure: "degraded".to_string(),
             oversized_refusals_total: 7,
             degraded_mode_entries_total: 3,
+            guard_hits: 9,
+            guard_misses: 4,
+            guard_bypassed_total: 2,
+            guard_hydrated_entries: 512,
+            guard_hydration_duration_ms: 18,
             cpu_load: 61.5,
             ram_load: 47.0,
             io_wait: 12.2,
@@ -88,6 +98,11 @@ mod tests {
         assert!(json.contains("\"service_pressure\":\"degraded\""));
         assert!(json.contains("\"oversized_refusals_total\":7"));
         assert!(json.contains("\"degraded_mode_entries_total\":3"));
+        assert!(json.contains("\"guard_hits\":9"));
+        assert!(json.contains("\"guard_misses\":4"));
+        assert!(json.contains("\"guard_bypassed_total\":2"));
+        assert!(json.contains("\"guard_hydrated_entries\":512"));
+        assert!(json.contains("\"guard_hydration_duration_ms\":18"));
         assert!(json.contains("\"cpu_load\":61.5"));
         assert!(json.contains("\"ram_load\":47.0"));
         assert!(json.contains("\"io_wait\":12.2"));

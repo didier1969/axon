@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod config;
 pub mod embedder;
+pub mod file_ingress_guard;
 pub mod fs_watcher;
 pub mod graph;
 pub mod graph_analytics;

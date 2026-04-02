@@ -1,3 +1,4 @@
+use crate::file_ingress_guard::{GuardDecision, SharedFileIngressGuard};
 use crate::graph::GraphStore;
 use crate::service_guard;
 use ignore::{gitignore::Gitignore, WalkBuilder};
@@ -28,11 +29,19 @@ impl Scanner {
     }
 
     pub fn scan(&self, graph: Arc<GraphStore>) {
+        self.scan_with_guard(graph, None);
+    }
+
+    pub fn scan_with_guard(
+        &self,
+        graph: Arc<GraphStore>,
+        guard: Option<&SharedFileIngressGuard>,
+    ) {
         info!(
             "Lattice Engine: Initializing recursive traversal on {:?}",
             self.root
         );
-        let total_files = self.scan_path(graph, &self.root);
+        let total_files = self.scan_path(graph, &self.root, guard);
         info!(
             "🏁 Nexus Scan Complete: {} files mapped to DuckDB (status: pending).",
             total_files
@@ -40,11 +49,20 @@ impl Scanner {
     }
 
     pub fn scan_subtree(&self, graph: Arc<GraphStore>, subtree: &Path) {
+        self.scan_subtree_with_guard(graph, subtree, None);
+    }
+
+    pub fn scan_subtree_with_guard(
+        &self,
+        graph: Arc<GraphStore>,
+        subtree: &Path,
+        guard: Option<&SharedFileIngressGuard>,
+    ) {
         info!(
             "Lattice Engine: Prioritizing hot subtree traversal on {:?}",
             subtree
         );
-        let total_files = self.scan_path(graph, subtree);
+        let total_files = self.scan_path(graph, subtree, guard);
         info!(
             "🔥 Hot subtree scan complete: {} files mapped from {:?}.",
             total_files, subtree
@@ -157,7 +175,12 @@ impl Scanner {
         }
     }
 
-    fn scan_path(&self, graph: Arc<GraphStore>, start: &Path) -> usize {
+    fn scan_path(
+        &self,
+        graph: Arc<GraphStore>,
+        start: &Path,
+        guard: Option<&SharedFileIngressGuard>,
+    ) -> usize {
         let mut batch = Vec::new();
         let mut total_files = 0;
         let walker = self.build_walker_from(start);
@@ -202,12 +225,32 @@ impl Scanner {
                     .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
                     .unwrap_or(0);
 
+                if let Some(shared_guard) = guard {
+                    let decision = shared_guard
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .should_stage(Path::new(&path_str), mtime, size);
+                    if decision == GuardDecision::SkipUnchanged {
+                        continue;
+                    }
+                }
+
                 batch.push((path_str, project_name, size, mtime));
 
                 if batch.len() >= 100 {
                     total_files += batch.len();
                     if let Err(e) = graph.bulk_insert_files(&batch) {
                         error!("Bulk insert failed: {:?}", e);
+                    } else if let Some(shared_guard) = guard {
+                        let paths = batch.iter().map(|(path, _, _, _)| path.clone()).collect::<Vec<_>>();
+                        if let Ok(rows) = graph.fetch_file_ingress_rows(&paths) {
+                            let mut locked = shared_guard
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner());
+                            for row in rows {
+                                locked.record_committed_row(row);
+                            }
+                        }
                     }
                     batch.clear();
                     info!("... {} files mapped", total_files);
@@ -227,7 +270,19 @@ impl Scanner {
 
         if !batch.is_empty() {
             total_files += batch.len();
-            let _ = graph.bulk_insert_files(&batch);
+            if graph.bulk_insert_files(&batch).is_ok() {
+                if let Some(shared_guard) = guard {
+                    let paths = batch.iter().map(|(path, _, _, _)| path.clone()).collect::<Vec<_>>();
+                    if let Ok(rows) = graph.fetch_file_ingress_rows(&paths) {
+                        let mut locked = shared_guard
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner());
+                        for row in rows {
+                            locked.record_committed_row(row);
+                        }
+                    }
+                }
+            }
         }
 
         total_files
