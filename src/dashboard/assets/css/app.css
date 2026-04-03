@@ -196,11 +196,26 @@ pre,
   margin-top: 1.25rem;
 }
 
+.cockpit-band.full-span {
+  margin-top: 1.25rem;
+}
+
 .cockpit-columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1.25rem;
   margin-top: 1.25rem;
+}
+
+.cockpit-columns-workbench {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  align-items: start;
+}
+
+.cockpit-column-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
 }
 
 .band-title-row {
@@ -307,8 +322,7 @@ pre,
 }
 
 .stack-row,
-.project-card,
-.activity-row {
+.project-card {
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
@@ -358,8 +372,23 @@ pre,
 }
 
 .project-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   margin-top: 0.9rem;
+}
+
+.project-grid .signal-stat {
+  padding: 0.7rem 0.75rem;
+  border-radius: 0.85rem;
+}
+
+.project-grid .signal-stat-label {
+  margin-bottom: 0.2rem;
+  font-size: 0.65rem;
+  letter-spacing: 0.09em;
+}
+
+.project-grid .signal-stat-value {
+  font-size: 0.86rem;
 }
 
 .mini-grid {
@@ -431,8 +460,39 @@ pre,
   gap: 0.7rem;
 }
 
+.activity-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.activity-header,
+.activity-row {
+  display: grid;
+  grid-template-columns: 8.5rem 7rem 8rem minmax(0, 1fr) 5.5rem;
+  gap: 0.85rem;
+  align-items: center;
+}
+
+.activity-header {
+  padding: 0 1rem 0.15rem;
+  color: oklch(70% 0.015 245);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.activity-row {
+  padding: 0.95rem 1rem;
+  border-radius: 1rem;
+  border: 1px solid oklch(23% 0.015 250);
+  background: oklch(16% 0.01 250 / 0.85);
+}
+
 .activity-badge {
-  min-width: 5.75rem;
+  min-width: 0;
+  width: 100%;
   padding: 0.35rem 0.6rem;
   border-radius: 999px;
   text-align: center;
@@ -458,17 +518,29 @@ pre,
 }
 
 .activity-path {
-  flex: 1;
+  min-width: 0;
   color: oklch(91% 0.01 250);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
+.activity-size,
+.activity-extension,
 .activity-time {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   color: oklch(66% 0.015 250);
   font-size: 0.8rem;
+}
+
+.activity-size,
+.activity-extension {
+  color: oklch(82% 0.02 240);
+}
+
+.project-band {
+  height: 100%;
 }
 
 .empty-state {
@@ -484,9 +556,17 @@ pre,
   }
 
   .detail-grid,
-  .mini-grid,
-  .project-grid {
+  .mini-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .project-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .activity-header,
+  .activity-row {
+    grid-template-columns: 7.5rem 6rem 6.5rem minmax(0, 1fr) 5rem;
   }
 }
 
@@ -503,6 +583,10 @@ pre,
   .header-signals {
     justify-content: flex-start;
   }
+
+  .cockpit-columns-workbench {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 640px) {
@@ -512,14 +596,25 @@ pre,
 
   .hero-grid,
   .detail-grid,
-  .mini-grid,
-  .project-grid {
+  .mini-grid {
     grid-template-columns: 1fr;
   }
 
-  .stack-row,
-  .activity-row {
+  .project-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stack-row {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .activity-header {
+    display: none;
+  }
+
+  .activity-row {
+    grid-template-columns: 1fr;
+    align-items: flex-start;
   }
 }

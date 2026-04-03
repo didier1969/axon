@@ -63,6 +63,14 @@ defmodule Axon.Watcher.Telemetry do
       ingress_enabled: Map.get(payload, "ingress_enabled", false),
       ingress_buffered_entries: Map.get(payload, "ingress_buffered_entries", 0),
       ingress_subtree_hints: Map.get(payload, "ingress_subtree_hints", 0),
+      ingress_subtree_hint_in_flight:
+        Map.get(payload, "ingress_subtree_hint_in_flight", 0),
+      ingress_subtree_hint_accepted_total:
+        Map.get(payload, "ingress_subtree_hint_accepted_total", 0),
+      ingress_subtree_hint_blocked_total:
+        Map.get(payload, "ingress_subtree_hint_blocked_total", 0),
+      ingress_subtree_hint_suppressed_total:
+        Map.get(payload, "ingress_subtree_hint_suppressed_total", 0),
       ingress_collapsed_total: Map.get(payload, "ingress_collapsed_total", 0),
       ingress_flush_count: Map.get(payload, "ingress_flush_count", 0),
       ingress_last_flush_duration_ms: Map.get(payload, "ingress_last_flush_duration_ms", 0),
@@ -70,6 +78,33 @@ defmodule Axon.Watcher.Telemetry do
     }
 
     :ets.insert(:axon_telemetry, {:runtime_snapshot, runtime_snapshot})
+  end
+
+  def mark_bridge_connected do
+    now = DateTime.utc_now()
+    :ets.insert(:axon_telemetry, {:bridge_status, :connected})
+    :ets.insert(:axon_telemetry, {:bridge_last_connected_at, now})
+  end
+
+  def mark_bridge_disconnected do
+    now = DateTime.utc_now()
+    :ets.insert(:axon_telemetry, {:bridge_status, :disconnected})
+    :ets.insert(:axon_telemetry, {:bridge_last_disconnected_at, now})
+  end
+
+  def mark_sql_snapshot_success(duration_ms) when is_integer(duration_ms) do
+    now = DateTime.utc_now()
+    :ets.insert(:axon_telemetry, {:sql_snapshot_status, :ok})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_last_success_at, now})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_last_duration_ms, duration_ms})
+  end
+
+  def mark_sql_snapshot_error(reason, duration_ms) do
+    now = DateTime.utc_now()
+    :ets.insert(:axon_telemetry, {:sql_snapshot_status, :error})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_at, now})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_reason, inspect(reason)})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_last_duration_ms, duration_ms})
   end
 
   def init_directories(files) do
@@ -106,7 +141,7 @@ defmodule Axon.Watcher.Telemetry do
 
     # Update Last Files
     last_files = get_val(:last_files)
-    new_last = [%{path: file_path, status: status, time: now} | Enum.take(last_files, 14)]
+    new_last = [recent_file_entry(file_path, status, now) | Enum.take(last_files, 14)]
     :ets.insert(:axon_telemetry, {:last_files, new_last})
 
     # Update Directory Stats
@@ -138,6 +173,14 @@ defmodule Axon.Watcher.Telemetry do
       t4_ema: get_val(:t4_ema),
       flux_reel: get_val(:flux_reel),
       total_ingested: get_val(:total_ingested),
+      bridge_status: get_val(:bridge_status),
+      bridge_last_connected_at: get_val(:bridge_last_connected_at),
+      bridge_last_disconnected_at: get_val(:bridge_last_disconnected_at),
+      sql_snapshot_status: get_val(:sql_snapshot_status),
+      sql_snapshot_last_success_at: get_val(:sql_snapshot_last_success_at),
+      sql_snapshot_last_error_at: get_val(:sql_snapshot_last_error_at),
+      sql_snapshot_last_error_reason: get_val(:sql_snapshot_last_error_reason),
+      sql_snapshot_last_duration_ms: get_val(:sql_snapshot_last_duration_ms),
       budget_bytes: Map.get(runtime, :budget_bytes, 0),
       reserved_bytes: Map.get(runtime, :reserved_bytes, 0),
       exhaustion_ratio: Map.get(runtime, :exhaustion_ratio, 0.0),
@@ -168,6 +211,14 @@ defmodule Axon.Watcher.Telemetry do
       ingress_enabled: Map.get(runtime, :ingress_enabled, false),
       ingress_buffered_entries: Map.get(runtime, :ingress_buffered_entries, 0),
       ingress_subtree_hints: Map.get(runtime, :ingress_subtree_hints, 0),
+      ingress_subtree_hint_in_flight:
+        Map.get(runtime, :ingress_subtree_hint_in_flight, 0),
+      ingress_subtree_hint_accepted_total:
+        Map.get(runtime, :ingress_subtree_hint_accepted_total, 0),
+      ingress_subtree_hint_blocked_total:
+        Map.get(runtime, :ingress_subtree_hint_blocked_total, 0),
+      ingress_subtree_hint_suppressed_total:
+        Map.get(runtime, :ingress_subtree_hint_suppressed_total, 0),
       ingress_collapsed_total: Map.get(runtime, :ingress_collapsed_total, 0),
       ingress_flush_count: Map.get(runtime, :ingress_flush_count, 0),
       ingress_last_flush_duration_ms: Map.get(runtime, :ingress_last_flush_duration_ms, 0),
@@ -184,6 +235,14 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:t4_ema, 0.0})
     :ets.insert(:axon_telemetry, {:flux_reel, 0.0})
     :ets.insert(:axon_telemetry, {:total_ingested, 0})
+    :ets.insert(:axon_telemetry, {:bridge_status, :connecting})
+    :ets.insert(:axon_telemetry, {:bridge_last_connected_at, nil})
+    :ets.insert(:axon_telemetry, {:bridge_last_disconnected_at, nil})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_status, :unknown})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_last_success_at, nil})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_at, nil})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_reason, nil})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_last_duration_ms, 0})
     :ets.insert(
       :axon_telemetry,
       {:runtime_snapshot,
@@ -217,6 +276,10 @@ defmodule Axon.Watcher.Telemetry do
          ingress_enabled: false,
          ingress_buffered_entries: 0,
          ingress_subtree_hints: 0,
+         ingress_subtree_hint_in_flight: 0,
+         ingress_subtree_hint_accepted_total: 0,
+         ingress_subtree_hint_blocked_total: 0,
+         ingress_subtree_hint_suppressed_total: 0,
          ingress_collapsed_total: 0,
          ingress_flush_count: 0,
          ingress_last_flush_duration_ms: 0,
@@ -240,6 +303,31 @@ defmodule Axon.Watcher.Telemetry do
     case parts do
       [dir | _] when dir != "." -> dir
       _ -> "root"
+    end
+  end
+
+  defp recent_file_entry(file_path, status, now) do
+    %{
+      path: file_path,
+      status: status,
+      time: now,
+      extension: extension_for(file_path),
+      size_bytes: file_size_for(file_path)
+    }
+  end
+
+  defp extension_for(file_path) do
+    case Path.extname(file_path) do
+      "" -> "(none)"
+      "." -> "(none)"
+      ext -> String.trim_leading(ext, ".")
+    end
+  end
+
+  defp file_size_for(file_path) do
+    case File.stat(file_path) do
+      {:ok, stat} -> stat.size
+      {:error, _reason} -> nil
     end
   end
 end
