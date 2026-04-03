@@ -6,7 +6,9 @@ use walkdir::WalkDir;
 
 use crate::file_ingress_guard::{GuardDecision, SharedFileIngressGuard};
 use crate::graph::GraphStore;
-use crate::ingress_buffer::{IngressCause, IngressFileEvent, IngressSource, SharedIngressBuffer};
+use crate::ingress_buffer::{
+    record_blocked_subtree_hint, IngressCause, IngressFileEvent, IngressSource, SharedIngressBuffer,
+};
 use crate::scanner::Scanner;
 use crate::watcher_probe;
 
@@ -76,6 +78,23 @@ fn stage_hot_path_delta_count(
     }
 
     if metadata.is_dir() {
+        if !scanner.should_descend_into_directory(path) {
+            watcher_probe::record(
+                "watcher.filtered",
+                Some(path),
+                "reason=ignored_directory_event",
+            );
+            return Ok(0);
+        }
+        if !scanner.should_buffer_subtree_hint(path) {
+            record_blocked_subtree_hint();
+            watcher_probe::record(
+                "watcher.filtered",
+                Some(path),
+                "reason=blocked_subtree_hint_segment",
+            );
+            return Ok(0);
+        }
         let mut staged = 0usize;
         for entry in WalkDir::new(path)
             .into_iter()
@@ -299,6 +318,23 @@ fn enqueue_hot_path_delta_count(
     }
 
     if metadata.is_dir() {
+        if !scanner.should_descend_into_directory(path) {
+            watcher_probe::record(
+                "watcher.filtered",
+                Some(path),
+                "reason=ignored_directory_event",
+            );
+            return Ok(0);
+        }
+        if !scanner.should_buffer_subtree_hint(path) {
+            record_blocked_subtree_hint();
+            watcher_probe::record(
+                "watcher.filtered",
+                Some(path),
+                "reason=blocked_subtree_hint_segment",
+            );
+            return Ok(0);
+        }
         let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         ingress
             .lock()

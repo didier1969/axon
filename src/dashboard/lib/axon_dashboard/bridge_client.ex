@@ -39,6 +39,7 @@ defmodule AxonDashboard.BridgeClient do
     case :gen_tcp.connect({:local, @socket_path}, 0, [:binary, active: true]) do
       {:ok, socket} ->
         Logger.info("[BRIDGE] Connected to Data Plane")
+        Axon.Watcher.Telemetry.mark_bridge_connected()
         {:noreply, %{state | socket: socket}}
 
       {:error, _reason} ->
@@ -78,6 +79,7 @@ defmodule AxonDashboard.BridgeClient do
 
   def handle_info({:tcp_closed, _socket}, state) do
     Logger.warning("[BRIDGE] Connection lost. Reconnecting...")
+    Axon.Watcher.Telemetry.mark_bridge_disconnected()
     send(self(), :connect)
     {:noreply, %{state | socket: nil, engine_state: :idle}}
   end

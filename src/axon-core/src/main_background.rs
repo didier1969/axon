@@ -86,6 +86,10 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub ingress_enabled: bool,
     pub ingress_buffered_entries: usize,
     pub ingress_subtree_hints: usize,
+    pub ingress_subtree_hint_in_flight: usize,
+    pub ingress_subtree_hint_accepted_total: u64,
+    pub ingress_subtree_hint_blocked_total: u64,
+    pub ingress_subtree_hint_suppressed_total: u64,
     pub ingress_collapsed_total: u64,
     pub ingress_flush_count: u64,
     pub ingress_last_flush_duration_ms: u64,
@@ -104,6 +108,12 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub db_total_bytes: u64,
     pub duckdb_memory_bytes: u64,
     pub duckdb_temporary_bytes: u64,
+    pub graph_projection_queue_queued: usize,
+    pub graph_projection_queue_inflight: usize,
+    pub graph_projection_queue_depth: usize,
+    pub file_vectorization_queue_queued: usize,
+    pub file_vectorization_queue_inflight: usize,
+    pub file_vectorization_queue_depth: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -156,10 +166,7 @@ pub(crate) fn start_memory_watchdog() {
     });
 }
 
-pub(crate) fn spawn_memory_reclaimer(
-    queue: Arc<QueueStore>,
-    ingress_buffer: SharedIngressBuffer,
-) {
+pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>, ingress_buffer: SharedIngressBuffer) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(MEMORY_RECLAIMER_POLL_INTERVAL_SECS));
 
@@ -307,6 +314,16 @@ pub(crate) fn runtime_telemetry_snapshot(
     let process_memory = process_memory_snapshot();
     let storage = duckdb_storage_snapshot(store);
     let duckdb_memory = duckdb_memory_snapshot(store);
+    let (graph_projection_queue_queued, graph_projection_queue_inflight) = store
+        .fetch_graph_projection_queue_counts()
+        .unwrap_or((0, 0));
+    let graph_projection_queue_depth =
+        graph_projection_queue_queued + graph_projection_queue_inflight;
+    let (file_vectorization_queue_queued, file_vectorization_queue_inflight) = store
+        .fetch_file_vectorization_queue_counts()
+        .unwrap_or((0, 0));
+    let file_vectorization_queue_depth =
+        file_vectorization_queue_queued + file_vectorization_queue_inflight;
 
     RuntimeTelemetrySnapshot {
         budget_bytes: budget.budget_bytes,
@@ -329,6 +346,10 @@ pub(crate) fn runtime_telemetry_snapshot(
         ingress_enabled: ingress_metrics.enabled,
         ingress_buffered_entries: ingress_metrics.buffered_entries,
         ingress_subtree_hints: ingress_metrics.subtree_hints,
+        ingress_subtree_hint_in_flight: ingress_metrics.subtree_hint_in_flight,
+        ingress_subtree_hint_accepted_total: ingress_metrics.subtree_hint_accepted_total,
+        ingress_subtree_hint_blocked_total: ingress_metrics.subtree_hint_blocked_total,
+        ingress_subtree_hint_suppressed_total: ingress_metrics.subtree_hint_suppressed_total,
         ingress_collapsed_total: ingress_metrics.collapsed_total,
         ingress_flush_count: ingress_metrics.flush_count,
         ingress_last_flush_duration_ms: ingress_metrics.last_flush_duration_ms,
@@ -348,6 +369,12 @@ pub(crate) fn runtime_telemetry_snapshot(
         db_total_bytes: storage.db_total_bytes,
         duckdb_memory_bytes: duckdb_memory.memory_usage_bytes,
         duckdb_temporary_bytes: duckdb_memory.temporary_storage_bytes,
+        graph_projection_queue_queued,
+        graph_projection_queue_inflight,
+        graph_projection_queue_depth,
+        file_vectorization_queue_queued,
+        file_vectorization_queue_inflight,
+        file_vectorization_queue_depth,
     }
 }
 
@@ -435,6 +462,10 @@ fn flush_ingress_buffer_once(
                 Some(file_ingress_guard),
                 Some(ingress_buffer),
             );
+            ingress_buffer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .complete_subtree_hint(&hint.path);
         }
     }
 
@@ -736,7 +767,7 @@ fn enqueue_claimed_files(
             record_structure_only_admission();
         }
 
-            if let Err(err) = queue.push_with_mode(&file.path, 0, &file.trace_id, 0, 0, is_hot, mode) {
+        if let Err(err) = queue.push_with_mode(&file.path, 0, &file.trace_id, 0, 0, is_hot, mode) {
             record_oversized_refusal();
             warn!(
                 "Autonomous Ingestor failed to enqueue {} (priority={}, mode={:?}): {}. Requeueing claim.",
@@ -745,8 +776,8 @@ fn enqueue_claimed_files(
                 mode,
                 err
             );
-            if let Err(requeue_err) =
-                store.requeue_claimed_file_with_reason(&file.path, "requeued_after_queue_push_failure")
+            if let Err(requeue_err) = store
+                .requeue_claimed_file_with_reason(&file.path, "requeued_after_queue_push_failure")
             {
                 error!(
                     "Autonomous Ingestor failed to requeue claimed file {} after queue pressure: {}",
@@ -1015,7 +1046,12 @@ fn current_rss_bytes() -> Option<u64> {
 fn memory_reclaimer_enabled() -> bool {
     std::env::var("AXON_ENABLE_MEMORY_RECLAIMER")
         .ok()
-        .map(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"))
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off"
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -1636,10 +1672,7 @@ mod tests {
         unsafe {
             std::env::set_var("AXON_MEMORY_RECLAIMER_MIN_ANON_MB", "2048");
         }
-        assert_eq!(
-            memory_reclaimer_min_anon_bytes(),
-            2_048 * 1024 * 1024
-        );
+        assert_eq!(memory_reclaimer_min_anon_bytes(), 2_048 * 1024 * 1024);
         unsafe {
             std::env::remove_var("AXON_MEMORY_RECLAIMER_MIN_ANON_MB");
         }

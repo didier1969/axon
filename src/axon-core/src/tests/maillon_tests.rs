@@ -45,6 +45,12 @@ mod tests {
             count, 1,
             "Le scanner doit insérer les fichiers en status 'pending'"
         );
+
+        let lifecycle = store
+            .query_json("SELECT file_stage, graph_ready, vector_ready FROM File WHERE path = '/tmp/test.rs'")
+            .unwrap();
+        assert!(lifecycle.contains("promoted"), "{lifecycle}");
+        assert!(lifecycle.contains("false"), "{lifecycle}");
     }
 
     #[test]
@@ -151,10 +157,13 @@ mod tests {
         );
 
         let row = store
-            .query_json("SELECT status, status_reason FROM File WHERE path = '/tmp/a.rs'")
+            .query_json(
+                "SELECT status, status_reason, file_stage FROM File WHERE path = '/tmp/a.rs'",
+            )
             .unwrap();
         assert!(row.contains("indexing"), "{row}");
         assert!(row.contains("claimed_for_indexing"), "{row}");
+        assert!(row.contains("claimed"), "{row}");
     }
 
     #[test]
@@ -351,6 +360,42 @@ mod tests {
         assert!(batch.tombstones.is_empty());
         assert_eq!(batch.subtree_hints.len(), 1);
         assert_eq!(batch.subtree_hints[0].path, "/tmp/project/tmp");
+    }
+
+    #[test]
+    fn test_ingress_buffer_subtree_hint_enters_in_flight_until_completed() {
+        let mut buffer = IngressBuffer::default();
+
+        buffer.record_subtree_hint("/tmp/project/runtime", 900, IngressSource::Watcher);
+
+        let first = buffer.drain_batch(100);
+        assert_eq!(first.subtree_hints.len(), 1);
+        assert_eq!(buffer.metrics_snapshot().subtree_hint_in_flight, 1);
+
+        let second = buffer.drain_batch(100);
+        assert!(second.subtree_hints.is_empty());
+
+        buffer.complete_subtree_hint("/tmp/project/runtime");
+        assert_eq!(buffer.metrics_snapshot().subtree_hint_in_flight, 0);
+    }
+
+    #[test]
+    fn test_ingress_buffer_subtree_hint_cooldown_blocks_immediate_requeue() {
+        let mut buffer = IngressBuffer::default();
+
+        buffer.record_subtree_hint("/tmp/project/cooling", 900, IngressSource::Watcher);
+        let first = buffer.drain_batch(100);
+        assert_eq!(first.subtree_hints.len(), 1);
+
+        buffer.complete_subtree_hint("/tmp/project/cooling");
+        buffer.record_subtree_hint("/tmp/project/cooling", 900, IngressSource::Watcher);
+
+        let second = buffer.drain_batch(100);
+        assert!(second.subtree_hints.is_empty());
+        assert!(
+            buffer.metrics_snapshot().subtree_hint_blocked_total >= 1,
+            "Un hint immédiat pendant le cooldown doit être bloqué"
+        );
     }
 
     #[test]
@@ -1127,7 +1172,7 @@ mod tests {
         );
         assert_eq!(
             reopened
-                .query_count("SELECT count(*) FROM RuntimeMetadata WHERE key = 'schema_version' AND value = '2'")
+                .query_count("SELECT count(*) FROM RuntimeMetadata WHERE key = 'schema_version' AND value = '3'")
                 .unwrap(),
             1,
             "Le metadata runtime doit être réaligné après rebuild"
@@ -1290,7 +1335,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let project = root.join("proj");
-        let nested = project.join("tmp");
+        let nested = project.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         let file_path = nested.join("dir_event.ex");
         std::fs::write(&file_path, "defmodule DirEvent do\nend\n").unwrap();
@@ -1346,6 +1391,73 @@ mod tests {
         assert!(
             !staged,
             "Un repertoire bruité ne doit pas produire de subtree_hint"
+        );
+
+        let locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(locked.subtree_hint_entries(), 0);
+        assert_eq!(locked.buffered_entries(), 0);
+    }
+
+    #[test]
+    fn test_maillon_2h3_watcher_allows_project_local_worktree_directory_when_root_rule_is_anchored()
+    {
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join(".axonignore"), "/.worktrees/\n").unwrap();
+
+        let project_worktree = root.join("proj").join(".worktrees").join("feature");
+        std::fs::create_dir_all(&project_worktree).unwrap();
+        std::fs::write(
+            project_worktree.join("keep.ex"),
+            "defmodule ProjectWorktree do\nend\n",
+        )
+        .unwrap();
+
+        let ingress = shared_ingress_buffer();
+        let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
+
+        let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            root,
+            &project_worktree,
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+            &ingress,
+        )
+        .unwrap();
+
+        assert!(
+            staged,
+            "Une worktree locale au projet doit rester eligible si seule la worktree racine est ignoree"
+        );
+
+        let locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(locked.subtree_hint_entries(), 1);
+    }
+
+    #[test]
+    fn test_maillon_2h4_watcher_blocks_subtree_hint_for_build_tree_even_if_directory_exists() {
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let blocked = root.join("proj").join("_build").join("dev").join("lib");
+        std::fs::create_dir_all(&blocked).unwrap();
+
+        let ingress = shared_ingress_buffer();
+        let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
+
+        let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            root,
+            &root.join("proj").join("_build"),
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+            &ingress,
+        )
+        .unwrap();
+
+        assert!(
+            !staged,
+            "Un arbre de build ne doit pas produire de subtree_hint"
         );
 
         let locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -1475,11 +1587,13 @@ mod tests {
 
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-live-changed".to_string(),
                 path: file_path.to_string_lossy().to_string(),
                 content: Some("defmodule LiveChanged do\nend\n".to_string()),
                 extraction,
                 processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
                 t0: 0,
                 t1: 0,
                 t2: 0,
@@ -1544,11 +1658,13 @@ mod tests {
 
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-deleted-live".to_string(),
                 path: file_path.to_string_lossy().to_string(),
                 content: Some("defmodule DeletedLive do\nend\n".to_string()),
                 extraction,
                 processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
                 t0: 0,
                 t1: 0,
                 t2: 0,
@@ -1642,11 +1758,13 @@ mod tests {
 
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-rename-old".to_string(),
                 path: old_path.to_string_lossy().to_string(),
                 content: Some("defmodule RenameOld do\nend\n".to_string()),
                 extraction,
                 processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
                 t0: 0,
                 t1: 0,
                 t2: 0,
@@ -1753,7 +1871,7 @@ mod tests {
         let reopened = GraphStore::new(&db_root_str).unwrap();
         let replay_row = reopened
             .query_json(&format!(
-                "SELECT status, worker_id FROM File WHERE path = '{}'",
+                "SELECT status, worker_id, file_stage FROM File WHERE path = '{}'",
                 file_path.to_string_lossy().replace('\'', "''")
             ))
             .unwrap();
@@ -1765,6 +1883,7 @@ mod tests {
             replay_row.contains("null"),
             "Le worker orphelin doit être libéré au redémarrage"
         );
+        assert!(replay_row.contains("promoted"), "{replay_row}");
 
         let replay_batch = reopened.fetch_pending_batch(10).unwrap();
         assert_eq!(
@@ -1834,11 +1953,13 @@ mod tests {
 
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-degraded-file".to_string(),
                 path: path.clone(),
                 content: None,
                 extraction,
                 processing_mode: ProcessingMode::StructureOnly,
                 trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
                 t0: 0,
                 t1: 0,
                 t2: 0,
@@ -1848,7 +1969,7 @@ mod tests {
 
         let row = store
             .query_json(
-                "SELECT status, last_error_reason FROM File WHERE path = '/tmp/degraded_file.rs'",
+                "SELECT status, last_error_reason, file_stage, graph_ready, vector_ready FROM File WHERE path = '/tmp/degraded_file.rs'",
             )
             .unwrap();
         assert!(
@@ -1857,6 +1978,8 @@ mod tests {
             row
         );
         assert!(row.contains("degraded_structure_only"));
+        assert!(row.contains("graph_indexed"), "{row}");
+        assert!(row.contains("true"), "{row}");
 
         let symbol_count = store
             .query_count("SELECT count(*) FROM Symbol WHERE project_slug = 'proj'")
@@ -1902,11 +2025,13 @@ mod tests {
 
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-full-success".to_string(),
                 path: path.clone(),
                 content: Some("fn full_success() {}".to_string()),
                 extraction,
                 processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
                 t0: 0,
                 t1: 0,
                 t2: 0,
@@ -1916,11 +2041,129 @@ mod tests {
 
         let row = store
             .query_json(
-                "SELECT status, status_reason FROM File WHERE path = '/tmp/full_success.rs'",
+                "SELECT status, status_reason, file_stage, graph_ready, vector_ready FROM File WHERE path = '/tmp/full_success.rs'",
             )
             .unwrap();
         assert!(row.contains("indexed"), "{row}");
         assert!(row.contains("indexed_success_full"), "{row}");
+        assert!(row.contains("graph_indexed"), "{row}");
+        assert!(row.contains("true"), "{row}");
+    }
+
+    #[test]
+    fn test_maillon_2r2_skipped_commit_marks_terminal_file_stage_without_graph_ready() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/skipped_file.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 32, 1)])
+            .unwrap();
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileSkipped {
+                reservation_id: "res-skipped-file".to_string(),
+                path: path.clone(),
+                reason: "unsupported".to_string(),
+                trace_id: "trace".to_string(),
+                observed_cost_bytes: None,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+            }])
+            .unwrap();
+
+        let row = store
+            .query_json(
+                "SELECT status, file_stage, graph_ready, vector_ready FROM File WHERE path = '/tmp/skipped_file.rs'",
+            )
+            .unwrap();
+        assert!(row.contains("skipped"), "{row}");
+        assert!(row.contains("false"), "{row}");
+    }
+
+    #[test]
+    fn test_maillon_2r3_bootstrap_adds_lifecycle_columns() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let columns = store
+            .query_json("SELECT name FROM pragma_table_info('File')")
+            .unwrap();
+
+        assert!(columns.contains("file_stage"), "{columns}");
+        assert!(columns.contains("graph_ready"), "{columns}");
+        assert!(columns.contains("vector_ready"), "{columns}");
+    }
+
+    #[test]
+    fn test_maillon_2r4_vector_ready_flips_true_after_chunk_embeddings_land() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/vector_ready.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .unwrap();
+
+        let extraction = parser::ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "vector_ready".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-vector-ready".to_string(),
+                path: path.clone(),
+                content: Some("fn vector_ready() {}".to_string()),
+                extraction,
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        let before = store
+            .query_json(
+                "SELECT graph_ready, vector_ready FROM File WHERE path = '/tmp/vector_ready.rs'",
+            )
+            .unwrap();
+        assert!(before.contains("true"), "{before}");
+        assert!(before.contains("false"), "{before}");
+
+        let chunk_rows = store
+            .query_json("SELECT id, content_hash FROM Chunk WHERE project_slug = 'proj'")
+            .unwrap();
+        let rows: Vec<Vec<String>> = serde_json::from_str(&chunk_rows).unwrap();
+        let chunk_id = rows[0][0].clone();
+        let content_hash = rows[0][1].clone();
+
+        store
+            .update_chunk_embeddings("test-model", &[(chunk_id, content_hash, vec![0.0; 384])])
+            .unwrap();
+
+        let after = store
+            .query_json(
+                "SELECT graph_ready, vector_ready FROM File WHERE path = '/tmp/vector_ready.rs'",
+            )
+            .unwrap();
+        let after_rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&after).unwrap();
+        assert_eq!(after_rows.len(), 1);
+        assert_eq!(after_rows[0].len(), 2);
+        assert_eq!(after_rows[0][0].as_str(), Some("true"));
+        assert_eq!(after_rows[0][1].as_str(), Some("true"));
     }
 
     #[test]
@@ -1985,7 +2228,9 @@ mod tests {
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
             .unwrap();
-        let claimed = store.claim_pending_paths(std::slice::from_ref(&path)).unwrap();
+        let claimed = store
+            .claim_pending_paths(std::slice::from_ref(&path))
+            .unwrap();
         assert_eq!(claimed.len(), 1);
 
         store
@@ -2015,9 +2260,11 @@ mod tests {
 
         store
             .insert_file_data_batch(&[DbWriteTask::FileSkipped {
+                reservation_id: "res-tombstoned-late".to_string(),
                 path: path.clone(),
                 reason: "Read Error: vanished".to_string(),
                 trace_id: "trace-late".to_string(),
+                observed_cost_bytes: None,
                 t0: 0,
                 t1: 0,
                 t2: 0,
@@ -2089,11 +2336,13 @@ mod tests {
 
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-late-deleted".to_string(),
                 path: file_path.to_string_lossy().to_string(),
                 content: Some("defmodule LateDeleted do\nend\n".to_string()),
                 extraction,
                 processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
                 t0: 0,
                 t1: 0,
                 t2: 0,
@@ -2272,11 +2521,13 @@ mod tests {
         };
 
         let task = DbWriteTask::FileExtraction {
+            reservation_id: "res-maillon-7".to_string(),
             path: path.clone(),
             content: Some("fn test() {}".to_string()),
             extraction,
             processing_mode: ProcessingMode::Full,
             trace_id: "t".to_string(),
+            observed_cost_bytes: 0,
             t0: 0,
             t1: 0,
             t2: 0,
@@ -2328,11 +2579,13 @@ mod tests {
         };
 
         let task = DbWriteTask::FileExtraction {
+            reservation_id: "res-maillon-7b".to_string(),
             path: path.clone(),
             content: Some("fn test() {}".to_string()),
             extraction,
             processing_mode: ProcessingMode::Full,
             trace_id: "t".to_string(),
+            observed_cost_bytes: 0,
             t0: 0,
             t1: 0,
             t2: 0,
@@ -2416,33 +2669,39 @@ mod tests {
         store
             .insert_file_data_batch(&[
                 DbWriteTask::FileExtraction {
+                    reservation_id: "res-alpha-1".to_string(),
                     path: path_a.clone(),
                     content: Some("fn alpha() {\n    old_body();\n}\n".to_string()),
                     extraction: extraction_for("proj", "alpha", "old_body", None),
                     processing_mode: ProcessingMode::Full,
                     trace_id: "alpha-1".to_string(),
+                    observed_cost_bytes: 0,
                     t0: 0,
                     t1: 0,
                     t2: 0,
                     t3: 0,
                 },
                 DbWriteTask::FileExtraction {
+                    reservation_id: "res-beta-1".to_string(),
                     path: path_b.clone(),
                     content: Some("fn beta() {\n    stable_body();\n}\n".to_string()),
                     extraction: extraction_for("proj", "beta", "stable_body", None),
                     processing_mode: ProcessingMode::Full,
                     trace_id: "beta-1".to_string(),
+                    observed_cost_bytes: 0,
                     t0: 0,
                     t1: 0,
                     t2: 0,
                     t3: 0,
                 },
                 DbWriteTask::FileExtraction {
+                    reservation_id: "res-gamma-1".to_string(),
                     path: path_c.clone(),
                     content: Some("fn gamma() {\n    foreign_project();\n}\n".to_string()),
                     extraction: extraction_for("other", "gamma", "foreign_project", None),
                     processing_mode: ProcessingMode::Full,
                     trace_id: "gamma-1".to_string(),
+                    observed_cost_bytes: 0,
                     t0: 0,
                     t1: 0,
                     t2: 0,
@@ -2492,6 +2751,7 @@ mod tests {
 
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-alpha-2".to_string(),
                 path: path_a.clone(),
                 content: Some("fn alpha() {\n    new_body();\n}\n".to_string()),
                 extraction: extraction_for(
@@ -2502,6 +2762,7 @@ mod tests {
                 ),
                 processing_mode: ProcessingMode::Full,
                 trace_id: "alpha-2".to_string(),
+                observed_cost_bytes: 0,
                 t0: 0,
                 t1: 0,
                 t2: 0,
@@ -2613,22 +2874,26 @@ mod tests {
         store
             .insert_file_data_batch(&[
                 DbWriteTask::FileExtraction {
+                    reservation_id: "res-a".to_string(),
                     path: path_a.clone(),
                     content: Some("def send_cypher(query):\n    return query\n".to_string()),
                     extraction: extraction_a,
                     processing_mode: ProcessingMode::Full,
                     trace_id: "a".to_string(),
+                    observed_cost_bytes: 0,
                     t0: 0,
                     t1: 0,
                     t2: 0,
                     t3: 0,
                 },
                 DbWriteTask::FileExtraction {
+                    reservation_id: "res-b".to_string(),
                     path: path_b.clone(),
                     content: Some("def send_cypher(query):\n    return query\n".to_string()),
                     extraction: extraction_b,
                     processing_mode: ProcessingMode::Full,
                     trace_id: "b".to_string(),
+                    observed_cost_bytes: 0,
                     t0: 0,
                     t1: 0,
                     t2: 0,
@@ -2695,11 +2960,13 @@ mod tests {
 
         store
             .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-multi-clause".to_string(),
                 path: path.clone(),
                 content: Some("defmodule AxonDashboardWeb.StatusLive do\nend\n".to_string()),
                 extraction,
                 processing_mode: ProcessingMode::Full,
                 trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
                 t0: 0,
                 t1: 0,
                 t2: 0,

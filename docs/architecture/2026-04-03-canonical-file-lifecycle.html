@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Axon Canonical File Lifecycle</title>
+  <style>
+    :root {
+      --bg: #f5f0e6;
+      --ink: #1f1a14;
+      --muted: #6f6558;
+      --card: #fffaf2;
+      --line: #c8b9a3;
+      --ok: #1f6f50;
+      --warn: #9a5b00;
+      --info: #245d8a;
+      --accent: #8b2e1d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #f8f4ec 0%, var(--bg) 100%);
+      color: var(--ink);
+    }
+    main { max-width: 1200px; margin: 0 auto; }
+    h1, h2, h3 { margin: 0 0 12px; }
+    p { line-height: 1.5; }
+    .intro { margin-bottom: 28px; color: var(--muted); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 18px;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 10px 24px rgba(31, 26, 20, 0.06);
+    }
+    .flow {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .node {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 14px;
+      background: #fff;
+    }
+    .node strong { display: block; margin-bottom: 4px; }
+    .node.ok { border-color: #93c7b1; }
+    .node.info { border-color: #9dc1dc; }
+    .node.warn { border-color: #d8b377; }
+    .node.accent { border-color: #cd8f83; }
+    .arrow {
+      color: var(--muted);
+      font-weight: 700;
+      padding-left: 12px;
+    }
+    code {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.95em;
+      background: rgba(31, 26, 20, 0.06);
+      padding: 1px 5px;
+      border-radius: 6px;
+    }
+    ul { margin: 10px 0 0 18px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Axon Canonical File Lifecycle</h1>
+    <p class="intro">
+      This document defines the real canonical flow of a file inside Axon after the 2026-04-03 lifecycle refactor.
+      It separates structural truth from vector truth and separates normal file flow from subtree-driven rescans.
+    </p>
+
+    <section class="grid">
+      <article class="card">
+        <h2>1. Normal File Path</h2>
+        <div class="flow">
+          <div class="node info"><strong>Disk</strong> A source file exists under a workspace project root.</div>
+          <div class="arrow">↓</div>
+          <div class="node info"><strong>Watcher / Scanner</strong> The file is observed directly or discovered by a scan.</div>
+          <div class="arrow">↓</div>
+          <div class="node warn"><strong>Ingress Guard + Buffer</strong> Duplicates and unchanged metadata are reduced before canonical writes.</div>
+          <div class="arrow">↓</div>
+          <div class="node accent"><strong>Promoter</strong> The file becomes canonical in <code>File</code> with <code>file_stage=promoted</code>.</div>
+          <div class="arrow">↓</div>
+          <div class="node accent"><strong>Claim</strong> Scheduler claims the file with <code>file_stage=claimed</code>.</div>
+          <div class="arrow">↓</div>
+          <div class="node accent"><strong>Worker → Writer</strong> The file enters <code>writer_pending_commit</code> until structural commit lands.</div>
+          <div class="arrow">↓</div>
+          <div class="node ok"><strong>Graph Indexed</strong> Structural truth is committed with <code>graph_ready=true</code>.</div>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>2. Directory Event Path</h2>
+        <div class="flow">
+          <div class="node info"><strong>Directory Event</strong> A directory change is observed.</div>
+          <div class="arrow">↓</div>
+          <div class="node warn"><strong>Eligibility Filters</strong> Early ignore rules and blocked subtree segments decide whether the directory is even allowed to request a rescan.</div>
+          <div class="arrow">↓</div>
+          <div class="node accent"><strong>Subtree Hint</strong> A bounded control signal is stored in the ingress layer. It is not per-file truth.</div>
+          <div class="arrow">↓</div>
+          <div class="node info"><strong>Controlled Rescan</strong> The promoter triggers a subtree scan which emits new file events.</div>
+          <div class="arrow">↓</div>
+          <div class="node ok"><strong>Back To Normal File Path</strong> Only emitted file events become canonical file rows.</div>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>3. Vector Path</h2>
+        <div class="flow">
+          <div class="node ok"><strong>Graph Ready</strong> Structural truth exists and is queryable.</div>
+          <div class="arrow">↓</div>
+          <div class="node info"><strong>Chunk Embeddings</strong> Chunks derived from symbols are embedded asynchronously.</div>
+          <div class="arrow">↓</div>
+          <div class="node ok"><strong>Vector Ready</strong> <code>vector_ready=true</code> means the current chunk set for the file is embedded for the active model.</div>
+        </div>
+        <p>
+          Structural completion is canonical. Vector completion is derived and may lag without invalidating structural truth.
+        </p>
+      </article>
+
+      <article class="card">
+        <h2>4. Canonical Per-File Indicators</h2>
+        <ul>
+          <li><code>status</code> remains compatibility-facing and operational.</li>
+          <li><code>file_stage</code> is the canonical lifecycle stage.</li>
+          <li><code>graph_ready</code> states structural completion.</li>
+          <li><code>vector_ready</code> states vector completion for the current chunk set.</li>
+          <li><code>status_reason</code> remains the human-operational cause.</li>
+        </ul>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

@@ -7,6 +7,10 @@ pub type SharedIngressBuffer = Arc<Mutex<IngressBuffer>>;
 
 static INGRESS_BUFFERED_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 static INGRESS_SUBTREE_HINTS: AtomicUsize = AtomicUsize::new(0);
+static INGRESS_SUBTREE_HINT_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_SUBTREE_HINT_BLOCKED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_COLLAPSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
 static INGRESS_LAST_FLUSH_DURATION_MS: AtomicU64 = AtomicU64::new(0);
@@ -67,6 +71,16 @@ pub struct IngressSubtreeHint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct BufferedSubtreeHint {
+    hint: IngressSubtreeHint,
+    first_seen_ms: u64,
+    last_seen_ms: u64,
+    execution_count: u64,
+    cooldown_until_ms: u64,
+    in_flight: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BufferedIngress {
     File(IngressFileEvent),
     Tombstone { path: String, source: IngressSource },
@@ -91,6 +105,10 @@ pub struct IngressMetricsSnapshot {
     pub enabled: bool,
     pub buffered_entries: usize,
     pub subtree_hints: usize,
+    pub subtree_hint_in_flight: usize,
+    pub subtree_hint_accepted_total: u64,
+    pub subtree_hint_blocked_total: u64,
+    pub subtree_hint_suppressed_total: u64,
     pub hot_entries: usize,
     pub scan_entries: usize,
     pub collapsed_total: u64,
@@ -103,7 +121,7 @@ pub struct IngressMetricsSnapshot {
 pub struct IngressBuffer {
     enabled: bool,
     by_path: HashMap<String, BufferedIngress>,
-    subtree_hints: HashMap<String, IngressSubtreeHint>,
+    subtree_hints: HashMap<String, BufferedSubtreeHint>,
     collapsed_events: u64,
 }
 
@@ -165,23 +183,51 @@ impl IngressBuffer {
         priority: i64,
         source: IngressSource,
     ) {
+        let now = current_time_ms();
+        self.prune_idle_subtree_hints(now);
         let path = path.into();
         match self.subtree_hints.get_mut(&path) {
             Some(existing) => {
                 self.collapsed_events += 1;
                 INGRESS_COLLAPSED_TOTAL.fetch_add(1, Ordering::Relaxed);
-                existing.priority = existing.priority.max(priority);
-                if priority >= existing.priority {
-                    existing.source = source;
+                existing.last_seen_ms = now;
+                if existing.cooldown_until_ms > 0 && now >= existing.cooldown_until_ms {
+                    existing.cooldown_until_ms = 0;
+                    existing.execution_count = 0;
                 }
+                existing.hint.priority = existing.hint.priority.max(priority);
+                if priority >= existing.hint.priority {
+                    existing.hint.source = source;
+                }
+                if existing.in_flight || existing.cooldown_until_ms > now {
+                    record_blocked_subtree_hint();
+                    INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
+                    self.sync_metrics();
+                    return;
+                }
+                if existing.execution_count >= subtree_hint_retry_budget() {
+                    record_blocked_subtree_hint();
+                    INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
+                    self.sync_metrics();
+                    return;
+                }
+                INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL.fetch_add(1, Ordering::Relaxed);
             }
             None => {
+                INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL.fetch_add(1, Ordering::Relaxed);
                 self.subtree_hints.insert(
                     path.clone(),
-                    IngressSubtreeHint {
-                        path,
-                        priority,
-                        source,
+                    BufferedSubtreeHint {
+                        hint: IngressSubtreeHint {
+                            path,
+                            priority,
+                            source,
+                        },
+                        first_seen_ms: now,
+                        last_seen_ms: now,
+                        execution_count: 0,
+                        cooldown_until_ms: 0,
+                        in_flight: false,
                     },
                 );
             }
@@ -200,6 +246,11 @@ impl IngressBuffer {
     pub fn metrics_snapshot(&self) -> IngressMetricsSnapshot {
         let mut hot_entries = 0usize;
         let mut scan_entries = 0usize;
+        let subtree_hint_in_flight = self
+            .subtree_hints
+            .values()
+            .filter(|state| state.in_flight)
+            .count();
 
         for entry in self.by_path.values() {
             match entry {
@@ -218,6 +269,12 @@ impl IngressBuffer {
             enabled: self.enabled,
             buffered_entries: self.by_path.len(),
             subtree_hints: self.subtree_hints.len(),
+            subtree_hint_in_flight,
+            subtree_hint_accepted_total: INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL
+                .load(Ordering::Relaxed),
+            subtree_hint_blocked_total: INGRESS_SUBTREE_HINT_BLOCKED_TOTAL.load(Ordering::Relaxed),
+            subtree_hint_suppressed_total: INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL
+                .load(Ordering::Relaxed),
             hot_entries,
             scan_entries,
             collapsed_total: INGRESS_COLLAPSED_TOTAL.load(Ordering::Relaxed),
@@ -228,14 +285,22 @@ impl IngressBuffer {
     }
 
     pub fn drain_batch(&mut self, limit: usize) -> IngressDrainBatch {
-        let mut drained: Vec<BufferedIngress> =
-            self.by_path.drain().map(|(_, value)| value).collect();
-        drained.sort_by(|left, right| compare_buffered(left, right));
+        let now = current_time_ms();
+        self.prune_idle_subtree_hints(now);
+        let mut selected = self
+            .by_path
+            .iter()
+            .map(|(path, entry)| (path.clone(), entry.clone()))
+            .collect::<Vec<_>>();
+        selected.sort_by(|left, right| compare_buffered(&left.1, &right.1));
 
         let mut files = Vec::new();
         let mut tombstones = Vec::new();
 
-        for entry in drained.into_iter().take(limit.max(1)) {
+        for (path, _) in selected.into_iter().take(limit.max(1)) {
+            let Some(entry) = self.by_path.remove(&path) else {
+                continue;
+            };
             match entry {
                 BufferedIngress::File(file) => files.push(file),
                 BufferedIngress::Tombstone { path, .. } => tombstones.push(path),
@@ -244,20 +309,33 @@ impl IngressBuffer {
 
         let mut subtree_hints = self
             .subtree_hints
-            .drain()
-            .map(|(_, hint)| hint)
+            .iter()
+            .filter(|(_, state)| {
+                !state.in_flight
+                    && state.cooldown_until_ms <= now
+                    && state.execution_count < subtree_hint_retry_budget()
+            })
+            .map(|(path, state)| (path.clone(), state.hint.clone()))
             .collect::<Vec<_>>();
         subtree_hints.sort_by(|left, right| {
             right
+                .1
                 .priority
-                .cmp(&left.priority)
-                .then_with(|| left.path.cmp(&right.path))
+                .cmp(&left.1.priority)
+                .then_with(|| left.1.path.cmp(&right.1.path))
         });
+        subtree_hints.truncate(limit.max(1));
+        for (path, _) in &subtree_hints {
+            if let Some(state) = self.subtree_hints.get_mut(path) {
+                state.in_flight = true;
+                state.last_seen_ms = now;
+            }
+        }
 
         let batch = IngressDrainBatch {
             files,
             tombstones,
-            subtree_hints,
+            subtree_hints: subtree_hints.into_iter().map(|(_, hint)| hint).collect(),
             collapsed_events: self.collapsed_events,
         };
         self.collapsed_events = 0;
@@ -265,9 +343,37 @@ impl IngressBuffer {
         batch
     }
 
+    pub fn complete_subtree_hint(&mut self, path: &str) {
+        let now = current_time_ms();
+        if let Some(state) = self.subtree_hints.get_mut(path) {
+            state.in_flight = false;
+            state.last_seen_ms = now;
+            state.execution_count = state.execution_count.saturating_add(1);
+            state.cooldown_until_ms = now.saturating_add(subtree_hint_cooldown_ms());
+            if state.execution_count >= subtree_hint_retry_budget() {
+                INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.prune_idle_subtree_hints(now);
+        self.sync_metrics();
+    }
+
+    fn prune_idle_subtree_hints(&mut self, now: u64) {
+        self.subtree_hints.retain(|_, state| {
+            state.in_flight || state.cooldown_until_ms == 0 || now < state.cooldown_until_ms
+        });
+    }
+
     fn sync_metrics(&self) {
         INGRESS_BUFFERED_ENTRIES.store(self.by_path.len(), Ordering::Relaxed);
         INGRESS_SUBTREE_HINTS.store(self.subtree_hints.len(), Ordering::Relaxed);
+        INGRESS_SUBTREE_HINT_IN_FLIGHT.store(
+            self.subtree_hints
+                .values()
+                .filter(|state| state.in_flight)
+                .count(),
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -321,6 +427,11 @@ pub fn ingress_metrics_snapshot() -> IngressMetricsSnapshot {
         enabled: ingress_buffer_enabled(),
         buffered_entries: INGRESS_BUFFERED_ENTRIES.load(Ordering::Relaxed),
         subtree_hints: INGRESS_SUBTREE_HINTS.load(Ordering::Relaxed),
+        subtree_hint_in_flight: INGRESS_SUBTREE_HINT_IN_FLIGHT.load(Ordering::Relaxed),
+        subtree_hint_accepted_total: INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL.load(Ordering::Relaxed),
+        subtree_hint_blocked_total: INGRESS_SUBTREE_HINT_BLOCKED_TOTAL.load(Ordering::Relaxed),
+        subtree_hint_suppressed_total: INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL
+            .load(Ordering::Relaxed),
         hot_entries: 0,
         scan_entries: 0,
         collapsed_total: INGRESS_COLLAPSED_TOTAL.load(Ordering::Relaxed),
@@ -334,6 +445,31 @@ pub fn record_ingress_flush(duration_ms: u64, promoted_count: usize) {
     INGRESS_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
     INGRESS_LAST_FLUSH_DURATION_MS.store(duration_ms, Ordering::Relaxed);
     INGRESS_LAST_PROMOTED_COUNT.store(promoted_count as u64, Ordering::Relaxed);
+}
+
+pub fn record_blocked_subtree_hint() {
+    INGRESS_SUBTREE_HINT_BLOCKED_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn subtree_hint_cooldown_ms() -> u64 {
+    crate::config::CONFIG
+        .indexing
+        .subtree_hint_cooldown_ms
+        .max(1)
+}
+
+fn subtree_hint_retry_budget() -> u64 {
+    crate::config::CONFIG
+        .indexing
+        .subtree_hint_retry_budget
+        .max(1)
 }
 
 impl Default for IngressBuffer {

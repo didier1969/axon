@@ -4,6 +4,7 @@ defmodule Axon.Watcher.CockpitLive do
   use Phoenix.LiveView
 
   alias Axon.Watcher.Progress
+  alias Axon.Watcher.SqlGateway
   alias Axon.Watcher.Telemetry
 
   @tick_ms 750
@@ -24,6 +25,7 @@ defmodule Axon.Watcher.CockpitLive do
       |> assign(
         repo_slug: repo_slug,
         monitoring_active: true,
+        sql_source: SqlGateway.source_info(),
         workspace: default_workspace(),
         runtime: default_runtime(),
         recent_files: [],
@@ -69,6 +71,7 @@ defmodule Axon.Watcher.CockpitLive do
 
         <div class="header-signals">
           <.signal_chip label="Rust Runtime" value="Observed" tone={:ok} />
+          <.signal_chip label="SQL Source" value={sql_source_value(@sql_source)} tone={:neutral} />
           <.signal_chip label="MCP" value={mcp_state(@workspace)} tone={mcp_tone(@workspace)} />
           <.signal_chip
             label="Truth"
@@ -162,6 +165,30 @@ defmodule Axon.Watcher.CockpitLive do
 
             <div class="detail-grid">
               <.signal_stat label="Queue Depth" value={Integer.to_string(@runtime.queue_depth)} />
+              <.signal_stat
+                label="Graph Projection Queued"
+                value={Integer.to_string(@runtime.graph_projection_queue_queued)}
+              />
+              <.signal_stat
+                label="Graph Projection In-Flight"
+                value={Integer.to_string(@runtime.graph_projection_queue_inflight)}
+              />
+            <.signal_stat
+                label="Graph Projection Pending"
+                value={Integer.to_string(@runtime.graph_projection_queue_depth)}
+              />
+              <.signal_stat
+                label="File Vector Queued"
+                value={Integer.to_string(@runtime.file_vectorization_queue_queued)}
+              />
+              <.signal_stat
+                label="File Vector In-Flight"
+                value={Integer.to_string(@runtime.file_vectorization_queue_inflight)}
+              />
+              <.signal_stat
+                label="File Vector Pending"
+                value={Integer.to_string(@runtime.file_vectorization_queue_depth)}
+              />
               <.signal_stat label="Claim Mode" value={String.upcase(@runtime.claim_mode)} />
               <.signal_stat
                 label="Service Pressure"
@@ -426,16 +453,17 @@ defmodule Axon.Watcher.CockpitLive do
 
   defp assign_snapshot(socket, snapshot) do
     socket
-    |> assign(
-      workspace: snapshot.workspace,
-      runtime: snapshot.runtime,
-      readiness: snapshot.readiness,
-      recent_files: snapshot.recent_files,
-      projects: snapshot.projects,
-      reasons: snapshot.reasons,
-      project_count: length(snapshot.projects),
-      reason_count: length(snapshot.reasons)
-    )
+      |> assign(
+        sql_source: snapshot.sql_source,
+        workspace: snapshot.workspace,
+        runtime: snapshot.runtime,
+        readiness: snapshot.readiness,
+        recent_files: snapshot.recent_files,
+        projects: snapshot.projects,
+        reasons: snapshot.reasons,
+        project_count: length(snapshot.projects),
+        reason_count: length(snapshot.reasons)
+      )
     |> stream(:projects, snapshot.projects, reset: true)
     |> stream(:reasons, snapshot.reasons, reset: true)
   end
@@ -460,6 +488,7 @@ defmodule Axon.Watcher.CockpitLive do
     runtime = structify_runtime(Telemetry.get_stats())
 
     %{
+      sql_source: SqlGateway.source_info(),
       workspace: workspace,
       projects: projects,
       reasons: reasons,
@@ -618,6 +647,18 @@ defmodule Axon.Watcher.CockpitLive do
       db_total_bytes: Map.get(stats, :db_total_bytes, 0) || 0,
       duckdb_memory_bytes: Map.get(stats, :duckdb_memory_bytes, 0) || 0,
       duckdb_temporary_bytes: Map.get(stats, :duckdb_temporary_bytes, 0) || 0,
+      graph_projection_queue_queued:
+        Map.get(stats, :graph_projection_queue_queued, 0) || 0,
+      graph_projection_queue_inflight:
+        Map.get(stats, :graph_projection_queue_inflight, 0) || 0,
+      graph_projection_queue_depth:
+        Map.get(stats, :graph_projection_queue_depth, 0) || 0,
+      file_vectorization_queue_queued:
+        Map.get(stats, :file_vectorization_queue_queued, 0) || 0,
+      file_vectorization_queue_inflight:
+        Map.get(stats, :file_vectorization_queue_inflight, 0) || 0,
+      file_vectorization_queue_depth:
+        Map.get(stats, :file_vectorization_queue_depth, 0) || 0,
       ingress_enabled: Map.get(stats, :ingress_enabled, false) || false,
       ingress_buffered_entries: Map.get(stats, :ingress_buffered_entries, 0) || 0,
       ingress_subtree_hints: Map.get(stats, :ingress_subtree_hints, 0) || 0,
@@ -680,6 +721,9 @@ defmodule Axon.Watcher.CockpitLive do
   defp sql_status_label(:unknown, duration_ms), do: "UNKNOWN (#{duration_ms} ms)"
   defp sql_status_label(other, duration_ms),
     do: "#{other |> to_string() |> String.upcase()} (#{duration_ms} ms)"
+
+  defp sql_source_value(%{endpoint: endpoint}) when is_binary(endpoint), do: endpoint
+  defp sql_source_value(_), do: "unknown"
 
   defp readiness_tone("ready"), do: :ok
   defp readiness_tone("partial"), do: :info

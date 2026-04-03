@@ -49,6 +49,16 @@ impl RuntimeMode {
     }
 }
 
+fn results_broadcast_capacity() -> usize {
+    const DEFAULT_CAPACITY: usize = 2_048;
+
+    std::env::var("AXON_RESULTS_BROADCAST_CAPACITY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|capacity| *capacity > 0)
+        .unwrap_or(DEFAULT_CAPACITY)
+}
+
 fn main() -> anyhow::Result<()> {
     let profile = RuntimeProfile::detect();
 
@@ -127,7 +137,12 @@ fn main() -> anyhow::Result<()> {
             main_background::start_memory_watchdog();
 
             // --- BROADCAST SYSTEM for Telemetry ---
-            let (results_tx, _) = tokio::sync::broadcast::channel::<String>(100000);
+            let results_capacity = results_broadcast_capacity();
+            info!(
+                "Bridge broadcast capacity configured to {} messages.",
+                results_capacity
+            );
+            let (results_tx, _) = tokio::sync::broadcast::channel::<String>(results_capacity);
             main_telemetry::spawn_runtime_telemetry(
                 graph_store.clone(),
                 queue_store.clone(),

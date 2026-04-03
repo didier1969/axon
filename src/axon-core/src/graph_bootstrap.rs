@@ -9,9 +9,10 @@ use tracing::{info, warn};
 
 use crate::graph::{CloseDbFunc, ExecFunc, GraphStore, InitDbFunc, LatticePool};
 
-const IST_SCHEMA_VERSION: &str = "2";
+const IST_SCHEMA_VERSION: &str = "3";
 const IST_INGESTION_VERSION: &str = "3";
 const IST_EMBEDDING_VERSION: &str = "1";
+const GRAPH_MODEL_ID: &str = "graph-bge-small-en-v1.5-384";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IstCompatibilityAction {
@@ -104,6 +105,38 @@ impl GraphStore {
             store.ensure_additive_soll_schema()?;
             store.ensure_runtime_compatibility()?;
             store.recover_interrupted_indexing()?;
+            let _ = store.clear_stale_inflight_graph_projection_work();
+            let _ = store.clear_stale_inflight_file_vectorization_work();
+            match store.backfill_graph_projection_queue_for_model(GRAPH_MODEL_ID) {
+                Ok(count) if count > 0 => {
+                    info!(
+                        "Backfilled {} graph projection queue entries for graph embeddings",
+                        count
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!(
+                        "Unable to backfill graph projection queue at startup: {:?}",
+                        err
+                    );
+                }
+            }
+            match store.backfill_file_vectorization_queue() {
+                Ok(count) if count > 0 => {
+                    info!(
+                        "Backfilled {} file vectorization queue entries for chunk embeddings",
+                        count
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!(
+                        "Unable to backfill file vectorization queue at startup: {:?}",
+                        err
+                    );
+                }
+            }
             store.execute("CHECKPOINT;")?;
 
             let reader_ptr = if is_memory {
@@ -193,7 +226,7 @@ impl GraphStore {
         self.execute(
             "CREATE TABLE IF NOT EXISTS RuntimeMetadata (key VARCHAR PRIMARY KEY, value VARCHAR)",
         )?;
-        self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT, file_stage VARCHAR DEFAULT 'promoted', graph_ready BOOLEAN DEFAULT FALSE, vector_ready BOOLEAN DEFAULT FALSE)")?;
         self.execute("CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384])")?;
         self.execute("CREATE TABLE IF NOT EXISTS Chunk (id VARCHAR PRIMARY KEY, source_type VARCHAR, source_id VARCHAR, project_slug VARCHAR, kind VARCHAR, content VARCHAR, content_hash VARCHAR, start_line BIGINT, end_line BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS EmbeddingModel (id VARCHAR PRIMARY KEY, kind VARCHAR, model_name VARCHAR, dimension BIGINT, version VARCHAR, created_at BIGINT)")?;
@@ -201,6 +234,9 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS GraphProjection (anchor_type VARCHAR, anchor_id VARCHAR, target_type VARCHAR, target_id VARCHAR, edge_kind VARCHAR, distance BIGINT, radius BIGINT, projection_version VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS GraphProjectionState (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, source_signature VARCHAR, projection_version VARCHAR, updated_at BIGINT)")?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_projection_state_anchor_idx ON GraphProjectionState(anchor_type, anchor_id, radius)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS GraphProjectionQueue (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT)")?;
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_projection_queue_anchor_idx ON GraphProjectionQueue(anchor_type, anchor_id, radius)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS FileVectorizationQueue (file_path VARCHAR PRIMARY KEY, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding FLOAT[384], updated_at BIGINT)")?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_embedding_anchor_model_idx ON GraphEmbedding(anchor_type, anchor_id, radius, model_id)")?;
         self.execute("CREATE TABLE IF NOT EXISTS Project (name VARCHAR PRIMARY KEY)")?;
@@ -213,7 +249,7 @@ impl GraphStore {
         self.execute(
             "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR)",
         )?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Vision (id VARCHAR PRIMARY KEY DEFAULT 'VIS-AXO-001', title VARCHAR, description VARCHAR, goal VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Pillar (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Requirement (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, status VARCHAR, priority VARCHAR, metadata VARCHAR)")?;
@@ -263,10 +299,70 @@ impl GraphStore {
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS status_reason VARCHAR")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS defer_count BIGINT DEFAULT 0")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_deferred_at_ms BIGINT")?;
+        self.execute(
+            "ALTER TABLE File ADD COLUMN IF NOT EXISTS file_stage VARCHAR DEFAULT 'promoted'",
+        )?;
+        self.execute(
+            "ALTER TABLE File ADD COLUMN IF NOT EXISTS graph_ready BOOLEAN DEFAULT FALSE",
+        )?;
+        self.execute(
+            "ALTER TABLE File ADD COLUMN IF NOT EXISTS vector_ready BOOLEAN DEFAULT FALSE",
+        )?;
+
+        let columns = self.list_file_table_columns()?;
+        let has_status = columns.contains("status");
+        let has_file_stage = columns.contains("file_stage");
+        let has_graph_ready = columns.contains("graph_ready");
+        let has_vector_ready = columns.contains("vector_ready");
+
+        if has_file_stage {
+            if has_status {
+                self.execute(
+                    "UPDATE File \
+                     SET file_stage = CASE \
+                            WHEN status = 'indexing' THEN 'claimed' \
+                            WHEN status IN ('indexed', 'indexed_degraded') THEN 'graph_indexed' \
+                            WHEN status = 'skipped' THEN 'skipped' \
+                            WHEN status = 'deleted' THEN 'deleted' \
+                            ELSE 'promoted' \
+                         END \
+                         WHERE file_stage IS NULL",
+                )?;
+            } else {
+                self.execute(
+                    "UPDATE File \
+                     SET file_stage = 'promoted' \
+                     WHERE file_stage IS NULL",
+                )?;
+            }
+        }
+
+        if has_graph_ready {
+            if has_status {
+                self.execute(
+                    "UPDATE File \
+                     SET graph_ready = CASE WHEN status IN ('indexed', 'indexed_degraded') THEN TRUE ELSE COALESCE(graph_ready, FALSE) END \
+                     WHERE graph_ready IS NULL OR status IN ('indexed', 'indexed_degraded')",
+                )?;
+            } else {
+                self.execute(
+                    "UPDATE File \
+                     SET graph_ready = COALESCE(graph_ready, FALSE) \
+                     WHERE graph_ready IS NULL",
+                )?;
+            }
+        }
+
+        if has_vector_ready {
+            self.execute("UPDATE File SET vector_ready = COALESCE(vector_ready, FALSE) WHERE vector_ready IS NULL")?;
+        }
         Ok(())
     }
 
     fn ensure_additive_soll_schema(&self) -> Result<()> {
+        self.execute(
+            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_pil BIGINT DEFAULT 0",
+        )?;
         self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS goal VARCHAR")?;
         self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
 
@@ -306,11 +402,7 @@ impl GraphStore {
         let mut applied = Vec::new();
 
         if !schema_matches {
-            if self.is_known_additive_schema_repair(
-                &current,
-                ingestion_matches,
-                embedding_matches,
-            )? {
+            if self.is_known_additive_schema_repair(&current)? {
                 info!("IST schema drift detected but preserved via additive repair.");
                 applied.push(IstCompatibilityAction::AdditiveRepair);
             } else {
@@ -361,7 +453,7 @@ impl GraphStore {
                 interrupted
             );
             self.execute(
-                "UPDATE File SET status = 'pending', worker_id = NULL, status_reason = 'recovered_interrupted_indexing' WHERE status = 'indexing'",
+                "UPDATE File SET status = 'pending', worker_id = NULL, status_reason = 'recovered_interrupted_indexing', file_stage = 'promoted' WHERE status = 'indexing'",
             )?;
         }
         Ok(())
@@ -393,23 +485,13 @@ impl GraphStore {
     fn is_known_additive_schema_repair(
         &self,
         current: &std::collections::HashMap<String, String>,
-        ingestion_matches: bool,
-        embedding_matches: bool,
     ) -> Result<bool> {
-        if current.get("schema_version").map(String::as_str) != Some("1") {
+        let schema_version = current.get("schema_version").map(String::as_str);
+        if schema_version != Some("1") && schema_version != Some("2") {
             return Ok(false);
         }
 
-        if !ingestion_matches || !embedding_matches {
-            return Ok(false);
-        }
-
-        let existing = self.query_json("SELECT name FROM pragma_table_info('File')")?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&existing).unwrap_or_default();
-        let columns: std::collections::HashSet<String> = rows
-            .into_iter()
-            .filter_map(|row| row.into_iter().next())
-            .collect();
+        let columns = self.list_file_table_columns()?;
 
         let required = [
             "path",
@@ -421,9 +503,22 @@ impl GraphStore {
             "worker_id",
             "trace_id",
             "needs_reindex",
+            "file_stage",
+            "graph_ready",
+            "vector_ready",
         ];
 
         Ok(required.iter().all(|column| columns.contains(*column)))
+    }
+
+    fn list_file_table_columns(&self) -> Result<std::collections::HashSet<String>> {
+        let existing = self.query_json("SELECT name FROM pragma_table_info('File')")?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&existing).unwrap_or_default();
+        let columns: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .collect();
+        Ok(columns)
     }
 
     fn reset_ist_state(&self) -> Result<()> {
@@ -437,16 +532,22 @@ impl GraphStore {
             "DELETE FROM GraphEmbedding",
             "DELETE FROM GraphProjectionState",
             "DELETE FROM GraphProjection",
+            "DELETE FROM GraphProjectionQueue",
+            "DELETE FROM FileVectorizationQueue",
             "DELETE FROM EmbeddingModel",
             "DELETE FROM Chunk",
             "DELETE FROM Symbol",
-            "DELETE FROM File",
             "DELETE FROM Project",
         ];
 
         for query in cleanup_queries {
             self.execute(query)?;
         }
+
+        self.execute("DROP TABLE IF EXISTS File;")?;
+        self.execute(
+            "CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT, file_stage VARCHAR DEFAULT 'promoted', graph_ready BOOLEAN DEFAULT FALSE, vector_ready BOOLEAN DEFAULT FALSE)",
+        )?;
 
         info!("IST state reset complete. SOLL sanctuary preserved.");
         Ok(())
@@ -463,10 +564,12 @@ impl GraphStore {
             "DELETE FROM GraphEmbedding",
             "DELETE FROM GraphProjectionState",
             "DELETE FROM GraphProjection",
+            "DELETE FROM GraphProjectionQueue",
+            "DELETE FROM FileVectorizationQueue",
             "DELETE FROM EmbeddingModel",
             "DELETE FROM Chunk",
             "DELETE FROM Symbol",
-            "UPDATE File SET status = 'pending', worker_id = NULL, needs_reindex = FALSE, status_reason = 'soft_invalidated'",
+            "UPDATE File SET status = 'pending', worker_id = NULL, needs_reindex = FALSE, status_reason = 'soft_invalidated', file_stage = 'promoted', graph_ready = FALSE, vector_ready = FALSE",
         ];
 
         for query in cleanup_queries {
@@ -483,6 +586,8 @@ impl GraphStore {
             "DELETE FROM GraphEmbedding",
             "DELETE FROM EmbeddingModel",
             "UPDATE Symbol SET embedding = NULL",
+            "UPDATE File SET vector_ready = FALSE WHERE graph_ready = TRUE",
+            "DELETE FROM FileVectorizationQueue",
         ];
 
         for query in cleanup_queries {

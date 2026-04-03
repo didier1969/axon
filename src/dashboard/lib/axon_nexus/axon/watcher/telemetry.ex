@@ -60,6 +60,16 @@ defmodule Axon.Watcher.Telemetry do
       db_total_bytes: Map.get(payload, "db_total_bytes", 0),
       duckdb_memory_bytes: Map.get(payload, "duckdb_memory_bytes", 0),
       duckdb_temporary_bytes: Map.get(payload, "duckdb_temporary_bytes", 0),
+      graph_projection_queue_queued: Map.get(payload, "graph_projection_queue_queued", 0),
+      graph_projection_queue_inflight:
+        Map.get(payload, "graph_projection_queue_inflight", 0),
+      graph_projection_queue_depth:
+        Map.get(payload, "graph_projection_queue_depth", 0),
+      file_vectorization_queue_queued: Map.get(payload, "file_vectorization_queue_queued", 0),
+      file_vectorization_queue_inflight:
+        Map.get(payload, "file_vectorization_queue_inflight", 0),
+      file_vectorization_queue_depth:
+        Map.get(payload, "file_vectorization_queue_depth", 0),
       ingress_enabled: Map.get(payload, "ingress_enabled", false),
       ingress_buffered_entries: Map.get(payload, "ingress_buffered_entries", 0),
       ingress_subtree_hints: Map.get(payload, "ingress_subtree_hints", 0),
@@ -208,6 +218,14 @@ defmodule Axon.Watcher.Telemetry do
       db_total_bytes: Map.get(runtime, :db_total_bytes, 0),
       duckdb_memory_bytes: Map.get(runtime, :duckdb_memory_bytes, 0),
       duckdb_temporary_bytes: Map.get(runtime, :duckdb_temporary_bytes, 0),
+      graph_projection_queue_queued: Map.get(runtime, :graph_projection_queue_queued, 0),
+      graph_projection_queue_inflight:
+        Map.get(runtime, :graph_projection_queue_inflight, 0),
+      graph_projection_queue_depth: Map.get(runtime, :graph_projection_queue_depth, 0),
+      file_vectorization_queue_queued: Map.get(runtime, :file_vectorization_queue_queued, 0),
+      file_vectorization_queue_inflight:
+        Map.get(runtime, :file_vectorization_queue_inflight, 0),
+      file_vectorization_queue_depth: Map.get(runtime, :file_vectorization_queue_depth, 0),
       ingress_enabled: Map.get(runtime, :ingress_enabled, false),
       ingress_buffered_entries: Map.get(runtime, :ingress_buffered_entries, 0),
       ingress_subtree_hints: Map.get(runtime, :ingress_subtree_hints, 0),
@@ -273,6 +291,12 @@ defmodule Axon.Watcher.Telemetry do
          db_total_bytes: 0,
          duckdb_memory_bytes: 0,
          duckdb_temporary_bytes: 0,
+         graph_projection_queue_queued: 0,
+         graph_projection_queue_inflight: 0,
+         graph_projection_queue_depth: 0,
+         file_vectorization_queue_queued: 0,
+         file_vectorization_queue_inflight: 0,
+         file_vectorization_queue_depth: 0,
          ingress_enabled: false,
          ingress_buffered_entries: 0,
          ingress_subtree_hints: 0,

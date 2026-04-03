@@ -49,6 +49,11 @@ pub(crate) fn spawn_runtime_telemetry(
                 ingress_enabled: snapshot.ingress_enabled,
                 ingress_buffered_entries: snapshot.ingress_buffered_entries,
                 ingress_subtree_hints: snapshot.ingress_subtree_hints,
+                ingress_subtree_hint_in_flight: snapshot.ingress_subtree_hint_in_flight,
+                ingress_subtree_hint_accepted_total: snapshot.ingress_subtree_hint_accepted_total,
+                ingress_subtree_hint_blocked_total: snapshot.ingress_subtree_hint_blocked_total,
+                ingress_subtree_hint_suppressed_total: snapshot
+                    .ingress_subtree_hint_suppressed_total,
                 ingress_collapsed_total: snapshot.ingress_collapsed_total,
                 ingress_flush_count: snapshot.ingress_flush_count,
                 ingress_last_flush_duration_ms: snapshot.ingress_last_flush_duration_ms,
@@ -67,6 +72,12 @@ pub(crate) fn spawn_runtime_telemetry(
                 db_total_bytes: snapshot.db_total_bytes,
                 duckdb_memory_bytes: snapshot.duckdb_memory_bytes,
                 duckdb_temporary_bytes: snapshot.duckdb_temporary_bytes,
+                graph_projection_queue_queued: snapshot.graph_projection_queue_queued,
+                graph_projection_queue_inflight: snapshot.graph_projection_queue_inflight,
+                graph_projection_queue_depth: snapshot.graph_projection_queue_depth,
+                file_vectorization_queue_queued: snapshot.file_vectorization_queue_queued,
+                file_vectorization_queue_inflight: snapshot.file_vectorization_queue_inflight,
+                file_vectorization_queue_depth: snapshot.file_vectorization_queue_depth,
             };
 
             if let Ok(message) = serde_json::to_string(&event) {

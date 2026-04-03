@@ -22,6 +22,8 @@ impl RuntimeProfile {
         let ingestion_memory_budget_gb = detect_ingestion_memory_budget_gb(ram_budget_gb);
         let gpu_present = detect_gpu_presence();
         let sizing = recommend_sizing(cpu_cores, ram_total_gb, gpu_present);
+        let max_workers = configured_max_worker_cap().unwrap_or(sizing.recommended_workers);
+        let recommended_workers = sizing.recommended_workers.min(max_workers).max(1);
 
         Self {
             cpu_cores,
@@ -29,7 +31,7 @@ impl RuntimeProfile {
             ram_budget_gb,
             ingestion_memory_budget_gb,
             gpu_present,
-            recommended_workers: sizing.recommended_workers,
+            recommended_workers,
             max_blocking_threads: sizing.max_blocking_threads,
             queue_capacity: sizing.queue_capacity,
         }
@@ -53,6 +55,13 @@ fn detect_total_ram_gb() -> Option<u64> {
         .parse::<u64>()
         .ok()?;
     Some((kb / 1024 / 1024).max(1))
+}
+
+fn configured_max_worker_cap() -> Option<usize> {
+    std::env::var("MAX_AXON_WORKERS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|workers| *workers >= 1)
 }
 
 fn detect_ram_budget_gb(total_gb: u64) -> u64 {
@@ -109,7 +118,10 @@ fn recommend_sizing(cpu_cores: usize, ram_total_gb: u64, gpu_present: bool) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_ingestion_memory_budget_gb, detect_ram_budget_gb, recommend_sizing};
+    use super::{
+        configured_max_worker_cap, detect_ingestion_memory_budget_gb, detect_ram_budget_gb,
+        recommend_sizing,
+    };
 
     #[test]
     fn test_recommend_sizing_scales_down_on_low_memory() {
@@ -149,5 +161,12 @@ mod tests {
         assert_eq!(detect_ingestion_memory_budget_gb(24), 9);
         assert_eq!(detect_ingestion_memory_budget_gb(12), 5);
         assert_eq!(detect_ingestion_memory_budget_gb(6), 3);
+    }
+
+    #[test]
+    fn test_max_worker_cap_reads_positive_integer() {
+        std::env::set_var("MAX_AXON_WORKERS", "1");
+        assert_eq!(configured_max_worker_cap(), Some(1));
+        std::env::remove_var("MAX_AXON_WORKERS");
     }
 }

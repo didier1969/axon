@@ -233,10 +233,7 @@ defmodule Axon.Watcher.Progress do
       {:ok, json} ->
         Telemetry.mark_sql_snapshot_success(System.monotonic_time(:millisecond) - started_at)
 
-        case Jason.decode(json) do
-          {:ok, rows} when is_list(rows) -> rows
-          _ -> []
-        end
+        decode_rows(json)
 
       {:error, reason} ->
         duration_ms = System.monotonic_time(:millisecond) - started_at
@@ -245,6 +242,64 @@ defmodule Axon.Watcher.Progress do
         []
     end
   end
+
+  defp decode_rows(payload) when is_binary(payload) do
+    case Jason.decode(payload) do
+      {:ok, decoded} -> decode_rows(decoded)
+      {:error, reason} ->
+        Logger.warning("[cockpit] SQL gateway payload invalid JSON: #{inspect(reason)}")
+        []
+    end
+  end
+
+  defp decode_rows(%{"rows" => rows} = envelope) when is_list(rows) do
+    columns =
+      case envelope do
+        %{"columns" => cols} when is_list(cols) -> parse_columns(cols)
+        _ -> nil
+      end
+
+    rows
+    |> Enum.map(&normalize_row(&1, columns))
+    |> Enum.filter(&is_list/1)
+  end
+
+  defp decode_rows(%{"result" => rows}) when is_list(rows) do
+    decode_rows(rows)
+  end
+
+  defp decode_rows(%{"data" => rows}) when is_list(rows) do
+    decode_rows(rows)
+  end
+
+  defp decode_rows([_ | _] = rows) do
+    Enum.filter(rows, &is_list/1)
+  end
+
+  defp decode_rows(_), do: []
+
+  defp parse_columns(columns) when is_list(columns) do
+    columns
+    |> Enum.map(fn
+      col when is_binary(col) -> col
+      %{"name" => name} when is_binary(name) -> name
+      %{"name" => name} when is_atom(name) -> to_string(name)
+      _ -> nil
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp normalize_row(row, nil) when is_list(row), do: row
+
+  defp normalize_row(row, columns) when is_list(columns) and is_list(row) do
+    row
+  end
+
+  defp normalize_row(row, columns) when is_list(columns) and is_map(row) do
+    Enum.map(columns, &Map.get(row, &1))
+  end
+
+  defp normalize_row(_row, _columns), do: nil
 
   defp snapshot_query do
     """

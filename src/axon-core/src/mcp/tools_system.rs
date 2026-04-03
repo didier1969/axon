@@ -43,6 +43,39 @@ fn json_i64(value: &Value) -> Option<i64> {
     }
 }
 
+fn parse_reason_count_rows(raw: &str) -> Vec<(String, i64)> {
+    if let Ok(rows) = serde_json::from_str::<Vec<Vec<Value>>>(raw) {
+        let parsed: Vec<(String, i64)> = rows
+            .into_iter()
+            .filter_map(|row| {
+                let reason = row.first()?.as_str()?.to_string();
+                let count = json_i64(row.get(1)?)?;
+                Some((reason, count))
+            })
+            .collect();
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+
+    serde_json::from_str::<Vec<serde_json::Map<String, Value>>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| {
+            let reason = row
+                .get("status_reason")
+                .or_else(|| row.get("coalesce(status_reason, 'unknown')"))?
+                .as_str()?
+                .to_string();
+            let count = row
+                .get("count(*)")
+                .or_else(|| row.get("count_star()"))
+                .and_then(json_i64)?;
+            Some((reason, count))
+        })
+        .collect()
+}
+
 impl McpServer {
     pub(crate) fn axon_refine_lattice(&self, _args: &Value) -> Option<Value> {
         let store = &self.graph_store;
@@ -99,6 +132,26 @@ impl McpServer {
             .graph_store
             .query_count("SELECT count(*) FROM File WHERE status = 'skipped'")
             .unwrap_or(0);
+        let graph_ready_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File WHERE graph_ready = TRUE")
+            .unwrap_or(0);
+        let vector_ready_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File WHERE vector_ready = TRUE")
+            .unwrap_or(0);
+        let (graph_projection_queue_queued, graph_projection_queue_inflight) = self
+            .graph_store
+            .fetch_graph_projection_queue_counts()
+            .unwrap_or((0, 0));
+        let graph_projection_queue_depth =
+            graph_projection_queue_queued + graph_projection_queue_inflight;
+        let (file_vectorization_queue_queued, file_vectorization_queue_inflight) = self
+            .graph_store
+            .fetch_file_vectorization_queue_counts()
+            .unwrap_or((0, 0));
+        let file_vectorization_queue_depth =
+            file_vectorization_queue_queued + file_vectorization_queue_inflight;
         let completed_count = (file_count - pending_count - indexing_count).max(0);
         let completion_rate = if file_count > 0 {
             (completed_count as f64 / file_count as f64) * 100.0
@@ -119,6 +172,17 @@ impl McpServer {
         let storage = duckdb_storage_snapshot(&self.graph_store);
         let duckdb_memory = duckdb_memory_snapshot(&self.graph_store);
         let ingress = ingress_metrics_snapshot();
+        let stage_rows = self
+            .graph_store
+            .query_json(
+                "SELECT COALESCE(file_stage, 'unknown'), count(*) \
+                 FROM File \
+                 GROUP BY 1 \
+                 ORDER BY count(*) DESC, 1 ASC \
+                 LIMIT 6",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let stage_counts = parse_reason_count_rows(&stage_rows);
         let backlog_reason_rows = self
             .graph_store
             .query_json(
@@ -130,18 +194,16 @@ impl McpServer {
                  LIMIT 5",
             )
             .unwrap_or_else(|_| "[]".to_string());
-        let backlog_reasons: Vec<(String, i64)> =
-            serde_json::from_str::<Vec<Vec<Value>>>(&backlog_reason_rows)
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|row| {
-                    let reason = row.first()?.as_str()?.to_string();
-                    let count = json_i64(row.get(1)?)?;
-                    Some((reason, count))
-                })
-                .collect();
+        let backlog_reasons = parse_reason_count_rows(&backlog_reason_rows);
         let backlog_reason_section = if backlog_reasons.is_empty() {
-            "*   Causes backlog dominantes : aucune.\n".to_string()
+            if pending_count + indexing_count > 0 {
+                format!(
+                    "**Causes backlog dominantes :**\n*   `unknown` : {}\n\n",
+                    pending_count + indexing_count
+                )
+            } else {
+                "*   Causes backlog dominantes : aucune.\n".to_string()
+            }
         } else {
             let lines = backlog_reasons
                 .iter()
@@ -149,6 +211,16 @@ impl McpServer {
                 .collect::<Vec<_>>()
                 .join("\n");
             format!("**Causes backlog dominantes :**\n{}\n\n", lines)
+        };
+        let file_stage_section = if stage_counts.is_empty() {
+            "*   Stages fichiers : aucune donnée.\n\n".to_string()
+        } else {
+            let lines = stage_counts
+                .iter()
+                .map(|(stage, count)| format!("*   `{}` : {}", stage, count))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("**Stages canoniques :**\n{}\n\n", lines)
         };
 
         let report = format!(
@@ -175,7 +247,16 @@ impl McpServer {
             *   Indexed degraded : {}\n\
             *   Oversized : {}\n\
             *   Skipped : {}\n\
+            *   Graph Ready : {}\n\
+            *   Vector Ready : {}\n\
             *   Taux de complétion : {:.2} %\n\n\
+            *   Graph Projection Queue Queued : {}\n\
+            *   Graph Projection Queue Inflight : {}\n\
+            *   Graph Projection Queue Pending : {}\n\n\
+            *   File Vectorization Queue Queued : {}\n\
+            *   File Vectorization Queue Inflight : {}\n\
+            *   File Vectorization Queue Pending : {}\n\n\
+            {}\
             {}\
             **Stockage DuckDB :**\n\
             *   Fichier principal : {}\n\
@@ -188,6 +269,10 @@ impl McpServer {
             *   Activé : {}\n\
             *   Entrées bufferisées : {}\n\
             *   Indices de sous-arbre : {}\n\
+            *   Subtree hints en vol : {}\n\
+            *   Subtree hints acceptés : {}\n\
+            *   Subtree hints bloqués : {}\n\
+            *   Subtree hints supprimés : {}\n\
             *   Événements collapsés : {}\n\
             *   Flushs : {}\n\
             *   Dernier flush : {} ms\n\
@@ -207,7 +292,16 @@ impl McpServer {
             degraded_count,
             oversized_count,
             skipped_count,
+            graph_ready_count,
+            vector_ready_count,
             completion_rate,
+            graph_projection_queue_queued,
+            graph_projection_queue_inflight,
+            graph_projection_queue_depth,
+            file_vectorization_queue_queued,
+            file_vectorization_queue_inflight,
+            file_vectorization_queue_depth,
+            file_stage_section,
             backlog_reason_section,
             format_bytes_human(storage.db_file_bytes),
             format_bytes_human(storage.db_wal_bytes),
@@ -217,6 +311,10 @@ impl McpServer {
             if ingress.enabled { "oui" } else { "non" },
             ingress.buffered_entries,
             ingress.subtree_hints,
+            ingress.subtree_hint_in_flight,
+            ingress.subtree_hint_accepted_total,
+            ingress.subtree_hint_blocked_total,
+            ingress.subtree_hint_suppressed_total,
             ingress.collapsed_total,
             ingress.flush_count,
             ingress.last_flush_duration_ms,

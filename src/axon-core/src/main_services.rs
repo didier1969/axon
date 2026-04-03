@@ -35,11 +35,21 @@ pub(crate) fn start_runtime_services(
     num_workers: usize,
     options: RuntimeServiceOptions,
 ) -> Sender<axon_core::worker::DbWriteTask> {
-    let (db_tx, db_rx) = crossbeam_channel::unbounded();
+    let writer_queue_capacity = std::env::var("AXON_WRITER_QUEUE_CAPACITY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|capacity| *capacity > 0)
+        .unwrap_or_else(|| num_workers.saturating_mul(4).clamp(32, 256));
+    let (db_tx, db_rx) = crossbeam_channel::bounded(writer_queue_capacity);
 
     if options.spawn_indexing_workers {
+        info!(
+            "Runtime services: writer queue capacity set to {} tasks.",
+            writer_queue_capacity
+        );
         axon_core::worker::WorkerPool::spawn_writer_actor(
             graph_store.clone(),
+            queue_store.clone(),
             db_rx,
             results_tx.clone(),
         );

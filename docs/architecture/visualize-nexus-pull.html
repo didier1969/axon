@@ -508,6 +508,152 @@
             </div>
         </section>
 
+        <section id="file-traceability">
+            <h2>Flux Reel d'un Fichier : Disque → Graphe → Vectoriel</h2>
+            <p>Le flux reel doit etre lu en <strong>trois branches</strong> : le chemin normal d'un fichier, le chemin special des <code>directory events</code> qui deviennent des <code>subtree_hints</code>, puis la couche vectorielle qui part apres confirmation structurelle. Aujourd'hui, Axon sait bien suivre un fichier jusqu'a la confirmation structurelle dans <code>File</code>, mais il ne dispose pas encore d'un <strong>indicateur canonique unique par fichier</strong> pour toute la chaine vectorielle.</p>
+            <div class="mermaid">
+            flowchart TD
+                A[Le fichier existe sur disque] --> B{Watcher ou Scanner}
+                B -->|fichier ignore / non processable| Z[Sortie precoce<br/>watcher_probe / scan only]
+                B -->|file delta| C[FileIngressGuard<br/>path + mtime + size]
+                B -->|directory event| D{directory eligible<br/>for subtree hint}
+
+                C -->|unchanged| Z
+                C -->|new / changed| E[IngressBuffer RAM<br/>file event]
+                E --> F[IngressPromoter]
+                F --> G[UPSERT DuckDB File]
+                G --> H[File.status = pending<br/>status_reason = discovered_new / metadata_changed_*]
+                H --> I[Claim Scheduler]
+                I --> J[QueueStore + reservation_id]
+                J --> K[Worker]
+                K --> L[read_to_string + parser]
+                L --> M[Writer queue]
+                M --> N[status_reason = writer_pending_commit]
+                N --> O[Writer Actor commit]
+                O --> P[File.status = indexed / indexed_degraded / skipped / deleted]
+
+                D -->|no| Z
+                D -->|yes| Q[IngressBuffer RAM<br/>subtree hint]
+                Q --> F
+                F --> R[scan_subtree_with_guard_and_ingress]
+                R --> C
+
+                P --> S[VERITE GRAPHE CONFIRMEE]
+                S --> S1[Symbol]
+                S --> S2[Chunk]
+                S --> S3[CONTAINS / CALLS / CALLS_NIF]
+
+                S --> T[Semantic Worker]
+                T --> T1[ChunkEmbedding]
+                T --> T2[Symbol.embedding]
+                T --> T3[GraphProjection + GraphEmbedding]
+                T1 --> U[VERITE VECTORIELLE DISPONIBLE]
+                T2 --> U
+                T3 --> U
+
+                style E fill:#ecfeff,stroke:#0891b2,stroke-width:2px
+                style Q fill:#e0f2fe,stroke:#0284c7,stroke-width:2px
+                style G fill:#eff6ff,stroke:#2563eb,stroke-width:2px
+                style P fill:#dcfce7,stroke:#16a34a,stroke-width:2px
+                style U fill:#fef3c7,stroke:#d97706,stroke-width:2px
+                style Z fill:#f8fafc,stroke:#94a3b8,stroke-dasharray: 5 5
+            </div>
+
+            <table style="width:100%; border-collapse: collapse; margin-top: 18px;">
+                <tr style="background: #f1f5f9; text-align: left;">
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Etape</th>
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Indicateur individuel par fichier</th>
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Etat reel</th>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Fichier detecte sur disque</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Non durable</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Seulement via logs <code>watcher_probe</code> ou scan. Pas de ligne canonique garantie tant que le promoteur n'a pas ecrit <code>File</code>.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Dans l'IngressBuffer</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Partiel</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Il existe bien une entree RAM par path, mais elle n'est pas exposee aujourd'hui comme surface canonique interrogeable par fichier.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Backlog canonique</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Oui</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>File.status = pending</code> + <code>status_reason</code>.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Claim et execution worker</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Oui</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>File.status = indexing</code>, <code>worker_id</code>, puis <code>status_reason = writer_pending_commit</code>.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Confirmation graphe</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Oui</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>indexed</code>, <code>indexed_degraded</code>, <code>skipped</code>, <code>deleted</code>, avec les tables <code>Symbol</code>, <code>Chunk</code> et relations materialisees.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Confirmation vectorielle</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Non, pas en un seul indicateur fichier</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Il faut inferrer via <code>ChunkEmbedding</code>, <code>Symbol.embedding</code> et <code>GraphEmbedding</code>. Il manque un flag simple du type <code>file_vectorized = true</code>.</td>
+                </tr>
+            </table>
+
+            <div class="grid">
+                <div class="info-card">
+                    <h3>Ce qui est bien trace aujourd'hui</h3>
+                    <p>La chaine canonique jusqu'a la confirmation <strong>structurelle</strong> est visible par fichier dans <code>File</code> : <code>pending → indexing → indexed/indexed_degraded/skipped/deleted</code>, avec <code>status_reason</code>, <code>worker_id</code>, <code>defer_count</code> et <code>last_deferred_at_ms</code>.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Ce qui manque encore</h3>
+                    <p>Il n'existe pas encore un indicateur individuel couvrant toute la chaine : <code>buffered</code>, <code>subtree-hinted</code>, <code>writer queued</code>, <code>graph confirmed</code>, <code>vector confirmed</code>. La branche <code>subtree_hint</code> reste aussi une branche speciale de rescan, pas un etat canonique expose par fichier.</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="promotion-starvation">
+            <h2>Hypothese d'Affamement de Promotion</h2>
+            <p>Oui, le soupcon est techniquement plausible et les signes runtime actuels vont dans ce sens. Le probleme n'est pas seulement "des dossiers ignores existent". Le vrai risque est plutot : <strong>des directories events encore autorises creent des <code>subtree_hints</code> repetes, qui relancent des scans recursifs et consomment CPU + RAM avant que la promotion canonique vers <code>File</code> ne rattrape</strong>.</p>
+            <div class="mermaid">
+            flowchart LR
+                A[Directory event autorise] --> B[watcher.buffered_subtree_hint]
+                B --> C[flush_ingress_buffer_once]
+                C --> D[scan_subtree_with_guard_and_ingress]
+                D --> E[Nouveaux deltas bufferises]
+                E --> F[Encore des subtree_hints]
+                F --> C
+                C -. temps CPU / memoire .-> G[Promoteur en retard]
+                G --> H[File connu trop bas / backlog canonique en retard]
+
+                style B fill:#dbeafe,stroke:#2563eb,stroke-width:2px
+                style D fill:#fef3c7,stroke:#d97706,stroke-width:2px
+                style G fill:#fee2e2,stroke:#b91c1c,stroke-width:2px
+            </div>
+            <table style="width:100%; border-collapse: collapse; margin-top: 18px;">
+                <tr style="background: #f1f5f9; text-align: left;">
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Signal observe</th>
+                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Lecture</th>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>Buffered Entries ~ 35k</code> et <code>Subtree Hints ~ 11k</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Le buffer est rempli de travail transitoire avant d'etre converti en verite canonique.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>File = 0</code> alors que le runtime tourne fort</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Le promoteur ou son effet visible est en retard par rapport au volume de bruit amont.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Repetition de <code>Hot subtree scan complete</code> sur <code>metaclaw_audit/MetaClaw/benchmark/...</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Ce n'est pas du bruit filtre tot. C'est un sous-arbre encore autorise qui recycle la chaine.</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>Last Flush ~ 128s</code> avec WAL qui grossit</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">La promotion n'est pas au rythme du bruit genere.</td>
+                </tr>
+            </table>
+            <div class="llm-bubble">
+                "Le point critique n'est donc pas seulement le filtre de fichiers. Il faut aussi maitriser quels evenements de repertoire ont le droit de devenir des rescans recursifs."
+            </div>
+        </section>
+
         <!-- 4. ANALYSE DE LA CONCURRENCE -->
         <section id="concurrency">
             <h2>Gestion de la Concurrence (MVCC vs Guardian)</h2>

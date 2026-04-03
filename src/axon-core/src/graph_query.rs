@@ -74,7 +74,8 @@ impl GraphStore {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             unsafe {
-                let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
+                let count_fn: LibSymbol<QueryCountFunc> =
+                    self.pool.lib.get(b"duckdb_query_count\0")?;
                 return Ok(count_fn(*writer, CString::new(query)?.as_ptr()));
             }
         }
@@ -555,7 +556,9 @@ mod tests {
         assert!(read.contains("1"), "{read}");
 
         let write = store
-            .execute_raw_sql_gateway("INSERT INTO File (path, project_slug) VALUES ('/tmp/sql_gateway.ex', 'proj')")
+            .execute_raw_sql_gateway(
+                "INSERT INTO File (path, project_slug) VALUES ('/tmp/sql_gateway.ex', 'proj')",
+            )
             .unwrap();
         assert!(write.contains("\"ok\":true"), "{write}");
 

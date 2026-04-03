@@ -13,20 +13,24 @@ use crate::queue::{estimate_observed_cost_bytes, ProcessingMode, QueueStore};
 // Payload for the Writer Actor
 pub enum DbWriteTask {
     FileExtraction {
+        reservation_id: String,
         path: String,
         content: Option<String>,
         extraction: crate::parser::ExtractionResult,
         processing_mode: ProcessingMode,
         trace_id: String,
+        observed_cost_bytes: u64,
         t0: i64,
         t1: i64,
         t2: i64,
         t3: i64,
     },
     FileSkipped {
+        reservation_id: String,
         path: String,
         reason: String,
         trace_id: String,
+        observed_cost_bytes: Option<u64>,
         t0: i64,
         t1: i64,
         t2: i64,
@@ -38,6 +42,12 @@ pub enum DbWriteTask {
 
 pub struct WorkerPool {
     _workers: Vec<thread::JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskDispatchOutcome {
+    Enqueued,
+    Rejected(Option<u64>),
 }
 
 impl WorkerPool {
@@ -102,9 +112,12 @@ impl WorkerPool {
             // 2. Process first task if available
             if !local_buffer.is_empty() {
                 let task = local_buffer.remove(0);
-                let observed_cost_bytes =
-                    Self::process_one_task(id, &task, &db_sender, &result_sender);
-                let _ = queue.mark_done(&task, observed_cost_bytes);
+                match Self::process_one_task(id, &task, &_graph_store, &db_sender, &result_sender) {
+                    TaskDispatchOutcome::Enqueued => {}
+                    TaskDispatchOutcome::Rejected(observed_cost_bytes) => {
+                        let _ = queue.mark_done(&task, observed_cost_bytes);
+                    }
+                }
             } else {
                 // If really empty, wait a bit longer to save CPU
                 thread::sleep(std::time::Duration::from_millis(50));
@@ -115,9 +128,10 @@ impl WorkerPool {
     pub fn process_one_task(
         _worker_id: usize,
         task: &crate::queue::Task,
+        graph_store: &Arc<GraphStore>,
         db_sender: &Sender<DbWriteTask>,
         _result_sender: &tokio::sync::broadcast::Sender<String>,
-    ) -> Option<u64> {
+    ) -> TaskDispatchOutcome {
         let _span = tracing::info_span!("worker_task", path = %task.path).entered();
         let t2 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -148,47 +162,87 @@ impl WorkerPool {
                         ProcessingMode::StructureOnly => None,
                     };
 
-                    let _ = db_sender.send(DbWriteTask::FileExtraction {
-                        path: task.path.clone(),
-                        content: content_for_writer,
-                        extraction,
-                        processing_mode: task.mode,
-                        trace_id: task.trace_id.clone(),
-                        t0: task.t0,
-                        t1: task.t1,
-                        t2,
-                        t3,
-                    });
-                    return Some(observed_cost_bytes);
+                    if db_sender
+                        .send(DbWriteTask::FileExtraction {
+                            reservation_id: task.reservation_id.clone(),
+                            path: task.path.clone(),
+                            content: content_for_writer,
+                            extraction,
+                            processing_mode: task.mode,
+                            trace_id: task.trace_id.clone(),
+                            observed_cost_bytes,
+                            t0: task.t0,
+                            t1: task.t1,
+                            t2,
+                            t3,
+                        })
+                        .is_err()
+                    {
+                        let _ = graph_store.requeue_claimed_file_with_reason(
+                            &task.path,
+                            "requeued_after_writer_channel_failure",
+                        );
+                        return TaskDispatchOutcome::Rejected(Some(observed_cost_bytes));
+                    }
+
+                    let _ = graph_store.mark_claimed_file_writer_pending_commit(&task.path);
+                    return TaskDispatchOutcome::Enqueued;
                 } else {
                     // Fallback for non-supported but discovered files
-                    let _ = db_sender.send(DbWriteTask::FileSkipped {
-                        path: task.path.clone(),
-                        reason: "No parser found".to_string(),
-                        trace_id: task.trace_id.clone(),
-                        t0: task.t0,
-                        t1: task.t1,
-                        t2,
-                    });
-                    return Some(task.estimated_cost_bytes);
+                    if db_sender
+                        .send(DbWriteTask::FileSkipped {
+                            reservation_id: task.reservation_id.clone(),
+                            path: task.path.clone(),
+                            reason: "No parser found".to_string(),
+                            trace_id: task.trace_id.clone(),
+                            observed_cost_bytes: Some(task.estimated_cost_bytes),
+                            t0: task.t0,
+                            t1: task.t1,
+                            t2,
+                        })
+                        .is_err()
+                    {
+                        let _ = graph_store.requeue_claimed_file_with_reason(
+                            &task.path,
+                            "requeued_after_writer_channel_failure",
+                        );
+                        return TaskDispatchOutcome::Rejected(Some(task.estimated_cost_bytes));
+                    }
+
+                    let _ = graph_store.mark_claimed_file_writer_pending_commit(&task.path);
+                    return TaskDispatchOutcome::Enqueued;
                 }
             }
             Err(e) => {
-                let _ = db_sender.send(DbWriteTask::FileSkipped {
-                    path: task.path.clone(),
-                    reason: format!("Read Error: {:?}", e),
-                    trace_id: task.trace_id.clone(),
-                    t0: task.t0,
-                    t1: task.t1,
-                    t2,
-                });
-                return None;
+                if db_sender
+                    .send(DbWriteTask::FileSkipped {
+                        reservation_id: task.reservation_id.clone(),
+                        path: task.path.clone(),
+                        reason: format!("Read Error: {:?}", e),
+                        trace_id: task.trace_id.clone(),
+                        observed_cost_bytes: None,
+                        t0: task.t0,
+                        t1: task.t1,
+                        t2,
+                    })
+                    .is_err()
+                {
+                    let _ = graph_store.requeue_claimed_file_with_reason(
+                        &task.path,
+                        "requeued_after_writer_channel_failure",
+                    );
+                    return TaskDispatchOutcome::Rejected(None);
+                }
+
+                let _ = graph_store.mark_claimed_file_writer_pending_commit(&task.path);
+                return TaskDispatchOutcome::Enqueued;
             }
         }
     }
 
     pub fn spawn_writer_actor(
         graph_store: Arc<GraphStore>,
+        queue: Arc<QueueStore>,
         db_receiver: Receiver<DbWriteTask>,
         result_sender: tokio::sync::broadcast::Sender<String>,
     ) {
@@ -200,22 +254,26 @@ impl WorkerPool {
                 // 1. BLOCKING WAIT for first message
                 match db_receiver.recv() {
                     Ok(DbWriteTask::FileExtraction {
+                        reservation_id,
                         path,
                         content,
                         extraction,
                         processing_mode,
                         trace_id,
+                        observed_cost_bytes,
                         t0,
                         t1,
                         t2,
                         t3,
                     }) => {
                         batch.push(DbWriteTask::FileExtraction {
+                            reservation_id,
                             path,
                             content,
                             extraction,
                             processing_mode,
                             trace_id,
+                            observed_cost_bytes,
                             t0,
                             t1,
                             t2,
@@ -223,17 +281,21 @@ impl WorkerPool {
                         });
                     }
                     Ok(DbWriteTask::FileSkipped {
+                        reservation_id,
                         path,
                         reason,
                         trace_id,
+                        observed_cost_bytes,
                         t0,
                         t1,
                         t2,
                     }) => {
                         batch.push(DbWriteTask::FileSkipped {
+                            reservation_id,
                             path,
                             reason,
                             trace_id,
+                            observed_cost_bytes,
                             t0,
                             t1,
                             t2,
@@ -268,11 +330,12 @@ impl WorkerPool {
                                 requeue_err
                             );
                         }
+                        release_writer_batch_reservations(&queue, &batch);
                     } else {
-                        let combined_feedback = build_feedback_messages(&batch);
-                        if !combined_feedback.is_empty() {
-                            let _ = result_sender.send(combined_feedback);
+                        for feedback in build_feedback_messages(&batch) {
+                            let _ = result_sender.send(feedback);
                         }
+                        release_writer_batch_reservations(&queue, &batch);
                     }
                     batch.clear();
                 }
@@ -281,8 +344,8 @@ impl WorkerPool {
     }
 }
 
-fn build_feedback_messages(batch: &[DbWriteTask]) -> String {
-    let mut combined_feedback = String::new();
+fn build_feedback_messages(batch: &[DbWriteTask]) -> Vec<String> {
+    let mut feedback_messages = Vec::new();
     for task in batch {
         if let DbWriteTask::FileExtraction {
             path,
@@ -300,6 +363,9 @@ fn build_feedback_messages(batch: &[DbWriteTask]) -> String {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_micros() as i64;
+            let queue_wait_us = (t2 - t1).max(0);
+            let parse_us = (t3 - t2).max(0);
+            let commit_us = (t4 - t3).max(0);
             let msg = serde_json::json!({
                 "FileIndexed": {
                     "path": path,
@@ -310,11 +376,13 @@ fn build_feedback_messages(batch: &[DbWriteTask]) -> String {
                     },
                     "symbol_count": extraction.symbols.len(),
                     "relation_count": extraction.relations.len(), "trace_id": trace_id,
-                    "t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4
+                    "t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4,
+                    "queue_wait_us": queue_wait_us,
+                    "parse_us": parse_us,
+                    "commit_us": commit_us
                 }
             });
-            combined_feedback.push_str(&serde_json::to_string(&msg).unwrap());
-            combined_feedback.push('\n');
+            feedback_messages.push(format!("{}\n", serde_json::to_string(&msg).unwrap()));
         } else if let DbWriteTask::FileSkipped {
             path,
             reason,
@@ -322,23 +390,52 @@ fn build_feedback_messages(batch: &[DbWriteTask]) -> String {
             t0,
             t1,
             t2,
+            ..
         } = task
         {
             let t4 = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_micros() as i64;
+            let queue_wait_us = (t2 - t1).max(0);
+            let parse_us = 0;
+            let commit_us = (t4 - t2).max(0);
             let msg = serde_json::json!({
                 "FileIndexed": {
                     "path": path, "status": "skipped", "error_reason": reason,
-                    "trace_id": trace_id, "t0": t0, "t1": t1, "t2": t2, "t3": t2, "t4": t4
+                    "trace_id": trace_id,
+                    "t0": t0, "t1": t1, "t2": t2, "t3": t2, "t4": t4,
+                    "queue_wait_us": queue_wait_us,
+                    "parse_us": parse_us,
+                    "commit_us": commit_us
                 }
             });
-            combined_feedback.push_str(&serde_json::to_string(&msg).unwrap());
-            combined_feedback.push('\n');
+            feedback_messages.push(format!("{}\n", serde_json::to_string(&msg).unwrap()));
         }
     }
-    combined_feedback
+    feedback_messages
+}
+
+fn release_writer_batch_reservations(queue: &Arc<QueueStore>, batch: &[DbWriteTask]) {
+    for task in batch {
+        match task {
+            DbWriteTask::FileExtraction {
+                reservation_id,
+                observed_cost_bytes,
+                ..
+            } => {
+                let _ = queue.mark_done_by_reservation(reservation_id, Some(*observed_cost_bytes));
+            }
+            DbWriteTask::FileSkipped {
+                reservation_id,
+                observed_cost_bytes,
+                ..
+            } => {
+                let _ = queue.mark_done_by_reservation(reservation_id, *observed_cost_bytes);
+            }
+            DbWriteTask::ExecuteCypher { .. } => {}
+        }
+    }
 }
 
 fn claimed_paths_from_batch(batch: &[DbWriteTask]) -> Vec<String> {
@@ -358,9 +455,11 @@ fn claimed_paths_from_batch(batch: &[DbWriteTask]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DbWriteTask, WorkerPool};
+    use super::{DbWriteTask, TaskDispatchOutcome, WorkerPool};
+    use crate::graph::GraphStore;
     use crate::queue::TaskLane;
-    use crate::queue::{ProcessingMode, Task};
+    use crate::queue::{ProcessingMode, QueueStore, Task};
+    use std::sync::Arc;
 
     #[test]
     fn test_large_file_is_not_skipped_when_budget_admitted_it() {
@@ -384,11 +483,12 @@ mod tests {
             mode: ProcessingMode::Full,
         };
 
+        let graph = Arc::new(GraphStore::new(":memory:").unwrap());
         let (db_sender, db_receiver) = crossbeam_channel::unbounded();
         let (results_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 
-        let observed = WorkerPool::process_one_task(0, &task, &db_sender, &results_tx);
-        assert!(observed.is_some());
+        let outcome = WorkerPool::process_one_task(0, &task, &graph, &db_sender, &results_tx);
+        assert_eq!(outcome, TaskDispatchOutcome::Enqueued);
 
         match db_receiver.recv().unwrap() {
             DbWriteTask::FileExtraction {
@@ -434,11 +534,12 @@ mod tests {
             mode: ProcessingMode::StructureOnly,
         };
 
+        let graph = Arc::new(GraphStore::new(":memory:").unwrap());
         let (db_sender, db_receiver) = crossbeam_channel::unbounded();
         let (results_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 
-        let observed = WorkerPool::process_one_task(0, &task, &db_sender, &results_tx);
-        assert!(observed.is_some());
+        let outcome = WorkerPool::process_one_task(0, &task, &graph, &db_sender, &results_tx);
+        assert_eq!(outcome, TaskDispatchOutcome::Enqueued);
 
         match db_receiver.recv().unwrap() {
             DbWriteTask::FileExtraction {
@@ -467,28 +568,34 @@ mod tests {
     fn claimed_paths_from_batch_deduplicates_file_paths() {
         let batch = vec![
             DbWriteTask::FileSkipped {
+                reservation_id: "res-a".to_string(),
                 path: "/tmp/a.ex".to_string(),
                 reason: "No parser found".to_string(),
                 trace_id: "trace-a".to_string(),
+                observed_cost_bytes: None,
                 t0: 0,
                 t1: 0,
                 t2: 0,
             },
             DbWriteTask::FileExtraction {
+                reservation_id: "res-b".to_string(),
                 path: "/tmp/a.ex".to_string(),
                 content: Some("defmodule A do end".to_string()),
                 extraction: crate::parser::ExtractionResult::default(),
                 processing_mode: ProcessingMode::Full,
                 trace_id: "trace-a".to_string(),
+                observed_cost_bytes: 42,
                 t0: 0,
                 t1: 0,
                 t2: 0,
                 t3: 0,
             },
             DbWriteTask::FileSkipped {
+                reservation_id: "res-c".to_string(),
                 path: "/tmp/b.ex".to_string(),
                 reason: "No parser found".to_string(),
                 trace_id: "trace-b".to_string(),
+                observed_cost_bytes: None,
                 t0: 0,
                 t1: 0,
                 t2: 0,
@@ -496,6 +603,139 @@ mod tests {
         ];
 
         let claimed = super::claimed_paths_from_batch(&batch);
-        assert_eq!(claimed, vec!["/tmp/a.ex".to_string(), "/tmp/b.ex".to_string()]);
+        assert_eq!(
+            claimed,
+            vec!["/tmp/a.ex".to_string(), "/tmp/b.ex".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_feedback_messages_emits_one_line_per_task() {
+        let batch = vec![
+            DbWriteTask::FileExtraction {
+                reservation_id: "res-a".to_string(),
+                path: "/tmp/a.ex".to_string(),
+                content: Some("defmodule A do end".to_string()),
+                extraction: crate::parser::ExtractionResult::default(),
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace-a".to_string(),
+                observed_cost_bytes: 42,
+                t0: 1,
+                t1: 2,
+                t2: 3,
+                t3: 4,
+            },
+            DbWriteTask::FileSkipped {
+                reservation_id: "res-b".to_string(),
+                path: "/tmp/b.ex".to_string(),
+                reason: "No parser found".to_string(),
+                trace_id: "trace-b".to_string(),
+                observed_cost_bytes: None,
+                t0: 1,
+                t1: 2,
+                t2: 3,
+            },
+        ];
+
+        let messages = super::build_feedback_messages(&batch);
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|message| message.ends_with('\n')));
+        assert!(messages[0].contains("\"FileIndexed\""));
+        assert!(messages[0].contains("/tmp/a.ex"));
+        assert!(messages[1].contains("\"status\":\"skipped\""));
+        assert!(messages[1].contains("/tmp/b.ex"));
+    }
+
+    #[test]
+    fn process_one_task_keeps_reservation_until_writer_ack() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("writer_ack.rs");
+        std::fs::write(&path, "defmodule WriterAck do\nend\n").unwrap();
+
+        let graph = Arc::new(GraphStore::new(":memory:").unwrap());
+        graph
+            .bulk_insert_files(&[(
+                path.to_string_lossy().to_string(),
+                "proj".to_string(),
+                32,
+                1,
+            )])
+            .unwrap();
+        graph
+            .claim_pending_paths(&[path.to_string_lossy().to_string()])
+            .unwrap();
+
+        let queue = QueueStore::with_memory_budget(10, 64 * 1024 * 1024);
+        queue
+            .push(
+                path.to_string_lossy().as_ref(),
+                1,
+                "trace-writer-ack",
+                0,
+                0,
+                false,
+            )
+            .unwrap();
+        let task = queue.pop().unwrap();
+        let reserved_before = queue.memory_budget_snapshot().reserved_bytes;
+        assert!(reserved_before > 0);
+
+        let (db_sender, db_receiver) = crossbeam_channel::unbounded();
+        let (results_tx, _) = tokio::sync::broadcast::channel::<String>(16);
+
+        let outcome = WorkerPool::process_one_task(0, &task, &graph, &db_sender, &results_tx);
+        assert_eq!(outcome, TaskDispatchOutcome::Enqueued);
+        assert_eq!(
+            queue.memory_budget_snapshot().reserved_bytes,
+            reserved_before,
+            "writer backlog must still hold the reservation until commit ack"
+        );
+
+        let queued = db_receiver.recv().unwrap();
+        super::release_writer_batch_reservations(&Arc::new(queue), &[queued]);
+    }
+
+    #[test]
+    fn process_one_task_marks_file_as_writer_pending_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("writer_stage.rs");
+        std::fs::write(&path, "defmodule WriterStage do\nend\n").unwrap();
+        let path_str = path.to_string_lossy().to_string();
+
+        let graph = Arc::new(GraphStore::new(":memory:").unwrap());
+        graph
+            .bulk_insert_files(&[(path_str.clone(), "proj".to_string(), 32, 1)])
+            .unwrap();
+        graph
+            .claim_pending_paths(std::slice::from_ref(&path_str))
+            .unwrap();
+
+        let task = Task {
+            reservation_id: "res-writer-stage".to_string(),
+            path: path_str.clone(),
+            trace_id: "trace-writer-stage".to_string(),
+            lane: TaskLane::Bulk,
+            size_bytes: 32,
+            estimated_cost_bytes: 1024,
+            parser_key: "ex".to_string(),
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            mode: ProcessingMode::Full,
+        };
+
+        let (db_sender, _db_receiver) = crossbeam_channel::unbounded();
+        let (results_tx, _) = tokio::sync::broadcast::channel::<String>(16);
+        let outcome = WorkerPool::process_one_task(0, &task, &graph, &db_sender, &results_tx);
+        assert_eq!(outcome, TaskDispatchOutcome::Enqueued);
+
+        let row = graph
+            .query_json(&format!(
+                "SELECT status, status_reason FROM File WHERE path = '{}'",
+                path_str.replace('\'', "''")
+            ))
+            .unwrap();
+        assert!(row.contains("indexing"), "{row}");
+        assert!(row.contains("writer_pending_commit"), "{row}");
     }
 }

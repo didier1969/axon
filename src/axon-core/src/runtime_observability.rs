@@ -128,7 +128,9 @@ fn read_statm_rss_bytes() -> Option<u64> {
 }
 
 fn file_len(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0)
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn wal_path_for(db_path: &Path) -> PathBuf {
@@ -138,7 +140,11 @@ fn wal_path_for(db_path: &Path) -> PathBuf {
 fn parse_u64_value(value: Option<&serde_json::Value>) -> Option<u64> {
     value
         .and_then(|value| value.as_u64())
-        .or_else(|| value.and_then(|value| value.as_i64()).map(|value| value.max(0) as u64))
+        .or_else(|| {
+            value
+                .and_then(|value| value.as_i64())
+                .map(|value| value.max(0) as u64)
+        })
         .or_else(|| {
             value
                 .and_then(|value| value.as_str())

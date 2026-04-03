@@ -33,200 +33,400 @@ impl McpServer {
                     .get("project_slug")
                     .and_then(|v| v.as_str())
                     .unwrap_or("AXO");
-                let reg_col = match entity {
-                    "pillar" | "requirement" => "last_req",
-                    "concept" => "last_cpt",
-                    "decision" => "last_dec",
-                    "milestone" => "last_mil",
-                    "validation" => "last_val",
-                    "stakeholder" => "id",
-                    _ => return None,
-                };
-                let prefix = match entity {
-                    "pillar" => "PIL",
-                    "requirement" => "REQ",
-                    "concept" => "CPT",
-                    "decision" => "DEC",
-                    "milestone" => "MIL",
-                    "validation" => "VAL",
-                    _ => "OBJ",
-                };
-
-                let update_query = if entity == "stakeholder" {
-                    "SELECT 0".to_string()
-                } else {
-                    format!("INSERT INTO soll.Registry (project_slug, id, last_req, last_cpt, last_dec, last_mil, last_val) \
-                             VALUES ('{0}', 'AXON_GLOBAL', 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING; \
-                             UPDATE soll.Registry SET {1} = {1} + 1 WHERE project_slug = '{0}' RETURNING {1}",
-                             project_slug.replace("'", "''"), reg_col)
-                };
-
-                match self.graph_store.query_json(&update_query) {
-                    Ok(res) => {
-                        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-                        let formatted_id = if entity == "stakeholder" {
-                            data.get("name")?.as_str()?.to_string()
-                        } else {
-                            let next_num: u64 = rows[0][0].parse().unwrap_or(0);
+                let formatted_id = match entity {
+                    "stakeholder" => data.get("name")?.as_str()?.to_string(),
+                    "vision" => data
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("VIS-AXO-001")
+                        .to_string(),
+                    _ => match self.next_soll_numeric_id(project_slug, entity) {
+                        Ok((prefix, next_num)) => {
                             format!("{}-{}-{:03}", prefix, project_slug, next_num)
-                        };
-
-                        let insert_res = match entity {
-                            "pillar" => {
-                                let title = data.get("title")?.as_str()?;
-                                let desc = data.get("description")?.as_str()?;
-                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                                let q = "INSERT INTO soll.Pillar (id, title, description, metadata) VALUES (?, ?, ?, ?)";
-                                self.graph_store.execute_param(
-                                    q,
-                                    &json!([formatted_id, title, desc, meta.to_string()]),
-                                )
-                            }
-                            "requirement" => {
-                                let title = data.get("title")?.as_str()?;
-                                let desc = data.get("description")?.as_str()?;
-                                let prio = data
-                                    .get("priority")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("P2");
-                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                                let q = "INSERT INTO soll.Requirement (id, title, description, priority, metadata) VALUES (?, ?, ?, ?, ?)";
-                                self.graph_store.execute_param(
-                                    q,
-                                    &json!([formatted_id, title, desc, prio, meta.to_string()]),
-                                )
-                            }
-                            "concept" => {
-                                let name = data.get("name")?.as_str()?;
-                                let expl = data.get("explanation")?.as_str()?;
-                                let rat = data.get("rationale")?.as_str()?;
-                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                                let final_name = format!("{}: {}", formatted_id, name);
-                                let q = "INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES (?, ?, ?, ?)";
-                                self.graph_store.execute_param(
-                                    q,
-                                    &json!([final_name, expl, rat, meta.to_string()]),
-                                )
-                            }
-                            "decision" => {
-                                let title = data.get("title")?.as_str()?;
-                                let ctx = data.get("context")?.as_str()?;
-                                let rat = data.get("rationale")?.as_str()?;
-                                let status = data
-                                    .get("status")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("accepted");
-                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                                let q = "INSERT INTO soll.Decision (id, title, context, rationale, status, metadata) VALUES (?, ?, ?, ?, ?, ?)";
-                                self.graph_store.execute_param(
-                                    q,
-                                    &json!([
-                                        formatted_id,
-                                        title,
-                                        ctx,
-                                        rat,
-                                        status,
-                                        meta.to_string()
-                                    ]),
-                                )
-                            }
-                            "milestone" => {
-                                let title = data.get("title")?.as_str()?;
-                                let status = data
-                                    .get("status")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("planned");
-                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                                let q = "INSERT INTO soll.Milestone (id, title, status, metadata) VALUES (?, ?, ?, ?)";
-                                self.graph_store.execute_param(
-                                    q,
-                                    &json!([formatted_id, title, status, meta.to_string()]),
-                                )
-                            }
-                            "stakeholder" => {
-                                let name = data.get("name")?.as_str()?;
-                                let role = data.get("role")?.as_str()?;
-                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                                let q = "INSERT INTO soll.Stakeholder (name, role, metadata) VALUES (?, ?, ?)";
-                                self.graph_store
-                                    .execute_param(q, &json!([name, role, meta.to_string()]))
-                            }
-                            "validation" => {
-                                let method = data.get("method")?.as_str()?;
-                                let result = data.get("result")?.as_str()?;
-                                let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                                let ts = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_secs() as i64;
-                                let q = "INSERT INTO soll.Validation (id, method, result, timestamp, metadata) VALUES (?, ?, ?, ?, ?)";
-                                self.graph_store.execute_param(
-                                    q,
-                                    &json!([formatted_id, method, result, ts, meta.to_string()]),
-                                )
-                            }
-                            _ => Err(anyhow!("Unknown entity")),
-                        };
-
-                        match insert_res {
-                            Ok(_) => {
-                                let report = format!("✅ Entité SOLL créée : `{}`", formatted_id);
-                                Some(json!({ "content": [{ "type": "text", "text": report }] }))
-                            }
-                            Err(e) => Some(
-                                json!({ "content": [{ "type": "text", "text": format!("Erreur d'insertion: {}", e) }], "isError": true }),
-                            ),
                         }
+                        Err(e) => {
+                            return Some(
+                                json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }),
+                            )
+                        }
+                    },
+                };
+
+                let insert_res = match entity {
+                    "vision" => {
+                        let title = data.get("title")?.as_str()?;
+                        let description = data.get("description")?.as_str()?;
+                        let goal = data.get("goal")?.as_str()?;
+                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                        let q = "INSERT INTO soll.Vision (id, title, description, goal, metadata) VALUES (?, ?, ?, ?, ?) \
+                                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, goal = EXCLUDED.goal, metadata = EXCLUDED.metadata";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([formatted_id, title, description, goal, meta.to_string()]),
+                        )
+                    }
+                    "pillar" => {
+                        let title = data.get("title")?.as_str()?;
+                        let desc = data.get("description")?.as_str()?;
+                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                        let q = "INSERT INTO soll.Pillar (id, title, description, metadata) VALUES (?, ?, ?, ?)";
+                        self.graph_store
+                            .execute_param(q, &json!([formatted_id, title, desc, meta.to_string()]))
+                    }
+                    "requirement" => {
+                        let title = data.get("title")?.as_str()?;
+                        let desc = data.get("description")?.as_str()?;
+                        let prio = data
+                            .get("priority")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("P2");
+                        let status = data
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("current");
+                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                        let q = "INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES (?, ?, ?, ?, ?, ?)";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([formatted_id, title, desc, status, prio, meta.to_string()]),
+                        )
+                    }
+                    "concept" => {
+                        let name = data.get("name")?.as_str()?;
+                        let expl = data.get("explanation")?.as_str()?;
+                        let rat = data.get("rationale")?.as_str()?;
+                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                        let final_name = if name.starts_with(&formatted_id) {
+                            name.to_string()
+                        } else {
+                            format!("{}: {}", formatted_id, name)
+                        };
+                        let q = "INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES (?, ?, ?, ?)";
+                        self.graph_store
+                            .execute_param(q, &json!([final_name, expl, rat, meta.to_string()]))
+                    }
+                    "decision" => {
+                        let title = data.get("title")?.as_str()?;
+                        let description = data
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let ctx = data.get("context")?.as_str()?;
+                        let rat = data.get("rationale")?.as_str()?;
+                        let status = data
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("accepted");
+                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                        let q = "INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([
+                                formatted_id,
+                                title,
+                                description,
+                                ctx,
+                                rat,
+                                status,
+                                meta.to_string()
+                            ]),
+                        )
+                    }
+                    "milestone" => {
+                        let title = data.get("title")?.as_str()?;
+                        let status = data
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("planned");
+                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                        let q = "INSERT INTO soll.Milestone (id, title, status, metadata) VALUES (?, ?, ?, ?)";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([formatted_id, title, status, meta.to_string()]),
+                        )
+                    }
+                    "stakeholder" => {
+                        let name = data.get("name")?.as_str()?;
+                        let role = data.get("role")?.as_str()?;
+                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                        let q =
+                            "INSERT INTO soll.Stakeholder (name, role, metadata) VALUES (?, ?, ?)";
+                        self.graph_store
+                            .execute_param(q, &json!([name, role, meta.to_string()]))
+                    }
+                    "validation" => {
+                        let method = data.get("method")?.as_str()?;
+                        let result = data.get("result")?.as_str()?;
+                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64;
+                        let q = "INSERT INTO soll.Validation (id, method, result, timestamp, metadata) VALUES (?, ?, ?, ?, ?)";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([formatted_id, method, result, ts, meta.to_string()]),
+                        )
+                    }
+                    _ => Err(anyhow!("Unknown entity")),
+                };
+
+                match insert_res {
+                    Ok(_) => {
+                        let report = format!("✅ Entité SOLL créée : `{}`", formatted_id);
+                        Some(json!({ "content": [{ "type": "text", "text": report }] }))
                     }
                     Err(e) => Some(
-                        json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }),
+                        json!({ "content": [{ "type": "text", "text": format!("Erreur d'insertion: {}", e) }], "isError": true }),
                     ),
                 }
             }
             "update" => {
                 let id = data.get("id")?.as_str()?;
-                let update_res = match entity {
+                let update_res: anyhow::Result<()> = (|| match entity {
                     "pillar" => {
-                        let title = data.get("title")?.as_str()?;
-                        let desc = data.get("description")?.as_str()?;
-                        let q = "UPDATE soll.Pillar SET title = ?, description = ? WHERE id = ?";
-                        self.graph_store.execute_param(q, &json!([title, desc, id]))
+                        let current = self
+                            .query_named_row(
+                                &format!(
+                                    "SELECT title, description, metadata FROM soll.Pillar WHERE id = '{}'",
+                                    escape_sql(id)
+                                ),
+                                3,
+                            )?;
+                        let q =
+                            "UPDATE soll.Pillar SET title = ?, description = ?, metadata = ? WHERE id = ?";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([
+                                data.get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[0]),
+                                data.get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[1]),
+                                data.get("metadata")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| current[2].clone()),
+                                id
+                            ]),
+                        )
                     }
                     "requirement" => {
-                        let title = data.get("title")?.as_str()?;
-                        let desc = data.get("description")?.as_str()?;
+                        let current = self
+                            .query_named_row(
+                                &format!(
+                                    "SELECT title, description, priority, status, metadata FROM soll.Requirement WHERE id = '{}'",
+                                    escape_sql(id)
+                                ),
+                                5,
+                            )?;
                         let q =
-                            "UPDATE soll.Requirement SET title = ?, description = ? WHERE id = ?";
-                        self.graph_store.execute_param(q, &json!([title, desc, id]))
+                            "UPDATE soll.Requirement SET title = ?, description = ?, priority = ?, status = ?, metadata = ? WHERE id = ?";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([
+                                data.get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[0]),
+                                data.get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[1]),
+                                data.get("priority")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[2]),
+                                data.get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[3]),
+                                data.get("metadata")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| current[4].clone()),
+                                id
+                            ]),
+                        )
                     }
                     "concept" => {
-                        let expl = data.get("explanation")?.as_str()?;
-                        let rat = data.get("rationale")?.as_str()?;
-                        let q = "UPDATE soll.Concept SET explanation = ?, rationale = ? WHERE name LIKE ?";
-                        self.graph_store
-                            .execute_param(q, &json!([expl, rat, format!("{}%", id)]))
+                        let current = self
+                            .query_named_row(
+                                &format!(
+                                    "SELECT name, explanation, rationale, metadata FROM soll.Concept WHERE name LIKE '{}:%'",
+                                    escape_sql(id)
+                                ),
+                                4,
+                            )?;
+                        let concept_name = data
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|name| {
+                                if name.starts_with(id) {
+                                    name.to_string()
+                                } else {
+                                    format!("{}: {}", id, name)
+                                }
+                            })
+                            .unwrap_or_else(|| current[0].clone());
+                        let q = "UPDATE soll.Concept SET name = ?, explanation = ?, rationale = ?, metadata = ? WHERE name LIKE ?";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([
+                                concept_name,
+                                data.get("explanation")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[1]),
+                                data.get("rationale")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[2]),
+                                data.get("metadata")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| current[3].clone()),
+                                format!("{}:%", id)
+                            ]),
+                        )
                     }
                     "decision" => {
-                        let status = data.get("status")?.as_str()?;
-                        let q = "UPDATE soll.Decision SET status = ? WHERE id = ?";
-                        self.graph_store.execute_param(q, &json!([status, id]))
+                        let current = self
+                            .query_named_row(
+                                &format!(
+                                    "SELECT title, description, context, rationale, status, metadata FROM soll.Decision WHERE id = '{}'",
+                                    escape_sql(id)
+                                ),
+                                6,
+                            )?;
+                        let q = "UPDATE soll.Decision SET title = ?, description = ?, context = ?, rationale = ?, status = ?, metadata = ? WHERE id = ?";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([
+                                data.get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[0]),
+                                data.get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[1]),
+                                data.get("context")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[2]),
+                                data.get("rationale")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[3]),
+                                data.get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[4]),
+                                data.get("metadata")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| current[5].clone()),
+                                id
+                            ]),
+                        )
+                    }
+                    "milestone" => {
+                        let current = self
+                            .query_named_row(
+                                &format!(
+                                    "SELECT title, status, metadata FROM soll.Milestone WHERE id = '{}'",
+                                    escape_sql(id)
+                                ),
+                                3,
+                            )?;
+                        let q = "UPDATE soll.Milestone SET title = ?, status = ?, metadata = ? WHERE id = ?";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([
+                                data.get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[0]),
+                                data.get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[1]),
+                                data.get("metadata")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| current[2].clone()),
+                                id
+                            ]),
+                        )
                     }
                     "stakeholder" => {
-                        let role = data.get("role")?.as_str()?;
-                        let q = "UPDATE soll.Stakeholder SET role = ? WHERE name = ?";
-                        self.graph_store.execute_param(q, &json!([role, id]))
+                        let current = self.query_named_row(
+                            &format!(
+                                "SELECT role, metadata FROM soll.Stakeholder WHERE name = '{}'",
+                                escape_sql(id)
+                            ),
+                            2,
+                        )?;
+                        let q = "UPDATE soll.Stakeholder SET role = ?, metadata = ? WHERE name = ?";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([
+                                data.get("role")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[0]),
+                                data.get("metadata")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| current[1].clone()),
+                                id
+                            ]),
+                        )
                     }
                     "validation" => {
-                        let result = data.get("result")?.as_str()?;
+                        let current = self
+                            .query_named_row(
+                                &format!(
+                                    "SELECT method, result, metadata FROM soll.Validation WHERE id = '{}'",
+                                    escape_sql(id)
+                                ),
+                                3,
+                            )?;
                         let ts = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_secs() as i64;
-                        let q = "UPDATE soll.Validation SET result = ?, timestamp = ? WHERE id = ?";
-                        self.graph_store.execute_param(q, &json!([result, ts, id]))
+                        let q = "UPDATE soll.Validation SET method = ?, result = ?, timestamp = ?, metadata = ? WHERE id = ?";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([
+                                data.get("method")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[0]),
+                                data.get("result")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[1]),
+                                ts,
+                                data.get("metadata")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| current[2].clone()),
+                                id
+                            ]),
+                        )
+                    }
+                    "vision" => {
+                        let current = self
+                            .query_named_row(
+                                &format!(
+                                    "SELECT title, description, goal, metadata FROM soll.Vision WHERE id = '{}'",
+                                    escape_sql(id)
+                                ),
+                                4,
+                            )?;
+                        let q = "UPDATE soll.Vision SET title = ?, description = ?, goal = ?, metadata = ? WHERE id = ?";
+                        self.graph_store.execute_param(
+                            q,
+                            &json!([
+                                data.get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[0]),
+                                data.get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[1]),
+                                data.get("goal")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[2]),
+                                data.get("metadata")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| current[3].clone()),
+                                id
+                            ]),
+                        )
                     }
                     _ => Err(anyhow!("Unknown entity")),
-                };
+                })();
                 match update_res {
                     Ok(_) => Some(
                         json!({ "content": [{ "type": "text", "text": format!("✅ Mise à jour réussie pour `{}`", id) }] }),
@@ -570,8 +770,8 @@ impl McpServer {
         };
 
         if let Err(e) = self.graph_store.execute(
-            "INSERT INTO soll.Registry (project_slug, id, last_req, last_cpt, last_dec, last_mil, last_val)
-             VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 0, 0, 0)
+            "INSERT INTO soll.Registry (project_slug, id, last_pil, last_req, last_cpt, last_dec, last_mil, last_val)
+             VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0)
              ON CONFLICT (project_slug) DO NOTHING"
         ) {
             return Some(json!({
@@ -752,6 +952,78 @@ impl McpServer {
             .collect())
     }
 
+    fn query_named_row(&self, query: &str, expected_columns: usize) -> anyhow::Result<Vec<String>> {
+        let res = self.graph_store.query_json(query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        let row = rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("Entité SOLL introuvable"))?;
+        if row.len() < expected_columns {
+            return Err(anyhow!("Résultat SOLL incomplet pour la mise à jour"));
+        }
+        Ok(row)
+    }
+
+    fn next_soll_numeric_id(
+        &self,
+        project_slug: &str,
+        entity: &str,
+    ) -> anyhow::Result<(&'static str, u64)> {
+        let (prefix, reg_col, table, id_expr) = match entity {
+            "pillar" => ("PIL", "last_pil", "soll.Pillar", "id"),
+            "requirement" => ("REQ", "last_req", "soll.Requirement", "id"),
+            "concept" => ("CPT", "last_cpt", "soll.Concept", "name"),
+            "decision" => ("DEC", "last_dec", "soll.Decision", "id"),
+            "milestone" => ("MIL", "last_mil", "soll.Milestone", "id"),
+            "validation" => ("VAL", "last_val", "soll.Validation", "id"),
+            _ => return Err(anyhow!("Unknown entity")),
+        };
+
+        self.graph_store.execute(&format!(
+            "INSERT INTO soll.Registry (project_slug, id, last_pil, last_req, last_cpt, last_dec, last_mil, last_val) \
+             VALUES ('{}', 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING",
+            escape_sql(project_slug)
+        ))?;
+
+        let current_query = format!(
+            "SELECT COALESCE({}, 0) FROM soll.Registry WHERE project_slug = '{}'",
+            reg_col,
+            escape_sql(project_slug)
+        );
+        let current = self
+            .query_single_column(&current_query)?
+            .into_iter()
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let ids_query = format!(
+            "SELECT {} FROM {} WHERE {} LIKE '{}-{}-%'",
+            id_expr,
+            table,
+            id_expr,
+            prefix,
+            escape_sql(project_slug)
+        );
+        let observed_max = self
+            .query_single_column(&ids_query)?
+            .into_iter()
+            .filter_map(|value| parse_numeric_suffix(&value))
+            .max()
+            .unwrap_or(0);
+
+        let next = current.max(observed_max) + 1;
+        self.graph_store.execute(&format!(
+            "UPDATE soll.Registry SET {} = {} WHERE project_slug = '{}'",
+            reg_col,
+            next,
+            escape_sql(project_slug)
+        ))?;
+
+        Ok((prefix, next))
+    }
+
     fn restore_soll_relation(
         &self,
         relation_type: &str,
@@ -787,4 +1059,13 @@ impl McpServer {
         )?;
         Ok(())
     }
+}
+
+fn parse_numeric_suffix(value: &str) -> Option<u64> {
+    let head = value.split(':').next()?.trim();
+    head.rsplit('-').next()?.parse::<u64>().ok()
+}
+
+fn escape_sql(value: &str) -> String {
+    value.replace('\'', "''")
 }

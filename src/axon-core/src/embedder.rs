@@ -1,8 +1,10 @@
 use crate::graph::GraphStore;
+use crate::graph_ingestion::{FileVectorizationWork, GraphProjectionWork};
 use crate::queue::QueueStore;
 use crate::service_guard::{self, ServicePressure};
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -11,10 +13,12 @@ use tracing::{debug, error, info};
 const SYMBOL_MODEL_ID: &str = "sym-bge-small-en-v1.5-384";
 const CHUNK_MODEL_ID: &str = "chunk-bge-small-en-v1.5-384";
 const GRAPH_MODEL_ID: &str = "graph-bge-small-en-v1.5-384";
+const FILE_PROJECTION_RADIUS: i64 = 2;
 const MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 const MODEL_VERSION: &str = "1";
 const CHUNK_BATCH_SIZE: usize = 16;
 const SYMBOL_BATCH_SIZE: usize = 32;
+const FILE_VECTORIZATION_BATCH_SIZE: usize = 8;
 const GRAPH_BATCH_SIZE: usize = 6;
 const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -115,40 +119,177 @@ impl SemanticWorkerPool {
                 continue;
             }
 
-            let mut chunk_backlog_active = false;
-            match graph_store.fetch_unembedded_chunks(CHUNK_MODEL_ID, CHUNK_BATCH_SIZE) {
-                Ok(chunks) if !chunks.is_empty() => {
-                    chunk_backlog_active = true;
-                    debug!("Semantic Worker: Embedding {} chunks...", chunks.len());
-                    let texts: Vec<String> = chunks
-                        .iter()
-                        .map(|(_, content, _)| content.clone())
-                        .collect();
-                    match model.embed(texts, None) {
-                        Ok(embeddings) => {
-                            let updates: Vec<(String, String, Vec<f32>)> = chunks
-                                .into_iter()
-                                .zip(embeddings.into_iter())
-                                .map(|((id, _, hash), emb)| (id, hash, emb))
-                                .collect();
+            let mut file_vectorization_backlog_active = false;
+            match graph_store.fetch_pending_file_vectorization_work(FILE_VECTORIZATION_BATCH_SIZE) {
+                Ok(pending) if !pending.is_empty() => {
+                    file_vectorization_backlog_active = true;
+                    debug!(
+                        "Semantic Worker: Embedding {} file vectorization jobs...",
+                        pending.len()
+                    );
 
-                            if let Err(e) =
-                                graph_store.update_chunk_embeddings(CHUNK_MODEL_ID, &updates)
-                            {
-                                error!("Semantic Worker: Chunk DB Write Error: {:?}", e);
+                    let mut completed_works: Vec<FileVectorizationWork> = Vec::new();
+                    let mut failed: HashMap<String, Vec<FileVectorizationWork>> = HashMap::new();
+
+                    for work in pending {
+                        let mut this_work_done = false;
+                        let mut this_work_failed = false;
+                        let mut iteration_reason = String::new();
+
+                        loop {
+                            match graph_store.fetch_unembedded_chunks_for_file(
+                                &work.file_path,
+                                CHUNK_MODEL_ID,
+                                CHUNK_BATCH_SIZE,
+                            ) {
+                                Ok(chunks) if chunks.is_empty() => {
+                                    this_work_done = true;
+                                    break;
+                                }
+                                Ok(chunks) => {
+                                    let texts: Vec<String> = chunks
+                                        .iter()
+                                        .map(|(_, content, _)| content.clone())
+                                        .collect();
+                                    match model.embed(texts, None) {
+                                        Ok(embeddings) => {
+                                            let updates: Vec<(String, String, Vec<f32>)> = chunks
+                                                .into_iter()
+                                                .zip(embeddings.into_iter())
+                                                .map(|((id, _, hash), emb)| (id, hash, emb))
+                                                .collect();
+
+                                            if let Err(err) = graph_store
+                                                .update_chunk_embeddings(CHUNK_MODEL_ID, &updates)
+                                            {
+                                                this_work_failed = true;
+                                                iteration_reason = format!(
+                                                    "failed to persist chunk embeddings: {:?}",
+                                                    err
+                                                );
+                                                error!(
+                                                    "Semantic Worker: Chunk DB write error for file {}: {:?}",
+                                                    work.file_path, err
+                                                );
+                                                break;
+                                            }
+
+                                            match graph_store.file_has_unembedded_chunks(
+                                                &work.file_path,
+                                                CHUNK_MODEL_ID,
+                                            ) {
+                                                Ok(has_pending) if has_pending => {
+                                                    continue;
+                                                }
+                                                Ok(_) => {
+                                                    this_work_done = true;
+                                                    break;
+                                                }
+                                                Err(err) => {
+                                                    this_work_failed = true;
+                                                    iteration_reason = format!(
+                                                        "failed to check pending chunks: {:?}",
+                                                        err
+                                                    );
+                                                    error!(
+                                                        "Semantic Worker: failed to check chunk completion for {}: {:?}",
+                                                        work.file_path, err
+                                                    );
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            this_work_failed = true;
+                                            iteration_reason =
+                                                format!("chunk embedding failed: {:?}", e);
+                                            if is_fatal_embedding_error(&e) {
+                                                error!(
+                                                    "Semantic Worker: fatal chunk embedding error, disabling semantic worker: {:?}",
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                            error!(
+                                                "Semantic Worker: Chunk embedding failed for {}: {:?}",
+                                                work.file_path, e
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    this_work_failed = true;
+                                    iteration_reason = format!(
+                                        "chunk fetch failed for file {}: {:?}",
+                                        work.file_path, err
+                                    );
+                                    error!(
+                                        "Semantic Worker: failed to fetch unembedded chunks for {}: {:?}",
+                                        work.file_path, err
+                                    );
+                                    break;
+                                }
                             }
                         }
-                        Err(e) => {
-                            if is_fatal_embedding_error(&e) {
-                                error!("Semantic Worker: fatal chunk embedding error, disabling semantic worker: {:?}", e);
-                                return;
+
+                        if this_work_done {
+                            if let Err(err) =
+                                graph_store.mark_file_vectorization_done(&[work.file_path.clone()])
+                            {
+                                failed
+                                    .entry(format!(
+                                        "failed to mark vectorization completion for {}: {:?}",
+                                        work.file_path, err
+                                    ))
+                                    .or_default()
+                                    .push(work);
+                            } else {
+                                completed_works.push(work.clone());
                             }
-                            error!("Semantic Worker: Chunk embedding failed: {:?}", e);
+                        } else if this_work_failed {
+                            failed.entry(iteration_reason).or_default().push(work);
+                        }
+                    }
+
+                    if let Err(err) =
+                        graph_store.mark_file_vectorization_work_done(&completed_works)
+                    {
+                        failed
+                            .entry(format!("failed to clear file vector queue: {:?}", err))
+                            .or_default()
+                            .extend(completed_works.iter().cloned());
+                    } else {
+                        for work in &completed_works {
+                            if let Err(err) = graph_store.enqueue_graph_projection_refresh(
+                                "file",
+                                &work.file_path,
+                                FILE_PROJECTION_RADIUS,
+                            ) {
+                                failed
+                                    .entry(format!(
+                                        "failed to enqueue file projection for {}: {:?}",
+                                        work.file_path, err
+                                    ))
+                                    .or_default()
+                                    .push(work.clone());
+                            }
+                        }
+                    }
+
+                    for (reason, works) in failed {
+                        if let Err(err) =
+                            graph_store.mark_file_vectorization_work_failed(&works, &reason)
+                        {
+                            error!(
+                                "Semantic Worker: failed to persist file vector backlog failure [{}]: {:?}",
+                                reason, err
+                            );
                         }
                     }
                 }
                 Ok(_) => {}
-                Err(e) => error!("Semantic Worker: Chunk DB Fetch error: {:?}", e),
+                Err(e) => error!("Semantic Worker: File vectorization fetch error: {:?}", e),
             }
 
             let mut symbol_backlog_active = false;
@@ -179,78 +320,270 @@ impl SemanticWorkerPool {
                         }
                     }
                 }
-                Ok(_) => wait_for_query_request(&mut model, &query_rx, policy.idle_sleep),
+                Ok(_) => {}
                 Err(e) => {
                     error!("Semantic Worker: DB Fetch error: {:?}", e);
                     wait_for_query_request(&mut model, &query_rx, policy.idle_sleep);
                 }
             }
 
-            if chunk_backlog_active
+            if file_vectorization_backlog_active
                 || symbol_backlog_active
                 || service_guard::current_pressure() != ServicePressure::Healthy
             {
                 continue;
             }
 
-            match graph_store.fetch_unembedded_graph_projections(GRAPH_MODEL_ID, GRAPH_BATCH_SIZE) {
-                Ok(graphs) if !graphs.is_empty() => {
+            match graph_store.fetch_pending_graph_projection_work(GRAPH_BATCH_SIZE) {
+                Ok(pending) if !pending.is_empty() => {
                     debug!(
-                        "Semantic Worker: Embedding {} graph projections...",
-                        graphs.len()
+                        "Semantic Worker: Embedding {} graph projection jobs...",
+                        pending.len()
                     );
-                    let texts: Vec<String> = graphs
-                        .iter()
-                        .map(|(_, _, _, _, _, content)| content.clone())
-                        .collect();
-                    match model.embed(texts, None) {
-                        Ok(embeddings) => {
-                            let updates: Vec<(String, String, i64, String, String, Vec<f32>)> =
-                                graphs
-                                    .into_iter()
-                                    .zip(embeddings.into_iter())
-                                    .map(
-                                        |(
-                                            (
-                                                anchor_type,
-                                                anchor_id,
-                                                radius,
-                                                source_signature,
-                                                projection_version,
-                                                _,
-                                            ),
-                                            emb,
-                                        )| {
-                                            (
-                                                anchor_type,
-                                                anchor_id,
-                                                radius,
-                                                source_signature,
-                                                projection_version,
-                                                emb,
-                                            )
-                                        },
-                                    )
-                                    .collect();
 
-                            if let Err(e) =
-                                graph_store.update_graph_embeddings(GRAPH_MODEL_ID, &updates)
+                    let mut to_embed: Vec<(GraphProjectionWork, String, String, String)> =
+                        Vec::new();
+                    let mut failed: HashMap<String, Vec<GraphProjectionWork>> = HashMap::new();
+
+                    for work in pending {
+                        let maybe_state = match work.anchor_type.as_str() {
+                            "file" => {
+                                if let Err(err) = graph_store
+                                    .refresh_file_projection(&work.anchor_id, work.radius as u64)
+                                {
+                                    let reason =
+                                        format!("failed to refresh file projection: {:?}", err);
+                                    failed.entry(reason).or_default().push(work.clone());
+                                    None
+                                } else {
+                                    graph_store
+                                        .fetch_graph_projection_state(
+                                            "file",
+                                            &work.anchor_id,
+                                            work.radius,
+                                        )
+                                        .ok()
+                                        .and_then(|state| match state {
+                                            Some(state) => Some((work.clone(), state)),
+                                            None => {
+                                                failed
+                                                    .entry(format!(
+                                                        "missing projection state for {}",
+                                                        work.anchor_id
+                                                    ))
+                                                    .or_default()
+                                                    .push(work.clone());
+                                                None
+                                            }
+                                        })
+                                }
+                            }
+                            "symbol" => match graph_store
+                                .refresh_symbol_projection(&work.anchor_id, work.radius as u64)
                             {
-                                error!("Semantic Worker: Graph DB Write Error: {:?}", e);
+                                Ok(Some(_anchor_id)) => graph_store
+                                    .fetch_graph_projection_state(
+                                        "symbol",
+                                        &work.anchor_id,
+                                        work.radius,
+                                    )
+                                    .ok()
+                                    .and_then(|state| match state {
+                                        Some(state) => Some((work.clone(), state)),
+                                        None => {
+                                            failed
+                                                .entry(format!(
+                                                    "missing projection state for {}",
+                                                    work.anchor_id
+                                                ))
+                                                .or_default()
+                                                .push(work.clone());
+                                            None
+                                        }
+                                    }),
+                                Ok(None) => {
+                                    debug!(
+                                        "Semantic Worker: symbol projection anchor gone, dropping job {}",
+                                        work.anchor_id
+                                    );
+                                    if let Err(err) =
+                                        graph_store.mark_graph_projection_work_done(&[work.clone()])
+                                    {
+                                        let reason = format!(
+                                            "failed to drop stale symbol projection job: {:?}",
+                                            err
+                                        );
+                                        failed.entry(reason).or_default().push(work.clone());
+                                    }
+                                    None
+                                }
+                                Err(err) => {
+                                    let reason =
+                                        format!("failed to refresh symbol projection: {:?}", err);
+                                    failed.entry(reason).or_default().push(work.clone());
+                                    None
+                                }
+                            },
+                            anchor_type => {
+                                failed
+                                    .entry(format!("unsupported anchor_type {}", anchor_type))
+                                    .or_default()
+                                    .push(work.clone());
+                                None
                             }
-                        }
-                        Err(e) => {
-                            if is_fatal_embedding_error(&e) {
-                                error!("Semantic Worker: fatal graph embedding error, disabling semantic worker: {:?}", e);
-                                return;
+                        };
+
+                        if let Some((work, (source_signature, projection_version))) = maybe_state {
+                            match graph_store.has_matching_graph_projection_embedding(
+                                &work.anchor_type,
+                                &work.anchor_id,
+                                work.radius,
+                                GRAPH_MODEL_ID,
+                                &source_signature,
+                                &projection_version,
+                            ) {
+                                Ok(true) => {
+                                    if let Err(err) = graph_store.mark_graph_projection_work_done(
+                                        std::slice::from_ref(&work),
+                                    ) {
+                                        failed
+                                            .entry(format!(
+                                                "failed to clear up-to-date projection job: {:?}",
+                                                err
+                                            ))
+                                            .or_default()
+                                            .push(work.clone());
+                                    }
+                                    continue;
+                                }
+                                Ok(false) => {}
+                                Err(err) => {
+                                    failed
+                                        .entry(format!(
+                                            "failed to check projection freshness: {:?}",
+                                            err
+                                        ))
+                                        .or_default()
+                                        .push(work.clone());
+                                    continue;
+                                }
                             }
-                            error!("Semantic Worker: Graph embedding failed: {:?}", e);
+
+                            match graph_store.graph_projection_embedding_text(
+                                &work.anchor_type,
+                                &work.anchor_id,
+                                work.radius,
+                            ) {
+                                Ok(content) => to_embed.push((
+                                    work,
+                                    source_signature,
+                                    projection_version,
+                                    content,
+                                )),
+                                Err(err) => {
+                                    failed
+                                        .entry(format!(
+                                            "failed to build projection text: {:?}",
+                                            err
+                                        ))
+                                        .or_default()
+                                        .push(work);
+                                }
+                            }
                         }
                     }
+
+                    if !to_embed.is_empty() {
+                        let texts: Vec<String> = to_embed
+                            .iter()
+                            .map(|(_, _, _, content)| content.clone())
+                            .collect();
+                        match model.embed(texts, None) {
+                            Ok(embeddings) => {
+                                let updates: Vec<(String, String, i64, String, String, Vec<f32>)> =
+                                    to_embed
+                                        .iter()
+                                        .zip(embeddings.into_iter())
+                                        .map(
+                                            |(
+                                                (work, source_signature, projection_version, _),
+                                                embedding,
+                                            )| {
+                                                (
+                                                    work.anchor_type.clone(),
+                                                    work.anchor_id.clone(),
+                                                    work.radius,
+                                                    source_signature.clone(),
+                                                    projection_version.clone(),
+                                                    embedding,
+                                                )
+                                            },
+                                        )
+                                        .collect();
+                                let done_works: Vec<GraphProjectionWork> = to_embed
+                                    .iter()
+                                    .map(|(work, _, _, _)| work.clone())
+                                    .collect();
+                                if let Err(err) =
+                                    graph_store.update_graph_embeddings(GRAPH_MODEL_ID, &updates)
+                                {
+                                    let reason =
+                                        format!("graph embedding DB write failed: {:?}", err);
+                                    for work in done_works {
+                                        failed.entry(reason.clone()).or_default().push(work);
+                                    }
+                                } else if let Err(err) =
+                                    graph_store.mark_graph_projection_work_done(&done_works)
+                                {
+                                    error!(
+                                        "Semantic Worker: failed to clear done projection jobs: {:?}",
+                                        err
+                                    );
+                                    for work in done_works {
+                                        failed
+                                            .entry(format!(
+                                                "failed to clear done projection jobs: {:?}",
+                                                err
+                                            ))
+                                            .or_default()
+                                            .push(work);
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                if is_fatal_embedding_error(&err) {
+                                    error!(
+                                        "Semantic Worker: fatal graph embedding error, disabling semantic worker: {:?}",
+                                        err
+                                    );
+                                    return;
+                                }
+                                error!("Semantic Worker: Graph embedding failed: {:?}", err);
+                                for (work, _, _, _) in to_embed {
+                                    failed
+                                        .entry(format!("graph embedding failed: {:?}", err))
+                                        .or_default()
+                                        .push(work);
+                                }
+                            }
+                        }
+                    }
+
+                    for (reason, work) in failed {
+                        if let Err(err) =
+                            graph_store.mark_graph_projection_work_failed(&work, &reason)
+                        {
+                            error!(
+                                "Semantic Worker: failed to persist projection failure state [{}]: {:?}",
+                                reason, err
+                            );
+                        }
+                    }
+                    continue;
                 }
                 Ok(_) => wait_for_query_request(&mut model, &query_rx, policy.idle_sleep),
-                Err(e) => {
-                    error!("Semantic Worker: Graph DB Fetch error: {:?}", e);
+                Err(err) => {
+                    error!("Semantic Worker: Graph projection fetch error: {:?}", err);
                     wait_for_query_request(&mut model, &query_rx, policy.idle_sleep);
                 }
             }
@@ -309,7 +642,9 @@ fn handle_pending_query_requests(
 }
 
 fn serve_query_embedding_request(model: &mut TextEmbedding, request: QueryEmbeddingRequest) {
-    let result = model.embed(request.texts, None).map_err(anyhow::Error::from);
+    let result = model
+        .embed(request.texts, None)
+        .map_err(anyhow::Error::from);
     let _ = request.reply.send(result);
 }
 
@@ -383,63 +718,6 @@ impl GraphStore {
         }
 
         Ok(lines.join("\n"))
-    }
-
-    pub fn fetch_unembedded_graph_projections(
-        &self,
-        model_id: &str,
-        count: usize,
-    ) -> anyhow::Result<Vec<(String, String, i64, String, String, String)>> {
-        let query = format!(
-            "SELECT gps.anchor_type, gps.anchor_id, gps.radius, gps.source_signature, gps.projection_version \
-             FROM GraphProjectionState gps \
-             LEFT JOIN GraphEmbedding ge \
-               ON ge.anchor_type = gps.anchor_type \
-              AND ge.anchor_id = gps.anchor_id \
-              AND ge.radius = gps.radius \
-              AND ge.model_id = '{}' \
-             WHERE ge.anchor_id IS NULL \
-                OR ge.source_signature <> gps.source_signature \
-                OR ge.projection_version <> gps.projection_version \
-             ORDER BY CASE WHEN gps.anchor_type = 'symbol' THEN 0 ELSE 1 END ASC, gps.updated_at ASC \
-             LIMIT {}",
-            Self::escape_embedding_sql(model_id),
-            count
-        );
-        let res = self.query_json_on_reader(&query)?;
-
-        if res == "[]" || res.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res)?;
-        let mut jobs = Vec::new();
-        for row in raw {
-            let Some(anchor_type) = row.first().and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let Some(anchor_id) = row.get(1).and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let radius = row.get(2).and_then(|value| value.as_i64()).unwrap_or(1);
-            let Some(source_signature) = row.get(3).and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let Some(projection_version) = row.get(4).and_then(|value| value.as_str()) else {
-                continue;
-            };
-            let content = self.graph_projection_embedding_text(anchor_type, anchor_id, radius)?;
-            jobs.push((
-                anchor_type.to_string(),
-                anchor_id.to_string(),
-                radius,
-                source_signature.to_string(),
-                projection_version.to_string(),
-                content,
-            ));
-        }
-
-        Ok(jobs)
     }
 
     pub fn update_graph_embeddings(
@@ -574,8 +852,8 @@ mod tests {
         is_fatal_embedding_error, query_embedding_allowed, request_query_embedding,
         semantic_policy, QueryEmbeddingRequest,
     };
-    use crossbeam_channel::unbounded;
     use crate::service_guard::ServicePressure;
+    use crossbeam_channel::unbounded;
     use std::time::Duration;
 
     #[test]

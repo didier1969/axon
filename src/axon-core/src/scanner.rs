@@ -91,10 +91,30 @@ impl Scanner {
         if !path.is_file() {
             return false;
         }
-        if self.is_ignored_by_axon_ignore(path) {
+        if self.is_ignored_by_axon_ignore(path, false) {
             return false;
         }
         self.is_supported(path)
+    }
+
+    pub fn should_descend_into_directory(&self, path: &Path) -> bool {
+        if !path.is_dir() {
+            return false;
+        }
+        if self.is_ignored_by_axon_ignore(path, true) {
+            return false;
+        }
+        !self.path_has_ignored_directory_noise(path)
+    }
+
+    pub fn should_buffer_subtree_hint(&self, path: &Path) -> bool {
+        if !path.is_dir() {
+            return false;
+        }
+        if !self.should_descend_into_directory(path) {
+            return false;
+        }
+        !self.path_has_blocked_subtree_hint_segment(path)
     }
 
     pub fn project_slug_for_path(&self, path: &Path) -> String {
@@ -121,7 +141,7 @@ impl Scanner {
         builder
     }
 
-    fn is_ignored_by_axon_ignore(&self, path: &Path) -> bool {
+    fn is_ignored_by_axon_ignore(&self, path: &Path, is_dir: bool) -> bool {
         let absolute = match std::fs::canonicalize(path) {
             Ok(path) => path,
             Err(_) => path.to_path_buf(),
@@ -141,7 +161,7 @@ impl Scanner {
                 let ignore_path = dir.join(ignore_name);
                 if ignore_path.exists() {
                     let (matcher, _err) = Gitignore::new(&ignore_path);
-                    let matched = matcher.matched_path_or_any_parents(&absolute, false);
+                    let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
                     if matched.is_ignore() {
                         decision = Some(true);
                     } else if matched.is_whitelist() {
@@ -155,21 +175,8 @@ impl Scanner {
     }
 
     fn is_supported(&self, path: &Path) -> bool {
-        let path_str = path.to_string_lossy().to_lowercase();
-
         // 1. DIRECTORY NOISE FILTER (Strict)
-        if path_str.contains("/.git/")
-            || path_str.contains("/.mypy_cache/")
-            || path_str.contains("/.pytest_cache/")
-            || path_str.contains("/__pycache__/")
-            || path_str.contains("/.venv/")
-            || path_str.contains("/.fastembed_cache/")
-            || path_str.contains("/.devenv/")
-            || path_str.contains("/node_modules/")
-            || path_str.contains("/target/")
-            || path_str.contains("/_build/")
-            || path_str.contains("/deps/")
-        {
+        if self.path_has_ignored_directory_noise(path) {
             return false;
         }
 
@@ -191,6 +198,40 @@ impl Scanner {
         } else {
             false
         }
+    }
+
+    fn path_has_ignored_directory_noise(&self, path: &Path) -> bool {
+        let relative = match path.strip_prefix(&self.root) {
+            Ok(path) => path,
+            Err(_) => return true,
+        };
+        relative.components().any(|component| {
+            let Some(segment) = component.as_os_str().to_str() else {
+                return false;
+            };
+            crate::config::CONFIG
+                .indexing
+                .ignored_directory_segments
+                .iter()
+                .any(|ignored| ignored == segment)
+        })
+    }
+
+    fn path_has_blocked_subtree_hint_segment(&self, path: &Path) -> bool {
+        let relative = match path.strip_prefix(&self.root) {
+            Ok(path) => path,
+            Err(_) => return true,
+        };
+        relative.components().any(|component| {
+            let Some(segment) = component.as_os_str().to_str() else {
+                return false;
+            };
+            crate::config::CONFIG
+                .indexing
+                .blocked_subtree_hint_segments
+                .iter()
+                .any(|blocked| blocked == segment)
+        })
     }
 
     fn scan_path(
@@ -472,6 +513,90 @@ mod tests {
         let scanner = Scanner::new(root.to_string_lossy().as_ref());
         assert!(scanner.should_process_path(Path::new(&kept)));
         assert!(!scanner.should_process_path(Path::new(&skipped)));
+    }
+
+    #[test]
+    fn test_workspace_root_axonignore_can_ignore_only_top_level_worktrees() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let top_level_worktrees = root.join(".worktrees").join("scratch");
+        let project_worktree = root.join("proj").join(".worktrees").join("feature");
+
+        std::fs::create_dir_all(&top_level_worktrees).unwrap();
+        std::fs::create_dir_all(&project_worktree).unwrap();
+        std::fs::write(root.join(".axonignore"), "/.worktrees/\n").unwrap();
+
+        let top_level_file = top_level_worktrees.join("drop.ex");
+        let project_file = project_worktree.join("keep.ex");
+        std::fs::write(&top_level_file, "defmodule Drop do\nend\n").unwrap();
+        std::fs::write(&project_file, "defmodule Keep do\nend\n").unwrap();
+
+        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+
+        assert!(
+            !scanner.should_descend_into_directory(root.join(".worktrees").as_path()),
+            "La regle racine doit ignorer seulement le subtree .worktrees du workspace"
+        );
+        assert!(
+            scanner.should_process_path(project_file.as_path()),
+            "Une worktree locale a un projet ne doit pas etre bannie par une regle racine ancree"
+        );
+        assert!(
+            !scanner.should_process_path(top_level_file.as_path()),
+            "Le subtree .worktrees du workspace doit rester ignore"
+        );
+    }
+
+    #[test]
+    fn test_hard_directory_noise_rejects_direnv_cache_and_ruff_cache_without_ignore_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+
+        for relative in [
+            Path::new("proj/.direnv"),
+            Path::new("proj/.cache"),
+            Path::new("proj/.ruff_cache"),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(&path).unwrap();
+            assert!(
+                !scanner.should_descend_into_directory(path.as_path()),
+                "Le filtre dur doit bloquer {:?} meme sans .axonignore",
+                relative
+            );
+        }
+    }
+
+    #[test]
+    fn test_blocked_subtree_hint_segments_reject_build_like_directory_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+
+        for relative in [
+            Path::new("proj/_build"),
+            Path::new("proj/node_modules"),
+            Path::new("proj/.devenv/state/postgres/pg_wal"),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(&path).unwrap();
+            assert!(
+                !scanner.should_buffer_subtree_hint(path.as_path()),
+                "Le watcher ne doit pas créer de subtree_hint pour {:?}",
+                relative
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_config_exposes_ignored_directory_segments() {
+        let ignored = &crate::config::CONFIG.indexing.ignored_directory_segments;
+        assert!(ignored.iter().any(|segment| segment == ".devenv"));
+        assert!(ignored.iter().any(|segment| segment == "_build"));
+        assert!(ignored.iter().any(|segment| segment == "node_modules"));
+        assert!(crate::config::CONFIG.indexing.subtree_hint_cooldown_ms >= 1);
+        assert!(crate::config::CONFIG.indexing.subtree_hint_retry_budget >= 1);
     }
 
     #[test]

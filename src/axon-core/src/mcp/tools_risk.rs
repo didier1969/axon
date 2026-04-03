@@ -22,7 +22,10 @@ impl McpServer {
         };
         let res = self.graph_store.query_json_param(query, &params).ok()?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-        rows.first()?.first()?.as_str().map(|value| value.to_string())
+        rows.first()?
+            .first()?
+            .as_str()
+            .map(|value| value.to_string())
     }
 
     fn build_local_projection_section(
@@ -32,7 +35,10 @@ impl McpServer {
         depth: u64,
     ) -> Option<String> {
         let radius = depth.max(1).min(2);
-        let anchor_id = self.graph_store.refresh_symbol_projection(anchor, radius).ok()??;
+        let anchor_id = self
+            .graph_store
+            .refresh_symbol_projection(anchor, radius)
+            .ok()??;
         let projection_res = self
             .graph_store
             .query_graph_projection("symbol", &anchor_id, radius)
@@ -106,7 +112,8 @@ impl McpServer {
                     report.push_str(&note);
                     report.push('\n');
                 }
-                if let Some(note) = self.degraded_truth_note(self.degraded_symbol_count(symbol, project))
+                if let Some(note) =
+                    self.degraded_truth_note(self.degraded_symbol_count(symbol, project))
                 {
                     report.push_str(&note);
                     report.push('\n');
@@ -116,7 +123,8 @@ impl McpServer {
                     depth, impact_radius
                 ));
                 report.push_str(&table);
-                if let Some(section) = self.build_local_projection_section(symbol, &target_id, depth)
+                if let Some(section) =
+                    self.build_local_projection_section(symbol, &target_id, depth)
                 {
                     report.push_str(&section);
                 }

@@ -32,7 +32,10 @@ fn json_i64(value: &Value) -> Option<i64> {
 }
 
 impl McpServer {
-    pub(crate) fn project_scope_summary(&self, project: Option<&str>) -> Option<ProjectScopeSummary> {
+    pub(crate) fn project_scope_summary(
+        &self,
+        project: Option<&str>,
+    ) -> Option<ProjectScopeSummary> {
         let project = project?;
         if project == "*" {
             return None;
@@ -279,7 +282,8 @@ impl McpServer {
         let query_text = args.get("query")?.as_str()?;
         let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
-        let degraded_note = self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));
+        let degraded_note =
+            self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));
 
         let embedding = crate::embedder::batch_embed(vec![query_text.to_string()])
             .ok()
@@ -351,16 +355,14 @@ impl McpServer {
                     vec!["Nom", "Type", "URI (Chemin)"]
                 };
                 let table = format_table_from_json(&res, &headers);
-                Some(
-                    json!({ "content": [{ "type": "text", "text": format!(
+                Some(json!({ "content": [{ "type": "text", "text": format!(
                         "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** {}\n\n{}{}{}",
                         query_text,
                         mode_label,
                         project_note.clone().unwrap_or_default(),
                         degraded_note.clone().unwrap_or_default(),
                         table
-                    ) }] }),
-                )
+                    ) }] }))
             }
             Err(_) => self.axon_query_from_chunks(query_text, project, &params),
         }
@@ -377,7 +379,8 @@ impl McpServer {
         let body_match = Self::chunk_body_match_expression();
         let path_match = Self::chunk_path_match_expression();
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
-        let degraded_note = self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));
+        let degraded_note =
+            self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));
         let sql = if project == "*" {
             format!(
                 "WITH chunk_matches AS ( \
@@ -572,23 +575,20 @@ impl McpServer {
                 json!({"sym": symbol}),
             )
         };
-        let degraded_note =
-            self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
+        let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
         let project_note = self.project_scope_truth_note(project);
 
         match self.graph_store.query_json_param(query, &params) {
             Ok(res) => {
                 let table =
                     format_table_from_json(&res, &["Nom", "Type", "Testé", "Appelants", "Appelés"]);
-                Some(
-                    json!({ "content": [{ "type": "text", "text": format!(
+                Some(json!({ "content": [{ "type": "text", "text": format!(
                         "### 🔍 Inspection du Symbole : {}\n\n{}{}{}",
                         symbol,
                         project_note.unwrap_or_default(),
                         degraded_note.unwrap_or_default(),
                         table
-                    ) }] }),
-                )
+                    ) }] }))
             }
             Err(_) => None,
         }

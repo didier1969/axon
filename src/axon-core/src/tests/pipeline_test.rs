@@ -4,7 +4,7 @@ use tokio::sync::broadcast;
 
 use crate::graph::GraphStore;
 use crate::queue::QueueStore;
-use crate::worker::{DbWriteTask, WorkerPool};
+use crate::worker::{DbWriteTask, TaskDispatchOutcome, WorkerPool};
 
 #[test]
 fn test_full_pipeline_loop() {
@@ -50,10 +50,8 @@ fn test_full_pipeline_loop() {
     // 7. Run Worker logic for one task (Manual single-threaded execution)
     println!("[TEST] Step 7: Pop and Process task...");
     let task = queue.pop().expect("Queue should have 1 task");
-    let observed_cost = WorkerPool::process_one_task(0, &task, &db_sender, &results_tx);
-    queue
-        .mark_done(&task, observed_cost)
-        .expect("Failed to release queue reservation");
+    let outcome = WorkerPool::process_one_task(0, &task, &graph, &db_sender, &results_tx);
+    assert_eq!(outcome, TaskDispatchOutcome::Enqueued);
 
     // 8. Verify Worker sent a write task to the Actor (with timeout to avoid hangs)
     println!("[TEST] Step 8: Receive write task...");
@@ -67,6 +65,29 @@ fn test_full_pipeline_loop() {
     graph
         .insert_file_data_batch(&batch)
         .expect("Failed to commit batch");
+    for task in &batch {
+        match task {
+            DbWriteTask::FileExtraction {
+                reservation_id,
+                observed_cost_bytes,
+                ..
+            } => {
+                queue
+                    .mark_done_by_reservation(reservation_id, Some(*observed_cost_bytes))
+                    .expect("Failed to release writer reservation");
+            }
+            DbWriteTask::FileSkipped {
+                reservation_id,
+                observed_cost_bytes,
+                ..
+            } => {
+                queue
+                    .mark_done_by_reservation(reservation_id, *observed_cost_bytes)
+                    .expect("Failed to release writer reservation");
+            }
+            DbWriteTask::ExecuteCypher { .. } => {}
+        }
+    }
 
     // 10. VERIFY TRUTH IN DATABASE
     println!("[TEST] Step 10: VERIFY TRUTH IN DATABASE");

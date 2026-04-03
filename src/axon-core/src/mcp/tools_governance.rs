@@ -103,7 +103,9 @@ impl McpServer {
             report.push_str(&note);
             report.push('\n');
         }
-        if let Some(note) = self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project))) {
+        if let Some(note) =
+            self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)))
+        {
             report.push_str(&note);
             report.push('\n');
         }

@@ -200,6 +200,13 @@ export HYDRA_HTTP_PORT=44129
 export HYDRA_ODATA_PORT=44130
 export HYDRA_HTTP2_PORT=44131
 export HYDRA_MCP_PORT=44132
+export WSL_IP
+WSL_IP=$(ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
+if [ -z "$WSL_IP" ]; then
+    WSL_IP="127.0.0.1"
+fi
+export AXON_SQL_URL="http://$WSL_IP:$HYDRA_HTTP_PORT/sql"
+export SQL_URL="$AXON_SQL_URL"
 
 # Clean only the sockets used by the active runtime path
 rm -f /tmp/axon-telemetry.sock /tmp/axon-mcp.sock
@@ -218,12 +225,16 @@ tmux new-session -d -s axon -n "core"
 # Start Data Plane
 # We use 'devenv shell' to ensure the runtime matches the pinned project toolchain.
 # NEXUS v10.8: We force fastembed to use the system's libonnxruntime.so to prevent C++ aborts.
-tmux send-keys -t axon:core "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
+WORKER_CAP_EXPORT=""
+if [[ -n "${MAX_AXON_WORKERS:-}" ]]; then
+    WORKER_CAP_EXPORT="export MAX_AXON_WORKERS=\"$MAX_AXON_WORKERS\"; "
+fi
+tmux send-keys -t axon:core "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; ${WORKER_CAP_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
 
 if [ "$START_DASHBOARD" = "1" ]; then
     # Start Visualization Plane
     tmux new-window -t axon -n "nexus"
-    tmux send-keys -t axon:nexus "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+    tmux send-keys -t axon:nexus "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 fi
 
 echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 120s)..."
@@ -296,9 +307,6 @@ else
 fi
 
 # 6. Final Report
-WSL_IP=$(ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
-if [ -z "$WSL_IP" ]; then WSL_IP="127.0.0.1"; fi
-
 echo ""
 echo "🛡️ Axon is rising in TMUX session 'axon'."
 echo "To view processes: 'tmux attach -t axon'"

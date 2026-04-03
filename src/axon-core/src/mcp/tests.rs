@@ -87,6 +87,13 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     store
         .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/a.rs', 'axon::a')")
         .unwrap();
+    store
+        .execute(
+            "INSERT INTO GraphProjectionQueue (anchor_type, anchor_id, radius, status, attempts, queued_at, last_error_reason, last_attempt_at) VALUES \
+             ('file', 'src/a.rs', 2, 'queued', 0, 1, NULL, NULL), \
+             ('file', 'src/b.rs', 2, 'inflight', 0, 1, NULL, NULL)",
+        )
+        .unwrap();
 
     let response = server.axon_debug().expect("debug response");
     let content = response["content"][0]["text"].as_str().unwrap_or_default();
@@ -102,6 +109,18 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     assert!(content.contains("RSS Anon"), "{content}");
     assert!(content.contains("Mémoire DuckDB"), "{content}");
     assert!(content.contains("Ingress Buffer"), "{content}");
+    assert!(
+        content.contains("Graph Projection Queue Queued : 1"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Graph Projection Queue Inflight : 1"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Graph Projection Queue Pending : 2"),
+        "{content}"
+    );
 }
 
 #[test]
@@ -961,7 +980,7 @@ fn test_axon_soll_manager_auto_id() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Registry (project_slug, id, last_req, last_cpt, last_dec) VALUES ('AXO', 'AXON_GLOBAL', 0, 10, 0)")
+        .execute("INSERT INTO soll.Registry (project_slug, id, last_pil, last_req, last_cpt, last_dec) VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 10, 0)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -998,6 +1017,161 @@ fn test_axon_soll_manager_auto_id() {
         .query_count("SELECT count(*) FROM soll.Concept WHERE name LIKE 'CPT-AXO-011%'")
         .unwrap();
     assert_eq!(count, 1);
+}
+
+#[test]
+fn test_axon_soll_manager_pillar_uses_dedicated_counter() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Registry (project_slug, id, last_pil, last_req, last_cpt, last_dec) VALUES ('AXO', 'AXON_GLOBAL', 3, 12, 0, 0)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "pillar",
+                "data": {
+                    "project_slug": "AXO",
+                    "title": "Dedicated Pillar Counter",
+                    "description": "Pillars must not consume requirement ids"
+                }
+            }
+        })),
+        id: Some(json!(102)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("PIL-AXO-004"), "{content}");
+}
+
+#[test]
+fn test_axon_soll_manager_recovers_when_registry_lags_existing_entities() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Registry (project_slug, id, last_pil, last_req, last_cpt, last_dec) VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 0, 0)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, priority, metadata) VALUES ('REQ-AXO-007', 'Existing', 'Already there', 'P1', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "requirement",
+                "data": {
+                    "project_slug": "AXO",
+                    "title": "Recovered Counter",
+                    "description": "Should continue after observed max",
+                    "priority": "P1"
+                }
+            }
+        })),
+        id: Some(json!(103)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("REQ-AXO-008"), "{content}");
+}
+
+#[test]
+fn test_axon_soll_manager_can_create_and_update_vision() {
+    let server = create_test_server();
+
+    let create_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "vision",
+                "data": {
+                    "title": "Axon Vision",
+                    "description": "Deterministic ingestion",
+                    "goal": "Structural truth first",
+                    "metadata": {"owner": "platform"}
+                }
+            }
+        })),
+        id: Some(json!(104)),
+    };
+
+    let create_response = server.handle_request(create_req);
+    let create_result = create_response.unwrap().result.unwrap();
+    let create_content = create_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(create_content.contains("VIS-AXO-001"), "{create_content}");
+
+    let update_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_soll_manager",
+            "arguments": {
+                "action": "update",
+                "entity": "vision",
+                "data": {
+                    "id": "VIS-AXO-001",
+                    "goal": "Graph before vectors",
+                    "metadata": {"owner": "runtime"}
+                }
+            }
+        })),
+        id: Some(json!(105)),
+    };
+
+    let update_response = server.handle_request(update_req);
+    let update_result = update_response.unwrap().result.unwrap();
+    let update_content = update_result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        update_content.contains("Mise à jour réussie"),
+        "{update_content}"
+    );
+
+    let vision_json = server
+        .graph_store
+        .query_json(
+            "SELECT title, description, goal, metadata FROM soll.Vision WHERE id = 'VIS-AXO-001'",
+        )
+        .unwrap();
+    assert!(vision_json.contains("Axon Vision"), "{vision_json}");
+    assert!(
+        vision_json.contains("Graph before vectors"),
+        "{vision_json}"
+    );
+    assert!(vision_json.contains("runtime"), "{vision_json}");
 }
 
 #[test]
@@ -1503,11 +1677,13 @@ fn test_vcr1_chunk_retrieval_uses_ingested_docstring_content() {
     server
         .graph_store
         .insert_file_data_batch(&[crate::worker::DbWriteTask::FileExtraction {
+            reservation_id: "res-docstring-trace".to_string(),
             path: path.clone(),
             content: Some("fn opaque_gate() {\n    notify_runtime();\n}\n".to_string()),
             extraction,
             processing_mode: ProcessingMode::Full,
             trace_id: "docstring-trace".to_string(),
+            observed_cost_bytes: 0,
             t0: 0,
             t1: 0,
             t2: 0,

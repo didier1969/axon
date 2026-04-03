@@ -54,6 +54,10 @@ pub enum BridgeEvent {
         ingress_enabled: bool,
         ingress_buffered_entries: usize,
         ingress_subtree_hints: usize,
+        ingress_subtree_hint_in_flight: usize,
+        ingress_subtree_hint_accepted_total: u64,
+        ingress_subtree_hint_blocked_total: u64,
+        ingress_subtree_hint_suppressed_total: u64,
         ingress_collapsed_total: u64,
         ingress_flush_count: u64,
         ingress_last_flush_duration_ms: u64,
@@ -72,6 +76,12 @@ pub enum BridgeEvent {
         db_total_bytes: u64,
         duckdb_memory_bytes: u64,
         duckdb_temporary_bytes: u64,
+        graph_projection_queue_queued: usize,
+        graph_projection_queue_inflight: usize,
+        graph_projection_queue_depth: usize,
+        file_vectorization_queue_queued: usize,
+        file_vectorization_queue_inflight: usize,
+        file_vectorization_queue_depth: usize,
     },
     ScanComplete {
         total_files: usize,
@@ -107,6 +117,10 @@ mod tests {
             ingress_enabled: true,
             ingress_buffered_entries: 12,
             ingress_subtree_hints: 2,
+            ingress_subtree_hint_in_flight: 1,
+            ingress_subtree_hint_accepted_total: 15,
+            ingress_subtree_hint_blocked_total: 4,
+            ingress_subtree_hint_suppressed_total: 2,
             ingress_collapsed_total: 19,
             ingress_flush_count: 5,
             ingress_last_flush_duration_ms: 44,
@@ -125,6 +139,12 @@ mod tests {
             db_total_bytes: 4_608,
             duckdb_memory_bytes: 2_048,
             duckdb_temporary_bytes: 256,
+            graph_projection_queue_queued: 12,
+            graph_projection_queue_inflight: 3,
+            graph_projection_queue_depth: 15,
+            file_vectorization_queue_queued: 7,
+            file_vectorization_queue_inflight: 2,
+            file_vectorization_queue_depth: 9,
         };
 
         let json = serde_json::to_string(&payload).expect("bridge event serializes");
@@ -150,6 +170,10 @@ mod tests {
         assert!(json.contains("\"ingress_enabled\":true"));
         assert!(json.contains("\"ingress_buffered_entries\":12"));
         assert!(json.contains("\"ingress_subtree_hints\":2"));
+        assert!(json.contains("\"ingress_subtree_hint_in_flight\":1"));
+        assert!(json.contains("\"ingress_subtree_hint_accepted_total\":15"));
+        assert!(json.contains("\"ingress_subtree_hint_blocked_total\":4"));
+        assert!(json.contains("\"ingress_subtree_hint_suppressed_total\":2"));
         assert!(json.contains("\"ingress_collapsed_total\":19"));
         assert!(json.contains("\"ingress_flush_count\":5"));
         assert!(json.contains("\"ingress_last_flush_duration_ms\":44"));
@@ -168,5 +192,11 @@ mod tests {
         assert!(json.contains("\"db_total_bytes\":4608"));
         assert!(json.contains("\"duckdb_memory_bytes\":2048"));
         assert!(json.contains("\"duckdb_temporary_bytes\":256"));
+        assert!(json.contains("\"graph_projection_queue_queued\":12"));
+        assert!(json.contains("\"graph_projection_queue_inflight\":3"));
+        assert!(json.contains("\"graph_projection_queue_depth\":15"));
+        assert!(json.contains("\"file_vectorization_queue_queued\":7"));
+        assert!(json.contains("\"file_vectorization_queue_inflight\":2"));
+        assert!(json.contains("\"file_vectorization_queue_depth\":9"));
     }
 }

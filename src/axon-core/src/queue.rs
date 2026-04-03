@@ -180,13 +180,8 @@ impl QueueStore {
         let size_bytes = metadata.len();
         let parser_key = parser_key_for_path(path);
         let reservation_id = next_reservation_id();
-        let estimated_cost_bytes = self.reserve_memory_budget(
-            &reservation_id,
-            trace_id,
-            &parser_key,
-            size_bytes,
-            mode,
-        )?;
+        let estimated_cost_bytes =
+            self.reserve_memory_budget(&reservation_id, trace_id, &parser_key, size_bytes, mode)?;
         let lane = if priority {
             TaskLane::Hot
         } else {
@@ -248,6 +243,15 @@ impl QueueStore {
 
     pub fn mark_done(&self, task: &Task, observed_cost_bytes: Option<u64>) -> Result<(), String> {
         self.release_reservation(&task.reservation_id, observed_cost_bytes);
+        Ok(())
+    }
+
+    pub fn mark_done_by_reservation(
+        &self,
+        reservation_id: &str,
+        observed_cost_bytes: Option<u64>,
+    ) -> Result<(), String> {
+        self.release_reservation(reservation_id, observed_cost_bytes);
         Ok(())
     }
 
