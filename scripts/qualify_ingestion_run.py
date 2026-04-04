@@ -594,7 +594,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interval", type=int, default=5, help="Sampling interval in seconds. Default: 5")
     parser.add_argument(
         "--mode",
-        choices=["full", "read_only", "mcp_only"],
+        choices=["full", "graph_only", "read_only", "mcp_only"],
         default="full",
         help="Runtime mode passed to start.sh. Default: full",
     )
@@ -709,6 +709,7 @@ def main() -> int:
 
     start_mode_arg = {
         "full": "--full",
+        "graph_only": "--graph-only",
         "read_only": "--read-only",
         "mcp_only": "--mcp-only",
     }[args.mode]

@@ -503,23 +503,17 @@ impl McpServer {
                     .get("project_slug")
                     .and_then(|v| v.as_str())
                     .unwrap_or("AXO");
-                let formatted_id = match entity {
-                    "stakeholder" => data.get("name")?.as_str()?.to_string(),
-                    "vision" => data
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("VIS-AXO-001")
-                        .to_string(),
-                    _ => match self.next_soll_numeric_id(project_slug, entity) {
-                        Ok((prefix, next_num)) => {
-                            format!("{}-{}-{:03}", prefix, project_slug, next_num)
-                        }
-                        Err(e) => {
-                            return Some(
-                                json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }),
-                            )
-                        }
-                    },
+                let (project_slug, project_code, formatted_id) = match self.next_soll_numeric_id(project_slug, entity) {
+                    Ok((canonical_slug, project_code, prefix, next_num)) => (
+                        canonical_slug,
+                        project_code.clone(),
+                        format!("{}-{}-{:03}", prefix, project_code, next_num),
+                    ),
+                    Err(e) => {
+                        return Some(
+                            json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }),
+                        )
+                    }
                 };
 
                 let insert_res = match entity {
@@ -528,11 +522,11 @@ impl McpServer {
                         let description = data.get("description")?.as_str()?;
                         let goal = data.get("goal")?.as_str()?;
                         let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let q = "INSERT INTO soll.Vision (id, title, description, goal, metadata) VALUES (?, ?, ?, ?, ?) \
-                                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, goal = EXCLUDED.goal, metadata = EXCLUDED.metadata";
+                        let q = "INSERT INTO soll.Vision (id, project_slug, project_code, title, description, goal, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) \
+                                 ON CONFLICT (id) DO UPDATE SET project_slug = EXCLUDED.project_slug, project_code = EXCLUDED.project_code, title = EXCLUDED.title, description = EXCLUDED.description, goal = EXCLUDED.goal, metadata = EXCLUDED.metadata";
                         self.graph_store.execute_param(
                             q,
-                            &json!([formatted_id, title, description, goal, meta.to_string()]),
+                            &json!([formatted_id, project_slug, project_code, title, description, goal, meta.to_string()]),
                         )
                     }
                     "pillar" => {
@@ -592,14 +586,9 @@ impl McpServer {
                         let expl = data.get("explanation")?.as_str()?;
                         let rat = data.get("rationale")?.as_str()?;
                         let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let final_name = if name.starts_with(&formatted_id) {
-                            name.to_string()
-                        } else {
-                            format!("{}: {}", formatted_id, name)
-                        };
-                        let q = "INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES (?, ?, ?, ?)";
+                        let q = "INSERT INTO soll.Concept (id, project_slug, project_code, name, explanation, rationale, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)";
                         self.graph_store
-                            .execute_param(q, &json!([final_name, expl, rat, meta.to_string()]))
+                            .execute_param(q, &json!([formatted_id, project_slug, project_code, name, expl, rat, meta.to_string()]))
                     }
                     "decision" => {
                         let title = data.get("title")?.as_str()?;
@@ -658,9 +647,9 @@ impl McpServer {
                         let role = data.get("role")?.as_str()?;
                         let meta = data.get("metadata").cloned().unwrap_or(json!({}));
                         let q =
-                            "INSERT INTO soll.Stakeholder (name, role, metadata) VALUES (?, ?, ?)";
+                            "INSERT INTO soll.Stakeholder (id, project_slug, project_code, name, role, metadata) VALUES (?, ?, ?, ?, ?, ?)";
                         self.graph_store
-                            .execute_param(q, &json!([name, role, meta.to_string()]))
+                            .execute_param(q, &json!([formatted_id, project_slug, project_code, name, role, meta.to_string()]))
                     }
                     "validation" => {
                         let method = data.get("method")?.as_str()?;
@@ -766,7 +755,7 @@ impl McpServer {
                         let current = self
                             .query_named_row(
                                 &format!(
-                                    "SELECT name, explanation, rationale, metadata FROM soll.Concept WHERE name LIKE '{}:%'",
+                                    "SELECT name, explanation, rationale, metadata FROM soll.Concept WHERE id = '{}'",
                                     escape_sql(id)
                                 ),
                                 4,
@@ -774,15 +763,8 @@ impl McpServer {
                         let concept_name = data
                             .get("name")
                             .and_then(|v| v.as_str())
-                            .map(|name| {
-                                if name.starts_with(id) {
-                                    name.to_string()
-                                } else {
-                                    format!("{}: {}", id, name)
-                                }
-                            })
-                            .unwrap_or_else(|| current[0].clone());
-                        let q = "UPDATE soll.Concept SET name = ?, explanation = ?, rationale = ?, metadata = ? WHERE name LIKE ?";
+                            .unwrap_or(&current[0]);
+                        let q = "UPDATE soll.Concept SET name = ?, explanation = ?, rationale = ?, metadata = ? WHERE id = ?";
                         self.graph_store.execute_param(
                             q,
                             &json!([
@@ -796,7 +778,7 @@ impl McpServer {
                                 data.get("metadata")
                                     .map(|v| v.to_string())
                                     .unwrap_or_else(|| current[3].clone()),
-                                format!("{}:%", id)
+                                id
                             ]),
                         )
                     }
@@ -871,12 +853,12 @@ impl McpServer {
                     "stakeholder" => {
                         let current = self.query_named_row(
                             &format!(
-                                "SELECT role, metadata FROM soll.Stakeholder WHERE name = '{}'",
+                                "SELECT role, metadata FROM soll.Stakeholder WHERE id = '{}'",
                                 escape_sql(id)
                             ),
                             2,
                         )?;
-                        let q = "UPDATE soll.Stakeholder SET role = ?, metadata = ? WHERE name = ?";
+                        let q = "UPDATE soll.Stakeholder SET role = ?, metadata = ? WHERE id = ?";
                         self.graph_store.execute_param(
                             q,
                             &json!([
@@ -1020,7 +1002,12 @@ impl McpServer {
         }
     }
 
-    pub(crate) fn axon_export_soll(&self) -> Option<Value> {
+    pub(crate) fn axon_export_soll(&self, args: &Value) -> Option<Value> {
+        let project_slug = args.get("project_slug").and_then(|v| v.as_str());
+        let project_code = project_slug
+            .map(|slug| self.resolve_project_code(slug))
+            .transpose()
+            .ok()?;
         let mut markdown = String::from("# SOLL Extraction\n\n");
 
         let now = std::time::SystemTime::now();
@@ -1028,17 +1015,24 @@ impl McpServer {
         let timestamp_str = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
         markdown.push_str(&format!("*Généré le : {}*\n\n", timestamp_str));
 
+        if let Some(slug) = project_slug {
+            markdown.push_str(&format!("*Portée : projet `{}`*\n\n", slug));
+        }
+
         markdown.push_str("## 1. Vision & Objectifs Stratégiques\n");
         if let Ok(res) = self
             .graph_store
-            .query_json("SELECT title, description, goal, metadata FROM soll.Vision")
+            .query_json(&format!(
+                "SELECT id, title, description, goal, metadata FROM soll.Vision{} ORDER BY id",
+                project_scope_clause_for_table("id", project_code.as_deref())
+            ))
         {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                let meta = r.get(3).cloned().unwrap_or_default();
+                let meta = r.get(4).cloned().unwrap_or_default();
                 markdown.push_str(&format!(
-                    "### {}\n**Description:** {}\n**Goal:** {}\n**Meta:** `{}`\n\n",
-                    r[0], r[1], r[2], meta
+                    "### {} - {}\n**Description:** {}\n**Goal:** {}\n**Meta:** `{}`\n\n",
+                    r[0], r[1], r[2], r[3], meta
                 ));
             }
         }
@@ -1046,7 +1040,10 @@ impl McpServer {
         markdown.push_str("## 2. Piliers d'Architecture\n");
         if let Ok(res) = self
             .graph_store
-            .query_json("SELECT id, title, description, metadata FROM soll.Pillar")
+            .query_json(&format!(
+                "SELECT id, title, description, metadata FROM soll.Pillar{} ORDER BY id",
+                project_scope_clause_for_table("id", project_code.as_deref())
+            ))
         {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
@@ -1060,11 +1057,31 @@ impl McpServer {
         markdown.push_str("\n## 2b. Concepts\n");
         if let Ok(res) = self
             .graph_store
-            .query_json("SELECT name, explanation, rationale, metadata FROM soll.Concept")
+            .query_json(&format!(
+                "SELECT id, name, explanation, rationale, metadata FROM soll.Concept{} ORDER BY id",
+                project_scope_clause_for_table("id", project_code.as_deref())
+            ))
         {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
-                markdown.push_str(&format!("* **{}** : {} ({})\n", r[0], r[1], r[2]));
+                markdown.push_str(&format!("* **{}: {}** : {} ({})\n", r[0], r[1], r[2], r[3]));
+                if let Some(meta) = r.get(4).filter(|m| !m.is_empty() && *m != "{}") {
+                    markdown.push_str(&format!("  Meta: `{}`\n", meta));
+                }
+            }
+        }
+
+        markdown.push_str("\n## 2c. Stakeholders\n");
+        if let Ok(res) = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT id, name, role, metadata FROM soll.Stakeholder{} ORDER BY id",
+                project_scope_clause_for_table("id", project_code.as_deref())
+            ))
+        {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            for r in rows {
+                markdown.push_str(&format!("* **{}: {}** : {}\n", r[0], r[1], r[2]));
                 if let Some(meta) = r.get(3).filter(|m| !m.is_empty() && *m != "{}") {
                     markdown.push_str(&format!("  Meta: `{}`\n", meta));
                 }
@@ -1074,7 +1091,10 @@ impl McpServer {
         markdown.push_str("\n## 3. Jalons & Roadmap (Milestones)\n");
         if let Ok(res) = self
             .graph_store
-            .query_json("SELECT id, title, status, metadata FROM soll.Milestone")
+            .query_json(&format!(
+                "SELECT id, title, status, metadata FROM soll.Milestone{} ORDER BY id",
+                project_scope_clause_for_table("id", project_code.as_deref())
+            ))
         {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
@@ -1090,9 +1110,11 @@ impl McpServer {
         }
 
         markdown.push_str("## 4. Exigences & Rayon d'Impact (Requirements)\n");
-        let req_query =
-            "SELECT id, title, priority, description, status, metadata FROM soll.Requirement";
-        if let Ok(res) = self.graph_store.query_json(req_query) {
+        let req_query = format!(
+            "SELECT id, title, priority, description, status, metadata FROM soll.Requirement{} ORDER BY id",
+            project_scope_clause_for_table("id", project_code.as_deref())
+        );
+        if let Ok(res) = self.graph_store.query_json(&req_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
                 markdown.push_str(&format!(
@@ -1110,7 +1132,10 @@ impl McpServer {
         }
 
         markdown.push_str("## 5. Registre des Décisions (ADR)\n");
-        if let Ok(res) = self.graph_store.query_json("SELECT id, title, status, context, description, rationale, metadata FROM soll.Decision") {
+        if let Ok(res) = self.graph_store.query_json(&format!(
+            "SELECT id, title, status, context, description, rationale, metadata FROM soll.Decision{} ORDER BY id",
+            project_scope_clause_for_table("id", project_code.as_deref())
+        )) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
                 markdown.push_str(&format!("### {}\n**Titre :** {}\n**Statut :** `{}`\n", r[0], r[1], r[2]));
@@ -1131,7 +1156,10 @@ impl McpServer {
         markdown.push_str("## 6. Preuves de Validation & Witness\n");
         if let Ok(res) = self
             .graph_store
-            .query_json("SELECT id, method, result, timestamp, metadata FROM soll.Validation")
+            .query_json(&format!(
+                "SELECT id, method, result, timestamp, metadata FROM soll.Validation{} ORDER BY id",
+                project_scope_clause_for_table("id", project_code.as_deref())
+            ))
         {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for r in rows {
@@ -1148,8 +1176,9 @@ impl McpServer {
         markdown.push_str("\n## 7. Liens de Traçabilité SOLL\n");
         for (relation_type, table_name) in SOLL_RELATION_EXPORTS {
             if let Ok(res) = self.graph_store.query_json(&format!(
-                "SELECT source_id, target_id FROM {} ORDER BY source_id, target_id",
-                table_name
+                "SELECT source_id, target_id FROM {}{} ORDER BY source_id, target_id",
+                table_name,
+                project_scope_clause_for_relation(project_code.as_deref())
             )) {
                 let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
                 for row in rows {
@@ -1195,10 +1224,15 @@ impl McpServer {
         }
     }
 
-    pub(crate) fn axon_validate_soll(&self) -> Option<Value> {
+    pub(crate) fn axon_validate_soll(&self, args: &Value) -> Option<Value> {
+        let project_slug = args.get("project_slug").and_then(|v| v.as_str());
+        let project_code = project_slug
+            .map(|slug| self.resolve_project_code(slug))
+            .transpose()
+            .ok()?;
         let orphan_requirements = self
             .query_single_column(
-                "SELECT id FROM soll.Requirement r
+                &format!("SELECT id FROM soll.Requirement r
                  WHERE NOT EXISTS (SELECT 1 FROM soll.BELONGS_TO WHERE source_id = r.id OR target_id = r.id)
                    AND NOT EXISTS (SELECT 1 FROM soll.EXPLAINS WHERE source_id = r.id OR target_id = r.id)
                    AND NOT EXISTS (SELECT 1 FROM soll.SOLVES WHERE source_id = r.id OR target_id = r.id)
@@ -1207,24 +1241,27 @@ impl McpServer {
                    AND NOT EXISTS (SELECT 1 FROM soll.ORIGINATES WHERE source_id = r.id OR target_id = r.id)
                    AND NOT EXISTS (SELECT 1 FROM SUBSTANTIATES WHERE source_id = r.id OR target_id = r.id)
                    AND NOT EXISTS (SELECT 1 FROM IMPACTS WHERE source_id = r.id OR target_id = r.id)
-                 ORDER BY id",
+                   {}
+                 ORDER BY id", project_scope_predicate("r.id", project_code.as_deref())),
             )
             .ok()?;
 
         let validations_without_verifies = self
             .query_single_column(
-                "SELECT id FROM soll.Validation v
+                &format!("SELECT id FROM soll.Validation v
                  WHERE NOT EXISTS (SELECT 1 FROM soll.VERIFIES WHERE source_id = v.id OR target_id = v.id)
-                 ORDER BY id",
+                   {}
+                 ORDER BY id", project_scope_predicate("v.id", project_code.as_deref())),
             )
             .ok()?;
 
         let decisions_without_links = self
             .query_single_column(
-                "SELECT id FROM soll.Decision d
+                &format!("SELECT id FROM soll.Decision d
                  WHERE NOT EXISTS (SELECT 1 FROM soll.SOLVES WHERE source_id = d.id OR target_id = d.id)
                    AND NOT EXISTS (SELECT 1 FROM IMPACTS WHERE source_id = d.id OR target_id = d.id)
-                 ORDER BY id",
+                   {}
+                 ORDER BY id", project_scope_predicate("d.id", project_code.as_deref())),
             )
             .ok()?;
 
@@ -1275,7 +1312,10 @@ impl McpServer {
             format_standard_contract(
                 status,
                 summary,
-                "workspace:*",
+                &match project_slug {
+                    Some(slug) => format!("project:{}", slug),
+                    None => "workspace:*".to_string(),
+                },
                 &evidence,
                 &["run `soll_verify_requirements` for requirement-level coverage", "apply targeted SOLL links with `soll_manager` if needed"],
                 confidence,
@@ -1312,8 +1352,8 @@ impl McpServer {
         };
 
         if let Err(e) = self.graph_store.execute(
-            "INSERT INTO soll.Registry (project_slug, id, last_pil, last_req, last_cpt, last_dec, last_mil, last_val)
-             VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0)
+            "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk)
+             VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0)
              ON CONFLICT (project_slug) DO NOTHING"
         ) {
             return Some(json!({
@@ -1327,9 +1367,11 @@ impl McpServer {
         for vision in restore.vision {
             let metadata = vision.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Vision (id, title, description, goal, metadata)
-                 VALUES ('VIS-AXO-001', $title, $description, $goal, $metadata)
+                "INSERT INTO soll.Vision (id, project_slug, project_code, title, description, goal, metadata)
+                 VALUES ('VIS-AXO-001', 'AXO', 'AXO', $title, $description, $goal, $metadata)
                  ON CONFLICT (id) DO UPDATE SET
+                   project_slug = EXCLUDED.project_slug,
+                   project_code = EXCLUDED.project_code,
                    title = EXCLUDED.title,
                    description = EXCLUDED.description,
                    goal = EXCLUDED.goal,
@@ -1367,13 +1409,16 @@ impl McpServer {
         for concept in restore.concepts {
             let metadata = concept.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Concept (name, explanation, rationale, metadata)
-                 VALUES ($name, $explanation, $rationale, $metadata)
-                 ON CONFLICT (name) DO UPDATE SET
+                "INSERT INTO soll.Concept (id, project_slug, project_code, name, explanation, rationale, metadata)
+                 VALUES ($id, 'AXO', 'AXO', $name, $explanation, $rationale, $metadata)
+                 ON CONFLICT (id) DO UPDATE SET
+                   project_slug = EXCLUDED.project_slug,
+                   project_code = EXCLUDED.project_code,
+                   name = EXCLUDED.name,
                    explanation = EXCLUDED.explanation,
                    rationale = EXCLUDED.rationale,
                    metadata = EXCLUDED.metadata",
-                &json!({"name": concept.name, "explanation": concept.explanation, "rationale": concept.rationale, "metadata": metadata})
+                &json!({"id": concept.id, "name": concept.name, "explanation": concept.explanation, "rationale": concept.rationale, "metadata": metadata})
             ) {
                 return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore concept error: {}", e) }], "isError": true }));
             }
@@ -1507,26 +1552,55 @@ impl McpServer {
         Ok(row)
     }
 
+    fn resolve_project_code(&self, project_slug: &str) -> anyhow::Result<String> {
+        let escaped = escape_sql(project_slug);
+        let by_slug = self.query_single_column(&format!(
+            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_slug = '{}'",
+            escaped
+        ))?;
+        if let Some(code) = by_slug.into_iter().next() {
+            return Ok(code);
+        }
+
+        if is_three_letter_project_code(project_slug) {
+            let by_code = self.query_single_column(&format!(
+                "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
+                escaped
+            ))?;
+            if let Some(code) = by_code.into_iter().next() {
+                return Ok(code);
+            }
+        }
+
+        Err(anyhow!(
+            "Project code introuvable pour `{}` dans soll.ProjectCodeRegistry",
+            project_slug
+        ))
+    }
+
     fn next_soll_numeric_id(
         &self,
         project_slug: &str,
         entity: &str,
-    ) -> anyhow::Result<(&'static str, u64)> {
+    ) -> anyhow::Result<(String, String, &'static str, u64)> {
+        let project_code = self.resolve_project_code(project_slug)?;
         let (prefix, reg_col, table, id_expr) = match entity {
+            "vision" => ("VIS", "last_vis", "soll.Vision", "id"),
             "pillar" => ("PIL", "last_pil", "soll.Pillar", "id"),
             "requirement" => ("REQ", "last_req", "soll.Requirement", "id"),
-            "concept" => ("CPT", "last_cpt", "soll.Concept", "name"),
+            "concept" => ("CPT", "last_cpt", "soll.Concept", "id"),
             "decision" => ("DEC", "last_dec", "soll.Decision", "id"),
             "milestone" => ("MIL", "last_mil", "soll.Milestone", "id"),
             "validation" => ("VAL", "last_val", "soll.Validation", "id"),
+            "stakeholder" => ("STK", "last_stk", "soll.Stakeholder", "id"),
             _ => return Err(anyhow!("Unknown entity")),
         };
 
-        self.graph_store.execute(&format!(
-            "INSERT INTO soll.Registry (project_slug, id, last_pil, last_req, last_cpt, last_dec, last_mil, last_val) \
-             VALUES ('{}', 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING",
-            escape_sql(project_slug)
-        ))?;
+        self.graph_store.execute_param(
+            "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk) \
+             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING",
+            &json!([project_slug]),
+        )?;
 
         let current_query = format!(
             "SELECT COALESCE({}, 0) FROM soll.Registry WHERE project_slug = '{}'",
@@ -1546,7 +1620,7 @@ impl McpServer {
             table,
             id_expr,
             prefix,
-            escape_sql(project_slug)
+            escape_sql(&project_code)
         );
         let observed_max = self
             .query_single_column(&ids_query)?
@@ -1563,7 +1637,7 @@ impl McpServer {
             escape_sql(project_slug)
         ))?;
 
-        Ok((prefix, next))
+        Ok((project_slug.to_string(), project_code, prefix, next))
     }
 
     fn restore_soll_relation(
@@ -1858,6 +1932,34 @@ fn extract_soll_id_from_message(text: String) -> Option<String> {
     Some(text[start + 1..start + 1 + end].to_string())
 }
 
+fn project_scope_clause_for_table(id_column: &str, project_code: Option<&str>) -> String {
+    project_code
+        .map(|code| format!(" WHERE {} LIKE '%-{}-%'", id_column, escape_sql(code)))
+        .unwrap_or_default()
+}
+
+fn project_scope_clause_for_relation(project_code: Option<&str>) -> String {
+    project_code
+        .map(|code| {
+            let escaped = escape_sql(code);
+            format!(
+                " WHERE source_id LIKE '%-{}-%' OR target_id LIKE '%-{}-%'",
+                escaped, escaped
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn project_scope_predicate(id_column: &str, project_code: Option<&str>) -> String {
+    project_code
+        .map(|code| format!("AND {} LIKE '%-{}-%'", id_column, escape_sql(code)))
+        .unwrap_or_default()
+}
+
+fn is_three_letter_project_code(value: &str) -> bool {
+    value.len() == 3 && value.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
 impl McpServer {
     pub(crate) fn axon_soll_apply_plan_v2(&self, args: &Value) -> Option<Value> {
         let project_slug = args
@@ -1990,16 +2092,17 @@ impl McpServer {
             .get("project_slug")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
+        let project_code = self.resolve_project_code(project_slug).ok()?;
         let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(25).max(1);
 
         let reqs = self.query_single_column(&format!(
             "SELECT id || '|' || title || '|' || COALESCE(status,'') || '|' || COALESCE(priority,'') FROM soll.Requirement WHERE id LIKE 'REQ-{}-%' ORDER BY id DESC LIMIT {}",
-            escape_sql(project_slug),
+            escape_sql(&project_code),
             limit
         )).unwrap_or_default();
         let decisions = self.query_single_column(&format!(
             "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Decision WHERE id LIKE 'DEC-{}-%' ORDER BY id DESC LIMIT {}",
-            escape_sql(project_slug),
+            escape_sql(&project_code),
             limit
         )).unwrap_or_default();
         let revisions = self.query_single_column(&format!(
@@ -2116,7 +2219,7 @@ impl McpServer {
         let (limited_waves, returned_items, truncated) = apply_wave_limit(&waves, limit);
         let top_recommendations = build_top_recommendations(&limited_waves, top);
         let global_validation = self.axon_soll_verify_requirements(&json!({ "project_slug": project_slug }));
-        let soll_validation = self.axon_validate_soll();
+        let soll_validation = self.axon_validate_soll(&json!({ "project_slug": project_slug }));
         let validation_gates = json!({
             "requirement_verification": global_validation
                 .as_ref()
@@ -2217,6 +2320,9 @@ impl McpServer {
     }
 
     fn load_work_plan_nodes(&self, project_slug: &str) -> HashMap<String, WorkPlanNode> {
+        let Ok(project_code) = self.resolve_project_code(project_slug) else {
+            return HashMap::new();
+        };
         let mut nodes = HashMap::new();
         let req_query = format!(
             "SELECT r.id, r.title, COALESCE(r.status,''), COALESCE(r.priority,''), COUNT(t.id), COALESCE(r.acceptance_criteria,'')
@@ -2225,7 +2331,7 @@ impl McpServer {
              WHERE r.id LIKE 'REQ-{}-%'
              GROUP BY 1,2,3,4,6
              ORDER BY r.id",
-            escape_sql(project_slug)
+            escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&req_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
@@ -2263,7 +2369,7 @@ impl McpServer {
 
         let dec_query = format!(
             "SELECT id, title, COALESCE(status,'') FROM soll.Decision WHERE id LIKE 'DEC-{}-%' ORDER BY id",
-            escape_sql(project_slug)
+            escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&dec_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
@@ -2296,7 +2402,7 @@ impl McpServer {
 
         let mil_query = format!(
             "SELECT id, title, COALESCE(status,'') FROM soll.Milestone WHERE id LIKE 'MIL-{}-%' ORDER BY id",
-            escape_sql(project_slug)
+            escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&mil_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
@@ -2331,12 +2437,15 @@ impl McpServer {
     }
 
     fn load_work_plan_edges(&self, project_slug: &str) -> Vec<(String, String)> {
+        let Ok(project_code) = self.resolve_project_code(project_slug) else {
+            return Vec::new();
+        };
         let mut edges = Vec::new();
         let solves_query = format!(
             "SELECT source_id, target_id FROM soll.SOLVES
              WHERE source_id LIKE 'DEC-{}-%' AND target_id LIKE 'REQ-{}-%'",
-            escape_sql(project_slug),
-            escape_sql(project_slug)
+            escape_sql(&project_code),
+            escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&solves_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
@@ -2351,9 +2460,9 @@ impl McpServer {
             "SELECT source_id, target_id FROM soll.BELONGS_TO
              WHERE source_id LIKE 'REQ-{}-%'
                AND (target_id LIKE 'REQ-{}-%' OR target_id LIKE 'MIL-{}-%')",
-            escape_sql(project_slug),
-            escape_sql(project_slug),
-            escape_sql(project_slug)
+            escape_sql(&project_code),
+            escape_sql(&project_code),
+            escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&belongs_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
@@ -2492,6 +2601,7 @@ impl McpServer {
             .get("project_slug")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
+        let project_code = self.resolve_project_code(project_slug).ok()?;
         let query = format!(
             "SELECT r.id, COALESCE(r.status,''), COALESCE(r.acceptance_criteria,''), COUNT(t.id)
              FROM soll.Requirement r
@@ -2499,7 +2609,7 @@ impl McpServer {
              WHERE r.id LIKE 'REQ-{}-%'
              GROUP BY 1,2,3
              ORDER BY r.id",
-            escape_sql(project_slug)
+            escape_sql(&project_code)
         );
         let rows_raw = self.graph_store.query_json(&query).ok()?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();

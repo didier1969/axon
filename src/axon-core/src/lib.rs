@@ -16,6 +16,7 @@ pub mod mcp_http;
 pub mod parser;
 pub mod queue;
 pub mod runtime_observability;
+pub mod runtime_mode;
 pub mod runtime_profile;
 pub mod scanner;
 pub mod service_guard;

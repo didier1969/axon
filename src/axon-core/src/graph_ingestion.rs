@@ -12,6 +12,7 @@ use crate::file_ingress_guard::FileIngressRow;
 use crate::graph::{ExecFunc, GraphStore, PendingFile};
 use crate::ingress_buffer::{IngressDrainBatch, IngressPromotionStats, IngressSource};
 use crate::queue::ProcessingMode;
+use crate::runtime_mode::AxonRuntimeMode;
 use crate::watcher_probe;
 
 const DEFAULT_GRAPH_EMBEDDING_RADIUS: i64 = 2;
@@ -1047,6 +1048,17 @@ impl GraphStore {
     }
 
     pub fn insert_file_data_batch(&self, tasks: &[crate::worker::DbWriteTask]) -> Result<()> {
+        self.insert_file_data_batch_with_vectorization_policy(
+            tasks,
+            AxonRuntimeMode::from_env().background_vectorization_enabled(),
+        )
+    }
+
+    pub(crate) fn insert_file_data_batch_with_vectorization_policy(
+        &self,
+        tasks: &[crate::worker::DbWriteTask],
+        enqueue_vectorization: bool,
+    ) -> Result<()> {
         if tasks.is_empty() {
             return Ok(());
         }
@@ -1080,7 +1092,8 @@ impl GraphStore {
                         ProcessingMode::Full => indexed_paths.push(escaped_path.clone()),
                         ProcessingMode::StructureOnly => degraded_paths.push(escaped_path.clone()),
                     }
-                    if matches!(
+                    if enqueue_vectorization
+                        && matches!(
                         processing_mode,
                         ProcessingMode::Full | ProcessingMode::StructureOnly
                     ) {

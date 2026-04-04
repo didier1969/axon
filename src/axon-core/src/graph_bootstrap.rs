@@ -1,4 +1,5 @@
 use std::ffi::{c_void, CString};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,6 +9,7 @@ use libloading::{Library, Symbol as LibSymbol};
 use tracing::{info, warn};
 
 use crate::graph::{CloseDbFunc, ExecFunc, GraphStore, InitDbFunc, LatticePool};
+use crate::runtime_mode::AxonRuntimeMode;
 
 const IST_SCHEMA_VERSION: &str = "3";
 const IST_INGESTION_VERSION: &str = "3";
@@ -124,20 +126,27 @@ impl GraphStore {
                     );
                 }
             }
-            match store.backfill_file_vectorization_queue() {
-                Ok(count) if count > 0 => {
-                    info!(
-                        "Backfilled {} file vectorization queue entries for chunk embeddings",
-                        count
-                    );
+            if AxonRuntimeMode::from_env().background_vectorization_enabled() {
+                match store.backfill_file_vectorization_queue() {
+                    Ok(count) if count > 0 => {
+                        info!(
+                            "Backfilled {} file vectorization queue entries for chunk embeddings",
+                            count
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!(
+                            "Unable to backfill file vectorization queue at startup: {:?}",
+                            err
+                        );
+                    }
                 }
-                Ok(_) => {}
-                Err(err) => {
-                    warn!(
-                        "Unable to backfill file vectorization queue at startup: {:?}",
-                        err
-                    );
-                }
+            } else {
+                info!(
+                    "Skipping file vectorization queue backfill at startup because runtime mode is {}.",
+                    AxonRuntimeMode::from_env().as_str()
+                );
             }
             store.execute("CHECKPOINT;")?;
 
@@ -317,7 +326,8 @@ impl GraphStore {
             "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR)",
         )?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Vision (id VARCHAR PRIMARY KEY DEFAULT 'VIS-AXO-001', title VARCHAR, description VARCHAR, goal VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_slug VARCHAR PRIMARY KEY, project_code VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Vision (id VARCHAR PRIMARY KEY DEFAULT 'VIS-AXO-001', project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, goal VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Pillar (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Requirement (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, status VARCHAR, priority VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Decision (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, context VARCHAR, rationale VARCHAR, status VARCHAR, metadata VARCHAR)")?;
@@ -431,11 +441,17 @@ impl GraphStore {
     }
 
     fn ensure_additive_soll_schema(&self) -> Result<()> {
+        self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_slug VARCHAR PRIMARY KEY, project_code VARCHAR)")?;
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx ON soll.ProjectCodeRegistry(project_code)")?;
         self.execute(
             "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_pil BIGINT DEFAULT 0",
         )?;
+        self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_vis BIGINT DEFAULT 0")?;
+        self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_stk BIGINT DEFAULT 0")?;
         self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS goal VARCHAR")?;
         self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS project_slug VARCHAR")?;
+        self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
 
         self.execute("ALTER TABLE soll.Pillar ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
         self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS status VARCHAR")?;
@@ -454,12 +470,333 @@ impl GraphStore {
         self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS updated_at BIGINT")?;
         self.execute("ALTER TABLE soll.Milestone ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
         self.execute("ALTER TABLE soll.Validation ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Concept ADD COLUMN IF NOT EXISTS id VARCHAR")?;
+        self.execute("ALTER TABLE soll.Concept ADD COLUMN IF NOT EXISTS project_slug VARCHAR")?;
+        self.execute("ALTER TABLE soll.Concept ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
         self.execute("ALTER TABLE soll.Concept ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Stakeholder ADD COLUMN IF NOT EXISTS id VARCHAR")?;
+        self.execute("ALTER TABLE soll.Stakeholder ADD COLUMN IF NOT EXISTS project_slug VARCHAR")?;
+        self.execute("ALTER TABLE soll.Stakeholder ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
         self.execute("ALTER TABLE soll.Stakeholder ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_concept_id_idx ON soll.Concept(id)")?;
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_stakeholder_id_idx ON soll.Stakeholder(id)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_slug VARCHAR, payload VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
+        self.seed_project_code_registry()?;
+        self.migrate_canonical_soll_ids()?;
+        Ok(())
+    }
+
+    fn seed_project_code_registry(&self) -> Result<()> {
+        self.execute(
+            "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
+             VALUES ('AXO', 'AXO')
+             ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
+        )?;
+        self.execute(
+            "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
+             VALUES ('BookingSystem', 'BKS')
+             ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
+        )?;
+        Ok(())
+    }
+
+    fn migrate_canonical_soll_ids(&self) -> Result<()> {
+        self.migrate_prefixed_id_table("soll.Vision")?;
+        self.migrate_prefixed_id_table("soll.Pillar")?;
+        self.migrate_prefixed_id_table("soll.Requirement")?;
+        self.migrate_prefixed_id_table("soll.Decision")?;
+        self.migrate_prefixed_id_table("soll.Milestone")?;
+        self.migrate_prefixed_id_table("soll.Validation")?;
+        self.migrate_concepts_to_server_ids()?;
+        self.migrate_stakeholders_to_server_ids()?;
+        Ok(())
+    }
+
+    fn migrate_prefixed_id_table(&self, table: &str) -> Result<()> {
+        let raw = self.query_json(&format!("SELECT id FROM {} ORDER BY id", table))?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        for row in rows {
+            let Some(old_id) = row.first().cloned() else {
+                continue;
+            };
+            let Some((prefix, project_part, number)) = parse_prefixed_entity_id(&old_id) else {
+                continue;
+            };
+            let (project_slug, project_code) =
+                self.resolve_or_seed_existing_project_identity(project_part)?;
+            let new_id = format!("{}-{}-{:03}", prefix, project_code, number);
+            if new_id != old_id {
+                self.execute_param(
+                    &format!("UPDATE {} SET id = ? WHERE id = ?", table),
+                    &serde_json::json!([new_id, old_id]),
+                )?;
+                self.replace_soll_id_references(&old_id, &new_id)?;
+            }
+            if table == "soll.Vision" {
+                self.execute_param(
+                    "UPDATE soll.Vision SET project_slug = ?, project_code = ? WHERE id = ?",
+                    &serde_json::json!([project_slug, project_code, new_id]),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn migrate_concepts_to_server_ids(&self) -> Result<()> {
+        let raw = self.query_json(
+            "SELECT COALESCE(id,''), COALESCE(project_slug,''), COALESCE(project_code,''), name
+             FROM soll.Concept
+             ORDER BY name",
+        )?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        for row in rows {
+            if row.len() < 4 {
+                continue;
+            }
+            let existing_id = row[0].clone();
+            let existing_project_slug = row[1].clone();
+            let existing_project_code = row[2].clone();
+            let stored_name = row[3].clone();
+
+            let (source_id, clean_name) = if !existing_id.trim().is_empty() {
+                (existing_id.clone(), stored_name.clone())
+            } else if let Some((parsed_id, parsed_name)) = split_prefixed_display_name(&stored_name) {
+                (parsed_id, parsed_name)
+            } else {
+                continue;
+            };
+
+            let Some((_, project_part, number)) = parse_prefixed_entity_id(&source_id) else {
+                continue;
+            };
+            let (project_slug, project_code) = if !existing_project_slug.trim().is_empty()
+                && !existing_project_code.trim().is_empty()
+            {
+                (existing_project_slug, existing_project_code)
+            } else {
+                self.resolve_or_seed_existing_project_identity(project_part)?
+            };
+            let new_id = format!("CPT-{}-{:03}", project_code, number);
+
+            self.execute_param(
+                "UPDATE soll.Concept
+                 SET id = ?, project_slug = ?, project_code = ?, name = ?
+                 WHERE COALESCE(id,'') = ? AND name = ?",
+                &serde_json::json!([
+                    new_id,
+                    project_slug,
+                    project_code,
+                    clean_name,
+                    existing_id,
+                    stored_name
+                ]),
+            )?;
+
+            if new_id != source_id {
+                self.replace_soll_id_references(&source_id, &new_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn migrate_stakeholders_to_server_ids(&self) -> Result<()> {
+        let raw = self.query_json(
+            "SELECT COALESCE(id,''), COALESCE(project_slug,''), COALESCE(project_code,''), name
+             FROM soll.Stakeholder
+             ORDER BY name",
+        )?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut next_by_code: HashMap<String, u64> = HashMap::new();
+
+        for row in rows {
+            if row.len() < 4 {
+                continue;
+            }
+            let existing_id = row[0].clone();
+            let existing_project_slug = row[1].clone();
+            let existing_project_code = row[2].clone();
+            let name = row[3].clone();
+
+            let (project_slug, project_code, source_id, new_id) = if let Some((prefix, project_part, number)) =
+                parse_prefixed_entity_id(&existing_id)
+            {
+                let (slug, code) = if !existing_project_slug.trim().is_empty()
+                    && !existing_project_code.trim().is_empty()
+                {
+                    (existing_project_slug, existing_project_code)
+                } else {
+                    self.resolve_or_seed_existing_project_identity(project_part)?
+                };
+                (slug, code.clone(), existing_id.clone(), format!("{}-{}-{:03}", prefix, code, number))
+            } else {
+                let slug = if existing_project_slug.trim().is_empty() {
+                    "AXO".to_string()
+                } else {
+                    existing_project_slug
+                };
+                let (_, code) = self.resolve_or_seed_existing_project_identity(&slug)?;
+                let next = match next_by_code.get(&code).copied() {
+                    Some(current) => current + 1,
+                    None => self.max_numeric_suffix_for_prefix(&format!("STK-{}-", code))? + 1,
+                };
+                next_by_code.insert(code.clone(), next);
+                (
+                    slug,
+                    code.clone(),
+                    if existing_id.trim().is_empty() {
+                        name.clone()
+                    } else {
+                        existing_id.clone()
+                    },
+                    format!("STK-{}-{:03}", code, next),
+                )
+            };
+
+            self.execute_param(
+                "UPDATE soll.Stakeholder
+                 SET id = ?, project_slug = ?, project_code = ?
+                 WHERE COALESCE(id,'') = ? AND name = ?",
+                &serde_json::json!([new_id, project_slug, project_code, existing_id, name]),
+            )?;
+
+            if new_id != source_id {
+                self.replace_soll_id_references(&source_id, &new_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn max_numeric_suffix_for_prefix(&self, prefix: &str) -> Result<u64> {
+        let mut max_seen = 0u64;
+        for table in [
+            "soll.Vision",
+            "soll.Pillar",
+            "soll.Requirement",
+            "soll.Decision",
+            "soll.Milestone",
+            "soll.Validation",
+            "soll.Concept",
+            "soll.Stakeholder",
+        ] {
+            let id_col = if table == "soll.Concept" || table == "soll.Stakeholder" {
+                "id"
+            } else {
+                "id"
+            };
+            let raw = self.query_json(&format!(
+                "SELECT {} FROM {} WHERE {} LIKE '{}%'",
+                id_col,
+                table,
+                id_col,
+                prefix.replace('\'', "''")
+            ))?;
+            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+            for row in rows {
+                if let Some(id) = row.first() {
+                    if let Some((_, _, number)) = parse_prefixed_entity_id(id) {
+                        max_seen = max_seen.max(number);
+                    }
+                }
+            }
+        }
+        Ok(max_seen)
+    }
+
+    fn resolve_or_seed_existing_project_identity(
+        &self,
+        project_slug_or_code: &str,
+    ) -> Result<(String, String)> {
+        let key = project_slug_or_code.trim();
+        if key.is_empty() {
+            return Err(anyhow!("Empty project identifier"));
+        }
+
+        let by_slug = self.query_json(&format!(
+            "SELECT project_slug, project_code FROM soll.ProjectCodeRegistry WHERE project_slug = '{}'",
+            key.replace('\'', "''")
+        ))?;
+        let slug_rows: Vec<Vec<String>> = serde_json::from_str(&by_slug).unwrap_or_default();
+        if let Some(row) = slug_rows.first() {
+            if row.len() >= 2 {
+                return Ok((row[0].clone(), row[1].clone()));
+            }
+        }
+
+        let by_code = self.query_json(&format!(
+            "SELECT project_slug, project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
+            key.replace('\'', "''")
+        ))?;
+        let code_rows: Vec<Vec<String>> = serde_json::from_str(&by_code).unwrap_or_default();
+        if let Some(row) = code_rows.first() {
+            if row.len() >= 2 {
+                return Ok((row[0].clone(), row[1].clone()));
+            }
+        }
+
+        if is_three_letter_code(key) {
+            self.execute_param(
+                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
+                 VALUES (?, ?)
+                 ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
+                &serde_json::json!([key, key.to_ascii_uppercase()]),
+            )?;
+            return Ok((key.to_string(), key.to_ascii_uppercase()));
+        }
+
+        Err(anyhow!("Missing project code registry entry for {}", key))
+    }
+
+    fn replace_soll_id_references(&self, old_id: &str, new_id: &str) -> Result<()> {
+        if old_id == new_id {
+            return Ok(());
+        }
+        for table in [
+            "soll.EPITOMIZES",
+            "soll.BELONGS_TO",
+            "soll.EXPLAINS",
+            "soll.SOLVES",
+            "soll.TARGETS",
+            "soll.VERIFIES",
+            "soll.ORIGINATES",
+            "soll.SUPERSEDES",
+            "soll.CONTRIBUTES_TO",
+            "soll.REFINES",
+            "IMPACTS",
+            "SUBSTANTIATES",
+        ] {
+            self.execute_param(
+                &format!("UPDATE {} SET source_id = ? WHERE source_id = ?", table),
+                &serde_json::json!([new_id, old_id]),
+            )?;
+            self.execute_param(
+                &format!("UPDATE {} SET target_id = ? WHERE target_id = ?", table),
+                &serde_json::json!([new_id, old_id]),
+            )?;
+        }
+
+        self.execute_param(
+            "UPDATE soll.Traceability SET soll_entity_id = ? WHERE soll_entity_id = ?",
+            &serde_json::json!([new_id, old_id]),
+        )?;
+        self.execute_param(
+            "UPDATE soll.RevisionChange SET entity_id = ? WHERE entity_id = ?",
+            &serde_json::json!([new_id, old_id]),
+        )?;
+        self.execute_param(
+            "UPDATE soll.RevisionChange SET before_json = REPLACE(before_json, ?, ?) WHERE before_json LIKE ?",
+            &serde_json::json!([old_id, new_id, format!("%{}%", old_id)]),
+        )?;
+        self.execute_param(
+            "UPDATE soll.RevisionChange SET after_json = REPLACE(after_json, ?, ?) WHERE after_json LIKE ?",
+            &serde_json::json!([old_id, new_id, format!("%{}%", old_id)]),
+        )?;
+        self.execute_param(
+            "UPDATE soll.RevisionPreview SET payload = REPLACE(payload, ?, ?) WHERE payload LIKE ?",
+            &serde_json::json!([old_id, new_id, format!("%{}%", old_id)]),
+        )?;
         Ok(())
     }
 
@@ -731,4 +1068,25 @@ impl GraphStore {
         info!("IST embedding layers soft-invalidated. Structural truth preserved.");
         Ok(())
     }
+}
+
+fn parse_prefixed_entity_id(value: &str) -> Option<(&str, &str, u64)> {
+    let trimmed = value.trim();
+    let mut parts = trimmed.splitn(3, '-');
+    let prefix = parts.next()?;
+    let project = parts.next()?;
+    let number_str = parts.next()?;
+    let number = number_str.parse::<u64>().ok()?;
+    Some((prefix, project, number))
+}
+
+fn split_prefixed_display_name(value: &str) -> Option<(String, String)> {
+    let (id_part, name_part) = value.split_once(':')?;
+    let id = id_part.trim();
+    parse_prefixed_entity_id(id)?;
+    Some((id.to_string(), name_part.trim().to_string()))
+}
+
+fn is_three_letter_code(value: &str) -> bool {
+    value.len() == 3 && value.chars().all(|ch| ch.is_ascii_alphanumeric())
 }

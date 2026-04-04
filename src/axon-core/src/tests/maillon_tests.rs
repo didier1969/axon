@@ -2166,6 +2166,67 @@ mod tests {
     }
 
     #[test]
+    fn test_graph_only_policy_keeps_graph_ready_without_vector_queue_backlog() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let path = "/tmp/graph_only_ready.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .unwrap();
+
+        let extraction = parser::ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "graph_only_ready".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch_with_vectorization_policy(
+                &[DbWriteTask::FileExtraction {
+                    reservation_id: "graph-only".to_string(),
+                    path: path.clone(),
+                    content: Some("fn graph_only_ready() {}".to_string()),
+                    extraction,
+                    processing_mode: ProcessingMode::Full,
+                    trace_id: "trace".to_string(),
+                    observed_cost_bytes: 0,
+                    t0: 0,
+                    t1: 0,
+                    t2: 0,
+                    t3: 0,
+                }],
+                false,
+            )
+            .unwrap();
+
+        let row = store
+            .query_json(
+                "SELECT status, file_stage, graph_ready, vector_ready FROM File WHERE path = '/tmp/graph_only_ready.rs'",
+            )
+            .unwrap();
+        assert!(row.contains("indexed"), "{row}");
+        assert!(row.contains("graph_indexed"), "{row}");
+        assert!(row.contains("true"), "{row}");
+
+        let queued = store
+            .query_count("SELECT count(*) FROM FileVectorizationQueue")
+            .unwrap();
+        assert_eq!(queued, 0, "graph-only should not enqueue vectorization");
+    }
+
+    #[test]
     fn test_maillon_2p_deferred_pending_file_builds_aging_debt_and_claim_reset() {
         let store = GraphStore::new(":memory:").unwrap();
         let path = "/tmp/deferred_file.rs".to_string();

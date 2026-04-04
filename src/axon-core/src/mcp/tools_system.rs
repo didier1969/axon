@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
 use crate::ingress_buffer::ingress_metrics_snapshot;
+use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_observability::{
     duckdb_memory_snapshot, duckdb_storage_snapshot, process_memory_snapshot,
 };
@@ -101,6 +102,59 @@ fn parse_scalar_count_row(raw: &str) -> Option<i64> {
 }
 
 impl McpServer {
+    pub(crate) fn axon_resume_vectorization(&self, _args: &Value) -> Option<Value> {
+        let runtime_mode = AxonRuntimeMode::from_env();
+        match self.graph_store.backfill_file_vectorization_queue() {
+            Ok(count) => {
+                let mut evidence = format!(
+                    "Queued {} file(s) for deferred chunk vectorization.\nRuntime mode: {}.\n",
+                    count,
+                    runtime_mode.as_str()
+                );
+                if runtime_mode.semantic_workers_enabled() {
+                    evidence.push_str(
+                        "Semantic workers are active; queued files can be consumed immediately.\n",
+                    );
+                } else {
+                    evidence.push_str(
+                        "Semantic workers are disabled in the current runtime mode; processing remains deferred until a `full` restart.\n",
+                    );
+                }
+                let summary = if count == 0 {
+                    "no missing vectorization backlog found"
+                } else {
+                    "vectorization backlog re-queued"
+                };
+                let report = format!(
+                    "### 🧠 Resume Vectorization\n\n{}",
+                    format_standard_contract(
+                        "ok",
+                        summary,
+                        "workspace:*",
+                        &evidence,
+                        &[
+                            "restart in `full` mode to let semantic workers consume the queue",
+                            "use `health` or `debug` to inspect graph/vector readiness and queue depth",
+                        ],
+                        "high",
+                    )
+                );
+                Some(json!({
+                    "content": [{ "type": "text", "text": report }],
+                    "data": {
+                        "queued_files": count,
+                        "runtime_mode": runtime_mode.as_str(),
+                        "semantic_workers_enabled": runtime_mode.semantic_workers_enabled()
+                    }
+                }))
+            }
+            Err(err) => Some(json!({
+                "content": [{ "type": "text", "text": format!("Resume vectorization error: {}", err) }],
+                "isError": true
+            })),
+        }
+    }
+
     pub(crate) fn axon_refine_lattice(&self, _args: &Value) -> Option<Value> {
         let store = &self.graph_store;
         let refine_query = "

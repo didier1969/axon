@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::graph::GraphStore;
+use crate::parser;
 use crate::queue::ProcessingMode;
 use std::path::Path;
 use std::sync::Arc;
@@ -32,7 +33,7 @@ fn test_mcp_tools_list() {
         .as_array()
         .expect("tools is array");
 
-    assert_eq!(tools.len(), 33);
+    assert_eq!(tools.len(), 34);
 
     let tool_names: Vec<&str> = tools
         .iter()
@@ -58,6 +59,7 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"api_break_check"));
     assert!(tool_names.contains(&"simulate_mutation"));
     assert!(tool_names.contains(&"debug"));
+    assert!(tool_names.contains(&"resume_vectorization"));
 }
 
 #[test]
@@ -1258,9 +1260,45 @@ fn test_axon_soll_manager_auto_id() {
 
     let count = server
         .graph_store
-        .query_count("SELECT count(*) FROM soll.Concept WHERE name LIKE 'CPT-AXO-011%'")
+        .query_count("SELECT count(*) FROM soll.Concept WHERE id = 'CPT-AXO-011'")
         .unwrap();
     assert_eq!(count, 1);
+}
+
+#[test]
+fn test_axon_soll_manager_uses_project_code_registry_for_booking_system() {
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "decision",
+                "data": {
+                    "project_slug": "BookingSystem",
+                    "title": "Canonical Booking Decision",
+                    "context": "Project code must be server-managed",
+                    "rationale": "Slug longs are not canonical",
+                    "status": "accepted"
+                }
+            }
+        })),
+        id: Some(json!(1001)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("DEC-BKS-001"), "{content}");
+    assert!(!content.contains("DEC-BookingSystem-"), "{content}");
 }
 
 #[test]
@@ -1355,6 +1393,7 @@ fn test_axon_soll_manager_can_create_and_update_vision() {
                 "action": "create",
                 "entity": "vision",
                 "data": {
+                    "project_slug": "AXO",
                     "title": "Axon Vision",
                     "description": "Deterministic ingestion",
                     "goal": "Structural truth first",
@@ -1435,6 +1474,7 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
                 "action": "create",
                 "entity": "stakeholder",
                 "data": {
+                    "project_slug": "AXO",
                     "name": "Runtime Rust",
                     "role": "Owns ingestion and canonical persistence"
                 }
@@ -1450,12 +1490,12 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
         .unwrap()
         .as_str()
         .unwrap();
-    assert!(content.contains("Entité SOLL créée"), "{content}");
+    assert!(content.contains("STK-AXO-001"), "{content}");
 
     std::thread::sleep(std::time::Duration::from_millis(75));
 
     let count = store
-        .query_count("SELECT count(*) FROM soll.Stakeholder WHERE name = 'Runtime Rust'")
+        .query_count("SELECT count(*) FROM soll.Stakeholder WHERE id = 'STK-AXO-001' AND name = 'Runtime Rust'")
         .unwrap();
     assert_eq!(count, 1);
 }
@@ -1463,8 +1503,8 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
 #[test]
 fn test_axon_export_soll() {
     let server = create_test_server();
-    server.graph_store.execute("INSERT INTO soll.Vision (id, title, description, goal, metadata) VALUES ('VIS-AXO-001', 'Test Vision', 'Desc', 'Goal', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Concept (name, explanation, rationale, metadata) VALUES ('CPT-AXO-001: My Concept', 'Expl', 'Rat', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Vision (id, project_slug, project_code, title, description, goal, metadata) VALUES ('VIS-AXO-001', 'AXO', 'AXO', 'Test Vision', 'Desc', 'Goal', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Concept (id, project_slug, project_code, name, explanation, rationale, metadata) VALUES ('CPT-AXO-001', 'AXO', 'AXO', 'My Concept', 'Expl', 'Rat', '{}')").unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -1750,6 +1790,159 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
 
     assert!(content.contains("0 violation"));
     assert!(content.contains("cohérence minimale"));
+}
+
+#[test]
+fn test_axon_validate_soll_can_scope_by_project_slug() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES ('REQ-AXO-001', 'AXO orphan', 'No structural links', 'draft', 'P1', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES ('REQ-BKS-001', 'BKS orphan', 'No structural links', 'draft', 'P1', '{}')")
+        .unwrap();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "validate_soll",
+            "arguments": { "project_slug": "AXO" }
+        })),
+        id: Some(json!(3201)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("project:AXO"), "{content}");
+    assert!(content.contains("REQ-AXO-001"), "{content}");
+    assert!(!content.contains("REQ-BKS-001"), "{content}");
+}
+
+#[test]
+fn test_axon_export_soll_can_scope_by_project_slug() {
+    let server = create_test_server();
+    server.graph_store.execute("INSERT INTO soll.Vision (id, project_slug, project_code, title, description, goal, metadata) VALUES ('VIS-AXO-001', 'AXO', 'AXO', 'AXO Vision', 'Desc', 'Goal', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Vision (id, project_slug, project_code, title, description, goal, metadata) VALUES ('VIS-BKS-001', 'BookingSystem', 'BKS', 'BKS Vision', 'Desc', 'Goal', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Concept (id, project_slug, project_code, name, explanation, rationale, metadata) VALUES ('CPT-AXO-001', 'AXO', 'AXO', 'AXO Concept', 'Expl', 'Rat', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Concept (id, project_slug, project_code, name, explanation, rationale, metadata) VALUES ('CPT-BKS-001', 'BookingSystem', 'BKS', 'BKS Concept', 'Expl', 'Rat', '{}')").unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "export_soll",
+            "arguments": { "project_slug": "BookingSystem" }
+        })),
+        id: Some(json!(3202)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let export_path = content
+        .lines()
+        .find_map(|line| line.strip_prefix("✅ Exported to "))
+        .expect("Expected export path line")
+        .trim()
+        .to_string();
+
+    let export_body = std::fs::read_to_string(&export_path).expect("export file should exist");
+    assert!(export_body.contains("VIS-BKS-001"), "{export_body}");
+    assert!(export_body.contains("CPT-BKS-001"), "{export_body}");
+    assert!(!export_body.contains("VIS-AXO-001"), "{export_body}");
+    assert!(!export_body.contains("CPT-AXO-001"), "{export_body}");
+
+    let _ = std::fs::remove_file(export_path);
+}
+
+#[test]
+fn test_resume_vectorization_backfills_missing_queue_entries() {
+    let server = create_test_server();
+    let path = "/tmp/resume_vectorization.rs".to_string();
+    server
+        .graph_store
+        .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+        .unwrap();
+
+    let extraction = parser::ExtractionResult {
+        project_slug: Some("proj".to_string()),
+        symbols: vec![parser::Symbol {
+            name: "resume_vectorization".to_string(),
+            kind: "func".to_string(),
+            start_line: 1,
+            end_line: 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: std::collections::HashMap::new(),
+            embedding: None,
+        }],
+        relations: vec![],
+    };
+
+    server
+        .graph_store
+        .insert_file_data_batch_with_vectorization_policy(
+            &[crate::worker::DbWriteTask::FileExtraction {
+                reservation_id: "resume-vectorization".to_string(),
+                path: path.clone(),
+                content: Some("fn resume_vectorization() {}".to_string()),
+                extraction,
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }],
+            false,
+        )
+        .unwrap();
+
+    let before = server
+        .graph_store
+        .query_count("SELECT count(*) FROM FileVectorizationQueue")
+        .unwrap();
+    assert_eq!(before, 0);
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "resume_vectorization",
+            "arguments": {}
+        })),
+        id: Some(json!(904)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result["content"][0]["text"].as_str().unwrap_or_default();
+    let queued = result["data"]["queued_files"].as_u64();
+
+    assert!(content.contains("Resume Vectorization"), "{content}");
+    assert_eq!(queued, Some(1), "{result:?}");
+    let after = server
+        .graph_store
+        .query_count("SELECT count(*) FROM FileVectorizationQueue")
+        .unwrap();
+    assert_eq!(after, 1);
 }
 
 #[test]

@@ -15,6 +15,13 @@ This skill defines the canonical way to operate SOLL with Axon MCP:
 
 Core rule: default to read/verify first, mutate second, certify last.
 
+Identity rule:
+- Every SOLL entity is server-identified.
+- Canonical IDs follow `TYPE-CODE-NNN`.
+- `CODE` comes from server-side `project_slug -> project_code` registry.
+- The client/LLM never chooses the final ID or numeric suffix.
+- `create` returns the canonical ID; every later `update`/`link` must reuse that ID.
+
 ## SOLL Semantic Contract (Critical)
 
 Use the following meanings strictly:
@@ -92,6 +99,13 @@ MCP tools:
 - `export_soll`
 - `restore_soll`
 
+Identity-sensitive arguments:
+- `soll_manager create`: send `project_slug` plus business fields; the server returns `TYPE-CODE-NNN`.
+- `soll_manager update`: `id` is mandatory and must already be canonical.
+- `soll_manager link`: `source_id` and `target_id` must already be canonical.
+- `validate_soll(project_slug=...)`: validates only one project when requested.
+- `export_soll(project_slug=...)`: exports only one project when requested.
+
 CLI wrappers:
 - `./scripts/axon soll-import --input <file> --format md|json|ndjson|yaml [--dry-run] [--strict]`
 - `./scripts/axon work-plan --project <slug> [--limit N] [--top N] [--json] [--no-ist]`
@@ -103,6 +117,7 @@ CLI wrappers:
 1. `validate_soll`
 2. `soll_query_context` (project scope)
 3. targeted `soll_manager` (`create`/`update`/`link`)
+   Creation returns server-owned IDs; keep them for all later mutations.
 4. `validate_soll`
 5. optional `export_soll`
 
@@ -175,6 +190,11 @@ Use only for canonical replay from reviewed markdown snapshots.
 
 ## Structured Payload Contract (json/yaml)
 
+Server-owned identity contract:
+- do not send final entity IDs for `create`
+- do send canonical IDs for `update`, `link`, evidence attachment, and any rollback target
+- treat SOLL IDs exactly like database primary keys
+
 Top-level keys supported:
 - `plan` (for `soll_apply_plan_v2`): `pillars`, `requirements`, `decisions`, `milestones`
 - `visions`
@@ -237,6 +257,7 @@ Practical rule:
 - Use `dry-run` before high-volume changes.
 - Prefer explicit `relation_type` for links in batch mode.
 - Prefer `soll_apply_plan_v2` + revision commit over ad-hoc multi-step writes.
+- Never fabricate IDs from raw slugs like `DEC-BookingSystem-001`; expected canonical form is `DEC-BKS-001`.
 
 ## Fast Triage
 

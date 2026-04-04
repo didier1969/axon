@@ -393,7 +393,12 @@ def run_mode(
             except FileNotFoundError:
                 pass
 
-    start_arg = {"full": "--full", "read_only": "--read-only", "mcp_only": "--mcp-only"}[mode]
+    start_arg = {
+        "full": "--full",
+        "graph_only": "--graph-only",
+        "read_only": "--read-only",
+        "mcp_only": "--mcp-only",
+    }[mode]
     start_code, start_output = run_script("scripts/start.sh", [start_arg], check=False)
     (run_dir / f"{mode}-start.log").write_text(start_output)
     if start_code != 0 and detect_axon_pid() is None:
@@ -514,7 +519,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     modes = [mode.strip() for mode in args.modes.split(",") if mode.strip()]
     for mode in modes:
-        if mode not in {"full", "read_only", "mcp_only"}:
+        if mode not in {"full", "graph_only", "read_only", "mcp_only"}:
             raise SystemExit(f"Unsupported mode: {mode}")
     if args.duration <= 0 or args.concurrency <= 0 or args.timeout <= 0 or args.warmup < 0:
         raise SystemExit("duration, concurrency and timeout must be > 0; warmup must be >= 0")

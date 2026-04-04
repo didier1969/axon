@@ -25,6 +25,7 @@ WRITE_CAPABLE_TOOLS = {
     "soll_rollback_revision",
     "export_soll",
     "restore_soll",
+    "resume_vectorization",
 }
 
 
@@ -128,6 +129,7 @@ def build_args(
         },
         "export_soll": {},
         "restore_soll": {"path": "docs/vision/non-existent-file.md"},
+        "resume_vectorization": {},
         "validate_soll": {},
         "fs_read": {"uri": "README.md", "start_line": 1, "end_line": 20},
         "refine_lattice": {},

@@ -9,45 +9,13 @@ use axon_core::file_ingress_guard::{FileIngressGuard, SharedFileIngressGuard};
 use axon_core::graph::GraphStore;
 use axon_core::ingress_buffer::{IngressBuffer, SharedIngressBuffer};
 use axon_core::queue::QueueStore;
+use axon_core::runtime_mode::AxonRuntimeMode;
 use axon_core::runtime_profile::RuntimeProfile;
 use std::fs;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tracing::{error, info, warn};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeMode {
-    Full,
-    ReadOnly,
-    McpOnly,
-}
-
-impl RuntimeMode {
-    fn from_env() -> Self {
-        match std::env::var("AXON_RUNTIME_MODE")
-            .unwrap_or_else(|_| "full".to_string())
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "read_only" | "readonly" | "read-only" => Self::ReadOnly,
-            "mcp_only" | "mcponly" | "mcp-only" => Self::McpOnly,
-            _ => Self::Full,
-        }
-    }
-
-    fn service_options(self) -> main_services::RuntimeServiceOptions {
-        match self {
-            Self::Full => main_services::RuntimeServiceOptions::full(),
-            Self::ReadOnly | Self::McpOnly => main_services::RuntimeServiceOptions::read_only(),
-        }
-    }
-
-    fn ingestion_enabled(self) -> bool {
-        matches!(self, Self::Full)
-    }
-}
 
 fn results_broadcast_capacity() -> usize {
     const DEFAULT_CAPACITY: usize = 2_048;
@@ -75,7 +43,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "/home/dstadel/projects".to_string());
             let projects_root = projects_root_env.leak();
             let db_root = "/home/dstadel/projects/axon/.axon/graph_v2";
-            let runtime_mode = RuntimeMode::from_env();
+            let runtime_mode = AxonRuntimeMode::from_env();
 
             info!("Starting Axon Core v2.2 (Nexus Seal - Zero-Sleep Edition)");
             info!("Engine Boot Time: {}", boot_time);
@@ -167,7 +135,13 @@ fn main() -> anyhow::Result<()> {
                 queue_store.clone(),
                 results_tx.clone(),
                 num_workers,
-                runtime_mode.service_options(),
+                match runtime_mode {
+                    AxonRuntimeMode::Full => main_services::RuntimeServiceOptions::full(),
+                    AxonRuntimeMode::GraphOnly => main_services::RuntimeServiceOptions::graph_only(),
+                    AxonRuntimeMode::ReadOnly | AxonRuntimeMode::McpOnly => {
+                        main_services::RuntimeServiceOptions::read_only()
+                    }
+                },
             );
 
             let projects_root_str = projects_root.to_string();

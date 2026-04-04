@@ -39,6 +39,7 @@ pub(crate) struct ParsedPillar {
 }
 
 pub(crate) struct ParsedConcept {
+    pub id: String,
     pub name: String,
     pub explanation: String,
     pub rationale: String,
@@ -144,7 +145,11 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
 
         match section {
             "## 1. Vision & Objectifs Stratégiques" if trimmed.starts_with("### ") => {
-                let title = trimmed.trim_start_matches("### ").trim().to_string();
+                let raw = trimmed.trim_start_matches("### ").trim();
+                let title = raw
+                    .split_once(" - ")
+                    .map(|(_, title)| title.trim().to_string())
+                    .unwrap_or_else(|| raw.to_string());
                 let description = lines
                     .next()
                     .unwrap_or("")
@@ -184,10 +189,15 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
             }
             "## 2b. Concepts" if trimmed.starts_with("* **") => {
                 if let Some((name, rest)) = parse_bold_bullet(trimmed) {
+                    let (id, display_name) = name
+                        .split_once(':')
+                        .map(|(id, display)| (id.trim().to_string(), display.trim().to_string()))
+                        .unwrap_or_else(|| (name.clone(), name.clone()));
                     let (explanation, rationale) = split_title_paren(rest);
                     let metadata = parse_optional_metadata_line(&mut lines, "Meta:");
                     parsed.concepts.push(ParsedConcept {
-                        name,
+                        id,
+                        name: display_name,
                         explanation,
                         rationale,
                         metadata,

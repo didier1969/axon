@@ -20,6 +20,13 @@ impl RuntimeServiceOptions {
         }
     }
 
+    pub(crate) fn graph_only() -> Self {
+        Self {
+            spawn_indexing_workers: true,
+            spawn_semantic_workers: false,
+        }
+    }
+
     pub(crate) fn read_only() -> Self {
         Self {
             spawn_indexing_workers: false,

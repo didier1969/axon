@@ -9,26 +9,30 @@ Usage: ./scripts/axon <command> [options]
 
 Commands:
   setup                    Bootstrap environment and build artifacts
-  start [mode options]     Start runtime (supports --full|--read-only|--mcp-only|--no-dashboard)
+  start [mode options]     Start runtime (supports --full|--graph-only|--read-only|--mcp-only|--no-dashboard)
   stop [options]           Stop runtime (supports --hard|--verify)
   restart [mode options]   Stop then start
   status                   Runtime health/status check
-  qualify [args...]        Run qualification pipeline
+  qualify [args...]        Run unified qualification pipeline
   validate-mcp [args...]   Exhaustive MCP tool validation
   robustness-mcp [args...] Qualify MCP responsiveness and recovery under load
   quality-mcp              Run strict MCP quality gate on core projects
   soll-import [args...]    Bulk import SOLL payloads via MCP (md/json/ndjson/yaml)
   work-plan [args...]      Generate an ideal read-only work plan from SOLL
+  resume-vectorization [args...] Requeue missing chunk vectorization from graph-ready files
   migrate-ignore [args...] Migrate .axonignore patterns to .gitignore (dry-run by default)
   reindex-project [args...] Reindex one project with before/after noise evaluation
 
 Examples:
   ./scripts/axon setup
   ./scripts/axon start --full
+  ./scripts/axon start --graph-only
   ./scripts/axon stop --hard
   ./scripts/axon restart --read-only
   ./scripts/axon status
-  ./scripts/axon qualify --mode full --duration 120 --interval 5 --enforce-gate
+  ./scripts/axon qualify --profile demo --mode graph_only
+  ./scripts/axon qualify --profile full --mode full --duration 120 --interval 5 --enforce-gate
+  ./scripts/axon qualify --profile smoke --compare mcp_only,graph_only
   ./scripts/axon validate-mcp --project BookingSystem --strict
   ./scripts/axon robustness-mcp --modes mcp_only,full --duration 60 --concurrency 4
   ./scripts/axon quality-mcp
@@ -36,6 +40,7 @@ Examples:
   ./scripts/axon soll-import --input /tmp/soll_payload.json --project AXO --author codex --dry-run
   ./scripts/axon work-plan --project AXO
   ./scripts/axon work-plan --project AXO --json
+  ./scripts/axon resume-vectorization
   ./scripts/axon migrate-ignore --root /home/dstadel/projects --apply
   ./scripts/axon reindex-project --project BookingSystem --wait-seconds 180
 USAGE
@@ -66,7 +71,7 @@ case "$cmd" in
     exec bash "$SCRIPT_DIR/status.sh" "$@"
     ;;
   qualify)
-    exec python3 "$SCRIPT_DIR/qualify_ingestion_run.py" "$@"
+    exec python3 "$SCRIPT_DIR/qualify_runtime.py" "$@"
     ;;
   validate-mcp)
     exec python3 "$SCRIPT_DIR/mcp_validate.py" "$@"
@@ -82,6 +87,9 @@ case "$cmd" in
     ;;
   work-plan)
     exec python3 "$SCRIPT_DIR/work_plan.py" "$@"
+    ;;
+  resume-vectorization)
+    exec python3 "$SCRIPT_DIR/resume_vectorization.py" "$@"
     ;;
   migrate-ignore)
     exec bash "$SCRIPT_DIR/migrate_axonignore_to_gitignore.sh" "$@"

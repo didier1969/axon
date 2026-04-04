@@ -13,6 +13,9 @@ Provide deterministic skill resolution and Axon-first operational behavior for S
 - Resolve workflows from skills only.
 - If Axon MCP is available, use `axon-soll-operator` before SOLL operations.
 - Prefer MCP tools for SOLL operations; use shell only for bootstrap/verification.
+- SOLL identity is server-owned: `create` returns canonical IDs in the form `TYPE-CODE-NNN`.
+- `CODE` is resolved by Axon from `project_slug`, not chosen by the client.
+- All later SOLL mutations must use canonical IDs exactly, like primary keys.
 
 ## Verification Commands
 ```bash
@@ -30,12 +33,20 @@ Expected:
 ## Runtime Notes
 - Start a new Codex/Gemini session after skill/path updates.
 - Existing sessions may keep old context and not pick up new policies immediately.
+- Runtime modes now include `graph_only` for watcher + graph indexing without background semantic/vector workers.
+- Use `./scripts/axon resume-vectorization` to recreate missing chunk vectorization backlog explicitly.
 
 ## Recommended SOLL Entry Path
 1. Check MCP availability (`axon_health`, `axon_debug`).
 2. Load `axon-soll-operator` workflow.
 3. Execute SOLL workflow via MCP tools (unit or bulk path), not direct DB mutations.
 4. Verify with SOLL validation tools before reporting completion.
+
+## SOLL Identity and Scope
+- Canonical examples: `VIS-AXO-001`, `DEC-BKS-001`, `STK-AXO-003`.
+- Non-canonical example: `DEC-BookingSystem-001`.
+- Use `validate_soll --project_slug <slug>` when the goal is project-scoped invariants rather than workspace-global triage.
+- Use `export_soll --project_slug <slug>` when the goal is a project snapshot rather than a mixed workspace export.
 
 ## Read-Only Planning Path
 - Use `soll_work_plan` when the goal is to derive an ordered execution plan from `SOLL` without mutating the graph.
@@ -44,6 +55,10 @@ Expected:
 - Use `top_recommendations` when the goal is immediate operator action rather than full graph review.
 
 ## Runtime Robustness Path
+- Use `./scripts/axon qualify` as the default unified entry point for runtime qualification, demos, and regression checks.
+- Preferred quick run: `./scripts/axon qualify --profile demo --mode graph_only`
+- Preferred comparison run: `./scripts/axon qualify --profile smoke --compare mcp_only,graph_only,full`
+- Use `--profile full` when ingestion qualification must be included in the same consolidated report.
 - Use `./scripts/axon robustness-mcp` when the goal is to qualify MCP responsiveness and recovery under load.
 - Preferred comparative run: `./scripts/axon robustness-mcp --modes mcp_only,full --duration 60 --concurrency 4`
 - Read the output as a diagnostic, not a hard release gate: compare `responsive`, `success`, `p95`, `timeout`, and `recovered_without_restart`.

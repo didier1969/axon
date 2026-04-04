@@ -32,10 +32,10 @@ pub(crate) fn tools_catalog() -> Value {
                     "type": "object",
                     "properties": {
                         "action": { "type": "string", "enum": ["create", "update", "link"], "description": "L'opération à effectuer." },
-                        "entity": { "type": "string", "enum": ["pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation"], "description": "Le type d'objet concerné." },
+                        "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation"], "description": "Le type d'objet concerné." },
                         "data": {
                             "type": "object",
-                            "description": "Données JSON. \n- create (pillar: title, desc; requirement: title, desc, priority; concept: name, explanation, rationale; decision: title, context, rationale, status; milestone: title, status; stakeholder: name, role; validation: method, result).\n- update (id, status/desc/etc).\n- link (source_id, target_id)."
+                            "description": "Données JSON. \n- create (vision/pillar/requirement/concept/decision/milestone/stakeholder/validation) avec `project_slug`; le serveur retourne l'ID canonique `TYPE-CODE-NNN`.\n- update (id canonique requis, status/desc/etc).\n- link (source_id, target_id canoniques)."
                         }
                     },
                     "required": ["action", "entity", "data"]
@@ -155,7 +155,9 @@ pub(crate) fn tools_catalog() -> Value {
                 "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Milestones, Requirements, Decisions, Concepts) dans un document Markdown horodaté. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "project_slug": { "type": "string", "description": "Filtre l'export au projet demandé." }
+                    },
                     "required": []
                 }
             },
@@ -175,7 +177,9 @@ pub(crate) fn tools_catalog() -> Value {
                 "description": "[SOLL] Exécute des garde-fous minimaux de cohérence sur le graphe intentionnel. Validation en lecture seule: détecte les états orphelins évidents sans modifier SOLL. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "project_slug": { "type": "string", "description": "Filtre la validation au projet demandé." }
+                    },
                     "required": []
                 }
             },
@@ -399,6 +403,15 @@ pub(crate) fn tools_catalog() -> Value {
             json!({
                 "name": "truth_check",
                 "description": "[SYSTEM] Contrôle de cohérence reader-path vs canonical writer sur les compteurs critiques (File/Symbol/CALLS...).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }),
+            json!({
+                "name": "resume_vectorization",
+                "description": "[SYSTEM] Recrée explicitement la queue de vectorisation manquante à partir des fichiers déjà graph_indexed.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},

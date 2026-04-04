@@ -18,6 +18,9 @@ while [[ $# -gt 0 ]]; do
         --full)
             RUNTIME_MODE="full"
             ;;
+        --graph-only|--graphonly)
+            RUNTIME_MODE="graph_only"
+            ;;
         --read-only|--readonly)
             RUNTIME_MODE="read_only"
             ;;
@@ -34,6 +37,7 @@ Usage: ./scripts/start.sh [--full|--read-only|--mcp-only] [--no-dashboard]
 
 Modes:
   --full        Full runtime: scan + watcher + ingestion + SQL/MCP + dashboard
+  --graph-only  Scan + watcher + graph indexing + SQL/MCP + dashboard, without semantic/vector workers
   --read-only   SQL/MCP + dashboard only, without scan/watcher/ingestion workers
   --mcp-only    SQL/MCP only, without dashboard and without scan/watcher/ingestion workers
 EOF
