@@ -32,7 +32,7 @@ fn test_mcp_tools_list() {
         .as_array()
         .expect("tools is array");
 
-    assert_eq!(tools.len(), 20);
+    assert_eq!(tools.len(), 33);
 
     let tool_names: Vec<&str> = tools
         .iter()
@@ -44,6 +44,7 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"query"));
     assert!(tool_names.contains(&"restore_soll"));
     assert!(tool_names.contains(&"validate_soll"));
+    assert!(tool_names.contains(&"soll_work_plan"));
     assert!(tool_names.contains(&"inspect"));
     assert!(tool_names.contains(&"audit"));
     assert!(tool_names.contains(&"impact"));
@@ -57,6 +58,248 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"api_break_check"));
     assert!(tool_names.contains(&"simulate_mutation"));
     assert!(tool_names.contains(&"debug"));
+}
+
+#[test]
+fn test_soll_work_plan_orders_decision_requirement_milestone_chain() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-001', 'Runtime truth', 'Keep runtime truthful', 'draft', 'P1', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata) VALUES ('DEC-AXO-001', 'Rust authoritative', '', '', '', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Milestone (id, title, status, metadata) VALUES ('MIL-AXO-001', 'Deliver runtime slice', 'planned', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.SOLVES (source_id, target_id) VALUES ('DEC-AXO-001', 'REQ-AXO-001')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.BELONGS_TO (source_id, target_id) VALUES ('REQ-AXO-001', 'MIL-AXO-001')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_slug": "AXO", "format": "json" }
+        })),
+        id: Some(json!(501)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").expect("data payload");
+    let waves = data
+        .get("ordered_waves")
+        .and_then(|v| v.as_array())
+        .expect("waves array");
+
+    assert_eq!(waves.len(), 3, "{:?}", data);
+    assert_eq!(waves[0]["items"][0]["id"].as_str(), Some("DEC-AXO-001"));
+    assert_eq!(waves[1]["items"][0]["id"].as_str(), Some("REQ-AXO-001"));
+    assert_eq!(waves[2]["items"][0]["id"].as_str(), Some("MIL-AXO-001"));
+    assert_eq!(data["summary"]["cycle_count"].as_u64(), Some(0));
+}
+
+#[test]
+fn test_soll_work_plan_groups_parallel_ready_nodes_in_same_wave() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-001', 'Runtime truth', '', 'draft', 'P1', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-002', 'Operator cockpit', '', 'draft', 'P2', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_slug": "AXO", "format": "json" }
+        })),
+        id: Some(json!(502)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").expect("data payload");
+    let waves = data["ordered_waves"].as_array().expect("waves");
+    let first_wave_items = waves[0]["items"].as_array().expect("items");
+
+    assert_eq!(waves.len(), 1, "{:?}", data);
+    assert_eq!(first_wave_items.len(), 2, "{:?}", data);
+    assert_eq!(first_wave_items[0]["id"].as_str(), Some("REQ-AXO-001"));
+    assert_eq!(first_wave_items[1]["id"].as_str(), Some("REQ-AXO-002"));
+}
+
+#[test]
+fn test_soll_work_plan_reports_cycles_and_blocks_dependents() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-001', 'A', '', 'draft', 'P1', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-002', 'B', '', 'draft', 'P1', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-003', 'C', '', 'draft', 'P1', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.BELONGS_TO (source_id, target_id) VALUES ('REQ-AXO-001', 'REQ-AXO-002')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.BELONGS_TO (source_id, target_id) VALUES ('REQ-AXO-002', 'REQ-AXO-001')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.BELONGS_TO (source_id, target_id) VALUES ('REQ-AXO-001', 'REQ-AXO-003')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_slug": "AXO", "format": "json" }
+        })),
+        id: Some(json!(503)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").expect("data payload");
+    let cycles = data["cycles"].as_array().expect("cycles");
+    let blockers = data["blockers"].as_array().expect("blockers");
+    let waves = data["ordered_waves"].as_array().expect("waves");
+
+    assert_eq!(cycles.len(), 1, "{:?}", data);
+    assert!(cycles[0]["node_ids"].to_string().contains("REQ-AXO-001"));
+    assert!(cycles[0]["node_ids"].to_string().contains("REQ-AXO-002"));
+    assert!(blockers.iter().any(|v| v["id"].as_str() == Some("REQ-AXO-003")));
+    assert!(waves.is_empty(), "{:?}", data);
+}
+
+#[test]
+fn test_soll_work_plan_returns_contract_fields() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-001', 'Runtime truth', '', 'draft', 'P1', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_slug": "AXO", "format": "json", "include_ist": true }
+        })),
+        id: Some(json!(504)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").expect("data payload");
+
+    assert!(data.get("summary").is_some(), "{:?}", data);
+    assert!(data.get("blockers").is_some(), "{:?}", data);
+    assert!(data.get("cycles").is_some(), "{:?}", data);
+    assert!(data.get("ordered_waves").is_some(), "{:?}", data);
+    assert!(data.get("top_recommendations").is_some(), "{:?}", data);
+    assert!(data.get("validation_gates").is_some(), "{:?}", data);
+    assert!(data.get("metadata").is_some(), "{:?}", data);
+    assert_eq!(data["metadata"]["algorithm_version"].as_str(), Some("v1"));
+}
+
+#[test]
+fn test_soll_work_plan_respects_limit_and_marks_truncated() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-001', 'A', '', 'draft', 'P1', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-002', 'B', '', 'draft', 'P1', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-003', 'C', '', 'draft', 'P1', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_slug": "AXO", "format": "json", "limit": 2 }
+        })),
+        id: Some(json!(505)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").expect("data payload");
+    let waves = data["ordered_waves"].as_array().expect("waves");
+    let items = waves[0]["items"].as_array().expect("items");
+
+    assert_eq!(items.len(), 2, "{:?}", data);
+    assert_eq!(data["summary"]["returned_items"].as_u64(), Some(2));
+    assert_eq!(data["metadata"]["truncated"].as_bool(), Some(true));
+}
+
+#[test]
+fn test_soll_work_plan_returns_top_recommendations() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES ('REQ-AXO-001', 'A', '', 'draft', 'P1', '{}', '', '[]', '[]', 1)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata) VALUES ('DEC-AXO-001', 'D1', '', '', '', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.SOLVES (source_id, target_id) VALUES ('DEC-AXO-001', 'REQ-AXO-001')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_work_plan",
+            "arguments": { "project_slug": "AXO", "format": "json", "top": 1 }
+        })),
+        id: Some(json!(506)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let data = result.get("data").expect("data payload");
+    let top = data["top_recommendations"].as_array().expect("top recommendations");
+
+    assert_eq!(top.len(), 1, "{:?}", data);
+    assert_eq!(top[0]["id"].as_str(), Some("DEC-AXO-001"));
+    assert_eq!(top[0]["kind"].as_str(), Some("unblocker"));
+    assert_eq!(data["summary"]["top_count"].as_u64(), Some(1));
+    assert_eq!(data["metadata"]["top"].as_u64(), Some(1));
 }
 
 #[test]
@@ -662,7 +905,7 @@ fn test_axon_health_god_objects() {
         )
         .unwrap();
 
-    for i in 0..10 {
+    for i in 0..20 {
         server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::dep{}', 'dep{}', 'function', false, true, false, 'global')", i, i)).unwrap();
         server
             .graph_store
@@ -690,7 +933,7 @@ fn test_axon_health_god_objects() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("God Object detected") || content.contains("GodClass"));
+    assert!(content.contains("God Objects detected") || content.contains("GodClass"));
 }
 
 #[test]
@@ -946,7 +1189,7 @@ fn test_axon_health_uses_project_slug_even_when_path_does_not_contain_project_na
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Health Report for beta"));
+    assert!(content.contains("Health Report: beta"));
     assert!(content.contains("Coverage 100%"));
     assert!(!content.contains("GodClass"));
     assert!(!content.contains("seems unindexed"));
@@ -1778,6 +2021,110 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
 }
 
 #[test]
+fn test_axon_query_exact_config_lookup_prefers_operational_source_over_documentary_chunk() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('config/runtime.exs', 'axon')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'axon')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('axon::runtime_config', 'runtime_config', 'module', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('axon::audit_section', 'audit_section', 'section', true, true, false, 'axon')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('config/runtime.exs', 'axon::runtime_config')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'axon::audit_section')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('axon::runtime_config::chunk', 'symbol', 'axon::runtime_config', 'axon', 'module', 'symbol: runtime_config\nkind: module\nfile: config/runtime.exs\nlines: 1-12\n\nconfigures Credo.Check.Refactor.CyclomaticComplexity threshold for the application runtime', 'hash-runtime', 1, 12)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('axon::audit_section::chunk', 'symbol', 'axon::audit_section', 'axon', 'section', 'symbol: audit_section\nkind: section\nfile: docs/AXON_TEXT_PARSING_AUDIT.md\nlines: 20-35\n\naudit notes mention Credo.Check.Refactor.CyclomaticComplexity as a failing lookup scenario', 'hash-audit', 20, 35)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "query",
+            "arguments": { "query": "Credo.Check.Refactor.CyclomaticComplexity", "project": "axon" }
+        })),
+        id: Some(json!(281)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    let config_pos = content
+        .find("config/runtime.exs")
+        .expect("operational config result should appear");
+    let doc_pos = content
+        .find("docs/AXON_TEXT_PARSING_AUDIT.md")
+        .expect("documentary result should appear");
+    assert!(
+        config_pos < doc_pos,
+        "operational config source should rank ahead of documentary prose: {content}"
+    );
+    assert!(content.contains("Type de resultat"));
+    assert!(content.contains("source operatoire"), "{content}");
+    assert!(content.contains("config_lookup_exact"), "{content}");
+}
+
+#[test]
+fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_match() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_slug) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'axon')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('axon::audit_section', 'audit_section', 'section', true, true, false, 'axon')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'axon::audit_section')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('axon::audit_section::chunk', 'symbol', 'axon::audit_section', 'axon', 'section', 'symbol: audit_section\nkind: section\nfile: docs/AXON_TEXT_PARSING_AUDIT.md\nlines: 20-35\n\naudit notes mention Credo.Check.Refactor.CyclomaticComplexity as a failing lookup scenario', 'hash-audit-only', 20, 35)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "query",
+            "arguments": { "query": "Credo.Check.Refactor.CyclomaticComplexity", "project": "axon" }
+        })),
+        id: Some(json!(282)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("docs/AXON_TEXT_PARSING_AUDIT.md"), "{content}");
+    assert!(content.contains("Type de resultat"), "{content}");
+    assert!(content.contains("documentaire"), "{content}");
+    assert!(content.contains("config_lookup_exact"), "{content}");
+}
+
+#[test]
 fn test_axon_query_falls_back_when_contains_is_absent() {
     let server = create_test_server();
     server
@@ -1887,7 +2234,7 @@ fn test_vcr2_impact_before_change_on_public_api() {
         .as_str()
         .unwrap();
 
-    assert!(api_break_text.contains("RISQUE DE RUPTURE D'API"));
+    assert!(api_break_text.contains("warn_api_break_risk") || api_break_text.contains("public api consumer impact detected"));
     assert!(api_break_text.contains("consumer_a"));
     assert!(api_break_text.contains("consumer_b"));
 }
@@ -2214,7 +2561,7 @@ fn test_axon_health_warns_when_project_contains_degraded_files() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Health Report for alpha"), "{}", content);
+    assert!(content.contains("Health Report: alpha"), "{}", content);
     assert!(content.contains("verite partielle"), "{}", content);
     assert!(content.contains("indexed_degraded"), "{}", content);
 }

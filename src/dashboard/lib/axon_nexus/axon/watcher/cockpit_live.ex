@@ -7,14 +7,17 @@ defmodule Axon.Watcher.CockpitLive do
   alias Axon.Watcher.SqlGateway
   alias Axon.Watcher.Telemetry
 
-  @tick_ms 750
+  @reconcile_ms 20_000
+  @mcp_probe_ms 5_000
+  @event_refresh_ms 400
 
   @impl true
   def mount(_params, _session, socket) do
     repo_slug = System.get_env("AXON_REPO_SLUG") || Path.expand(".") |> Path.basename()
 
     if connected?(socket) do
-      :timer.send_interval(@tick_ms, self(), :tick)
+      :timer.send_interval(@reconcile_ms, self(), :reconcile_tick)
+      :timer.send_interval(@mcp_probe_ms, self(), :mcp_probe_tick)
       Phoenix.PubSub.subscribe(AxonDashboard.PubSub, "bridge_events")
     end
 
@@ -36,7 +39,10 @@ defmodule Axon.Watcher.CockpitLive do
         readiness: default_readiness(),
         scan_complete: false,
         project_count: 0,
-        reason_count: 0
+        reason_count: 0,
+        event_refresh_scheduled: false,
+        snapshot_refresh_in_flight: false,
+        snapshot_refresh_pending: false
       )
       |> assign_snapshot(build_snapshot(repo_slug))
 
@@ -50,16 +56,60 @@ defmodule Axon.Watcher.CockpitLive do
 
   @impl true
   def handle_info({:bridge_event, event}, socket) do
-    {:noreply, apply_bridge_event(socket, event)}
+    socket =
+      socket
+      |> apply_bridge_event(event)
+      |> schedule_event_refresh(event)
+
+    {:noreply, socket}
   end
 
   @impl true
-  def handle_info(:tick, socket) do
-    socket = maybe_probe_mcp(socket)
-    started_at = System.monotonic_time(:millisecond)
-    socket = refresh_snapshot(socket)
-    Telemetry.mark_dashboard_render(System.monotonic_time(:millisecond) - started_at)
+  def handle_info(:mcp_probe_tick, socket) do
+    {:noreply, maybe_probe_mcp(socket)}
+  end
+
+  @impl true
+  def handle_info(:reconcile_tick, socket) do
+    {:noreply, request_snapshot_refresh(socket)}
+  end
+
+  @impl true
+  def handle_info(:event_refresh, socket) do
+    socket =
+      socket
+      |> assign(:event_refresh_scheduled, false)
+      |> request_snapshot_refresh()
+
     {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info(:snapshot_refresh_now, socket) do
+    {:noreply, request_snapshot_refresh(socket)}
+  end
+
+  @impl true
+  def handle_info({:snapshot_ready, started_at, snapshot}, socket) do
+    socket =
+      socket
+      |> assign(:snapshot_refresh_in_flight, false)
+      |> apply_snapshot(snapshot)
+      |> push_event("workspace_sunburst", sunburst_payload(snapshot.workspace))
+
+    Telemetry.mark_dashboard_render(System.monotonic_time(:millisecond) - started_at)
+
+    if socket.assigns.snapshot_refresh_pending do
+      send(self(), :snapshot_refresh_now)
+      {:noreply, assign(socket, :snapshot_refresh_pending, false)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_info({:snapshot_failed, _started_at, _reason}, socket) do
+    {:noreply, assign(socket, :snapshot_refresh_in_flight, false)}
   end
 
   @impl true
@@ -159,26 +209,22 @@ defmodule Axon.Watcher.CockpitLive do
       <section class="cockpit-band">
         <div class="band-title-row">
           <div>
-            <p class="eyebrow">Workspace Flow</p>
-            <h2>Sunburst d'avancement des fichiers</h2>
+            <p class="eyebrow">Workspace</p>
+            <h2>Sunburst progression</h2>
           </div>
-          <span class="band-kicker">Known: {@workspace["known"]}</span>
+          <span class="band-kicker">Push live (ECharts)</span>
         </div>
-
         <div
           id="workspace-sunburst"
-          class="workspace-sunburst"
           phx-hook="WorkspaceSunburst"
+          phx-update="ignore"
+          class="workspace-sunburst"
           data-known={@workspace["known"] || 0}
-          data-indexed={@workspace["indexed"] || 0}
-          data-indexed-degraded={@workspace["indexed_degraded"] || 0}
-          data-pending={@workspace["pending"] || 0}
-          data-indexing={@workspace["indexing"] || 0}
-          data-oversized={@workspace["oversized"] || 0}
-          data-skipped={@workspace["skipped"] || 0}
-          data-deleted={@workspace["deleted"] || 0}
+          data-completed={@workspace["completed"] || 0}
           data-graph-ready={@workspace["graph_ready"] || 0}
-          data-vector-ready-file={@workspace["vector_ready_file"] || 0}
+          data-vector-file={@workspace["vector_ready_file"] || 0}
+          data-vector-graph={@workspace["vector_ready_graph"] || 0}
+          style="width:100%;height:360px;"
         >
         </div>
       </section>
@@ -606,9 +652,7 @@ defmodule Axon.Watcher.CockpitLive do
     |> stream(:reasons, snapshot.reasons, reset: true)
   end
 
-  defp refresh_snapshot(socket) do
-    snapshot = build_snapshot(socket.assigns.repo_slug)
-
+  defp apply_snapshot(socket, snapshot) do
     snapshot =
       snapshot
       |> preserve_workspace(socket.assigns.workspace)
@@ -616,6 +660,28 @@ defmodule Axon.Watcher.CockpitLive do
       |> preserve_reasons(socket.assigns.reason_count, socket.assigns.reasons)
 
     assign_snapshot(socket, snapshot)
+  end
+
+  defp request_snapshot_refresh(socket) do
+    if socket.assigns.snapshot_refresh_in_flight do
+      assign(socket, :snapshot_refresh_pending, true)
+    else
+      parent = self()
+      repo_slug = socket.assigns.repo_slug
+      started_at = System.monotonic_time(:millisecond)
+
+      Task.start(fn ->
+        try do
+          send(parent, {:snapshot_ready, started_at, build_snapshot(repo_slug)})
+        rescue
+          error -> send(parent, {:snapshot_failed, started_at, error})
+        end
+      end)
+
+      socket
+      |> assign(:snapshot_refresh_in_flight, true)
+      |> assign(:snapshot_refresh_pending, false)
+    end
   end
 
   defp build_snapshot(repo_slug) do
@@ -998,21 +1064,39 @@ defmodule Axon.Watcher.CockpitLive do
 
   defp maybe_probe_mcp(socket) do
     now = System.monotonic_time(:millisecond)
-    last = socket.assigns[:last_mcp_probe_ms] || 0
 
-    if now - last >= 2_000 do
-      case SqlGateway.mcp_ping() do
-        {:ok, duration_ms} ->
-          Telemetry.mark_mcp_probe_success(duration_ms)
+    case SqlGateway.mcp_ping() do
+      {:ok, duration_ms} ->
+        Telemetry.mark_mcp_probe_success(duration_ms)
 
-        {:error, reason, duration_ms} ->
-          Telemetry.mark_mcp_probe_error(reason, duration_ms)
-      end
+      {:error, reason, duration_ms} ->
+        Telemetry.mark_mcp_probe_error(reason, duration_ms)
+    end
 
-      assign(socket, :last_mcp_probe_ms, now)
+    assign(socket, :last_mcp_probe_ms, now)
+  end
+
+  defp schedule_event_refresh(socket, event) do
+    if should_refresh_from_bridge_event?(event) and not socket.assigns.event_refresh_scheduled do
+      Process.send_after(self(), :event_refresh, @event_refresh_ms)
+      assign(socket, :event_refresh_scheduled, true)
     else
       socket
     end
+  end
+
+  defp should_refresh_from_bridge_event?(%{"FileIndexed" => _payload}), do: true
+  defp should_refresh_from_bridge_event?(%{"ScanComplete" => _payload}), do: true
+  defp should_refresh_from_bridge_event?(_event), do: false
+
+  defp sunburst_payload(workspace) do
+    %{
+      "known" => Map.get(workspace, "known", 0) || 0,
+      "completed" => Map.get(workspace, "completed", 0) || 0,
+      "graph_ready" => Map.get(workspace, "graph_ready", 0) || 0,
+      "vector_ready_file" => Map.get(workspace, "vector_ready_file", 0) || 0,
+      "vector_ready_graph" => Map.get(workspace, "vector_ready_graph", 0) || 0
+    }
   end
 
   defp slug_dom_id(value) do

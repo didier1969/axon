@@ -143,14 +143,28 @@ impl GraphStore {
             SELECT s.name, count(*) AS fan_in
             FROM Symbol s
             JOIN CALLS c ON c.target_id = s.id
+            LEFT JOIN CONTAINS rel ON rel.target_id = s.id
+            LEFT JOIN File f ON f.path = rel.source_id
             {}
+            AND length(s.name) >= 3
+            AND lower(s.name) NOT LIKE '__webpack%'
+            AND lower(s.name) NOT LIKE '%minified%'
+            AND (
+                f.path IS NULL
+                OR (
+                    lower(f.path) NOT LIKE '%/priv/static/%'
+                    AND lower(f.path) NOT LIKE '%/node_modules/%'
+                    AND lower(f.path) NOT LIKE '%/dist/%'
+                    AND lower(f.path) NOT LIKE '%/_build/%'
+                )
+            )
             GROUP BY s.name
-            HAVING count(*) >= 5
+            HAVING count(*) >= 20
         ",
             if scoped {
                 format!("WHERE s.project_slug = '{}'", escaped)
             } else {
-                String::new()
+                "WHERE 1=1".to_string()
             }
         );
         let res = self.query_json(&query)?;

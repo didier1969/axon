@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use super::format::format_table_from_json;
+use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
 
 impl McpServer {
@@ -26,6 +26,41 @@ impl McpServer {
             .first()?
             .as_str()
             .map(|value| value.to_string())
+    }
+
+    fn suggest_scoped_symbols(
+        &self,
+        symbol: &str,
+        project: Option<&str>,
+        limit: usize,
+    ) -> String {
+        let needle = symbol.trim();
+        if needle.is_empty() {
+            return "[]".to_string();
+        }
+        let (query, params) = if let Some(project) = project {
+            (
+                "SELECT name, kind, COALESCE(project_slug, 'unknown') \
+                 FROM Symbol \
+                 WHERE project_slug = $project \
+                   AND lower(name) LIKE lower($pat) \
+                 ORDER BY name \
+                 LIMIT $limit",
+                json!({ "project": project, "pat": format!("%{}%", needle), "limit": limit as u64 }),
+            )
+        } else {
+            (
+                "SELECT name, kind, COALESCE(project_slug, 'unknown') \
+                 FROM Symbol \
+                 WHERE lower(name) LIKE lower($pat) \
+                 ORDER BY name \
+                 LIMIT $limit",
+                json!({ "pat": format!("%{}%", needle), "limit": limit as u64 }),
+            )
+        };
+        self.graph_store
+            .query_json_param(query, &params)
+            .unwrap_or_else(|_| "[]".to_string())
     }
 
     fn build_local_projection_section(
@@ -59,6 +94,7 @@ impl McpServer {
 
     pub(crate) fn axon_impact(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
+        let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
         let Some(target_id) = self.resolve_scoped_symbol_id(symbol, project) else {
@@ -189,31 +225,46 @@ impl McpServer {
                     return self.axon_impact_without_calls(symbol, project, depth);
                 }
 
-                let mut report = format!("## 💥 Analyse d'Impact Transversale : {}\n\n", symbol);
+                let mut evidence = String::new();
                 if let Some(note) = self.project_scope_truth_note(project) {
-                    report.push_str(&note);
-                    report.push('\n');
+                    evidence.push_str(&note);
+                    evidence.push('\n');
                 }
                 if let Some(note) =
                     self.degraded_truth_note(self.degraded_symbol_count(symbol, project))
                 {
-                    report.push_str(&note);
-                    report.push('\n');
+                    evidence.push_str(&note);
+                    evidence.push('\n');
                 }
-                report.push_str(&format!(
+                evidence.push_str(&format!(
                     "**Rayon d'Impact (profondeur {}) :** {} composants affectés à travers le Treillis.\n\n",
                     depth, impact_radius
                 ));
-                report.push_str(&format!(
+                evidence.push_str(&format!(
                     "**Coverage:** confidence={} (direct_calls={}, calls_nif={}, inferred_bridge={})\n\n",
                     confidence_label, direct_edges, nif_edges, inferred_edges
                 ));
-                report.push_str(&table);
+                evidence.push_str(&table);
                 if let Some(section) =
                     self.build_local_projection_section(symbol, &target_id, depth)
                 {
-                    report.push_str(&section);
+                    evidence.push_str(&section);
                 }
+                let scope = project
+                    .map(|p| format!("project:{}", p))
+                    .unwrap_or_else(|| "workspace:*".to_string());
+                let report = format!(
+                    "## 💥 Analyse d'Impact Transversale : {}\n\n{}",
+                    symbol,
+                    format_standard_contract(
+                        "ok",
+                        "impact analysis computed",
+                        &scope,
+                        &evidence_by_mode(&evidence, mode),
+                        &["review top impacted symbols", "run simulate_mutation before editing"],
+                        confidence_label,
+                    )
+                );
 
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
@@ -252,10 +303,26 @@ impl McpServer {
             .unwrap_or_else(|_| "[]".to_string());
         let symbol_rows: Vec<Vec<Value>> = serde_json::from_str(&symbol_res).unwrap_or_default();
         if symbol_rows.is_empty() {
+            let suggestions = self.suggest_scoped_symbols(symbol, project, 8);
+            let suggestions_table = format_table_from_json(
+                &suggestions,
+                &["Symbole suggéré", "Type", "Projet"],
+            );
             return Some(json!({
                 "content": [{
                     "type": "text",
-                    "text": format!("## 💥 Analyse d'Impact Transversale : {}\n\nAucun symbole correspondant n'a ete trouve.", symbol)
+                    "text": format!(
+                        "## 💥 Analyse d'Impact Transversale : {}\n\n{}",
+                        symbol,
+                        format_standard_contract(
+                            "warn_input_not_found",
+                            "symbol not found in current scope",
+                            &project.map(|p| format!("project:{}", p)).unwrap_or_else(|| "workspace:*".to_string()),
+                            &format!("Aucun symbole exact correspondant n'a ete trouve dans le scope courant.\n\n### Suggestions\n\n{}", suggestions_table),
+                            &["retry with one suggested symbol", "use query/inspect to validate exact name"],
+                            "medium",
+                        )
+                    )
                 }]
             }));
         }
@@ -297,6 +364,12 @@ impl McpServer {
 
     pub(crate) fn axon_diff(&self, args: &Value) -> Option<Value> {
         let diff = args.get("diff_content")?.as_str()?;
+        let mode = args.get("mode").and_then(|v| v.as_str());
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.clamp(10, 500) as usize)
+            .unwrap_or(120);
         let mut files = std::collections::HashSet::new();
         for line in diff.lines() {
             if let Some(path) = line.strip_prefix("+++ b/") {
@@ -311,14 +384,38 @@ impl McpServer {
         let mut all_results = Vec::new();
         for file in files {
             let query = format!(
-                "SELECT s.name, s.kind FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id WHERE f.path LIKE '%{}%'",
-                file.replace("'", "''")
+                "SELECT s.name, s.kind FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id WHERE f.path LIKE '%{}%' LIMIT {}",
+                file.replace("'", "''"),
+                limit
             );
             if let Ok(res) = self.graph_store.query_json(&query) {
                 all_results.push(format!("File: {}\nSymbols:\n{}", file, res));
             }
         }
-        Some(json!({ "content": [{ "type": "text", "text": all_results.join("\n\n") }] }))
+        let mut joined = all_results.join("\n\n");
+        let truncated = if joined.len() > 60_000 {
+            joined.truncate(60_000);
+            true
+        } else {
+            false
+        };
+        let evidence = if truncated {
+            format!("{}\n\n[truncated=true, max_chars=60000]", joined)
+        } else {
+            joined
+        };
+        let report = format!(
+            "## 🧬 Diff Impact\n\n{}",
+            format_standard_contract(
+                "ok",
+                "diff symbol extraction completed",
+                "workspace:*",
+                &evidence_by_mode(&evidence, mode),
+                &["increase `limit` if needed", "run impact on selected symbols for blast radius"],
+                if truncated { "medium" } else { "high" },
+            )
+        );
+        Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
     pub(crate) fn axon_simulate_mutation(&self, args: &Value) -> Option<Value> {
@@ -331,17 +428,34 @@ impl McpServer {
                 }));
             }
         };
+        let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2);
         let target_id = match self.resolve_scoped_symbol_id(symbol, project) {
             Some(id) => id,
             None => {
+                let suggestions = self.suggest_scoped_symbols(symbol, project, 8);
+                let suggestions_table =
+                    format_table_from_json(&suggestions, &["Symbole suggéré", "Type", "Projet"]);
                 return Some(json!({
                     "content": [{
                         "type": "text",
-                        "text": format!("Symbol not found in current scope: {}", symbol)
-                    }],
-                    "isError": true
+                        "text": format!(
+                            "## 🔮 Dry-Run Mutation : {}\n\n{}",
+                            symbol,
+                            format_standard_contract(
+                                "warn_input_not_found",
+                                "symbol not found in current scope",
+                                &project.map(|p| format!("project:{}", p)).unwrap_or_else(|| "workspace:*".to_string()),
+                                &evidence_by_mode(
+                                    &format!("Aucun symbole exact n'a ete trouve dans le scope courant.\n\n### Suggestions\n\n{}", suggestions_table),
+                                    mode,
+                                ),
+                                &["retry with one suggested symbol", "run inspect to validate symbol name"],
+                                "medium",
+                            )
+                        )
+                    }]
                 }));
             }
         };
@@ -362,8 +476,19 @@ impl McpServer {
             Ok(res) => {
                 let count: i64 = res.trim().parse().unwrap_or(0);
                 let report = format!(
-                    "🔮 Dry-Run Mutation : Modifier '{}' va impacter en cascade ~{} composants dans l'architecture.",
-                    symbol, count
+                    "## 🔮 Dry-Run Mutation : {}\n\n{}",
+                    symbol,
+                    format_standard_contract(
+                        "ok",
+                        "mutation blast-radius estimated",
+                        &project.map(|p| format!("project:{}", p)).unwrap_or_else(|| "workspace:*".to_string()),
+                        &evidence_by_mode(
+                            &format!("Modifier '{}' va impacter en cascade ~{} composants dans l'architecture.", symbol, count),
+                            mode,
+                        ),
+                        &["review impact output for precise affected components"],
+                        "high",
+                    )
                 );
                 Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
