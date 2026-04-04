@@ -68,44 +68,44 @@ devenv shell
 Bootstrap initial ou après dérive importante:
 
 ```bash
-./scripts/setup_v2.sh
+./scripts/setup.sh
 ```
 
 Démarrage quotidien:
 
 ```bash
-./scripts/start-v2.sh
+./scripts/start.sh
 ```
 
 Arrêt propre:
 
 ```bash
-./scripts/stop-v2.sh
+./scripts/stop.sh
 ```
 
 ## Ce que font les scripts
 
-- `setup_v2.sh`
+- `setup.sh`
   - prépare l’environnement
   - compile le core Rust
   - compile le dashboard Elixir
   - exécute les validations principales
 
-- `start-v2.sh`
+- `start.sh`
   - vérifie l’environnement Devenv
   - auto-répare le binaire `release` si nécessaire
   - démarre Axon dans `tmux`
   - attend le dashboard et le runtime
   - vérifie la surface SQL live quand le core est prêt
 
-- `stop-v2.sh`
+- `stop.sh`
   - arrête uniquement les processus Axon
   - ferme la session `tmux`
   - nettoie sockets, locks et WAL locaux
 
 ## Vérification minimale après démarrage
 
-Une fois `./scripts/start-v2.sh` terminé, les surfaces attendues sont celles affichées par le script.
+Une fois `./scripts/start.sh` terminé, les surfaces attendues sont celles affichées par le script.
 
 Les ports sont stables par défaut, mais l’adresse annoncée peut dépendre du bind courant de l’environnement local.
 

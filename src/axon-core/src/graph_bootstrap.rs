@@ -1,6 +1,6 @@
 use std::ffi::{c_void, CString};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -79,6 +79,8 @@ impl GraphStore {
                 pool: pool.clone(),
                 db_path,
                 recent_write_epoch_ms: AtomicU64::new(0),
+                last_reader_refresh_epoch_ms: AtomicU64::new(Self::current_epoch_ms()),
+                reader_refresh_failures_total: AtomicU64::new(0),
             };
 
             if !is_memory {
@@ -177,6 +179,71 @@ impl GraphStore {
         }
     }
 
+    pub fn refresh_reader_snapshot(&self) -> Result<()> {
+        let Some(db_path) = self.db_path.as_ref() else {
+            self.last_reader_refresh_epoch_ms
+                .store(Self::current_epoch_ms(), Ordering::Relaxed);
+            return Ok(());
+        };
+
+        let c_path = CString::new(db_path.to_string_lossy().to_string())?;
+        unsafe {
+            let init_fn: LibSymbol<InitDbFunc> = self.pool.lib.get(b"duckdb_init_db\0")?;
+            let close_fn: LibSymbol<CloseDbFunc> = self.pool.lib.get(b"duckdb_close_db\0")?;
+
+            let new_reader = init_fn(c_path.as_ptr(), true);
+            if new_reader.is_null() {
+                self.reader_refresh_failures_total
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(anyhow!("Failed to init refreshed DuckDB Reader"));
+            }
+
+            let mut soll_path = db_path
+                .parent()
+                .ok_or_else(|| anyhow!("DB parent path unavailable for reader refresh"))?
+                .to_path_buf();
+            soll_path.push("sanctuary/soll.db");
+            let attach_q = format!("ATTACH '{}' AS soll;", soll_path.to_string_lossy().replace('\'', "''"));
+            self.setup_session(new_reader, &attach_q)?;
+
+            let writer_ctx = *self
+                .pool
+                .writer_ctx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let old_reader = {
+                let mut reader_guard = self
+                    .pool
+                    .reader_ctx
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                let previous = *reader_guard;
+                *reader_guard = new_reader;
+                previous
+            };
+
+            if !old_reader.is_null() && old_reader != writer_ctx {
+                close_fn(old_reader);
+            }
+        }
+
+        self.last_reader_refresh_epoch_ms
+            .store(Self::current_epoch_ms(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn reader_snapshot_age_ms(&self) -> u64 {
+        let ts = self.last_reader_refresh_epoch_ms.load(Ordering::Relaxed);
+        if ts == 0 {
+            return u64::MAX;
+        }
+        Self::current_epoch_ms().saturating_sub(ts)
+    }
+
+    pub fn reader_refresh_failures_total(&self) -> u64 {
+        self.reader_refresh_failures_total.load(Ordering::Relaxed)
+    }
+
     fn setup_session(&self, ctx: *mut c_void, attach_query: &str) -> Result<()> {
         unsafe {
             let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
@@ -258,6 +325,10 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.Validation (id VARCHAR PRIMARY KEY, method VARCHAR, result VARCHAR, timestamp BIGINT, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Concept (name VARCHAR PRIMARY KEY, explanation VARCHAR, rationale VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Stakeholder (name VARCHAR PRIMARY KEY, role VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_slug VARCHAR, payload VARCHAR, created_at BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
         self.execute(
             "CREATE TABLE IF NOT EXISTS soll.EPITOMIZES (source_id VARCHAR, target_id VARCHAR)",
         )?;
@@ -370,14 +441,25 @@ impl GraphStore {
         self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS status VARCHAR")?;
         self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS priority VARCHAR")?;
         self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS owner VARCHAR")?;
+        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS acceptance_criteria VARCHAR")?;
+        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS evidence_refs VARCHAR")?;
+        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS updated_at BIGINT")?;
         self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS description VARCHAR")?;
         self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS context VARCHAR")?;
         self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS rationale VARCHAR")?;
         self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS supersedes_decision_id VARCHAR")?;
+        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS impact_scope VARCHAR")?;
+        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS updated_at BIGINT")?;
         self.execute("ALTER TABLE soll.Milestone ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
         self.execute("ALTER TABLE soll.Validation ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
         self.execute("ALTER TABLE soll.Concept ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
         self.execute("ALTER TABLE soll.Stakeholder ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_slug VARCHAR, payload VARCHAR, created_at BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
         Ok(())
     }
 
@@ -387,6 +469,19 @@ impl GraphStore {
             ("ingestion_version", IST_INGESTION_VERSION),
             ("embedding_version", IST_EMBEDDING_VERSION),
         ];
+
+        let before_graph_ready = self
+            .query_count("SELECT count(*) FROM File WHERE graph_ready = TRUE")
+            .unwrap_or(0);
+        let before_vector_ready = self
+            .query_count("SELECT count(*) FROM File WHERE vector_ready = TRUE")
+            .unwrap_or(0);
+        let before_vec_queue_queued = self
+            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'queued'")
+            .unwrap_or(0);
+        let before_vec_queue_inflight = self
+            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'")
+            .unwrap_or(0);
 
         let current = self.load_runtime_metadata()?;
         let schema_matches = current
@@ -398,6 +493,23 @@ impl GraphStore {
         let embedding_matches = current
             .get("embedding_version")
             .is_some_and(|v| v == IST_EMBEDDING_VERSION);
+
+        info!(
+            "IST compatibility preflight: current(schema={}, ingestion={}, embedding={}) expected(schema={}, ingestion={}, embedding={}) matches(schema={}, ingestion={}, embedding={}) before(graph_ready={}, vector_ready={}, vec_queue_queued={}, vec_queue_inflight={})",
+            current.get("schema_version").map(String::as_str).unwrap_or("missing"),
+            current.get("ingestion_version").map(String::as_str).unwrap_or("missing"),
+            current.get("embedding_version").map(String::as_str).unwrap_or("missing"),
+            IST_SCHEMA_VERSION,
+            IST_INGESTION_VERSION,
+            IST_EMBEDDING_VERSION,
+            schema_matches,
+            ingestion_matches,
+            embedding_matches,
+            before_graph_ready,
+            before_vector_ready,
+            before_vec_queue_queued,
+            before_vec_queue_inflight
+        );
 
         let mut applied = Vec::new();
 
@@ -430,6 +542,28 @@ impl GraphStore {
         }
 
         self.write_runtime_metadata(&expected)?;
+
+        let after_graph_ready = self
+            .query_count("SELECT count(*) FROM File WHERE graph_ready = TRUE")
+            .unwrap_or(0);
+        let after_vector_ready = self
+            .query_count("SELECT count(*) FROM File WHERE vector_ready = TRUE")
+            .unwrap_or(0);
+        let after_vec_queue_queued = self
+            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'queued'")
+            .unwrap_or(0);
+        let after_vec_queue_inflight = self
+            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'")
+            .unwrap_or(0);
+
+        info!(
+            "IST compatibility actions={:?} after(graph_ready={}, vector_ready={}, vec_queue_queued={}, vec_queue_inflight={})",
+            applied,
+            after_graph_ready,
+            after_vector_ready,
+            after_vec_queue_queued,
+            after_vec_queue_inflight
+        );
         Ok(())
     }
 

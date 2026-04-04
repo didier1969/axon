@@ -48,5 +48,5 @@ echo "--- Elixir Dashboard Tests ---"
 devenv shell -- bash -lc "cd '$DASHBOARD_DIR' && mix test"
 
 echo "🏁 Bootstrap complete."
-echo "Next step: ./scripts/start-v2.sh"
-echo "Stop running services with: ./scripts/stop-v2.sh"
+echo "Next step: ./scripts/start.sh"
+echo "Stop running services with: ./scripts/stop.sh"

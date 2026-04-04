@@ -24,10 +24,12 @@ Already delivered in code and verified:
 - probationary deferral for cold oversized candidates before definitive refusal
 - cockpit exposure of `oversized_refusals_total` and `degraded_mode_entries_total`
 
-Still remaining for this plan:
+Completed:
 
 - degradation-before-refusal where feasible
 - final operator wording for probationary oversized files versus definitive oversized refusals
+
+Current status: all tasks from this plan are implemented and covered by tests in Rust + dashboard.
 
 ## Dependency Decision
 

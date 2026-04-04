@@ -15,6 +15,14 @@ defmodule Axon.Watcher.Progress do
 
   def get_snapshot(_repo_slug) do
     rows = query_rows(snapshot_query())
+    soll_coverage = query_rows(soll_coverage_query())
+    soll_revision = query_rows(soll_revision_query())
+    global_graph_vectors = query_rows(global_graph_vector_query())
+    global_nodes = query_rows(global_nodes_query())
+    global_links = query_rows(global_links_query())
+    project_nodes = query_rows(project_nodes_query()) |> decode_scope_counts()
+    project_links = query_rows(project_links_query()) |> decode_scope_counts()
+    project_graph_vectors = query_rows(project_graph_vector_query()) |> decode_scope_counts()
 
     workspace_counts = rows |> section_rows("workspace_status") |> normalize_counts()
     stage_counts = rows |> section_rows("workspace_stage") |> normalize_counts()
@@ -44,6 +52,8 @@ defmodule Axon.Watcher.Progress do
         total = Enum.sum(Map.values(counts))
         completed = completed_total(counts)
         readiness = Map.get(readiness_by_project, slug, %{graph_ready: 0, vector_ready: 0})
+        project_nodes_count = Map.get(project_nodes, slug, 0)
+        project_graph_vectors_count = Map.get(project_graph_vectors, slug, 0)
 
         %{
           slug: slug,
@@ -56,7 +66,14 @@ defmodule Axon.Watcher.Progress do
           oversized: oversized_total(counts),
           skipped: Map.get(counts, "skipped", 0),
           graph_ready: readiness.graph_ready,
+          graph_ready_pct: percentage(readiness.graph_ready, total),
           vector_ready: readiness.vector_ready,
+          vector_ready_file: readiness.vector_ready,
+          vector_ready_file_pct: percentage(readiness.vector_ready, total),
+          vector_ready_graph: project_graph_vectors_count,
+          vector_ready_graph_pct: percentage(project_graph_vectors_count, project_nodes_count),
+          nodes_count: project_nodes_count,
+          links_count: Map.get(project_links, slug, 0),
           progress: percentage(completed, total),
           readiness: readiness_label(counts, total)
         }
@@ -82,6 +99,7 @@ defmodule Axon.Watcher.Progress do
     workspace = %{
       "status" => workspace_state(workspace_counts, total),
       "progress" => progress,
+      "global_indexation_pct" => progress,
       "synced" => indexed + degraded,
       "total" => total,
       "indexed" => indexed,
@@ -92,13 +110,25 @@ defmodule Axon.Watcher.Progress do
       "skipped" => skipped,
       "deleted" => Map.get(workspace_counts, "deleted", 0),
       "graph_ready" => graph_ready,
+      "graph_ready_pct" => percentage(graph_ready, total),
       "vector_ready" => vector_ready,
+      "vector_ready_file" => vector_ready,
+      "vector_ready_file_pct" => percentage(vector_ready, total),
+      "vector_ready_graph" => decode_single_count(global_graph_vectors),
+      "nodes_count" => decode_single_count(global_nodes),
+      "vector_ready_graph_pct" =>
+        percentage(decode_single_count(global_graph_vectors), decode_single_count(global_nodes)),
+      "links_count" => decode_single_count(global_links),
       "stage_promoted" => Map.get(stage_counts, "promoted", 0),
       "stage_claimed" => Map.get(stage_counts, "claimed", 0),
       "stage_writer_pending_commit" => Map.get(stage_counts, "writer_pending_commit", 0),
       "stage_graph_indexed" => Map.get(stage_counts, "graph_indexed", 0),
       "known" => total,
       "completed" => terminal,
+      "soll_done" => decode_soll_metric(soll_coverage, 1),
+      "soll_partial" => decode_soll_metric(soll_coverage, 2),
+      "soll_missing" => decode_soll_metric(soll_coverage, 3),
+      "soll_last_revision" => decode_soll_revision(soll_revision),
       "last_update" => DateTime.utc_now() |> DateTime.to_iso8601()
     }
 
@@ -117,7 +147,7 @@ defmodule Axon.Watcher.Progress do
       |> normalize_counts()
 
     {graph_ready, vector_ready} =
-      "SELECT SUM(CASE WHEN graph_ready THEN 1 ELSE 0 END), SUM(CASE WHEN vector_ready THEN 1 ELSE 0 END) FROM File;"
+      workspace_ready_query()
       |> query_rows()
       |> decode_ready_pair()
 
@@ -131,6 +161,7 @@ defmodule Axon.Watcher.Progress do
     %{
       "status" => workspace_state(counts, total),
       "progress" => progress,
+      "global_indexation_pct" => progress,
       "synced" => indexed + degraded,
       "total" => total,
       "indexed" => indexed,
@@ -141,13 +172,28 @@ defmodule Axon.Watcher.Progress do
       "skipped" => skipped,
       "deleted" => Map.get(counts, "deleted", 0),
       "graph_ready" => graph_ready,
+      "graph_ready_pct" => percentage(graph_ready, total),
       "vector_ready" => vector_ready,
+      "vector_ready_file" => vector_ready,
+      "vector_ready_file_pct" => percentage(vector_ready, total),
+      "vector_ready_graph" => decode_single_count(query_rows(global_graph_vector_query())),
+      "vector_ready_graph_pct" =>
+        percentage(
+          decode_single_count(query_rows(global_graph_vector_query())),
+          decode_single_count(query_rows(global_nodes_query()))
+        ),
+      "nodes_count" => decode_single_count(query_rows(global_nodes_query())),
+      "links_count" => decode_single_count(query_rows(global_links_query())),
       "stage_promoted" => Map.get(stage_counts, "promoted", 0),
       "stage_claimed" => Map.get(stage_counts, "claimed", 0),
       "stage_writer_pending_commit" => Map.get(stage_counts, "writer_pending_commit", 0),
       "stage_graph_indexed" => Map.get(stage_counts, "graph_indexed", 0),
       "known" => total,
       "completed" => terminal,
+      "soll_done" => 0,
+      "soll_partial" => 0,
+      "soll_missing" => 0,
+      "soll_last_revision" => nil,
       "last_update" => DateTime.utc_now() |> DateTime.to_iso8601()
     }
   end
@@ -167,8 +213,11 @@ defmodule Axon.Watcher.Progress do
   end
 
   def list_projects(_repo_slug) do
+    project_nodes = query_rows(project_nodes_query()) |> decode_scope_counts()
+    project_graph_vectors = query_rows(project_graph_vector_query()) |> decode_scope_counts()
+
     readiness_by_project =
-      "SELECT COALESCE(project_slug, '(unscoped)'), SUM(CASE WHEN graph_ready THEN 1 ELSE 0 END), SUM(CASE WHEN vector_ready THEN 1 ELSE 0 END) FROM File GROUP BY 1;"
+      project_ready_query()
       |> query_rows()
       |> Enum.reduce(%{}, fn
         [slug, graph_ready, vector_ready], acc ->
@@ -190,6 +239,8 @@ defmodule Axon.Watcher.Progress do
       total = Enum.sum(Map.values(counts))
       completed = completed_total(counts)
       readiness = Map.get(readiness_by_project, slug, %{graph_ready: 0, vector_ready: 0})
+      project_nodes_count = Map.get(project_nodes, slug, 0)
+      project_graph_vectors_count = Map.get(project_graph_vectors, slug, 0)
 
       %{
         slug: slug,
@@ -202,7 +253,14 @@ defmodule Axon.Watcher.Progress do
         oversized: oversized_total(counts),
         skipped: Map.get(counts, "skipped", 0),
         graph_ready: readiness.graph_ready,
+        graph_ready_pct: percentage(readiness.graph_ready, total),
         vector_ready: readiness.vector_ready,
+        vector_ready_file: readiness.vector_ready,
+        vector_ready_file_pct: percentage(readiness.vector_ready, total),
+        vector_ready_graph: project_graph_vectors_count,
+        vector_ready_graph_pct: percentage(project_graph_vectors_count, project_nodes_count),
+        nodes_count: project_nodes_count,
+        links_count: 0,
         progress: percentage(completed, total),
         readiness: readiness_label(counts, total)
       }
@@ -273,7 +331,16 @@ defmodule Axon.Watcher.Progress do
   end
 
   defp decode_rows([_ | _] = rows) do
-    Enum.filter(rows, &is_list/1)
+    cond do
+      Enum.all?(rows, &is_list/1) ->
+        rows
+
+      Enum.all?(rows, &is_map/1) ->
+        rows
+
+      true ->
+        Enum.filter(rows, &(is_list(&1) or is_map(&1)))
+    end
   end
 
   defp decode_rows(_), do: []
@@ -303,15 +370,31 @@ defmodule Axon.Watcher.Progress do
 
   defp snapshot_query do
     """
-    WITH normalized_file AS (
+    WITH pending_vector_chunks AS (
       SELECT
-        COALESCE(project_slug, '(unscoped)') AS project_slug,
-        COALESCE(status, 'unknown') AS status,
-        COALESCE(file_stage, 'unknown') AS file_stage,
-        COALESCE(status_reason, 'unknown') AS status_reason,
-        graph_ready,
-        vector_ready
-      FROM File
+        co.source_id AS file_path
+      FROM Chunk c
+      JOIN CONTAINS co ON co.target_id = c.source_id
+      LEFT JOIN ChunkEmbedding ce
+        ON ce.chunk_id = c.id
+       AND ce.model_id = 'chunk-bge-small-en-v1.5-384'
+       AND ce.source_hash = c.content_hash
+      WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash
+      GROUP BY 1
+    ),
+    normalized_file AS (
+      SELECT
+        COALESCE(f.project_slug, '(unscoped)') AS project_slug,
+        COALESCE(f.status, 'unknown') AS status,
+        COALESCE(f.file_stage, 'unknown') AS file_stage,
+        COALESCE(f.status_reason, 'unknown') AS status_reason,
+        f.graph_ready AS graph_ready,
+        CASE
+          WHEN f.graph_ready = TRUE AND pvc.file_path IS NULL THEN TRUE
+          ELSE FALSE
+        END AS vector_ready
+      FROM File f
+      LEFT JOIN pending_vector_chunks pvc ON pvc.file_path = f.path
     )
     SELECT
       'workspace_status' AS section,
@@ -382,6 +465,8 @@ defmodule Axon.Watcher.Progress do
   defp section_rows(rows, section) do
     Enum.filter(rows, fn
       [^section | _rest] -> true
+      %{"section" => ^section} -> true
+      %{section: ^section} -> true
       _row -> false
     end)
   end
@@ -394,6 +479,30 @@ defmodule Axon.Watcher.Progress do
       [_section, _scope, status, count, _secondary_count] ->
         {status, decode_integer(count)}
 
+      %{"key" => status, "primary_count" => count} ->
+        {status, decode_integer(count)}
+
+      %{key: status, primary_count: count} ->
+        {status, decode_integer(count)}
+
+      %{"status" => status} = row ->
+        count =
+          Map.get(row, "count(*)") ||
+            Map.get(row, "count_star()") ||
+            Map.get(row, "count") ||
+            0
+
+        {status, decode_integer(count)}
+
+      %{status: status} = row ->
+        count =
+          Map.get(row, :"count(*)") ||
+            Map.get(row, :count_star) ||
+            Map.get(row, :count) ||
+            0
+
+        {status, decode_integer(count)}
+
       row when is_list(row) and length(row) >= 2 ->
         {Enum.at(row, 0), decode_integer(Enum.at(row, 1))}
     end)
@@ -403,9 +512,28 @@ defmodule Axon.Watcher.Progress do
   defp decode_integer(value) when is_float(value), do: round(value)
 
   defp decode_integer(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {parsed, _} -> parsed
-      :error -> 0
+    normalized = String.trim(value)
+
+    cond do
+      normalized in ["", "null", "NULL"] ->
+        0
+
+      String.starts_with?(normalized, "HugeInt(") and String.ends_with?(normalized, ")") ->
+        inner =
+          normalized
+          |> String.trim_leading("HugeInt(")
+          |> String.trim_trailing(")")
+
+        case Integer.parse(inner) do
+          {parsed, _} -> parsed
+          :error -> 0
+        end
+
+      true ->
+        case Integer.parse(normalized) do
+          {parsed, _} -> parsed
+          :error -> 0
+        end
     end
   end
 
@@ -415,9 +543,25 @@ defmodule Axon.Watcher.Progress do
     {decode_integer(graph_ready), decode_integer(vector_ready)}
   end
 
+  defp decode_ready_pair([%{"graph_ready" => graph_ready, "vector_ready" => vector_ready} | _rest]) do
+    {decode_integer(graph_ready), decode_integer(vector_ready)}
+  end
+
+  defp decode_ready_pair([%{graph_ready: graph_ready, vector_ready: vector_ready} | _rest]) do
+    {decode_integer(graph_ready), decode_integer(vector_ready)}
+  end
+
   defp decode_ready_pair(_rows), do: {0, 0}
 
   defp decode_snapshot_ready_pair([[_section, _scope, _key, graph_ready, vector_ready] | _rest]) do
+    {decode_integer(graph_ready), decode_integer(vector_ready)}
+  end
+
+  defp decode_snapshot_ready_pair([%{"primary_count" => graph_ready, "secondary_count" => vector_ready} | _rest]) do
+    {decode_integer(graph_ready), decode_integer(vector_ready)}
+  end
+
+  defp decode_snapshot_ready_pair([%{primary_count: graph_ready, secondary_count: vector_ready} | _rest]) do
     {decode_integer(graph_ready), decode_integer(vector_ready)}
   end
 
@@ -465,4 +609,190 @@ defmodule Axon.Watcher.Progress do
     |> String.split()
     |> Enum.map_join(" ", &String.capitalize/1)
   end
+
+  defp workspace_ready_query do
+    """
+    WITH pending_vector_chunks AS (
+      SELECT
+        co.source_id AS file_path
+      FROM Chunk c
+      JOIN CONTAINS co ON co.target_id = c.source_id
+      LEFT JOIN ChunkEmbedding ce
+        ON ce.chunk_id = c.id
+       AND ce.model_id = 'chunk-bge-small-en-v1.5-384'
+       AND ce.source_hash = c.content_hash
+      WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash
+      GROUP BY 1
+    )
+    SELECT
+      SUM(CASE WHEN f.graph_ready THEN 1 ELSE 0 END) AS graph_ready,
+      SUM(
+        CASE
+          WHEN f.graph_ready = TRUE AND pvc.file_path IS NULL THEN 1
+          ELSE 0
+        END
+      ) AS vector_ready
+    FROM File f
+    LEFT JOIN pending_vector_chunks pvc ON pvc.file_path = f.path
+    """
+  end
+
+  defp project_ready_query do
+    """
+    WITH pending_vector_chunks AS (
+      SELECT
+        co.source_id AS file_path
+      FROM Chunk c
+      JOIN CONTAINS co ON co.target_id = c.source_id
+      LEFT JOIN ChunkEmbedding ce
+        ON ce.chunk_id = c.id
+       AND ce.model_id = 'chunk-bge-small-en-v1.5-384'
+       AND ce.source_hash = c.content_hash
+      WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash
+      GROUP BY 1
+    )
+    SELECT
+      COALESCE(f.project_slug, '(unscoped)') AS project_slug,
+      SUM(CASE WHEN f.graph_ready THEN 1 ELSE 0 END) AS graph_ready,
+      SUM(
+        CASE
+          WHEN f.graph_ready = TRUE AND pvc.file_path IS NULL THEN 1
+          ELSE 0
+        END
+      ) AS vector_ready
+    FROM File f
+    LEFT JOIN pending_vector_chunks pvc ON pvc.file_path = f.path
+    GROUP BY 1
+    """
+  end
+
+  defp global_graph_vector_query do
+    "SELECT COUNT(DISTINCT anchor_type || ':' || anchor_id) FROM GraphEmbedding"
+  end
+
+  defp global_nodes_query do
+    "SELECT COUNT(*) FROM Symbol"
+  end
+
+  defp global_links_query do
+    """
+    SELECT (
+      COALESCE((SELECT COUNT(*) FROM CALLS), 0) +
+      COALESCE((SELECT COUNT(*) FROM CONTAINS), 0) +
+      COALESCE((SELECT COUNT(*) FROM IMPACTS), 0) +
+      COALESCE((SELECT COUNT(*) FROM SUBSTANTIATES), 0)
+    ) AS links_count
+    """
+  end
+
+  defp project_nodes_query do
+    "SELECT COALESCE(project_slug, '(unscoped)'), COUNT(*) FROM Symbol GROUP BY 1"
+  end
+
+  defp project_links_query do
+    """
+    WITH edge_sources AS (
+      SELECT source_id FROM CALLS
+      UNION ALL
+      SELECT source_id FROM CONTAINS
+      UNION ALL
+      SELECT source_id FROM IMPACTS
+      UNION ALL
+      SELECT source_id FROM SUBSTANTIATES
+    )
+    SELECT COALESCE(s.project_slug, '(unscoped)'), COUNT(*)
+    FROM edge_sources e
+    LEFT JOIN Symbol s ON s.id = e.source_id
+    GROUP BY 1
+    """
+  end
+
+  defp project_graph_vector_query do
+    """
+    SELECT COALESCE(s.project_slug, '(unscoped)'), COUNT(DISTINCT g.anchor_type || ':' || g.anchor_id)
+    FROM GraphEmbedding g
+    LEFT JOIN Symbol s ON g.anchor_type = 'Symbol' AND s.id = g.anchor_id
+    GROUP BY 1
+    """
+  end
+
+  defp decode_single_count([[value | _] | _]), do: decode_integer(value)
+  defp decode_single_count([%{"count" => value} | _]), do: decode_integer(value)
+  defp decode_single_count(_), do: 0
+
+  defp decode_scope_counts(rows) do
+    Enum.reduce(rows, %{}, fn
+      [scope, value | _], acc when is_binary(scope) ->
+        Map.put(acc, scope, decode_integer(value))
+
+      _row, acc ->
+        acc
+    end)
+  end
+
+  defp soll_coverage_query do
+    """
+    SELECT
+      COUNT(*) AS total_requirements,
+      SUM(
+        CASE
+          WHEN COALESCE(r.acceptance_criteria, '') NOT IN ('', '[]')
+               AND COALESCE(r.status, '') IN ('current', 'accepted')
+               AND EXISTS (
+                 SELECT 1
+                 FROM soll.Traceability t
+                 WHERE t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
+               )
+          THEN 1 ELSE 0
+        END
+      ) AS done_requirements,
+      SUM(
+        CASE
+          WHEN (
+            COALESCE(r.acceptance_criteria, '') NOT IN ('', '[]')
+            OR EXISTS (
+              SELECT 1
+              FROM soll.Traceability t
+              WHERE t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
+            )
+          )
+          AND NOT (
+            COALESCE(r.acceptance_criteria, '') NOT IN ('', '[]')
+            AND COALESCE(r.status, '') IN ('current', 'accepted')
+            AND EXISTS (
+              SELECT 1
+              FROM soll.Traceability t
+              WHERE t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
+            )
+          )
+          THEN 1 ELSE 0
+        END
+      ) AS partial_requirements,
+      SUM(
+        CASE
+          WHEN COALESCE(r.acceptance_criteria, '') IN ('', '[]')
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM soll.Traceability t
+                 WHERE t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
+               )
+          THEN 1 ELSE 0
+        END
+      ) AS missing_requirements
+    FROM soll.Requirement r
+    """
+  end
+
+  defp soll_revision_query do
+    "SELECT revision_id FROM soll.Revision ORDER BY committed_at DESC LIMIT 1"
+  end
+
+  defp decode_soll_metric([row | _], idx) when is_list(row) do
+    row |> Enum.at(idx) |> decode_integer()
+  end
+
+  defp decode_soll_metric(_rows, _idx), do: 0
+
+  defp decode_soll_revision([[revision_id | _] | _]) when is_binary(revision_id), do: revision_id
+  defp decode_soll_revision(_), do: nil
 end

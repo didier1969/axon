@@ -25,6 +25,8 @@ defmodule Axon.Watcher.CockpitLive do
       |> assign(
         repo_slug: repo_slug,
         monitoring_active: true,
+        expanded_projects: MapSet.new(),
+        last_mcp_probe_ms: 0,
         sql_source: SqlGateway.source_info(),
         workspace: default_workspace(),
         runtime: default_runtime(),
@@ -53,7 +55,23 @@ defmodule Axon.Watcher.CockpitLive do
 
   @impl true
   def handle_info(:tick, socket) do
-    {:noreply, refresh_snapshot(socket)}
+    socket = maybe_probe_mcp(socket)
+    started_at = System.monotonic_time(:millisecond)
+    socket = refresh_snapshot(socket)
+    Telemetry.mark_dashboard_render(System.monotonic_time(:millisecond) - started_at)
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("toggle_project", %{"slug" => slug}, socket) do
+    expanded_projects =
+      if MapSet.member?(socket.assigns.expanded_projects, slug) do
+        MapSet.delete(socket.assigns.expanded_projects, slug)
+      else
+        MapSet.put(socket.assigns.expanded_projects, slug)
+      end
+
+    {:noreply, assign(socket, :expanded_projects, expanded_projects)}
   end
 
   @impl true
@@ -90,24 +108,78 @@ defmodule Axon.Watcher.CockpitLive do
           <div class="band-meta">
             <span>Repo slug: {@repo_slug}</span>
             <span>Completion: {@workspace["progress"]}%</span>
+            <span>Global Indexation: {@workspace["global_indexation_pct"] || 0}%</span>
           </div>
         </div>
 
         <div class="hero-grid">
-          <.metric_card label="Known Files" value={@workspace["known"]} tone={:neutral} />
-          <.metric_card label="Completed" value={@workspace["completed"]} tone={:ok} />
-          <.metric_card label="Graph Ready" value={@workspace["graph_ready"]} tone={:ok} />
-          <.metric_card label="Vector Ready" value={@workspace["vector_ready"]} tone={:info} />
-          <.metric_card label="Indexing" value={@workspace["indexing"]} tone={:info} />
-          <.metric_card label="Pending" value={@workspace["pending"]} tone={:warn} />
-          <.metric_card label="Degraded" value={@workspace["indexed_degraded"]} tone={:warn} />
-          <.metric_card label="Oversized" value={@workspace["oversized"]} tone={:danger} />
-          <.metric_card label="Skipped" value={@workspace["skipped"]} tone={:neutral} />
-          <.metric_card label="Deleted" value={@workspace["deleted"]} tone={:neutral} />
+          <.metric_card label="Known Files" value={@workspace["known"]} tone={:neutral} hint="Total fichiers détectés dans le workspace." />
+          <.metric_card label="Completed" value={@workspace["completed"]} tone={:ok} hint="Fichiers en statut terminal: indexed + indexed_degraded + skipped + deleted." />
+          <.metric_card
+            label="Graph Ready"
+            value={"#{@workspace["graph_ready"]} (#{@workspace["graph_ready_pct"] || 0}%)"}
+            tone={:ok}
+            hint="Fichiers avec projection graphe validée."
+          />
+          <.metric_card
+            label="Vector Ready File"
+            value={"#{@workspace["vector_ready_file"]} (#{@workspace["vector_ready_file_pct"] || 0}%)"}
+            tone={:info}
+            hint="Fichiers marqués vectorisés côté File."
+          />
+          <.metric_card
+            label="Vector Ready Graph"
+            value={"#{@workspace["vector_ready_graph"]} (#{@workspace["vector_ready_graph_pct"] || 0}%)"}
+            tone={:info}
+            hint="Ancres graphe avec embedding dans GraphEmbedding."
+          />
+          <.metric_card label="Nodes" value={@workspace["nodes_count"]} tone={:neutral} hint="Nombre de nœuds (Symbol)." />
+          <.metric_card label="Links" value={@workspace["links_count"]} tone={:neutral} hint="Nombre de liens structurels (CALLS/CONTAINS/IMPACTS/SUBSTANTIATES)." />
+          <.metric_card label="Indexing" value={@workspace["indexing"]} tone={:info} hint="Fichiers en traitement actif." />
+          <.metric_card label="Pending" value={@workspace["pending"]} tone={:warn} hint="Fichiers encore en attente de traitement." />
+          <.metric_card label="Degraded" value={@workspace["indexed_degraded"]} tone={:warn} hint="Indexation partielle (fallback/dégradé)." />
+          <.metric_card label="Oversized" value={@workspace["oversized"]} tone={:danger} hint="Fichiers refusés pour contrainte de taille/budget." />
+          <.metric_card label="Skipped" value={@workspace["skipped"]} tone={:neutral} hint="Fichiers ignorés intentionnellement." />
+          <.metric_card label="Deleted" value={@workspace["deleted"]} tone={:neutral} hint="Fichiers supprimés côté source." />
+          <.metric_card label="SOLL Done" value={@workspace["soll_done"]} tone={:ok} />
+          <.metric_card label="SOLL Partial" value={@workspace["soll_partial"]} tone={:warn} />
+          <.metric_card label="SOLL Missing" value={@workspace["soll_missing"]} tone={:danger} />
+          <.metric_card
+            label="SOLL Revision"
+            value={@workspace["soll_last_revision"] || "none"}
+            tone={:info}
+          />
         </div>
 
         <div class="progress-rail">
           <div class="progress-rail-fill" style={"width: #{@workspace["progress"]}%"}></div>
+        </div>
+      </section>
+
+      <section class="cockpit-band">
+        <div class="band-title-row">
+          <div>
+            <p class="eyebrow">Workspace Flow</p>
+            <h2>Sunburst d'avancement des fichiers</h2>
+          </div>
+          <span class="band-kicker">Known: {@workspace["known"]}</span>
+        </div>
+
+        <div
+          id="workspace-sunburst"
+          class="workspace-sunburst"
+          phx-hook="WorkspaceSunburst"
+          data-known={@workspace["known"] || 0}
+          data-indexed={@workspace["indexed"] || 0}
+          data-indexed-degraded={@workspace["indexed_degraded"] || 0}
+          data-pending={@workspace["pending"] || 0}
+          data-indexing={@workspace["indexing"] || 0}
+          data-oversized={@workspace["oversized"] || 0}
+          data-skipped={@workspace["skipped"] || 0}
+          data-deleted={@workspace["deleted"] || 0}
+          data-graph-ready={@workspace["graph_ready"] || 0}
+          data-vector-ready-file={@workspace["vector_ready_file"] || 0}
+        >
         </div>
       </section>
 
@@ -240,6 +312,12 @@ defmodule Axon.Watcher.CockpitLive do
               <.signal_stat label="Host IO Wait" value={"#{format_float(@runtime.io_wait)}%"} />
               <.signal_stat label="Host State" value={String.upcase(@runtime.host_state)} />
             </div>
+
+            <div class="latency-grid">
+              <.latency_panel label="MCP Latency" summary={@runtime.mcp_latency} />
+              <.latency_panel label="SQL Truth Latency" summary={@runtime.sql_latency} />
+              <.latency_panel label="Dashboard Latency" summary={@runtime.dashboard_latency} />
+            </div>
           </section>
 
           <section class="cockpit-band">
@@ -345,23 +423,47 @@ defmodule Axon.Watcher.CockpitLive do
             phx-update="stream"
             class="stack-list"
           >
-            <div :for={{dom_id, project} <- @streams.projects} id={dom_id} class="project-card">
+            <div :for={{dom_id, project} <- @streams.projects} id={dom_id} class={["project-card", if(expanded_project?(@expanded_projects, project.slug), do: "open", else: "closed")]}>
               <div class="project-head">
                 <div>
                   <p class="stack-title">{project.slug}</p>
                   <p class="stack-caption">{project.readiness |> String.upcase()} readiness</p>
                 </div>
-                <span class={["readiness-pill", readiness_class(project.readiness)]}>
-                  {project.progress}%
-                </span>
+                <div class="project-head-actions">
+                  <span class={["readiness-pill", readiness_class(project.readiness)]}>
+                    {project.progress}%
+                  </span>
+                  <button type="button" class="project-toggle" phx-click="toggle_project" phx-value-slug={project.slug}>
+                    {if expanded_project?(@expanded_projects, project.slug), do: "Hide", else: "Details"}
+                  </button>
+                </div>
               </div>
 
-              <div class="project-grid">
+              <div class="project-grid compact">
                 <.signal_stat label="Known Files" value={Integer.to_string(project.known)} />
                 <.signal_stat label="Completed" value={Integer.to_string(project.completed)} />
                 <.signal_stat label="Pending" value={Integer.to_string(project.pending)} />
                 <.signal_stat label="Indexing" value={Integer.to_string(project.indexing)} />
+                <.signal_stat
+                  label="Graph Ready"
+                  value={"#{project.graph_ready} (#{project.graph_ready_pct || 0}%)"}
+                />
+              </div>
+
+              <div :if={expanded_project?(@expanded_projects, project.slug)} class="project-grid expanded">
                 <.signal_stat label="Degraded" value={Integer.to_string(project.degraded)} />
+                <.signal_stat label="Oversized" value={Integer.to_string(project.oversized)} />
+                <.signal_stat label="Skipped" value={Integer.to_string(project.skipped)} />
+                <.signal_stat
+                  label="Vector File"
+                  value={"#{project.vector_ready_file} (#{project.vector_ready_file_pct || 0}%)"}
+                />
+                <.signal_stat
+                  label="Vector Graph"
+                  value={"#{project.vector_ready_graph} (#{project.vector_ready_graph_pct || 0}%)"}
+                />
+                <.signal_stat label="Nodes" value={Integer.to_string(project.nodes_count)} />
+                <.signal_stat label="Links" value={Integer.to_string(project.links_count)} />
               </div>
 
               <div class="progress-rail compact">
@@ -429,11 +531,15 @@ defmodule Axon.Watcher.CockpitLive do
   attr :label, :string, required: true
   attr :value, :any, required: true
   attr :tone, :atom, default: :neutral
+  attr :hint, :string, default: nil
 
   defp metric_card(assigns) do
     ~H"""
     <article class={["metric-card", tone_class(@tone)]}>
-      <p class="metric-label">{@label}</p>
+      <p class="metric-label">
+        {@label}
+        <span :if={is_binary(@hint) and String.trim(@hint) != ""} class="metric-hint" title={@hint}>i</span>
+      </p>
       <p class="metric-value">{@value}</p>
     </article>
     """
@@ -447,6 +553,38 @@ defmodule Axon.Watcher.CockpitLive do
     <div class="signal-stat">
       <span class="signal-stat-label">{@label}</span>
       <strong class="signal-stat-value">{@value}</strong>
+    </div>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :summary, :map, required: true
+
+  defp latency_panel(assigns) do
+    series = Map.get(assigns.summary, :series, [])
+    max_sample = Enum.max(series ++ [1])
+    assigns = assign(assigns, :series, series)
+    assigns = assign(assigns, :max_sample, max_sample)
+
+    ~H"""
+    <div class="latency-card">
+      <p class="latency-title">{@label}</p>
+      <div class="latency-stats">
+        <span>last {@summary[:last_ms] || 0}ms</span>
+        <span>p50 {@summary[:p50_ms] || 0}ms</span>
+        <span>p95 {@summary[:p95_ms] || 0}ms</span>
+        <span>p99 {@summary[:p99_ms] || 0}ms</span>
+      </div>
+      <div class="latency-sparkline">
+        <span
+          :for={sample <- @series}
+          class="latency-bar"
+          style={"height: #{spark_height(sample, @max_sample)}%"}
+        />
+      </div>
+      <p class="latency-error" :if={Map.has_key?(@summary, :error_rate)}>
+        error rate {Float.round((@summary[:error_rate] || 0.0) * 100, 2)}%
+      </p>
     </div>
     """
   end
@@ -588,6 +726,7 @@ defmodule Axon.Watcher.CockpitLive do
     %{
       "status" => "connecting",
       "progress" => 0,
+      "global_indexation_pct" => 0,
       "synced" => 0,
       "total" => 0,
       "indexed" => 0,
@@ -598,13 +737,24 @@ defmodule Axon.Watcher.CockpitLive do
       "skipped" => 0,
       "deleted" => 0,
       "graph_ready" => 0,
+      "graph_ready_pct" => 0,
       "vector_ready" => 0,
+      "vector_ready_file" => 0,
+      "vector_ready_file_pct" => 0,
+      "vector_ready_graph" => 0,
+      "vector_ready_graph_pct" => 0,
+      "nodes_count" => 0,
+      "links_count" => 0,
       "stage_promoted" => 0,
       "stage_claimed" => 0,
       "stage_writer_pending_commit" => 0,
       "stage_graph_indexed" => 0,
       "known" => 0,
-      "completed" => 0
+      "completed" => 0,
+      "soll_done" => 0,
+      "soll_partial" => 0,
+      "soll_missing" => 0,
+      "soll_last_revision" => nil
     }
   end
 
@@ -682,7 +832,33 @@ defmodule Axon.Watcher.CockpitLive do
       sql_snapshot_last_success_at: Map.get(stats, :sql_snapshot_last_success_at, nil),
       sql_snapshot_last_error_at: Map.get(stats, :sql_snapshot_last_error_at, nil),
       sql_snapshot_last_error_reason: Map.get(stats, :sql_snapshot_last_error_reason, nil),
-      sql_snapshot_last_duration_ms: Map.get(stats, :sql_snapshot_last_duration_ms, 0) || 0
+      sql_snapshot_last_duration_ms: Map.get(stats, :sql_snapshot_last_duration_ms, 0) || 0,
+      mcp_latency:
+        Map.get(stats, :mcp_latency, %{
+          last_ms: 0,
+          p50_ms: 0,
+          p95_ms: 0,
+          p99_ms: 0,
+          error_rate: 0.0,
+          series: []
+        }),
+      sql_latency:
+        Map.get(stats, :sql_latency, %{
+          last_ms: 0,
+          p50_ms: 0,
+          p95_ms: 0,
+          p99_ms: 0,
+          error_rate: 0.0,
+          series: []
+        }),
+      dashboard_latency:
+        Map.get(stats, :dashboard_latency, %{
+          last_ms: 0,
+          p50_ms: 0,
+          p95_ms: 0,
+          p99_ms: 0,
+          series: []
+        })
     }
   end
 
@@ -804,6 +980,40 @@ defmodule Axon.Watcher.CockpitLive do
 
   defp blank_to_none(""), do: "(none)"
   defp blank_to_none(value), do: value
+
+  defp expanded_project?(expanded_projects, slug) do
+    MapSet.member?(expanded_projects, slug)
+  end
+
+  defp spark_height(value, max_value) when is_integer(value) and is_integer(max_value) and max_value > 0 do
+    value
+    |> Kernel.*(100)
+    |> Kernel./(max_value)
+    |> max(10)
+    |> min(100)
+    |> round()
+  end
+
+  defp spark_height(_value, _max_value), do: 10
+
+  defp maybe_probe_mcp(socket) do
+    now = System.monotonic_time(:millisecond)
+    last = socket.assigns[:last_mcp_probe_ms] || 0
+
+    if now - last >= 2_000 do
+      case SqlGateway.mcp_ping() do
+        {:ok, duration_ms} ->
+          Telemetry.mark_mcp_probe_success(duration_ms)
+
+        {:error, reason, duration_ms} ->
+          Telemetry.mark_mcp_probe_error(reason, duration_ms)
+      end
+
+      assign(socket, :last_mcp_probe_ms, now)
+    else
+      socket
+    end
+  end
 
   defp slug_dom_id(value) do
     value

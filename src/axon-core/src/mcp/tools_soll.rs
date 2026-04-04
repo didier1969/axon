@@ -84,11 +84,37 @@ impl McpServer {
                             .get("status")
                             .and_then(|v| v.as_str())
                             .unwrap_or("current");
+                        let owner = data
+                            .get("owner")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let acceptance_criteria = data
+                            .get("acceptance_criteria")
+                            .cloned()
+                            .unwrap_or(json!([]))
+                            .to_string();
+                        let evidence_refs = data
+                            .get("evidence_refs")
+                            .cloned()
+                            .unwrap_or(json!([]))
+                            .to_string();
+                        let updated_at = now_unix_ms();
                         let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let q = "INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES (?, ?, ?, ?, ?, ?)";
+                        let q = "INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
                         self.graph_store.execute_param(
                             q,
-                            &json!([formatted_id, title, desc, status, prio, meta.to_string()]),
+                            &json!([
+                                formatted_id,
+                                title,
+                                desc,
+                                status,
+                                prio,
+                                meta.to_string(),
+                                owner,
+                                acceptance_criteria,
+                                evidence_refs,
+                                updated_at
+                            ]),
                         )
                     }
                     "concept" => {
@@ -117,8 +143,17 @@ impl McpServer {
                             .get("status")
                             .and_then(|v| v.as_str())
                             .unwrap_or("accepted");
+                        let supersedes_decision_id = data
+                            .get("supersedes_decision_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let impact_scope = data
+                            .get("impact_scope")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let updated_at = now_unix_ms();
                         let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let q = "INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)";
+                        let q = "INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata, supersedes_decision_id, impact_scope, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
                         self.graph_store.execute_param(
                             q,
                             &json!([
@@ -128,7 +163,10 @@ impl McpServer {
                                 ctx,
                                 rat,
                                 status,
-                                meta.to_string()
+                                meta.to_string(),
+                                supersedes_decision_id,
+                                impact_scope,
+                                updated_at
                             ]),
                         )
                     }
@@ -215,13 +253,13 @@ impl McpServer {
                         let current = self
                             .query_named_row(
                                 &format!(
-                                    "SELECT title, description, priority, status, metadata FROM soll.Requirement WHERE id = '{}'",
+                                    "SELECT title, description, priority, status, metadata, owner, acceptance_criteria, evidence_refs FROM soll.Requirement WHERE id = '{}'",
                                     escape_sql(id)
                                 ),
-                                5,
+                                8,
                             )?;
                         let q =
-                            "UPDATE soll.Requirement SET title = ?, description = ?, priority = ?, status = ?, metadata = ? WHERE id = ?";
+                            "UPDATE soll.Requirement SET title = ?, description = ?, priority = ?, status = ?, metadata = ?, owner = ?, acceptance_criteria = ?, evidence_refs = ?, updated_at = ? WHERE id = ?";
                         self.graph_store.execute_param(
                             q,
                             &json!([
@@ -240,6 +278,16 @@ impl McpServer {
                                 data.get("metadata")
                                     .map(|v| v.to_string())
                                     .unwrap_or_else(|| current[4].clone()),
+                                data.get("owner")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[5]),
+                                data.get("acceptance_criteria")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| current[6].clone()),
+                                data.get("evidence_refs")
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| current[7].clone()),
+                                now_unix_ms(),
                                 id
                             ]),
                         )
@@ -286,12 +334,12 @@ impl McpServer {
                         let current = self
                             .query_named_row(
                                 &format!(
-                                    "SELECT title, description, context, rationale, status, metadata FROM soll.Decision WHERE id = '{}'",
+                                    "SELECT title, description, context, rationale, status, metadata, supersedes_decision_id, impact_scope FROM soll.Decision WHERE id = '{}'",
                                     escape_sql(id)
                                 ),
-                                6,
+                                8,
                             )?;
-                        let q = "UPDATE soll.Decision SET title = ?, description = ?, context = ?, rationale = ?, status = ?, metadata = ? WHERE id = ?";
+                        let q = "UPDATE soll.Decision SET title = ?, description = ?, context = ?, rationale = ?, status = ?, metadata = ?, supersedes_decision_id = ?, impact_scope = ?, updated_at = ? WHERE id = ?";
                         self.graph_store.execute_param(
                             q,
                             &json!([
@@ -313,6 +361,13 @@ impl McpServer {
                                 data.get("metadata")
                                     .map(|v| v.to_string())
                                     .unwrap_or_else(|| current[5].clone()),
+                                data.get("supersedes_decision_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[6]),
+                                data.get("impact_scope")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&current[7]),
+                                now_unix_ms(),
                                 id
                             ]),
                         )
@@ -1059,6 +1114,739 @@ impl McpServer {
         )?;
         Ok(())
     }
+}
+
+impl McpServer {
+    pub(crate) fn axon_soll_apply_plan(&self, args: &Value) -> Option<Value> {
+        let project_slug = args
+            .get("project_slug")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AXO");
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let plan = args.get("plan")?;
+
+        let mut created: Vec<Value> = Vec::new();
+        let mut updated: Vec<Value> = Vec::new();
+        let mut skipped: Vec<Value> = Vec::new();
+        let mut errors: Vec<Value> = Vec::new();
+        let mut id_map = serde_json::Map::new();
+
+        self.apply_plan_entity_group(
+            project_slug,
+            "pillar",
+            plan.get("pillars"),
+            dry_run,
+            &mut created,
+            &mut updated,
+            &mut skipped,
+            &mut errors,
+            &mut id_map,
+        );
+        self.apply_plan_entity_group(
+            project_slug,
+            "requirement",
+            plan.get("requirements"),
+            dry_run,
+            &mut created,
+            &mut updated,
+            &mut skipped,
+            &mut errors,
+            &mut id_map,
+        );
+        self.apply_plan_entity_group(
+            project_slug,
+            "decision",
+            plan.get("decisions"),
+            dry_run,
+            &mut created,
+            &mut updated,
+            &mut skipped,
+            &mut errors,
+            &mut id_map,
+        );
+        self.apply_plan_entity_group(
+            project_slug,
+            "milestone",
+            plan.get("milestones"),
+            dry_run,
+            &mut created,
+            &mut updated,
+            &mut skipped,
+            &mut errors,
+            &mut id_map,
+        );
+
+        let summary = format!(
+            "SOLL apply_plan {}: created={}, updated={}, skipped={}, errors={}",
+            if dry_run { "DRY-RUN" } else { "APPLIED" },
+            created.len(),
+            updated.len(),
+            skipped.len(),
+            errors.len()
+        );
+
+        Some(json!({
+            "content": [{ "type": "text", "text": summary }],
+            "data": {
+                "project_slug": project_slug,
+                "dry_run": dry_run,
+                "created": created,
+                "updated": updated,
+                "skipped": skipped,
+                "errors": errors,
+                "id_map": id_map
+            },
+            "isError": !errors.is_empty()
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_plan_entity_group(
+        &self,
+        project_slug: &str,
+        entity: &str,
+        items: Option<&Value>,
+        dry_run: bool,
+        created: &mut Vec<Value>,
+        updated: &mut Vec<Value>,
+        skipped: &mut Vec<Value>,
+        errors: &mut Vec<Value>,
+        id_map: &mut serde_json::Map<String, Value>,
+    ) {
+        let Some(items) = items.and_then(|v| v.as_array()) else {
+            return;
+        };
+
+        for item in items {
+            let Some(obj) = item.as_object() else {
+                errors.push(json!({"entity": entity, "error": "item must be an object"}));
+                continue;
+            };
+
+            let title = obj.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let logical_key = obj
+                .get("logical_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or(title);
+
+            if logical_key.trim().is_empty() {
+                errors.push(json!({"entity": entity, "error": "missing logical_key or title"}));
+                continue;
+            }
+
+            let existing_id = self.resolve_soll_id(entity, title, logical_key);
+            if let Some(existing_id) = existing_id {
+                if dry_run {
+                    skipped.push(json!({"entity": entity, "logical_key": logical_key, "id": existing_id, "action": "would_update"}));
+                    id_map.insert(logical_key.to_string(), json!(existing_id));
+                    continue;
+                }
+
+                let mut data = serde_json::Map::new();
+                data.insert("id".to_string(), json!(existing_id));
+                for (k, v) in obj {
+                    if k != "logical_key" {
+                        data.insert(k.clone(), v.clone());
+                    }
+                }
+
+                let resp = self.axon_soll_manager(&json!({
+                    "action": "update",
+                    "entity": entity,
+                    "data": Value::Object(data)
+                }));
+
+                if soll_tool_is_error(resp.as_ref()) {
+                    errors.push(json!({"entity": entity, "logical_key": logical_key, "id": existing_id, "error": soll_tool_text(resp.as_ref())}));
+                } else {
+                    updated.push(json!({"entity": entity, "logical_key": logical_key, "id": existing_id}));
+                    id_map.insert(logical_key.to_string(), json!(existing_id));
+                }
+                continue;
+            }
+
+            if dry_run {
+                skipped.push(json!({"entity": entity, "logical_key": logical_key, "action": "would_create"}));
+                continue;
+            }
+
+            let mut data = serde_json::Map::new();
+            data.insert("project_slug".to_string(), json!(project_slug));
+            for (k, v) in obj {
+                if k != "logical_key" {
+                    data.insert(k.clone(), v.clone());
+                }
+            }
+
+            let mut metadata = data
+                .get("metadata")
+                .and_then(|m| m.as_object())
+                .cloned()
+                .unwrap_or_default();
+            metadata.insert("logical_key".to_string(), json!(logical_key));
+            data.insert("metadata".to_string(), Value::Object(metadata));
+
+            let resp = self.axon_soll_manager(&json!({
+                "action": "create",
+                "entity": entity,
+                "data": Value::Object(data)
+            }));
+
+            if soll_tool_is_error(resp.as_ref()) {
+                errors.push(json!({"entity": entity, "logical_key": logical_key, "error": soll_tool_text(resp.as_ref())}));
+            } else {
+                let created_id = soll_tool_text(resp.as_ref())
+                    .and_then(extract_soll_id_from_message)
+                    .unwrap_or_else(|| "unknown".to_string());
+                created.push(json!({"entity": entity, "logical_key": logical_key, "id": created_id}));
+                id_map.insert(logical_key.to_string(), json!(created_id));
+            }
+        }
+    }
+
+    fn resolve_soll_id(&self, entity: &str, title: &str, logical_key: &str) -> Option<String> {
+        let table = match entity {
+            "pillar" => "soll.Pillar",
+            "requirement" => "soll.Requirement",
+            "decision" => "soll.Decision",
+            "milestone" => "soll.Milestone",
+            _ => return None,
+        };
+
+        let by_metadata = format!(
+            "SELECT id FROM {} WHERE metadata LIKE '%\"logical_key\":\"{}\"%' ORDER BY id DESC LIMIT 1",
+            table,
+            escape_sql(logical_key)
+        );
+        if let Some(found) = query_first_sql_cell(self, &by_metadata) {
+            return Some(found);
+        }
+
+        if !title.trim().is_empty() {
+            let by_title = format!(
+                "SELECT id FROM {} WHERE title = '{}' ORDER BY id DESC LIMIT 1",
+                table,
+                escape_sql(title)
+            );
+            if let Some(found) = query_first_sql_cell(self, &by_title) {
+                return Some(found);
+            }
+        }
+
+        None
+    }
+}
+
+fn query_first_sql_cell(server: &McpServer, query: &str) -> Option<String> {
+    let raw = server.execute_raw_sql(query).ok()?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    let rows = parsed.get("rows")?.as_array()?;
+    let first = rows.first()?.as_array()?;
+    first.first()?.as_str().map(|s| s.to_string())
+}
+
+fn soll_tool_text(resp: Option<&Value>) -> Option<String> {
+    resp.and_then(|v| {
+        v.get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|entry| entry.get("text"))
+            .and_then(|text| text.as_str())
+            .map(|s| s.to_string())
+    })
+}
+
+fn soll_tool_is_error(resp: Option<&Value>) -> bool {
+    resp.and_then(|v| v.get("isError"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn extract_soll_id_from_message(text: String) -> Option<String> {
+    let start = text.find('`')?;
+    let end = text[start + 1..].find('`')?;
+    Some(text[start + 1..start + 1 + end].to_string())
+}
+
+impl McpServer {
+    pub(crate) fn axon_soll_apply_plan_v2(&self, args: &Value) -> Option<Value> {
+        let project_slug = args
+            .get("project_slug")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AXO");
+        let author = args
+            .get("author")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let plan = args.get("plan")?;
+
+        let operations = self.build_plan_operations(project_slug, plan);
+        let preview_id = format!("PRV-{}-{}", project_slug, now_unix_ms());
+        let payload = json!({
+            "project_slug": project_slug,
+            "author": author,
+            "dry_run": dry_run,
+            "operations": operations
+        });
+
+        if let Err(e) = self.graph_store.execute_param(
+            "INSERT INTO soll.RevisionPreview (preview_id, author, project_slug, payload, created_at) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (preview_id) DO UPDATE SET author = EXCLUDED.author, project_slug = EXCLUDED.project_slug, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at",
+            &json!([preview_id, author, project_slug, payload.to_string(), now_unix_ms()]),
+        ) {
+            return Some(json!({
+                "content": [{"type":"text","text": format!("SOLL apply_plan_v2 error: {}", e)}],
+                "isError": true
+            }));
+        }
+
+        let counts = summarize_ops(&operations);
+        if dry_run {
+            return Some(json!({
+                "content": [{"type":"text","text": format!("SOLL apply_plan_v2 DRY-RUN ready. preview_id={} (create={}, update={})", preview_id, counts.0, counts.1)}],
+                "data": { "preview_id": preview_id, "counts": {"create": counts.0, "update": counts.1}, "operations": operations }
+            }));
+        }
+
+        self.axon_soll_commit_revision(&json!({ "preview_id": preview_id, "author": author }))
+    }
+
+    pub(crate) fn axon_soll_commit_revision(&self, args: &Value) -> Option<Value> {
+        let preview_id = match args.get("preview_id").and_then(|v| v.as_str()) {
+            Some(v) if !v.trim().is_empty() => v,
+            _ => {
+                return Some(json!({
+                    "content": [{"type":"text","text":"Missing required argument: preview_id"}],
+                    "isError": true
+                }));
+            }
+        };
+        let author = args
+            .get("author")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let preview_raw = match query_first_sql_cell(
+            self,
+            &format!(
+                "SELECT payload FROM soll.RevisionPreview WHERE preview_id = '{}'",
+                escape_sql(preview_id)
+            ),
+        ) {
+            Some(v) => v,
+            None => {
+                return Some(json!({
+                    "content": [{"type":"text","text": format!("Preview not found: {}", preview_id)}],
+                    "isError": true
+                }));
+            }
+        };
+        let payload: Value = match serde_json::from_str(&preview_raw) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some(json!({
+                    "content": [{"type":"text","text": format!("Invalid preview payload JSON: {}", e)}],
+                    "isError": true
+                }));
+            }
+        };
+        let operations = payload
+            .get("operations")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let project_slug = payload
+            .get("project_slug")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AXO");
+
+        let revision_id = format!("REV-{}-{}", project_slug, now_unix_ms());
+        let now = now_unix_ms();
+        let _ = self.graph_store.execute("BEGIN TRANSACTION");
+
+        if let Err(e) = self.graph_store.execute_param(
+            "INSERT INTO soll.Revision (revision_id, author, source, summary, status, created_at, committed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            &json!([revision_id, author, "mcp", "SOLL plan commit", "committed", now, now]),
+        ) {
+            let _ = self.graph_store.execute("ROLLBACK");
+            return Some(json!({"content":[{"type":"text","text": format!("SOLL commit error (revision row): {}", e)}],"isError": true}));
+        }
+
+        for op in &operations {
+            if let Err(e) = self.apply_operation_with_audit(&revision_id, op) {
+                let _ = self.graph_store.execute("ROLLBACK");
+                return Some(json!({"content":[{"type":"text","text": format!("SOLL commit error (operation): {}", e)}],"isError": true}));
+            }
+        }
+
+        let _ = self.graph_store.execute("COMMIT");
+        let _ = self.graph_store.execute(&format!(
+            "DELETE FROM soll.RevisionPreview WHERE preview_id = '{}'",
+            escape_sql(preview_id)
+        ));
+
+        Some(json!({
+            "content": [{"type":"text","text": format!("SOLL revision committed: {} ({} operations)", revision_id, operations.len())}],
+            "data": {"revision_id": revision_id, "operations": operations.len()}
+        }))
+    }
+
+    pub(crate) fn axon_soll_query_context(&self, args: &Value) -> Option<Value> {
+        let project_slug = args
+            .get("project_slug")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AXO");
+        let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(25).max(1);
+
+        let reqs = self.query_single_column(&format!(
+            "SELECT id || '|' || title || '|' || COALESCE(status,'') || '|' || COALESCE(priority,'') FROM soll.Requirement WHERE id LIKE 'REQ-{}-%' ORDER BY id DESC LIMIT {}",
+            escape_sql(project_slug),
+            limit
+        )).unwrap_or_default();
+        let decisions = self.query_single_column(&format!(
+            "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Decision WHERE id LIKE 'DEC-{}-%' ORDER BY id DESC LIMIT {}",
+            escape_sql(project_slug),
+            limit
+        )).unwrap_or_default();
+        let revisions = self.query_single_column(&format!(
+            "SELECT revision_id || '|' || COALESCE(summary,'') || '|' || COALESCE(author,'') FROM soll.Revision ORDER BY committed_at DESC LIMIT {}",
+            limit
+        )).unwrap_or_default();
+
+        Some(json!({
+            "content": [{"type":"text","text": format!("SOLL context for {} loaded.", project_slug)}],
+            "data": {
+                "project_slug": project_slug,
+                "requirements": reqs,
+                "decisions": decisions,
+                "revisions": revisions
+            }
+        }))
+    }
+
+    pub(crate) fn axon_soll_attach_evidence(&self, args: &Value) -> Option<Value> {
+        let entity_type = args.get("entity_type")?.as_str()?;
+        let entity_id = args.get("entity_id")?.as_str()?;
+        let artifacts = args.get("artifacts")?.as_array()?;
+        let mut attached = 0usize;
+        let now = now_unix_ms();
+
+        for (idx, art) in artifacts.iter().enumerate() {
+            let artifact_type = art
+                .get("artifact_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let artifact_ref = art
+                .get("artifact_ref")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if artifact_ref.is_empty() {
+                continue;
+            }
+            let confidence = art
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.8);
+            let metadata = art.get("metadata").cloned().unwrap_or(json!({})).to_string();
+            let trace_id = format!("TRC-{}-{}-{}", entity_id, now, idx);
+
+            if self.graph_store.execute_param(
+                "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                &json!([trace_id, entity_type, entity_id, artifact_type, artifact_ref, confidence, metadata, now]),
+            ).is_ok() {
+                attached += 1;
+            }
+        }
+
+        Some(json!({
+            "content": [{"type":"text","text": format!("Attached {} evidence item(s) to {}:{}", attached, entity_type, entity_id)}],
+            "data": {"attached": attached}
+        }))
+    }
+
+    pub(crate) fn axon_soll_verify_requirements(&self, args: &Value) -> Option<Value> {
+        let project_slug = args
+            .get("project_slug")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AXO");
+        let query = format!(
+            "SELECT r.id, COALESCE(r.status,''), COALESCE(r.acceptance_criteria,''), COUNT(t.id)
+             FROM soll.Requirement r
+             LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
+             WHERE r.id LIKE 'REQ-{}-%'
+             GROUP BY 1,2,3
+             ORDER BY r.id",
+            escape_sql(project_slug)
+        );
+        let rows_raw = self.graph_store.query_json(&query).ok()?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+        let mut done = 0usize;
+        let mut partial = 0usize;
+        let mut missing = 0usize;
+        let mut details: Vec<Value> = Vec::new();
+
+        for row in rows {
+            if row.len() < 4 {
+                continue;
+            }
+            let id = row[0].clone();
+            let status = row[1].clone();
+            let criteria = row[2].clone();
+            let evidence_count = row[3].parse::<usize>().unwrap_or(0);
+            let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
+
+            let state = if evidence_count > 0 && has_criteria && (status == "current" || status == "accepted") {
+                done += 1;
+                "done"
+            } else if evidence_count > 0 || has_criteria {
+                partial += 1;
+                "partial"
+            } else {
+                missing += 1;
+                "missing"
+            };
+
+            details.push(json!({"id": id, "state": state, "status": status, "evidence_count": evidence_count}));
+        }
+
+        Some(json!({
+            "content": [{"type":"text","text": format!("Requirement verification: done={}, partial={}, missing={}", done, partial, missing)}],
+            "data": {"project_slug": project_slug, "done": done, "partial": partial, "missing": missing, "details": details}
+        }))
+    }
+
+    pub(crate) fn axon_soll_rollback_revision(&self, args: &Value) -> Option<Value> {
+        let revision_id = args.get("revision_id")?.as_str()?;
+        let query = format!(
+            "SELECT entity_type, entity_id, action, before_json, after_json
+             FROM soll.RevisionChange
+             WHERE revision_id = '{}'
+             ORDER BY created_at DESC",
+            escape_sql(revision_id)
+        );
+        let rows_raw = self.graph_store.query_json(&query).ok()?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+
+        let _ = self.graph_store.execute("BEGIN TRANSACTION");
+        for row in rows {
+            if row.len() < 5 {
+                continue;
+            }
+            let entity_type = &row[0];
+            let entity_id = &row[1];
+            let action = &row[2];
+            let before_json = &row[3];
+
+            let op = if action == "create" {
+                json!({"kind":"delete", "entity": entity_type, "entity_id": entity_id})
+            } else {
+                let before_val: Value = serde_json::from_str(before_json).unwrap_or(json!({}));
+                json!({"kind":"restore", "entity": entity_type, "entity_id": entity_id, "before": before_val})
+            };
+
+            if let Err(e) = self.apply_rollback_operation(&op) {
+                let _ = self.graph_store.execute("ROLLBACK");
+                return Some(json!({"content":[{"type":"text","text": format!("Rollback failed: {}", e)}],"isError": true}));
+            }
+        }
+
+        let _ = self.graph_store.execute("COMMIT");
+        let _ = self.graph_store.execute(&format!(
+            "UPDATE soll.Revision SET status = 'rolled_back' WHERE revision_id = '{}'",
+            escape_sql(revision_id)
+        ));
+        Some(json!({"content":[{"type":"text","text": format!("Revision rolled back: {}", revision_id)}]}))
+    }
+
+    fn build_plan_operations(&self, project_slug: &str, plan: &Value) -> Vec<Value> {
+        let mut operations = Vec::new();
+        for entity in ["pillar", "requirement", "decision", "milestone"] {
+            if let Some(items) = plan.get(format!("{}s", entity)).and_then(|v| v.as_array()) {
+                for item in items {
+                    if let Some(obj) = item.as_object() {
+                        let title = obj.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                        let logical_key = obj
+                            .get("logical_key")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(title);
+                        if logical_key.is_empty() {
+                            continue;
+                        }
+                        let existing_id = self.resolve_soll_id(entity, title, logical_key);
+                        let kind = if existing_id.is_some() { "update" } else { "create" };
+                        operations.push(json!({
+                            "kind": kind,
+                            "entity": entity,
+                            "project_slug": project_slug,
+                            "logical_key": logical_key,
+                            "entity_id": existing_id,
+                            "payload": Value::Object(obj.clone())
+                        }));
+                    }
+                }
+            }
+        }
+        operations
+    }
+
+    fn apply_operation_with_audit(&self, revision_id: &str, op: &Value) -> anyhow::Result<()> {
+        let kind = op.get("kind").and_then(|v| v.as_str()).unwrap_or("create");
+        let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("requirement");
+        let payload = op.get("payload").cloned().unwrap_or(json!({}));
+        let project_slug = op
+            .get("project_slug")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AXO");
+        let entity_id_hint = op
+            .get("entity_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let before = if let Some(id) = entity_id_hint.clone() {
+            self.snapshot_entity(entity, &id).unwrap_or(json!({}))
+        } else {
+            json!({})
+        };
+
+        let result = if kind == "update" && entity_id_hint.is_some() {
+            let mut data = payload.clone();
+            data["id"] = json!(entity_id_hint.clone().unwrap_or_default());
+            self.axon_soll_manager(&json!({"action":"update","entity":entity,"data":data}))
+        } else {
+            let mut data = payload.clone();
+            data["project_slug"] = json!(project_slug);
+            self.axon_soll_manager(&json!({"action":"create","entity":entity,"data":data}))
+        };
+
+        if soll_tool_is_error(result.as_ref()) {
+            return Err(anyhow!(
+                "{}",
+                soll_tool_text(result.as_ref()).unwrap_or_else(|| "unknown error".to_string())
+            ));
+        }
+
+        let entity_id = if let Some(id) = entity_id_hint {
+            id
+        } else {
+            soll_tool_text(result.as_ref())
+                .and_then(extract_soll_id_from_message)
+                .unwrap_or_else(|| "unknown".to_string())
+        };
+
+        let after = self.snapshot_entity(entity, &entity_id).unwrap_or(json!({}));
+        self.graph_store.execute_param(
+            "INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, action, before_json, after_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            &json!([
+                revision_id,
+                entity,
+                entity_id,
+                kind,
+                before.to_string(),
+                after.to_string(),
+                now_unix_ms()
+            ]),
+        )?;
+        Ok(())
+    }
+
+    fn apply_rollback_operation(&self, op: &Value) -> anyhow::Result<()> {
+        let kind = op.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+        let entity_id = op.get("entity_id").and_then(|v| v.as_str()).unwrap_or("");
+
+        match (kind, entity) {
+            ("delete", "pillar") => self.graph_store.execute(&format!("DELETE FROM soll.Pillar WHERE id = '{}'", escape_sql(entity_id)))?,
+            ("delete", "requirement") => self.graph_store.execute(&format!("DELETE FROM soll.Requirement WHERE id = '{}'", escape_sql(entity_id)))?,
+            ("delete", "decision") => self.graph_store.execute(&format!("DELETE FROM soll.Decision WHERE id = '{}'", escape_sql(entity_id)))?,
+            ("delete", "milestone") => self.graph_store.execute(&format!("DELETE FROM soll.Milestone WHERE id = '{}'", escape_sql(entity_id)))?,
+            ("restore", _) => {
+                let before = op.get("before").cloned().unwrap_or(json!({}));
+                let mut data = before;
+                data["id"] = json!(entity_id);
+                let resp = self.axon_soll_manager(&json!({"action":"update","entity":entity,"data":data}));
+                if soll_tool_is_error(resp.as_ref()) {
+                    return Err(anyhow!("{}", soll_tool_text(resp.as_ref()).unwrap_or_default()));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn snapshot_entity(&self, entity: &str, entity_id: &str) -> Option<Value> {
+        let query = match entity {
+            "pillar" => format!("SELECT title, description, metadata FROM soll.Pillar WHERE id = '{}'", escape_sql(entity_id)),
+            "requirement" => format!("SELECT title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs FROM soll.Requirement WHERE id = '{}'", escape_sql(entity_id)),
+            "decision" => format!("SELECT title, description, context, rationale, status, metadata, supersedes_decision_id, impact_scope FROM soll.Decision WHERE id = '{}'", escape_sql(entity_id)),
+            "milestone" => format!("SELECT title, status, metadata FROM soll.Milestone WHERE id = '{}'", escape_sql(entity_id)),
+            _ => return None,
+        };
+        let raw = self.graph_store.query_json(&query).ok()?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).ok()?;
+        let first = rows.first()?;
+        match entity {
+            "pillar" => Some(json!({
+                "title": first.first().cloned().unwrap_or_default(),
+                "description": first.get(1).cloned().unwrap_or_default(),
+                "metadata": first.get(2).cloned().unwrap_or_else(|| "{}".to_string())
+            })),
+            "requirement" => Some(json!({
+                "title": first.first().cloned().unwrap_or_default(),
+                "description": first.get(1).cloned().unwrap_or_default(),
+                "status": first.get(2).cloned().unwrap_or_default(),
+                "priority": first.get(3).cloned().unwrap_or_default(),
+                "metadata": first.get(4).cloned().unwrap_or_else(|| "{}".to_string()),
+                "owner": first.get(5).cloned().unwrap_or_default(),
+                "acceptance_criteria": first.get(6).cloned().unwrap_or_else(|| "[]".to_string()),
+                "evidence_refs": first.get(7).cloned().unwrap_or_else(|| "[]".to_string())
+            })),
+            "decision" => Some(json!({
+                "title": first.first().cloned().unwrap_or_default(),
+                "description": first.get(1).cloned().unwrap_or_default(),
+                "context": first.get(2).cloned().unwrap_or_default(),
+                "rationale": first.get(3).cloned().unwrap_or_default(),
+                "status": first.get(4).cloned().unwrap_or_default(),
+                "metadata": first.get(5).cloned().unwrap_or_else(|| "{}".to_string()),
+                "supersedes_decision_id": first.get(6).cloned().unwrap_or_default(),
+                "impact_scope": first.get(7).cloned().unwrap_or_default()
+            })),
+            "milestone" => Some(json!({
+                "title": first.first().cloned().unwrap_or_default(),
+                "status": first.get(1).cloned().unwrap_or_default(),
+                "metadata": first.get(2).cloned().unwrap_or_else(|| "{}".to_string())
+            })),
+            _ => None,
+        }
+    }
+}
+
+fn summarize_ops(ops: &[Value]) -> (usize, usize) {
+    let mut creates = 0usize;
+    let mut updates = 0usize;
+    for op in ops {
+        match op.get("kind").and_then(|v| v.as_str()).unwrap_or("") {
+            "create" => creates += 1,
+            "update" => updates += 1,
+            _ => {}
+        }
+    }
+    (creates, updates)
+}
+
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn parse_numeric_suffix(value: &str) -> Option<u64> {

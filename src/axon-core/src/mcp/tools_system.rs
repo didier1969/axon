@@ -76,6 +76,30 @@ fn parse_reason_count_rows(raw: &str) -> Vec<(String, i64)> {
         .collect()
 }
 
+fn parse_scalar_count_row(raw: &str) -> Option<i64> {
+    if let Ok(rows) = serde_json::from_str::<Vec<Vec<Value>>>(raw) {
+        if let Some(v) = rows.first().and_then(|row| row.first()).and_then(json_i64) {
+            return Some(v);
+        }
+    }
+
+    let rows = serde_json::from_str::<Vec<serde_json::Map<String, Value>>>(raw).ok()?;
+    for row in rows {
+        if let Some(v) = row
+            .get("count(*)")
+            .or_else(|| row.get("count_star()"))
+            .or_else(|| row.get("count"))
+            .and_then(json_i64)
+        {
+            return Some(v);
+        }
+        if let Some(v) = row.values().next().and_then(json_i64) {
+            return Some(v);
+        }
+    }
+    None
+}
+
 impl McpServer {
     pub(crate) fn axon_refine_lattice(&self, _args: &Value) -> Option<Value> {
         let store = &self.graph_store;
@@ -108,38 +132,46 @@ impl McpServer {
     }
 
     pub(crate) fn axon_debug(&self) -> Option<Value> {
-        let file_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM File")
-            .unwrap_or(0);
-        let pending_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM File WHERE status = 'pending'")
-            .unwrap_or(0);
-        let indexing_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM File WHERE status = 'indexing'")
-            .unwrap_or(0);
-        let degraded_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM File WHERE status = 'indexed_degraded'")
-            .unwrap_or(0);
-        let oversized_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM File WHERE status = 'oversized_for_current_budget'")
-            .unwrap_or(0);
-        let skipped_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM File WHERE status = 'skipped'")
-            .unwrap_or(0);
-        let graph_ready_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM File WHERE graph_ready = TRUE")
-            .unwrap_or(0);
-        let vector_ready_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM File WHERE vector_ready = TRUE")
-            .unwrap_or(0);
+        let canonical_count = |query: &str| -> i64 {
+            self.graph_store
+                .execute_raw_sql_gateway(query)
+                .ok()
+                .as_deref()
+                .and_then(parse_scalar_count_row)
+                .unwrap_or(0)
+        };
+        let canonical_json = |query: &str| -> String {
+            self.graph_store
+                .execute_raw_sql_gateway(query)
+                .unwrap_or_else(|_| "[]".to_string())
+        };
+
+        let file_count = canonical_count("SELECT count(*) FROM File");
+        let pending_count = canonical_count("SELECT count(*) FROM File WHERE status = 'pending'");
+        let indexing_count = canonical_count("SELECT count(*) FROM File WHERE status = 'indexing'");
+        let degraded_count =
+            canonical_count("SELECT count(*) FROM File WHERE status = 'indexed_degraded'");
+        let oversized_count =
+            canonical_count("SELECT count(*) FROM File WHERE status = 'oversized_for_current_budget'");
+        let skipped_count = canonical_count("SELECT count(*) FROM File WHERE status = 'skipped'");
+        let graph_ready_count = canonical_count("SELECT count(*) FROM File WHERE graph_ready = TRUE");
+        let vector_ready_count = canonical_count(
+            "WITH pending_vector_chunks AS ( \
+               SELECT co.source_id AS file_path \
+               FROM Chunk c \
+               JOIN CONTAINS co ON co.target_id = c.source_id \
+               LEFT JOIN ChunkEmbedding ce \
+                 ON ce.chunk_id = c.id \
+                AND ce.model_id = 'chunk-bge-small-en-v1.5-384' \
+                AND ce.source_hash = c.content_hash \
+               WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash \
+               GROUP BY 1 \
+             ) \
+             SELECT COUNT(*) \
+             FROM File f \
+             LEFT JOIN pending_vector_chunks pvc ON pvc.file_path = f.path \
+             WHERE f.graph_ready = TRUE AND pvc.file_path IS NULL",
+        );
         let (graph_projection_queue_queued, graph_projection_queue_inflight) = self
             .graph_store
             .fetch_graph_projection_queue_counts()
@@ -152,48 +184,43 @@ impl McpServer {
             .unwrap_or((0, 0));
         let file_vectorization_queue_depth =
             file_vectorization_queue_queued + file_vectorization_queue_inflight;
+        let reader_snapshot_age_ms = self.graph_store.reader_snapshot_age_ms();
+        let reader_refresh_failures_total = self.graph_store.reader_refresh_failures_total();
+        let reader_file_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File")
+            .unwrap_or(0);
+        let truth_drift_files = (file_count - reader_file_count).abs();
         let completed_count = (file_count - pending_count - indexing_count).max(0);
         let completion_rate = if file_count > 0 {
             (completed_count as f64 / file_count as f64) * 100.0
         } else {
             0.0
         };
-        let symbol_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM Symbol")
-            .unwrap_or(0);
-        let edge_count = self
-            .graph_store
-            .query_count(
-                "SELECT (SELECT count(*) FROM CONTAINS) + (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)",
-            )
-            .unwrap_or(0);
+        let symbol_count = canonical_count("SELECT count(*) FROM Symbol");
+        let edge_count = canonical_count(
+            "SELECT (SELECT count(*) FROM CONTAINS) + (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)",
+        );
         let memory = process_memory_snapshot();
         let storage = duckdb_storage_snapshot(&self.graph_store);
         let duckdb_memory = duckdb_memory_snapshot(&self.graph_store);
         let ingress = ingress_metrics_snapshot();
-        let stage_rows = self
-            .graph_store
-            .query_json(
-                "SELECT COALESCE(file_stage, 'unknown'), count(*) \
-                 FROM File \
-                 GROUP BY 1 \
-                 ORDER BY count(*) DESC, 1 ASC \
-                 LIMIT 6",
-            )
-            .unwrap_or_else(|_| "[]".to_string());
+        let stage_rows = canonical_json(
+            "SELECT COALESCE(file_stage, 'unknown'), count(*) \
+             FROM File \
+             GROUP BY 1 \
+             ORDER BY count(*) DESC, 1 ASC \
+             LIMIT 6",
+        );
         let stage_counts = parse_reason_count_rows(&stage_rows);
-        let backlog_reason_rows = self
-            .graph_store
-            .query_json(
-                "SELECT COALESCE(status_reason, 'unknown'), count(*) \
-                 FROM File \
-                 WHERE status IN ('pending', 'indexing') \
-                 GROUP BY 1 \
-                 ORDER BY count(*) DESC, 1 ASC \
-                 LIMIT 5",
-            )
-            .unwrap_or_else(|_| "[]".to_string());
+        let backlog_reason_rows = canonical_json(
+            "SELECT COALESCE(status_reason, 'unknown'), count(*) \
+             FROM File \
+             WHERE status IN ('pending', 'indexing') \
+             GROUP BY 1 \
+             ORDER BY count(*) DESC, 1 ASC \
+             LIMIT 5",
+        );
         let backlog_reasons = parse_reason_count_rows(&backlog_reason_rows);
         let backlog_reason_section = if backlog_reasons.is_empty() {
             if pending_count + indexing_count > 0 {
@@ -223,7 +250,7 @@ impl McpServer {
             format!("**Stages canoniques :**\n{}\n\n", lines)
         };
 
-        let report = format!(
+        let mut report = format!(
             "## 🤖 Axon Core V2 (Maestria) - Diagnostic Interne\n\n\
             **Architecture du Moteur :**\n\
             *   **Mode :** Embarqué (C-FFI) sans réseau TCP.\n\
@@ -320,6 +347,148 @@ impl McpServer {
             ingress.last_flush_duration_ms,
             ingress.last_promoted_count,
         );
+        if reader_snapshot_age_ms == u64::MAX {
+            report.push_str("\n**Reader Snapshot:** indisponible (mode mémoire ou non initialisé)\n");
+        } else {
+            report.push_str(&format!(
+                "\n**Reader Snapshot:** age={} ms, refresh_failures_total={}\n",
+                reader_snapshot_age_ms, reader_refresh_failures_total
+            ));
+        }
+        report.push_str(&format!(
+            "**Truth Drift (File count):** canonical={} vs reader={} (delta={})\n",
+            file_count, reader_file_count, truth_drift_files
+        ));
+        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+    }
+
+    pub(crate) fn axon_schema_overview(&self, _args: &Value) -> Option<Value> {
+        let tables = self
+            .graph_store
+            .execute_raw_sql_gateway(
+                "SELECT table_schema, table_name \
+                 FROM information_schema.tables \
+                 WHERE table_schema IN ('main', 'soll') \
+                 ORDER BY table_schema, table_name",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let columns = self
+            .graph_store
+            .execute_raw_sql_gateway(
+                "SELECT table_schema, table_name, COUNT(*) \
+                 FROM information_schema.columns \
+                 WHERE table_schema IN ('main', 'soll') \
+                 GROUP BY 1,2 \
+                 ORDER BY 1,2",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+
+        let report = format!(
+            "## 🧭 Axon Schema Overview\n\n\
+             **Tables (main + soll):**\n{}\n\n\
+             **Column count by table:**\n{}\n",
+            format_table_from_json(&tables, &["Schema", "Table"]),
+            format_table_from_json(&columns, &["Schema", "Table", "Columns"])
+        );
+        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+    }
+
+    pub(crate) fn axon_list_labels_tables(&self, _args: &Value) -> Option<Value> {
+        let rels = self
+            .graph_store
+            .execute_raw_sql_gateway(
+                "SELECT table_name \
+                 FROM information_schema.tables \
+                 WHERE table_schema = 'main' \
+                   AND table_name IN ('File','Symbol','Chunk','CONTAINS','CALLS','CALLS_NIF','IMPACTS','SUBSTANTIATES','GraphEmbedding','GraphProjection','GraphProjectionQueue','FileVectorizationQueue') \
+                 ORDER BY table_name",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let cols = self
+            .graph_store
+            .execute_raw_sql_gateway(
+                "SELECT table_name, column_name, data_type \
+                 FROM information_schema.columns \
+                 WHERE table_schema = 'main' \
+                   AND table_name IN ('File','Symbol','CALLS','CALLS_NIF','CONTAINS','GraphEmbedding') \
+                 ORDER BY table_name, ordinal_position",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let report = format!(
+            "## 🗂️ Labels / Tables Discovery\n\n\
+             **Core tables:**\n{}\n\n\
+             **Key columns:**\n{}\n",
+            format_table_from_json(&rels, &["Table"]),
+            format_table_from_json(&cols, &["Table", "Column", "Type"])
+        );
+        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+    }
+
+    pub(crate) fn axon_query_examples(&self, _args: &Value) -> Option<Value> {
+        let examples = r#"## 📚 Query Examples (SQL gateway / cypher tool)
+
+1) Workspace status
+`SELECT status, count(*) FROM File GROUP BY 1 ORDER BY 2 DESC;`
+
+2) Project health
+`SELECT project_slug, count(*) AS known, SUM(CASE WHEN status IN ('indexed','indexed_degraded','skipped','deleted') THEN 1 ELSE 0 END) AS completed FROM File GROUP BY 1 ORDER BY known DESC;`
+
+3) Top backlog reasons
+`SELECT COALESCE(status_reason,'unknown'), count(*) FROM File WHERE status IN ('pending','indexing') GROUP BY 1 ORDER BY 2 DESC LIMIT 10;`
+
+4) Parser/ingestion failures
+`SELECT COALESCE(last_error_reason,'unknown'), count(*) FROM File WHERE last_error_reason IS NOT NULL GROUP BY 1 ORDER BY 2 DESC;`
+
+5) Inter-language bridge visibility
+`SELECT COUNT(*) AS calls, (SELECT COUNT(*) FROM CALLS_NIF) AS calls_nif FROM CALLS;`
+
+6) Symbol lookup by project
+`SELECT id, name, kind FROM Symbol WHERE project_slug = 'BookingSystem' ORDER BY name LIMIT 50;`
+"#;
+        Some(json!({ "content": [{ "type": "text", "text": examples }] }))
+    }
+
+    pub(crate) fn axon_truth_check(&self, _args: &Value) -> Option<Value> {
+        let canonical_count = |query: &str| -> i64 {
+            self.graph_store
+                .execute_raw_sql_gateway(query)
+                .ok()
+                .as_deref()
+                .and_then(parse_scalar_count_row)
+                .unwrap_or(0)
+        };
+        let reader_count = |query: &str| -> i64 { self.graph_store.query_count(query).unwrap_or(0) };
+
+        let checks = vec![
+            ("File", "SELECT count(*) FROM File"),
+            ("Symbol", "SELECT count(*) FROM Symbol"),
+            ("CALLS", "SELECT count(*) FROM CALLS"),
+            ("CALLS_NIF", "SELECT count(*) FROM CALLS_NIF"),
+            ("CONTAINS", "SELECT count(*) FROM CONTAINS"),
+        ];
+
+        let mut rows = Vec::new();
+        let mut drift_count = 0_i64;
+        for (name, query) in checks {
+            let canonical = canonical_count(query);
+            let reader = reader_count(query);
+            let delta = (canonical - reader).abs();
+            if delta > 0 {
+                drift_count += 1;
+            }
+            rows.push(json!([name, canonical, reader, delta]));
+        }
+        let table = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
+        let status = if drift_count == 0 { "aligned" } else { "drift_detected" };
+        let report = format!(
+            "## 🧪 Truth Contract Check\n\n\
+             **Status:** {}\n\
+             **Drifted counters:** {}\n\n\
+             {}\n",
+            status,
+            drift_count,
+            format_table_from_json(&table, &["Counter", "Canonical(writer)", "Reader-path", "Delta"])
+        );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
@@ -339,12 +508,13 @@ impl McpServer {
 
         for call in calls {
             let tool_name = call.get("tool")?.as_str()?;
+            let normalized_tool_name = tool_name.strip_prefix("axon_").unwrap_or(tool_name);
             let tool_args = call.get("args")?;
 
-            let res = match tool_name {
-                "axon_query" => self.axon_query(tool_args),
-                "axon_inspect" => self.axon_inspect(tool_args),
-                "axon_impact" => self.axon_impact(tool_args),
+            let res = match normalized_tool_name {
+                "query" => self.axon_query(tool_args),
+                "inspect" => self.axon_inspect(tool_args),
+                "impact" => self.axon_impact(tool_args),
                 _ => None,
             };
 

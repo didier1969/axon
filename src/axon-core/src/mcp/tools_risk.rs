@@ -66,11 +66,24 @@ impl McpServer {
         };
 
         let query = format!(
-            "WITH RECURSIVE traverse(caller, callee, depth) AS (
-                SELECT source_id, target_id, 1 as depth FROM CALLS WHERE target_id = $target_id
+            "WITH RECURSIVE bridge_edges AS (
+                SELECT s1.id AS source_id, s2.id AS target_id
+                FROM Symbol s1
+                JOIN Symbol s2 ON s1.name = s2.name AND s1.id <> s2.id
+                WHERE (COALESCE(s1.is_nif, FALSE) = TRUE OR COALESCE(s2.is_nif, FALSE) = TRUE)
+            ),
+            all_edges AS (
+                SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
                 UNION ALL
-                SELECT c.source_id, c.target_id, t.depth + 1
-                FROM CALLS c JOIN traverse t ON c.target_id = t.caller
+                SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
+                UNION ALL
+                SELECT source_id, target_id, 'bridge_name' AS edge_type FROM bridge_edges
+            ),
+            traverse(caller, callee, depth, edge_type) AS (
+                SELECT source_id, target_id, 1 as depth, edge_type FROM all_edges WHERE target_id = $target_id
+                UNION ALL
+                SELECT c.source_id, c.target_id, t.depth + 1, c.edge_type
+                FROM all_edges c JOIN traverse t ON c.target_id = t.caller
                 WHERE t.depth < {}
             )
             SELECT DISTINCT COALESCE(f.path, 'Unknown') AS origin, s.name, s.kind
@@ -88,20 +101,89 @@ impl McpServer {
                 let table =
                     format_table_from_json(&res, &["Fichier / Projet", "Symbole Impacté", "Type"]);
                 let count_query = format!(
-                    "WITH RECURSIVE traverse(caller, callee, depth) AS (
-                        SELECT source_id, target_id, 1 as depth FROM CALLS WHERE target_id = $target_id
+                    "WITH RECURSIVE bridge_edges AS (
+                        SELECT s1.id AS source_id, s2.id AS target_id
+                        FROM Symbol s1
+                        JOIN Symbol s2 ON s1.name = s2.name AND s1.id <> s2.id
+                        WHERE (COALESCE(s1.is_nif, FALSE) = TRUE OR COALESCE(s2.is_nif, FALSE) = TRUE)
+                    ),
+                    all_edges AS (
+                        SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
                         UNION ALL
-                        SELECT c.source_id, c.target_id, t.depth + 1
-                        FROM CALLS c JOIN traverse t ON c.target_id = t.caller
+                        SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
+                        UNION ALL
+                        SELECT source_id, target_id, 'bridge_name' AS edge_type FROM bridge_edges
+                    ),
+                    traverse(caller, callee, depth, edge_type) AS (
+                        SELECT source_id, target_id, 1 as depth, edge_type FROM all_edges WHERE target_id = $target_id
+                        UNION ALL
+                        SELECT c.source_id, c.target_id, t.depth + 1, c.edge_type
+                        FROM all_edges c JOIN traverse t ON c.target_id = t.caller
                         WHERE t.depth < {}
                     )
                     SELECT count(DISTINCT caller) FROM traverse",
+                    depth
+                );
+                let confidence_query = format!(
+                    "WITH RECURSIVE bridge_edges AS (
+                        SELECT s1.id AS source_id, s2.id AS target_id
+                        FROM Symbol s1
+                        JOIN Symbol s2 ON s1.name = s2.name AND s1.id <> s2.id
+                        WHERE (COALESCE(s1.is_nif, FALSE) = TRUE OR COALESCE(s2.is_nif, FALSE) = TRUE)
+                    ),
+                    all_edges AS (
+                        SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
+                        UNION ALL
+                        SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
+                        UNION ALL
+                        SELECT source_id, target_id, 'bridge_name' AS edge_type FROM bridge_edges
+                    ),
+                    traverse(caller, callee, depth, edge_type) AS (
+                        SELECT source_id, target_id, 1 as depth, edge_type FROM all_edges WHERE target_id = $target_id
+                        UNION ALL
+                        SELECT c.source_id, c.target_id, t.depth + 1, c.edge_type
+                        FROM all_edges c JOIN traverse t ON c.target_id = t.caller
+                        WHERE t.depth < {}
+                    )
+                    SELECT edge_type, count(*) FROM traverse GROUP BY 1 ORDER BY 2 DESC",
                     depth
                 );
                 let impact_radius = self
                     .graph_store
                     .query_count_param(&count_query, &params)
                     .unwrap_or(0);
+                let confidence_raw = self
+                    .graph_store
+                    .query_json_param(&confidence_query, &params)
+                    .unwrap_or_else(|_| "[]".to_string());
+                let confidence_rows: Vec<Vec<Value>> =
+                    serde_json::from_str(&confidence_raw).unwrap_or_default();
+                let mut direct_edges = 0_i64;
+                let mut nif_edges = 0_i64;
+                let mut inferred_edges = 0_i64;
+                for row in confidence_rows {
+                    let edge_type = row
+                        .first()
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let count = row
+                        .get(1)
+                        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|x| x as i64)))
+                        .unwrap_or(0);
+                    match edge_type {
+                        "calls" => direct_edges += count,
+                        "calls_nif" => nif_edges += count,
+                        "bridge_name" => inferred_edges += count,
+                        _ => {}
+                    }
+                }
+                let confidence_label = if direct_edges + nif_edges > 0 {
+                    "high"
+                } else if inferred_edges > 0 {
+                    "medium"
+                } else {
+                    "low"
+                };
 
                 if rows.is_empty() && impact_radius == 0 {
                     return self.axon_impact_without_calls(symbol, project, depth);
@@ -121,6 +203,10 @@ impl McpServer {
                 report.push_str(&format!(
                     "**Rayon d'Impact (profondeur {}) :** {} composants affectés à travers le Treillis.\n\n",
                     depth, impact_radius
+                ));
+                report.push_str(&format!(
+                    "**Coverage:** confidence={} (direct_calls={}, calls_nif={}, inferred_bridge={})\n\n",
+                    confidence_label, direct_edges, nif_edges, inferred_edges
                 ));
                 report.push_str(&table);
                 if let Some(section) =
@@ -178,7 +264,7 @@ impl McpServer {
 
         let calls_count = self
             .graph_store
-            .query_count("SELECT count(*) FROM CALLS")
+            .query_count("SELECT (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)")
             .unwrap_or(0);
         if calls_count > 0 {
             return Some(json!({
@@ -236,10 +322,29 @@ impl McpServer {
     }
 
     pub(crate) fn axon_simulate_mutation(&self, args: &Value) -> Option<Value> {
-        let symbol = args.get("symbol")?.as_str()?;
+        let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+            Some(v) if !v.trim().is_empty() => v,
+            _ => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": "Missing required argument: symbol" }],
+                    "isError": true
+                }));
+            }
+        };
         let project = args.get("project").and_then(|v| v.as_str());
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2);
-        let target_id = self.resolve_scoped_symbol_id(symbol, project)?;
+        let target_id = match self.resolve_scoped_symbol_id(symbol, project) {
+            Some(id) => id,
+            None => {
+                return Some(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Symbol not found in current scope: {}", symbol)
+                    }],
+                    "isError": true
+                }));
+            }
+        };
         let query = format!(
             "WITH RECURSIVE traverse(caller, callee, depth) AS ( \
                 SELECT source_id, target_id, 1 as depth FROM CALLS WHERE target_id = $target_id \

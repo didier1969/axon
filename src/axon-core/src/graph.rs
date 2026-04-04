@@ -41,6 +41,8 @@ pub struct GraphStore {
     pub(crate) pool: Arc<LatticePool>,
     pub(crate) db_path: Option<PathBuf>,
     pub(crate) recent_write_epoch_ms: AtomicU64,
+    pub(crate) last_reader_refresh_epoch_ms: AtomicU64,
+    pub(crate) reader_refresh_failures_total: AtomicU64,
 }
 
 impl Drop for LatticePool {

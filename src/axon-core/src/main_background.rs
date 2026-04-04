@@ -203,6 +203,30 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>, ingress_buffer: Sha
     });
 }
 
+fn reader_refresh_interval_ms() -> u64 {
+    std::env::var("AXON_READER_REFRESH_INTERVAL_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|v| *v >= 250)
+        .unwrap_or(5_000)
+}
+
+pub(crate) fn spawn_reader_snapshot_refresher(store: Arc<GraphStore>) {
+    std::thread::spawn(move || {
+        let sleep_ms = reader_refresh_interval_ms();
+        info!(
+            "Reader snapshot refresher enabled (interval={}ms).",
+            sleep_ms
+        );
+        loop {
+            std::thread::sleep(Duration::from_millis(sleep_ms));
+            if let Err(err) = store.refresh_reader_snapshot() {
+                warn!("Reader snapshot refresh failed: {}", err);
+            }
+        }
+    });
+}
+
 pub(crate) fn spawn_autonomous_ingestor(store: Arc<GraphStore>, queue: Arc<QueueStore>) {
     tokio::spawn(async move {
         info!("Autonomous Ingestor: Ignition. Monitoring DuckDB for work...");

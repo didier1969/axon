@@ -200,6 +200,16 @@ pre,
   margin-top: 1.25rem;
 }
 
+.workspace-sunburst {
+  width: 100%;
+  min-height: 460px;
+  height: 52vh;
+  max-height: 640px;
+  border-radius: 1rem;
+  border: 1px solid oklch(23% 0.018 245);
+  background: linear-gradient(180deg, oklch(14% 0.01 245), oklch(12% 0.01 245));
+}
+
 .cockpit-columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -265,6 +275,23 @@ pre,
   text-transform: uppercase;
   letter-spacing: 0.12em;
   font-size: 0.74rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.metric-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  border: 1px solid oklch(36% 0.015 250);
+  color: oklch(84% 0.02 210);
+  font-size: 0.65rem;
+  font-weight: 700;
+  cursor: help;
 }
 
 .metric-value {
@@ -364,6 +391,23 @@ pre,
   align-items: center;
 }
 
+.project-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.project-toggle {
+  border: 1px solid oklch(33% 0.015 250);
+  background: oklch(14% 0.01 250 / 0.9);
+  color: oklch(84% 0.015 250);
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .project-grid,
 .mini-grid,
 .detail-grid {
@@ -374,6 +418,10 @@ pre,
 .project-grid {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   margin-top: 0.9rem;
+}
+
+.project-grid.expanded {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .project-grid .signal-stat {
@@ -389,6 +437,59 @@ pre,
 
 .project-grid .signal-stat-value {
   font-size: 0.86rem;
+}
+
+.latency-grid {
+  margin-top: 1rem;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.latency-card {
+  padding: 0.85rem 0.9rem;
+  border-radius: 1rem;
+  border: 1px solid oklch(25% 0.02 220 / 0.5);
+  background: oklch(15% 0.01 250 / 0.78);
+}
+
+.latency-title {
+  font-size: 0.75rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: oklch(80% 0.03 210);
+}
+
+.latency-stats {
+  margin-top: 0.45rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.25rem 0.5rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: oklch(88% 0.01 250);
+}
+
+.latency-sparkline {
+  margin-top: 0.55rem;
+  height: 2.2rem;
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.latency-bar {
+  flex: 1;
+  min-width: 2px;
+  border-radius: 2px 2px 0 0;
+  background: linear-gradient(180deg, oklch(80% 0.11 195), oklch(64% 0.08 220));
+}
+
+.latency-error {
+  margin-top: 0.45rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  color: oklch(86% 0.11 80);
 }
 
 .mini-grid {
@@ -564,6 +665,14 @@ pre,
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .project-grid.expanded {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .latency-grid {
+    grid-template-columns: 1fr;
+  }
+
   .activity-header,
   .activity-row {
     grid-template-columns: 7.5rem 6rem 6.5rem minmax(0, 1fr) 5rem;
@@ -601,6 +710,10 @@ pre,
   }
 
   .project-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .project-grid.expanded {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

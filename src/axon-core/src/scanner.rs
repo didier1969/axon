@@ -91,20 +91,37 @@ impl Scanner {
         if !path.is_file() {
             return false;
         }
-        if self.is_ignored_by_axon_ignore(path, false) {
+        if self.path_has_ignored_directory_noise(path) {
             return false;
         }
-        self.is_supported(path)
+        if self.is_ignored_by_legacy_axonignore(path, false) {
+            return false;
+        }
+        if !self.is_supported(path) {
+            return false;
+        }
+        if self.is_ignored_by_git_rules(path, false) && !self.is_included_by_axon_include(path, false) {
+            return false;
+        }
+        true
     }
 
     pub fn should_descend_into_directory(&self, path: &Path) -> bool {
         if !path.is_dir() {
             return false;
         }
-        if self.is_ignored_by_axon_ignore(path, true) {
+        if self.is_workspace_root_worktrees_dir(path) {
             return false;
         }
-        !self.path_has_ignored_directory_noise(path)
+        if self.path_has_ignored_directory_noise(path) {
+            return false;
+        }
+        if self.is_ignored_by_legacy_axonignore(path, true) {
+            return false;
+        }
+        // We intentionally do not prune directories only because of .gitignore
+        // so that `.axoninclude` can re-introduce selected descendants.
+        true
     }
 
     pub fn should_buffer_subtree_hint(&self, path: &Path) -> bool {
@@ -121,6 +138,41 @@ impl Scanner {
         self.extract_project_slug(path)
     }
 
+    pub fn is_ignore_control_path(&self, path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        if matches!(
+            name,
+            ".gitignore" | ".axonignore" | ".axonignore.local" | ".axoninclude"
+        ) {
+            return true;
+        }
+        path.ends_with(".git/info/exclude")
+    }
+
+    pub fn explain_ignore_decision(&self, path: &Path, is_dir: bool) -> String {
+        if self.is_workspace_root_worktrees_dir(path) {
+            return "blocked_root_worktrees_hard_rule".to_string();
+        }
+        if self.path_has_ignored_directory_noise(path) {
+            return "ignored_by_hard_deny_directory_segment".to_string();
+        }
+        if self.is_ignored_by_legacy_axonignore(path, is_dir) {
+            return "ignored_by_legacy_axonignore".to_string();
+        }
+        if self.is_included_by_axon_include(path, is_dir) {
+            return "included_by_axoninclude".to_string();
+        }
+        if self.is_ignored_by_git_rules(path, is_dir) {
+            return "ignored_by_gitignore_or_exclude".to_string();
+        }
+        if !is_dir && !self.is_supported(path) {
+            return "ignored_by_extension_or_hidden_filter".to_string();
+        }
+        "eligible".to_string()
+    }
+
     fn extract_project_slug(&self, path: &Path) -> String {
         if let Ok(relative) = path.strip_prefix(&self.root) {
             if let Some(first_dir) = relative.components().next() {
@@ -134,14 +186,12 @@ impl Scanner {
         let mut builder = WalkBuilder::new(start);
         builder.hidden(false);
         builder.git_ignore(false);
-        builder.git_global(false);
+        builder.git_global(crate::config::CONFIG.indexing.use_git_global_ignore);
         builder.git_exclude(false);
-        builder.add_custom_ignore_filename(".axonignore");
-        builder.add_custom_ignore_filename(".axonignore.local");
         builder
     }
 
-    fn is_ignored_by_axon_ignore(&self, path: &Path, is_dir: bool) -> bool {
+    fn is_ignored_by_git_rules(&self, path: &Path, is_dir: bool) -> bool {
         let absolute = match std::fs::canonicalize(path) {
             Ok(path) => path,
             Err(_) => path.to_path_buf(),
@@ -155,7 +205,81 @@ impl Scanner {
             return true;
         }
 
-        let mut decision = None;
+        let mut decision: Option<bool> = None;
+        for dir in ancestor_chain(&root, &absolute) {
+            let ignore_path = dir.join(".gitignore");
+            if ignore_path.exists() {
+                let (matcher, _err) = Gitignore::new(&ignore_path);
+                let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
+                if matched.is_ignore() {
+                    decision = Some(true);
+                } else if matched.is_whitelist() {
+                    decision = Some(false);
+                }
+            }
+            let exclude_path = dir.join(".git").join("info").join("exclude");
+            if exclude_path.exists() {
+                let (matcher, _err) = Gitignore::new(&exclude_path);
+                let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
+                if matched.is_ignore() {
+                    decision = Some(true);
+                } else if matched.is_whitelist() {
+                    decision = Some(false);
+                }
+            }
+        }
+
+        decision.unwrap_or(false)
+    }
+
+    fn is_included_by_axon_include(&self, path: &Path, is_dir: bool) -> bool {
+        let absolute = match std::fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(_) => path.to_path_buf(),
+        };
+        let root = match std::fs::canonicalize(&self.root) {
+            Ok(root) => root,
+            Err(_) => self.root.clone(),
+        };
+
+        if !absolute.starts_with(&root) {
+            return false;
+        }
+
+        let mut included = false;
+        for dir in ancestor_chain(&root, &absolute) {
+            let include_path = dir.join(".axoninclude");
+            if include_path.exists() {
+                let (matcher, _err) = Gitignore::new(&include_path);
+                let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
+                if matched.is_ignore() || matched.is_whitelist() {
+                    included = true;
+                }
+            }
+        }
+
+        included
+    }
+
+    fn is_ignored_by_legacy_axonignore(&self, path: &Path, is_dir: bool) -> bool {
+        if !crate::config::CONFIG.indexing.legacy_axonignore_additive {
+            return false;
+        }
+
+        let absolute = match std::fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(_) => path.to_path_buf(),
+        };
+        let root = match std::fs::canonicalize(&self.root) {
+            Ok(root) => root,
+            Err(_) => self.root.clone(),
+        };
+
+        if !absolute.starts_with(&root) {
+            return false;
+        }
+
+        let mut decision: Option<bool> = None;
         for dir in ancestor_chain(&root, &absolute) {
             for ignore_name in [".axonignore", ".axonignore.local"] {
                 let ignore_path = dir.join(ignore_name);
@@ -182,7 +306,13 @@ impl Scanner {
 
         // 2. HIDDEN FILE FILTER
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with('.') && name != ".env" {
+            if name.starts_with('.')
+                && name != ".env"
+                && !matches!(
+                    name,
+                    ".gitignore" | ".axoninclude" | ".axonignore" | ".axonignore.local"
+                )
+            {
                 return false;
             }
         }
@@ -234,6 +364,19 @@ impl Scanner {
         })
     }
 
+    fn is_workspace_root_worktrees_dir(&self, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(&self.root) else {
+            return false;
+        };
+        let mut comps = relative.components();
+        let first = comps.next();
+        let second = comps.next();
+        match (first, second) {
+            (Some(a), None) => a.as_os_str() == ".worktrees",
+            _ => false,
+        }
+    }
+
     fn scan_path(
         &self,
         graph: Arc<GraphStore>,
@@ -249,7 +392,7 @@ impl Scanner {
             let path = entry.path();
 
             if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-                if !self.is_supported(path) {
+                if !self.should_process_path(path) {
                     continue;
                 }
 

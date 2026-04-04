@@ -14,7 +14,7 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeMode {
@@ -118,9 +118,18 @@ fn main() -> anyhow::Result<()> {
                     .ingestion_memory_budget_gb
                     .saturating_mul(1024 * 1024 * 1024),
             ));
-            let file_ingress_guard: SharedFileIngressGuard = Arc::new(Mutex::new(
-                FileIngressGuard::hydrate_from_store(&graph_store).unwrap_or_default(),
-            ));
+            let hydrated_guard = match FileIngressGuard::hydrate_from_store(&graph_store) {
+                Ok(guard) => guard,
+                Err(err) => {
+                    warn!(
+                        "File ingress guard hydration failed at startup: {:?}. Falling back to empty in-memory guard (still enabled).",
+                        err
+                    );
+                    FileIngressGuard::default()
+                }
+            };
+            let file_ingress_guard: SharedFileIngressGuard =
+                Arc::new(Mutex::new(hydrated_guard));
             let ingress_buffer: SharedIngressBuffer =
                 Arc::new(Mutex::new(IngressBuffer::default()));
             let tel_socket_path = "/tmp/axon-telemetry.sock";
@@ -190,6 +199,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 info!("Ingress, watcher, scan and autonomous ingestion disabled by runtime mode.");
             }
+            main_background::spawn_reader_snapshot_refresher(graph_store.clone());
 
             // --- Telemetry Listener Loop (Elixir/Dashboard) ---
             loop {

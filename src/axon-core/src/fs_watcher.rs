@@ -51,6 +51,29 @@ fn stage_hot_path_delta_count(
     guard: Option<&SharedFileIngressGuard>,
 ) -> Result<usize> {
     let scanner = Scanner::new(watch_root.to_string_lossy().as_ref());
+    if scanner.is_ignore_control_path(path) {
+        match store.reconcile_ignore_rules_for_scope(watch_root, &scanner) {
+            Ok(stats) => watcher_probe::record(
+                "watcher.control_file.reconcile",
+                Some(path),
+                format!(
+                    "scanned={} newly_ignored={} newly_included={} dry_run={}",
+                    stats.scanned, stats.newly_ignored, stats.newly_included, stats.dry_run
+                ),
+            ),
+            Err(err) => watcher_probe::record(
+                "watcher.control_file.reconcile",
+                Some(path),
+                format!("error={}", err),
+            ),
+        }
+        watcher_probe::record(
+            "watcher.control_file",
+            Some(path),
+            format!("reason=ignore_control_changed action=rescan_root decision={}", scanner.explain_ignore_decision(path, false)),
+        );
+        return stage_hot_path_delta_count(store, watch_root, watch_root, priority, guard);
+    }
 
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -300,6 +323,24 @@ fn enqueue_hot_path_delta_count(
     ingress: &SharedIngressBuffer,
 ) -> Result<usize> {
     let scanner = Scanner::new(watch_root.to_string_lossy().as_ref());
+    if scanner.is_ignore_control_path(path) {
+        watcher_probe::record(
+            "watcher.control_file",
+            Some(path),
+            format!("reason=ignore_control_changed action=enqueue_root_hint decision={}", scanner.explain_ignore_decision(path, false)),
+        );
+        let absolute_root =
+            std::fs::canonicalize(watch_root).unwrap_or_else(|_| watch_root.to_path_buf());
+        ingress
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .record_subtree_hint(
+                absolute_root.to_string_lossy().to_string(),
+                priority,
+                IngressSource::Watcher,
+            );
+        return Ok(1);
+    }
 
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,

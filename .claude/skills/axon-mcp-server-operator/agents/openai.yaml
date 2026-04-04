@@ -1,0 +1,7 @@
+interface:
+  display_name: "Axon MCP Operator"
+  short_description: "Exécute tools/list et tools/call proprement"
+  default_prompt: "Use $axon-mcp-server-operator to discover MCP tools and execute safe JSON-RPC call flows."
+
+policy:
+  allow_implicit_invocation: true

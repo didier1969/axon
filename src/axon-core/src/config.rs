@@ -19,6 +19,14 @@ pub struct IndexingConfig {
     pub subtree_hint_cooldown_ms: u64,
     #[serde(default = "default_subtree_hint_retry_budget")]
     pub subtree_hint_retry_budget: u64,
+    #[serde(default = "default_use_git_global_ignore")]
+    pub use_git_global_ignore: bool,
+    #[serde(default = "default_legacy_axonignore_additive")]
+    pub legacy_axonignore_additive: bool,
+    #[serde(default = "default_ignore_reconcile_enabled")]
+    pub ignore_reconcile_enabled: bool,
+    #[serde(default = "default_ignore_reconcile_dry_run")]
+    pub ignore_reconcile_dry_run: bool,
 }
 
 pub static CONFIG: Lazy<Config> = Lazy::new(|| {
@@ -29,6 +37,10 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| {
             blocked_subtree_hint_segments: default_blocked_subtree_hint_segments(),
             subtree_hint_cooldown_ms: default_subtree_hint_cooldown_ms(),
             subtree_hint_retry_budget: default_subtree_hint_retry_budget(),
+            use_git_global_ignore: default_use_git_global_ignore(),
+            legacy_axonignore_additive: default_legacy_axonignore_additive(),
+            ignore_reconcile_enabled: default_ignore_reconcile_enabled(),
+            ignore_reconcile_dry_run: default_ignore_reconcile_dry_run(),
         },
     })
 });
@@ -111,6 +123,22 @@ fn default_subtree_hint_cooldown_ms() -> u64 {
 
 fn default_subtree_hint_retry_budget() -> u64 {
     3
+}
+
+fn default_use_git_global_ignore() -> bool {
+    false
+}
+
+fn default_legacy_axonignore_additive() -> bool {
+    true
+}
+
+fn default_ignore_reconcile_enabled() -> bool {
+    true
+}
+
+fn default_ignore_reconcile_dry_run() -> bool {
+    true
 }
 
 fn load_config() -> anyhow::Result<Config> {

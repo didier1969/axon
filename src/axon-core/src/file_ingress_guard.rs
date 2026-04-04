@@ -40,7 +40,7 @@ struct FileStamp {
     is_indexing: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FileIngressGuard {
     enabled: bool,
     by_path: HashMap<String, FileStamp>,
@@ -157,6 +157,15 @@ impl FileIngressGuard {
 
     pub fn invalidate_all(&mut self) {
         self.by_path.clear();
+    }
+}
+
+impl Default for FileIngressGuard {
+    fn default() -> Self {
+        Self {
+            enabled: read_enabled_from_env(),
+            by_path: HashMap::new(),
+        }
     }
 }
 

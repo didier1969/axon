@@ -37,6 +37,8 @@ COCKPIT_URL = os.environ.get(
     "AXON_DASHBOARD_URL",
     "http://127.0.0.1:44127/cockpit",
 )
+MCP_URL = os.environ.get("AXON_MCP_URL", "http://127.0.0.1:44129/mcp")
+QUALIFY_PROJECT = os.environ.get("AXON_QUALIFY_PROJECT", "BookingSystem")
 
 SQL_OVERVIEW = """
 SELECT
@@ -238,6 +240,12 @@ def parse_int(value: Any) -> int:
     if isinstance(value, float):
         return int(round(value))
     if isinstance(value, str):
+        numeric = re.search(r"-?\d+", value.replace(",", ""))
+        if numeric:
+            try:
+                return int(numeric.group(0))
+            except ValueError:
+                pass
         try:
             return int(value.replace(",", "").strip())
         except ValueError:
@@ -404,7 +412,10 @@ def cockpit_metrics(html: str) -> dict[str, Any]:
             extract_html_value(html, r"Graph Ready</p>\s*<p[^>]*class=\"metric-value\">([^<]+)")
         ),
         "vector_ready": parse_int(
-            extract_html_value(html, r"Vector Ready</p>\s*<p[^>]*class=\"metric-value\">([^<]+)")
+            extract_html_value(html, r"Vector Ready File</p>\s*<p[^>]*class=\"metric-value\">([^<]+)")
+        ),
+        "vector_ready_graph": parse_int(
+            extract_html_value(html, r"Vector Ready Graph</p>\s*<p[^>]*class=\"metric-value\">([^<]+)")
         ),
         "indexing": parse_int(
             extract_html_value(html, r"Indexing</p>\s*<p[^>]*class=\"metric-value\">([^<]+)")
@@ -527,6 +538,33 @@ def wait_for_runtime(timeout_s: int = 180) -> int:
     raise RuntimeError(f"Axon runtime not ready after {timeout_s}s (last pid={last_pid})")
 
 
+def mcp_call(tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments or {}},
+    }
+    proc = shell(
+        [
+            "curl",
+            "-sS",
+            "-X",
+            "POST",
+            MCP_URL,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            json.dumps(payload),
+        ],
+        capture=True,
+    )
+    parsed = parse_json_payload(proc.stdout)
+    if isinstance(parsed, dict):
+        return parsed
+    return {"error": "invalid_mcp_response", "raw": proc.stdout}
+
+
 def runtime_is_up() -> bool:
     return detect_axon_pid() is not None
 
@@ -543,6 +581,7 @@ class Args:
     mode: str
     reset_ist: bool
     keep_running: bool
+    enforce_gate: bool
     label: str
     output_root: Path
 
@@ -557,7 +596,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=["full", "read_only", "mcp_only"],
         default="full",
-        help="Runtime mode passed to start-v2.sh. Default: full",
+        help="Runtime mode passed to start.sh. Default: full",
     )
     parser.add_argument(
         "--label",
@@ -579,6 +618,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Stop Axon again after the monitoring window completes.",
     )
+    parser.add_argument(
+        "--enforce-gate",
+        action="store_true",
+        help="Fail with exit code 2 if MCP truth_check reports drift_detected.",
+    )
     return parser
 
 
@@ -596,6 +640,7 @@ def parse_args() -> Args:
         mode=ns.mode,
         reset_ist=not ns.no_reset_ist,
         keep_running=not ns.stop_after,
+        enforce_gate=ns.enforce_gate,
         label=sanitize_label(ns.label),
         output_root=Path(ns.output_root),
     )
@@ -639,8 +684,8 @@ def main() -> int:
         },
         "git": git_context(),
         "commands": {
-            "stop": "bash scripts/stop-v2.sh",
-            "start": f"bash scripts/start-v2.sh --{args.mode.replace('_', '-')}",
+            "stop": "bash scripts/stop.sh",
+            "start": f"bash scripts/start.sh --{args.mode.replace('_', '-')}",
         },
     }
     write_json(lock_path, lock)
@@ -648,11 +693,11 @@ def main() -> int:
     print(f"[qualify] run_dir={run_dir}")
     print(f"[qualify] reset_ist={args.reset_ist} mode={args.mode} duration={args.duration}s interval={args.interval}s")
 
-    stop_code, stop_output = run_script("scripts/stop-v2.sh", check=False)
+    stop_code, stop_output = run_script("scripts/stop.sh", check=False)
     stop_log_path.write_text(stop_output)
     if stop_code != 0 and runtime_is_up():
         raise RuntimeError(
-            f"stop-v2.sh returned {stop_code} and axon-core is still running; see {stop_log_path}"
+            f"stop.sh returned {stop_code} and axon-core is still running; see {stop_log_path}"
         )
 
     if args.reset_ist:
@@ -668,12 +713,12 @@ def main() -> int:
         "mcp_only": "--mcp-only",
     }[args.mode]
     start_code, start_output = run_script(
-        "scripts/start-v2.sh", [start_mode_arg], check=False
+        "scripts/start.sh", [start_mode_arg], check=False
     )
     start_log_path.write_text(start_output)
     if start_code != 0 and not runtime_is_up():
         raise RuntimeError(
-            f"start-v2.sh returned {start_code} and runtime is not up; see {start_log_path}"
+            f"start.sh returned {start_code} and runtime is not up; see {start_log_path}"
         )
     pid = wait_for_runtime()
     lock["runtime"] = {
@@ -844,6 +889,20 @@ def main() -> int:
         "known_divergence_samples": divergence_samples,
         "final_sample": final_sample,
     }
+    mcp_truth_check = mcp_call("truth_check", {})
+    mcp_indexing_diagnosis = mcp_call("diagnose_indexing", {"project": QUALIFY_PROJECT})
+    summary["mcp_truth_check"] = mcp_truth_check
+    summary["mcp_diagnose_indexing"] = mcp_indexing_diagnosis
+
+    truth_text = ""
+    if isinstance(mcp_truth_check.get("result"), dict):
+        content = mcp_truth_check["result"].get("content", [])
+        if isinstance(content, list) and content:
+            first = content[0]
+            if isinstance(first, dict):
+                truth_text = str(first.get("text", ""))
+    truth_drift_detected = "drift_detected" in truth_text.lower()
+    summary["truth_drift_detected"] = truth_drift_detected
     write_json(summary_path, summary)
 
     notes = [
@@ -868,6 +927,7 @@ def main() -> int:
         f"Final cockpit buffered: {final_sample.get('cockpit', {}).get('buffered_entries', 'ERR')}",
         f"Final cockpit graph projection queued: {final_sample.get('cockpit', {}).get('graph_projection_queue', {}).get('queued', 'ERR')}",
         f"Final cockpit graph projection inflight: {final_sample.get('cockpit', {}).get('graph_projection_queue', {}).get('inflight', 'ERR')}",
+        f"MCP truth drift detected: {truth_drift_detected}",
         f"FileIndexed events parsed from runtime log: {file_indexed_stats['parsed_file_indexed_events']}",
         f"Max FileIndexed queue_wait_us: {file_indexed_stats['max_queue_wait_us']}",
         f"Max FileIndexed parse_us: {file_indexed_stats['max_parse_us']}",
@@ -875,9 +935,13 @@ def main() -> int:
     ]
     notes_path.write_text("\n".join(notes) + "\n")
 
+    if args.enforce_gate and truth_drift_detected:
+        print("[qualify] release gate failed: truth drift detected")
+        return 2
+
     if not args.keep_running:
         stop_after_code, stop_after_output = run_script(
-            "scripts/stop-v2.sh", check=False
+            "scripts/stop.sh", check=False
         )
         stop_log_path.write_text(
             stop_log_path.read_text()
@@ -886,7 +950,7 @@ def main() -> int:
         )
         if stop_after_code != 0 and runtime_is_up():
             raise RuntimeError(
-                f"stop-v2.sh --stop-after returned {stop_after_code} and runtime is still up; see {stop_log_path}"
+                f"stop.sh --stop-after returned {stop_after_code} and runtime is still up; see {stop_log_path}"
             )
 
     print(f"[qualify] summary={summary_path}")

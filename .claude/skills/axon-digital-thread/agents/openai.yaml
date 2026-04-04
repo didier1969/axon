@@ -1,7 +1,7 @@
 interface:
   display_name: "Axon Digital Thread"
-  short_description: "Gouverne factuellement SOLL et IST"
-  default_prompt: "Use $axon-digital-thread to align this work with the Axon Vision -> Pillar -> Requirement -> Decision -> Concept hierarchy."
+  short_description: "SOLL v2 via MCP avec révisions et preuves"
+  default_prompt: "Use $axon-digital-thread to manage SOLL with apply_plan_v2 (dry-run -> commit), attach evidence, and verify requirement coverage."
 
 policy:
   allow_implicit_invocation: true

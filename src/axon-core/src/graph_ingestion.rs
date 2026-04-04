@@ -15,6 +15,7 @@ use crate::queue::ProcessingMode;
 use crate::watcher_probe;
 
 const DEFAULT_GRAPH_EMBEDDING_RADIUS: i64 = 2;
+const CHUNK_EMBEDDING_MODEL_ID: &str = "chunk-bge-small-en-v1.5-384";
 
 #[derive(Debug, Clone, Copy)]
 enum FileUpsertSource {
@@ -32,6 +33,14 @@ pub struct GraphProjectionWork {
 #[derive(Debug, Clone)]
 pub struct FileVectorizationWork {
     pub file_path: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IgnoreReconcileStats {
+    pub scanned: usize,
+    pub newly_ignored: usize,
+    pub newly_included: usize,
+    pub dry_run: bool,
 }
 
 fn parse_i64_field(value: &serde_json::Value) -> Option<i64> {
@@ -370,6 +379,170 @@ impl GraphStore {
             format!("affected={}", affected),
         );
         Ok(affected as usize)
+    }
+
+    pub fn reconcile_ignore_rules_for_scope(
+        &self,
+        scope_root: &Path,
+        scanner: &crate::scanner::Scanner,
+    ) -> Result<IgnoreReconcileStats> {
+        if !crate::config::CONFIG.indexing.ignore_reconcile_enabled {
+            return Ok(IgnoreReconcileStats::default());
+        }
+
+        let dry_run = crate::config::CONFIG.indexing.ignore_reconcile_dry_run;
+        let scope = std::fs::canonicalize(scope_root).unwrap_or_else(|_| scope_root.to_path_buf());
+        let scope_str = scope.to_string_lossy().to_string();
+        let prefix = Self::escape_sql(&format!("{}/%", scope_str.trim_end_matches('/')));
+        let escaped_scope = Self::escape_sql(&scope_str);
+
+        let raw = self.query_json(&format!(
+            "SELECT path, COALESCE(project_slug, 'global'), status FROM File \
+             WHERE path = '{}' OR path LIKE '{}';",
+            escaped_scope, prefix
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+
+        let mut newly_ignored: Vec<String> = Vec::new();
+        let mut newly_included: Vec<String> = Vec::new();
+
+        for row in &rows {
+            if row.len() < 3 {
+                continue;
+            }
+            let Some(path) = row[0].as_str() else {
+                continue;
+            };
+            let status = row[2].as_str().unwrap_or("unknown");
+            let path_obj = Path::new(path);
+            let eligible = scanner.should_process_path(path_obj);
+
+            if !eligible && status != "deleted" && status != "ignored_pending_purge" {
+                newly_ignored.push(path.to_string());
+            } else if eligible && (status == "deleted" || status == "ignored_pending_purge") {
+                newly_included.push(path.to_string());
+            }
+        }
+
+        if dry_run {
+            watcher_probe::record(
+                "ignore.reconcile",
+                Some(scope.as_path()),
+                format!(
+                    "mode=dry_run scanned={} newly_ignored={} newly_included={}",
+                    rows.len(),
+                    newly_ignored.len(),
+                    newly_included.len()
+                ),
+            );
+            return Ok(IgnoreReconcileStats {
+                scanned: rows.len(),
+                newly_ignored: newly_ignored.len(),
+                newly_included: newly_included.len(),
+                dry_run: true,
+            });
+        }
+
+        if !newly_ignored.is_empty() {
+            for chunk in newly_ignored.chunks(300) {
+                let selector = chunk
+                    .iter()
+                    .map(|p| format!("'{}'", Self::escape_sql(p)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut queries = Self::derived_cleanup_queries(&selector);
+                queries.push(format!(
+                    "DELETE FROM CALLS WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) \
+                     OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
+                    selector, selector
+                ));
+                queries.push(format!(
+                    "DELETE FROM CALLS_NIF WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) \
+                     OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
+                    selector, selector
+                ));
+                queries.push(format!(
+                    "DELETE FROM ChunkEmbedding WHERE chunk_id IN (SELECT id FROM Chunk WHERE source_type = 'symbol' \
+                     AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})));",
+                    selector
+                ));
+                queries.push(format!(
+                    "DELETE FROM Chunk WHERE source_type = 'symbol' \
+                     AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
+                    selector
+                ));
+                queries.push(format!(
+                    "DELETE FROM Symbol WHERE id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
+                    selector
+                ));
+                queries.push(format!(
+                    "DELETE FROM CONTAINS WHERE source_id IN ({});",
+                    selector
+                ));
+                queries.push(format!(
+                    "DELETE FROM FileVectorizationQueue WHERE file_path IN ({});",
+                    selector
+                ));
+                queries.push(format!(
+                    "UPDATE File SET status = 'ignored_pending_purge', worker_id = NULL, needs_reindex = FALSE, \
+                     status_reason = 'ignore_rules_changed', file_stage = 'deleted', graph_ready = FALSE, vector_ready = FALSE \
+                     WHERE path IN ({});",
+                    selector
+                ));
+                self.execute_batch(&queries)?;
+            }
+        }
+
+        if !newly_included.is_empty() {
+            let mut queries = Vec::new();
+            for path in &newly_included {
+                let path_obj = Path::new(path);
+                let metadata = match std::fs::metadata(path_obj) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if !metadata.is_file() {
+                    continue;
+                }
+                let project = scanner.project_slug_for_path(path_obj);
+                let size = metadata.len() as i64;
+                let mtime = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                queries.extend(Self::upsert_file_queries(
+                    path,
+                    &project,
+                    size,
+                    mtime,
+                    900,
+                    FileUpsertSource::HotDelta,
+                ));
+            }
+            if !queries.is_empty() {
+                self.execute_batch(&queries)?;
+            }
+        }
+
+        watcher_probe::record(
+            "ignore.reconcile",
+            Some(scope.as_path()),
+            format!(
+                "mode=apply scanned={} newly_ignored={} newly_included={}",
+                rows.len(),
+                newly_ignored.len(),
+                newly_included.len()
+            ),
+        );
+
+        Ok(IgnoreReconcileStats {
+            scanned: rows.len(),
+            newly_ignored: newly_ignored.len(),
+            newly_included: newly_included.len(),
+            dry_run: false,
+        })
     }
 
     pub fn fetch_file_ingress_row(&self, path: &str) -> Result<Option<FileIngressRow>> {
@@ -737,13 +910,26 @@ impl GraphStore {
     }
 
     pub fn backfill_file_vectorization_queue(&self) -> Result<usize> {
-        let query = "SELECT path \
-                     FROM File \
-                     WHERE status IN ('indexed', 'indexed_degraded') \
-                       AND file_stage = 'graph_indexed' \
-                       AND graph_ready = TRUE \
-                       AND (vector_ready IS FALSE OR vector_ready IS NULL)";
-        let raw = self.query_json(query)?;
+        let query = format!(
+            "SELECT path \
+             FROM File \
+             WHERE status IN ('indexed', 'indexed_degraded') \
+               AND file_stage = 'graph_indexed' \
+               AND graph_ready = TRUE \
+               AND EXISTS ( \
+                   SELECT 1 \
+                   FROM Chunk c \
+                   JOIN CONTAINS co ON co.target_id = c.source_id \
+                   LEFT JOIN ChunkEmbedding ce \
+                     ON ce.chunk_id = c.id \
+                    AND ce.model_id = '{}' \
+                    AND ce.source_hash = c.content_hash \
+                   WHERE co.source_id = File.path \
+                     AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
+               )",
+            Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
+        );
+        let raw = self.query_json(&query)?;
         if raw == "[]" || raw.is_empty() {
             return Ok(0);
         }
@@ -1012,10 +1198,6 @@ impl GraphStore {
                 indexed_filter
             ));
             queries.push(format!(
-                "DELETE FROM ChunkEmbedding WHERE chunk_id IN (SELECT id FROM Chunk WHERE source_type = 'symbol' AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})));",
-                indexed_filter
-            ));
-            queries.push(format!(
                 "DELETE FROM Chunk WHERE source_type = 'symbol' AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 indexed_filter
             ));
@@ -1030,7 +1212,20 @@ impl GraphStore {
                  SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed' END, \
                      file_stage = CASE WHEN needs_reindex THEN 'promoted' ELSE 'graph_indexed' END, \
                      graph_ready = CASE WHEN needs_reindex THEN FALSE ELSE TRUE END, \
-                     vector_ready = CASE WHEN needs_reindex THEN FALSE ELSE FALSE END, \
+                     vector_ready = CASE \
+                         WHEN needs_reindex THEN FALSE \
+                         ELSE NOT EXISTS ( \
+                             SELECT 1 \
+                             FROM Chunk c \
+                             JOIN CONTAINS co ON co.target_id = c.source_id \
+                             LEFT JOIN ChunkEmbedding ce \
+                               ON ce.chunk_id = c.id \
+                              AND ce.model_id = '{}' \
+                              AND ce.source_hash = c.content_hash \
+                             WHERE co.source_id = File.path \
+                               AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
+                         ) \
+                     END, \
                      worker_id = NULL, \
                      needs_reindex = FALSE, \
                      last_error_reason = NULL, \
@@ -1038,6 +1233,7 @@ impl GraphStore {
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
+                Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID),
                 indexed_paths.join(",")
             ));
         }
@@ -1047,7 +1243,20 @@ impl GraphStore {
                      SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed_degraded' END, \
                      file_stage = CASE WHEN needs_reindex THEN 'promoted' ELSE 'graph_indexed' END, \
                      graph_ready = CASE WHEN needs_reindex THEN FALSE ELSE TRUE END, \
-                     vector_ready = CASE WHEN needs_reindex THEN FALSE ELSE FALSE END, \
+                     vector_ready = CASE \
+                         WHEN needs_reindex THEN FALSE \
+                         ELSE NOT EXISTS ( \
+                             SELECT 1 \
+                             FROM Chunk c \
+                             JOIN CONTAINS co ON co.target_id = c.source_id \
+                             LEFT JOIN ChunkEmbedding ce \
+                               ON ce.chunk_id = c.id \
+                              AND ce.model_id = '{}' \
+                              AND ce.source_hash = c.content_hash \
+                             WHERE co.source_id = File.path \
+                               AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
+                         ) \
+                     END, \
                      worker_id = NULL, \
                      needs_reindex = FALSE, \
                      last_error_reason = 'degraded_structure_only', \
@@ -1055,6 +1264,7 @@ impl GraphStore {
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
+                Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID),
                 degraded_paths.join(",")
             ));
         }
@@ -1454,7 +1664,7 @@ impl GraphStore {
             .unwrap_or(false))
     }
 
-    pub fn mark_file_vectorization_done(&self, paths: &[String]) -> Result<()> {
+    pub fn mark_file_vectorization_done(&self, paths: &[String], model_id: &str) -> Result<()> {
         if paths.is_empty() {
             return Ok(());
         }
@@ -1466,8 +1676,19 @@ impl GraphStore {
             .join(",");
         self.execute(&format!(
             "UPDATE File \
-             SET vector_ready = TRUE \
+             SET vector_ready = NOT EXISTS ( \
+                 SELECT 1 \
+                 FROM Chunk c \
+                 JOIN CONTAINS co ON co.target_id = c.source_id \
+                 LEFT JOIN ChunkEmbedding ce \
+                   ON ce.chunk_id = c.id \
+                  AND ce.model_id = '{}' \
+                  AND ce.source_hash = c.content_hash \
+                 WHERE co.source_id = File.path \
+                   AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
+             ) \
              WHERE graph_ready = TRUE AND path IN ({})",
+            Self::escape_sql(model_id),
             filter
         ))
     }
@@ -1667,7 +1888,9 @@ impl GraphStore {
                     mtime=EXCLUDED.mtime, \
                     status = CASE \
                         WHEN File.status = 'indexing' THEN File.status \
-                        ELSE 'pending' \
+                        WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'pending' \
+                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN 'pending' \
+                        ELSE File.status \
                     END, \
                     priority = EXCLUDED.priority, \
                     worker_id = CASE \
@@ -1680,42 +1903,55 @@ impl GraphStore {
                     END, \
                     status_reason = CASE \
                         WHEN File.status = 'indexing' THEN File.status_reason \
+                        WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'manual_or_system_requeue' \
                         WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size THEN '{}' \
                         WHEN File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN 'manual_or_system_requeue' \
-                        WHEN File.priority IS DISTINCT FROM EXCLUDED.priority THEN 'manual_or_system_requeue' \
-                        ELSE COALESCE(File.status_reason, 'manual_or_system_requeue') \
+                        WHEN File.priority IS DISTINCT FROM EXCLUDED.priority THEN 'priority_adjusted_no_requeue' \
+                        ELSE COALESCE(File.status_reason, 'stable_metadata_no_requeue') \
                     END, \
                     file_stage = CASE \
                         WHEN File.status = 'indexing' THEN File.file_stage \
-                        ELSE 'promoted' \
+                        WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'promoted' \
+                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN 'promoted' \
+                        ELSE File.file_stage \
                     END, \
                     graph_ready = CASE \
                         WHEN File.status = 'indexing' THEN File.graph_ready \
-                        ELSE FALSE \
+                        WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
+                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN FALSE \
+                        ELSE File.graph_ready \
                     END, \
                     vector_ready = CASE \
                         WHEN File.status = 'indexing' THEN File.vector_ready \
-                        ELSE FALSE \
+                        WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
+                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN FALSE \
+                        ELSE File.vector_ready \
                     END, \
                     defer_count = CASE \
                         WHEN File.status = 'indexing' THEN File.defer_count \
-                        ELSE 0 \
+                        WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 0 \
+                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN 0 \
+                        ELSE File.defer_count \
                     END, \
                     last_deferred_at_ms = CASE \
                         WHEN File.status = 'indexing' THEN File.last_deferred_at_ms \
-                        ELSE NULL \
+                        WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN NULL \
+                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN NULL \
+                        ELSE File.last_deferred_at_ms \
                     END, \
                     needs_reindex = CASE \
                         WHEN File.status = 'indexing' \
                              AND (File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size) \
                         THEN TRUE \
                         WHEN File.status = 'indexing' THEN File.needs_reindex \
-                        ELSE FALSE \
+                        WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
+                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN FALSE \
+                        ELSE File.needs_reindex \
                     END \
                  WHERE File.project_slug IS DISTINCT FROM EXCLUDED.project_slug \
                     OR File.mtime IS DISTINCT FROM EXCLUDED.mtime \
                     OR File.size IS DISTINCT FROM EXCLUDED.size \
-                    OR File.status <> 'indexed' \
+                    OR File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') \
                     OR File.priority IS DISTINCT FROM EXCLUDED.priority;",
                 Self::escape_sql(path),
                 Self::escape_sql(project),

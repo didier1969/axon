@@ -7,6 +7,7 @@ defmodule Axon.Watcher.Telemetry do
   Tracks progress per directory.
   """
   use GenServer
+  @latency_window 120
 
   def start_link(_) do
     GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
@@ -107,6 +108,8 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:sql_snapshot_status, :ok})
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_success_at, now})
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_duration_ms, duration_ms})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_ok_total, (get_val(:sql_snapshot_ok_total) || 0) + 1})
+    push_latency_sample(:sql_latency_samples, duration_ms)
   end
 
   def mark_sql_snapshot_error(reason, duration_ms) do
@@ -115,6 +118,32 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_at, now})
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_reason, inspect(reason)})
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_duration_ms, duration_ms})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_error_total, (get_val(:sql_snapshot_error_total) || 0) + 1})
+    push_latency_sample(:sql_latency_samples, duration_ms)
+  end
+
+  def mark_mcp_probe_success(duration_ms) when is_integer(duration_ms) do
+    now = DateTime.utc_now()
+    :ets.insert(:axon_telemetry, {:mcp_probe_status, :ok})
+    :ets.insert(:axon_telemetry, {:mcp_probe_last_success_at, now})
+    :ets.insert(:axon_telemetry, {:mcp_probe_last_duration_ms, duration_ms})
+    :ets.insert(:axon_telemetry, {:mcp_probe_ok_total, (get_val(:mcp_probe_ok_total) || 0) + 1})
+    push_latency_sample(:mcp_latency_samples, duration_ms)
+  end
+
+  def mark_mcp_probe_error(reason, duration_ms) do
+    now = DateTime.utc_now()
+    :ets.insert(:axon_telemetry, {:mcp_probe_status, :error})
+    :ets.insert(:axon_telemetry, {:mcp_probe_last_error_at, now})
+    :ets.insert(:axon_telemetry, {:mcp_probe_last_error_reason, inspect(reason)})
+    :ets.insert(:axon_telemetry, {:mcp_probe_last_duration_ms, duration_ms})
+    :ets.insert(:axon_telemetry, {:mcp_probe_error_total, (get_val(:mcp_probe_error_total) || 0) + 1})
+    push_latency_sample(:mcp_latency_samples, duration_ms)
+  end
+
+  def mark_dashboard_render(duration_ms) when is_integer(duration_ms) and duration_ms >= 0 do
+    :ets.insert(:axon_telemetry, {:dashboard_render_last_duration_ms, duration_ms})
+    push_latency_sample(:dashboard_latency_samples, duration_ms)
   end
 
   def init_directories(files) do
@@ -174,6 +203,9 @@ defmodule Axon.Watcher.Telemetry do
 
   def get_stats do
     runtime = get_val(:runtime_snapshot)
+    sql_latency = latency_summary(:sql_latency_samples)
+    mcp_latency = latency_summary(:mcp_latency_samples)
+    dashboard_latency = latency_summary(:dashboard_latency_samples)
 
     %{
       active_workers: get_val(:active_workers),
@@ -191,6 +223,14 @@ defmodule Axon.Watcher.Telemetry do
       sql_snapshot_last_error_at: get_val(:sql_snapshot_last_error_at),
       sql_snapshot_last_error_reason: get_val(:sql_snapshot_last_error_reason),
       sql_snapshot_last_duration_ms: get_val(:sql_snapshot_last_duration_ms),
+      mcp_probe_status: get_val(:mcp_probe_status),
+      mcp_probe_last_success_at: get_val(:mcp_probe_last_success_at),
+      mcp_probe_last_error_at: get_val(:mcp_probe_last_error_at),
+      mcp_probe_last_error_reason: get_val(:mcp_probe_last_error_reason),
+      mcp_probe_last_duration_ms: get_val(:mcp_probe_last_duration_ms),
+      mcp_latency: Map.put(mcp_latency, :error_rate, error_rate(:mcp_probe_ok_total, :mcp_probe_error_total)),
+      sql_latency: Map.put(sql_latency, :error_rate, error_rate(:sql_snapshot_ok_total, :sql_snapshot_error_total)),
+      dashboard_latency: dashboard_latency,
       budget_bytes: Map.get(runtime, :budget_bytes, 0),
       reserved_bytes: Map.get(runtime, :reserved_bytes, 0),
       exhaustion_ratio: Map.get(runtime, :exhaustion_ratio, 0.0),
@@ -261,6 +301,19 @@ defmodule Axon.Watcher.Telemetry do
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_at, nil})
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_error_reason, nil})
     :ets.insert(:axon_telemetry, {:sql_snapshot_last_duration_ms, 0})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_ok_total, 0})
+    :ets.insert(:axon_telemetry, {:sql_snapshot_error_total, 0})
+    :ets.insert(:axon_telemetry, {:sql_latency_samples, []})
+    :ets.insert(:axon_telemetry, {:mcp_probe_status, :unknown})
+    :ets.insert(:axon_telemetry, {:mcp_probe_last_success_at, nil})
+    :ets.insert(:axon_telemetry, {:mcp_probe_last_error_at, nil})
+    :ets.insert(:axon_telemetry, {:mcp_probe_last_error_reason, nil})
+    :ets.insert(:axon_telemetry, {:mcp_probe_last_duration_ms, 0})
+    :ets.insert(:axon_telemetry, {:mcp_probe_ok_total, 0})
+    :ets.insert(:axon_telemetry, {:mcp_probe_error_total, 0})
+    :ets.insert(:axon_telemetry, {:mcp_latency_samples, []})
+    :ets.insert(:axon_telemetry, {:dashboard_render_last_duration_ms, 0})
+    :ets.insert(:axon_telemetry, {:dashboard_latency_samples, []})
     :ets.insert(
       :axon_telemetry,
       {:runtime_snapshot,
@@ -353,5 +406,47 @@ defmodule Axon.Watcher.Telemetry do
       {:ok, stat} -> stat.size
       {:error, _reason} -> nil
     end
+  end
+
+  defp push_latency_sample(key, duration_ms) do
+    series = get_val(key) || []
+    updated =
+      [duration_ms | series]
+      |> Enum.take(@latency_window)
+      |> Enum.reverse()
+      |> Enum.take(@latency_window)
+    :ets.insert(:axon_telemetry, {key, updated})
+  end
+
+  defp latency_summary(key) do
+    series = get_val(key) || []
+    sorted = Enum.sort(series)
+    %{
+      last_ms: List.last(series) || 0,
+      p50_ms: percentile(sorted, 50),
+      p95_ms: percentile(sorted, 95),
+      p99_ms: percentile(sorted, 99),
+      series: series
+    }
+  end
+
+  defp percentile([], _pct), do: 0
+  defp percentile(sorted, pct) do
+    index =
+      sorted
+      |> length()
+      |> Kernel.-(1)
+      |> Kernel.*(pct)
+      |> Kernel./(100)
+      |> round()
+
+    Enum.at(sorted, max(index, 0), 0)
+  end
+
+  defp error_rate(ok_key, error_key) do
+    ok = get_val(ok_key) || 0
+    err = get_val(error_key) || 0
+    total = ok + err
+    if total == 0, do: 0.0, else: err / total
   end
 end

@@ -30,7 +30,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             cat <<'EOF'
-Usage: ./scripts/start-v2.sh [--full|--read-only|--mcp-only] [--no-dashboard]
+Usage: ./scripts/start.sh [--full|--read-only|--mcp-only] [--no-dashboard]
 
 Modes:
   --full        Full runtime: scan + watcher + ingestion + SQL/MCP + dashboard
@@ -49,7 +49,7 @@ EOF
 done
 
 if ! command -v tmux >/dev/null 2>&1; then
-    echo "❌ tmux is required to start Axon via scripts/start-v2.sh"
+    echo "❌ tmux is required to start Axon via scripts/start.sh"
     exit 1
 fi
 
@@ -61,7 +61,7 @@ devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --fo
 
 if [ ! -x "bin/axon-core" ]; then
     echo "❌ Missing bin/axon-core"
-    echo "   Run ./scripts/setup_v2.sh first."
+    echo "   Run ./scripts/setup.sh first."
     exit 1
 fi
 
@@ -76,7 +76,7 @@ if tmux has-session -t axon 2>/dev/null; then
     if [ -n "${DELETED_EXE_PIDS:-}" ]; then
         echo "⚠️ Found Axon processes still running on deleted executables: $DELETED_EXE_PIDS"
         echo "   Resetting stale runtime state before restart..."
-        bash "$PROJECT_ROOT/scripts/stop-v2.sh"
+        bash "$PROJECT_ROOT/scripts/stop.sh"
     fi
 
     if nc -z localhost 44129 2>/dev/null || [ -S "/tmp/axon-telemetry.sock" ]; then
@@ -104,11 +104,21 @@ fi
 CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
 LEGACY_RELEASE_BIN="$PROJECT_ROOT/src/axon-core/target/release/axon-core"
 DEVENV_RELEASE_BIN="$CARGO_TARGET_ROOT/release/axon-core"
+DEVENV_TUNNEL_BIN="$CARGO_TARGET_ROOT/release/axon-mcp-tunnel"
 
 rebuild_core_release() {
     echo "🔧 Rebuilding axon-core release inside Devenv..."
     if ! devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/axon-core' && cargo build --release"; then
         echo "❌ Automatic Devenv rebuild failed."
+        return 1
+    fi
+    return 0
+}
+
+rebuild_tunnel_release() {
+    echo "🔧 Rebuilding axon-mcp-tunnel release inside Devenv..."
+    if ! devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/axon-mcp-tunnel' && cargo build --release"; then
+        echo "❌ Automatic Devenv rebuild for axon-mcp-tunnel failed."
         return 1
     fi
     return 0
@@ -169,6 +179,11 @@ if [ ! -f "$DEVENV_RELEASE_BIN" ]; then
     rebuild_core_release || exit 1
 fi
 
+if [ ! -f "$DEVENV_TUNNEL_BIN" ]; then
+    echo "⚠️ Missing Devenv tunnel binary at $DEVENV_TUNNEL_BIN"
+    rebuild_tunnel_release || exit 1
+fi
+
 if [ -f "$DEVENV_RELEASE_BIN" ] && find "$PROJECT_ROOT/src/axon-core/src" \
     "$PROJECT_ROOT/src/axon-core/Cargo.toml" \
     "$PROJECT_ROOT/src/axon-core/Cargo.lock" \
@@ -178,14 +193,23 @@ if [ -f "$DEVENV_RELEASE_BIN" ] && find "$PROJECT_ROOT/src/axon-core/src" \
     rebuild_core_release || exit 1
 fi
 
+if [ -f "$DEVENV_TUNNEL_BIN" ] && find "$PROJECT_ROOT/src/axon-mcp-tunnel/src" \
+    "$PROJECT_ROOT/src/axon-mcp-tunnel/Cargo.toml" \
+    "$PROJECT_ROOT/src/axon-mcp-tunnel/Cargo.lock" \
+    -newer "$DEVENV_TUNNEL_BIN" -print -quit | grep -q .; then
+    echo "⚠️ Detected newer axon-mcp-tunnel sources than $DEVENV_TUNNEL_BIN"
+    echo "   Rebuilding authoritative Devenv tunnel release..."
+    rebuild_tunnel_release || exit 1
+fi
+
 if [ -f "$DEVENV_RELEASE_BIN" ]; then
     echo "🔄 Updating bin/axon-core safely..."
     install -m 755 "$DEVENV_RELEASE_BIN" bin/axon-core
 fi
 
-if [ -f "$CARGO_TARGET_ROOT/release/axon-mcp-tunnel" ]; then
+if [ -f "$DEVENV_TUNNEL_BIN" ]; then
     echo "🔄 Updating bin/axon-mcp-tunnel safely..."
-    install -m 755 "$CARGO_TARGET_ROOT/release/axon-mcp-tunnel" bin/axon-mcp-tunnel
+    install -m 755 "$DEVENV_TUNNEL_BIN" bin/axon-mcp-tunnel
 fi
 
 echo "🚀 Starting Axon in TMUX session 'axon'..."
@@ -315,5 +339,5 @@ if [ "$START_DASHBOARD" = "1" ]; then
 fi
 echo "SQL Gateway: http://$WSL_IP:44129/sql"
 echo "MCP Server: http://$WSL_IP:44129/mcp"
-echo "Stop services with: ./scripts/stop-v2.sh"
+echo "Stop services with: ./scripts/stop.sh"
 echo ""

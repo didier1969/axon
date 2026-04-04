@@ -4,7 +4,7 @@ pub(crate) fn tools_catalog() -> Value {
     json!({
         "tools": [
             {
-                "name": "axon_refine_lattice",
+                "name": "refine_lattice",
                 "description": "[SYSTEM] Lattice Refiner: Analyse le graphe post-ingestion pour lier les frontières inter-langages (ex: Elixir NIF -> Rust natif).",
                 "inputSchema": {
                     "type": "object",
@@ -13,7 +13,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_fs_read",
+                "name": "fs_read",
                 "description": "[DX] Agent DX L2 (Detail) : Lit le contenu physique complet d'un fichier source. À n'utiliser qu'après avoir identifié une URI (chemin) précise via axon_query ou axon_inspect.",
                 "inputSchema": {
                     "type": "object",
@@ -26,7 +26,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_soll_manager",
+                "name": "soll_manager",
                 "description": "[SOLL] Centre de commande pour le graphe intentionnel. Gère la création (avec IDs auto), la mise à jour et les liaisons hiérarchiques.",
                 "inputSchema": {
                     "type": "object",
@@ -42,7 +42,101 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_export_soll",
+                "name": "soll_apply_plan",
+                "description": "[SOLL] Wrapper haut niveau idempotent pour appliquer un plan SOLL (pillars, requirements, decisions, milestones) avec dry-run et rapport created/updated/skipped/errors.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_slug": { "type": "string", "description": "Slug projet (ex: AXO)." },
+                        "dry_run": { "type": "boolean", "description": "Si true, ne modifie rien et produit seulement le plan d'action." },
+                        "plan": {
+                            "type": "object",
+                            "properties": {
+                                "pillars": { "type": "array", "items": { "type": "object" } },
+                                "requirements": { "type": "array", "items": { "type": "object" } },
+                                "decisions": { "type": "array", "items": { "type": "object" } },
+                                "milestones": { "type": "array", "items": { "type": "object" } }
+                            }
+                        }
+                    },
+                    "required": ["plan"]
+                }
+            },
+            {
+                "name": "soll_apply_plan_v2",
+                "description": "[SOLL] Prépare un plan révisable (dry-run par défaut), persiste un preview et fournit le diff d'opérations create/update.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_slug": { "type": "string" },
+                        "author": { "type": "string" },
+                        "dry_run": { "type": "boolean" },
+                        "plan": { "type": "object" }
+                    },
+                    "required": ["plan"]
+                }
+            },
+            {
+                "name": "soll_commit_revision",
+                "description": "[SOLL] Commit atomique d'un preview SOLL vers une revision journalisée.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "preview_id": { "type": "string" },
+                        "author": { "type": "string" }
+                    },
+                    "required": ["preview_id"]
+                }
+            },
+            {
+                "name": "soll_query_context",
+                "description": "[SOLL] Retourne le contexte projet (requirements, decisions, revisions) compact et prêt pour consommation LLM.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_slug": { "type": "string" },
+                        "limit": { "type": "integer" }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "soll_attach_evidence",
+                "description": "[SOLL] Attache des preuves (fichier/test/metric/dashboard) à une entité SOLL.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "entity_type": { "type": "string" },
+                        "entity_id": { "type": "string" },
+                        "artifacts": { "type": "array", "items": { "type": "object" } }
+                    },
+                    "required": ["entity_type", "entity_id", "artifacts"]
+                }
+            },
+            {
+                "name": "soll_verify_requirements",
+                "description": "[SOLL] Vérifie la couverture requirements (done/partial/missing) selon critères et preuves rattachées.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_slug": { "type": "string" }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "soll_rollback_revision",
+                "description": "[SOLL] Rollback best-effort d'une révision SOLL via le journal RevisionChange.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "revision_id": { "type": "string" }
+                    },
+                    "required": ["revision_id"]
+                }
+            },
+            {
+                "name": "export_soll",
                 "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Milestones, Requirements, Decisions, Concepts) dans un document Markdown horodaté.",
                 "inputSchema": {
                     "type": "object",
@@ -51,7 +145,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_restore_soll",
+                "name": "restore_soll",
                 "description": "[SOLL] Restaure les entites conceptuelles depuis un export Markdown officiel SOLL. Fonctionne en mode merge, sans purge destructive implicite.",
                 "inputSchema": {
                     "type": "object",
@@ -62,7 +156,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_validate_soll",
+                "name": "validate_soll",
                 "description": "[SOLL] Exécute des garde-fous minimaux de cohérence sur le graphe intentionnel. Validation en lecture seule: détecte les états orphelins évidents sans modifier SOLL.",
                 "inputSchema": {
                     "type": "object",
@@ -71,7 +165,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_query",
+                "name": "query",
                 "description": "[DX] Recherche de symboles à forte valeur développeur. Utilise la recherche structurelle immédiatement, et ajoute la similarité sémantique seulement si l'embedding temps réel est disponible.",
                 "inputSchema": {
                     "type": "object",
@@ -83,7 +177,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_inspect",
+                "name": "inspect",
                 "description": "[DX] Vue 360° d'un symbole (code source, appelants/appelés, statistiques).",
                 "inputSchema": {
                     "type": "object",
@@ -95,7 +189,18 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_audit",
+                "name": "diagnose_indexing",
+                "description": "[SYSTEM] Diagnostic Day-1 d'indexation par projet: causes probables, raisons dominantes, erreurs parser/runtime et remédiations.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": { "type": "string", "description": "Slug projet ou '*' pour global." }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "audit",
                 "description": "[GOVERNANCE] Vérification de conformité (Sécurité OWASP, Qualité, Anti-patterns, Dette Technique).",
                 "inputSchema": {
                     "type": "object",
@@ -106,7 +211,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_impact",
+                "name": "impact",
                 "description": "[RISK] Analyse prédictive (Rayon d'impact et chemins critiques).",
                 "inputSchema": {
                     "type": "object",
@@ -119,7 +224,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_health",
+                "name": "health",
                 "description": "[GOVERNANCE] Rapport de santé global (Code mort, lacunes de tests, points d'entrée).",
                 "inputSchema": {
                     "type": "object",
@@ -130,7 +235,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_diff",
+                "name": "diff",
                 "description": "[RISK] Analyse sémantique des changements (Git Diff -> Symboles touchés).",
                 "inputSchema": {
                     "type": "object",
@@ -141,7 +246,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_batch",
+                "name": "batch",
                 "description": "[SYSTEM] Orchestration d'appels multiples pour optimiser la performance.",
                 "inputSchema": {
                     "type": "object",
@@ -162,7 +267,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_semantic_clones",
+                "name": "semantic_clones",
                 "description": "[GOVERNANCE] Trouve des fonctions sémantiquement similaires (clones de logique) dans le projet.",
                 "inputSchema": {
                     "type": "object",
@@ -173,7 +278,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_architectural_drift",
+                "name": "architectural_drift",
                 "description": "[GOVERNANCE] Vérifie les violations d'architecture entre deux couches (ex: 'ui' appelant directement 'db').",
                 "inputSchema": {
                     "type": "object",
@@ -185,7 +290,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_bidi_trace",
+                "name": "bidi_trace",
                 "description": "[DX] Trace bidirectionnelle: remonte aux Entry Points (haut) et liste les appels profonds (bas).",
                 "inputSchema": {
                     "type": "object",
@@ -197,7 +302,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_api_break_check",
+                "name": "api_break_check",
                 "description": "[RISK] Vérifie si la modification d'un symbole public impacte des composants externes.",
                 "inputSchema": {
                     "type": "object",
@@ -208,7 +313,7 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_simulate_mutation",
+                "name": "simulate_mutation",
                 "description": "[RISK] Dry-run : calcule le volume de l'impact d'une modification avant de coder.",
                 "inputSchema": {
                     "type": "object",
@@ -221,7 +326,34 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
-                "name": "axon_cypher",
+                "name": "schema_overview",
+                "description": "[SYSTEM] Vue d'ensemble du schéma SQL Axon (tables main/soll, volumétrie colonnes).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "list_labels_tables",
+                "description": "[SYSTEM] Inventaire des tables/labels principales et colonnes clés pour démarrer des requêtes sans connaissance interne.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "query_examples",
+                "description": "[SYSTEM] Exemples de requêtes prêtes à l'emploi pour exploration, backlog, erreurs et bridges inter-langages.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "cypher",
                 "description": "[SYSTEM] Interface de bas niveau pour requêtes graphe brutes. Reservee au diagnostic et aux usages experts.",
                 "inputSchema": {
                     "type": "object",
@@ -232,8 +364,17 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             json!({
-                "name": "axon_debug",
+                "name": "debug",
                 "description": "[SYSTEM] Diagnostic système bas niveau : Affiche l'état interne du moteur Axon V2 (RAM, DB, architecture, statut d'indexation) pour éviter les hallucinations sur l'infrastructure.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }),
+            json!({
+                "name": "truth_check",
+                "description": "[SYSTEM] Contrôle de cohérence reader-path vs canonical writer sur les compteurs critiques (File/Symbol/CALLS...).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},

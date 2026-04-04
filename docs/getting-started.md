@@ -37,7 +37,7 @@ Si le validateur échoue, le shell courant n’est pas l’environnement support
 ## 2. Bootstrap initial
 
 ```bash
-./scripts/setup_v2.sh
+./scripts/setup.sh
 ```
 
 Ce script:
@@ -48,7 +48,7 @@ Ce script:
 ## 3. Démarrer Axon
 
 ```bash
-./scripts/start-v2.sh
+./scripts/start.sh
 ```
 
 Le script:
@@ -77,7 +77,7 @@ curl -sS -X POST http://127.0.0.1:44129/sql \
 ## 5. Arrêter Axon
 
 ```bash
-./scripts/stop-v2.sh
+./scripts/stop.sh
 ```
 
 Le script arrête uniquement les processus Axon et nettoie sockets, locks et WAL locaux.

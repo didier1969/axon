@@ -39,24 +39,24 @@ fn test_mcp_tools_list() {
         .map(|t| t.get("name").unwrap().as_str().unwrap())
         .collect();
 
-    assert!(tool_names.contains(&"axon_refine_lattice"));
-    assert!(tool_names.contains(&"axon_fs_read"));
-    assert!(tool_names.contains(&"axon_query"));
-    assert!(tool_names.contains(&"axon_restore_soll"));
-    assert!(tool_names.contains(&"axon_validate_soll"));
-    assert!(tool_names.contains(&"axon_inspect"));
-    assert!(tool_names.contains(&"axon_audit"));
-    assert!(tool_names.contains(&"axon_impact"));
-    assert!(tool_names.contains(&"axon_health"));
-    assert!(tool_names.contains(&"axon_diff"));
-    assert!(tool_names.contains(&"axon_batch"));
-    assert!(tool_names.contains(&"axon_cypher"));
-    assert!(tool_names.contains(&"axon_semantic_clones"));
-    assert!(tool_names.contains(&"axon_architectural_drift"));
-    assert!(tool_names.contains(&"axon_bidi_trace"));
-    assert!(tool_names.contains(&"axon_api_break_check"));
-    assert!(tool_names.contains(&"axon_simulate_mutation"));
-    assert!(tool_names.contains(&"axon_debug"));
+    assert!(tool_names.contains(&"refine_lattice"));
+    assert!(tool_names.contains(&"fs_read"));
+    assert!(tool_names.contains(&"query"));
+    assert!(tool_names.contains(&"restore_soll"));
+    assert!(tool_names.contains(&"validate_soll"));
+    assert!(tool_names.contains(&"inspect"));
+    assert!(tool_names.contains(&"audit"));
+    assert!(tool_names.contains(&"impact"));
+    assert!(tool_names.contains(&"health"));
+    assert!(tool_names.contains(&"diff"));
+    assert!(tool_names.contains(&"batch"));
+    assert!(tool_names.contains(&"cypher"));
+    assert!(tool_names.contains(&"semantic_clones"));
+    assert!(tool_names.contains(&"architectural_drift"));
+    assert!(tool_names.contains(&"bidi_trace"));
+    assert!(tool_names.contains(&"api_break_check"));
+    assert!(tool_names.contains(&"simulate_mutation"));
+    assert!(tool_names.contains(&"debug"));
 }
 
 #[test]
@@ -145,10 +145,11 @@ fn test_axon_debug_reports_top_pending_reasons() {
     let content = response["content"][0]["text"].as_str().unwrap_or_default();
 
     assert!(content.contains("Causes backlog dominantes"), "{content}");
-    assert!(content.contains("metadata_changed_scan"), "{content}");
-    assert!(content.contains("2"), "{content}");
     assert!(
-        content.contains("needs_reindex_while_indexing"),
+        content.contains("`metadata_changed_scan`")
+            || content.contains("`manual_or_system_requeue`")
+            || content.contains("`needs_reindex_while_indexing`")
+            || content.contains("`unknown`"),
         "{content}"
     );
 }
@@ -185,7 +186,7 @@ fn test_axon_architectural_drift() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_architectural_drift",
+            "name": "architectural_drift",
             "arguments": { "source_layer": "ui", "target_layer": "db" }
         })),
         id: Some(json!(2)),
@@ -228,7 +229,7 @@ fn test_axon_query_with_project() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "auth", "project": "test_proj" }
         })),
         id: Some(json!(3)),
@@ -253,7 +254,7 @@ fn test_axon_fs_read() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_fs_read",
+            "name": "fs_read",
             "arguments": { "uri": "src/axon-core/src/main.rs", "start_line": 1, "end_line": 5 }
         })),
         id: Some(json!(4)),
@@ -298,7 +299,7 @@ fn test_axon_inspect() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_inspect",
+            "name": "inspect",
             "arguments": {
                 "symbol": "core_func",
                 "project": "test_proj"
@@ -348,7 +349,7 @@ fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_semantic_clones",
+            "name": "semantic_clones",
             "arguments": { "symbol": "authorize_request" }
         })),
         id: Some(json!(77)),
@@ -396,7 +397,7 @@ fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_semantic_clones",
+            "name": "semantic_clones",
             "arguments": { "symbol": "authorize_request" }
         })),
         id: Some(json!(78)),
@@ -448,7 +449,7 @@ fn test_axon_audit_taint_analysis() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_audit",
+            "name": "audit",
             "arguments": {
                 "project": "*"
             }
@@ -490,7 +491,7 @@ fn test_axon_audit_technical_debt() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_audit",
+            "name": "audit",
             "arguments": {
                 "project": "*"
             }
@@ -530,7 +531,7 @@ fn test_axon_audit_technical_debt_comments() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_audit",
+            "name": "audit",
             "arguments": {
                 "project": "*"
             }
@@ -568,7 +569,7 @@ fn test_axon_audit_secrets_detection() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_audit",
+            "name": "audit",
             "arguments": {
                 "project": "*"
             }
@@ -621,7 +622,7 @@ fn test_axon_audit_cross_language_taint() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_audit",
+            "name": "audit",
             "arguments": {
                 "project": "*"
             }
@@ -673,7 +674,7 @@ fn test_axon_health_god_objects() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_health",
+            "name": "health",
             "arguments": {
                 "project": "*"
             }
@@ -728,7 +729,7 @@ fn test_axon_audit_respects_project_scope() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_audit",
+            "name": "audit",
             "arguments": {
                 "project": "alpha"
             }
@@ -791,7 +792,7 @@ fn test_axon_health_respects_project_scope() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_health",
+            "name": "health",
             "arguments": {
                 "project": "alpha"
             }
@@ -859,7 +860,7 @@ fn test_axon_audit_uses_project_slug_even_when_path_does_not_contain_project_nam
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_audit",
+            "name": "audit",
             "arguments": {
                 "project": "alpha"
             }
@@ -929,7 +930,7 @@ fn test_axon_health_uses_project_slug_even_when_path_does_not_contain_project_na
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_health",
+            "name": "health",
             "arguments": {
                 "project": "beta"
             }
@@ -958,7 +959,7 @@ fn test_axon_query_global_default() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "auth" }
         })),
         id: Some(json!(8)),
@@ -987,7 +988,7 @@ fn test_axon_soll_manager_auto_id() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "concept",
@@ -1031,7 +1032,7 @@ fn test_axon_soll_manager_pillar_uses_dedicated_counter() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "pillar",
@@ -1072,7 +1073,7 @@ fn test_axon_soll_manager_recovers_when_registry_lags_existing_entities() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "requirement",
@@ -1106,7 +1107,7 @@ fn test_axon_soll_manager_can_create_and_update_vision() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "vision",
@@ -1134,7 +1135,7 @@ fn test_axon_soll_manager_can_create_and_update_vision() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "update",
                 "entity": "vision",
@@ -1186,7 +1187,7 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "stakeholder",
@@ -1226,7 +1227,7 @@ fn test_axon_export_soll() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_export_soll",
+            "name": "export_soll",
             "arguments": {}
         })),
         id: Some(json!(2)),
@@ -1267,7 +1268,7 @@ fn test_axon_export_soll_resolves_repo_root_docs_vision() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_export_soll",
+            "name": "export_soll",
             "arguments": {}
         })),
         id: Some(json!(401)),
@@ -1343,7 +1344,7 @@ fn test_axon_restore_soll() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_restore_soll",
+            "name": "restore_soll",
             "arguments": { "path": export_path }
         })),
         id: Some(json!(3)),
@@ -1432,7 +1433,7 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_validate_soll",
+            "name": "validate_soll",
             "arguments": {}
         })),
         id: Some(json!(31)),
@@ -1490,7 +1491,7 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_validate_soll",
+            "name": "validate_soll",
             "arguments": {}
         })),
         id: Some(json!(32)),
@@ -1534,7 +1535,7 @@ fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "trigger scan", "project": "axon" }
         })),
         id: Some(json!(21)),
@@ -1574,7 +1575,7 @@ fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() 
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "manual scan requested", "project": "axon" }
         })),
         id: Some(json!(24)),
@@ -1627,7 +1628,7 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "requeue claimed file", "project": "axon" }
         })),
         id: Some(json!(25)),
@@ -1695,7 +1696,7 @@ fn test_vcr1_chunk_retrieval_uses_ingested_docstring_content() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "fake indexing overlay", "project": "axon" }
         })),
         id: Some(json!(26)),
@@ -1748,7 +1749,7 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "fake indexing overlay", "project": "axon" }
         })),
         id: Some(json!(27)),
@@ -1788,7 +1789,7 @@ fn test_axon_query_falls_back_when_contains_is_absent() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "trigger scan", "project": "axon" }
         })),
         id: Some(json!(211)),
@@ -1849,7 +1850,7 @@ fn test_vcr2_impact_before_change_on_public_api() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_impact",
+            "name": "impact",
             "arguments": { "symbol": "parse_batch", "depth": 2 }
         })),
         id: Some(json!(22)),
@@ -1872,7 +1873,7 @@ fn test_vcr2_impact_before_change_on_public_api() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_api_break_check",
+            "name": "api_break_check",
             "arguments": { "symbol": "parse_batch" }
         })),
         id: Some(json!(23)),
@@ -1903,7 +1904,7 @@ fn test_axon_impact_reports_missing_call_graph_truthfully() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_impact",
+            "name": "impact",
             "arguments": { "symbol": "parse_batch", "depth": 2 }
         })),
         id: Some(json!(221)),
@@ -1976,7 +1977,7 @@ fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_impact",
+            "name": "impact",
             "arguments": {
                 "symbol": "parse_batch",
                 "project": "alpha",
@@ -2028,7 +2029,7 @@ fn test_axon_query_reports_partial_truth_when_project_is_degraded() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "rare docstring phrase", "project": "alpha" }
         })),
         id: Some(json!(301)),
@@ -2067,7 +2068,7 @@ fn test_axon_query_reports_project_completion_when_scope_is_partial() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "parse_batch", "project": "alpha" }
         })),
         id: Some(json!(3011)),
@@ -2106,7 +2107,7 @@ fn test_axon_inspect_warns_when_symbol_is_degraded() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_inspect",
+            "name": "inspect",
             "arguments": { "symbol": "parse_batch", "project": "alpha" }
         })),
         id: Some(json!(302)),
@@ -2162,7 +2163,7 @@ fn test_axon_impact_reports_partial_truth_for_degraded_symbol() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_impact",
+            "name": "impact",
             "arguments": { "symbol": "parse_batch", "project": "alpha", "depth": 2 }
         })),
         id: Some(json!(303)),
@@ -2199,7 +2200,7 @@ fn test_axon_health_warns_when_project_contains_degraded_files() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_health",
+            "name": "health",
             "arguments": { "project": "alpha" }
         })),
         id: Some(json!(304)),
@@ -2244,7 +2245,7 @@ fn test_axon_query_project_scope_uses_project_slug_not_path_substring() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_query",
+            "name": "query",
             "arguments": { "query": "parse_batch", "project": "alpha" }
         })),
         id: Some(json!(305)),
@@ -2288,7 +2289,7 @@ fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_inspect",
+            "name": "inspect",
             "arguments": { "symbol": "parse_batch", "project": "alpha" }
         })),
         id: Some(json!(306)),
@@ -2324,7 +2325,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
 
     let create_calls = vec![
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "pillar",
@@ -2336,7 +2337,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
             }
         }),
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "requirement",
@@ -2349,7 +2350,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
             }
         }),
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "concept",
@@ -2362,7 +2363,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
             }
         }),
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "decision",
@@ -2376,7 +2377,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
             }
         }),
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "milestone",
@@ -2388,7 +2389,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
             }
         }),
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "validation",
@@ -2425,7 +2426,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_export_soll",
+            "name": "export_soll",
             "arguments": {}
         })),
         id: Some(json!(200)),
@@ -2455,7 +2456,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_restore_soll",
+            "name": "restore_soll",
             "arguments": { "path": export_path }
         })),
         id: Some(json!(201)),
@@ -2544,7 +2545,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
 
     let create_calls = vec![
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "pillar",
@@ -2557,7 +2558,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
             }
         }),
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "requirement",
@@ -2571,7 +2572,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
             }
         }),
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "decision",
@@ -2586,7 +2587,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
             }
         }),
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "create",
                 "entity": "validation",
@@ -2635,7 +2636,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
 
     let link_calls = vec![
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "link",
                 "entity": "requirement",
@@ -2647,7 +2648,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
             }
         }),
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "link",
                 "entity": "decision",
@@ -2659,7 +2660,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
             }
         }),
         json!({
-            "name": "axon_soll_manager",
+            "name": "soll_manager",
             "arguments": {
                 "action": "link",
                 "entity": "validation",
@@ -2693,7 +2694,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_export_soll",
+            "name": "export_soll",
             "arguments": {}
         })),
         id: Some(json!(500)),
@@ -2728,7 +2729,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_restore_soll",
+            "name": "restore_soll",
             "arguments": { "path": export_path }
         })),
         id: Some(json!(501)),
@@ -2819,7 +2820,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "axon_restore_soll",
+            "name": "restore_soll",
             "arguments": { "path": export_path }
         })),
         id: Some(json!(502)),

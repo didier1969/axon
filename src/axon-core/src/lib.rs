@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 pub mod bridge;
 pub mod config;
 pub mod embedder;

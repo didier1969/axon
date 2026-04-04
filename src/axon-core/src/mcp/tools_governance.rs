@@ -6,19 +6,210 @@ use super::format::format_table_from_json;
 use super::McpServer;
 
 impl McpServer {
-    fn file_count_for_project(&self, project: &str) -> i64 {
-        if project == "*" {
-            self.graph_store
-                .query_count("SELECT count(*) FROM File")
-                .unwrap_or(0)
-        } else {
-            self.graph_store
-                .query_count_param(
-                    "SELECT count(*) FROM File WHERE project_slug = $project",
-                    &json!({ "project": project }),
-                )
-                .unwrap_or(0)
+    fn json_to_i64(value: &Value) -> Option<i64> {
+        match value {
+            Value::Number(n) => n
+                .as_i64()
+                .or_else(|| n.as_u64().and_then(|v| i64::try_from(v).ok()))
+                .or_else(|| n.as_f64().map(|v| v.round() as i64)),
+            Value::String(s) => s
+                .parse::<i64>()
+                .ok()
+                .or_else(|| s.parse::<f64>().ok().map(|v| v.round() as i64)),
+            _ => None,
         }
+    }
+
+    fn sql_scalar(&self, query: &str) -> i64 {
+        let raw = match self.graph_store.execute_raw_sql_gateway(query) {
+            Ok(raw) => raw,
+            Err(_) => return 0,
+        };
+        let rows: Vec<Vec<Value>> = match serde_json::from_str(&raw) {
+            Ok(rows) => rows,
+            Err(_) => return 0,
+        };
+        rows.first()
+            .and_then(|row| row.first())
+            .and_then(Self::json_to_i64)
+            .unwrap_or(0)
+    }
+
+    fn sql_rows(&self, query: &str) -> Vec<Vec<Value>> {
+        self.graph_store
+            .execute_raw_sql_gateway(query)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<Value>>>(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn project_filter(project: &str, column: &str) -> String {
+        if project == "*" {
+            "1=1".to_string()
+        } else {
+            format!("{} = '{}'", column, project.replace('\'', "''"))
+        }
+    }
+
+    pub(crate) fn indexing_diagnosis_markdown(&self, project: &str) -> String {
+        let file_filter = Self::project_filter(project, "project_slug");
+        let symbol_filter = Self::project_filter(project, "project_slug");
+        let known = self.sql_scalar(&format!("SELECT count(*) FROM File WHERE {}", file_filter));
+        let global_known = self.sql_scalar("SELECT count(*) FROM File");
+        let pending = self.sql_scalar(&format!(
+            "SELECT count(*) FROM File WHERE {} AND status = 'pending'",
+            file_filter
+        ));
+        let indexing = self.sql_scalar(&format!(
+            "SELECT count(*) FROM File WHERE {} AND status = 'indexing'",
+            file_filter
+        ));
+        let completed = self.sql_scalar(&format!(
+            "SELECT count(*) FROM File WHERE {} AND status IN ('indexed','indexed_degraded','skipped','deleted')",
+            file_filter
+        ));
+        let symbols = self.sql_scalar(&format!(
+            "SELECT count(*) FROM Symbol WHERE {}",
+            symbol_filter
+        ));
+        let calls_direct = self.sql_scalar(&format!(
+            "SELECT count(*) FROM CALLS c JOIN Symbol s ON c.source_id = s.id WHERE {}",
+            Self::project_filter(project, "s.project_slug")
+        ));
+        let calls_nif = self.sql_scalar(&format!(
+            "SELECT count(*) FROM CALLS_NIF c JOIN Symbol s ON c.source_id = s.id WHERE {}",
+            Self::project_filter(project, "s.project_slug")
+        ));
+        let top_reasons = self.sql_rows(&format!(
+            "SELECT COALESCE(status_reason, 'unknown'), count(*) \
+             FROM File \
+             WHERE {} AND status IN ('pending','indexing','indexed_degraded','oversized_for_current_budget') \
+             GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT 5",
+            file_filter
+        ));
+        let top_errors = self.sql_rows(&format!(
+            "SELECT COALESCE(last_error_reason, 'unknown'), count(*) \
+             FROM File \
+             WHERE {} AND last_error_reason IS NOT NULL \
+             GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT 5",
+            file_filter
+        ));
+
+        let mut causes = Vec::new();
+        if known == 0 {
+            if project != "*" && global_known > 0 {
+                causes.push(
+                    "scope_mismatch_or_wrong_project_slug: le workspace contient des fichiers, mais pas ce projet"
+                        .to_string(),
+                );
+            } else {
+                causes.push(
+                    "discovery_absent_or_filtered: aucun fichier découvert (watch root, ignore rules, permissions)"
+                        .to_string(),
+                );
+            }
+        }
+        if known > 0 && completed == 0 && (pending + indexing) > 0 {
+            causes.push(
+                "ingestion_not_completed: fichiers en pending/indexing, pipeline possiblement bloqué ou encore en cours"
+                    .to_string(),
+            );
+        }
+        if known > 0 && symbols == 0 {
+            causes.push(
+                "parser_extraction_gap: fichiers connus mais 0 symbole extrait (langage non supporté ou échec parse)"
+                    .to_string(),
+            );
+        }
+        if symbols > 0 && (calls_direct + calls_nif) == 0 {
+            causes.push(
+                "call_graph_gap: symboles présents mais graphe d'appels vide pour ce scope".to_string(),
+            );
+        }
+        if causes.is_empty() {
+            causes.push("no_blocker_detected: aucun blocage majeur détecté par ce diagnostic".to_string());
+        }
+
+        let reason_lines = if top_reasons.is_empty() {
+            "* aucune raison dominante".to_string()
+        } else {
+            top_reasons
+                .iter()
+                .filter_map(|row| {
+                    let reason = row.first()?.as_str()?;
+                    let count = row.get(1)?.as_i64().or_else(|| row.get(1)?.as_u64().map(|v| v as i64))?;
+                    Some(format!("* `{}`: {}", reason, count))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let error_lines = if top_errors.is_empty() {
+            "* aucune erreur parser/commit remontée dans `last_error_reason`".to_string()
+        } else {
+            top_errors
+                .iter()
+                .filter_map(|row| {
+                    let reason = row.first()?.as_str()?;
+                    let count = row.get(1)?.as_i64().or_else(|| row.get(1)?.as_u64().map(|v| v as i64))?;
+                    Some(format!("* `{}`: {}", reason, count))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let cause_lines = causes
+            .iter()
+            .map(|c| format!("* {}", c))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            "### 🔎 Day-1 Indexing Diagnosis ({})\n\n\
+             **Scope facts**\n\
+             * known files: {}\n\
+             * completed files: {}\n\
+             * pending: {}\n\
+             * indexing: {}\n\
+             * symbols: {}\n\
+             * calls (direct): {}\n\
+             * calls (nif): {}\n\n\
+             **Likely root causes**\n{}\n\n\
+             **Top status reasons**\n{}\n\n\
+             **Top parser/runtime errors**\n{}\n\n\
+             **Remediation hints**\n\
+             * validate project slug and scope (`project_slug`) used in calls\n\
+             * check watch root and ignored paths\n\
+             * inspect parser support and `last_error_reason`\n\
+             * if symbols > 0 but calls = 0, run bridge refinement and inspect FFI boundaries",
+            project, known, completed, pending, indexing, symbols, calls_direct, calls_nif, cause_lines, reason_lines, error_lines
+        )
+    }
+
+    pub(crate) fn axon_diagnose_indexing(&self, args: &Value) -> Option<Value> {
+        let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        let report = self.indexing_diagnosis_markdown(project);
+        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+    }
+
+    fn file_count_for_project(&self, project: &str) -> i64 {
+        let query = if project == "*" {
+            "SELECT count(*) FROM File".to_string()
+        } else {
+            format!(
+                "SELECT count(*) FROM File WHERE project_slug = '{}'",
+                project.replace('\'', "''")
+            )
+        };
+
+        self.graph_store
+            .execute_raw_sql_gateway(&query)
+            .ok()
+            .and_then(|raw| {
+                let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).ok()?;
+                Self::json_to_i64(rows.first()?.first()?)
+            })
+            .unwrap_or(0)
     }
 
     fn build_graph_clone_section(&self, symbol: &str) -> Option<String> {
@@ -85,7 +276,9 @@ impl McpServer {
                 "⚠️ Warning: Project '{}' seems unindexed or parser failed (Found {} files). Health metrics are invalid.",
                 project, file_count
             );
-            return Some(json!({ "content": [{ "type": "text", "text": warning }] }));
+            let diagnostic = self.indexing_diagnosis_markdown(project);
+            let report = format!("{}\n\n{}", warning, diagnostic);
+            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
         }
 
         let (sec_score, paths) = self
@@ -147,7 +340,9 @@ impl McpServer {
                 "⚠️ Warning: Project '{}' seems unindexed or parser failed (Found {} files). Health metrics are invalid.",
                 project, file_count
             );
-            return Some(json!({ "content": [{ "type": "text", "text": warning }] }));
+            let diagnostic = self.indexing_diagnosis_markdown(project);
+            let report = format!("{}\n\n{}", warning, diagnostic);
+            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
         }
 
         let coverage = self.graph_store.get_coverage_score(project).unwrap_or(0);

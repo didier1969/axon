@@ -114,11 +114,6 @@ impl SemanticWorkerPool {
 
             let policy =
                 semantic_policy(queue_store.common_len(), service_guard::current_pressure());
-            if policy.pause {
-                wait_for_query_request(&mut model, &query_rx, policy.sleep);
-                continue;
-            }
-
             let mut file_vectorization_backlog_active = false;
             match graph_store.fetch_pending_file_vectorization_work(FILE_VECTORIZATION_BATCH_SIZE) {
                 Ok(pending) if !pending.is_empty() => {
@@ -235,7 +230,10 @@ impl SemanticWorkerPool {
 
                         if this_work_done {
                             if let Err(err) =
-                                graph_store.mark_file_vectorization_done(&[work.file_path.clone()])
+                                graph_store.mark_file_vectorization_done(
+                                    &[work.file_path.clone()],
+                                    CHUNK_MODEL_ID,
+                                )
                             {
                                 failed
                                     .entry(format!(
@@ -327,10 +325,12 @@ impl SemanticWorkerPool {
                 }
             }
 
-            if file_vectorization_backlog_active
-                || symbol_backlog_active
-                || service_guard::current_pressure() != ServicePressure::Healthy
-            {
+            if file_vectorization_backlog_active || symbol_backlog_active {
+                continue;
+            }
+
+            if policy.pause || service_guard::current_pressure() != ServicePressure::Healthy {
+                wait_for_query_request(&mut model, &query_rx, policy.sleep);
                 continue;
             }
 

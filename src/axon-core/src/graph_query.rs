@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::graph::{ExecFunc, FreeStrFunc, GraphStore, QueryCountFunc, QueryJsonFunc};
 
 impl GraphStore {
-    fn current_epoch_ms() -> u64 {
+    pub(crate) fn current_epoch_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -35,6 +35,15 @@ impl GraphStore {
 
     fn query_targets_attached_soll(query: &str) -> bool {
         query.to_ascii_lowercase().contains("soll.")
+    }
+
+    fn query_json_on_writer(&self, query: &str) -> Result<String> {
+        let writer = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        self.query_on_ctx(query, *writer)
     }
 
     pub(crate) fn query_json_on_reader(&self, query: &str) -> Result<String> {
@@ -104,7 +113,9 @@ impl GraphStore {
 
     pub fn execute_raw_sql_gateway(&self, query: &str) -> Result<String> {
         if is_read_only_sql(query) {
-            return self.query_json(query);
+            // SQL gateway is the dashboard's canonical truth surface.
+            // Force read-only SQL through writer ctx to avoid reader/writer snapshot oscillation.
+            return self.query_json_on_writer(query);
         }
 
         self.execute(query)?;

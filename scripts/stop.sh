@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             cat <<'EOF'
-Usage: ./scripts/stop-v2.sh [--hard|--verify]
+Usage: ./scripts/stop.sh [--hard|--verify]
 
 Options:
   --hard    Force a broader kill pass (patterns + pkill fallback, still best-effort).
@@ -55,11 +55,11 @@ kill_single_pid() {
 
 wait_for_exit_processes() {
     local -n patterns_ref="$1"
-    for _ in {1..24}; do
+    for _ in {1..12}; do
         if [ -z "$(collect_process_pids "$1")" ]; then
             return 0
         fi
-        sleep 0.25
+        sleep 0.10
     done
     return 1
 }
@@ -135,7 +135,20 @@ kill_pids() {
         kill_single_pid "$pid" "TERM"
     done
 
-    sleep 1
+    # Fast grace window before escalation to KILL.
+    for _ in {1..6}; do
+        local alive=0
+        for pid in $pids; do
+            if pid_exists "$pid"; then
+                alive=1
+                break
+            fi
+        done
+        if [ "$alive" -eq 0 ]; then
+            return 0
+        fi
+        sleep 0.10
+    done
 
     for pid in $pids; do
         if pid_exists "$pid"; then
@@ -148,7 +161,12 @@ kill_tmux_session() {
     if tmux has-session -t axon 2>/dev/null; then
         echo "Closing TMUX session 'axon'..."
         tmux kill-session -t axon 2>/dev/null || true
-        sleep 0.5
+        for _ in {1..5}; do
+            if ! tmux has-session -t axon 2>/dev/null; then
+                break
+            fi
+            sleep 0.10
+        done
     fi
 
     # Fallback in case socket resolution fails inside the current runner context.
@@ -159,7 +177,7 @@ kill_tmux_session() {
         for pid in $tmux_fallback_pids; do
             kill -15 "$pid" 2>/dev/null || true
         done
-        sleep 0.5
+        sleep 0.20
         for pid in $tmux_fallback_pids; do
             kill -9 "$pid" 2>/dev/null || true
         done
@@ -170,7 +188,7 @@ kill_by_devenv() {
     if command -v devenv >/dev/null 2>&1; then
         echo "Attempting 'devenv processes down' as authoritative cleanup..."
         devenv processes down >/dev/null 2>&1 || true
-        sleep 1
+        sleep 0.20
     fi
 }
 
@@ -270,7 +288,7 @@ fi
 if command -v elixir >/dev/null 2>&1; then
     echo "Sending shutdown signal to Axon Nexus node..."
     elixir --name stop_script@127.0.0.1 --cookie axon_secret --rpc "axon_nexus@127.0.0.1" :init :stop >/dev/null 2>&1 || true
-    sleep 1
+    sleep 0.20
 fi
 
 # 3. Close TMUX session (primary path + fallback)
@@ -310,8 +328,9 @@ fi
 # 4. Clean up sockets, ports and locks (final safety net)
 echo "Cleaning up sockets, ports and locks..."
 for port in "${AXON_TCP_PORTS[@]}"; do
-    fuser -k "${port}/tcp" 2>/dev/null || true
+    fuser -k "${port}/tcp" 2>/dev/null || true &
 done
+wait || true
 rm -f /tmp/axon-mcp.sock /tmp/axon-telemetry.sock /tmp/axon-v2.sock
 rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.lock
 
