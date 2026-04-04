@@ -270,6 +270,31 @@ pre,
   background: linear-gradient(180deg, oklch(17% 0.01 250), oklch(14% 0.01 250));
 }
 
+.metric-card.tone-ok {
+  border-color: oklch(52% 0.12 160 / 0.5);
+  background: linear-gradient(180deg, oklch(24% 0.06 160 / 0.35), oklch(14% 0.02 250));
+}
+
+.metric-card.tone-info {
+  border-color: oklch(58% 0.1 230 / 0.5);
+  background: linear-gradient(180deg, oklch(23% 0.06 230 / 0.35), oklch(14% 0.02 250));
+}
+
+.metric-card.tone-warn {
+  border-color: oklch(70% 0.14 85 / 0.55);
+  background: linear-gradient(180deg, oklch(28% 0.07 85 / 0.35), oklch(14% 0.02 250));
+}
+
+.metric-card.tone-danger {
+  border-color: oklch(62% 0.18 28 / 0.6);
+  background: linear-gradient(180deg, oklch(27% 0.09 28 / 0.35), oklch(14% 0.02 250));
+}
+
+.metric-card.tone-neutral {
+  border-color: oklch(42% 0.02 250 / 0.45);
+  background: linear-gradient(180deg, oklch(20% 0.015 250), oklch(14% 0.01 250));
+}
+
 .metric-label {
   color: oklch(74% 0.015 250);
   text-transform: uppercase;
@@ -300,6 +325,26 @@ pre,
   font-weight: 650;
   line-height: 1;
   color: oklch(96% 0.01 245);
+}
+
+.metric-card.tone-ok .metric-value {
+  color: oklch(88% 0.11 160);
+}
+
+.metric-card.tone-info .metric-value {
+  color: oklch(86% 0.1 230);
+}
+
+.metric-card.tone-warn .metric-value {
+  color: oklch(91% 0.12 90);
+}
+
+.metric-card.tone-danger .metric-value {
+  color: oklch(88% 0.13 30);
+}
+
+.metric-card.tone-neutral .metric-value {
+  color: oklch(94% 0.015 250);
 }
 
 .tone-ok {
@@ -338,7 +383,7 @@ pre,
 .progress-rail-fill {
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, oklch(74% 0.11 195), oklch(78% 0.14 150));
+  background: linear-gradient(90deg, oklch(70% 0.12 225), oklch(74% 0.13 190), oklch(78% 0.11 150));
   transition: width 180ms ease-out;
 }
 

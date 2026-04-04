@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -36,6 +37,15 @@ class ToolResult:
     request_args: dict[str, Any]
     response_excerpt: str
     response_size: int
+
+
+@dataclass
+class ScenarioStep:
+    name: str
+    tool: str
+    args: dict[str, Any]
+    expect_contains: list[str]
+    fail_if_contains: list[str]
 
 
 def rpc_call(url: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
@@ -77,20 +87,21 @@ def build_args(
     schema: dict[str, Any],
     project: str,
     query: str,
+    symbol_probe: str,
 ) -> dict[str, Any]:
     # Safe, deterministic overrides for known tools.
     overrides: dict[str, dict[str, Any]] = {
         "query": {"query": query, "project": project},
-        "inspect": {"symbol": "Booking", "project": project},
+        "inspect": {"symbol": symbol_probe, "project": project},
         "health": {"project": project},
         "audit": {"project": project},
-        "impact": {"symbol": "Booking", "depth": 2, "project": project},
-        "bidi_trace": {"symbol": "Booking", "depth": 2},
+        "impact": {"symbol": symbol_probe, "depth": 2, "project": project},
+        "bidi_trace": {"symbol": symbol_probe, "depth": 2},
         "diff": {"diff_content": "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"},
         "batch": {"calls": [{"tool": "health", "args": {"project": project}}]},
-        "api_break_check": {"symbol": "Booking"},
-        "simulate_mutation": {"symbol": "Booking"},
-        "semantic_clones": {"symbol": "Booking"},
+        "api_break_check": {"symbol": symbol_probe},
+        "simulate_mutation": {"symbol": symbol_probe, "project": project},
+        "semantic_clones": {"symbol": symbol_probe},
         "architectural_drift": {"source_layer": "ui", "target_layer": "db"},
         "diagnose_indexing": {"project": project},
         "truth_check": {"project": project},
@@ -99,6 +110,7 @@ def build_args(
         "query_examples": {},
         "debug": {"project": project},
         "soll_query_context": {"project_slug": "AXO", "limit": 5},
+        "soll_work_plan": {"project_slug": "AXO", "limit": 10, "include_ist": True, "format": "json"},
         "soll_verify_requirements": {"project_slug": "AXO"},
         "soll_apply_plan": {"project_slug": "AXO", "dry_run": True, "plan": {}},
         "soll_apply_plan_v2": {"project_slug": "AXO", "author": "mcp_validate", "dry_run": True, "plan": {}},
@@ -180,10 +192,17 @@ def evaluate_response(tool_name: str, resp: dict[str, Any]) -> tuple[str, str]:
         return "fail", "tool response indicates backend transport failure"
 
     # Functional-semantic failures (business-level negatives).
-    semantic_fail_patterns = [
-        "seems unindexed or parser failed (found 0 files)",
+    semantic_warn_patterns = [
         "aucun symbole correspondant n'a ete trouve",
         "symbol not found in current scope",
+        "status: warn_input_not_found",
+    ]
+    for p in semantic_warn_patterns:
+        if p in text:
+            return "warn", f"semantic warning pattern detected: {p}"
+
+    semantic_fail_patterns = [
+        "seems unindexed or parser failed (found 0 files)",
         "preview not found:",
         "erreur update: entité soll introuvable",
         "tool not found",
@@ -217,8 +236,157 @@ def summarize_response(resp: dict[str, Any], excerpt_limit: int) -> tuple[str, i
     return truncate_text(raw, excerpt_limit), len(raw)
 
 
+def discover_symbol_probe(url: str, project: str, query: str, timeout: int) -> str:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 77,
+        "method": "tools/call",
+        "params": {
+            "name": "query",
+            "arguments": {"query": query, "project": project},
+        },
+    }
+    try:
+        resp = rpc_call(url, payload, timeout)
+    except Exception:
+        return ""
+
+    text = extract_text(resp)
+    if not text:
+        return ""
+
+    # Parse first markdown table data row in query output.
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        if re.search(r"^\|\s*---", line):
+            continue
+        cells = [part.strip() for part in line.strip("|").split("|")]
+        if not cells:
+            continue
+        first = cells[0]
+        if not first or first.lower() in {"nom", "name"}:
+            continue
+        return first
+    return ""
+
+
+def load_scenario_steps(path: str, default_project: str) -> tuple[str, list[ScenarioStep]]:
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    if not isinstance(payload, dict):
+        raise ValueError("scenario file must contain a JSON object")
+
+    project = payload.get("project", default_project)
+    if not isinstance(project, str) or not project.strip():
+        raise ValueError("scenario project must be a non-empty string")
+
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise ValueError("scenario file must contain a non-empty 'steps' list")
+
+    steps: list[ScenarioStep] = []
+    for index, raw_step in enumerate(raw_steps, start=1):
+        if not isinstance(raw_step, dict):
+            raise ValueError(f"scenario step #{index} must be an object")
+        name = raw_step.get("name", f"scenario.step_{index}")
+        tool = raw_step.get("tool")
+        args = raw_step.get("args", {})
+        expect_contains = raw_step.get("expect_contains", [])
+        fail_if_contains = raw_step.get("fail_if_contains", [])
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"scenario step #{index} has invalid name")
+        if not isinstance(tool, str) or not tool.strip():
+            raise ValueError(f"scenario step #{index} has invalid tool")
+        if not isinstance(args, dict):
+            raise ValueError(f"scenario step #{index} args must be an object")
+        if not isinstance(expect_contains, list) or not all(
+            isinstance(item, str) for item in expect_contains
+        ):
+            raise ValueError(f"scenario step #{index} expect_contains must be a list of strings")
+        if not isinstance(fail_if_contains, list) or not all(
+            isinstance(item, str) for item in fail_if_contains
+        ):
+            raise ValueError(f"scenario step #{index} fail_if_contains must be a list of strings")
+
+        step_args = dict(args)
+        if "project" not in step_args and tool in {"query", "inspect", "health", "audit", "impact", "debug", "diagnose_indexing", "truth_check"}:
+            step_args["project"] = project
+        steps.append(
+            ScenarioStep(
+                name=name,
+                tool=tool,
+                args=step_args,
+                expect_contains=expect_contains,
+                fail_if_contains=fail_if_contains,
+            )
+        )
+
+    return project, steps
+
+
+def run_query_sequence_scenario(
+    url: str,
+    timeout: int,
+    excerpt_limit: int,
+    scenario_steps: list[ScenarioStep],
+) -> list[ToolResult]:
+    results: list[ToolResult] = []
+    for offset, step in enumerate(scenario_steps, start=900):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": offset,
+            "method": "tools/call",
+            "params": {"name": step.tool, "arguments": step.args},
+        }
+        t0 = time.time()
+        try:
+            resp = rpc_call(url, payload, timeout)
+            status, note = evaluate_response(step.tool, resp)
+            excerpt, response_size = summarize_response(resp, excerpt_limit)
+            text = extract_text(resp)
+            if status == "ok":
+                for expected_snippet in step.expect_contains:
+                    if expected_snippet not in text:
+                        status, note = "fail", f"missing expected snippet: {expected_snippet}"
+                        break
+            if status == "ok":
+                for forbidden_snippet in step.fail_if_contains:
+                    if forbidden_snippet in text:
+                        status, note = "fail", f"forbidden snippet present: {forbidden_snippet}"
+                        break
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
+            status, note = "fail", f"{type(e).__name__}: {e}"
+            excerpt, response_size = f"{type(e).__name__}: {e}", 0
+        dt = int((time.time() - t0) * 1000)
+        results.append(
+            ToolResult(
+                name=step.name,
+                status=status,
+                duration_ms=dt,
+                note=note,
+                request_args=step.args,
+                response_excerpt=excerpt,
+                response_size=response_size,
+            )
+        )
+
+    return results
+
+
 def run(args: argparse.Namespace) -> int:
     started = time.time()
+    scenario_steps: list[ScenarioStep] = []
+    scenario_project = args.project
+    if args.scenario_file:
+        try:
+            scenario_project, scenario_steps = load_scenario_steps(args.scenario_file, args.project)
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            print(f"FATAL: scenario load failed: {type(e).__name__}: {e}")
+            return 2
+    project = scenario_project
 
     # 1) Transport + initialize
     try:
@@ -264,6 +432,11 @@ def run(args: argparse.Namespace) -> int:
         print("FATAL: tools/list returned no tools")
         return 2
 
+    symbol_probe = args.symbol.strip() if isinstance(args.symbol, str) else ""
+    if not symbol_probe:
+        discovered = discover_symbol_probe(args.url, project, args.query, args.timeout)
+        symbol_probe = discovered or (args.query if args.query.strip() else "booking")
+
     tool_results: list[ToolResult] = []
     for i, tool in enumerate(tools, start=100):
         name = str(tool.get("name", "")).strip()
@@ -283,7 +456,13 @@ def run(args: argparse.Namespace) -> int:
                 )
             )
             continue
-        call_args = build_args(name, schema if isinstance(schema, dict) else {}, args.project, args.query)
+        call_args = build_args(
+            name,
+            schema if isinstance(schema, dict) else {},
+            project,
+            args.query,
+            symbol_probe,
+        )
         payload = {
             "jsonrpc": "2.0",
             "id": i,
@@ -311,6 +490,11 @@ def run(args: argparse.Namespace) -> int:
             )
         )
 
+    if scenario_steps:
+        tool_results.extend(
+            run_query_sequence_scenario(args.url, args.timeout, args.excerpt, scenario_steps)
+        )
+
     ok = sum(1 for r in tool_results if r.status == "ok")
     warn = sum(1 for r in tool_results if r.status == "warn")
     fail = sum(1 for r in tool_results if r.status == "fail")
@@ -319,8 +503,14 @@ def run(args: argparse.Namespace) -> int:
     elapsed_ms = int((time.time() - started) * 1000)
     print(f"MCP validation completed in {elapsed_ms} ms")
     print(f"URL: {args.url}")
-    print(f"Project: {args.project}")
+    print(f"Project: {project}")
+    if args.scenario_file:
+        print(f"Scenario: {args.scenario_file}")
+    print(f"Symbol Probe: {symbol_probe}")
     print(f"Tools total: {len(tool_results)} | ok={ok} warn={warn} fail={fail} skip={skip}")
+    transport_health = "pass" if fail == 0 else "degraded"
+    semantic_quality = "pass" if (fail == 0 and warn == 0) else ("warn" if fail == 0 else "degraded")
+    print(f"Health gates: transport_health={transport_health} semantic_quality={semantic_quality}")
     print("")
     print("Per-tool status:")
     for r in sorted(tool_results, key=lambda x: (x.status, x.name)):
@@ -333,7 +523,7 @@ def run(args: argparse.Namespace) -> int:
     if args.json_out:
         payload = {
             "url": args.url,
-            "project": args.project,
+            "project": project,
             "summary": {
                 "total": len(tool_results),
                 "ok": ok,
@@ -342,6 +532,10 @@ def run(args: argparse.Namespace) -> int:
                 "skip": skip,
                 "elapsed_ms": elapsed_ms,
                 "allow_mutations": args.allow_mutations,
+                "symbol_probe": symbol_probe,
+                "transport_health": transport_health,
+                "semantic_quality": semantic_quality,
+                "scenario_file": args.scenario_file,
             },
             "results": [r.__dict__ for r in tool_results],
             "slowest_tools": [
@@ -366,6 +560,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--url", default=DEFAULT_URL, help="MCP HTTP endpoint")
     p.add_argument("--project", default="BookingSystem", help="Project scope for project-aware tools")
     p.add_argument("--query", default="booking", help="Default semantic query term")
+    p.add_argument(
+        "--symbol",
+        default="",
+        help="Optional symbol probe for symbol-based tools (defaults to --query)",
+    )
     p.add_argument("--timeout", type=int, default=20, help="Per-call timeout in seconds")
     p.add_argument("--strict", action="store_true", help="Treat warnings as failures")
     p.add_argument(
@@ -377,6 +576,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--excerpt", type=int, default=240, help="Max chars for response excerpt")
     p.add_argument("--top-slowest", type=int, default=5, help="Top N slowest tools in JSON report")
     p.add_argument("--json-out", default="", help="Optional JSON output path")
+    p.add_argument("--scenario-file", default="", help="Optional JSON scenario file for sequential validation")
     return p.parse_args(argv)
 
 

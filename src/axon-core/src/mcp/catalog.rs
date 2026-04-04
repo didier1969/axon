@@ -27,7 +27,7 @@ pub(crate) fn tools_catalog() -> Value {
             },
             {
                 "name": "soll_manager",
-                "description": "[SOLL] Centre de commande pour le graphe intentionnel. Gère la création (avec IDs auto), la mise à jour et les liaisons hiérarchiques.",
+                "description": "[SOLL] Centre de commande pour le graphe intentionnel. Gère la création (avec IDs auto), la mise à jour et les liaisons hiérarchiques. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -43,7 +43,7 @@ pub(crate) fn tools_catalog() -> Value {
             },
             {
                 "name": "soll_apply_plan",
-                "description": "[SOLL] Wrapper haut niveau idempotent pour appliquer un plan SOLL (pillars, requirements, decisions, milestones) avec dry-run et rapport created/updated/skipped/errors.",
+                "description": "[SOLL] Wrapper haut niveau idempotent pour appliquer un plan SOLL (pillars, requirements, decisions, milestones) avec dry-run et rapport created/updated/skipped/errors. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -64,7 +64,7 @@ pub(crate) fn tools_catalog() -> Value {
             },
             {
                 "name": "soll_apply_plan_v2",
-                "description": "[SOLL] Prépare un plan révisable (dry-run par défaut), persiste un preview et fournit le diff d'opérations create/update.",
+                "description": "[SOLL] Prépare un plan révisable (dry-run par défaut), persiste un preview et fournit le diff d'opérations create/update. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -78,7 +78,7 @@ pub(crate) fn tools_catalog() -> Value {
             },
             {
                 "name": "soll_commit_revision",
-                "description": "[SOLL] Commit atomique d'un preview SOLL vers une revision journalisée.",
+                "description": "[SOLL] Commit atomique d'un preview SOLL vers une revision journalisée. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -90,7 +90,7 @@ pub(crate) fn tools_catalog() -> Value {
             },
             {
                 "name": "soll_query_context",
-                "description": "[SOLL] Retourne le contexte projet (requirements, decisions, revisions) compact et prêt pour consommation LLM.",
+                "description": "[SOLL] Retourne le contexte projet (requirements, decisions, revisions) compact et prêt pour consommation LLM. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -101,8 +101,23 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             },
             {
+                "name": "soll_work_plan",
+                "description": "[SOLL] Produit un plan de travail ideal read-only a partir du graphe intentionnel, avec waves paralleles, blockers, cycles et gates de validation. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_slug": { "type": "string" },
+                        "limit": { "type": "integer" },
+                        "top": { "type": "integer" },
+                        "include_ist": { "type": "boolean" },
+                        "format": { "type": "string", "enum": ["brief", "verbose", "json"] }
+                    },
+                    "required": ["project_slug"]
+                }
+            },
+            {
                 "name": "soll_attach_evidence",
-                "description": "[SOLL] Attache des preuves (fichier/test/metric/dashboard) à une entité SOLL.",
+                "description": "[SOLL] Attache des preuves (fichier/test/metric/dashboard) à une entité SOLL. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -115,7 +130,7 @@ pub(crate) fn tools_catalog() -> Value {
             },
             {
                 "name": "soll_verify_requirements",
-                "description": "[SOLL] Vérifie la couverture requirements (done/partial/missing) selon critères et preuves rattachées.",
+                "description": "[SOLL] Vérifie la couverture requirements (done/partial/missing) selon critères et preuves rattachées. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -126,7 +141,7 @@ pub(crate) fn tools_catalog() -> Value {
             },
             {
                 "name": "soll_rollback_revision",
-                "description": "[SOLL] Rollback best-effort d'une révision SOLL via le journal RevisionChange.",
+                "description": "[SOLL] Rollback best-effort d'une révision SOLL via le journal RevisionChange. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -137,7 +152,7 @@ pub(crate) fn tools_catalog() -> Value {
             },
             {
                 "name": "export_soll",
-                "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Milestones, Requirements, Decisions, Concepts) dans un document Markdown horodaté.",
+                "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Milestones, Requirements, Decisions, Concepts) dans un document Markdown horodaté. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -146,7 +161,7 @@ pub(crate) fn tools_catalog() -> Value {
             },
             {
                 "name": "restore_soll",
-                "description": "[SOLL] Restaure les entites conceptuelles depuis un export Markdown officiel SOLL. Fonctionne en mode merge, sans purge destructive implicite.",
+                "description": "[SOLL] Restaure les entites conceptuelles depuis un export Markdown officiel SOLL. Fonctionne en mode merge, sans purge destructive implicite. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -157,7 +172,7 @@ pub(crate) fn tools_catalog() -> Value {
             },
             {
                 "name": "validate_soll",
-                "description": "[SOLL] Exécute des garde-fous minimaux de cohérence sur le graphe intentionnel. Validation en lecture seule: détecte les états orphelins évidents sans modifier SOLL.",
+                "description": "[SOLL] Exécute des garde-fous minimaux de cohérence sur le graphe intentionnel. Validation en lecture seule: détecte les états orphelins évidents sans modifier SOLL. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -171,7 +186,8 @@ pub(crate) fn tools_catalog() -> Value {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string" },
-                        "project": { "type": "string" }
+                        "project": { "type": "string" },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": ["query"]
                 }
@@ -183,7 +199,8 @@ pub(crate) fn tools_catalog() -> Value {
                     "type": "object",
                     "properties": {
                         "symbol": { "type": "string" },
-                        "project": { "type": "string" }
+                        "project": { "type": "string" },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": ["symbol"]
                 }
@@ -205,7 +222,8 @@ pub(crate) fn tools_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project": { "type": "string" }
+                        "project": { "type": "string" },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": []
                 }
@@ -218,7 +236,8 @@ pub(crate) fn tools_catalog() -> Value {
                     "properties": {
                         "depth": { "type": "integer" },
                         "project": { "type": "string" },
-                        "symbol": { "type": "string" }
+                        "symbol": { "type": "string" },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": ["symbol"]
                 }
@@ -229,7 +248,8 @@ pub(crate) fn tools_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project": { "type": "string" }
+                        "project": { "type": "string" },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": []
                 }
@@ -240,7 +260,9 @@ pub(crate) fn tools_catalog() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "diff_content": { "type": "string" }
+                        "diff_content": { "type": "string" },
+                        "limit": { "type": "integer", "description": "Maximum symboles par fichier (default 120, borné 10..500)" },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
                     },
                     "required": ["diff_content"]
                 }
@@ -368,7 +390,9 @@ pub(crate) fn tools_catalog() -> Value {
                 "description": "[SYSTEM] Diagnostic système bas niveau : Affiche l'état interne du moteur Axon V2 (RAM, DB, architecture, statut d'indexation) pour éviter les hallucinations sur l'infrastructure.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                    },
                     "required": []
                 }
             }),

@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use super::format::format_table_from_json;
+use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
 
 impl McpServer {
@@ -267,6 +267,7 @@ impl McpServer {
 
     pub(crate) fn axon_audit(&self, args: &Value) -> Option<Value> {
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        let mode = args.get("mode").and_then(|v| v.as_str());
         let project = requested_project;
 
         let file_count = self.file_count_for_project(project);
@@ -277,7 +278,18 @@ impl McpServer {
                 project, file_count
             );
             let diagnostic = self.indexing_diagnosis_markdown(project);
-            let report = format!("{}\n\n{}", warning, diagnostic);
+            let report = format!(
+                "## 🛡️ Audit de Conformité : {}\n\n{}",
+                project,
+                format_standard_contract(
+                    "warn_input_not_ready",
+                    "project appears unindexed for audit scope",
+                    &format!("project:{}", project),
+                    &format!("{}\n\n{}", warning, diagnostic),
+                    &["run indexing and retry", "check project slug and ignore filters"],
+                    "low",
+                )
+            );
             return Some(json!({ "content": [{ "type": "text", "text": report }] }));
         }
 
@@ -291,46 +303,59 @@ impl McpServer {
             .get_technical_debt(project)
             .unwrap_or_default();
 
-        let mut report = format!("## 🛡️ Audit de Conformité : {}\n\n", project);
+        let mut evidence = String::new();
         if let Some(note) = self.project_scope_truth_note((project != "*").then_some(project)) {
-            report.push_str(&note);
-            report.push('\n');
+            evidence.push_str(&note);
+            evidence.push('\n');
         }
         if let Some(note) =
             self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)))
         {
-            report.push_str(&note);
-            report.push('\n');
+            evidence.push_str(&note);
+            evidence.push('\n');
         }
-        report.push_str(&format!("### 🔒 Sécurité : {}/100\n", sec_score));
+        evidence.push_str(&format!("### 🔒 Sécurité : {}/100\n", sec_score));
 
         if sec_score < 100 {
-            report.push_str("🚨 **Vulnérabilités potentielles détectées.**\n");
-            report.push_str(&format!("Chemins critiques trouvés : {}\n", paths));
+            evidence.push_str("🚨 **Vulnérabilités potentielles détectées.**\n");
+            evidence.push_str(&format!("Chemins critiques trouvés : {}\n", paths));
         } else {
-            report.push_str("✅ Aucun chemin critique vers des fonctions dangereuses détecté.\n");
+            evidence.push_str("✅ Aucun chemin critique vers des fonctions dangereuses détecté.\n");
         }
 
         if !tech_debt.is_empty() {
-            report.push_str("\n### ⚠️ Dette Technique & Panic Points\n");
-            report.push_str("Les points suivants présentent des risques de crash (panic) ou une mauvaise gestion d'erreur :\n\n");
+            evidence.push_str("\n### ⚠️ Dette Technique & Panic Points\n");
+            evidence.push_str("Les points suivants présentent des risques de crash (panic) ou une mauvaise gestion d'erreur :\n\n");
             for (file, issue) in tech_debt.iter().take(10) {
-                report.push_str(&format!("*   `{}` dans `{}`\n", issue, file));
+                evidence.push_str(&format!("*   `{}` dans `{}`\n", issue, file));
             }
             if tech_debt.len() > 10 {
-                report.push_str(&format!(
+                evidence.push_str(&format!(
                     "*... et {} autres points détectés.*\n",
                     tech_debt.len() - 10
                 ));
             }
         }
 
-        report.push_str(&format!("\n### 🧪 Qualité & Tests : {}%\n", cov_score));
+        evidence.push_str(&format!("\n### 🧪 Qualité & Tests : {}%\n", cov_score));
+        let report = format!(
+            "## 🛡️ Audit de Conformité : {}\n\n{}",
+            project,
+            format_standard_contract(
+                "ok",
+                "governance audit computed",
+                &format!("project:{}", project),
+                &evidence_by_mode(&evidence, mode),
+                &["review critical security paths first", "triage top technical debt items"],
+                if sec_score >= 90 { "high" } else { "medium" },
+            )
+        );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
     pub(crate) fn axon_health(&self, args: &Value) -> Option<Value> {
         let requested_project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        let mode = args.get("mode").and_then(|v| v.as_str());
         let project = requested_project;
 
         let file_count = self.file_count_for_project(project);
@@ -341,7 +366,18 @@ impl McpServer {
                 project, file_count
             );
             let diagnostic = self.indexing_diagnosis_markdown(project);
-            let report = format!("{}\n\n{}", warning, diagnostic);
+            let report = format!(
+                "## 🏥 Health Report: {}\n\n{}",
+                project,
+                format_standard_contract(
+                    "warn_input_not_ready",
+                    "project appears unindexed for health scope",
+                    &format!("project:{}", project),
+                    &format!("{}\n\n{}", warning, diagnostic),
+                    &["run indexing and retry", "validate parser coverage for project languages"],
+                    "low",
+                )
+            );
             return Some(json!({ "content": [{ "type": "text", "text": report }] }));
         }
 
@@ -351,26 +387,38 @@ impl McpServer {
             .get_god_objects(project)
             .unwrap_or_default();
 
-        let mut report = format!(
-            "🏥 Health Report for {}: Coverage {}%. Stability high.",
-            project, coverage
+        let mut evidence = format!(
+            "Coverage {}%. Stability high.",
+            coverage
         );
         if let Some(note) = self.project_scope_truth_note((project != "*").then_some(project)) {
-            report.push_str(&format!("\n{}", note));
+            evidence.push_str(&format!("\n{}", note));
         }
         if let Some(note) =
             self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)))
         {
-            report.push_str(&format!("\n{}", note));
+            evidence.push_str(&format!("\n{}", note));
         }
         if !god_objects.is_empty() {
             let god_list: Vec<String> = god_objects
                 .iter()
                 .map(|(name, count)| format!("{} ({} lines)", name, count))
                 .collect();
-            report.push_str(&format!("\nGod Objects detected: {}", god_list.join(", ")));
+            evidence.push_str(&format!("\nGod Objects detected: {}", god_list.join(", ")));
         }
 
+        let report = format!(
+            "## 🏥 Health Report: {}\n\n{}",
+            project,
+            format_standard_contract(
+                "ok",
+                "health metrics computed",
+                &format!("project:{}", project),
+                &evidence_by_mode(&evidence, mode),
+                &["inspect god objects first", "run audit for governance details"],
+                "medium",
+            )
+        );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 

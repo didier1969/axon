@@ -1,7 +1,13 @@
 use serde_json::{json, Value};
 
-use super::format::format_table_from_json;
+use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryIntent {
+    Generic,
+    ConfigLookupExact,
+}
 
 pub(crate) struct ProjectScopeSummary {
     pub(crate) total_files: i64,
@@ -187,6 +193,28 @@ impl McpServer {
         ))
     }
 
+    fn resolve_scoped_symbol_id_dx(&self, symbol: &str, project: Option<&str>) -> Option<String> {
+        let (query, params) = if let Some(project) = project {
+            (
+                "SELECT id FROM Symbol \
+                 WHERE (name = $sym OR id = $sym) AND project_slug = $project \
+                 LIMIT 1",
+                json!({ "sym": symbol, "project": project }),
+            )
+        } else {
+            (
+                "SELECT id FROM Symbol WHERE name = $sym OR id = $sym LIMIT 1",
+                json!({ "sym": symbol }),
+            )
+        };
+        let res = self.graph_store.query_json_param(query, &params).ok()?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+        rows.first()?
+            .first()?
+            .as_str()
+            .map(|value| value.to_string())
+    }
+
     fn build_symbol_search_params(query_text: &str, project: &str) -> Value {
         let normalized_query = query_text.to_lowercase();
         let wildcard_query = normalized_query.replace([' ', '-', ':'], "%");
@@ -241,6 +269,169 @@ impl McpServer {
          OR lower(f.path) LIKE '%' || $normalized || '%'"
     }
 
+    fn classify_query_intent(query_text: &str) -> QueryIntent {
+        let trimmed = query_text.trim();
+        let token_count = trimmed.split_whitespace().count();
+        let dot_count = trimmed.matches('.').count();
+        let looks_structured = !trimmed.is_empty()
+            && trimmed
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-' | '/'));
+        if token_count == 1 && dot_count >= 2 && looks_structured {
+            QueryIntent::ConfigLookupExact
+        } else {
+            QueryIntent::Generic
+        }
+    }
+
+    fn query_intent_label(intent: QueryIntent) -> &'static str {
+        match intent {
+            QueryIntent::Generic => "generic",
+            QueryIntent::ConfigLookupExact => "config_lookup_exact",
+        }
+    }
+
+    fn is_operational_file_path(path: &str) -> bool {
+        let lower = path.to_ascii_lowercase();
+        lower.ends_with("/mix.exs")
+            || lower.ends_with("/mix.lock")
+            || lower.ends_with("devenv.yaml")
+            || lower.ends_with("devenv.nix")
+            || lower.ends_with(".exs")
+            || lower.ends_with(".yml")
+            || lower.ends_with(".yaml")
+            || lower.ends_with(".json")
+            || lower.ends_with(".toml")
+            || lower.contains("/config/")
+            || lower.contains("/.github/workflows/")
+            || lower.contains("docker-compose")
+    }
+
+    fn is_documentary_file_path(path: &str) -> bool {
+        let lower = path.to_ascii_lowercase();
+        lower.ends_with(".md")
+            || lower.contains("/docs/")
+            || lower.contains("/plans/")
+            || lower.contains("audit")
+            || lower.ends_with("readme.md")
+    }
+
+    fn result_category_for_path(path: &str) -> &'static str {
+        if Self::is_operational_file_path(path) {
+            "source operatoire"
+        } else if Self::is_documentary_file_path(path) {
+            "documentaire"
+        } else {
+            "code general"
+        }
+    }
+
+    fn query_diagnostic_block(
+        intent: QueryIntent,
+        query_path: &str,
+        result_category: &str,
+        semantic_fallback_reason: Option<&str>,
+    ) -> String {
+        let fallback = semantic_fallback_reason
+            .map(|reason| format!("**Fallback semantique:** {}\n", reason))
+            .unwrap_or_default();
+        format!(
+            "**Type de resultat:** {}\n**Diagnostic:** query_intent={} ; query_path={}\n{}\n",
+            result_category,
+            Self::query_intent_label(intent),
+            query_path,
+            fallback
+        )
+    }
+
+    fn exact_match_rank(value: Option<&str>, query_lower: &str) -> usize {
+        let Some(value) = value else {
+            return 2;
+        };
+        let value_lower = value.to_ascii_lowercase();
+        if value_lower == query_lower {
+            0
+        } else if value_lower.contains(query_lower) {
+            1
+        } else {
+            2
+        }
+    }
+
+    fn operational_rank(path: &str) -> usize {
+        if Self::is_operational_file_path(path) {
+            0
+        } else if Self::is_documentary_file_path(path) {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn rerank_symbol_rows(
+        rows: Vec<Vec<Value>>,
+        query_text: &str,
+        intent: QueryIntent,
+    ) -> Vec<Vec<Value>> {
+        if intent != QueryIntent::ConfigLookupExact {
+            return rows;
+        }
+
+        let query_lower = query_text.to_ascii_lowercase();
+        let mut indexed = rows.into_iter().enumerate().collect::<Vec<_>>();
+        indexed.sort_by_key(|(original_index, row)| {
+            let name = row.first().and_then(Value::as_str).unwrap_or_default();
+            let uri = row.get(2).and_then(Value::as_str).unwrap_or_default();
+            (
+                Self::operational_rank(uri),
+                Self::exact_match_rank(Some(name), &query_lower),
+                Self::exact_match_rank(Some(uri), &query_lower),
+                uri.len(),
+                uri.to_ascii_lowercase(),
+                *original_index,
+            )
+        });
+        indexed.into_iter().map(|(_, row)| row).collect()
+    }
+
+    fn chunk_match_rank(reason: &str) -> usize {
+        match reason {
+            "docstring" => 0,
+            "chunk body" => 1,
+            "chunk metadata" => 2,
+            "file path" => 3,
+            _ => 4,
+        }
+    }
+
+    fn rerank_chunk_rows(
+        rows: Vec<Vec<Value>>,
+        query_text: &str,
+        intent: QueryIntent,
+    ) -> Vec<Vec<Value>> {
+        if intent != QueryIntent::ConfigLookupExact {
+            return rows;
+        }
+
+        let query_lower = query_text.to_ascii_lowercase();
+        let mut indexed = rows.into_iter().enumerate().collect::<Vec<_>>();
+        indexed.sort_by_key(|(original_index, row)| {
+            let uri = row.get(2).and_then(Value::as_str).unwrap_or_default();
+            let match_reason = row.get(3).and_then(Value::as_str).unwrap_or_default();
+            let evidence = row.get(4).and_then(Value::as_str).unwrap_or_default();
+            (
+                Self::operational_rank(uri),
+                Self::exact_match_rank(Some(evidence), &query_lower),
+                Self::exact_match_rank(Some(uri), &query_lower),
+                Self::chunk_match_rank(match_reason),
+                uri.len(),
+                uri.to_ascii_lowercase(),
+                *original_index,
+            )
+        });
+        indexed.into_iter().map(|(_, row)| row).collect()
+    }
+
     pub(crate) fn axon_fs_read(&self, args: &Value) -> Option<Value> {
         let uri = args.get("uri")?.as_str()?;
         let start_line = args.get("start_line").and_then(|v| v.as_u64());
@@ -280,14 +471,21 @@ impl McpServer {
 
     pub(crate) fn axon_query(&self, args: &Value) -> Option<Value> {
         let query_text = args.get("query")?.as_str()?;
+        let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str()).unwrap_or("*");
+        let query_intent = Self::classify_query_intent(query_text);
         let project_note = self.project_scope_truth_note((project != "*").then_some(project));
         let degraded_note =
             self.degraded_truth_note(self.degraded_file_count((project != "*").then_some(project)));
 
-        let embedding = crate::embedder::batch_embed(vec![query_text.to_string()])
-            .ok()
-            .and_then(|v| v.into_iter().next());
+        let embedding_attempt = crate::embedder::batch_embed(vec![query_text.to_string()]);
+        let semantic_fallback_reason = embedding_attempt.as_ref().err().map(|err| err.to_string());
+        let embedding = embedding_attempt.ok().and_then(|v| v.into_iter().next());
+        let query_limit = if query_intent == QueryIntent::ConfigLookupExact {
+            25
+        } else {
+            10
+        };
 
         let base_predicate = Self::symbol_search_predicate();
         let (sql, params) = if let Some(emb) = embedding {
@@ -299,8 +497,8 @@ impl McpServer {
                          FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
                          WHERE {} \
                             OR array_cosine_distance(s.embedding, {}::FLOAT[384]) < 0.5 \
-                         ORDER BY score ASC LIMIT 10",
-                        vec_str, base_predicate, vec_str
+                         ORDER BY score ASC LIMIT {}",
+                        vec_str, base_predicate, vec_str, query_limit
                     ),
                     Self::build_symbol_search_params(query_text, project),
                 )
@@ -312,27 +510,31 @@ impl McpServer {
                          WHERE f.project_slug = $proj AND ( {} \
                             OR array_cosine_distance(s.embedding, {}::FLOAT[384]) < 0.5 \
                          ) \
-                         ORDER BY score ASC LIMIT 10",
-                        vec_str, base_predicate, vec_str
+                         ORDER BY score ASC LIMIT {}",
+                        vec_str, base_predicate, vec_str, query_limit
                     ),
                     Self::build_symbol_search_params(query_text, project),
                 )
             }
         } else if project == "*" {
             (
-                "SELECT s.name, s.kind, f.path AS uri \
-                 FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                 WHERE {} \
-                 LIMIT 10"
-                    .replace("{}", base_predicate),
+                format!(
+                    "SELECT s.name, s.kind, f.path AS uri \
+                     FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
+                     WHERE {} \
+                     LIMIT {}",
+                    base_predicate, query_limit
+                ),
                 Self::build_symbol_search_params(query_text, project),
             )
         } else {
             (
-                "SELECT s.name, s.kind, f.path AS uri \
-                 FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                 WHERE f.project_slug = $proj AND ( {} ) LIMIT 10"
-                    .replace("{}", base_predicate),
+                format!(
+                    "SELECT s.name, s.kind, f.path AS uri \
+                     FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
+                     WHERE f.project_slug = $proj AND ( {} ) LIMIT {}",
+                    base_predicate, query_limit
+                ),
                 Self::build_symbol_search_params(query_text, project),
             )
         };
@@ -345,26 +547,75 @@ impl McpServer {
 
         match self.graph_store.query_json_param(&sql, &params) {
             Ok(res) => {
-                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+                let rows: Vec<Vec<Value>> =
+                    Self::rerank_symbol_rows(serde_json::from_str(&res).unwrap_or_default(), query_text, query_intent);
                 if rows.is_empty() {
-                    return self.axon_query_from_chunks(query_text, project, &params);
+                    return self.axon_query_from_chunks(
+                        query_text,
+                        project,
+                        &params,
+                        query_intent,
+                        semantic_fallback_reason.as_deref(),
+                    );
                 }
                 let headers = if sql.contains("score") {
                     vec!["Nom", "Type", "URI (Chemin)", "Distance Sémantique"]
                 } else {
                     vec!["Nom", "Type", "URI (Chemin)"]
                 };
-                let table = format_table_from_json(&res, &headers);
-                Some(json!({ "content": [{ "type": "text", "text": format!(
-                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** {}\n\n{}{}{}",
-                        query_text,
-                        mode_label,
-                        project_note.clone().unwrap_or_default(),
-                        degraded_note.clone().unwrap_or_default(),
-                        table
-                    ) }] }))
+                let table_json = serde_json::to_string(&rows).unwrap_or(res);
+                let table = format_table_from_json(&table_json, &headers);
+                let scope = if project == "*" {
+                    "workspace:*".to_string()
+                } else {
+                    format!("project:{}", project)
+                };
+                let result_category = rows
+                    .first()
+                    .and_then(|row| row.get(2))
+                    .and_then(Value::as_str)
+                    .map(Self::result_category_for_path)
+                    .unwrap_or("inconnu");
+                let diagnostic = Self::query_diagnostic_block(
+                    query_intent,
+                    if sql.contains("score") {
+                        "symbol_index_semantic"
+                    } else {
+                        "symbol_index_structural"
+                    },
+                    result_category,
+                    semantic_fallback_reason.as_deref(),
+                );
+                let evidence = format!(
+                    "**Mode:** {}\n{}\n{}{}{}",
+                    mode_label,
+                    diagnostic,
+                    project_note.clone().unwrap_or_default(),
+                    degraded_note.clone().unwrap_or_default(),
+                    table
+                );
+                let evidence = evidence_by_mode(&evidence, mode);
+                let report = format!(
+                    "### 🔎 Resultats de recherche : '{}'\n\n{}",
+                    query_text,
+                    format_standard_contract(
+                        "ok",
+                        "semantic query resolved",
+                        &scope,
+                        &evidence,
+                        &["use `inspect` on a returned symbol", "use `impact` for blast radius"],
+                        "high",
+                    )
+                );
+                Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
-            Err(_) => self.axon_query_from_chunks(query_text, project, &params),
+            Err(_) => self.axon_query_from_chunks(
+                query_text,
+                project,
+                &params,
+                query_intent,
+                semantic_fallback_reason.as_deref(),
+            ),
         }
     }
 
@@ -373,6 +624,8 @@ impl McpServer {
         query_text: &str,
         project: &str,
         params: &Value,
+        query_intent: QueryIntent,
+        semantic_fallback_reason: Option<&str>,
     ) -> Option<Value> {
         let predicate = Self::chunk_search_predicate();
         let docstring_match = Self::chunk_docstring_match_expression();
@@ -410,11 +663,16 @@ impl McpServer {
                  SELECT name, kind, uri, match_reason, evidence \
                  FROM chunk_matches \
                  ORDER BY match_rank ASC, uri ASC, name ASC \
-                 LIMIT 10",
+                 LIMIT {limit}",
                 docstring_match = docstring_match,
                 body_match = body_match,
                 path_match = path_match,
                 predicate = predicate,
+                limit = if query_intent == QueryIntent::ConfigLookupExact {
+                    25
+                } else {
+                    10
+                },
             )
         } else {
             format!(
@@ -445,34 +703,66 @@ impl McpServer {
                  SELECT name, kind, uri, match_reason, evidence \
                  FROM chunk_matches \
                  ORDER BY match_rank ASC, uri ASC, name ASC \
-                 LIMIT 10",
+                 LIMIT {limit}",
                 docstring_match = docstring_match,
                 body_match = body_match,
                 path_match = path_match,
                 predicate = predicate,
+                limit = if query_intent == QueryIntent::ConfigLookupExact {
+                    25
+                } else {
+                    10
+                },
             )
         };
 
         match self.graph_store.query_json_param(&sql, params) {
             Ok(res) => {
-                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+                let rows: Vec<Vec<Value>> =
+                    Self::rerank_chunk_rows(serde_json::from_str(&res).unwrap_or_default(), query_text, query_intent);
                 if rows.is_empty() {
-                    return self.axon_query_without_contains(query_text, project, params);
+                    return self.axon_query_without_contains(
+                        query_text,
+                        project,
+                        params,
+                        query_intent,
+                        semantic_fallback_reason,
+                    );
                 }
+                let result_category = rows
+                    .first()
+                    .and_then(|row| row.get(2))
+                    .and_then(Value::as_str)
+                    .map(Self::result_category_for_path)
+                    .unwrap_or("inconnu");
+                let diagnostic = Self::query_diagnostic_block(
+                    query_intent,
+                    "chunk_fallback",
+                    result_category,
+                    semantic_fallback_reason,
+                );
+                let table_json = serde_json::to_string(&rows).unwrap_or(res);
                 Some(json!({
                     "content": [{
                         "type": "text",
                         "text": format!(
-                            "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** fallback lexical sur chunk derive\n**Provenance:** chaque resultat precise sa source de match (`docstring`, `chunk body`, `chunk metadata`, `file path`) et reste ancre sur un fichier structurel.\n\n{}{}{}",
+                            "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** fallback lexical sur chunk derive\n{}\n**Provenance:** chaque resultat precise sa source de match (`docstring`, `chunk body`, `chunk metadata`, `file path`) et reste ancre sur un fichier structurel.\n\n{}{}{}",
                             query_text,
+                            diagnostic,
                             project_note.unwrap_or_default(),
                             degraded_note.unwrap_or_default(),
-                            format_table_from_json(&res, &["Nom", "Type", "URI (Chemin)", "Why it matched", "Evidence"])
+                            format_table_from_json(&table_json, &["Nom", "Type", "URI (Chemin)", "Why it matched", "Evidence"])
                         )
                     }]
                 }))
             }
-            Err(_) => self.axon_query_without_contains(query_text, project, params),
+            Err(_) => self.axon_query_without_contains(
+                query_text,
+                project,
+                params,
+                query_intent,
+                semantic_fallback_reason,
+            ),
         }
     }
 
@@ -481,6 +771,8 @@ impl McpServer {
         query_text: &str,
         project: &str,
         params: &Value,
+        query_intent: QueryIntent,
+        semantic_fallback_reason: Option<&str>,
     ) -> Option<Value> {
         let degraded_files = self.degraded_file_count((project != "*").then_some(project));
         let degraded_note = self.degraded_truth_note(degraded_files);
@@ -490,12 +782,15 @@ impl McpServer {
             .query_count("SELECT count(*) FROM CONTAINS")
             .unwrap_or(0);
         if contains_count > 0 {
+            let diagnostic =
+                Self::query_diagnostic_block(query_intent, "structure_only_empty", "aucun", semantic_fallback_reason);
             return Some(json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** structurel\n\n{}{}{}\n",
+                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** structurel\n{}\n{}{}{}\n",
                         query_text,
+                        diagnostic,
                         project_note.clone().unwrap_or_default(),
                         degraded_note.clone().unwrap_or_default(),
                         "Aucun résultat trouvé."
@@ -519,12 +814,15 @@ impl McpServer {
             serde_json::from_str(&fallback_res).unwrap_or_default();
 
         if fallback_rows.is_empty() {
+            let diagnostic =
+                Self::query_diagnostic_block(query_intent, "structure_only_empty", "aucun", semantic_fallback_reason);
             Some(json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n\n{}{}{}\n",
+                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n{}\n{}{}{}\n",
                         query_text,
+                        diagnostic,
                         project_note.unwrap_or_default(),
                         degraded_note.unwrap_or_default(),
                         "Aucun résultat trouvé."
@@ -532,22 +830,37 @@ impl McpServer {
                 }]
             }))
         } else {
+            let rows = Self::rerank_symbol_rows(fallback_rows, query_text, query_intent);
+            let result_category = rows
+                .first()
+                .and_then(|row| row.get(2))
+                .and_then(Value::as_str)
+                .map(Self::result_category_for_path)
+                .unwrap_or("inconnu");
+            let diagnostic = Self::query_diagnostic_block(
+                query_intent,
+                "structure_only_unanchored",
+                result_category,
+                semantic_fallback_reason,
+            );
             let project_note = if project == "*" {
                 "portee projet non contrainte"
             } else {
                 "contrainte projet non fiable tant que CONTAINS est vide"
             };
+            let table_json = serde_json::to_string(&rows).unwrap_or(fallback_res);
             Some(json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n**Etat:** le graphe de containment n'est pas encore disponible; les symboles ci-dessous restent exploitables mais sans URI verifiee ({})\n{}{}\n{}",
+                        "### 🔎 Resultats de recherche : '{}'\n\n**Mode:** degrade structurel sans ancrage fichier\n{}\n**Etat:** le graphe de containment n'est pas encore disponible; les symboles ci-dessous restent exploitables mais sans URI verifiee ({})\n{}{}\n{}",
                         query_text,
+                        diagnostic,
                         project_note,
                         self.project_scope_truth_note((project != "*").then_some(project))
                             .unwrap_or_default(),
                         degraded_note.unwrap_or_default(),
-                        format_table_from_json(&fallback_res, &["Nom", "Type", "Projet"])
+                        format_table_from_json(&table_json, &["Nom", "Type", "Projet"])
                     )
                 }]
             }))
@@ -556,6 +869,7 @@ impl McpServer {
 
     pub(crate) fn axon_inspect(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
+        let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
         let (query, params) = if let Some(project) = project {
             (
@@ -582,13 +896,29 @@ impl McpServer {
             Ok(res) => {
                 let table =
                     format_table_from_json(&res, &["Nom", "Type", "Testé", "Appelants", "Appelés"]);
-                Some(json!({ "content": [{ "type": "text", "text": format!(
-                        "### 🔍 Inspection du Symbole : {}\n\n{}{}{}",
-                        symbol,
-                        project_note.unwrap_or_default(),
-                        degraded_note.unwrap_or_default(),
-                        table
-                    ) }] }))
+                let scope = project
+                    .map(|p| format!("project:{}", p))
+                    .unwrap_or_else(|| "workspace:*".to_string());
+                let evidence = format!(
+                    "{}{}{}",
+                    project_note.unwrap_or_default(),
+                    degraded_note.unwrap_or_default(),
+                    table
+                );
+                let evidence = evidence_by_mode(&evidence, mode);
+                let report = format!(
+                    "### 🔍 Inspection du Symbole : {}\n\n{}",
+                    symbol,
+                    format_standard_contract(
+                        "ok",
+                        "symbol inspection computed",
+                        &scope,
+                        &evidence,
+                        &["run `impact` for dependency blast radius", "run `bidi_trace` for topology"],
+                        "high",
+                    )
+                );
+                Some(json!({ "content": [{ "type": "text", "text": report }] }))
             }
             Err(_) => None,
         }
@@ -596,37 +926,99 @@ impl McpServer {
 
     pub(crate) fn axon_bidi_trace(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
+        let mode = args.get("mode").and_then(|v| v.as_str());
+        let project = args.get("project").and_then(|v| v.as_str());
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(100);
+        let scope = project
+            .map(|p| format!("project:{}", p))
+            .unwrap_or_else(|| "workspace:*".to_string());
+        let Some(target_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
+            let (sugg_query, sugg_params) = if let Some(project) = project {
+                (
+                    "SELECT name, kind, project_slug \
+                     FROM Symbol \
+                     WHERE project_slug = $project AND lower(name) LIKE lower($pat) \
+                     ORDER BY name \
+                     LIMIT 8",
+                    json!({ "project": project, "pat": format!("%{}%", symbol) }),
+                )
+            } else {
+                (
+                    "SELECT name, kind, COALESCE(project_slug, 'unknown') \
+                     FROM Symbol \
+                     WHERE lower(name) LIKE lower($pat) \
+                     ORDER BY name \
+                     LIMIT 8",
+                    json!({ "pat": format!("%{}%", symbol) }),
+                )
+            };
+            let suggestions = self
+                .graph_store
+                .query_json_param(sugg_query, &sugg_params)
+                .unwrap_or_else(|_| "[]".to_string());
+            let evidence = format!(
+                "{}{}",
+                self.project_scope_truth_note(project).unwrap_or_default(),
+                format_table_from_json(&suggestions, &["Symbole suggéré", "Type", "Projet"])
+            );
+            let report = format!(
+                "## ↕️ Trace Bidirectionnelle : {}\n\n{}",
+                symbol,
+                format_standard_contract(
+                    "warn_input_not_found",
+                    "symbol not found in current scope",
+                    &scope,
+                    &evidence_by_mode(&evidence, mode),
+                    &["pick one suggested symbol", "or pass the exact symbol id"],
+                    "low",
+                )
+            );
+            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
+        };
 
         let up_query = format!(
             "WITH RECURSIVE callers(sym, depth) AS (
-                SELECT source_id, 1 FROM CALLS WHERE target_id = $sym
+                SELECT source_id, 1 FROM CALLS WHERE target_id = $target_id
                 UNION ALL
                 SELECT c.source_id, callers.depth + 1
                 FROM CALLS c
                 JOIN callers ON c.target_id = callers.sym
                 WHERE callers.depth < {}
             )
-            SELECT DISTINCT s.name, s.kind FROM callers
-            JOIN Symbol s ON s.id = callers.sym",
-            depth
+            SELECT DISTINCT s.name, s.kind, COALESCE(s.project_slug, 'unknown') FROM callers
+            JOIN Symbol s ON s.id = callers.sym{}",
+            depth,
+            if project.is_some() {
+                " WHERE s.project_slug = $project"
+            } else {
+                ""
+            }
         );
 
         let down_query = format!(
             "WITH RECURSIVE callees(sym, depth) AS (
-                SELECT target_id, 1 FROM CALLS WHERE source_id = $sym
+                SELECT target_id, 1 FROM CALLS WHERE source_id = $target_id
                 UNION ALL
                 SELECT c.target_id, callees.depth + 1
                 FROM CALLS c
                 JOIN callees ON c.source_id = callees.sym
                 WHERE callees.depth < {}
             )
-            SELECT DISTINCT s.name, s.kind FROM callees
-            JOIN Symbol s ON s.id = callees.sym",
-            depth
+            SELECT DISTINCT s.name, s.kind, COALESCE(s.project_slug, 'unknown') FROM callees
+            JOIN Symbol s ON s.id = callees.sym{}",
+            depth,
+            if project.is_some() {
+                " WHERE s.project_slug = $project"
+            } else {
+                ""
+            }
         );
 
-        let params = json!({"sym": symbol});
+        let params = if let Some(project) = project {
+            json!({"target_id": target_id, "project": project})
+        } else {
+            json!({"target_id": target_id})
+        };
         let up_res = self
             .graph_store
             .query_json_param(&up_query, &params)
@@ -636,11 +1028,45 @@ impl McpServer {
             .query_json_param(&down_query, &params)
             .unwrap_or_else(|_| "[]".to_string());
 
+        let up_rows: Vec<Vec<Value>> = serde_json::from_str(&up_res).unwrap_or_default();
+        let down_rows: Vec<Vec<Value>> = serde_json::from_str(&down_res).unwrap_or_default();
+        let status = if up_rows.is_empty() && down_rows.is_empty() {
+            "warn_empty_result"
+        } else {
+            "ok"
+        };
+        let confidence = if up_rows.len() + down_rows.len() >= 5 {
+            "high"
+        } else if up_rows.is_empty() && down_rows.is_empty() {
+            "low"
+        } else {
+            "medium"
+        };
+        let mut evidence = String::new();
+        if let Some(note) = self.project_scope_truth_note(project) {
+            evidence.push_str(&note);
+            evidence.push('\n');
+        }
+        if let Some(note) = self.degraded_truth_note(self.degraded_symbol_count(symbol, project)) {
+            evidence.push_str(&note);
+            evidence.push('\n');
+        }
+        evidence.push_str("### ↑ Appelants / Entry Points\n");
+        evidence.push_str(&format_table_from_json(&up_res, &["Nom", "Type", "Projet"]));
+        evidence.push_str("\n\n### ↓ Appels Profonds\n");
+        evidence.push_str(&format_table_from_json(&down_res, &["Nom", "Type", "Projet"]));
+
         let report = format!(
-            "## ↕️ Trace Bidirectionnelle : {}\n\n### ↑ Appelants / Entry Points\n{}\n\n### ↓ Appels Profonds\n{}",
+            "## ↕️ Trace Bidirectionnelle : {}\n\n{}",
             symbol,
-            format_table_from_json(&up_res, &["Nom", "Type"]),
-            format_table_from_json(&down_res, &["Nom", "Type"])
+            format_standard_contract(
+                status,
+                "bidirectional call trace computed",
+                &scope,
+                &evidence_by_mode(&evidence, mode),
+                &["run `impact` for blast-radius summary", "run `inspect` on one critical neighbor"],
+                confidence,
+            )
         );
 
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
@@ -648,30 +1074,103 @@ impl McpServer {
 
     pub(crate) fn axon_api_break_check(&self, args: &Value) -> Option<Value> {
         let symbol = args.get("symbol")?.as_str()?;
-        let query = "
-            SELECT DISTINCT f.path AS consumer, s.name, s.kind
+        let mode = args.get("mode").and_then(|v| v.as_str());
+        let project = args.get("project").and_then(|v| v.as_str());
+        let scope = project
+            .map(|p| format!("project:{}", p))
+            .unwrap_or_else(|| "workspace:*".to_string());
+        let Some(target_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
+            let report = format!(
+                "## 🧯 Vérification rupture API : {}\n\n{}",
+                symbol,
+                format_standard_contract(
+                    "warn_input_not_found",
+                    "symbol not found in current scope",
+                    &scope,
+                    "",
+                    &["run `query` to discover the exact symbol id/name", "retry with `project` when relevant"],
+                    "low",
+                )
+            );
+            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
+        };
+
+        let query = if project.is_some() {
+            "
+            SELECT DISTINCT f.path AS consumer, s.name, s.kind, COALESCE(s.project_slug, 'unknown')
             FROM CALLS c
             JOIN Symbol s ON s.id = c.source_id
             LEFT JOIN CONTAINS con ON s.id = con.target_id
             LEFT JOIN File f ON f.path = con.source_id
             JOIN Symbol target ON target.id = c.target_id
-            WHERE target.name = $sym AND target.is_public = true
-        ";
+            WHERE target.id = $target_id AND target.is_public = true AND s.project_slug = $project
+        "
+        } else {
+            "
+            SELECT DISTINCT f.path AS consumer, s.name, s.kind, COALESCE(s.project_slug, 'unknown')
+            FROM CALLS c
+            JOIN Symbol s ON s.id = c.source_id
+            LEFT JOIN CONTAINS con ON s.id = con.target_id
+            LEFT JOIN File f ON f.path = con.source_id
+            JOIN Symbol target ON target.id = c.target_id
+            WHERE target.id = $target_id AND target.is_public = true
+        "
+        };
+        let params = if let Some(project) = project {
+            json!({ "target_id": target_id, "project": project })
+        } else {
+            json!({ "target_id": target_id })
+        };
 
-        match self
-            .graph_store
-            .query_json_param(query, &json!({"sym": symbol}))
-        {
+        match self.graph_store.query_json_param(query, &params) {
             Ok(res) => {
                 let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+                let mut evidence = String::new();
+                if let Some(note) = self.project_scope_truth_note(project) {
+                    evidence.push_str(&note);
+                    evidence.push('\n');
+                }
+                if let Some(note) =
+                    self.degraded_truth_note(self.degraded_symbol_count(symbol, project))
+                {
+                    evidence.push_str(&note);
+                    evidence.push('\n');
+                }
                 if rows.is_empty() {
-                    Some(
-                        json!({ "content": [{ "type": "text", "text": format!("✅ Aucun consommateur externe détecté pour '{}'.", symbol) }] }),
-                    )
+                    let report = format!(
+                        "## 🧯 Vérification rupture API : {}\n\n{}",
+                        symbol,
+                        format_standard_contract(
+                            "ok",
+                            "no external consumers detected for the resolved public symbol",
+                            &scope,
+                            &evidence_by_mode(&evidence, mode),
+                            &["run `impact` for broader dependency view"],
+                            "high",
+                        )
+                    );
+                    Some(json!({ "content": [{ "type": "text", "text": report }] }))
                 } else {
-                    Some(
-                        json!({ "content": [{ "type": "text", "text": format!("⚠️ **RISQUE DE RUPTURE D'API**\n\nModifier '{}' impactera directement les consommateurs suivants :\n\n{}", symbol, format_table_from_json(&res, &["Consommateur", "Symbole", "Type"])) }] }),
-                    )
+                    evidence.push_str(
+                        "Modifier ce symbole public impactera directement les consommateurs suivants:\n\n",
+                    );
+                    evidence.push_str(&format_table_from_json(
+                        &res,
+                        &["Consommateur", "Symbole", "Type", "Projet"],
+                    ));
+                    let report = format!(
+                        "## 🧯 Vérification rupture API : {}\n\n{}",
+                        symbol,
+                        format_standard_contract(
+                            "warn_api_break_risk",
+                            "public api consumer impact detected",
+                            &scope,
+                            &evidence_by_mode(&evidence, mode),
+                            &["inspect top consumers", "run `simulate_mutation` before changing signature"],
+                            "high",
+                        )
+                    );
+                    Some(json!({ "content": [{ "type": "text", "text": report }] }))
                 }
             }
             Err(e) => Some(

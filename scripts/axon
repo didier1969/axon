@@ -15,6 +15,10 @@ Commands:
   status                   Runtime health/status check
   qualify [args...]        Run qualification pipeline
   validate-mcp [args...]   Exhaustive MCP tool validation
+  robustness-mcp [args...] Qualify MCP responsiveness and recovery under load
+  quality-mcp              Run strict MCP quality gate on core projects
+  soll-import [args...]    Bulk import SOLL payloads via MCP (md/json/ndjson/yaml)
+  work-plan [args...]      Generate an ideal read-only work plan from SOLL
   migrate-ignore [args...] Migrate .axonignore patterns to .gitignore (dry-run by default)
   reindex-project [args...] Reindex one project with before/after noise evaluation
 
@@ -26,6 +30,12 @@ Examples:
   ./scripts/axon status
   ./scripts/axon qualify --mode full --duration 120 --interval 5 --enforce-gate
   ./scripts/axon validate-mcp --project BookingSystem --strict
+  ./scripts/axon robustness-mcp --modes mcp_only,full --duration 60 --concurrency 4
+  ./scripts/axon quality-mcp
+  ./scripts/axon soll-import --input docs/vision/SOLL_EXPORT_2026-04-04.md --format md
+  ./scripts/axon soll-import --input /tmp/soll_payload.json --project AXO --author codex --dry-run
+  ./scripts/axon work-plan --project AXO
+  ./scripts/axon work-plan --project AXO --json
   ./scripts/axon migrate-ignore --root /home/dstadel/projects --apply
   ./scripts/axon reindex-project --project BookingSystem --wait-seconds 180
 USAGE
@@ -60,6 +70,18 @@ case "$cmd" in
     ;;
   validate-mcp)
     exec python3 "$SCRIPT_DIR/mcp_validate.py" "$@"
+    ;;
+  robustness-mcp)
+    exec python3 "$SCRIPT_DIR/qualify_mcp_robustness.py" "$@"
+    ;;
+  quality-mcp)
+    exec bash "$SCRIPT_DIR/mcp_quality_gate.sh"
+    ;;
+  soll-import)
+    exec python3 "$SCRIPT_DIR/soll_import.py" "$@"
+    ;;
+  work-plan)
+    exec python3 "$SCRIPT_DIR/work_plan.py" "$@"
     ;;
   migrate-ignore)
     exec bash "$SCRIPT_DIR/migrate_axonignore_to_gitignore.sh" "$@"

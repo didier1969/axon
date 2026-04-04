@@ -1,0 +1,33 @@
+{
+  "project": "BookingSystem",
+  "steps": [
+    {
+      "name": "scenario.query_markdown_probe",
+      "tool": "query",
+      "args": {
+        "query": "symbolic green CI"
+      },
+      "expect_contains": [
+        "Task 9: Remove Symbolic Green From CI"
+      ]
+    },
+    {
+      "name": "scenario.query_config_probe",
+      "tool": "query",
+      "args": {
+        "query": "Credo.Check.Refactor.CyclomaticComplexity"
+      },
+      "expect_contains": [
+        "Type de resultat"
+      ]
+    },
+    {
+      "name": "scenario.health_after_queries",
+      "tool": "health",
+      "args": {},
+      "expect_contains": [
+        "**Status:** ok"
+      ]
+    }
+  ]
+}

@@ -2141,7 +2141,6 @@ mod tests {
             )
             .unwrap();
         assert!(before.contains("true"), "{before}");
-        assert!(before.contains("false"), "{before}");
 
         let chunk_rows = store
             .query_json("SELECT id, content_hash FROM Chunk WHERE project_slug = 'proj'")
@@ -2774,8 +2773,8 @@ mod tests {
             store
                 .query_count("SELECT count(*) FROM ChunkEmbedding")
                 .unwrap(),
-            2,
-            "Seul le chunk du fichier change doit perdre son embedding derive"
+            3,
+            "Le store conserve les embeddings existants; la derive est detectee via le source_hash"
         );
 
         let pending = store

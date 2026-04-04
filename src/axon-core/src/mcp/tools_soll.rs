@@ -1,6 +1,8 @@
 use anyhow::anyhow;
 use serde_json::{json, Value};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
+use super::format::format_standard_contract;
 use super::soll::{
     canonical_soll_export_dir, find_latest_soll_export, parse_soll_export, SollRestoreCounts,
 };
@@ -20,6 +22,474 @@ const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
     ("IMPACTS", "IMPACTS"),
     ("SUBSTANTIATES", "SUBSTANTIATES"),
 ];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum WorkPlanEntityType {
+    Decision,
+    Requirement,
+    Milestone,
+}
+
+impl WorkPlanEntityType {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Decision => "Decision",
+            Self::Requirement => "Requirement",
+            Self::Milestone => "Milestone",
+        }
+    }
+
+    fn sort_rank(&self) -> usize {
+        match self {
+            Self::Decision => 0,
+            Self::Requirement => 1,
+            Self::Milestone => 2,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WorkPlanNode {
+    id: String,
+    title: String,
+    entity_type: WorkPlanEntityType,
+    status: String,
+    priority: String,
+    requirement_state: Option<String>,
+    evidence_count: usize,
+    descendants: usize,
+    ist_degraded_links: usize,
+    backlog_visible: bool,
+    score: i64,
+    reasons: Vec<String>,
+    validation_gates: Vec<String>,
+    ist_signals: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct WorkPlanWave {
+    wave_index: usize,
+    items: Vec<WorkPlanNode>,
+}
+
+#[derive(Clone, Debug)]
+struct WorkPlanCycle {
+    node_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct WorkPlanBlocker {
+    id: String,
+    entity_type: String,
+    reason: String,
+}
+
+fn recommendation_kind(node: &WorkPlanNode) -> &'static str {
+    if node.descendants > 0 {
+        "unblocker"
+    } else if node
+        .requirement_state
+        .as_deref()
+        .is_some_and(|state| matches!(state, "missing" | "partial"))
+    {
+        "proof_gap"
+    } else if matches!(node.entity_type, WorkPlanEntityType::Milestone) {
+        "checkpoint"
+    } else {
+        "task"
+    }
+}
+
+fn recommendation_reason(node: &WorkPlanNode) -> String {
+    if node.descendants > 0 {
+        format!("debloque {} descendant(s)", node.descendants)
+    } else if node
+        .requirement_state
+        .as_deref()
+        .is_some_and(|state| matches!(state, "missing" | "partial"))
+    {
+        format!(
+            "fermer le gap de preuve ({})",
+            node.requirement_state.as_deref().unwrap_or("unknown")
+        )
+    } else if matches!(node.entity_type, WorkPlanEntityType::Milestone) {
+        "jalon a cadrer ou rattacher".to_string()
+    } else {
+        node.reasons
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "action immediate".to_string())
+    }
+}
+
+fn requirement_state_from(status: &str, criteria: &str, evidence_count: usize) -> &'static str {
+    let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
+    if evidence_count > 0 && has_criteria && matches!(status, "current" | "accepted") {
+        "done"
+    } else if evidence_count > 0 || has_criteria {
+        "partial"
+    } else {
+        "missing"
+    }
+}
+
+fn build_adjacency_map(edges: &[(String, String)]) -> HashMap<String, BTreeSet<String>> {
+    let mut adjacency: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for (source, target) in edges {
+        adjacency
+            .entry(source.clone())
+            .or_default()
+            .insert(target.clone());
+        adjacency.entry(target.clone()).or_default();
+    }
+    adjacency
+}
+
+fn detect_cycle_sets<'a, I>(
+    node_ids: I,
+    adjacency: &HashMap<String, BTreeSet<String>>,
+) -> Vec<HashSet<String>>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    struct TarjanState {
+        index: usize,
+        indices: HashMap<String, usize>,
+        lowlinks: HashMap<String, usize>,
+        stack: Vec<String>,
+        on_stack: HashSet<String>,
+        components: Vec<HashSet<String>>,
+    }
+
+    fn strong_connect(
+        node: &str,
+        adjacency: &HashMap<String, BTreeSet<String>>,
+        state: &mut TarjanState,
+    ) {
+        let current_index = state.index;
+        state.indices.insert(node.to_string(), current_index);
+        state.lowlinks.insert(node.to_string(), current_index);
+        state.index += 1;
+        state.stack.push(node.to_string());
+        state.on_stack.insert(node.to_string());
+
+        if let Some(neighbors) = adjacency.get(node) {
+            for neighbor in neighbors {
+                if !state.indices.contains_key(neighbor) {
+                    strong_connect(neighbor, adjacency, state);
+                    let neighbor_low = *state.lowlinks.get(neighbor).unwrap_or(&current_index);
+                    if let Some(low) = state.lowlinks.get_mut(node) {
+                        *low = (*low).min(neighbor_low);
+                    }
+                } else if state.on_stack.contains(neighbor) {
+                    let neighbor_index = *state.indices.get(neighbor).unwrap_or(&current_index);
+                    if let Some(low) = state.lowlinks.get_mut(node) {
+                        *low = (*low).min(neighbor_index);
+                    }
+                }
+            }
+        }
+
+        if state.indices.get(node) == state.lowlinks.get(node) {
+            let mut component = HashSet::new();
+            while let Some(member) = state.stack.pop() {
+                state.on_stack.remove(&member);
+                component.insert(member.clone());
+                if member == node {
+                    break;
+                }
+            }
+
+            let is_cycle = if component.len() > 1 {
+                true
+            } else {
+                component.iter().next().is_some_and(|single| {
+                    adjacency
+                        .get(single)
+                        .is_some_and(|neighbors| neighbors.contains(single))
+                })
+            };
+            if is_cycle {
+                state.components.push(component);
+            }
+        }
+    }
+
+    let mut state = TarjanState {
+        index: 0,
+        indices: HashMap::new(),
+        lowlinks: HashMap::new(),
+        stack: Vec::new(),
+        on_stack: HashSet::new(),
+        components: Vec::new(),
+    };
+
+    let mut ordered_ids = node_ids.into_iter().cloned().collect::<Vec<_>>();
+    ordered_ids.sort();
+    for node in ordered_ids {
+        if !state.indices.contains_key(&node) {
+            strong_connect(&node, adjacency, &mut state);
+        }
+    }
+
+    state.components
+}
+
+fn collect_blocked_by_cycles(
+    adjacency: &HashMap<String, BTreeSet<String>>,
+    cycle_node_ids: &HashSet<String>,
+) -> HashSet<String> {
+    let mut blocked = HashSet::new();
+    let mut queue = cycle_node_ids.iter().cloned().collect::<VecDeque<_>>();
+    while let Some(node) = queue.pop_front() {
+        if let Some(children) = adjacency.get(&node) {
+            for child in children {
+                if cycle_node_ids.contains(child) || !blocked.insert(child.clone()) {
+                    continue;
+                }
+                queue.push_back(child.clone());
+            }
+        }
+    }
+    blocked
+}
+
+fn filter_adjacency(
+    adjacency: &HashMap<String, BTreeSet<String>>,
+    allowed_ids: &HashSet<String>,
+) -> HashMap<String, BTreeSet<String>> {
+    let mut filtered = HashMap::new();
+    for id in allowed_ids {
+        let neighbors = adjacency
+            .get(id)
+            .map(|items| {
+                items.iter()
+                    .filter(|child| allowed_ids.contains(*child))
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        filtered.insert(id.clone(), neighbors);
+    }
+    filtered
+}
+
+fn compute_descendant_counts(
+    schedulable_ids: &HashSet<String>,
+    adjacency: &HashMap<String, BTreeSet<String>>,
+) -> HashMap<String, usize> {
+    let mut descendants = HashMap::new();
+    let mut ordered_ids = schedulable_ids.iter().cloned().collect::<Vec<_>>();
+    ordered_ids.sort();
+    for node_id in ordered_ids {
+        let mut seen = HashSet::new();
+        let mut stack = adjacency
+            .get(&node_id)
+            .map(|children| children.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        while let Some(next) = stack.pop() {
+            if !seen.insert(next.clone()) {
+                continue;
+            }
+            if let Some(children) = adjacency.get(&next) {
+                stack.extend(children.iter().cloned());
+            }
+        }
+        descendants.insert(node_id, seen.len());
+    }
+    descendants
+}
+
+fn score_node(node: &WorkPlanNode, include_ist: bool) -> (i64, Vec<String>, Vec<String>) {
+    let mut score = (node.descendants as i64) * 40;
+    let mut reasons = vec![format!("debloque {} descendant(s)", node.descendants)];
+    let mut validation_gates = Vec::new();
+
+    match node.priority.as_str() {
+        "P0" => {
+            score += 20;
+            reasons.push("priorite P0".to_string());
+        }
+        "P1" => {
+            score += 15;
+            reasons.push("priorite P1".to_string());
+        }
+        "P2" => {
+            score += 8;
+            reasons.push("priorite P2".to_string());
+        }
+        _ => {}
+    }
+
+    if let Some(state) = node.requirement_state.as_deref() {
+        match state {
+            "missing" => {
+                score += 15;
+                reasons.push("requirement missing".to_string());
+                validation_gates.push("define acceptance criteria and evidence".to_string());
+            }
+            "partial" => {
+                score += 8;
+                reasons.push("requirement partial".to_string());
+                validation_gates.push("complete missing proof or acceptance criteria".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    if node.evidence_count == 0 {
+        score += 10;
+        reasons.push("aucune evidence rattachee".to_string());
+        validation_gates.push("attach evidence".to_string());
+    }
+
+    if include_ist && node.ist_degraded_links > 0 {
+        score += 8;
+        reasons.push("scope IST degrade".to_string());
+        validation_gates.push("reindex degraded scope".to_string());
+    }
+
+    if node.backlog_visible {
+        score += 5;
+        reasons.push("backlog visible sur le projet".to_string());
+        validation_gates.push("reduce project backlog before closure".to_string());
+    }
+
+    if matches!(node.entity_type, WorkPlanEntityType::Milestone) && node.descendants == 0 {
+        score -= 10;
+        reasons.push("milestone isole".to_string());
+    }
+
+    (score, reasons, validation_gates)
+}
+
+fn build_waves(
+    nodes: &HashMap<String, WorkPlanNode>,
+    edges: &[(String, String)],
+    schedulable_ids: &HashSet<String>,
+) -> Vec<WorkPlanWave> {
+    let mut indegree = schedulable_ids
+        .iter()
+        .map(|id| (id.clone(), 0usize))
+        .collect::<HashMap<_, _>>();
+    let mut adjacency = HashMap::<String, Vec<String>>::new();
+
+    for (source, target) in edges {
+        if !schedulable_ids.contains(source) || !schedulable_ids.contains(target) {
+            continue;
+        }
+        adjacency
+            .entry(source.clone())
+            .or_default()
+            .push(target.clone());
+        *indegree.entry(target.clone()).or_insert(0) += 1;
+        indegree.entry(source.clone()).or_insert(0);
+    }
+
+    let mut ready = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    ready.sort();
+
+    let mut waves = Vec::new();
+    let mut wave_index = 1usize;
+    while !ready.is_empty() {
+        let mut current_ids = std::mem::take(&mut ready);
+        current_ids.sort();
+        let mut items = current_ids
+            .iter()
+            .filter_map(|id| nodes.get(id).cloned())
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| right.descendants.cmp(&left.descendants))
+                .then_with(|| left.entity_type.sort_rank().cmp(&right.entity_type.sort_rank()))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        waves.push(WorkPlanWave { wave_index, items });
+        wave_index += 1;
+
+        let mut next_ready = BTreeSet::new();
+        for current_id in current_ids {
+            if let Some(children) = adjacency.get(&current_id) {
+                for child in children {
+                    if let Some(entry) = indegree.get_mut(child) {
+                        *entry = entry.saturating_sub(1);
+                        if *entry == 0 {
+                            next_ready.insert(child.clone());
+                        }
+                    }
+                }
+            }
+            indegree.remove(&current_id);
+        }
+        ready = next_ready.into_iter().collect();
+    }
+
+    waves
+}
+
+fn apply_wave_limit(waves: &[WorkPlanWave], limit: usize) -> (Vec<WorkPlanWave>, usize, bool) {
+    let mut remaining = limit;
+    let mut returned_items = 0usize;
+    let mut limited = Vec::new();
+    for wave in waves {
+        if remaining == 0 {
+            break;
+        }
+        if wave.items.len() <= remaining {
+            returned_items += wave.items.len();
+            remaining -= wave.items.len();
+            limited.push(wave.clone());
+            continue;
+        }
+        let items = wave.items[..remaining].to_vec();
+        returned_items += items.len();
+        limited.push(WorkPlanWave {
+            wave_index: wave.wave_index,
+            items,
+        });
+        remaining = 0;
+    }
+
+    let total_items = waves.iter().map(|wave| wave.items.len()).sum::<usize>();
+    (limited, returned_items, returned_items < total_items)
+}
+
+fn blocker_to_json(blocker: &WorkPlanBlocker) -> Value {
+    json!({
+        "id": blocker.id,
+        "entity_type": blocker.entity_type,
+        "reason": blocker.reason
+    })
+}
+
+fn cycle_to_json(cycle: &WorkPlanCycle) -> Value {
+    json!({
+        "node_ids": cycle.node_ids
+    })
+}
+
+fn wave_to_json(wave: &WorkPlanWave) -> Value {
+    json!({
+        "wave_index": wave.wave_index,
+        "items": wave.items.iter().map(|item| {
+            json!({
+                "id": item.id,
+                "entity_type": item.entity_type.label(),
+                "title": item.title,
+                "score": item.score,
+                "reasons": item.reasons,
+                "validation_gates": item.validation_gates,
+                "ist_signals": item.ist_signals
+            })
+        }).collect::<Vec<_>>()
+    })
+}
 
 impl McpServer {
     pub(crate) fn axon_soll_manager(&self, args: &Value) -> Option<Value> {
@@ -762,38 +1232,55 @@ impl McpServer {
             + validations_without_verifies.len()
             + decisions_without_links.len();
 
-        let mut report = format!(
+        let mut evidence = format!(
             "Validation SOLL: {} violation(s) de cohérence minimale détectée(s).\n",
             violation_count
         );
-        report.push_str("Mode: lecture seule, sans auto-réparation.\n");
-
-        if violation_count == 0 {
-            report.push_str("Etat: cohérence minimale vérifiée, 0 violation détectée.\n");
-            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
-        }
+        evidence.push_str("Mode: lecture seule, sans auto-réparation.\n");
 
         if !orphan_requirements.is_empty() {
-            report.push_str("\n- Requirements orphelins:\n");
+            evidence.push_str("\n- Requirements orphelins:\n");
             for id in orphan_requirements {
-                report.push_str(&format!("  - {}\n", id));
+                evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
         if !validations_without_verifies.is_empty() {
-            report.push_str("\n- Validations sans lien VERIFIES:\n");
+            evidence.push_str("\n- Validations sans lien VERIFIES:\n");
             for id in validations_without_verifies {
-                report.push_str(&format!("  - {}\n", id));
+                evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
         if !decisions_without_links.is_empty() {
-            report.push_str("\n- Decisions sans lien SOLVES/IMPACTS:\n");
+            evidence.push_str("\n- Decisions sans lien SOLVES/IMPACTS:\n");
             for id in decisions_without_links {
-                report.push_str(&format!("  - {}\n", id));
+                evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
+        let status = if violation_count == 0 {
+            "ok"
+        } else {
+            "warn_soll_invariants"
+        };
+        let confidence = if violation_count == 0 { "high" } else { "medium" };
+        let summary = if violation_count == 0 {
+            "minimal soll invariants verified"
+        } else {
+            "minimal soll invariants violations detected"
+        };
+        let report = format!(
+            "### 🧭 Validation SOLL\n\n{}",
+            format_standard_contract(
+                status,
+                summary,
+                "workspace:*",
+                &evidence,
+                &["run `soll_verify_requirements` for requirement-level coverage", "apply targeted SOLL links with `soll_manager` if needed"],
+                confidence,
+            )
+        );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
@@ -1531,6 +2018,163 @@ impl McpServer {
         }))
     }
 
+    pub(crate) fn axon_soll_work_plan(&self, args: &Value) -> Option<Value> {
+        let project_slug = args.get("project_slug")?.as_str()?;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50)
+            .max(1) as usize;
+        let top = args
+            .get("top")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5)
+            .max(1) as usize;
+        let include_ist = args
+            .get("include_ist")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let format = args
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("brief");
+
+        let mut nodes = self.load_work_plan_nodes(project_slug);
+        let edges = self.load_work_plan_edges(project_slug);
+        let adjacency = build_adjacency_map(&edges);
+        let cycle_sets = detect_cycle_sets(nodes.keys(), &adjacency);
+        let cycle_node_ids = cycle_sets
+            .iter()
+            .flat_map(|set| set.iter().cloned())
+            .collect::<HashSet<_>>();
+        let blocked_by_cycles = collect_blocked_by_cycles(&adjacency, &cycle_node_ids);
+        let backlog_visible = self
+            .project_scope_summary(Some(project_slug))
+            .map(|summary| summary.backlog_files > 0)
+            .unwrap_or(false);
+
+        for node in nodes.values_mut() {
+            node.backlog_visible = backlog_visible;
+            if include_ist {
+                node.ist_degraded_links = self.count_degraded_links_for_node(&node.id);
+                if node.ist_degraded_links > 0 {
+                    node.ist_signals.push(format!(
+                        "{} lien(s) vers un scope `indexed_degraded`",
+                        node.ist_degraded_links
+                    ));
+                }
+            }
+        }
+
+        let schedulable_ids = nodes
+            .keys()
+            .filter(|id| !cycle_node_ids.contains(*id) && !blocked_by_cycles.contains(*id))
+            .cloned()
+            .collect::<HashSet<_>>();
+        let schedulable_adj = filter_adjacency(&adjacency, &schedulable_ids);
+        let descendants = compute_descendant_counts(&schedulable_ids, &schedulable_adj);
+
+        for node in nodes.values_mut() {
+            node.descendants = *descendants.get(&node.id).unwrap_or(&0);
+            let (score, reasons, gates) = score_node(node, include_ist);
+            node.score = score;
+            node.reasons = reasons;
+            node.validation_gates = gates;
+        }
+
+        let waves = build_waves(&nodes, &edges, &schedulable_ids);
+        let cycles = cycle_sets
+            .into_iter()
+            .map(|set| {
+                let mut node_ids = set.into_iter().collect::<Vec<_>>();
+                node_ids.sort();
+                WorkPlanCycle { node_ids }
+            })
+            .collect::<Vec<_>>();
+
+        let mut blockers = cycle_node_ids
+            .iter()
+            .filter_map(|id| nodes.get(id))
+            .map(|node| WorkPlanBlocker {
+                id: node.id.clone(),
+                entity_type: node.entity_type.label().to_string(),
+                reason: "in_cycle".to_string(),
+            })
+            .collect::<Vec<_>>();
+        blockers.extend(
+            blocked_by_cycles
+                .iter()
+                .filter_map(|id| nodes.get(id))
+                .map(|node| WorkPlanBlocker {
+                    id: node.id.clone(),
+                    entity_type: node.entity_type.label().to_string(),
+                    reason: "depends_on_cycle".to_string(),
+                }),
+        );
+        blockers.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let (limited_waves, returned_items, truncated) = apply_wave_limit(&waves, limit);
+        let top_recommendations = build_top_recommendations(&limited_waves, top);
+        let global_validation = self.axon_soll_verify_requirements(&json!({ "project_slug": project_slug }));
+        let soll_validation = self.axon_validate_soll();
+        let validation_gates = json!({
+            "requirement_verification": global_validation
+                .as_ref()
+                .and_then(|resp| resp.get("data"))
+                .cloned()
+                .unwrap_or(json!({})),
+            "soll_validation": soll_validation
+                .as_ref()
+                .and_then(|resp| resp.get("content"))
+                .cloned()
+                .unwrap_or(json!([])),
+            "backlog_visible": backlog_visible
+        });
+        let data = json!({
+            "summary": {
+                "project_slug": project_slug,
+                "total_nodes": nodes.len(),
+                "schedulable_nodes": schedulable_ids.len(),
+                "blocked_nodes": blockers.len(),
+                "cycle_count": cycles.len(),
+                "wave_count": waves.len(),
+                "returned_items": returned_items,
+                "top_count": top_recommendations.len()
+            },
+            "blockers": blockers.iter().map(blocker_to_json).collect::<Vec<_>>(),
+            "cycles": cycles.iter().map(cycle_to_json).collect::<Vec<_>>(),
+            "ordered_waves": limited_waves.iter().map(wave_to_json).collect::<Vec<_>>(),
+            "top_recommendations": top_recommendations,
+            "validation_gates": validation_gates,
+            "metadata": {
+                "algorithm_version": "v1",
+                "include_ist": include_ist,
+                "generated_at": now_unix_ms(),
+                "truncated": truncated,
+                "limit": limit,
+                "top": top
+            }
+        });
+
+        let text = if format == "json" {
+            format!("SOLL work plan generated for {}.", project_slug)
+        } else {
+            self.render_work_plan_text(
+                project_slug,
+                &limited_waves,
+                &blockers,
+                &cycles,
+                &top_recommendations,
+                truncated,
+            )
+        };
+
+        Some(json!({
+            "content": [{"type":"text","text": text}],
+            "data": data
+        }))
+    }
+
     pub(crate) fn axon_soll_attach_evidence(&self, args: &Value) -> Option<Value> {
         let entity_type = args.get("entity_type")?.as_str()?;
         let entity_id = args.get("entity_id")?.as_str()?;
@@ -1570,6 +2214,277 @@ impl McpServer {
             "content": [{"type":"text","text": format!("Attached {} evidence item(s) to {}:{}", attached, entity_type, entity_id)}],
             "data": {"attached": attached}
         }))
+    }
+
+    fn load_work_plan_nodes(&self, project_slug: &str) -> HashMap<String, WorkPlanNode> {
+        let mut nodes = HashMap::new();
+        let req_query = format!(
+            "SELECT r.id, r.title, COALESCE(r.status,''), COALESCE(r.priority,''), COUNT(t.id), COALESCE(r.acceptance_criteria,'')
+             FROM soll.Requirement r
+             LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
+             WHERE r.id LIKE 'REQ-{}-%'
+             GROUP BY 1,2,3,4,6
+             ORDER BY r.id",
+            escape_sql(project_slug)
+        );
+        if let Ok(raw) = self.graph_store.query_json(&req_query) {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+            for row in rows {
+                if row.len() < 6 {
+                    continue;
+                }
+                let evidence_count = row[4].parse::<usize>().unwrap_or(0);
+                let criteria = row[5].clone();
+                let status = row[2].clone();
+                let requirement_state =
+                    requirement_state_from(status.as_str(), &criteria, evidence_count).to_string();
+                let id = row[0].clone();
+                nodes.insert(
+                    id.clone(),
+                    WorkPlanNode {
+                        id,
+                        title: row[1].clone(),
+                        entity_type: WorkPlanEntityType::Requirement,
+                        status,
+                        priority: row[3].clone(),
+                        requirement_state: Some(requirement_state),
+                        evidence_count,
+                        descendants: 0,
+                        ist_degraded_links: 0,
+                        backlog_visible: false,
+                        score: 0,
+                        reasons: Vec::new(),
+                        validation_gates: Vec::new(),
+                        ist_signals: Vec::new(),
+                    },
+                );
+            }
+        }
+
+        let dec_query = format!(
+            "SELECT id, title, COALESCE(status,'') FROM soll.Decision WHERE id LIKE 'DEC-{}-%' ORDER BY id",
+            escape_sql(project_slug)
+        );
+        if let Ok(raw) = self.graph_store.query_json(&dec_query) {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+            for row in rows {
+                if row.len() < 3 {
+                    continue;
+                }
+                let id = row[0].clone();
+                nodes.insert(
+                    id.clone(),
+                    WorkPlanNode {
+                        id,
+                        title: row[1].clone(),
+                        entity_type: WorkPlanEntityType::Decision,
+                        status: row[2].clone(),
+                        priority: String::new(),
+                        requirement_state: None,
+                        evidence_count: 0,
+                        descendants: 0,
+                        ist_degraded_links: 0,
+                        backlog_visible: false,
+                        score: 0,
+                        reasons: Vec::new(),
+                        validation_gates: Vec::new(),
+                        ist_signals: Vec::new(),
+                    },
+                );
+            }
+        }
+
+        let mil_query = format!(
+            "SELECT id, title, COALESCE(status,'') FROM soll.Milestone WHERE id LIKE 'MIL-{}-%' ORDER BY id",
+            escape_sql(project_slug)
+        );
+        if let Ok(raw) = self.graph_store.query_json(&mil_query) {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+            for row in rows {
+                if row.len() < 3 {
+                    continue;
+                }
+                let id = row[0].clone();
+                nodes.insert(
+                    id.clone(),
+                    WorkPlanNode {
+                        id,
+                        title: row[1].clone(),
+                        entity_type: WorkPlanEntityType::Milestone,
+                        status: row[2].clone(),
+                        priority: String::new(),
+                        requirement_state: None,
+                        evidence_count: 0,
+                        descendants: 0,
+                        ist_degraded_links: 0,
+                        backlog_visible: false,
+                        score: 0,
+                        reasons: Vec::new(),
+                        validation_gates: Vec::new(),
+                        ist_signals: Vec::new(),
+                    },
+                );
+            }
+        }
+
+        nodes
+    }
+
+    fn load_work_plan_edges(&self, project_slug: &str) -> Vec<(String, String)> {
+        let mut edges = Vec::new();
+        let solves_query = format!(
+            "SELECT source_id, target_id FROM soll.SOLVES
+             WHERE source_id LIKE 'DEC-{}-%' AND target_id LIKE 'REQ-{}-%'",
+            escape_sql(project_slug),
+            escape_sql(project_slug)
+        );
+        if let Ok(raw) = self.graph_store.query_json(&solves_query) {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+            for row in rows {
+                if row.len() >= 2 {
+                    edges.push((row[0].clone(), row[1].clone()));
+                }
+            }
+        }
+
+        let belongs_query = format!(
+            "SELECT source_id, target_id FROM soll.BELONGS_TO
+             WHERE source_id LIKE 'REQ-{}-%'
+               AND (target_id LIKE 'REQ-{}-%' OR target_id LIKE 'MIL-{}-%')",
+            escape_sql(project_slug),
+            escape_sql(project_slug),
+            escape_sql(project_slug)
+        );
+        if let Ok(raw) = self.graph_store.query_json(&belongs_query) {
+            let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+            for row in rows {
+                if row.len() >= 2 {
+                    edges.push((row[0].clone(), row[1].clone()));
+                }
+            }
+        }
+
+        edges.sort();
+        edges.dedup();
+        edges
+    }
+
+    fn count_degraded_links_for_node(&self, node_id: &str) -> usize {
+        let degraded_file_query = format!(
+            "SELECT count(*) FROM (
+                SELECT DISTINCT f.path
+                FROM SUBSTANTIATES rel
+                JOIN File f ON (
+                    (rel.source_id = '{id}' AND rel.target_id = f.path)
+                    OR (rel.target_id = '{id}' AND rel.source_id = f.path)
+                )
+                WHERE f.status = 'indexed_degraded'
+                UNION
+                SELECT DISTINCT f.path
+                FROM IMPACTS rel
+                JOIN File f ON (
+                    (rel.source_id = '{id}' AND rel.target_id = f.path)
+                    OR (rel.target_id = '{id}' AND rel.source_id = f.path)
+                )
+                WHERE f.status = 'indexed_degraded'
+                UNION
+                SELECT DISTINCT f.path
+                FROM SUBSTANTIATES rel
+                JOIN CONTAINS c ON (
+                    (rel.source_id = '{id}' AND rel.target_id = c.target_id)
+                    OR (rel.target_id = '{id}' AND rel.source_id = c.target_id)
+                )
+                JOIN File f ON f.path = c.source_id
+                WHERE f.status = 'indexed_degraded'
+                UNION
+                SELECT DISTINCT f.path
+                FROM IMPACTS rel
+                JOIN CONTAINS c ON (
+                    (rel.source_id = '{id}' AND rel.target_id = c.target_id)
+                    OR (rel.target_id = '{id}' AND rel.source_id = c.target_id)
+                )
+                JOIN File f ON f.path = c.source_id
+                WHERE f.status = 'indexed_degraded'
+            ) t",
+            id = escape_sql(node_id)
+        );
+        self.graph_store
+            .query_count(&degraded_file_query)
+            .unwrap_or(0)
+            .max(0) as usize
+    }
+
+    fn render_work_plan_text(
+        &self,
+        project_slug: &str,
+        waves: &[WorkPlanWave],
+        blockers: &[WorkPlanBlocker],
+        cycles: &[WorkPlanCycle],
+        top_recommendations: &[Value],
+        truncated: bool,
+    ) -> String {
+        let mut evidence = String::new();
+        if !top_recommendations.is_empty() {
+            evidence.push_str("Immediate actions:\n");
+            for rec in top_recommendations {
+                let id = rec.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let kind = rec
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("task");
+                let reason = rec
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("action immediate");
+                evidence.push_str(&format!("- {} [{}] : {}\n", id, kind, reason));
+            }
+            evidence.push('\n');
+        }
+        if !blockers.is_empty() {
+            evidence.push_str("Blockers:\n");
+            for blocker in blockers {
+                evidence.push_str(&format!(
+                    "- {} ({}) : {}\n",
+                    blocker.id, blocker.entity_type, blocker.reason
+                ));
+            }
+            evidence.push('\n');
+        }
+        if !cycles.is_empty() {
+            evidence.push_str("Cycles:\n");
+            for cycle in cycles {
+                evidence.push_str(&format!("- {}\n", cycle.node_ids.join(" -> ")));
+            }
+            evidence.push('\n');
+        }
+        for wave in waves {
+            evidence.push_str(&format!("Wave {}:\n", wave.wave_index));
+            for item in &wave.items {
+                evidence.push_str(&format!(
+                    "- {} [{}] score={} :: {}\n",
+                    item.id,
+                    item.entity_type.label(),
+                    item.score,
+                    item.reasons.join(", ")
+                ));
+            }
+            evidence.push('\n');
+        }
+        if truncated {
+            evidence.push_str("[truncated=true]\n");
+        }
+        format!(
+            "### 🗺️ SOLL Work Plan: {}\n\n{}",
+            project_slug,
+            format_standard_contract(
+                "ok",
+                "work plan computed from SOLL",
+                &format!("project:{}", project_slug),
+                &evidence,
+                &["review blockers before execution", "use `format=json` for machine consumption"],
+                "medium",
+            )
+        )
     }
 
     pub(crate) fn axon_soll_verify_requirements(&self, args: &Value) -> Option<Value> {
@@ -1827,6 +2742,28 @@ impl McpServer {
             _ => None,
         }
     }
+}
+
+fn build_top_recommendations(waves: &[WorkPlanWave], top: usize) -> Vec<Value> {
+    let mut recommendations = Vec::new();
+    for wave in waves {
+        for item in &wave.items {
+            recommendations.push(json!({
+                "id": item.id,
+                "entity_type": item.entity_type.label(),
+                "title": item.title,
+                "score": item.score,
+                "wave_index": wave.wave_index,
+                "kind": recommendation_kind(item),
+                "reason": recommendation_reason(item),
+                "validation_gates": item.validation_gates
+            }));
+            if recommendations.len() >= top {
+                return recommendations;
+            }
+        }
+    }
+    recommendations
 }
 
 fn summarize_ops(ops: &[Value]) -> (usize, usize) {

@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::format::format_table_from_json;
+use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
 use crate::ingress_buffer::ingress_metrics_snapshot;
 use crate::runtime_observability::{
@@ -132,6 +132,11 @@ impl McpServer {
     }
 
     pub(crate) fn axon_debug(&self) -> Option<Value> {
+        self.axon_debug_with_args(&json!({}))
+    }
+
+    pub(crate) fn axon_debug_with_args(&self, args: &Value) -> Option<Value> {
+        let mode = args.get("mode").and_then(|v| v.as_str());
         let canonical_count = |query: &str| -> i64 {
             self.graph_store
                 .execute_raw_sql_gateway(query)
@@ -250,7 +255,7 @@ impl McpServer {
             format!("**Stages canoniques :**\n{}\n\n", lines)
         };
 
-        let mut report = format!(
+        let mut evidence = format!(
             "## 🤖 Axon Core V2 (Maestria) - Diagnostic Interne\n\n\
             **Architecture du Moteur :**\n\
             *   **Mode :** Embarqué (C-FFI) sans réseau TCP.\n\
@@ -348,17 +353,29 @@ impl McpServer {
             ingress.last_promoted_count,
         );
         if reader_snapshot_age_ms == u64::MAX {
-            report.push_str("\n**Reader Snapshot:** indisponible (mode mémoire ou non initialisé)\n");
+            evidence
+                .push_str("\n**Reader Snapshot:** indisponible (mode mémoire ou non initialisé)\n");
         } else {
-            report.push_str(&format!(
+            evidence.push_str(&format!(
                 "\n**Reader Snapshot:** age={} ms, refresh_failures_total={}\n",
                 reader_snapshot_age_ms, reader_refresh_failures_total
             ));
         }
-        report.push_str(&format!(
+        evidence.push_str(&format!(
             "**Truth Drift (File count):** canonical={} vs reader={} (delta={})\n",
             file_count, reader_file_count, truth_drift_files
         ));
+        let report = format!(
+            "## 🤖 Axon Debug\n\n{}",
+            format_standard_contract(
+                "ok",
+                "runtime diagnostics collected",
+                "workspace:*",
+                &evidence_by_mode(&evidence, mode),
+                &["run `truth_check` to inspect canonical vs reader drift", "run `health` for project-level view"],
+                "high",
+            )
+        );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
 
@@ -494,8 +511,63 @@ impl McpServer {
 
     pub(crate) fn axon_cypher(&self, args: &Value) -> Option<Value> {
         let cypher = args.get("cypher")?.as_str()?;
-        match self.graph_store.query_json(cypher) {
-            Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
+        let q = cypher.trim();
+        let ql = q.to_ascii_lowercase();
+
+        // Minimal robust support for common multi-hop CALLS checks.
+        if ql.contains("match")
+            && ql.contains("[:calls")
+            && ql.contains("return count(*)")
+        {
+            if ql.contains("[:calls*1..3]") {
+                let sql = "WITH RECURSIVE hops(source_id, target_id, depth) AS (
+                             SELECT source_id, target_id, 1 FROM CALLS
+                             UNION ALL
+                             SELECT h.source_id, c.target_id, h.depth + 1
+                             FROM hops h
+                             JOIN CALLS c ON c.source_id = h.target_id
+                             WHERE h.depth < 3
+                           )
+                           SELECT count(*) FROM hops WHERE depth BETWEEN 1 AND 3";
+                return match self.graph_store.query_json(sql) {
+                    Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
+                    Err(e) => Some(json!({
+                        "content": [{ "type": "text", "text": format!("Cypher Translation Error: {}", e) }],
+                        "isError": true
+                    })),
+                };
+            }
+
+            if ql.matches("[:calls]").count() >= 2 {
+                let sql = "SELECT count(*) \
+                           FROM CALLS c1 \
+                           JOIN CALLS c2 ON c2.source_id = c1.target_id";
+                return match self.graph_store.query_json(sql) {
+                    Ok(result) => Some(json!({ "content": [{ "type": "text", "text": result }] })),
+                    Err(e) => Some(json!({
+                        "content": [{ "type": "text", "text": format!("Cypher Translation Error: {}", e) }],
+                        "isError": true
+                    })),
+                };
+            }
+        }
+
+        match self.graph_store.query_json(q) {
+            Ok(result) => {
+                if result.trim() == "[]" && ql.contains("match") {
+                    let calls_count = self
+                        .graph_store
+                        .query_count("SELECT count(*) FROM CALLS")
+                        .unwrap_or(0);
+                    let note = format!(
+                        "[]\n\nStatus: warn_empty_result\nHint: requête de style Cypher détectée. Le backend accepte d'abord SQL; pour multi-hop CALLS, utiliser `MATCH ... [:CALLS*1..3] ... RETURN count(*)` ou les exemples `query_examples`.\nCALLS_count={}",
+                        calls_count
+                    );
+                    Some(json!({ "content": [{ "type": "text", "text": note }] }))
+                } else {
+                    Some(json!({ "content": [{ "type": "text", "text": result }] }))
+                }
+            }
             Err(e) => Some(
                 json!({ "content": [{ "type": "text", "text": format!("Cypher Error: {}", e) }], "isError": true }),
             ),

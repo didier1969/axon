@@ -22,127 +22,102 @@ import "phoenix_html"
 // Establish Phoenix Socket and LiveView configuration.
 import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
-import {hooks as colocatedHooks} from "phoenix-colocated/axon_dashboard"
 import * as echarts from "echarts"
+import {hooks as colocatedHooks} from "phoenix-colocated/axon_dashboard"
 import topbar from "../vendor/topbar"
 import LiveViewWitness from "../../../liveview_witness/priv/static/liveview_witness.js"
 
 const WorkspaceSunburst = {
   mounted() {
     this.chart = echarts.init(this.el)
-    this._onResize = () => this.chart && this.chart.resize()
-    window.addEventListener("resize", this._onResize)
-    this.renderSunburst()
+    this.handleEvent("workspace_sunburst", (payload) => {
+      this.renderChart(payload)
+    })
+    this.renderChart()
   },
   updated() {
-    this.renderSunburst()
+    this.renderChart()
   },
   destroyed() {
-    window.removeEventListener("resize", this._onResize)
-    if (this.chart) {
-      this.chart.dispose()
-      this.chart = null
-    }
+    if (this.chart) this.chart.dispose()
   },
-  renderSunburst() {
-    if (!this.chart) return
+  renderChart(payload = null) {
+    const known = Number((payload && payload.known) ?? this.el.dataset.known ?? 0)
+    const completed = Number((payload && payload.completed) ?? this.el.dataset.completed ?? 0)
+    const graphReady = Number((payload && payload.graph_ready) ?? this.el.dataset.graphReady ?? 0)
+    const vectorFile = Number((payload && payload.vector_ready_file) ?? this.el.dataset.vectorFile ?? 0)
+    const vectorGraph = Number((payload && payload.vector_ready_graph) ?? this.el.dataset.vectorGraph ?? 0)
 
-    const read = key => {
-      const value = Number(this.el.dataset[key] || 0)
-      return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0
-    }
+    const total = Math.max(known, 1)
+    const clamp = (value, max) => Math.max(0, Math.min(value, max))
 
-    const known = read("known")
-    const indexed = read("indexed")
-    const degraded = read("indexedDegraded")
-    const pending = read("pending")
-    const indexing = read("indexing")
-    const oversized = read("oversized")
-    const skipped = read("skipped")
-    const deleted = read("deleted")
-    const graphReady = read("graphReady")
-    const vectorReadyFile = read("vectorReadyFile")
+    const cCompleted = clamp(completed, total)
+    const cGraph = clamp(graphReady, cCompleted)
+    const cVectorFile = clamp(vectorFile, cGraph)
+    const cVectorGraph = clamp(vectorGraph, cVectorFile)
 
-    const completed = indexed + degraded + skipped + deleted
-    const vectorInIndexed = Math.min(indexed, vectorReadyFile)
-    const graphInIndexed = Math.min(indexed, graphReady)
-    const graphOnlyInIndexed = Math.max(0, graphInIndexed - vectorInIndexed)
-    const notReadyInIndexed = Math.max(0, indexed - vectorInIndexed - graphOnlyInIndexed)
-
-    const data = [
-      {
-        name: "Completed",
-        value: completed,
-        children: [
-          {
-            name: "Indexed",
-            value: indexed,
-            children: [
-              {name: "Vector Ready", value: vectorInIndexed},
-              {name: "Graph Only", value: graphOnlyInIndexed},
-              {name: "Not Ready", value: notReadyInIndexed},
-            ],
-          },
-          {name: "Degraded", value: degraded},
-          {name: "Skipped", value: skipped},
-          {name: "Deleted", value: deleted},
-        ],
-      },
-      {name: "Pending", value: pending},
-      {name: "Indexing", value: indexing},
-      {name: "Oversized", value: oversized},
-    ]
-
-    this.chart.setOption(
-      {
-        animationDuration: 300,
-        backgroundColor: "transparent",
-        tooltip: {
-          trigger: "item",
-          formatter: params => `${params.name}: ${params.value ?? 0}`,
+    const data = [{
+      name: "Known Files",
+      value: total,
+      children: [
+        {
+          name: "Completed",
+          value: cCompleted,
+          children: [
+            {
+              name: "Graph Ready",
+              value: cGraph,
+              children: [
+                {
+                  name: "Vector File Ready",
+                  value: cVectorFile,
+                  children: [
+                    {name: "Vector Graph Ready", value: cVectorGraph},
+                    {name: "Vector Graph Pending", value: cVectorFile - cVectorGraph}
+                  ]
+                },
+                {name: "Vector File Pending", value: cGraph - cVectorFile}
+              ]
+            },
+            {name: "Graph Pending", value: cCompleted - cGraph}
+          ]
         },
-        series: [
-          {
-            type: "sunburst",
-            radius: ["18%", "92%"],
-            sort: null,
-            nodeClick: false,
-            data: [{name: "Known Files", value: known, children: data}],
-            levels: [
-              {},
-              {r0: "18%", r: "45%", itemStyle: {borderWidth: 2, borderColor: "#0f172a"}},
-              {r0: "45%", r: "70%", itemStyle: {borderWidth: 2, borderColor: "#0f172a"}},
-              {r0: "70%", r: "92%", itemStyle: {borderWidth: 2, borderColor: "#0f172a"}},
-            ],
-            label: {
-              color: "#e5e7eb",
-              rotate: "radial",
-              fontSize: 11,
-            },
-            itemStyle: {
-              borderRadius: 6,
-            },
-            color: [
-              "#22c55e",
-              "#3b82f6",
-              "#f59e0b",
-              "#ef4444",
-              "#a78bfa",
-              "#06b6d4",
-              "#84cc16",
-              "#f97316",
-            ],
-          },
-        ],
-      },
-      true
-    )
-  },
+        {name: "Not Completed", value: total - cCompleted}
+      ]
+    }]
+
+    this.chart.setOption({
+      animation: true,
+      animationDuration: 350,
+      animationDurationUpdate: 220,
+      backgroundColor: "transparent",
+      tooltip: {trigger: "item"},
+      color: ["#5470C6", "#91CC75", "#FAC858", "#EE6666", "#73C0DE", "#3BA272", "#FC8452", "#9A60B4", "#EA7CCC"],
+      series: [
+        {
+          type: "sunburst",
+          data,
+          radius: ["10%", "92%"],
+          sort: null,
+          emphasis: {focus: "ancestor"},
+          itemStyle: {borderWidth: 2, borderColor: "#0b1220"},
+          label: {rotate: "radial", color: "#f8fafc", fontSize: 11, overflow: "truncate"},
+          levels: [
+            {},
+            {r0: "10%", r: "26%", itemStyle: {borderWidth: 2}, label: {fontSize: 12}},
+            {r0: "26%", r: "44%", itemStyle: {borderWidth: 2}},
+            {r0: "44%", r: "66%", itemStyle: {borderWidth: 2}},
+            {r0: "66%", r: "92%", itemStyle: {borderWidth: 2}, label: {fontSize: 10}}
+          ]
+        }
+      ]
+    }, true)
+  }
 }
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
-  longPollFallbackMs: 2500,
+  longPollFallbackMs: false,
   params: {_csrf_token: csrfToken},
   hooks: {...colocatedHooks, LiveViewWitness, WorkspaceSunburst},
 })
