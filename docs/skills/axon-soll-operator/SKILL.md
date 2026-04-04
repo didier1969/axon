@@ -18,9 +18,10 @@ Core rule: default to read/verify first, mutate second, certify last.
 Identity rule:
 - Every SOLL entity is server-identified.
 - Canonical IDs follow `TYPE-CODE-NNN`.
-- `CODE` comes from server-side `project_slug -> project_code` registry.
+- `CODE` comes from the canonical project declaration in `.axon/meta.json`.
 - The client/LLM never chooses the final ID or numeric suffix.
 - `create` returns the canonical ID; every later `update`/`link` must reuse that ID.
+- `project_slug` must match the canonical slug declared in `.axon/meta.json`; aliases are rejected.
 
 ## SOLL Semantic Contract (Critical)
 
@@ -91,7 +92,7 @@ MCP tools:
 - `soll_query_context`
 - `soll_work_plan`
 - `soll_manager`
-- `soll_apply_plan_v2`
+- `soll_apply_plan`
 - `soll_commit_revision`
 - `soll_rollback_revision`
 - `soll_attach_evidence`
@@ -102,9 +103,17 @@ MCP tools:
 Identity-sensitive arguments:
 - `soll_manager create`: send `project_slug` plus business fields; the server returns `TYPE-CODE-NNN`.
 - `soll_manager update`: `id` is mandatory and must already be canonical.
-- `soll_manager link`: `source_id` and `target_id` must already be canonical.
+- `soll_manager link`: `source_id` and `target_id` must already exist; the server validates the pair of types and accepts, rejects, or defaults the relation.
+- `soll_apply_plan`: send canonical `project_slug`; the server prepares a revision preview and returns `preview_id`.
 - `validate_soll(project_slug=...)`: validates only one project when requested.
 - `export_soll(project_slug=...)`: exports only one project when requested.
+
+Relation policy:
+- The client/LLM may propose `relation_type`, but Axon is the final authority.
+- If no `relation_type` is provided, Axon applies the canonical default when one exists.
+- If the proposed relation is not allowed for the source/target pair, Axon rejects it and returns the allowed relations.
+- Links are created only when both endpoints exist.
+- `validate_soll` also flags dangling or policy-invalid relations.
 
 CLI wrappers:
 - `./scripts/axon soll-import --input <file> --format md|json|ndjson|yaml [--dry-run] [--strict]`
@@ -134,7 +143,7 @@ Use when an operator or MCP client needs an ordered execution view from SOLL wit
 2. `soll_query_context` (optional, project scope sanity)
 3. `soll_work_plan`
 4. review `blockers`, `cycles`, `ordered_waves`, `validation_gates`
-5. only then choose a mutation path (`soll_manager` or `soll_apply_plan_v2`) if changes are needed
+5. only then choose a mutation path (`soll_manager` or `soll_apply_plan`) if changes are needed
 
 Contract notes:
 - V1 derives scheduling edges from `SOLL` only.
@@ -146,7 +155,7 @@ Contract notes:
 
 Use when changes span many entities.
 
-1. `soll_apply_plan_v2` with `dry_run=true`
+1. `soll_apply_plan` with `dry_run=true`
 2. review returned `preview_id` and operations
 3. `soll_commit_revision` with `preview_id`
 4. `soll_verify_requirements`
@@ -196,7 +205,7 @@ Server-owned identity contract:
 - treat SOLL IDs exactly like database primary keys
 
 Top-level keys supported:
-- `plan` (for `soll_apply_plan_v2`): `pillars`, `requirements`, `decisions`, `milestones`
+- `plan` (for `soll_apply_plan`): `pillars`, `requirements`, `decisions`, `milestones`
 - `visions`
 - `concepts`
 - `stakeholders`
@@ -255,8 +264,9 @@ Practical rule:
 
 - Never auto-delete orphan SOLL entities silently.
 - Use `dry-run` before high-volume changes.
-- Prefer explicit `relation_type` for links in batch mode.
-- Prefer `soll_apply_plan_v2` + revision commit over ad-hoc multi-step writes.
+- Prefer explicit `relation_type` for links in batch mode when the pair allows more than one canonical relation.
+- Do not treat `relation_type` as free text; it is a server-validated proposal.
+- Prefer `soll_apply_plan` + revision commit over ad-hoc multi-step writes.
 - Never fabricate IDs from raw slugs like `DEC-BookingSystem-001`; expected canonical form is `DEC-BKS-001`.
 
 ## Fast Triage
@@ -357,7 +367,7 @@ Use this sequence when a project starts with no reliable SOLL:
 ### Recommended bootstrap execution mode
 
 - First pass: `dry-run` for all batch operations.
-- Second pass: commit a reviewed revision (`soll_apply_plan_v2` + `soll_commit_revision`).
+- Second pass: commit a reviewed revision (`soll_apply_plan` + `soll_commit_revision`).
 - Keep rollback path ready (`soll_rollback_revision`) during the whole bootstrap window.
 
 Illustrative minimal bootstrap target (examples only):

@@ -15,7 +15,6 @@ impl McpServer {
             "restore_soll" => self.axon_restore_soll(arguments),
             "validate_soll" => self.axon_validate_soll(arguments),
             "soll_apply_plan" => self.axon_soll_apply_plan(arguments),
-            "soll_apply_plan_v2" => self.axon_soll_apply_plan_v2(arguments),
             "soll_commit_revision" => self.axon_soll_commit_revision(arguments),
             "soll_query_context" => self.axon_soll_query_context(arguments),
             "soll_work_plan" => self.axon_soll_work_plan(arguments),

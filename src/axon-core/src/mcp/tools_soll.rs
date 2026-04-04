@@ -7,6 +7,7 @@ use super::soll::{
     canonical_soll_export_dir, find_latest_soll_export, parse_soll_export, SollRestoreCounts,
 };
 use super::McpServer;
+use crate::project_meta::{discover_project_identities, resolve_canonical_project_identity};
 
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
     ("EPITOMIZES", "soll.EPITOMIZES"),
@@ -82,6 +83,141 @@ struct WorkPlanBlocker {
     id: String,
     entity_type: String,
     reason: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkEndpointKind {
+    Soll(&'static str),
+    Artifact,
+}
+
+impl LinkEndpointKind {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Soll(prefix) => prefix,
+            Self::Artifact => "ART",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RelationPolicy {
+    allowed: &'static [&'static str],
+    default: Option<&'static str>,
+    allow_multiple_types: bool,
+}
+
+fn relation_table_name(relation_type: &str) -> Option<&'static str> {
+    match relation_type {
+        "EPITOMIZES" => Some("soll.EPITOMIZES"),
+        "BELONGS_TO" => Some("soll.BELONGS_TO"),
+        "EXPLAINS" => Some("soll.EXPLAINS"),
+        "SOLVES" => Some("soll.SOLVES"),
+        "TARGETS" => Some("soll.TARGETS"),
+        "VERIFIES" => Some("soll.VERIFIES"),
+        "ORIGINATES" => Some("soll.ORIGINATES"),
+        "SUPERSEDES" => Some("soll.SUPERSEDES"),
+        "CONTRIBUTES_TO" => Some("soll.CONTRIBUTES_TO"),
+        "REFINES" => Some("soll.REFINES"),
+        "IMPACTS" => Some("IMPACTS"),
+        "SUBSTANTIATES" => Some("SUBSTANTIATES"),
+        _ => None,
+    }
+}
+
+fn soll_entity_table_name(prefix: &str) -> Option<&'static str> {
+    match prefix {
+        "VIS" => Some("soll.Vision"),
+        "PIL" => Some("soll.Pillar"),
+        "REQ" => Some("soll.Requirement"),
+        "CPT" => Some("soll.Concept"),
+        "DEC" => Some("soll.Decision"),
+        "MIL" => Some("soll.Milestone"),
+        "VAL" => Some("soll.Validation"),
+        "STK" => Some("soll.Stakeholder"),
+        _ => None,
+    }
+}
+
+fn relation_policy_for_pair(source_type: &str, target_type: &str) -> Option<RelationPolicy> {
+    match (source_type, target_type) {
+        ("PIL", "VIS") => Some(RelationPolicy {
+            allowed: &["EPITOMIZES"],
+            default: Some("EPITOMIZES"),
+            allow_multiple_types: false,
+        }),
+        ("REQ", "PIL") => Some(RelationPolicy {
+            allowed: &["BELONGS_TO"],
+            default: Some("BELONGS_TO"),
+            allow_multiple_types: false,
+        }),
+        ("CPT", "REQ") => Some(RelationPolicy {
+            allowed: &["EXPLAINS", "REFINES"],
+            default: Some("EXPLAINS"),
+            allow_multiple_types: true,
+        }),
+        ("DEC", "REQ") => Some(RelationPolicy {
+            allowed: &["SOLVES", "REFINES"],
+            default: Some("SOLVES"),
+            allow_multiple_types: true,
+        }),
+        ("MIL", "REQ") => Some(RelationPolicy {
+            allowed: &["TARGETS"],
+            default: Some("TARGETS"),
+            allow_multiple_types: false,
+        }),
+        ("VAL", "REQ") => Some(RelationPolicy {
+            allowed: &["VERIFIES"],
+            default: Some("VERIFIES"),
+            allow_multiple_types: false,
+        }),
+        ("STK", "REQ") => Some(RelationPolicy {
+            allowed: &["ORIGINATES", "CONTRIBUTES_TO"],
+            default: Some("ORIGINATES"),
+            allow_multiple_types: true,
+        }),
+        ("DEC", "DEC") => Some(RelationPolicy {
+            allowed: &["SUPERSEDES", "REFINES"],
+            default: None,
+            allow_multiple_types: false,
+        }),
+        ("REQ", "REQ") => Some(RelationPolicy {
+            allowed: &["REFINES", "BELONGS_TO"],
+            default: Some("REFINES"),
+            allow_multiple_types: false,
+        }),
+        ("MIL", "MIL") => Some(RelationPolicy {
+            allowed: &["SUPERSEDES"],
+            default: None,
+            allow_multiple_types: false,
+        }),
+        ("VAL", "VAL") => Some(RelationPolicy {
+            allowed: &["REFINES", "SUPERSEDES"],
+            default: None,
+            allow_multiple_types: false,
+        }),
+        ("DEC", "ART") => Some(RelationPolicy {
+            allowed: &["IMPACTS", "SUBSTANTIATES"],
+            default: Some("IMPACTS"),
+            allow_multiple_types: true,
+        }),
+        ("REQ", "ART") | ("VAL", "ART") => Some(RelationPolicy {
+            allowed: &["SUBSTANTIATES"],
+            default: Some("SUBSTANTIATES"),
+            allow_multiple_types: false,
+        }),
+        _ => None,
+    }
+}
+
+fn relation_scope_matches(source_id: &str, target_id: &str, project_code: Option<&str>) -> bool {
+    match project_code {
+        Some(code) => {
+            let marker = format!("-{}-", code);
+            source_id.contains(&marker) || target_id.contains(&marker)
+        }
+        None => true,
+    }
 }
 
 fn recommendation_kind(node: &WorkPlanNode) -> &'static str {
@@ -947,52 +1083,21 @@ impl McpServer {
                 let src = data.get("source_id")?.as_str()?;
                 let tgt = data.get("target_id")?.as_str()?;
                 let explicit_rel = data.get("relation_type").and_then(|v| v.as_str());
-
-                let rel_table = if let Some(r) = explicit_rel {
-                    match r.to_uppercase().as_str() {
-                        "EPITOMIZES" => "soll.EPITOMIZES",
-                        "BELONGS_TO" => "soll.BELONGS_TO",
-                        "EXPLAINS" => "soll.EXPLAINS",
-                        "SOLVES" => "soll.SOLVES",
-                        "TARGETS" => "soll.TARGETS",
-                        "VERIFIES" => "soll.VERIFIES",
-                        "ORIGINATES" => "soll.ORIGINATES",
-                        "SUPERSEDES" => "soll.SUPERSEDES",
-                        "CONTRIBUTES_TO" => "soll.CONTRIBUTES_TO",
-                        "REFINES" => "soll.REFINES",
-                        "IMPACTS" => "IMPACTS",
-                        "SUBSTANTIATES" => "SUBSTANTIATES",
-                        _ => {
-                            return Some(
-                                json!({ "content": [{ "type": "text", "text": format!("Erreur: Type de relation inconnu '{}'", r) }], "isError": true }),
-                            )
+                match self.select_relation_type_for_link(src, tgt, explicit_rel) {
+                    Ok((relation_type, policy)) => {
+                        let rel_table = relation_table_name(relation_type).unwrap_or(relation_type);
+                        match self.insert_validated_relation(relation_type, src, tgt, policy) {
+                            Ok(true) => Some(
+                                json!({ "content": [{ "type": "text", "text": format!("✅ Liaison établie : `{}` -> `{}` (via {})", src, tgt, rel_table) }] }),
+                            ),
+                            Ok(false) => Some(
+                                json!({ "content": [{ "type": "text", "text": format!("ℹ️ Liaison déjà présente : `{}` -> `{}` (via {})", src, tgt, rel_table) }] }),
+                            ),
+                            Err(e) => Some(
+                                json!({ "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }], "isError": true }),
+                            ),
                         }
                     }
-                } else {
-                    match (
-                        src.split('-').next().unwrap_or(""),
-                        tgt.split('-').next().unwrap_or(""),
-                    ) {
-                        ("PIL", "REQ") | ("REQ", "PIL") => "soll.BELONGS_TO",
-                        ("CPT", "REQ") | ("REQ", "CPT") => "soll.EXPLAINS",
-                        ("PIL", "AXO") | ("AXO", "PIL") => "soll.EPITOMIZES",
-                        ("DEC", "REQ") | ("REQ", "DEC") => "soll.SOLVES",
-                        ("MIL", "REQ") | ("REQ", "MIL") => "soll.TARGETS",
-                        ("VAL", "REQ") | ("REQ", "VAL") => "soll.VERIFIES",
-                        ("STK", "REQ") | ("REQ", "STK") => "soll.ORIGINATES",
-                        ("DEC", _) => "IMPACTS",
-                        _ => "SUBSTANTIATES",
-                    }
-                };
-
-                let q = format!(
-                    "INSERT INTO {} (source_id, target_id) VALUES (?, ?)",
-                    rel_table
-                );
-                match self.graph_store.execute_param(&q, &json!([src, tgt])) {
-                    Ok(_) => Some(
-                        json!({ "content": [{ "type": "text", "text": format!("✅ Liaison établie : `{}` -> `{}` (via {})", src, tgt, rel_table) }] }),
-                    ),
                     Err(e) => Some(
                         json!({ "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }], "isError": true }),
                     ),
@@ -1004,10 +1109,18 @@ impl McpServer {
 
     pub(crate) fn axon_export_soll(&self, args: &Value) -> Option<Value> {
         let project_slug = args.get("project_slug").and_then(|v| v.as_str());
-        let project_code = project_slug
+        let project_code = match project_slug
             .map(|slug| self.resolve_project_code(slug))
             .transpose()
-            .ok()?;
+        {
+            Ok(code) => code,
+            Err(e) => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                    "isError": true
+                }))
+            }
+        };
         let mut markdown = String::from("# SOLL Extraction\n\n");
 
         let now = std::time::SystemTime::now();
@@ -1226,10 +1339,18 @@ impl McpServer {
 
     pub(crate) fn axon_validate_soll(&self, args: &Value) -> Option<Value> {
         let project_slug = args.get("project_slug").and_then(|v| v.as_str());
-        let project_code = project_slug
+        let project_code = match project_slug
             .map(|slug| self.resolve_project_code(slug))
             .transpose()
-            .ok()?;
+        {
+            Ok(code) => code,
+            Err(e) => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                    "isError": true
+                }))
+            }
+        };
         let orphan_requirements = self
             .query_single_column(
                 &format!("SELECT id FROM soll.Requirement r
@@ -1265,9 +1386,13 @@ impl McpServer {
             )
             .ok()?;
 
+        let relation_policy_violations =
+            self.collect_relation_policy_violations(project_code.as_deref()).ok()?;
+
         let violation_count = orphan_requirements.len()
             + validations_without_verifies.len()
-            + decisions_without_links.len();
+            + decisions_without_links.len()
+            + relation_policy_violations.len();
 
         let mut evidence = format!(
             "Validation SOLL: {} violation(s) de cohérence minimale détectée(s).\n",
@@ -1293,6 +1418,13 @@ impl McpServer {
             evidence.push_str("\n- Decisions sans lien SOLVES/IMPACTS:\n");
             for id in decisions_without_links {
                 evidence.push_str(&format!("  - {}\n", id));
+            }
+        }
+
+        if !relation_policy_violations.is_empty() {
+            evidence.push_str("\n- Relations invalides:\n");
+            for violation in relation_policy_violations {
+                evidence.push_str(&format!("  - {}\n", violation));
             }
         }
 
@@ -1552,7 +1684,277 @@ impl McpServer {
         Ok(row)
     }
 
+    fn classify_existing_link_endpoint(&self, id: &str) -> anyhow::Result<LinkEndpointKind> {
+        let prefix = id.split('-').next().unwrap_or("");
+        if let Some(table_name) = soll_entity_table_name(prefix) {
+            let exists = self.graph_store.query_count(&format!(
+                "SELECT count(*) FROM {} WHERE id = '{}'",
+                table_name,
+                escape_sql(id)
+            ))?;
+            if exists == 0 {
+                return Err(anyhow!("ID `{}` introuvable", id));
+            }
+            let canonical_prefix = match prefix {
+                "VIS" => "VIS",
+                "PIL" => "PIL",
+                "REQ" => "REQ",
+                "CPT" => "CPT",
+                "DEC" => "DEC",
+                "MIL" => "MIL",
+                "VAL" => "VAL",
+                "STK" => "STK",
+                _ => return Err(anyhow!("Préfixe SOLL `{}` non géré", prefix)),
+            };
+            return Ok(LinkEndpointKind::Soll(canonical_prefix));
+        }
+
+        for table_name in ["File", "Symbol", "Chunk"] {
+            let column = if table_name == "File" { "path" } else { "id" };
+            let exists = self.graph_store.query_count(&format!(
+                "SELECT count(*) FROM {} WHERE {} = '{}'",
+                table_name,
+                column,
+                escape_sql(id)
+            ))?;
+            if exists > 0 {
+                return Ok(LinkEndpointKind::Artifact);
+            }
+        }
+
+        Err(anyhow!("ID `{}` introuvable", id))
+    }
+
+    fn select_relation_type_for_link(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        explicit_relation_type: Option<&str>,
+    ) -> anyhow::Result<(&'static str, RelationPolicy)> {
+        let source_kind = self.classify_existing_link_endpoint(source_id)?;
+        let target_kind = self.classify_existing_link_endpoint(target_id)?;
+        let policy = relation_policy_for_pair(source_kind.label(), target_kind.label())
+            .ok_or_else(|| {
+                anyhow!(
+                    "Aucune relation canonique autorisee pour {} -> {}",
+                    source_kind.label(),
+                    target_kind.label()
+                )
+            })?;
+
+        let selected = if let Some(relation_type) = explicit_relation_type {
+            let normalized = relation_type.to_uppercase();
+            if !policy.allowed.iter().any(|allowed| *allowed == normalized) {
+                return Err(anyhow!(
+                    "Relation `{}` interdite pour {} -> {}. Relations autorisées: {}. Défaut: {}",
+                    normalized,
+                    source_kind.label(),
+                    target_kind.label(),
+                    policy.allowed.join(", "),
+                    policy.default.unwrap_or("aucun")
+                ));
+            }
+            normalized
+        } else if let Some(default_relation) = policy.default {
+            default_relation.to_string()
+        } else {
+            return Err(anyhow!(
+                "Relation explicite requise pour {} -> {}. Relations autorisées: {}",
+                source_kind.label(),
+                target_kind.label(),
+                policy.allowed.join(", ")
+            ));
+        };
+
+        let selected_static = policy
+            .allowed
+            .iter()
+            .find(|allowed| **allowed == selected)
+            .copied()
+            .ok_or_else(|| anyhow!("Relation `{}` introuvable dans la politique canonique", selected))?;
+
+        Ok((selected_static, policy))
+    }
+
+    fn insert_validated_relation(
+        &self,
+        relation_type: &str,
+        source_id: &str,
+        target_id: &str,
+        policy: RelationPolicy,
+    ) -> anyhow::Result<bool> {
+        let table_name = relation_table_name(relation_type)
+            .ok_or_else(|| anyhow!("Type de relation inconnu `{}`", relation_type))?;
+
+        let same_relation_exists = self.graph_store.query_count(&format!(
+            "SELECT count(*) FROM {} WHERE source_id = '{}' AND target_id = '{}'",
+            table_name,
+            escape_sql(source_id),
+            escape_sql(target_id)
+        ))?;
+        if same_relation_exists > 0 {
+            return Ok(false);
+        }
+
+        if !policy.allow_multiple_types {
+            for other_relation in policy.allowed {
+                if *other_relation == relation_type {
+                    continue;
+                }
+                if let Some(other_table) = relation_table_name(other_relation) {
+                    let count = self.graph_store.query_count(&format!(
+                        "SELECT count(*) FROM {} WHERE source_id = '{}' AND target_id = '{}'",
+                        other_table,
+                        escape_sql(source_id),
+                        escape_sql(target_id)
+                    ))?;
+                    if count > 0 {
+                        return Err(anyhow!(
+                            "Conflit de cardinalité: `{}` existe déjà pour `{}` -> `{}`; `{}` est exclusif sur cette paire",
+                            other_relation,
+                            source_id,
+                            target_id,
+                            relation_type
+                        ));
+                    }
+                }
+            }
+        }
+
+        self.graph_store.execute_param(
+            &format!(
+                "INSERT INTO {} (source_id, target_id)
+                 SELECT ?, ?
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM {} WHERE source_id = ? AND target_id = ?
+                 )",
+                table_name, table_name
+            ),
+            &json!([source_id, target_id, source_id, target_id]),
+        )?;
+        Ok(true)
+    }
+
+    fn collect_relation_policy_violations(
+        &self,
+        project_code: Option<&str>,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut violations = Vec::new();
+        let mut exclusive_pairs: HashMap<(String, String), HashSet<String>> = HashMap::new();
+
+        for (relation_type, table_name) in SOLL_RELATION_EXPORTS {
+            let rows_raw = self.graph_store.query_json(&format!(
+                "SELECT source_id, target_id FROM {} ORDER BY source_id, target_id",
+                table_name
+            ))?;
+            let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+            for row in rows {
+                if row.len() < 2 {
+                    continue;
+                }
+                let source_id = &row[0];
+                let target_id = &row[1];
+                if !relation_scope_matches(source_id, target_id, project_code) {
+                    continue;
+                }
+
+                let source_kind = match self.classify_existing_link_endpoint(source_id) {
+                    Ok(kind) => kind,
+                    Err(e) => {
+                        violations.push(format!("{}: {} -> {} ({})", relation_type, source_id, target_id, e));
+                        continue;
+                    }
+                };
+                let target_kind = match self.classify_existing_link_endpoint(target_id) {
+                    Ok(kind) => kind,
+                    Err(e) => {
+                        violations.push(format!("{}: {} -> {} ({})", relation_type, source_id, target_id, e));
+                        continue;
+                    }
+                };
+
+                let Some(policy) =
+                    relation_policy_for_pair(source_kind.label(), target_kind.label())
+                else {
+                    violations.push(format!(
+                        "{}: {} -> {} (paire {} -> {} interdite)",
+                        relation_type,
+                        source_id,
+                        target_id,
+                        source_kind.label(),
+                        target_kind.label()
+                    ));
+                    continue;
+                };
+
+                if !policy.allowed.iter().any(|allowed| *allowed == relation_type) {
+                    violations.push(format!(
+                        "{}: {} -> {} (non autorisée pour {} -> {}; autorisées: {})",
+                        relation_type,
+                        source_id,
+                        target_id,
+                        source_kind.label(),
+                        target_kind.label(),
+                        policy.allowed.join(", ")
+                    ));
+                    continue;
+                }
+
+                if !policy.allow_multiple_types {
+                    exclusive_pairs
+                        .entry((source_id.clone(), target_id.clone()))
+                        .or_default()
+                        .insert(relation_type.to_string());
+                }
+            }
+        }
+
+        for ((source_id, target_id), relation_types) in exclusive_pairs {
+            if relation_types.len() > 1 {
+                let mut rels = relation_types.into_iter().collect::<Vec<_>>();
+                rels.sort();
+                violations.push(format!(
+                    "{} -> {} (relations exclusives en conflit: {})",
+                    source_id,
+                    target_id,
+                    rels.join(", ")
+                ));
+            }
+        }
+
+        violations.sort();
+        violations.dedup();
+        Ok(violations)
+    }
+
+    fn sync_project_code_registry_from_meta(&self) -> anyhow::Result<()> {
+        for identity in discover_project_identities() {
+            self.graph_store.execute_param(
+                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
+                 VALUES (?, ?)
+                 ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
+                &json!([identity.slug, identity.code]),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn resolve_canonical_project_identity_for_mutation(
+        &self,
+        project_slug: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let identity = resolve_canonical_project_identity(project_slug)?;
+        self.graph_store.execute_param(
+            "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
+             VALUES (?, ?)
+             ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
+            &json!([identity.slug, identity.code]),
+        )?;
+        Ok((identity.slug, identity.code))
+    }
+
     fn resolve_project_code(&self, project_slug: &str) -> anyhow::Result<String> {
+        let _ = self.sync_project_code_registry_from_meta();
         let escaped = escape_sql(project_slug);
         let by_slug = self.query_single_column(&format!(
             "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_slug = '{}'",
@@ -1562,18 +1964,22 @@ impl McpServer {
             return Ok(code);
         }
 
-        if is_three_letter_project_code(project_slug) {
-            let by_code = self.query_single_column(&format!(
-                "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
-                escaped
-            ))?;
-            if let Some(code) = by_code.into_iter().next() {
-                return Ok(code);
-            }
+        if let Ok(identity) = resolve_canonical_project_identity(project_slug) {
+            self.graph_store.execute_param(
+                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
+                 VALUES (?, ?)
+                 ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
+                &json!([identity.slug, identity.code]),
+            )?;
+            return Ok(identity.code);
+        }
+
+        if let Err(e) = resolve_canonical_project_identity(project_slug) {
+            return Err(e);
         }
 
         Err(anyhow!(
-            "Project code introuvable pour `{}` dans soll.ProjectCodeRegistry",
+            "Projet canonique `{}` introuvable dans `.axon/meta.json` ou soll.ProjectCodeRegistry",
             project_slug
         ))
     }
@@ -1583,7 +1989,8 @@ impl McpServer {
         project_slug: &str,
         entity: &str,
     ) -> anyhow::Result<(String, String, &'static str, u64)> {
-        let project_code = self.resolve_project_code(project_slug)?;
+        let (project_slug, project_code) =
+            self.resolve_canonical_project_identity_for_mutation(project_slug)?;
         let (prefix, reg_col, table, id_expr) = match entity {
             "vision" => ("VIS", "last_vis", "soll.Vision", "id"),
             "pillar" => ("PIL", "last_pil", "soll.Pillar", "id"),
@@ -1605,7 +2012,7 @@ impl McpServer {
         let current_query = format!(
             "SELECT COALESCE({}, 0) FROM soll.Registry WHERE project_slug = '{}'",
             reg_col,
-            escape_sql(project_slug)
+            escape_sql(&project_slug)
         );
         let current = self
             .query_single_column(&current_query)?
@@ -1634,10 +2041,10 @@ impl McpServer {
             "UPDATE soll.Registry SET {} = {} WHERE project_slug = '{}'",
             reg_col,
             next,
-            escape_sql(project_slug)
+            escape_sql(&project_slug)
         ))?;
 
-        Ok((project_slug.to_string(), project_code, prefix, next))
+        Ok((project_slug, project_code, prefix, next))
     }
 
     fn restore_soll_relation(
@@ -1646,33 +2053,10 @@ impl McpServer {
         source_id: &str,
         target_id: &str,
     ) -> anyhow::Result<()> {
-        let table_name = match relation_type {
-            "EPITOMIZES" => "soll.EPITOMIZES",
-            "BELONGS_TO" => "soll.BELONGS_TO",
-            "EXPLAINS" => "soll.EXPLAINS",
-            "SOLVES" => "soll.SOLVES",
-            "TARGETS" => "soll.TARGETS",
-            "VERIFIES" => "soll.VERIFIES",
-            "ORIGINATES" => "soll.ORIGINATES",
-            "SUPERSEDES" => "soll.SUPERSEDES",
-            "CONTRIBUTES_TO" => "soll.CONTRIBUTES_TO",
-            "REFINES" => "soll.REFINES",
-            "IMPACTS" => "IMPACTS",
-            "SUBSTANTIATES" => "SUBSTANTIATES",
-            _ => return Ok(()),
-        };
-
-        self.graph_store.execute_param(
-            &format!(
-                "INSERT INTO {} (source_id, target_id)
-                 SELECT ?, ?
-                 WHERE NOT EXISTS (
-                   SELECT 1 FROM {} WHERE source_id = ? AND target_id = ?
-                 )",
-                table_name, table_name
-            ),
-            &json!([source_id, target_id, source_id, target_id]),
-        )?;
+        let normalized = relation_type.to_uppercase();
+        let (selected, policy) =
+            self.select_relation_type_for_link(source_id, target_id, Some(&normalized))?;
+        self.insert_validated_relation(selected, source_id, target_id, policy)?;
         Ok(())
     }
 }
@@ -1683,191 +2067,67 @@ impl McpServer {
             .get("project_slug")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
+        let author = args
+            .get("author")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         let dry_run = args
             .get("dry_run")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .unwrap_or(true);
         let plan = args.get("plan")?;
 
-        let mut created: Vec<Value> = Vec::new();
-        let mut updated: Vec<Value> = Vec::new();
-        let mut skipped: Vec<Value> = Vec::new();
-        let mut errors: Vec<Value> = Vec::new();
-        let mut id_map = serde_json::Map::new();
-
-        self.apply_plan_entity_group(
-            project_slug,
-            "pillar",
-            plan.get("pillars"),
-            dry_run,
-            &mut created,
-            &mut updated,
-            &mut skipped,
-            &mut errors,
-            &mut id_map,
-        );
-        self.apply_plan_entity_group(
-            project_slug,
-            "requirement",
-            plan.get("requirements"),
-            dry_run,
-            &mut created,
-            &mut updated,
-            &mut skipped,
-            &mut errors,
-            &mut id_map,
-        );
-        self.apply_plan_entity_group(
-            project_slug,
-            "decision",
-            plan.get("decisions"),
-            dry_run,
-            &mut created,
-            &mut updated,
-            &mut skipped,
-            &mut errors,
-            &mut id_map,
-        );
-        self.apply_plan_entity_group(
-            project_slug,
-            "milestone",
-            plan.get("milestones"),
-            dry_run,
-            &mut created,
-            &mut updated,
-            &mut skipped,
-            &mut errors,
-            &mut id_map,
-        );
-
-        let summary = format!(
-            "SOLL apply_plan {}: created={}, updated={}, skipped={}, errors={}",
-            if dry_run { "DRY-RUN" } else { "APPLIED" },
-            created.len(),
-            updated.len(),
-            skipped.len(),
-            errors.len()
-        );
-
-        Some(json!({
-            "content": [{ "type": "text", "text": summary }],
-            "data": {
-                "project_slug": project_slug,
-                "dry_run": dry_run,
-                "created": created,
-                "updated": updated,
-                "skipped": skipped,
-                "errors": errors,
-                "id_map": id_map
-            },
-            "isError": !errors.is_empty()
-        }))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn apply_plan_entity_group(
-        &self,
-        project_slug: &str,
-        entity: &str,
-        items: Option<&Value>,
-        dry_run: bool,
-        created: &mut Vec<Value>,
-        updated: &mut Vec<Value>,
-        skipped: &mut Vec<Value>,
-        errors: &mut Vec<Value>,
-        id_map: &mut serde_json::Map<String, Value>,
-    ) {
-        let Some(items) = items.and_then(|v| v.as_array()) else {
-            return;
+        let (canonical_slug, _) = match self.resolve_canonical_project_identity_for_mutation(project_slug) {
+            Ok(identity) => identity,
+            Err(e) => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                    "isError": true
+                }))
+            }
         };
 
-        for item in items {
-            let Some(obj) = item.as_object() else {
-                errors.push(json!({"entity": entity, "error": "item must be an object"}));
-                continue;
-            };
+        let operations = self.build_plan_operations(&canonical_slug, plan);
+        let preview_id = format!("PRV-{}-{}", canonical_slug, now_unix_ms());
+        let payload = json!({
+            "project_slug": canonical_slug,
+            "author": author,
+            "dry_run": dry_run,
+            "operations": operations
+        });
 
-            let title = obj.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let logical_key = obj
-                .get("logical_key")
-                .and_then(|v| v.as_str())
-                .unwrap_or(title);
-
-            if logical_key.trim().is_empty() {
-                errors.push(json!({"entity": entity, "error": "missing logical_key or title"}));
-                continue;
-            }
-
-            let existing_id = self.resolve_soll_id(entity, title, logical_key);
-            if let Some(existing_id) = existing_id {
-                if dry_run {
-                    skipped.push(json!({"entity": entity, "logical_key": logical_key, "id": existing_id, "action": "would_update"}));
-                    id_map.insert(logical_key.to_string(), json!(existing_id));
-                    continue;
-                }
-
-                let mut data = serde_json::Map::new();
-                data.insert("id".to_string(), json!(existing_id));
-                for (k, v) in obj {
-                    if k != "logical_key" {
-                        data.insert(k.clone(), v.clone());
-                    }
-                }
-
-                let resp = self.axon_soll_manager(&json!({
-                    "action": "update",
-                    "entity": entity,
-                    "data": Value::Object(data)
-                }));
-
-                if soll_tool_is_error(resp.as_ref()) {
-                    errors.push(json!({"entity": entity, "logical_key": logical_key, "id": existing_id, "error": soll_tool_text(resp.as_ref())}));
-                } else {
-                    updated.push(json!({"entity": entity, "logical_key": logical_key, "id": existing_id}));
-                    id_map.insert(logical_key.to_string(), json!(existing_id));
-                }
-                continue;
-            }
-
-            if dry_run {
-                skipped.push(json!({"entity": entity, "logical_key": logical_key, "action": "would_create"}));
-                continue;
-            }
-
-            let mut data = serde_json::Map::new();
-            data.insert("project_slug".to_string(), json!(project_slug));
-            for (k, v) in obj {
-                if k != "logical_key" {
-                    data.insert(k.clone(), v.clone());
-                }
-            }
-
-            let mut metadata = data
-                .get("metadata")
-                .and_then(|m| m.as_object())
-                .cloned()
-                .unwrap_or_default();
-            metadata.insert("logical_key".to_string(), json!(logical_key));
-            data.insert("metadata".to_string(), Value::Object(metadata));
-
-            let resp = self.axon_soll_manager(&json!({
-                "action": "create",
-                "entity": entity,
-                "data": Value::Object(data)
+        if let Err(e) = self.graph_store.execute_param(
+            "INSERT INTO soll.RevisionPreview (preview_id, author, project_slug, payload, created_at) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (preview_id) DO UPDATE SET author = EXCLUDED.author, project_slug = EXCLUDED.project_slug, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at",
+            &json!([preview_id, author, canonical_slug, payload.to_string(), now_unix_ms()]),
+        ) {
+            return Some(json!({
+                "content": [{"type":"text","text": format!("SOLL apply_plan error: {}", e)}],
+                "isError": true
             }));
-
-            if soll_tool_is_error(resp.as_ref()) {
-                errors.push(json!({"entity": entity, "logical_key": logical_key, "error": soll_tool_text(resp.as_ref())}));
-            } else {
-                let created_id = soll_tool_text(resp.as_ref())
-                    .and_then(extract_soll_id_from_message)
-                    .unwrap_or_else(|| "unknown".to_string());
-                created.push(json!({"entity": entity, "logical_key": logical_key, "id": created_id}));
-                id_map.insert(logical_key.to_string(), json!(created_id));
-            }
         }
-    }
 
+        let counts = summarize_ops(&operations);
+        if dry_run {
+            return Some(json!({
+                "content": [{"type":"text","text": format!("SOLL apply_plan DRY-RUN ready. preview_id={} (create={}, update={})", preview_id, counts.0, counts.1)}],
+                "data": { "preview_id": preview_id, "counts": {"create": counts.0, "update": counts.1}, "operations": operations }
+            }));
+        }
+
+        self.axon_soll_commit_revision(&json!({ "preview_id": preview_id, "author": author }))
+    }
+}
+
+fn query_first_sql_cell(server: &McpServer, query: &str) -> Option<String> {
+    let raw = server.execute_raw_sql(query).ok()?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    let rows = parsed.get("rows")?.as_array()?;
+    let first = rows.first()?.as_array()?;
+    first.first()?.as_str().map(|s| s.to_string())
+}
+
+impl McpServer {
     fn resolve_soll_id(&self, entity: &str, title: &str, logical_key: &str) -> Option<String> {
         let table = match entity {
             "pillar" => "soll.Pillar",
@@ -1899,14 +2159,6 @@ impl McpServer {
 
         None
     }
-}
-
-fn query_first_sql_cell(server: &McpServer, query: &str) -> Option<String> {
-    let raw = server.execute_raw_sql(query).ok()?;
-    let parsed: Value = serde_json::from_str(&raw).ok()?;
-    let rows = parsed.get("rows")?.as_array()?;
-    let first = rows.first()?.as_array()?;
-    first.first()?.as_str().map(|s| s.to_string())
 }
 
 fn soll_tool_text(resp: Option<&Value>) -> Option<String> {
@@ -1956,57 +2208,7 @@ fn project_scope_predicate(id_column: &str, project_code: Option<&str>) -> Strin
         .unwrap_or_default()
 }
 
-fn is_three_letter_project_code(value: &str) -> bool {
-    value.len() == 3 && value.chars().all(|ch| ch.is_ascii_alphanumeric())
-}
-
 impl McpServer {
-    pub(crate) fn axon_soll_apply_plan_v2(&self, args: &Value) -> Option<Value> {
-        let project_slug = args
-            .get("project_slug")
-            .and_then(|v| v.as_str())
-            .unwrap_or("AXO");
-        let author = args
-            .get("author")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let dry_run = args
-            .get("dry_run")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let plan = args.get("plan")?;
-
-        let operations = self.build_plan_operations(project_slug, plan);
-        let preview_id = format!("PRV-{}-{}", project_slug, now_unix_ms());
-        let payload = json!({
-            "project_slug": project_slug,
-            "author": author,
-            "dry_run": dry_run,
-            "operations": operations
-        });
-
-        if let Err(e) = self.graph_store.execute_param(
-            "INSERT INTO soll.RevisionPreview (preview_id, author, project_slug, payload, created_at) VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT (preview_id) DO UPDATE SET author = EXCLUDED.author, project_slug = EXCLUDED.project_slug, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at",
-            &json!([preview_id, author, project_slug, payload.to_string(), now_unix_ms()]),
-        ) {
-            return Some(json!({
-                "content": [{"type":"text","text": format!("SOLL apply_plan_v2 error: {}", e)}],
-                "isError": true
-            }));
-        }
-
-        let counts = summarize_ops(&operations);
-        if dry_run {
-            return Some(json!({
-                "content": [{"type":"text","text": format!("SOLL apply_plan_v2 DRY-RUN ready. preview_id={} (create={}, update={})", preview_id, counts.0, counts.1)}],
-                "data": { "preview_id": preview_id, "counts": {"create": counts.0, "update": counts.1}, "operations": operations }
-            }));
-        }
-
-        self.axon_soll_commit_revision(&json!({ "preview_id": preview_id, "author": author }))
-    }
-
     pub(crate) fn axon_soll_commit_revision(&self, args: &Value) -> Option<Value> {
         let preview_id = match args.get("preview_id").and_then(|v| v.as_str()) {
             Some(v) if !v.trim().is_empty() => v,

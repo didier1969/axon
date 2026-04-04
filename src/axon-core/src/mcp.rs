@@ -94,7 +94,15 @@ impl McpServer {
                 },
                 "serverInfo": { "name": "axon-core", "version": "2.2.0" }
             })),
-            "tools/list" => Some(tools_catalog()),
+            "tools/list" => {
+                let include_internal = request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("include_internal"))
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                Some(tools_catalog(include_internal))
+            }
             "tools/call" => self.handle_call_tool(request.params),
             _ => None,
         };

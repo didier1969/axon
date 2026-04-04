@@ -19,7 +19,6 @@ WRITE_CAPABLE_TOOLS = {
     "refine_lattice",
     "soll_manager",
     "soll_apply_plan",
-    "soll_apply_plan_v2",
     "soll_commit_revision",
     "soll_attach_evidence",
     "soll_rollback_revision",
@@ -114,7 +113,6 @@ def build_args(
         "soll_work_plan": {"project_slug": "AXO", "limit": 10, "include_ist": True, "format": "json"},
         "soll_verify_requirements": {"project_slug": "AXO"},
         "soll_apply_plan": {"project_slug": "AXO", "dry_run": True, "plan": {}},
-        "soll_apply_plan_v2": {"project_slug": "AXO", "author": "mcp_validate", "dry_run": True, "plan": {}},
         "soll_commit_revision": {"preview_id": "dry-run-preview"},
         "soll_rollback_revision": {"revision_id": "dry-run-revision"},
         "soll_attach_evidence": {

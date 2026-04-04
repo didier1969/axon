@@ -14,8 +14,10 @@ Provide deterministic skill resolution and Axon-first operational behavior for S
 - If Axon MCP is available, use `axon-soll-operator` before SOLL operations.
 - Prefer MCP tools for SOLL operations; use shell only for bootstrap/verification.
 - SOLL identity is server-owned: `create` returns canonical IDs in the form `TYPE-CODE-NNN`.
-- `CODE` is resolved by Axon from `project_slug`, not chosen by the client.
+- `CODE` is resolved by Axon from the canonical project declaration in `.axon/meta.json`, not chosen by the client.
+- `project_slug` must match the canonical slug declared in `.axon/meta.json`; aliases are rejected.
 - All later SOLL mutations must use canonical IDs exactly, like primary keys.
+- SOLL relations are also server-governed: the LLM may propose `relation_type`, but Axon validates the source/target pair, applies a canonical default when available, or rejects the link.
 
 ## Verification Commands
 ```bash
@@ -37,16 +39,25 @@ Expected:
 - Use `./scripts/axon resume-vectorization` to recreate missing chunk vectorization backlog explicitly.
 
 ## Recommended SOLL Entry Path
-1. Check MCP availability (`axon_health`, `axon_debug`).
+1. Check MCP availability (`health`, then `validate_soll` if SOLL scope matters).
 2. Load `axon-soll-operator` workflow.
 3. Execute SOLL workflow via MCP tools (unit or bulk path), not direct DB mutations.
 4. Verify with SOLL validation tools before reporting completion.
+
+## Public MCP Surface
+- Public `tools/list` is intentionally reduced to the canonical operator surface.
+- Hidden-by-default expert/internal tools remain callable when explicitly named, but they are no longer part of the normal client/LLM discovery path.
+- Preferred public families:
+  - DX: `query`, `inspect`, `impact`, `health`, `audit`, `fs_read`
+  - SOLL read: `validate_soll`, `soll_query_context`, `soll_verify_requirements`, `soll_work_plan`, `export_soll`, `restore_soll`
+  - SOLL write: `soll_manager`, `soll_apply_plan`, `soll_commit_revision`, `soll_rollback_revision`, `soll_attach_evidence`
 
 ## SOLL Identity and Scope
 - Canonical examples: `VIS-AXO-001`, `DEC-BKS-001`, `STK-AXO-003`.
 - Non-canonical example: `DEC-BookingSystem-001`.
 - Use `validate_soll --project_slug <slug>` when the goal is project-scoped invariants rather than workspace-global triage.
 - Use `export_soll --project_slug <slug>` when the goal is a project snapshot rather than a mixed workspace export.
+- `validate_soll` now also catches dangling relation endpoints and relation-policy violations.
 
 ## Read-Only Planning Path
 - Use `soll_work_plan` when the goal is to derive an ordered execution plan from `SOLL` without mutating the graph.

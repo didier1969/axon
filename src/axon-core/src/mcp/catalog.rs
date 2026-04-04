@@ -1,7 +1,29 @@
 use serde_json::{json, Value};
 
-pub(crate) fn tools_catalog() -> Value {
-    json!({
+fn is_public_tool(name: &str) -> bool {
+    !matches!(
+        name,
+        "refine_lattice"
+            | "batch"
+            | "cypher"
+            | "debug"
+            | "schema_overview"
+            | "list_labels_tables"
+            | "query_examples"
+            | "truth_check"
+            | "diagnose_indexing"
+            | "diff"
+            | "semantic_clones"
+            | "architectural_drift"
+            | "bidi_trace"
+            | "api_break_check"
+            | "simulate_mutation"
+            | "resume_vectorization"
+    )
+}
+
+pub(crate) fn tools_catalog(include_internal: bool) -> Value {
+    let mut catalog = json!({
         "tools": [
             {
                 "name": "refine_lattice",
@@ -58,20 +80,6 @@ pub(crate) fn tools_catalog() -> Value {
                                 "milestones": { "type": "array", "items": { "type": "object" } }
                             }
                         }
-                    },
-                    "required": ["plan"]
-                }
-            },
-            {
-                "name": "soll_apply_plan_v2",
-                "description": "[SOLL] Prépare un plan révisable (dry-run par défaut), persiste un preview et fournit le diff d'opérations create/update. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "project_slug": { "type": "string" },
-                        "author": { "type": "string" },
-                        "dry_run": { "type": "boolean" },
-                        "plan": { "type": "object" }
                     },
                     "required": ["plan"]
                 }
@@ -419,5 +427,17 @@ pub(crate) fn tools_catalog() -> Value {
                 }
             })
         ]
-    })
+    });
+
+    if !include_internal {
+        if let Some(tools) = catalog.get_mut("tools").and_then(|value| value.as_array_mut()) {
+            tools.retain(|tool| {
+                tool.get("name")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(is_public_tool)
+            });
+        }
+    }
+
+    catalog
 }

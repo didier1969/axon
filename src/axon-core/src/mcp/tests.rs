@@ -33,33 +33,38 @@ fn test_mcp_tools_list() {
         .as_array()
         .expect("tools is array");
 
-    assert_eq!(tools.len(), 34);
-
     let tool_names: Vec<&str> = tools
         .iter()
         .map(|t| t.get("name").unwrap().as_str().unwrap())
         .collect();
 
-    assert!(tool_names.contains(&"refine_lattice"));
     assert!(tool_names.contains(&"fs_read"));
     assert!(tool_names.contains(&"query"));
     assert!(tool_names.contains(&"restore_soll"));
     assert!(tool_names.contains(&"validate_soll"));
+    assert!(tool_names.contains(&"soll_apply_plan"));
     assert!(tool_names.contains(&"soll_work_plan"));
     assert!(tool_names.contains(&"inspect"));
     assert!(tool_names.contains(&"audit"));
     assert!(tool_names.contains(&"impact"));
     assert!(tool_names.contains(&"health"));
-    assert!(tool_names.contains(&"diff"));
-    assert!(tool_names.contains(&"batch"));
-    assert!(tool_names.contains(&"cypher"));
-    assert!(tool_names.contains(&"semantic_clones"));
-    assert!(tool_names.contains(&"architectural_drift"));
-    assert!(tool_names.contains(&"bidi_trace"));
-    assert!(tool_names.contains(&"api_break_check"));
-    assert!(tool_names.contains(&"simulate_mutation"));
-    assert!(tool_names.contains(&"debug"));
-    assert!(tool_names.contains(&"resume_vectorization"));
+    assert!(!tool_names.contains(&"soll_apply_plan_v2"));
+    assert!(!tool_names.contains(&"refine_lattice"));
+    assert!(!tool_names.contains(&"batch"));
+    assert!(!tool_names.contains(&"cypher"));
+    assert!(!tool_names.contains(&"debug"));
+    assert!(!tool_names.contains(&"schema_overview"));
+    assert!(!tool_names.contains(&"list_labels_tables"));
+    assert!(!tool_names.contains(&"query_examples"));
+    assert!(!tool_names.contains(&"truth_check"));
+    assert!(!tool_names.contains(&"diagnose_indexing"));
+    assert!(!tool_names.contains(&"diff"));
+    assert!(!tool_names.contains(&"semantic_clones"));
+    assert!(!tool_names.contains(&"architectural_drift"));
+    assert!(!tool_names.contains(&"bidi_trace"));
+    assert!(!tool_names.contains(&"api_break_check"));
+    assert!(!tool_names.contains(&"simulate_mutation"));
+    assert!(!tool_names.contains(&"resume_vectorization"));
 }
 
 #[test]
@@ -1266,7 +1271,7 @@ fn test_axon_soll_manager_auto_id() {
 }
 
 #[test]
-fn test_axon_soll_manager_uses_project_code_registry_for_booking_system() {
+fn test_axon_soll_manager_rejects_legacy_project_without_canonical_meta() {
     let server = create_test_server();
 
     let req = JsonRpcRequest {
@@ -1297,8 +1302,46 @@ fn test_axon_soll_manager_uses_project_code_registry_for_booking_system() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("DEC-BKS-001"), "{content}");
-    assert!(!content.contains("DEC-BookingSystem-"), "{content}");
+    assert!(result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(content.contains("meta.json"), "{content}");
+    assert!(content.contains("BookingSystem"), "{content}");
+}
+
+#[test]
+fn test_axon_soll_manager_rejects_non_canonical_project_alias() {
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "decision",
+                "data": {
+                    "project_slug": "FSC",
+                    "title": "Alias should fail",
+                    "context": "Only canonical slugs are accepted",
+                    "rationale": "Server owns project identity",
+                    "status": "accepted"
+                }
+            }
+        })),
+        id: Some(json!(1002)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(content.contains("Projet canonique"), "{content}");
+    assert!(content.contains("FSC"), "{content}");
 }
 
 #[test]
@@ -1824,6 +1867,80 @@ fn test_axon_validate_soll_can_scope_by_project_slug() {
     assert!(content.contains("project:AXO"), "{content}");
     assert!(content.contains("REQ-AXO-001"), "{content}");
     assert!(!content.contains("REQ-BKS-001"), "{content}");
+}
+
+#[test]
+fn test_axon_validate_soll_rejects_non_canonical_project_alias() {
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "validate_soll",
+            "arguments": { "project_slug": "FSC" }
+        })),
+        id: Some(json!(3203)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(content.contains("Projet canonique"), "{content}");
+    assert!(content.contains("FSC"), "{content}");
+}
+
+#[test]
+fn test_axon_validate_soll_reports_invalid_and_dangling_relations() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Pillar (id, title, description, metadata) VALUES ('PIL-AXO-001', 'Platform Core', 'Protect SOLL', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES ('REQ-AXO-001', 'Linked requirement', 'Has links', 'draft', 'P1', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Validation (id, method, result, timestamp, metadata) VALUES ('VAL-AXO-001', 'manual', 'passed', 1234567890, '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.VERIFIES (source_id, target_id) VALUES ('VAL-AXO-001', 'PIL-AXO-001')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.SOLVES (source_id, target_id) VALUES ('DEC-AXO-404', 'REQ-AXO-001')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "validate_soll",
+            "arguments": { "project_slug": "AXO" }
+        })),
+        id: Some(json!(3204)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Relations invalides"), "{content}");
+    assert!(content.contains("VERIFIES"), "{content}");
+    assert!(content.contains("DEC-AXO-404"), "{content}");
 }
 
 #[test]
@@ -3073,6 +3190,186 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
     );
 
     let _ = std::fs::remove_file(&export_path);
+}
+
+#[test]
+fn test_axon_soll_manager_link_rejects_missing_endpoint() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES ('REQ-AXO-001', 'Req', 'Desc', 'draft', 'P1', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "requirement",
+                "data": {
+                    "source_id": "REQ-AXO-001",
+                    "target_id": "PIL-AXO-404"
+                }
+            }
+        })),
+        id: Some(json!(4101)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected SOLL link result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(content.contains("introuvable"), "{content}");
+}
+
+#[test]
+fn test_axon_soll_manager_link_applies_default_relation() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata) VALUES ('DEC-AXO-001', 'Decision', '', 'Context', 'Because', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES ('REQ-AXO-001', 'Req', 'Desc', 'draft', 'P1', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "decision",
+                "data": {
+                    "source_id": "DEC-AXO-001",
+                    "target_id": "REQ-AXO-001"
+                }
+            }
+        })),
+        id: Some(json!(4102)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected SOLL link result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("SOLVES"), "{content}");
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.SOLVES WHERE source_id = 'DEC-AXO-001' AND target_id = 'REQ-AXO-001'")
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn test_axon_soll_manager_link_rejects_relation_outside_policy() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata) VALUES ('DEC-AXO-001', 'Decision', '', 'Context', 'Because', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES ('REQ-AXO-001', 'Req', 'Desc', 'draft', 'P1', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "decision",
+                "data": {
+                    "source_id": "DEC-AXO-001",
+                    "target_id": "REQ-AXO-001",
+                    "relation_type": "VERIFIES"
+                }
+            }
+        })),
+        id: Some(json!(4103)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected SOLL link result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(content.contains("Relations autorisées"), "{content}");
+    assert!(content.contains("SOLVES"), "{content}");
+    assert!(content.contains("REFINES"), "{content}");
+}
+
+#[test]
+fn test_axon_soll_manager_link_allows_authorized_cumulative_relation() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata) VALUES ('DEC-AXO-001', 'Decision', '', 'Context', 'Because', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Requirement (id, title, description, status, priority, metadata) VALUES ('REQ-AXO-001', 'Req', 'Desc', 'draft', 'P1', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.SOLVES (source_id, target_id) VALUES ('DEC-AXO-001', 'REQ-AXO-001')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "link",
+                "entity": "decision",
+                "data": {
+                    "source_id": "DEC-AXO-001",
+                    "target_id": "REQ-AXO-001",
+                    "relation_type": "REFINES"
+                }
+            }
+        })),
+        id: Some(json!(4104)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected SOLL link result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("REFINES"), "{content}");
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.REFINES WHERE source_id = 'DEC-AXO-001' AND target_id = 'REQ-AXO-001'")
+            .unwrap(),
+        1
+    );
 }
 
 #[test]

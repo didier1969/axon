@@ -971,6 +971,64 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_2c_legacy_soll_reopen_merges_duplicate_canonical_ids() {
+        let db_root = std::env::temp_dir().join(format!(
+            "axon-legacy-soll-dup-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&db_root);
+        std::fs::create_dir_all(&db_root).unwrap();
+
+        let db_root_str = db_root.to_string_lossy().to_string();
+        let store = GraphStore::new(&db_root_str).unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
+                 VALUES ('Fiscaly', 'FSC')
+                 ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.Pillar (id, title, description, metadata) VALUES
+                 ('PIL-Fiscaly-001', 'Legacy Fiscaly Pillar', 'old id', '{}'),
+                 ('PIL-FSC-001', 'Canonical Fiscaly Pillar', 'new id', '{}')",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.BELONGS_TO (source_id, target_id) VALUES ('REQ-FSC-001', 'PIL-Fiscaly-001')",
+            )
+            .unwrap();
+        drop(store);
+
+        let reopened = GraphStore::new(&db_root_str).unwrap();
+        assert_eq!(
+            reopened
+                .query_count("SELECT count(*) FROM soll.Pillar WHERE id = 'PIL-Fiscaly-001'")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            reopened
+                .query_count("SELECT count(*) FROM soll.Pillar WHERE id = 'PIL-FSC-001'")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            reopened
+                .query_count(
+                    "SELECT count(*) FROM soll.BELONGS_TO WHERE source_id = 'REQ-FSC-001' AND target_id = 'PIL-FSC-001'"
+                )
+                .unwrap(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(&db_root);
+    }
+
+    #[test]
     fn test_maillon_2c_embedding_version_drift_resets_only_embedding_layers() {
         let db_root = std::env::temp_dir().join(format!(
             "axon-embedding-soft-reset-{}-{}",

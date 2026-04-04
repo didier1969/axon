@@ -9,6 +9,7 @@ use libloading::{Library, Symbol as LibSymbol};
 use tracing::{info, warn};
 
 use crate::graph::{CloseDbFunc, ExecFunc, GraphStore, InitDbFunc, LatticePool};
+use crate::project_meta::discover_project_identities;
 use crate::runtime_mode::AxonRuntimeMode;
 
 const IST_SCHEMA_VERSION: &str = "3";
@@ -490,11 +491,14 @@ impl GraphStore {
     }
 
     fn seed_project_code_registry(&self) -> Result<()> {
-        self.execute(
-            "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
-             VALUES ('AXO', 'AXO')
-             ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
-        )?;
+        for identity in discover_project_identities() {
+            self.execute_param(
+                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
+                 VALUES (?, ?)
+                 ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
+                &serde_json::json!([identity.slug, identity.code]),
+            )?;
+        }
         self.execute(
             "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
              VALUES ('BookingSystem', 'BKS')
@@ -529,11 +533,16 @@ impl GraphStore {
                 self.resolve_or_seed_existing_project_identity(project_part)?;
             let new_id = format!("{}-{}-{:03}", prefix, project_code, number);
             if new_id != old_id {
-                self.execute_param(
-                    &format!("UPDATE {} SET id = ? WHERE id = ?", table),
-                    &serde_json::json!([new_id, old_id]),
-                )?;
-                self.replace_soll_id_references(&old_id, &new_id)?;
+                if self.table_has_id(table, &new_id)? {
+                    self.replace_soll_id_references(&old_id, &new_id)?;
+                    self.delete_row_by_id(table, &old_id)?;
+                } else {
+                    self.execute_param(
+                        &format!("UPDATE {} SET id = ? WHERE id = ?", table),
+                        &serde_json::json!([new_id, old_id]),
+                    )?;
+                    self.replace_soll_id_references(&old_id, &new_id)?;
+                }
             }
             if table == "soll.Vision" {
                 self.execute_param(
@@ -581,22 +590,30 @@ impl GraphStore {
             };
             let new_id = format!("CPT-{}-{:03}", project_code, number);
 
-            self.execute_param(
-                "UPDATE soll.Concept
-                 SET id = ?, project_slug = ?, project_code = ?, name = ?
-                 WHERE COALESCE(id,'') = ? AND name = ?",
-                &serde_json::json!([
-                    new_id,
-                    project_slug,
-                    project_code,
-                    clean_name,
-                    existing_id,
-                    stored_name
-                ]),
-            )?;
-
-            if new_id != source_id {
+            if new_id != source_id && self.table_has_id("soll.Concept", &new_id)? {
                 self.replace_soll_id_references(&source_id, &new_id)?;
+                self.execute_param(
+                    "DELETE FROM soll.Concept WHERE COALESCE(id,'') = ? AND name = ?",
+                    &serde_json::json!([existing_id, stored_name]),
+                )?;
+            } else {
+                self.execute_param(
+                    "UPDATE soll.Concept
+                     SET id = ?, project_slug = ?, project_code = ?, name = ?
+                     WHERE COALESCE(id,'') = ? AND name = ?",
+                    &serde_json::json!([
+                        new_id,
+                        project_slug,
+                        project_code,
+                        clean_name,
+                        existing_id,
+                        stored_name
+                    ]),
+                )?;
+
+                if new_id != source_id {
+                    self.replace_soll_id_references(&source_id, &new_id)?;
+                }
             }
         }
         Ok(())
@@ -655,17 +672,41 @@ impl GraphStore {
                 )
             };
 
-            self.execute_param(
-                "UPDATE soll.Stakeholder
-                 SET id = ?, project_slug = ?, project_code = ?
-                 WHERE COALESCE(id,'') = ? AND name = ?",
-                &serde_json::json!([new_id, project_slug, project_code, existing_id, name]),
-            )?;
-
-            if new_id != source_id {
+            if new_id != source_id && self.table_has_id("soll.Stakeholder", &new_id)? {
                 self.replace_soll_id_references(&source_id, &new_id)?;
+                self.execute_param(
+                    "DELETE FROM soll.Stakeholder WHERE COALESCE(id,'') = ? AND name = ?",
+                    &serde_json::json!([existing_id, name]),
+                )?;
+            } else {
+                self.execute_param(
+                    "UPDATE soll.Stakeholder
+                     SET id = ?, project_slug = ?, project_code = ?
+                     WHERE COALESCE(id,'') = ? AND name = ?",
+                    &serde_json::json!([new_id, project_slug, project_code, existing_id, name]),
+                )?;
+
+                if new_id != source_id {
+                    self.replace_soll_id_references(&source_id, &new_id)?;
+                }
             }
         }
+        Ok(())
+    }
+
+    fn table_has_id(&self, table: &str, id: &str) -> Result<bool> {
+        Ok(self.query_count(&format!(
+            "SELECT count(*) FROM {} WHERE id = '{}'",
+            table,
+            id.replace('\'', "''")
+        ))? > 0)
+    }
+
+    fn delete_row_by_id(&self, table: &str, id: &str) -> Result<()> {
+        self.execute_param(
+            &format!("DELETE FROM {} WHERE id = ?", table),
+            &serde_json::json!([id]),
+        )?;
         Ok(())
     }
 
@@ -734,16 +775,6 @@ impl GraphStore {
             if row.len() >= 2 {
                 return Ok((row[0].clone(), row[1].clone()));
             }
-        }
-
-        if is_three_letter_code(key) {
-            self.execute_param(
-                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
-                 VALUES (?, ?)
-                 ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
-                &serde_json::json!([key, key.to_ascii_uppercase()]),
-            )?;
-            return Ok((key.to_string(), key.to_ascii_uppercase()));
         }
 
         Err(anyhow!("Missing project code registry entry for {}", key))
@@ -1085,8 +1116,4 @@ fn split_prefixed_display_name(value: &str) -> Option<(String, String)> {
     let id = id_part.trim();
     parse_prefixed_entity_id(id)?;
     Some((id.to_string(), name_part.trim().to_string()))
-}
-
-fn is_three_letter_code(value: &str) -> bool {
-    value.len() == 3 && value.chars().all(|ch| ch.is_ascii_alphanumeric())
 }

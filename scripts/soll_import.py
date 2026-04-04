@@ -4,7 +4,7 @@
 Supports:
 - Markdown export restore (`--format md`) via `restore_soll`
 - Structured payload import (`json|ndjson|yaml`) via:
-  - `soll_apply_plan_v2` for pillars/requirements/decisions/milestones
+  - `soll_apply_plan` for pillars/requirements/decisions/milestones
   - `soll_manager` for vision/concept/stakeholder/validation/relation links
   - `soll_attach_evidence` for traceability artifacts
 """
@@ -176,7 +176,7 @@ def run_structured_import(
     if "plan" in payload and isinstance(payload["plan"], dict):
         resp = rpc_call(
             url,
-            "soll_apply_plan_v2",
+            "soll_apply_plan",
             {
                 "project_slug": project_slug,
                 "author": author,
@@ -184,7 +184,7 @@ def run_structured_import(
                 "plan": payload["plan"],
             },
         )
-        append_step(steps, "soll_apply_plan_v2", resp)
+        append_step(steps, "soll_apply_plan", resp)
         if strict and is_error(resp):
             return steps
 

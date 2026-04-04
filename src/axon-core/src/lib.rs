@@ -14,6 +14,7 @@ pub mod ingress_buffer;
 pub mod mcp;
 pub mod mcp_http;
 pub mod parser;
+pub mod project_meta;
 pub mod queue;
 pub mod runtime_observability;
 pub mod runtime_mode;
