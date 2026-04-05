@@ -213,26 +213,18 @@ fi
 
 if [ -f "$DEVENV_RELEASE_BIN" ]; then
     echo "🔄 Updating bin/axon-core safely..."
-    install -m 755 "$DEVENV_RELEASE_BIN" bin/axon-core
+    mkdir -p bin && install -m 755 "$DEVENV_RELEASE_BIN" bin/axon-core
 fi
 
 if [ -f "$DEVENV_TUNNEL_BIN" ]; then
     echo "🔄 Updating bin/axon-mcp-tunnel safely..."
-    install -m 755 "$DEVENV_TUNNEL_BIN" bin/axon-mcp-tunnel
+    mkdir -p bin && install -m 755 "$DEVENV_TUNNEL_BIN" bin/axon-mcp-tunnel
 fi
 
 echo "🚀 Starting Axon in TMUX session '$TMUX_SESSION'..."
 echo "📂 Watch root: $WATCH_ROOT"
 echo "🗂️ Projects root: $PROJECTS_ROOT"
 echo "🧭 Runtime mode: $RUNTIME_MODE"
-
-if [ -f "$PROJECT_ROOT/.env.worktree" ]; then
-    echo "🔧 Loading .env.worktree configuration..."
-    source "$PROJECT_ROOT/.env.worktree"
-fi
-
-AXON_ENV="${AXON_ENV:-prod}"
-TMUX_SESSION="${TMUX_SESSION:-axon}"
 
 # Configuration
 if [ "$AXON_ENV" = "dev" ]; then
@@ -243,6 +235,7 @@ if [ "$AXON_ENV" = "dev" ]; then
     export HYDRA_HTTP2_PORT=44141
     export HYDRA_MCP_PORT=44142
     TMUX_SESSION="axon-dev"
+    ELIXIR_NODE_NAME="axon_dev_nexus"
 else
     export PHX_PORT=44127
     export HYDRA_TCP_PORT=44128
@@ -250,6 +243,7 @@ else
     export HYDRA_ODATA_PORT=44130
     export HYDRA_HTTP2_PORT=44131
     export HYDRA_MCP_PORT=44132
+    ELIXIR_NODE_NAME="axon_nexus"
 fi
 export WSL_IP
 WSL_IP=$(ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
@@ -285,7 +279,7 @@ tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'export AXON_PR
 if [ "$START_DASHBOARD" = "1" ]; then
     # Start Visualization Plane
     tmux new-window -t "$TMUX_SESSION" -n "nexus"
-    tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name axon_nexus@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+    tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 fi
 
 echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 120s)..."
@@ -364,6 +358,22 @@ if [ "$RUN_MCP_TESTS" = "1" ]; then
         echo "✅ MCP Quality Gate passed."
     else
         echo "❌ MCP Quality Gate failed."
+        exit 1
+    fi
+fi
+
+# 6. Final Report
+echo ""
+echo "🛡️ Axon is rising in TMUX session '$TMUX_SESSION'."
+echo "To view processes: 'tmux attach -t $TMUX_SESSION'"
+if [ "$START_DASHBOARD" = "1" ]; then
+    echo "Dashboard: http://$WSL_IP:44127/cockpit"
+fi
+echo "SQL Gateway: http://$WSL_IP:44129/sql"
+echo "MCP Server: http://$WSL_IP:44129/mcp"
+echo "Stop services with: ./scripts/stop.sh"
+echo ""
+ality Gate failed."
         exit 1
     fi
 fi
