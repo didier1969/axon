@@ -1,9 +1,9 @@
 ---
-name: axon-soll-operator
-description: Axon SOLL end-to-end operator (unit edits, bulk imports, verification, rollback). Enforces deterministic workflows, IST-driven execution, and strict identity constraints.
+name: axon-engineering-protocol
+description: Core engineering protocol for Axon. MUST BE READ before any coding, refactoring, or SOLL mutation. Defines IST-driven execution, TDD mandates, and the mandatory axon_commit_work MCP workflow.
 ---
 
-# Axon SOLL Operator
+# Axon Engineering Protocol
 
 ## Core Principles & Identity Contract
 - **Read/Verify First:** Always query IST/SOLL before mutating. Certify after.
@@ -74,6 +74,11 @@ Before coding or mutating SOLL, you MUST:
 }
 ```
 *Note:* The server atomically resolves `dec-1` to `DEC-AXO-001`, validating relations against the canonical policy.
+
+## Style Attendu (Writing Guidelines)
+- **Factual & Measurable:** No marketing fluff.
+- **Requirements:** Must be inherently testable.
+- **Decisions:** Must include context, rationale, and impact.
 
 ## Skill Maintenance
 Update this file immediately if:
