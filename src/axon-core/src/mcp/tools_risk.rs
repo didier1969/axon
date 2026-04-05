@@ -134,8 +134,79 @@ impl McpServer {
         match self.graph_store.query_json_param(&query, &params) {
             Ok(res) => {
                 let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-                let table =
-                    format_table_from_json(&res, &["Fichier / Projet", "Symbole Impacté", "Type"]);
+                let mut table = if rows.len() > 15 {
+                    format!("_Le rapport de code a été agrégé car {} symboles sont impactés. Seuls les impacts architecturaux majeurs sont détaillés ci-dessous._
+
+", rows.len())
+                } else {
+                    format_table_from_json(&res, &["Fichier / Projet", "Symbole Impacté", "Type"])
+                };
+
+                let soll_query = format!(
+                    "WITH RECURSIVE bridge_edges AS (
+                        SELECT s1.id AS source_id, s2.id AS target_id
+                        FROM Symbol s1
+                        JOIN Symbol s2 ON s1.name = s2.name AND s1.id <> s2.id
+                        WHERE (COALESCE(s1.is_nif, FALSE) = TRUE OR COALESCE(s2.is_nif, FALSE) = TRUE)
+                    ),
+                    all_edges AS (
+                        SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
+                        UNION ALL
+                        SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
+                        UNION ALL
+                        SELECT source_id, target_id, 'bridge_name' AS edge_type FROM bridge_edges
+                    ),
+                    code_traverse(caller, callee, depth) AS (
+                        SELECT source_id, target_id, 1 as depth FROM all_edges WHERE target_id = $target_id
+                        UNION ALL
+                        SELECT c.source_id, c.target_id, t.depth + 1
+                        FROM all_edges c JOIN code_traverse t ON c.target_id = t.caller
+                        WHERE t.depth < {code_depth}
+                    ),
+                    impacted_symbols AS (
+                        SELECT caller AS id FROM code_traverse
+                        UNION SELECT $target_id
+                    ),
+                    soll_entry_points AS (
+                        SELECT t.soll_entity_id as id
+                        FROM soll.Traceability t
+                        JOIN Symbol s ON s.name = t.artifact_ref
+                        JOIN impacted_symbols i ON i.id = s.id
+                        WHERE t.artifact_type = 'Symbol'
+                    ),
+                    soll_traverse(id, depth) AS (
+                        SELECT id, 1 as depth FROM soll_entry_points
+                        UNION ALL
+                        SELECT e.target_id, st.depth + 1
+                        FROM soll.Edge e
+                        JOIN soll_traverse st ON e.source_id = st.id
+                        WHERE st.depth < 10
+                    )
+                    SELECT DISTINCT n.id, n.type, n.title
+                    FROM soll_traverse st
+                    JOIN soll.Node n ON st.id = n.id
+                    ORDER BY n.type DESC, n.id",
+                    code_depth = depth
+                );
+
+                let soll_raw = self
+                    .graph_store
+                    .query_json_param(&soll_query, &params)
+                    .unwrap_or_else(|_| "[]".to_string());
+                let soll_rows: Vec<Vec<Value>> =
+                    serde_json::from_str(&soll_raw).unwrap_or_default();
+                    
+                if !soll_rows.is_empty() {
+                    table.push_str("\n### 🏛️ SOLL Impact (Architecture Compromise)\n\n| Entité | Type | Titre |\n| --- | --- | --- |\n");
+                    for row in soll_rows {
+                        let id = row.get(0).and_then(|v| v.as_str()).unwrap_or("-");
+                        let t = row.get(1).and_then(|v| v.as_str()).unwrap_or("-");
+                        let title = row.get(2).and_then(|v| v.as_str()).unwrap_or("-");
+                        table.push_str(&format!("| `{}` | `{}` | {} |\n", id, t, title));
+                    }
+                    table.push_str("\n");
+                }
+                
                 let count_query = format!(
                     "WITH RECURSIVE bridge_edges AS (
                         SELECT s1.id AS source_id, s2.id AS target_id

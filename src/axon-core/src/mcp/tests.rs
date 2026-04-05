@@ -4081,3 +4081,51 @@ fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
     assert!(content.contains("Commit effectué") || content.contains("Commit échoué"), "{}", content);
     assert!(content.contains("Exported to"), "{}", content);
 }
+
+
+#[test]
+fn test_axon_impact_traces_through_soll_architecture() {
+    let server = create_test_server();
+    
+    // 1. Create Code Symbols and Calls
+    server.graph_store.execute("INSERT INTO File (path, project_slug) VALUES ('src/payment.rs', 'BKS')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES ('payment::process', 'process', 'function', 'BKS')").unwrap();
+    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/payment.rs', 'payment::process')").unwrap();
+    
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES ('api::checkout', 'checkout', 'function', 'BKS')").unwrap();
+    server.graph_store.execute("INSERT INTO CALLS (source_id, target_id) VALUES ('api::checkout', 'payment::process')").unwrap();
+    
+    // 2. Create SOLL Intent Graph
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_slug, title) VALUES ('VIS-BKS-001', 'Vision', 'BKS', 'Paiement sans friction')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_slug, title) VALUES ('REQ-BKS-005', 'Requirement', 'BKS', 'Intégration Stripe')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_slug, title) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Utiliser Rust Stripe SDK')").unwrap();
+    
+    server.graph_store.execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-BKS-005', 'VIS-BKS-001', 'BELONGS_TO')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-BKS-010', 'REQ-BKS-005', 'SOLVES')").unwrap();
+    
+    // 3. Create Traceability Bridge (Code -> Intent)
+    server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-001', 'Decision', 'DEC-BKS-010', 'Symbol', 'checkout', 1.0, 0)").unwrap();
+    
+    // 4. Query Impact on the deep code function
+    let impact_req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "impact",
+            "arguments": { "symbol": "process", "depth": 2 }
+        })),
+        id: Some(json!(1)),
+    };
+
+    let impact_res = server.handle_request(impact_req).unwrap().result.unwrap();
+    let content = impact_res.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    
+    // 5. Asserts
+    println!("DEBUG IMPACT CONTENT: {}", content);
+    assert!(content.contains("checkout"), "Should find caller symbol");
+    assert!(content.contains("DEC-BKS-010"), "Should bridge to SOLL Decision");
+    assert!(content.contains("Utiliser Rust Stripe SDK"), "Should list decision title");
+    assert!(content.contains("REQ-BKS-005"), "Should traverse to Requirement");
+    assert!(content.contains("VIS-BKS-001"), "Should traverse to Vision");
+    assert!(content.contains("Paiement sans friction"), "Should list vision title");
+}
