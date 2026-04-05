@@ -279,8 +279,8 @@ DASHBOARD_READY=false
 # Wait up to 120 * 1s = 120s
 for i in {1..120}; do
     if [ "$CORE_READY" = false ]; then
-        if probe_sql_gateway; then
-            echo "✅ Axon Data Plane is Ready."
+        if probe_sql_gateway && verify_mcp_http; then
+            echo "✅ Axon Data Plane and MCP Gateway are Ready."
             CORE_READY=true
         fi
     fi
