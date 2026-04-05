@@ -1391,6 +1391,44 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
             .unwrap(),
         1
     );
+    let revision_rows = server
+        .graph_store
+        .query_json("SELECT revision_id FROM soll.Revision ORDER BY created_at DESC LIMIT 1")
+        .unwrap();
+    assert!(revision_rows.contains("REV-AXO-001"), "{revision_rows}");
+}
+
+#[test]
+fn test_axon_soll_apply_plan_dry_run_uses_canonical_preview_id() {
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_slug": "AXO",
+                "dry_run": true,
+                "author": "test",
+                "plan": {
+                    "requirements": [{
+                        "logical_key": "req-preview-id",
+                        "title": "Preview Id Requirement",
+                        "description": "Preview ids should be canonical",
+                        "priority": "P1",
+                        "status": "current"
+                    }]
+                }
+            }
+        })),
+        id: Some(json!(10003)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let preview_id = result["data"]["preview_id"].as_str().unwrap();
+    assert_eq!(preview_id, "PRV-AXO-001");
 }
 
 #[test]

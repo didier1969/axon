@@ -326,7 +326,7 @@ impl GraphStore {
         self.execute(
             "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR)",
         )?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_slug VARCHAR PRIMARY KEY, project_code VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Vision (id VARCHAR PRIMARY KEY DEFAULT 'VIS-AXO-001', project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, goal VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Pillar (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, metadata VARCHAR)")?;
@@ -449,6 +449,8 @@ impl GraphStore {
         )?;
         self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_vis BIGINT DEFAULT 0")?;
         self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_stk BIGINT DEFAULT 0")?;
+        self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_prv BIGINT DEFAULT 0")?;
+        self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_rev BIGINT DEFAULT 0")?;
         self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS goal VARCHAR")?;
         self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
         self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS project_slug VARCHAR")?;
@@ -563,6 +565,93 @@ impl GraphStore {
         self.migrate_prefixed_id_table("soll.Validation")?;
         self.migrate_concepts_to_server_ids()?;
         self.migrate_stakeholders_to_server_ids()?;
+        self.migrate_revision_preview_ids()?;
+        self.migrate_revision_ids()?;
+        Ok(())
+    }
+
+    fn migrate_revision_preview_ids(&self) -> Result<()> {
+        let raw = self.query_json(
+            "SELECT preview_id, COALESCE(project_slug,''), COALESCE(created_at, 0)
+             FROM soll.RevisionPreview
+             ORDER BY created_at ASC, preview_id ASC",
+        )?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut next_by_code: HashMap<String, u64> = HashMap::new();
+
+        for row in rows {
+            if row.len() < 3 {
+                continue;
+            }
+            let old_id = row[0].trim().to_string();
+            let project_slug = row[1].trim().to_string();
+            if old_id.is_empty() || project_slug.is_empty() {
+                continue;
+            }
+            let (_, project_code) = self.resolve_or_seed_existing_project_identity(&project_slug)?;
+            let next = next_by_code.get(&project_code).copied().unwrap_or(0) + 1;
+            next_by_code.insert(project_code.clone(), next);
+            let new_id = format!("PRV-{}-{:03}", project_code, next);
+
+            if old_id == new_id {
+                continue;
+            }
+
+            if self.table_has_named_id("soll.RevisionPreview", "preview_id", &new_id)? {
+                self.delete_row_by_named_id("soll.RevisionPreview", "preview_id", &old_id)?;
+            } else {
+                self.execute_param(
+                    "UPDATE soll.RevisionPreview SET preview_id = ? WHERE preview_id = ?",
+                    &serde_json::json!([new_id, old_id]),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn migrate_revision_ids(&self) -> Result<()> {
+        let raw = self.query_json(
+            "SELECT revision_id, COALESCE(created_at, 0)
+             FROM soll.Revision
+             ORDER BY created_at ASC, revision_id ASC",
+        )?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut next_by_code: HashMap<String, u64> = HashMap::new();
+
+        for row in rows {
+            if row.len() < 2 {
+                continue;
+            }
+            let old_id = row[0].trim().to_string();
+            let Some((_, project_part, _)) = parse_prefixed_entity_id(&old_id) else {
+                continue;
+            };
+            let (_, project_code) = self.resolve_or_seed_existing_project_identity(project_part)?;
+            let next = next_by_code.get(&project_code).copied().unwrap_or(0) + 1;
+            next_by_code.insert(project_code.clone(), next);
+            let new_id = format!("REV-{}-{:03}", project_code, next);
+
+            if old_id == new_id {
+                continue;
+            }
+
+            if self.table_has_named_id("soll.Revision", "revision_id", &new_id)? {
+                self.execute_param(
+                    "UPDATE soll.RevisionChange SET revision_id = ? WHERE revision_id = ?",
+                    &serde_json::json!([new_id, old_id]),
+                )?;
+                self.delete_row_by_named_id("soll.Revision", "revision_id", &old_id)?;
+            } else {
+                self.execute_param(
+                    "UPDATE soll.Revision SET revision_id = ? WHERE revision_id = ?",
+                    &serde_json::json!([new_id, old_id]),
+                )?;
+                self.execute_param(
+                    "UPDATE soll.RevisionChange SET revision_id = ? WHERE revision_id = ?",
+                    &serde_json::json!([new_id, old_id]),
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -777,9 +866,26 @@ impl GraphStore {
         ))? > 0)
     }
 
+    fn table_has_named_id(&self, table: &str, column: &str, id: &str) -> Result<bool> {
+        Ok(self.query_count(&format!(
+            "SELECT count(*) FROM {} WHERE {} = '{}'",
+            table,
+            column,
+            id.replace('\'', "''")
+        ))? > 0)
+    }
+
     fn delete_row_by_id(&self, table: &str, id: &str) -> Result<()> {
         self.execute_param(
             &format!("DELETE FROM {} WHERE id = ?", table),
+            &serde_json::json!([id]),
+        )?;
+        Ok(())
+    }
+
+    fn delete_row_by_named_id(&self, table: &str, column: &str, id: &str) -> Result<()> {
+        self.execute_param(
+            &format!("DELETE FROM {} WHERE {} = ?", table, column),
             &serde_json::json!([id]),
         )?;
         Ok(())

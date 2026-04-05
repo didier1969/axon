@@ -1484,8 +1484,8 @@ impl McpServer {
         };
 
         if let Err(e) = self.graph_store.execute(
-            "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk)
-             VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0)
+            "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_prv, last_rev)
+             VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
              ON CONFLICT (project_slug) DO NOTHING"
         ) {
             return Some(json!({
@@ -1972,14 +1972,14 @@ impl McpServer {
         ))
     }
 
-    fn next_soll_numeric_id(
+    fn next_server_numeric_id(
         &self,
         project_slug: &str,
-        entity: &str,
+        kind: &str,
     ) -> anyhow::Result<(String, String, &'static str, u64)> {
         let (project_slug, project_code) =
             self.resolve_canonical_project_identity_for_mutation(project_slug)?;
-        let (prefix, reg_col, table, id_expr) = match entity {
+        let (prefix, reg_col, table, id_expr) = match kind {
             "vision" => ("VIS", "last_vis", "soll.Vision", "id"),
             "pillar" => ("PIL", "last_pil", "soll.Pillar", "id"),
             "requirement" => ("REQ", "last_req", "soll.Requirement", "id"),
@@ -1988,12 +1988,14 @@ impl McpServer {
             "milestone" => ("MIL", "last_mil", "soll.Milestone", "id"),
             "validation" => ("VAL", "last_val", "soll.Validation", "id"),
             "stakeholder" => ("STK", "last_stk", "soll.Stakeholder", "id"),
-            _ => return Err(anyhow!("Unknown entity")),
+            "preview" => ("PRV", "last_prv", "soll.RevisionPreview", "preview_id"),
+            "revision" => ("REV", "last_rev", "soll.Revision", "revision_id"),
+            _ => return Err(anyhow!("Unknown id kind")),
         };
 
         self.graph_store.execute_param(
-            "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk) \
-             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING",
+            "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_prv, last_rev) \
+             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING",
             &json!([project_slug]),
         )?;
 
@@ -2033,6 +2035,14 @@ impl McpServer {
         ))?;
 
         Ok((project_slug, project_code, prefix, next))
+    }
+
+    fn next_soll_numeric_id(
+        &self,
+        project_slug: &str,
+        entity: &str,
+    ) -> anyhow::Result<(String, String, &'static str, u64)> {
+        self.next_server_numeric_id(project_slug, entity)
     }
 
     fn restore_soll_relation(
@@ -2076,7 +2086,17 @@ impl McpServer {
         };
 
         let operations = self.build_plan_operations(&canonical_slug, plan);
-        let preview_id = format!("PRV-{}-{}", canonical_slug, now_unix_ms());
+        let (_, project_code, _, next_preview) =
+            match self.next_server_numeric_id(&canonical_slug, "preview") {
+                Ok(parts) => parts,
+                Err(e) => {
+                    return Some(json!({
+                        "content": [{"type":"text","text": format!("SOLL apply_plan preview id error: {}", e)}],
+                        "isError": true
+                    }))
+                }
+            };
+        let preview_id = format!("PRV-{}-{:03}", project_code, next_preview);
         let payload = json!({
             "project_slug": canonical_slug,
             "author": author,
@@ -2250,7 +2270,17 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
 
-        let revision_id = format!("REV-{}-{}", project_slug, now_unix_ms());
+        let (_, project_code, _, next_revision) =
+            match self.next_server_numeric_id(project_slug, "revision") {
+                Ok(parts) => parts,
+                Err(e) => {
+                    return Some(json!({
+                        "content": [{"type":"text","text": format!("SOLL commit error (revision id): {}", e)}],
+                        "isError": true
+                    }))
+                }
+            };
+        let revision_id = format!("REV-{}-{:03}", project_code, next_revision);
         let now = now_unix_ms();
         let _ = self.graph_store.execute("BEGIN TRANSACTION");
 
