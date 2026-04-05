@@ -108,33 +108,12 @@ struct RelationPolicy {
 }
 
 fn relation_table_name(relation_type: &str) -> Option<&'static str> {
-    match relation_type {
-        "EPITOMIZES" => Some("soll.EPITOMIZES"),
-        "BELONGS_TO" => Some("soll.BELONGS_TO"),
-        "EXPLAINS" => Some("soll.EXPLAINS"),
-        "SOLVES" => Some("soll.SOLVES"),
-        "TARGETS" => Some("soll.TARGETS"),
-        "VERIFIES" => Some("soll.VERIFIES"),
-        "ORIGINATES" => Some("soll.ORIGINATES"),
-        "SUPERSEDES" => Some("soll.SUPERSEDES"),
-        "CONTRIBUTES_TO" => Some("soll.CONTRIBUTES_TO"),
-        "REFINES" => Some("soll.REFINES"),
-        "IMPACTS" => Some("IMPACTS"),
-        "SUBSTANTIATES" => Some("SUBSTANTIATES"),
-        _ => None,
-    }
+    Some("soll.Edge")
 }
 
 fn soll_entity_table_name(prefix: &str) -> Option<&'static str> {
     match prefix {
-        "VIS" => Some("soll.Vision"),
-        "PIL" => Some("soll.Pillar"),
-        "REQ" => Some("soll.Requirement"),
-        "CPT" => Some("soll.Concept"),
-        "DEC" => Some("soll.Decision"),
-        "MIL" => Some("soll.Milestone"),
-        "VAL" => Some("soll.Validation"),
-        "STK" => Some("soll.Stakeholder"),
+        "VIS" | "PIL" | "REQ" | "CPT" | "DEC" | "MIL" | "VAL" | "STK" => Some("soll.Node"),
         _ => None,
     }
 }
@@ -652,157 +631,51 @@ impl McpServer {
                     }
                 };
 
-                let insert_res = match entity {
-                    "vision" => {
-                        let title = data.get("title")?.as_str()?;
-                        let description = data.get("description")?.as_str()?;
-                        let goal = data.get("goal")?.as_str()?;
-                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let q = "INSERT INTO soll.Vision (id, project_slug, project_code, title, description, goal, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) \
-                                 ON CONFLICT (id) DO UPDATE SET project_slug = EXCLUDED.project_slug, project_code = EXCLUDED.project_code, title = EXCLUDED.title, description = EXCLUDED.description, goal = EXCLUDED.goal, metadata = EXCLUDED.metadata";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([formatted_id, project_slug, project_code, title, description, goal, meta.to_string()]),
-                        )
-                    }
-                    "pillar" => {
-                        let title = data.get("title")?.as_str()?;
-                        let desc = data.get("description")?.as_str()?;
-                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let q = "INSERT INTO soll.Pillar (id, title, description, metadata) VALUES (?, ?, ?, ?)";
-                        self.graph_store
-                            .execute_param(q, &json!([formatted_id, title, desc, meta.to_string()]))
-                    }
-                    "requirement" => {
-                        let title = data.get("title")?.as_str()?;
-                        let desc = data.get("description")?.as_str()?;
-                        let prio = data
-                            .get("priority")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("P2");
-                        let status = data
-                            .get("status")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("current");
-                        let owner = data
-                            .get("owner")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let acceptance_criteria = data
-                            .get("acceptance_criteria")
-                            .cloned()
-                            .unwrap_or(json!([]))
-                            .to_string();
-                        let evidence_refs = data
-                            .get("evidence_refs")
-                            .cloned()
-                            .unwrap_or(json!([]))
-                            .to_string();
-                        let updated_at = now_unix_ms();
-                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let q = "INSERT INTO soll.Requirement (id, title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([
-                                formatted_id,
-                                title,
-                                desc,
-                                status,
-                                prio,
-                                meta.to_string(),
-                                owner,
-                                acceptance_criteria,
-                                evidence_refs,
-                                updated_at
-                            ]),
-                        )
-                    }
-                    "concept" => {
-                        let name = data.get("name")?.as_str()?;
-                        let expl = data.get("explanation")?.as_str()?;
-                        let rat = data.get("rationale")?.as_str()?;
-                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let q = "INSERT INTO soll.Concept (id, project_slug, project_code, name, explanation, rationale, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)";
-                        self.graph_store
-                            .execute_param(q, &json!([formatted_id, project_slug, project_code, name, expl, rat, meta.to_string()]))
-                    }
-                    "decision" => {
-                        let title = data.get("title")?.as_str()?;
-                        let description = data
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let ctx = data.get("context")?.as_str()?;
-                        let rat = data.get("rationale")?.as_str()?;
-                        let status = data
-                            .get("status")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("accepted");
-                        let supersedes_decision_id = data
-                            .get("supersedes_decision_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let impact_scope = data
-                            .get("impact_scope")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let updated_at = now_unix_ms();
-                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let q = "INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata, supersedes_decision_id, impact_scope, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([
-                                formatted_id,
-                                title,
-                                description,
-                                ctx,
-                                rat,
-                                status,
-                                meta.to_string(),
-                                supersedes_decision_id,
-                                impact_scope,
-                                updated_at
-                            ]),
-                        )
-                    }
-                    "milestone" => {
-                        let title = data.get("title")?.as_str()?;
-                        let status = data
-                            .get("status")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("planned");
-                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let q = "INSERT INTO soll.Milestone (id, title, status, metadata) VALUES (?, ?, ?, ?)";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([formatted_id, title, status, meta.to_string()]),
-                        )
-                    }
-                    "stakeholder" => {
-                        let name = data.get("name")?.as_str()?;
-                        let role = data.get("role")?.as_str()?;
-                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let q =
-                            "INSERT INTO soll.Stakeholder (id, project_slug, project_code, name, role, metadata) VALUES (?, ?, ?, ?, ?, ?)";
-                        self.graph_store
-                            .execute_param(q, &json!([formatted_id, project_slug, project_code, name, role, meta.to_string()]))
-                    }
-                    "validation" => {
-                        let method = data.get("method")?.as_str()?;
-                        let result = data.get("result")?.as_str()?;
-                        let meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                        let ts = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as i64;
-                        let q = "INSERT INTO soll.Validation (id, method, result, timestamp, metadata) VALUES (?, ?, ?, ?, ?)";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([formatted_id, method, result, ts, meta.to_string()]),
-                        )
-                    }
-                    _ => Err(anyhow!("Unknown entity")),
+                
+                let mut meta = data.get("metadata").cloned().unwrap_or(json!({}));
+                let title = data.get("title").or_else(|| data.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+                let description = data.get("description").or_else(|| data.get("explanation")).and_then(|v| v.as_str()).unwrap_or("");
+                let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                let status = if entity == "validation" {
+                    data.get("result").and_then(|v| v.as_str()).unwrap_or(status)
+                } else {
+                    status
                 };
+                
+                if let Some(goal) = data.get("goal") { meta["goal"] = goal.clone(); }
+                if let Some(priority) = data.get("priority") { meta["priority"] = priority.clone(); }
+                if let Some(owner) = data.get("owner") { meta["owner"] = owner.clone(); }
+                if let Some(ac) = data.get("acceptance_criteria") { meta["acceptance_criteria"] = ac.clone(); }
+                if let Some(er) = data.get("evidence_refs") { meta["evidence_refs"] = er.clone(); }
+                if let Some(rat) = data.get("rationale") { meta["rationale"] = rat.clone(); }
+                if let Some(ctx) = data.get("context") { meta["context"] = ctx.clone(); }
+                if let Some(sup) = data.get("supersedes_decision_id") { meta["supersedes_decision_id"] = sup.clone(); }
+                if let Some(imp) = data.get("impact_scope") { meta["impact_scope"] = imp.clone(); }
+                if let Some(role) = data.get("role") { meta["role"] = role.clone(); }
+                if let Some(method) = data.get("method") { meta["method"] = method.clone(); }
+                if let Some(result) = data.get("result") { meta["result"] = result.clone(); }
+
+                meta["updated_at"] = json!(now_unix_ms());
+
+                let entity_type_cap = match entity {
+                    "vision" => "Vision",
+                    "pillar" => "Pillar",
+                    "requirement" => "Requirement",
+                    "concept" => "Concept",
+                    "decision" => "Decision",
+                    "milestone" => "Milestone",
+                    "stakeholder" => "Stakeholder",
+                    "validation" => "Validation",
+                    _ => return Some(json!({ "content": [{ "type": "text", "text": "Unknown entity" }], "isError": true })),
+                };
+
+                let q = "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET project_slug = EXCLUDED.project_slug, project_code = EXCLUDED.project_code, title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata";
+                
+                let insert_res = self.graph_store.execute_param(
+                    q,
+                    &json!([formatted_id, entity_type_cap, project_slug, project_code, title, description, status, meta.to_string()]),
+                );
+
 
                 match insert_res {
                     Ok(_) => {
@@ -816,260 +689,47 @@ impl McpServer {
             }
             "update" => {
                 let id = data.get("id")?.as_str()?;
-                let update_res: anyhow::Result<()> = (|| match entity {
-                    "pillar" => {
-                        let current = self
-                            .query_named_row(
-                                &format!(
-                                    "SELECT title, description, metadata FROM soll.Pillar WHERE id = '{}'",
-                                    escape_sql(id)
-                                ),
-                                3,
-                            )?;
-                        let q =
-                            "UPDATE soll.Pillar SET title = ?, description = ?, metadata = ? WHERE id = ?";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([
-                                data.get("title")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[0]),
-                                data.get("description")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[1]),
-                                data.get("metadata")
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| current[2].clone()),
-                                id
-                            ]),
-                        )
+                
+                let update_res: anyhow::Result<()> = (|| {
+                    let current = self.query_named_row(
+                        &format!("SELECT title, description, status, metadata FROM soll.Node WHERE id = '{}'", escape_sql(id)),
+                        4,
+                    )?;
+                    let mut meta: Value = serde_json::from_str(&current[3]).unwrap_or(json!({}));
+                    
+                    let title = data.get("title").or_else(|| data.get("name")).and_then(|v| v.as_str()).unwrap_or(&current[0]);
+                    let description = data.get("description").or_else(|| data.get("explanation")).and_then(|v| v.as_str()).unwrap_or(&current[1]);
+                    let status = data.get("status").and_then(|v| v.as_str()).unwrap_or(&current[2]);
+
+                    if let Some(m) = data.get("metadata") {
+                        if let Some(obj) = m.as_object() {
+                            for (k, v) in obj {
+                                meta[k] = v.clone();
+                            }
+                        }
                     }
-                    "requirement" => {
-                        let current = self
-                            .query_named_row(
-                                &format!(
-                                    "SELECT title, description, priority, status, metadata, owner, acceptance_criteria, evidence_refs FROM soll.Requirement WHERE id = '{}'",
-                                    escape_sql(id)
-                                ),
-                                8,
-                            )?;
-                        let q =
-                            "UPDATE soll.Requirement SET title = ?, description = ?, priority = ?, status = ?, metadata = ?, owner = ?, acceptance_criteria = ?, evidence_refs = ?, updated_at = ? WHERE id = ?";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([
-                                data.get("title")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[0]),
-                                data.get("description")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[1]),
-                                data.get("priority")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[2]),
-                                data.get("status")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[3]),
-                                data.get("metadata")
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| current[4].clone()),
-                                data.get("owner")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[5]),
-                                data.get("acceptance_criteria")
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| current[6].clone()),
-                                data.get("evidence_refs")
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| current[7].clone()),
-                                now_unix_ms(),
-                                id
-                            ]),
-                        )
-                    }
-                    "concept" => {
-                        let current = self
-                            .query_named_row(
-                                &format!(
-                                    "SELECT name, explanation, rationale, metadata FROM soll.Concept WHERE id = '{}'",
-                                    escape_sql(id)
-                                ),
-                                4,
-                            )?;
-                        let concept_name = data
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(&current[0]);
-                        let q = "UPDATE soll.Concept SET name = ?, explanation = ?, rationale = ?, metadata = ? WHERE id = ?";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([
-                                concept_name,
-                                data.get("explanation")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[1]),
-                                data.get("rationale")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[2]),
-                                data.get("metadata")
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| current[3].clone()),
-                                id
-                            ]),
-                        )
-                    }
-                    "decision" => {
-                        let current = self
-                            .query_named_row(
-                                &format!(
-                                    "SELECT title, description, context, rationale, status, metadata, supersedes_decision_id, impact_scope FROM soll.Decision WHERE id = '{}'",
-                                    escape_sql(id)
-                                ),
-                                8,
-                            )?;
-                        let q = "UPDATE soll.Decision SET title = ?, description = ?, context = ?, rationale = ?, status = ?, metadata = ?, supersedes_decision_id = ?, impact_scope = ?, updated_at = ? WHERE id = ?";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([
-                                data.get("title")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[0]),
-                                data.get("description")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[1]),
-                                data.get("context")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[2]),
-                                data.get("rationale")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[3]),
-                                data.get("status")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[4]),
-                                data.get("metadata")
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| current[5].clone()),
-                                data.get("supersedes_decision_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[6]),
-                                data.get("impact_scope")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[7]),
-                                now_unix_ms(),
-                                id
-                            ]),
-                        )
-                    }
-                    "milestone" => {
-                        let current = self
-                            .query_named_row(
-                                &format!(
-                                    "SELECT title, status, metadata FROM soll.Milestone WHERE id = '{}'",
-                                    escape_sql(id)
-                                ),
-                                3,
-                            )?;
-                        let q = "UPDATE soll.Milestone SET title = ?, status = ?, metadata = ? WHERE id = ?";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([
-                                data.get("title")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[0]),
-                                data.get("status")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[1]),
-                                data.get("metadata")
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| current[2].clone()),
-                                id
-                            ]),
-                        )
-                    }
-                    "stakeholder" => {
-                        let current = self.query_named_row(
-                            &format!(
-                                "SELECT role, metadata FROM soll.Stakeholder WHERE id = '{}'",
-                                escape_sql(id)
-                            ),
-                            2,
-                        )?;
-                        let q = "UPDATE soll.Stakeholder SET role = ?, metadata = ? WHERE id = ?";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([
-                                data.get("role")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[0]),
-                                data.get("metadata")
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| current[1].clone()),
-                                id
-                            ]),
-                        )
-                    }
-                    "validation" => {
-                        let current = self
-                            .query_named_row(
-                                &format!(
-                                    "SELECT method, result, metadata FROM soll.Validation WHERE id = '{}'",
-                                    escape_sql(id)
-                                ),
-                                3,
-                            )?;
-                        let ts = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as i64;
-                        let q = "UPDATE soll.Validation SET method = ?, result = ?, timestamp = ?, metadata = ? WHERE id = ?";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([
-                                data.get("method")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[0]),
-                                data.get("result")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[1]),
-                                ts,
-                                data.get("metadata")
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| current[2].clone()),
-                                id
-                            ]),
-                        )
-                    }
-                    "vision" => {
-                        let current = self
-                            .query_named_row(
-                                &format!(
-                                    "SELECT title, description, goal, metadata FROM soll.Vision WHERE id = '{}'",
-                                    escape_sql(id)
-                                ),
-                                4,
-                            )?;
-                        let q = "UPDATE soll.Vision SET title = ?, description = ?, goal = ?, metadata = ? WHERE id = ?";
-                        self.graph_store.execute_param(
-                            q,
-                            &json!([
-                                data.get("title")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[0]),
-                                data.get("description")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[1]),
-                                data.get("goal")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(&current[2]),
-                                data.get("metadata")
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_else(|| current[3].clone()),
-                                id
-                            ]),
-                        )
-                    }
-                    _ => Err(anyhow!("Unknown entity")),
+                    if let Some(goal) = data.get("goal") { meta["goal"] = goal.clone(); }
+                    if let Some(priority) = data.get("priority") { meta["priority"] = priority.clone(); }
+                    if let Some(owner) = data.get("owner") { meta["owner"] = owner.clone(); }
+                    if let Some(ac) = data.get("acceptance_criteria") { meta["acceptance_criteria"] = ac.clone(); }
+                    if let Some(er) = data.get("evidence_refs") { meta["evidence_refs"] = er.clone(); }
+                    if let Some(rat) = data.get("rationale") { meta["rationale"] = rat.clone(); }
+                    if let Some(ctx) = data.get("context") { meta["context"] = ctx.clone(); }
+                    if let Some(sup) = data.get("supersedes_decision_id") { meta["supersedes_decision_id"] = sup.clone(); }
+                    if let Some(imp) = data.get("impact_scope") { meta["impact_scope"] = imp.clone(); }
+                    if let Some(role) = data.get("role") { meta["role"] = role.clone(); }
+                    if let Some(method) = data.get("method") { meta["method"] = method.clone(); }
+                    if let Some(result) = data.get("result") { meta["result"] = result.clone(); }
+                    
+                    meta["updated_at"] = json!(now_unix_ms());
+
+                    let q = "UPDATE soll.Node SET title = ?, description = ?, status = ?, metadata = ? WHERE id = ?";
+                    self.graph_store.execute_param(
+                        q,
+                        &json!([title, description, status, meta.to_string(), id]),
+                    )
                 })();
+
                 match update_res {
                     Ok(_) => Some(
                         json!({ "content": [{ "type": "text", "text": format!("✅ Mise à jour réussie pour `{}`", id) }] }),
@@ -1107,7 +767,7 @@ impl McpServer {
         }
     }
 
-    pub(crate) fn axon_export_soll(&self, args: &Value) -> Option<Value> {
+    pub(crate) fn axon_export_soll(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         let project_slug = args.get("project_slug").and_then(|v| v.as_str());
         let project_code = match project_slug
             .map(|slug| self.resolve_project_code(slug))
@@ -1115,200 +775,89 @@ impl McpServer {
         {
             Ok(code) => code,
             Err(e) => {
-                return Some(json!({
+                return Some(serde_json::json!({
                     "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
                     "isError": true
                 }))
             }
         };
-        let mut markdown = String::from("# SOLL Extraction\n\n");
+        let mut markdown = String::from("# SOLL Extraction
+
+");
 
         let now = std::time::SystemTime::now();
         let datetime: chrono::DateTime<chrono::Local> = now.into();
         let timestamp_str = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
-        markdown.push_str(&format!("*Généré le : {}*\n\n", timestamp_str));
+        markdown.push_str(&format!("*Généré le : {}*
+
+", timestamp_str));
 
         if let Some(slug) = project_slug {
-            markdown.push_str(&format!("*Portée : projet `{}`*\n\n", slug));
-        }
+            markdown.push_str(&format!("*Portée : projet `{}`*
 
-        markdown.push_str("## 1. Vision & Objectifs Stratégiques\n");
-        if let Ok(res) = self
-            .graph_store
-            .query_json(&format!(
-                "SELECT id, title, description, goal, metadata FROM soll.Vision{} ORDER BY id",
-                project_scope_clause_for_table("id", project_code.as_deref())
-            ))
-        {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-            for r in rows {
-                let meta = r.get(4).cloned().unwrap_or_default();
-                markdown.push_str(&format!(
-                    "### {} - {}\n**Description:** {}\n**Goal:** {}\n**Meta:** `{}`\n\n",
-                    r[0], r[1], r[2], r[3], meta
-                ));
-            }
+", slug));
         }
-
-        markdown.push_str("## 2. Piliers d'Architecture\n");
-        if let Ok(res) = self
-            .graph_store
-            .query_json(&format!(
-                "SELECT id, title, description, metadata FROM soll.Pillar{} ORDER BY id",
-                project_scope_clause_for_table("id", project_code.as_deref())
-            ))
-        {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-            for r in rows {
-                markdown.push_str(&format!("* **{}** : {} ({})\n", r[0], r[1], r[2]));
-                if let Some(meta) = r.get(3).filter(|m| !m.is_empty() && *m != "{}") {
-                    markdown.push_str(&format!("  Meta: `{}`\n", meta));
-                }
-            }
-        }
-
-        markdown.push_str("\n## 2b. Concepts\n");
-        if let Ok(res) = self
-            .graph_store
-            .query_json(&format!(
-                "SELECT id, name, explanation, rationale, metadata FROM soll.Concept{} ORDER BY id",
-                project_scope_clause_for_table("id", project_code.as_deref())
-            ))
-        {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-            for r in rows {
-                markdown.push_str(&format!("* **{}: {}** : {} ({})\n", r[0], r[1], r[2], r[3]));
-                if let Some(meta) = r.get(4).filter(|m| !m.is_empty() && *m != "{}") {
-                    markdown.push_str(&format!("  Meta: `{}`\n", meta));
-                }
-            }
-        }
-
-        markdown.push_str("\n## 2c. Stakeholders\n");
-        if let Ok(res) = self
-            .graph_store
-            .query_json(&format!(
-                "SELECT id, name, role, metadata FROM soll.Stakeholder{} ORDER BY id",
-                project_scope_clause_for_table("id", project_code.as_deref())
-            ))
-        {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-            for r in rows {
-                markdown.push_str(&format!("* **{}: {}** : {}\n", r[0], r[1], r[2]));
-                if let Some(meta) = r.get(3).filter(|m| !m.is_empty() && *m != "{}") {
-                    markdown.push_str(&format!("  Meta: `{}`\n", meta));
-                }
-            }
-        }
-
-        markdown.push_str("\n## 3. Jalons & Roadmap (Milestones)\n");
-        if let Ok(res) = self
-            .graph_store
-            .query_json(&format!(
-                "SELECT id, title, status, metadata FROM soll.Milestone{} ORDER BY id",
-                project_scope_clause_for_table("id", project_code.as_deref())
-            ))
-        {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-            for r in rows {
-                markdown.push_str(&format!(
-                    "### {} : {}\n*Statut :* `{}`\n\n",
-                    r[0], r[1], r[2]
-                ));
-                if let Some(meta) = r.get(3).filter(|m| !m.is_empty() && *m != "{}") {
-                    markdown.push_str(&format!("*Meta :* `{}`\n", meta));
-                }
-                markdown.push('\n');
-            }
-        }
-
-        markdown.push_str("## 4. Exigences & Rayon d'Impact (Requirements)\n");
-        let req_query = format!(
-            "SELECT id, title, priority, description, status, metadata FROM soll.Requirement{} ORDER BY id",
-            project_scope_clause_for_table("id", project_code.as_deref())
-        );
-        if let Ok(res) = self.graph_store.query_json(&req_query) {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-            for r in rows {
-                markdown.push_str(&format!(
-                    "### {} - {}\n*Priorité :* `{}`\n*Description :* {}\n",
-                    r[0], r[1], r[2], r[3]
-                ));
-                if let Some(status) = r.get(4).filter(|m| !m.is_empty()) {
-                    markdown.push_str(&format!("*Statut :* `{}`\n", status));
-                }
-                if let Some(meta) = r.get(5).filter(|m| !m.is_empty() && *m != "{}") {
-                    markdown.push_str(&format!("*Meta :* `{}`\n", meta));
-                }
-                markdown.push('\n');
-            }
-        }
-
-        markdown.push_str("## 5. Registre des Décisions (ADR)\n");
+        
+        markdown.push_str("## Topologie (Mermaid)
+```mermaid
+graph TD;
+");
         if let Ok(res) = self.graph_store.query_json(&format!(
-            "SELECT id, title, status, context, description, rationale, metadata FROM soll.Decision{} ORDER BY id",
-            project_scope_clause_for_table("id", project_code.as_deref())
+            "SELECT source_id, target_id, relation_type FROM soll.Edge{}",
+            project_scope_clause_for_relation(project_code.as_deref())
         )) {
-            let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-            for r in rows {
-                markdown.push_str(&format!("### {}\n**Titre :** {}\n**Statut :** `{}`\n", r[0], r[1], r[2]));
-                if let Some(context) = r.get(3).filter(|m| !m.is_empty()) {
-                    markdown.push_str(&format!("**Contexte :** {}\n", context));
+            let edges: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            for edge in edges {
+                if edge.len() >= 3 {
+                    markdown.push_str(&format!("  {} -- {} --> {};
+", edge[0], edge[2], edge[1]));
                 }
-                if let Some(description) = r.get(4).filter(|m| !m.is_empty()) {
-                    markdown.push_str(&format!("**Description :** {}\n", description));
-                }
-                markdown.push_str(&format!("**Rationnel :** {}\n", r[5]));
-                if let Some(meta) = r.get(6).filter(|m| !m.is_empty() && *m != "{}") {
-                    markdown.push_str(&format!("**Meta :** `{}`\n", meta));
-                }
-                markdown.push('\n');
             }
         }
+        markdown.push_str("```
 
-        markdown.push_str("## 6. Preuves de Validation & Witness\n");
+");
+
         if let Ok(res) = self
             .graph_store
             .query_json(&format!(
-                "SELECT id, method, result, timestamp, metadata FROM soll.Validation{} ORDER BY id",
+                "SELECT id, type, title, description, status, metadata FROM soll.Node{} ORDER BY type, id",
                 project_scope_clause_for_table("id", project_code.as_deref())
             ))
         {
             let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+            let mut current_type = String::new();
             for r in rows {
-                markdown.push_str(&format!(
-                    "*   `{}` : **{}** via `{}` (Certifié le {})\n",
-                    r[0], r[2], r[1], r[3]
-                ));
-                if let Some(meta) = r.get(4).filter(|m| !m.is_empty() && *m != "{}") {
-                    markdown.push_str(&format!("  Meta: `{}`\n", meta));
+                let n_id = &r[0];
+                let n_type = &r[1];
+                let title = &r[2];
+                let desc = &r[3];
+                let status = &r[4];
+                let meta = r.get(5).cloned().unwrap_or_default();
+                
+                if n_type != &current_type {
+                    markdown.push_str(&format!("## Entités : {}\n", n_type));
+                    current_type = n_type.clone();
                 }
-            }
-        }
-
-        markdown.push_str("\n## 7. Liens de Traçabilité SOLL\n");
-        for (relation_type, table_name) in SOLL_RELATION_EXPORTS {
-            if let Ok(res) = self.graph_store.query_json(&format!(
-                "SELECT source_id, target_id FROM {}{} ORDER BY source_id, target_id",
-                table_name,
-                project_scope_clause_for_relation(project_code.as_deref())
-            )) {
-                let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-                for row in rows {
-                    if row.len() >= 2 {
-                        markdown.push_str(&format!(
-                            "* `{}`: `{}` -> `{}`\n",
-                            relation_type, row[0], row[1]
-                        ));
-                    }
+                
+                markdown.push_str(&format!("### {} - {}\n", n_id, title));
+                if !desc.is_empty() {
+                    markdown.push_str(&format!("**Description:** {}\n", desc));
                 }
+                if !status.is_empty() {
+                    markdown.push_str(&format!("**Status:** {}\n", status));
+                }
+                if meta != "{}" {
+                    markdown.push_str(&format!("**Meta:** `{}`\n", meta));
+                }
+                markdown.push_str("\n");
             }
         }
 
         let export_dir = match canonical_soll_export_dir() {
             Some(path) => path,
             None => {
-                return Some(json!({
+                return Some(serde_json::json!({
                     "content": [{
                         "type": "text",
                         "text": "Erreur d'écriture: impossible de résoudre le répertoire canonique docs/vision du dépôt"
@@ -1325,14 +874,18 @@ impl McpServer {
         match std::fs::write(&file_path, &markdown) {
             Ok(_) => {
                 let report = format!(
-                    "✅ Exported to {}\n\n---\n\n{}",
+                    "✅ Exported to {}
+
+---
+
+{}",
                     file_path.display(),
                     markdown.chars().take(300).collect::<String>()
                 );
-                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                Some(serde_json::json!({ "content": [{ "type": "text", "text": report }] }))
             }
             Err(e) => Some(
-                json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture: {}", e) }], "isError": true }),
+                serde_json::json!({ "content": [{ "type": "text", "text": format!("Erreur d'écriture: {}", e) }], "isError": true }),
             ),
         }
     }
@@ -1353,15 +906,9 @@ impl McpServer {
         };
         let orphan_requirements = self
             .query_single_column(
-                &format!("SELECT id FROM soll.Requirement r
-                 WHERE NOT EXISTS (SELECT 1 FROM soll.BELONGS_TO WHERE source_id = r.id OR target_id = r.id)
-                   AND NOT EXISTS (SELECT 1 FROM soll.EXPLAINS WHERE source_id = r.id OR target_id = r.id)
-                   AND NOT EXISTS (SELECT 1 FROM soll.SOLVES WHERE source_id = r.id OR target_id = r.id)
-                   AND NOT EXISTS (SELECT 1 FROM soll.TARGETS WHERE source_id = r.id OR target_id = r.id)
-                   AND NOT EXISTS (SELECT 1 FROM soll.VERIFIES WHERE source_id = r.id OR target_id = r.id)
-                   AND NOT EXISTS (SELECT 1 FROM soll.ORIGINATES WHERE source_id = r.id OR target_id = r.id)
-                   AND NOT EXISTS (SELECT 1 FROM SUBSTANTIATES WHERE source_id = r.id OR target_id = r.id)
-                   AND NOT EXISTS (SELECT 1 FROM IMPACTS WHERE source_id = r.id OR target_id = r.id)
+                &format!("SELECT id FROM soll.Node r
+                 WHERE type = 'Requirement'
+                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE source_id = r.id OR target_id = r.id)
                    {}
                  ORDER BY id", project_scope_predicate("r.id", project_code.as_deref())),
             )
@@ -1369,8 +916,9 @@ impl McpServer {
 
         let validations_without_verifies = self
             .query_single_column(
-                &format!("SELECT id FROM soll.Validation v
-                 WHERE NOT EXISTS (SELECT 1 FROM soll.VERIFIES WHERE source_id = v.id OR target_id = v.id)
+                &format!("SELECT id FROM soll.Node v
+                 WHERE type = 'Validation'
+                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = v.id OR target_id = v.id) AND relation_type = 'VERIFIES')
                    {}
                  ORDER BY id", project_scope_predicate("v.id", project_code.as_deref())),
             )
@@ -1378,9 +926,9 @@ impl McpServer {
 
         let decisions_without_links = self
             .query_single_column(
-                &format!("SELECT id FROM soll.Decision d
-                 WHERE NOT EXISTS (SELECT 1 FROM soll.SOLVES WHERE source_id = d.id OR target_id = d.id)
-                   AND NOT EXISTS (SELECT 1 FROM IMPACTS WHERE source_id = d.id OR target_id = d.id)
+                &format!("SELECT id FROM soll.Node d
+                 WHERE type = 'Decision'
+                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = d.id OR target_id = d.id) AND relation_type IN ('SOLVES', 'IMPACTS'))
                    {}
                  ORDER BY id", project_scope_predicate("d.id", project_code.as_deref())),
             )
@@ -1497,27 +1045,23 @@ impl McpServer {
         let mut restored = SollRestoreCounts::default();
 
         for vision in restore.vision {
-            let metadata = vision.metadata.unwrap_or_else(|| "{}".to_string());
+            let mut meta_out: serde_json::Value = vision.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            if !vision.goal.is_empty() { let goal = vision.goal.clone();
+                if let Some(obj) = meta_out.as_object_mut() {
+                    obj.insert("goal".to_string(), serde_json::Value::String(goal));
+                }
+            }
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Vision (id, project_slug, project_code, title, description, goal, metadata)
-                 VALUES ('VIS-AXO-001', 'AXO', 'AXO', $title, $description, $goal, $metadata)
-                 ON CONFLICT (id) DO UPDATE SET
-                   project_slug = EXCLUDED.project_slug,
-                   project_code = EXCLUDED.project_code,
-                   title = EXCLUDED.title,
-                   description = EXCLUDED.description,
-                   goal = EXCLUDED.goal,
-                   metadata = EXCLUDED.metadata",
-                &json!({
+                "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata)
+                 VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'AXO', $title, $description, NULL, $metadata)
+                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, metadata = EXCLUDED.metadata",
+                &serde_json::json!({
                     "title": vision.title,
                     "description": vision.description,
-                    "goal": vision.goal,
-                    "metadata": metadata
+                    "metadata": meta_out.to_string()
                 }),
             ) {
-                return Some(
-                    json!({ "content": [{ "type": "text", "text": format!("SOLL restore vision error: {}", e) }], "isError": true }),
-                );
+                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore vision error: {}", e) }], "isError": true }));
             }
             restored.vision += 1;
         }
@@ -1525,120 +1069,136 @@ impl McpServer {
         for pillar in restore.pillars {
             let metadata = pillar.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Pillar (id, title, description, metadata)
-                 VALUES ($id, $title, $description, $metadata)
-                 ON CONFLICT (id) DO UPDATE SET
-                   title = EXCLUDED.title,
-                   description = EXCLUDED.description,
-                   metadata = EXCLUDED.metadata",
-                &json!({"id": pillar.id, "title": pillar.title, "description": pillar.description, "metadata": metadata})
+                "INSERT INTO soll.Node (id, type, title, description, metadata)
+                 VALUES ($id, 'Pillar', $title, $description, $metadata)
+                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, metadata = EXCLUDED.metadata",
+                &serde_json::json!({
+                    "id": pillar.id,
+                    "title": pillar.title,
+                    "description": pillar.description,
+                    "metadata": metadata
+                }),
             ) {
-                return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore pillar error: {}", e) }], "isError": true }));
+                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore pillar error: {}", e) }], "isError": true }));
             }
             restored.pillars += 1;
         }
 
-        for concept in restore.concepts {
-            let metadata = concept.metadata.unwrap_or_else(|| "{}".to_string());
-            if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Concept (id, project_slug, project_code, name, explanation, rationale, metadata)
-                 VALUES ($id, 'AXO', 'AXO', $name, $explanation, $rationale, $metadata)
-                 ON CONFLICT (id) DO UPDATE SET
-                   project_slug = EXCLUDED.project_slug,
-                   project_code = EXCLUDED.project_code,
-                   name = EXCLUDED.name,
-                   explanation = EXCLUDED.explanation,
-                   rationale = EXCLUDED.rationale,
-                   metadata = EXCLUDED.metadata",
-                &json!({"id": concept.id, "name": concept.name, "explanation": concept.explanation, "rationale": concept.rationale, "metadata": metadata})
-            ) {
-                return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore concept error: {}", e) }], "isError": true }));
+        for req in restore.requirements {
+            let mut meta_out: serde_json::Value = req.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            if let Some(obj) = meta_out.as_object_mut() {
+                if !req.priority.is_empty() { let priority = req.priority.clone(); obj.insert("priority".to_string(), serde_json::Value::String(priority)); }
+                if false { let owner = String::new(); obj.insert("owner".to_string(), serde_json::Value::String(owner)); }
+                if false { let ac = String::new(); obj.insert("acceptance_criteria".to_string(), serde_json::Value::String(ac)); }
             }
-            restored.concepts += 1;
-        }
-
-        for milestone in restore.milestones {
-            let metadata = milestone.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Milestone (id, title, status, metadata)
-                 VALUES ($id, $title, $status, $metadata)
-                 ON CONFLICT (id) DO UPDATE SET
-                   title = EXCLUDED.title,
-                   status = EXCLUDED.status,
-                   metadata = EXCLUDED.metadata",
-                &json!({"id": milestone.id, "title": milestone.title, "status": milestone.status, "metadata": metadata})
+                "INSERT INTO soll.Node (id, type, title, description, status, metadata)
+                 VALUES ($id, 'Requirement', $title, $description, $status, $metadata)
+                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata",
+                &serde_json::json!({
+                    "id": req.id,
+                    "title": req.title,
+                    "description": req.description,
+                    "status": req.status.clone(),
+                    "metadata": meta_out.to_string()
+                }),
             ) {
-                return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore milestone error: {}", e) }], "isError": true }));
-            }
-            restored.milestones += 1;
-        }
-
-        for requirement in restore.requirements {
-            let metadata = requirement.metadata.unwrap_or_else(|| "{}".to_string());
-            let status = requirement.status.unwrap_or_else(|| "restored".to_string());
-            if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Requirement (id, title, description, status, priority, metadata)
-                 VALUES ($id, $title, $description, $status, $priority, $metadata)
-                 ON CONFLICT (id) DO UPDATE SET
-                   title = EXCLUDED.title,
-                   description = EXCLUDED.description,
-                   status = EXCLUDED.status,
-                   priority = EXCLUDED.priority,
-                   metadata = EXCLUDED.metadata",
-                &json!({"id": requirement.id, "title": requirement.title, "description": requirement.description, "priority": requirement.priority, "status": status, "metadata": metadata})
-            ) {
-                return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore requirement error: {}", e) }], "isError": true }));
+                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore requirement error: {}", e) }], "isError": true }));
             }
             restored.requirements += 1;
         }
 
-        for decision in restore.decisions {
-            let description = decision.description.unwrap_or_default();
-            let context = decision.context.unwrap_or_default();
-            let metadata = decision.metadata.unwrap_or_else(|| "{}".to_string());
+        for dec in restore.decisions {
+            let mut meta_out: serde_json::Value = dec.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            if let Some(obj) = meta_out.as_object_mut() {
+                if false { let ctx = String::new(); obj.insert("context".to_string(), serde_json::Value::String(ctx)); }
+                if false { let rat = String::new(); obj.insert("rationale".to_string(), serde_json::Value::String(rat)); }
+            }
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Decision (id, title, description, context, rationale, status, metadata)
-                 VALUES ($id, $title, $description, $context, $rationale, $status, $metadata)
-                 ON CONFLICT (id) DO UPDATE SET
-                   title = EXCLUDED.title,
-                   description = EXCLUDED.description,
-                   context = EXCLUDED.context,
-                   rationale = EXCLUDED.rationale,
-                   status = EXCLUDED.status,
-                   metadata = EXCLUDED.metadata",
-                &json!({"id": decision.id, "title": decision.title, "description": description, "context": context, "rationale": decision.rationale, "status": decision.status, "metadata": metadata})
+                "INSERT INTO soll.Node (id, type, title, description, status, metadata)
+                 VALUES ($id, 'Decision', $title, $description, $status, $metadata)
+                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata",
+                &serde_json::json!({
+                    "id": dec.id,
+                    "title": dec.title,
+                    "description": dec.description,
+                    "status": dec.status.clone(),
+                    "metadata": meta_out.to_string()
+                }),
             ) {
-                return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore decision error: {}", e) }], "isError": true }));
+                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore decision error: {}", e) }], "isError": true }));
             }
             restored.decisions += 1;
         }
 
-        for validation in restore.validations {
-            let metadata = validation.metadata.unwrap_or_else(|| "{}".to_string());
+        for mil in restore.milestones {
+            let metadata = mil.metadata.unwrap_or_else(|| "{}".to_string());
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Validation (id, method, result, timestamp, metadata)
-                 VALUES ($id, $method, $result, $timestamp, $metadata)
-                 ON CONFLICT (id) DO UPDATE SET
-                   method = EXCLUDED.method,
-                   result = EXCLUDED.result,
-                   timestamp = EXCLUDED.timestamp,
-                   metadata = EXCLUDED.metadata",
-                &json!({"id": validation.id, "method": validation.method, "result": validation.result, "timestamp": validation.timestamp, "metadata": metadata})
+                "INSERT INTO soll.Node (id, type, title, status, metadata)
+                 VALUES ($id, 'Milestone', $title, $status, $metadata)
+                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, status = EXCLUDED.status, metadata = EXCLUDED.metadata",
+                &serde_json::json!({
+                    "id": mil.id,
+                    "title": mil.title,
+                    "status": mil.status.clone(),
+                    "metadata": metadata
+                }),
             ) {
-                return Some(json!({ "content": [{ "type": "text", "text": format!("SOLL restore validation error: {}", e) }], "isError": true }));
+                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore milestone error: {}", e) }], "isError": true }));
+            }
+            restored.milestones += 1;
+        }
+
+        for val in restore.validations {
+            let mut meta_out: serde_json::Value = val.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            if let Some(obj) = meta_out.as_object_mut() {
+                if false { let m = String::new(); obj.insert("method".to_string(), serde_json::Value::String(m)); }
+                if false { let t: i64 = 0; obj.insert("timestamp".to_string(), serde_json::Value::Number(t.into())); }
+            }
+            if let Err(e) = self.graph_store.execute_param(
+                "INSERT INTO soll.Node (id, type, status, metadata)
+                 VALUES ($id, 'Validation', $result, $metadata)
+                 ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, metadata = EXCLUDED.metadata",
+                &serde_json::json!({
+                    "id": val.id,
+                    "result": val.result.clone(),
+                    "metadata": meta_out.to_string()
+                }),
+            ) {
+                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore validation error: {}", e) }], "isError": true }));
             }
             restored.validations += 1;
         }
 
-        for relation in restore.relations {
-            if let Err(e) = self.restore_soll_relation(
-                &relation.relation_type,
-                &relation.source_id,
-                &relation.target_id,
+        for cpt in restore.concepts {
+            let mut meta_out: serde_json::Value = cpt.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            if let Some(obj) = meta_out.as_object_mut() {
+                if !cpt.rationale.is_empty() { let rat = cpt.rationale.clone(); obj.insert("rationale".to_string(), serde_json::Value::String(rat)); }
+            }
+            if let Err(e) = self.graph_store.execute_param(
+                "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, metadata)
+                 VALUES ($id, 'Concept', $project_slug, $project_code, $name, $explanation, $metadata)
+                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, metadata = EXCLUDED.metadata",
+                &serde_json::json!({
+                    "id": cpt.id,
+                    "project_slug": "AXO".to_string(),
+                    "project_code": "AXO".to_string(),
+                    "name": cpt.name,
+                    "explanation": cpt.explanation,
+                    "metadata": meta_out.to_string()
+                }),
             ) {
-                return Some(
-                    json!({ "content": [{ "type": "text", "text": format!("SOLL restore relation error: {}", e) }], "isError": true }),
-                );
+                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore concept error: {}", e) }], "isError": true }));
+            }
+            restored.concepts += 1;
+        }
+
+        for rel in restore.relations {
+            if let Err(e) = self.graph_store.execute_param(
+                "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata) VALUES (?, ?, ?, '{}') ON CONFLICT DO NOTHING",
+                &serde_json::json!([rel.source_id, rel.target_id, rel.relation_type])
+            ) {
+                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore relation error: {}", e) }], "isError": true }));
             }
             restored.relations += 1;
         }
@@ -1783,14 +1343,11 @@ impl McpServer {
         target_id: &str,
         policy: RelationPolicy,
     ) -> anyhow::Result<bool> {
-        let table_name = relation_table_name(relation_type)
-            .ok_or_else(|| anyhow!("Type de relation inconnu `{}`", relation_type))?;
-
         let same_relation_exists = self.graph_store.query_count(&format!(
-            "SELECT count(*) FROM {} WHERE source_id = '{}' AND target_id = '{}'",
-            table_name,
+            "SELECT count(*) FROM soll.Edge WHERE source_id = '{}' AND target_id = '{}' AND relation_type = '{}'",
             escape_sql(source_id),
-            escape_sql(target_id)
+            escape_sql(target_id),
+            escape_sql(relation_type)
         ))?;
         if same_relation_exists > 0 {
             return Ok(false);
@@ -1801,36 +1358,27 @@ impl McpServer {
                 if *other_relation == relation_type {
                     continue;
                 }
-                if let Some(other_table) = relation_table_name(other_relation) {
-                    let count = self.graph_store.query_count(&format!(
-                        "SELECT count(*) FROM {} WHERE source_id = '{}' AND target_id = '{}'",
-                        other_table,
-                        escape_sql(source_id),
-                        escape_sql(target_id)
-                    ))?;
-                    if count > 0 {
-                        return Err(anyhow!(
-                            "Conflit de cardinalité: `{}` existe déjà pour `{}` -> `{}`; `{}` est exclusif sur cette paire",
-                            other_relation,
-                            source_id,
-                            target_id,
-                            relation_type
-                        ));
-                    }
+                let count = self.graph_store.query_count(&format!(
+                    "SELECT count(*) FROM soll.Edge WHERE source_id = '{}' AND target_id = '{}' AND relation_type = '{}'",
+                    escape_sql(source_id),
+                    escape_sql(target_id),
+                    escape_sql(other_relation)
+                ))?;
+                if count > 0 {
+                    return Err(anyhow::anyhow!(
+                        "Conflit de cardinalité: `{}` existe déjà pour `{}` -> `{}`; `{}` est exclusif sur cette paire",
+                        other_relation,
+                        source_id,
+                        target_id,
+                        relation_type
+                    ));
                 }
             }
         }
 
         self.graph_store.execute_param(
-            &format!(
-                "INSERT INTO {} (source_id, target_id)
-                 SELECT ?, ?
-                 WHERE NOT EXISTS (
-                   SELECT 1 FROM {} WHERE source_id = ? AND target_id = ?
-                 )",
-                table_name, table_name
-            ),
-            &json!([source_id, target_id, source_id, target_id]),
+            "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata) VALUES (?, ?, ?, '{}') ON CONFLICT DO NOTHING",
+            &serde_json::json!([source_id, target_id, relation_type]),
         )?;
         Ok(true)
     }
@@ -1840,72 +1388,68 @@ impl McpServer {
         project_code: Option<&str>,
     ) -> anyhow::Result<Vec<String>> {
         let mut violations = Vec::new();
-        let mut exclusive_pairs: HashMap<(String, String), HashSet<String>> = HashMap::new();
+        let mut exclusive_pairs: std::collections::HashMap<(String, String), std::collections::HashSet<String>> = std::collections::HashMap::new();
 
-        for (relation_type, table_name) in SOLL_RELATION_EXPORTS {
-            let rows_raw = self.graph_store.query_json(&format!(
-                "SELECT source_id, target_id FROM {} ORDER BY source_id, target_id",
-                table_name
-            ))?;
-            let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
-            for row in rows {
-                if row.len() < 2 {
+        let rows_raw = self.graph_store.query_json("SELECT source_id, target_id, relation_type FROM soll.Edge ORDER BY source_id, target_id")?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+        for row in rows {
+            if row.len() < 3 {
+                continue;
+            }
+            let source_id = &row[0];
+            let target_id = &row[1];
+            let relation_type = &row[2];
+            if !relation_scope_matches(source_id, target_id, project_code) {
+                continue;
+            }
+
+            let source_kind = match self.classify_existing_link_endpoint(source_id) {
+                Ok(kind) => kind,
+                Err(e) => {
+                    violations.push(format!("{}: {} -> {} ({})", relation_type, source_id, target_id, e));
                     continue;
                 }
-                let source_id = &row[0];
-                let target_id = &row[1];
-                if !relation_scope_matches(source_id, target_id, project_code) {
+            };
+            let target_kind = match self.classify_existing_link_endpoint(target_id) {
+                Ok(kind) => kind,
+                Err(e) => {
+                    violations.push(format!("{}: {} -> {} ({})", relation_type, source_id, target_id, e));
                     continue;
                 }
+            };
 
-                let source_kind = match self.classify_existing_link_endpoint(source_id) {
-                    Ok(kind) => kind,
-                    Err(e) => {
-                        violations.push(format!("{}: {} -> {} ({})", relation_type, source_id, target_id, e));
-                        continue;
-                    }
-                };
-                let target_kind = match self.classify_existing_link_endpoint(target_id) {
-                    Ok(kind) => kind,
-                    Err(e) => {
-                        violations.push(format!("{}: {} -> {} ({})", relation_type, source_id, target_id, e));
-                        continue;
-                    }
-                };
+            let Some(policy) =
+                relation_policy_for_pair(source_kind.label(), target_kind.label())
+            else {
+                violations.push(format!(
+                    "{}: {} -> {} (paire {} -> {} interdite)",
+                    relation_type,
+                    source_id,
+                    target_id,
+                    source_kind.label(),
+                    target_kind.label()
+                ));
+                continue;
+            };
 
-                let Some(policy) =
-                    relation_policy_for_pair(source_kind.label(), target_kind.label())
-                else {
-                    violations.push(format!(
-                        "{}: {} -> {} (paire {} -> {} interdite)",
-                        relation_type,
-                        source_id,
-                        target_id,
-                        source_kind.label(),
-                        target_kind.label()
-                    ));
-                    continue;
-                };
+            if !policy.allowed.iter().any(|allowed| *allowed == relation_type) {
+                violations.push(format!(
+                    "{}: {} -> {} (non autorisée pour {} -> {}; autorisées: {})",
+                    relation_type,
+                    source_id,
+                    target_id,
+                    source_kind.label(),
+                    target_kind.label(),
+                    policy.allowed.join(", ")
+                ));
+                continue;
+            }
 
-                if !policy.allowed.iter().any(|allowed| *allowed == relation_type) {
-                    violations.push(format!(
-                        "{}: {} -> {} (non autorisée pour {} -> {}; autorisées: {})",
-                        relation_type,
-                        source_id,
-                        target_id,
-                        source_kind.label(),
-                        target_kind.label(),
-                        policy.allowed.join(", ")
-                    ));
-                    continue;
-                }
-
-                if !policy.allow_multiple_types {
-                    exclusive_pairs
-                        .entry((source_id.clone(), target_id.clone()))
-                        .or_default()
-                        .insert(relation_type.to_string());
-                }
+            if !policy.allow_multiple_types {
+                exclusive_pairs
+                    .entry((source_id.clone(), target_id.clone()))
+                    .or_default()
+                    .insert(relation_type.to_string());
             }
         }
 
@@ -1980,14 +1524,14 @@ impl McpServer {
         let (project_slug, project_code) =
             self.resolve_canonical_project_identity_for_mutation(project_slug)?;
         let (prefix, reg_col, table, id_expr) = match kind {
-            "vision" => ("VIS", "last_vis", "soll.Vision", "id"),
-            "pillar" => ("PIL", "last_pil", "soll.Pillar", "id"),
-            "requirement" => ("REQ", "last_req", "soll.Requirement", "id"),
-            "concept" => ("CPT", "last_cpt", "soll.Concept", "id"),
-            "decision" => ("DEC", "last_dec", "soll.Decision", "id"),
-            "milestone" => ("MIL", "last_mil", "soll.Milestone", "id"),
-            "validation" => ("VAL", "last_val", "soll.Validation", "id"),
-            "stakeholder" => ("STK", "last_stk", "soll.Stakeholder", "id"),
+            "vision" => ("VIS", "last_vis", "soll.Node", "id"),
+            "pillar" => ("PIL", "last_pil", "soll.Node", "id"),
+            "requirement" => ("REQ", "last_req", "soll.Node", "id"),
+            "concept" => ("CPT", "last_cpt", "soll.Node", "id"),
+            "decision" => ("DEC", "last_dec", "soll.Node", "id"),
+            "milestone" => ("MIL", "last_mil", "soll.Node", "id"),
+            "validation" => ("VAL", "last_val", "soll.Node", "id"),
+            "stakeholder" => ("STK", "last_stk", "soll.Node", "id"),
             "preview" => ("PRV", "last_prv", "soll.RevisionPreview", "preview_id"),
             "revision" => ("REV", "last_rev", "soll.Revision", "revision_id"),
             _ => return Err(anyhow!("Unknown id kind")),
@@ -2142,10 +1686,10 @@ fn query_first_sql_cell(server: &McpServer, query: &str) -> Option<String> {
 impl McpServer {
     fn resolve_soll_id(&self, entity: &str, title: &str, logical_key: &str) -> Option<String> {
         let table = match entity {
-            "pillar" => "soll.Pillar",
-            "requirement" => "soll.Requirement",
-            "decision" => "soll.Decision",
-            "milestone" => "soll.Milestone",
+            "pillar" => "soll.Node",
+            "requirement" => "soll.Node",
+            "decision" => "soll.Node",
+            "milestone" => "soll.Node",
             _ => return None,
         };
 
@@ -2320,12 +1864,12 @@ impl McpServer {
         let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(25).max(1);
 
         let reqs = self.query_single_column(&format!(
-            "SELECT id || '|' || title || '|' || COALESCE(status,'') || '|' || COALESCE(priority,'') FROM soll.Requirement WHERE id LIKE 'REQ-{}-%' ORDER BY id DESC LIMIT {}",
+            "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Requirement' AND id LIKE 'REQ-{}-%' ORDER BY id DESC LIMIT {}",
             escape_sql(&project_code),
             limit
         )).unwrap_or_default();
         let decisions = self.query_single_column(&format!(
-            "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Decision WHERE id LIKE 'DEC-{}-%' ORDER BY id DESC LIMIT {}",
+            "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Decision' AND id LIKE 'DEC-{}-%' ORDER BY id DESC LIMIT {}",
             escape_sql(&project_code),
             limit
         )).unwrap_or_default();
@@ -2549,22 +2093,24 @@ impl McpServer {
         };
         let mut nodes = HashMap::new();
         let req_query = format!(
-            "SELECT r.id, r.title, COALESCE(r.status,''), COALESCE(r.priority,''), COUNT(t.id), COALESCE(r.acceptance_criteria,'')
-             FROM soll.Requirement r
+            "SELECT r.id, r.title, COALESCE(r.status,''), COALESCE(r.metadata,'{{}}'), COUNT(t.id)
+             FROM soll.Node r
              LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
-             WHERE r.id LIKE 'REQ-{}-%'
-             GROUP BY 1,2,3,4,6
+             WHERE r.type = 'Requirement' AND r.id LIKE 'REQ-{}-%'
+             GROUP BY 1,2,3,4
              ORDER BY r.id",
             escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&req_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
             for row in rows {
-                if row.len() < 6 {
+                if row.len() < 5 {
                     continue;
                 }
+                let meta: serde_json::Value = serde_json::from_str(&row[3]).unwrap_or(serde_json::json!({}));
+                let priority = meta.get("priority").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let criteria = meta.get("acceptance_criteria").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let evidence_count = row[4].parse::<usize>().unwrap_or(0);
-                let criteria = row[5].clone();
                 let status = row[2].clone();
                 let requirement_state =
                     requirement_state_from(status.as_str(), &criteria, evidence_count).to_string();
@@ -2576,7 +2122,7 @@ impl McpServer {
                         title: row[1].clone(),
                         entity_type: WorkPlanEntityType::Requirement,
                         status,
-                        priority: row[3].clone(),
+                        priority,
                         requirement_state: Some(requirement_state),
                         evidence_count,
                         descendants: 0,
@@ -2592,7 +2138,7 @@ impl McpServer {
         }
 
         let dec_query = format!(
-            "SELECT id, title, COALESCE(status,'') FROM soll.Decision WHERE id LIKE 'DEC-{}-%' ORDER BY id",
+            "SELECT id, title, COALESCE(status,'') FROM soll.Node WHERE type='Decision' AND id LIKE 'DEC-{}-%' ORDER BY id",
             escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&dec_query) {
@@ -2625,7 +2171,7 @@ impl McpServer {
         }
 
         let mil_query = format!(
-            "SELECT id, title, COALESCE(status,'') FROM soll.Milestone WHERE id LIKE 'MIL-{}-%' ORDER BY id",
+            "SELECT id, title, COALESCE(status,'') FROM soll.Node WHERE type='Milestone' AND id LIKE 'MIL-{}-%' ORDER BY id",
             escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&mil_query) {
@@ -2666,8 +2212,7 @@ impl McpServer {
         };
         let mut edges = Vec::new();
         let solves_query = format!(
-            "SELECT source_id, target_id FROM soll.SOLVES
-             WHERE source_id LIKE 'DEC-{}-%' AND target_id LIKE 'REQ-{}-%'",
+            "SELECT source_id, target_id FROM soll.Edge WHERE relation_type='SOLVES' AND source_id LIKE 'DEC-{}-%' AND target_id LIKE 'REQ-{}-%'",
             escape_sql(&project_code),
             escape_sql(&project_code)
         );
@@ -2681,9 +2226,7 @@ impl McpServer {
         }
 
         let belongs_query = format!(
-            "SELECT source_id, target_id FROM soll.BELONGS_TO
-             WHERE source_id LIKE 'REQ-{}-%'
-               AND (target_id LIKE 'REQ-{}-%' OR target_id LIKE 'MIL-{}-%')",
+            "SELECT source_id, target_id FROM soll.Edge WHERE relation_type='BELONGS_TO' AND source_id LIKE 'REQ-{}-%' AND (target_id LIKE 'REQ-{}-%' OR target_id LIKE 'MIL-{}-%')",
             escape_sql(&project_code),
             escape_sql(&project_code),
             escape_sql(&project_code)
@@ -2828,7 +2371,7 @@ impl McpServer {
         let project_code = self.resolve_project_code(project_slug).ok()?;
         let query = format!(
             "SELECT r.id, COALESCE(r.status,''), COALESCE(r.acceptance_criteria,''), COUNT(t.id)
-             FROM soll.Requirement r
+             FROM soll.Node r WHERE r.type='Requirement' AND
              LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
              WHERE r.id LIKE 'REQ-{}-%'
              GROUP BY 1,2,3
@@ -3013,10 +2556,10 @@ impl McpServer {
         let entity_id = op.get("entity_id").and_then(|v| v.as_str()).unwrap_or("");
 
         match (kind, entity) {
-            ("delete", "pillar") => self.graph_store.execute(&format!("DELETE FROM soll.Pillar WHERE id = '{}'", escape_sql(entity_id)))?,
-            ("delete", "requirement") => self.graph_store.execute(&format!("DELETE FROM soll.Requirement WHERE id = '{}'", escape_sql(entity_id)))?,
-            ("delete", "decision") => self.graph_store.execute(&format!("DELETE FROM soll.Decision WHERE id = '{}'", escape_sql(entity_id)))?,
-            ("delete", "milestone") => self.graph_store.execute(&format!("DELETE FROM soll.Milestone WHERE id = '{}'", escape_sql(entity_id)))?,
+            ("delete", "pillar") => self.graph_store.execute(&format!("DELETE FROM soll.Node WHERE type='Pillar' AND id = '{}'", escape_sql(entity_id)))?,
+            ("delete", "requirement") => self.graph_store.execute(&format!("DELETE FROM soll.Node WHERE type='Requirement' AND id = '{}'", escape_sql(entity_id)))?,
+            ("delete", "decision") => self.graph_store.execute(&format!("DELETE FROM soll.Node WHERE type='Decision' AND id = '{}'", escape_sql(entity_id)))?,
+            ("delete", "milestone") => self.graph_store.execute(&format!("DELETE FROM soll.Node WHERE type='Milestone' AND id = '{}'", escape_sql(entity_id)))?,
             ("restore", _) => {
                 let before = op.get("before").cloned().unwrap_or(json!({}));
                 let mut data = before;
@@ -3033,10 +2576,10 @@ impl McpServer {
 
     fn snapshot_entity(&self, entity: &str, entity_id: &str) -> Option<Value> {
         let query = match entity {
-            "pillar" => format!("SELECT title, description, metadata FROM soll.Pillar WHERE id = '{}'", escape_sql(entity_id)),
-            "requirement" => format!("SELECT title, description, status, priority, metadata, owner, acceptance_criteria, evidence_refs FROM soll.Requirement WHERE id = '{}'", escape_sql(entity_id)),
-            "decision" => format!("SELECT title, description, context, rationale, status, metadata, supersedes_decision_id, impact_scope FROM soll.Decision WHERE id = '{}'", escape_sql(entity_id)),
-            "milestone" => format!("SELECT title, status, metadata FROM soll.Milestone WHERE id = '{}'", escape_sql(entity_id)),
+            "pillar" => format!("SELECT title, description, metadata FROM soll.Node WHERE type='Pillar' AND id = '{}'", escape_sql(entity_id)),
+            "requirement" => format!("SELECT title, description, status, metadata FROM soll.Node WHERE type='Requirement' AND id = '{}'", escape_sql(entity_id)),
+            "decision" => format!("SELECT title, description, status, metadata FROM soll.Node WHERE type='Decision' AND id = '{}'", escape_sql(entity_id)),
+            "milestone" => format!("SELECT title, status, metadata FROM soll.Node WHERE type='Milestone' AND id = '{}'", escape_sql(entity_id)),
             _ => return None,
         };
         let raw = self.graph_store.query_json(&query).ok()?;

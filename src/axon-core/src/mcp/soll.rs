@@ -133,175 +133,81 @@ pub(crate) fn find_latest_soll_export() -> Option<String> {
 pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSollExport, String> {
     let mut parsed = ParsedSollExport::default();
     let mut lines = markdown.lines().peekable();
-    let mut section = "";
+    let mut current_type = String::new();
 
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
-
-        if trimmed.starts_with("## ") {
-            section = trimmed;
+        
+        if trimmed.starts_with("## Entités : ") {
+            current_type = trimmed.strip_prefix("## Entités : ").unwrap_or("").trim().to_string();
             continue;
         }
 
-        match section {
-            "## 1. Vision & Objectifs Stratégiques" if trimmed.starts_with("### ") => {
-                let raw = trimmed.trim_start_matches("### ").trim();
-                let title = raw
-                    .split_once(" - ")
-                    .map(|(_, title)| title.trim().to_string())
-                    .unwrap_or_else(|| raw.to_string());
-                let description = lines
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .trim_start_matches("**Description:**")
-                    .trim()
-                    .to_string();
-                let goal = lines
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .trim_start_matches("**Goal:**")
-                    .trim()
-                    .to_string();
-                let metadata_line = lines.next().unwrap_or("").trim();
-                let metadata = metadata_line
-                    .strip_prefix("**Meta:**")
-                    .map(|s| s.trim().trim_matches('`').to_string());
-                parsed.vision.push(ParsedVision {
-                    title,
-                    description,
-                    goal,
-                    metadata,
-                });
-            }
-            "## 2. Piliers d'Architecture" if trimmed.starts_with("* **") => {
-                if let Some((id, rest)) = parse_bold_bullet(trimmed) {
-                    let (title, description) = split_title_paren(rest);
-                    let metadata = parse_optional_metadata_line(&mut lines, "Meta:");
-                    parsed.pillars.push(ParsedPillar {
-                        id,
-                        title,
-                        description,
-                        metadata,
+        if trimmed.starts_with("## Topologie") {
+            current_type = "Topology".to_string();
+            continue;
+        }
+
+        if current_type == "Topology" && trimmed.contains(" -- ") && trimmed.contains(" --> ") {
+            // "  source -- relation --> target;"
+            let parts: Vec<&str> = trimmed.split(" -- ").collect();
+            if parts.len() == 2 {
+                let source_id = parts[0].trim().to_string();
+                let right_parts: Vec<&str> = parts[1].split(" --> ").collect();
+                if right_parts.len() == 2 {
+                    let relation_type = right_parts[0].trim().to_string();
+                    let target_id = right_parts[1].trim_end_matches(';').trim().to_string();
+                    parsed.relations.push(ParsedRelation {
+                        relation_type,
+                        source_id,
+                        target_id,
                     });
                 }
             }
-            "## 2b. Concepts" if trimmed.starts_with("* **") => {
-                if let Some((name, rest)) = parse_bold_bullet(trimmed) {
-                    let (id, display_name) = name
-                        .split_once(':')
-                        .map(|(id, display)| (id.trim().to_string(), display.trim().to_string()))
-                        .unwrap_or_else(|| (name.clone(), name.clone()));
-                    let (explanation, rationale) = split_title_paren(rest);
-                    let metadata = parse_optional_metadata_line(&mut lines, "Meta:");
-                    parsed.concepts.push(ParsedConcept {
-                        id,
-                        name: display_name,
-                        explanation,
-                        rationale,
-                        metadata,
-                    });
+            continue;
+        }
+
+        if trimmed.starts_with("### ") {
+            let raw = trimmed.strip_prefix("### ").unwrap_or("").trim();
+            let (id, title) = if let Some((id_str, title_str)) = raw.split_once(" - ") {
+                (id_str.trim().to_string(), title_str.trim().to_string())
+            } else if let Some(id_str) = raw.strip_suffix(" -") {
+                (id_str.trim().to_string(), "".to_string())
+            } else {
+                (raw.to_string(), "".to_string())
+            };
+
+            let mut description = String::new();
+            let mut status = String::new();
+            let mut metadata = None;
+
+            while let Some(next) = lines.peek() {
+                let next_trim = next.trim();
+                if next_trim.starts_with("### ") || next_trim.starts_with("## ") {
+                    break;
                 }
-            }
-            "## 3. Jalons & Roadmap (Milestones)" if trimmed.starts_with("### ") => {
-                let raw = trimmed.trim_start_matches("### ").trim();
-                let mut parts = raw.splitn(2, " : ");
-                let id = parts.next().unwrap_or("").trim().to_string();
-                let title = parts.next().unwrap_or("").trim().to_string();
-                let status_line = lines.next().unwrap_or("").trim();
-                let status = status_line
-                    .trim_start_matches("*Statut :*")
-                    .trim()
-                    .trim_matches('`')
-                    .to_string();
-                let metadata = parse_optional_metadata_line(&mut lines, "*Meta :*");
-                parsed.milestones.push(ParsedMilestone {
-                    id,
-                    title,
-                    status,
-                    metadata,
-                });
-            }
-            "## 4. Exigences & Rayon d'Impact (Requirements)" if trimmed.starts_with("### ") => {
-                let raw = trimmed.trim_start_matches("### ").trim();
-                let mut parts = raw.splitn(2, " - ");
-                let id = parts.next().unwrap_or("").trim().to_string();
-                let title = parts.next().unwrap_or("").trim().to_string();
-                let priority_line = lines.next().unwrap_or("").trim();
-                let description_line = lines.next().unwrap_or("").trim();
-                let priority = priority_line
-                    .trim_start_matches("*Priorité :*")
-                    .trim()
-                    .trim_matches('`')
-                    .to_string();
-                let description = description_line
-                    .trim_start_matches("*Description :*")
-                    .trim()
-                    .to_string();
-                let status = parse_optional_backticked_line(&mut lines, "*Statut :*");
-                let metadata = parse_optional_metadata_line(&mut lines, "*Meta :*");
-                parsed.requirements.push(ParsedRequirement {
-                    id,
-                    title,
-                    priority,
-                    description,
-                    status,
-                    metadata,
-                });
-            }
-            "## 5. Registre des Décisions (ADR)" if trimmed.starts_with("### ") => {
-                let id = trimmed.trim_start_matches("### ").trim().to_string();
-                let title = lines
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .trim_start_matches("**Titre :**")
-                    .trim()
-                    .to_string();
-                let status = lines
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .trim_start_matches("**Statut :**")
-                    .trim()
-                    .trim_matches('`')
-                    .to_string();
-                let context = parse_optional_plain_line(&mut lines, "**Contexte :**");
-                let description = parse_optional_plain_line(&mut lines, "**Description :**");
-                let rationale = lines
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .trim_start_matches("**Rationnel :**")
-                    .trim()
-                    .to_string();
-                let metadata = parse_optional_metadata_line(&mut lines, "**Meta :**");
-                parsed.decisions.push(ParsedDecision {
-                    id,
-                    title,
-                    status,
-                    description,
-                    context,
-                    rationale,
-                    metadata,
-                });
-            }
-            "## 6. Preuves de Validation & Witness" if trimmed.starts_with('*') => {
-                if let Some(validation) = parse_validation_line(trimmed) {
-                    let metadata = parse_optional_metadata_line(&mut lines, "Meta:");
-                    parsed.validations.push(ParsedValidation {
-                        metadata,
-                        ..validation
-                    });
+                
+                if next_trim.starts_with("**Description:**") {
+                    description = next_trim.strip_prefix("**Description:**").unwrap_or("").trim().to_string();
+                } else if next_trim.starts_with("**Status:**") {
+                    status = next_trim.strip_prefix("**Status:**").unwrap_or("").trim().to_string();
+                } else if next_trim.starts_with("**Meta:**") {
+                    let meta_str = next_trim.strip_prefix("**Meta:**").unwrap_or("").trim().trim_matches('`').to_string();
+                    metadata = Some(meta_str);
                 }
+                lines.next();
             }
-            "## 7. Liens de Traçabilité SOLL" if trimmed.starts_with('*') => {
-                if let Some(relation) = parse_relation_line(trimmed) {
-                    parsed.relations.push(relation);
-                }
+
+            match current_type.as_str() {
+                "Vision" => parsed.vision.push(ParsedVision { title, description, goal: "".to_string(), metadata }),
+                "Pillar" => parsed.pillars.push(ParsedPillar { id, title, description, metadata }),
+                "Requirement" => parsed.requirements.push(ParsedRequirement { id, title, priority: "".to_string(), description, status: Some(status), metadata }),
+                "Concept" => parsed.concepts.push(ParsedConcept { id, name: title, explanation: description, rationale: "".to_string(), metadata }),
+                "Decision" => parsed.decisions.push(ParsedDecision { id, title, status, description: Some(description), context: None, rationale: "".to_string(), metadata }),
+                "Milestone" => parsed.milestones.push(ParsedMilestone { id, title, status, metadata }),
+                "Validation" => parsed.validations.push(ParsedValidation { id, result: status, method: "".to_string(), timestamp: 0, metadata }),
+                _ => {}
             }
-            _ => {}
         }
     }
 
@@ -319,7 +225,6 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
 
     Ok(parsed)
 }
-
 fn parse_bold_bullet(line: &str) -> Option<(String, String)> {
     let rest = line.trim_start_matches('*').trim();
     let rest = rest.strip_prefix("**")?;

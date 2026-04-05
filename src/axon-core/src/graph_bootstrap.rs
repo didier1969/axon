@@ -328,48 +328,18 @@ impl GraphStore {
         )?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_slug VARCHAR PRIMARY KEY, project_code VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Vision (id VARCHAR PRIMARY KEY DEFAULT 'VIS-AXO-001', project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, goal VARCHAR, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Pillar (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Requirement (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, status VARCHAR, priority VARCHAR, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Decision (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, context VARCHAR, rationale VARCHAR, status VARCHAR, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Milestone (id VARCHAR PRIMARY KEY, title VARCHAR, status VARCHAR, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Validation (id VARCHAR PRIMARY KEY, method VARCHAR, result VARCHAR, timestamp BIGINT, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Concept (id VARCHAR PRIMARY KEY, project_slug VARCHAR, project_code VARCHAR, name VARCHAR, explanation VARCHAR, rationale VARCHAR, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Stakeholder (id VARCHAR PRIMARY KEY, project_slug VARCHAR, project_code VARCHAR, name VARCHAR, role VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_slug VARCHAR, payload VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS soll.EPITOMIZES (source_id VARCHAR, target_id VARCHAR)",
-        )?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS soll.BELONGS_TO (source_id VARCHAR, target_id VARCHAR)",
-        )?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS soll.EXPLAINS (source_id VARCHAR, target_id VARCHAR)",
-        )?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS soll.SOLVES (source_id VARCHAR, target_id VARCHAR)",
-        )?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS soll.TARGETS (source_id VARCHAR, target_id VARCHAR)",
-        )?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS soll.VERIFIES (source_id VARCHAR, target_id VARCHAR)",
-        )?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS soll.ORIGINATES (source_id VARCHAR, target_id VARCHAR)",
-        )?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS soll.SUPERSEDES (source_id VARCHAR, target_id VARCHAR)",
-        )?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS soll.CONTRIBUTES_TO (source_id VARCHAR, target_id VARCHAR)",
-        )?;
-        self.execute(
-            "CREATE TABLE IF NOT EXISTS soll.REFINES (source_id VARCHAR, target_id VARCHAR)",
-        )?;
         Ok(())
     }
 
@@ -444,6 +414,16 @@ impl GraphStore {
     fn ensure_additive_soll_schema(&self) -> Result<()> {
         self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_slug VARCHAR PRIMARY KEY, project_code VARCHAR)")?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx ON soll.ProjectCodeRegistry(project_code)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Edge (source_id VARCHAR, target_id VARCHAR, relation_type VARCHAR, metadata VARCHAR, PRIMARY KEY (source_id, target_id, relation_type))")?;
+        
+        // Performance Indexes
+        self.execute("CREATE INDEX IF NOT EXISTS soll_node_type_idx ON soll.Node(type)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_node_project_code_idx ON soll.Node(project_code)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_edge_source_idx ON soll.Edge(source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_edge_target_idx ON soll.Edge(target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_edge_relation_idx ON soll.Edge(relation_type)")?;
+
         self.execute(
             "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_pil BIGINT DEFAULT 0",
         )?;
@@ -451,44 +431,12 @@ impl GraphStore {
         self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_stk BIGINT DEFAULT 0")?;
         self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_prv BIGINT DEFAULT 0")?;
         self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_rev BIGINT DEFAULT 0")?;
-        self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS goal VARCHAR")?;
-        self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
-        self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS project_slug VARCHAR")?;
-        self.execute("ALTER TABLE soll.Vision ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
 
-        self.execute("ALTER TABLE soll.Pillar ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
-        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS status VARCHAR")?;
-        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS priority VARCHAR")?;
-        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
-        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS owner VARCHAR")?;
-        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS acceptance_criteria VARCHAR")?;
-        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS evidence_refs VARCHAR")?;
-        self.execute("ALTER TABLE soll.Requirement ADD COLUMN IF NOT EXISTS updated_at BIGINT")?;
-        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS description VARCHAR")?;
-        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS context VARCHAR")?;
-        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS rationale VARCHAR")?;
-        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
-        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS supersedes_decision_id VARCHAR")?;
-        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS impact_scope VARCHAR")?;
-        self.execute("ALTER TABLE soll.Decision ADD COLUMN IF NOT EXISTS updated_at BIGINT")?;
-        self.execute("ALTER TABLE soll.Milestone ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
-        self.execute("ALTER TABLE soll.Validation ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
-        self.execute("ALTER TABLE soll.Concept ADD COLUMN IF NOT EXISTS id VARCHAR")?;
-        self.execute("ALTER TABLE soll.Concept ADD COLUMN IF NOT EXISTS project_slug VARCHAR")?;
-        self.execute("ALTER TABLE soll.Concept ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
-        self.execute("ALTER TABLE soll.Concept ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
-        self.execute("ALTER TABLE soll.Stakeholder ADD COLUMN IF NOT EXISTS id VARCHAR")?;
-        self.execute("ALTER TABLE soll.Stakeholder ADD COLUMN IF NOT EXISTS project_slug VARCHAR")?;
-        self.execute("ALTER TABLE soll.Stakeholder ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
-        self.execute("ALTER TABLE soll.Stakeholder ADD COLUMN IF NOT EXISTS metadata VARCHAR")?;
-        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_concept_id_idx ON soll.Concept(id)")?;
-        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_stakeholder_id_idx ON soll.Stakeholder(id)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_slug VARCHAR, payload VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
         self.seed_project_code_registry()?;
-        self.migrate_canonical_soll_ids()?;
         Ok(())
     }
 
@@ -692,9 +640,9 @@ impl GraphStore {
 
     fn migrate_concepts_to_server_ids(&self) -> Result<()> {
         let raw = self.query_json(
-            "SELECT COALESCE(id,''), COALESCE(project_slug,''), COALESCE(project_code,''), name
-             FROM soll.Concept
-             ORDER BY name",
+            "SELECT COALESCE(id,''), COALESCE(project_slug,''), COALESCE(project_code,''), title
+             FROM soll.Node WHERE type='Concept'
+             ORDER BY title",
         )?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
         for row in rows {
@@ -737,7 +685,7 @@ impl GraphStore {
             if new_id != source_id && self.table_has_id("soll.Concept", &new_id)? {
                 self.replace_soll_id_references(&source_id, &new_id)?;
                 self.execute_param(
-                    "DELETE FROM soll.Concept WHERE COALESCE(id,'') = ? AND name = ?",
+                    "DELETE FROM soll.Node WHERE type='Concept' AND COALESCE(id,'') = ? AND title = ?",
                     &serde_json::json!([existing_id, stored_name]),
                 )?;
             } else if new_id == existing_id {
@@ -771,9 +719,9 @@ impl GraphStore {
 
     fn migrate_stakeholders_to_server_ids(&self) -> Result<()> {
         let raw = self.query_json(
-            "SELECT COALESCE(id,''), COALESCE(project_slug,''), COALESCE(project_code,''), name
-             FROM soll.Stakeholder
-             ORDER BY name",
+            "SELECT COALESCE(id,''), COALESCE(project_slug,''), COALESCE(project_code,''), title
+             FROM soll.Node WHERE type='Stakeholder'
+             ORDER BY title",
         )?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
         let mut next_by_code: HashMap<String, u64> = HashMap::new();
@@ -832,7 +780,7 @@ impl GraphStore {
             if new_id != source_id && self.table_has_id("soll.Stakeholder", &new_id)? {
                 self.replace_soll_id_references(&source_id, &new_id)?;
                 self.execute_param(
-                    "DELETE FROM soll.Stakeholder WHERE COALESCE(id,'') = ? AND name = ?",
+                    "DELETE FROM soll.Node WHERE type='Stakeholder' AND COALESCE(id,'') = ? AND title = ?",
                     &serde_json::json!([existing_id, name]),
                 )?;
             } else if new_id == existing_id {
