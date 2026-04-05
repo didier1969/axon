@@ -266,14 +266,23 @@ Minimal example:
 
 On success, `soll_apply_plan` returns an `identity_mapping` dictionary inside the `data` field bridging your `logical_key` inputs to the generated Canonical IDs (e.g. `{"req-runtime-authority": "REQ-AXO-001"}`).
 
-## SOLL/IST Coherence Guidance
+## SOLL/IST Coherence Guidance & IST-Driven Execution (Mandatory)
 
-Use links to keep intent and runtime aligned:
-- `SUBSTANTIATES`: SOLL concept/requirement ↔ IST symbol
-- `IMPACTS`: decision/requirement impact scope to runtime entities
+**IST-Driven Execution (Observation before Action):**
+Before executing any implementation plan task, writing code, or modifying SOLL intent, the AI Agent MUST query the real code state (Implementation Structure Truth - IST) using `mcp_axon_query` or `mcp_axon_inspect` on the target files or symbols. 
 
-Practical rule:
-- if code changed and intention changed, update SOLL in the same delivery wave.
+1. **Query IST:** Run `mcp_axon_query` or `mcp_axon_inspect` on the component you intend to modify.
+2. **Verify Drift:** Compare the actual IST result with the targeted SOLL requirement/decision or the static implementation plan. Explicitly formulate the gap between the plan and the real code before writing any new code.
+3. **Plan & Execute:** Adjust your approach based on reality and execute the code changes (TDD Phase).
+4. **Wire (Traceability):** Once the code is written and tests are passing (Green), the Agent MUST link the newly created or modified IST symbol back to its originating SOLL decision or requirement using the `SUBSTANTIATES` relation via `soll_manager`.
+
+**Use links to keep intent and runtime aligned:**
+- `SUBSTANTIATES`: SOLL concept/requirement/decision ↔ IST symbol (e.g., The class `PaymentGateway` SUBSTANTIATES the decision `DEC-PAY-001`).
+- `IMPACTS`: decision/requirement impact scope to runtime entities.
+
+**Practical rule:**
+- If code changed and intention changed, update SOLL in the same delivery wave. 
+- Always trace back the final IST symbol to its SOLL origin using `soll_manager link`. An implementation is only considered complete when the IST symbol is mathematically linked to the SOLL graph.
 
 ## Guardrails
 
