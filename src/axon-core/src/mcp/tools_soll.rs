@@ -681,6 +681,7 @@ impl McpServer {
                     "milestone" => "Milestone",
                     "stakeholder" => "Stakeholder",
                     "validation" => "Validation",
+                    "guideline" => "Guideline",
                     _ => return Some(json!({ "content": [{ "type": "text", "text": "Unknown entity" }], "isError": true })),
                 };
 
@@ -1206,6 +1207,25 @@ graph TD;
                 return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore concept error: {}", e) }], "isError": true }));
             }
             restored.concepts += 1;
+        }
+
+        for gui in restore.guidelines {
+            let mut meta_out: serde_json::Value = gui.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            if let Err(e) = self.graph_store.execute_param(
+                "INSERT INTO soll.Node (id, type, title, description, status, metadata) 
+                 VALUES ($id, 'Guideline', $title, $description, $status, $metadata)
+                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata",
+                &serde_json::json!({
+                    "id": gui.id,
+                    "title": gui.title,
+                    "description": gui.description,
+                    "status": gui.status,
+                    "metadata": meta_out.to_string()
+                }),
+            ) {
+                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore guideline error: {}", e) }], "isError": true }));
+            }
+            restored.guidelines += 1;
         }
 
         for rel in restore.relations {
@@ -2494,7 +2514,7 @@ impl McpServer {
         
         // 1. Entities
         if let Some(plan) = args.get("plan") {
-            for entity in ["pillar", "requirement", "decision", "milestone", "vision", "concept"] {
+            for entity in ["pillar", "requirement", "decision", "milestone", "vision", "concept", "stakeholder", "validation", "guideline"] {
                 if let Some(items) = plan.get(format!("{}s", entity)).and_then(|v| v.as_array()) {
                     for item in items {
                         if let Some(obj) = item.as_object() {
@@ -2522,8 +2542,11 @@ impl McpServer {
             }
         }
         
-        // 2. Relations
-        if let Some(relations) = args.get("relations").and_then(|v| v.as_array()) {
+        // 2. Relations (Can be root-level args or nested inside plan)
+        let relations_array = args.get("relations").and_then(|v| v.as_array())
+            .or_else(|| args.get("plan").and_then(|p| p.get("relations")).and_then(|v| v.as_array()));
+
+        if let Some(relations) = relations_array {
             for rel in relations {
                 if let Some(obj) = rel.as_object() {
                     operations.push(json!({

@@ -1,9 +1,9 @@
 ---
-name: axon-digital-thread
-description: Gouvernance SOLL/IST opérationnelle via MCP Axon. Utiliser pour structurer Vision/Pillar/Requirement/Decision/Concept, appliquer des plans SOLL v2 (dry-run -> commit), attacher des preuves et vérifier la couverture.
+name: axon-soll-ist-governance
+description: Gouvernance SOLL/IST opérationnelle via MCP Axon. Utiliser pour structurer Vision/Pillar/Requirement/Decision/Concept/Guideline, appliquer des plans SOLL v2 (dry-run -> commit), attacher des preuves et vérifier la couverture.
 ---
 
-# Axon Digital Thread (SOLL v2 via MCP)
+# Axon SOLL/IST Governance (MCP)
 
 ## Quand utiliser ce skill
 - Quand il faut gouverner le fil numérique SOLL/IST d’un projet Axon.

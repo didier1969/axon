@@ -9,6 +9,7 @@ pub(crate) struct SollRestoreCounts {
     pub requirements: usize,
     pub decisions: usize,
     pub validations: usize,
+    pub guidelines: usize,
     pub relations: usize,
 }
 
@@ -22,6 +23,16 @@ pub(crate) struct ParsedSollExport {
     pub decisions: Vec<ParsedDecision>,
     pub validations: Vec<ParsedValidation>,
     pub relations: Vec<ParsedRelation>,
+    pub guidelines: Vec<ParsedGuideline>,
+}
+
+
+pub(crate) struct ParsedGuideline {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    pub metadata: Option<String>,
 }
 
 pub(crate) struct ParsedVision {
@@ -206,6 +217,7 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
                 "Decision" => parsed.decisions.push(ParsedDecision { id, title, status, description: Some(description), context: None, rationale: "".to_string(), metadata }),
                 "Milestone" => parsed.milestones.push(ParsedMilestone { id, title, status, metadata }),
                 "Validation" => parsed.validations.push(ParsedValidation { id, result: status, method: "".to_string(), timestamp: 0, metadata }),
+                "Guideline" => parsed.guidelines.push(ParsedGuideline { id, title, description, status, metadata }),
                 _ => {}
             }
         }
@@ -219,6 +231,7 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
         && parsed.decisions.is_empty()
         && parsed.validations.is_empty()
         && parsed.relations.is_empty()
+        && parsed.guidelines.is_empty()
     {
         return Err("no restorable SOLL entities found in export".to_string());
     }
