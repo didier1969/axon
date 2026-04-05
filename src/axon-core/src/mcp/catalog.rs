@@ -54,13 +54,59 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "action": { "type": "string", "enum": ["create", "update", "link"], "description": "L'opération à effectuer." },
-                        "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation"], "description": "Le type d'objet concerné." },
+                        "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation", "guideline"], "description": "Le type d'objet concerné." },
                         "data": {
                             "type": "object",
-                            "description": "Données JSON. \n- create (vision/pillar/requirement/concept/decision/milestone/stakeholder/validation) avec `project_slug`; le serveur retourne l'ID canonique `TYPE-CODE-NNN`.\n- update (id canonique requis, status/desc/etc).\n- link (source_id, target_id canoniques)."
+                            "description": "Données JSON. \n- create (vision/pillar/requirement/concept/decision/milestone/stakeholder/validation/guideline) avec `project_slug`; le serveur retourne l'ID canonique `TYPE-CODE-NNN`.\n- update (id canonique requis, status/desc/etc).\n- link (source_id, target_id canoniques)."
                         }
                     },
                     "required": ["action", "entity", "data"]
+                }
+            },
+            {
+                "name": "axon_init_project",
+                "description": "[DX/SOLL] Initialise un nouveau projet Axon. Reçoit un Document de Concept optionnel, charge les règles globales et lance le dialogue d'héritage.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_name": { "type": "string", "description": "Le nom du projet (ex: BookingSystem)." },
+                        "project_slug": { "type": "string", "description": "Le slug en 3 lettres (ex: BKS)." },
+                        "concept_document_url_or_text": { "type": "string", "description": "Optionnel: le texte ou lien vers la vision du projet." }
+                    },
+                    "required": ["project_name", "project_slug"]
+                }
+            },
+            {
+                "name": "axon_apply_guidelines",
+                "description": "[DX/SOLL] Instancie les règles globales sélectionnées pour un projet spécifique.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_slug": { "type": "string", "description": "Le slug en 3 lettres du projet cible." },
+                        "accepted_global_rule_ids": { 
+                            "type": "array", 
+                            "items": { "type": "string" },
+                            "description": "Liste des IDs canoniques des règles globales à appliquer (ex: GUI-PRO-001)."
+                        }
+                    },
+                    "required": ["project_slug", "accepted_global_rule_ids"]
+                }
+            },
+            {
+                "name": "axon_commit_work",
+                "description": "[DX/SOLL] Outil OBLIGATOIRE pour valider et commiter le travail. Évalue les fichiers modifiés contre les Guidelines SOLL. Ne JAMAIS utiliser git commit via shell.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "diff_paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Liste des chemins de fichiers modifiés."
+                        },
+                        "message": { "type": "string", "description": "Message de commit (Conventional Commits)." },
+                        "dry_run": { "type": "boolean", "description": "Si true, valide uniquement sans commiter." }
+                    },
+                    "required": ["diff_paths", "message"]
                 }
             },
             {

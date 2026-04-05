@@ -326,7 +326,8 @@ impl GraphStore {
         self.execute(
             "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR)",
         )?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_gui BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
+        let _ = self.execute("ALTER TABLE soll.Registry ADD COLUMN last_gui BIGINT DEFAULT 0");
         self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_slug VARCHAR PRIMARY KEY, project_code VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
@@ -412,6 +413,7 @@ impl GraphStore {
     }
 
     fn ensure_additive_soll_schema(&self) -> Result<()> {
+        let _ = self.execute("ALTER TABLE soll.Registry ADD COLUMN last_gui BIGINT DEFAULT 0");
         self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_slug VARCHAR PRIMARY KEY, project_code VARCHAR)")?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx ON soll.ProjectCodeRegistry(project_code)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
@@ -437,6 +439,35 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_slug VARCHAR, payload VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
         self.seed_project_code_registry()?;
+        self.seed_global_guidelines()?;
+        Ok(())
+    }
+
+
+    fn seed_global_guidelines(&self) -> Result<()> {
+        let guidelines = [
+            (
+                "GUI-PRO-001",
+                "TDD Obligatoire",
+                "Les tests doivent être écrits avant ou avec le code source.",
+                "{\"phase\": \"pre-code\", \"trigger_path\": \"src/axon-core/src/*\", \"required_path\": \"tests.rs\", \"enforcement\": \"strict\"}"
+            ),
+            (
+                "GUI-PRO-002",
+                "Documentation MCP",
+                "Toute modification de src/mcp/tools_*.rs nécessite la mise à jour de SKILL.md",
+                "{\"phase\": \"post-code\", \"trigger_path\": \"src/axon-core/src/mcp/tools_*\", \"required_path\": \"SKILL.md\", \"enforcement\": \"strict\"}"
+            )
+        ];
+
+        for (id, title, desc, meta) in guidelines.iter() {
+            let _ = self.execute_param(
+                "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata) 
+                 VALUES (?, 'Guideline', 'GLOBAL', 'PRO', ?, ?, 'active', ?)
+                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, metadata = EXCLUDED.metadata",
+                &serde_json::json!([id, title, desc, meta])
+            );
+        }
         Ok(())
     }
 

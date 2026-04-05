@@ -113,7 +113,7 @@ fn relation_table_name(relation_type: &str) -> Option<&'static str> {
 
 fn soll_entity_table_name(prefix: &str) -> Option<&'static str> {
     match prefix {
-        "VIS" | "PIL" | "REQ" | "CPT" | "DEC" | "MIL" | "VAL" | "STK" => Some("soll.Node"),
+        "VIS" | "PIL" | "REQ" | "CPT" | "DEC" | "MIL" | "VAL" | "STK" | "GUI" => Some("soll.Node"),
         _ => None,
     }
 }
@@ -1532,14 +1532,15 @@ graph TD;
             "milestone" => ("MIL", "last_mil", "soll.Node", "id"),
             "validation" => ("VAL", "last_val", "soll.Node", "id"),
             "stakeholder" => ("STK", "last_stk", "soll.Node", "id"),
+            "guideline" => ("GUI", "last_gui", "soll.Node", "id"),
             "preview" => ("PRV", "last_prv", "soll.RevisionPreview", "preview_id"),
             "revision" => ("REV", "last_rev", "soll.Revision", "revision_id"),
             _ => return Err(anyhow!("Unknown id kind")),
         };
 
         self.graph_store.execute_param(
-            "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_prv, last_rev) \
-             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING",
+            "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev) \
+             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING",
             &json!([project_slug]),
         )?;
 
@@ -2580,6 +2581,7 @@ impl McpServer {
             "requirement" => format!("SELECT title, description, status, metadata FROM soll.Node WHERE type='Requirement' AND id = '{}'", escape_sql(entity_id)),
             "decision" => format!("SELECT title, description, status, metadata FROM soll.Node WHERE type='Decision' AND id = '{}'", escape_sql(entity_id)),
             "milestone" => format!("SELECT title, status, metadata FROM soll.Node WHERE type='Milestone' AND id = '{}'", escape_sql(entity_id)),
+            "guideline" => format!("SELECT title, description, status, metadata FROM soll.Node WHERE type='Guideline' AND id = '{}'", escape_sql(entity_id)),
             _ => return None,
         };
         let raw = self.graph_store.query_json(&query).ok()?;
@@ -2618,6 +2620,180 @@ impl McpServer {
             })),
             _ => None,
         }
+    }
+
+    pub(crate) fn axon_commit_work(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+        let diff_paths = args.get("diff_paths")?.as_array()?;
+        let message = args.get("message")?.as_str()?;
+        let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        // Extract guidelines
+        let rows_raw = self.graph_store.query_json(
+            "SELECT id, title, description, metadata FROM soll.Node WHERE type='Guideline' AND status='active'"
+        ).unwrap_or_else(|_| "[]".to_string());
+        
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+        
+        let mut violations = Vec::new();
+
+        for row in rows {
+            if row.len() < 4 { continue; }
+            let id = &row[0];
+            let meta: serde_json::Value = serde_json::from_str(&row[3]).unwrap_or_else(|_| serde_json::json!({}));
+            
+            let trigger_path = meta.get("trigger_path").and_then(|v| v.as_str()).unwrap_or("");
+            let required_path = meta.get("required_path").and_then(|v| v.as_str()).unwrap_or("");
+            let enforcement = meta.get("enforcement").and_then(|v| v.as_str()).unwrap_or("");
+
+            if trigger_path.is_empty() || required_path.is_empty() || enforcement != "strict" {
+                continue;
+            }
+
+            // Check if any diff_path matches trigger_path
+            let trigger_clean = trigger_path.replace("*", "");
+            let triggered = diff_paths.iter().any(|p| {
+                if let Some(path_str) = p.as_str() {
+                    path_str.contains(&trigger_clean)
+                } else {
+                    false
+                }
+            });
+
+            if triggered {
+                // Check if any diff_path matches required_path
+                let satisfied = diff_paths.iter().any(|p| {
+                    if let Some(path_str) = p.as_str() {
+                        path_str.contains(required_path)
+                    } else {
+                        false
+                    }
+                });
+
+                if !satisfied {
+                    let phase = meta.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+                    let phase_str = if phase.is_empty() { "".to_string() } else { format!(" [Phase: {}]", phase) };
+                    violations.push(serde_json::json!({
+                        "rule": format!("{} - {}", id, row[1]),
+                        "diagnostic": format!("Le chemin modifié déclenche la règle {}{}, qui exige que le fichier requis '{}' soit modifié.", id, phase_str, required_path),
+                        "remediation_plan": format!("1. Mettez à jour le fichier '{}'.\n2. Rappelez axon_commit_work.", required_path)
+                    }));
+                }
+            }
+        }
+
+        if !violations.is_empty() {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Violation de {}\n\nVoici le remediation_plan:\n{}", violations[0]["rule"], violations[0]["remediation_plan"]) }],
+                "isError": true,
+                "data": { "violations": violations }
+            }));
+        }
+
+        if dry_run {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Validation réussie (Dry Run). Aucun commit effectué. Le message '{}' est valide.", message) }]
+            }));
+        }
+
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": format!("Validation réussie. Commit effectué avec le message: {}", message) }]
+        }))
+    }
+
+    pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+        let project_name = args.get("project_name")?.as_str()?;
+        let project_slug = args.get("project_slug")?.as_str()?;
+        let concept_text = args.get("concept_document_url_or_text").and_then(|v| v.as_str());
+
+        // 1. Register project
+        if let Err(e) = self.graph_store.sync_project_code_registry_entry(project_slug, project_slug) {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],
+                "isError": true
+            }));
+        }
+
+        // 2. Fetch global guidelines
+        let rows_raw = self.graph_store.query_json(
+            "SELECT id, title, description, metadata FROM soll.Node WHERE type='Guideline' AND project_slug='GLOBAL'"
+        ).unwrap_or_else(|_| "[]".to_string());
+        
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+        
+        let mut rules_text = String::new();
+        for row in rows {
+            if row.len() >= 3 {
+                rules_text.push_str(&format!("- **{}**: {} ({})\n", row[0], row[1], row[2]));
+            }
+        }
+
+        // 3. Prepare response
+        let mut response_text = format!(
+            "Projet '{}' ({}) initialisé avec succès dans Axon.\n\n",
+            project_name, project_slug
+        );
+
+        if let Some(concept) = concept_text {
+            response_text.push_str(&format!(
+                "📄 Un document de concept a été détecté. Extrayez-en la Vision et les Piliers, et utilisez `soll_manager` pour les créer sous le projet {}.\n\n",
+                project_slug
+            ));
+        }
+
+        response_text.push_str("Voici les règles globales disponibles. Lesquelles souhaitez-vous activer, ignorer ou spécialiser pour ce projet ?\n");
+        response_text.push_str(&rules_text);
+        response_text.push_str("\n(Utilisez l'outil `axon_apply_guidelines` pour appliquer ces choix).");
+
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": response_text }]
+        }))
+    }
+
+    pub(crate) fn axon_apply_guidelines(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+        let project_slug = args.get("project_slug")?.as_str()?;
+        let accepted_ids = args.get("accepted_global_rule_ids")?.as_array()?;
+
+        let mut applied = Vec::new();
+        for id_val in accepted_ids {
+            let global_id = id_val.as_str().unwrap_or("");
+            
+            // Fetch global rule
+            let row_raw = self.graph_store.query_json(&format!(
+                "SELECT title, description, metadata FROM soll.Node WHERE id = '{}' AND type='Guideline'",
+                escape_sql(global_id)
+            )).unwrap_or_else(|_| "[]".to_string());
+            
+            let rows: Vec<Vec<String>> = serde_json::from_str(&row_raw).unwrap_or_default();
+            if let Some(row) = rows.first() {
+                if row.len() < 3 { continue; }
+                let title = &row[0];
+                let desc = &row[1];
+                let meta = &row[2];
+
+                // Create local rule
+                let (p_slug, p_code, prefix, num) = self.next_soll_numeric_id(project_slug, "guideline").unwrap();
+                let local_id = format!("{}-{}-{:03}", prefix, p_code, num);
+
+                // Insert local rule
+                let _ = self.graph_store.execute_param(
+                    "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata) 
+                     VALUES (?, 'Guideline', ?, ?, ?, ?, 'active', ?)",
+                    &serde_json::json!([local_id, p_slug, p_code, title, desc, meta])
+                );
+
+                // Insert edge
+                let _ = self.graph_store.execute_param(
+                    "INSERT INTO soll.Edge (source_id, target_id, relation_type, metadata) VALUES (?, ?, 'INHERITS_FROM', '{}')",
+                    &serde_json::json!([local_id, global_id])
+                );
+
+                applied.push(local_id);
+            }
+        }
+
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": format!("Héritage appliqué. Nouvelles règles locales créées: {:?}", applied) }]
+        }))
     }
 }
 

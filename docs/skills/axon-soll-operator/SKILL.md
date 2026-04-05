@@ -104,6 +104,9 @@ MCP tools:
 - `restore_soll`
 
 Identity-sensitive arguments:
+- `axon_init_project`: creates project in registry and suggests global guidelines.
+- `axon_apply_guidelines`: applies selected global rule IDs (`GUI-PRO-XXX`) to the local project (`GUI-SLUG-XXX`) via inheritance.
+- `axon_commit_work`: MUST be used to validate/commit work; checks modified paths against triggered guidelines.
 - `soll_manager create`: send `project_slug` plus business fields; the server returns `TYPE-CODE-NNN`.
 - `soll_manager update`: `id` is mandatory and must already be canonical.
 - `soll_manager link`: `source_id` and `target_id` must already exist; the server validates the pair of types and accepts, rejects, or defaults the relation.

@@ -1687,9 +1687,8 @@ fn test_axon_export_soll() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("# SOLL Extraction"));
-    assert!(content.contains("Test Vision"));
-    assert!(content.contains("CPT-AXO-001"));
+    println!("DEBUG EXPORT CONTENT: {}", content);
+
     assert!(content.contains("docs/vision/SOLL_EXPORT_"));
 
     let export_path = content
@@ -1698,6 +1697,11 @@ fn test_axon_export_soll() {
         .expect("Expected export path line")
         .trim()
         .to_string();
+        
+    let export_content = std::fs::read_to_string(&export_path).unwrap();
+    assert!(export_content.contains("# SOLL Extraction"));
+    assert!(export_content.contains("Test Vision"));
+    assert!(export_content.contains("CPT-AXO-001"));
 
     let export_body = std::fs::read_to_string(&export_path).expect("export file should exist");
     assert!(export_body.contains("## Entités : Vision"));
@@ -3815,4 +3819,168 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
     );
 
     let _ = std::fs::remove_file(&export_path);
+}
+
+
+#[test]
+fn test_axon_commit_work_enforces_guideline() {
+    let server = create_test_server();
+    
+    // Insert a Guideline into SolDB requiring tests to be updated if src/mcp/ is modified
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata) 
+         VALUES ('GUI-AXO-001', 'Guideline', 'AXO', 'AXO', 'Mise à jour des Tests', 'Les modifications de src/mcp/ doivent inclure des tests', 'active', '{\"trigger_path\":\"src/mcp/\",\"required_path\":\"tests.rs\",\"enforcement\":\"strict\"}')"
+    ).unwrap();
+
+    // 1. Simulate a bad commit (modifies src/mcp/ but no tests.rs)
+    let req_bad = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_commit_work",
+            "arguments": {
+                "diff_paths": ["src/axon-core/src/mcp/tools_soll.rs"],
+                "message": "fix: update tools",
+                "dry_run": true
+            }
+        },
+        "id": 1
+    });
+
+    let res_bad = server.handle_request(serde_json::from_value(req_bad).unwrap()).unwrap().result.unwrap();
+    let content_bad = res_bad.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    
+    println!("DEBUG CONTENT BAD: {}", content_bad);
+
+    // It should be rejected
+    assert!(res_bad.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(content_bad.contains("GUI-AXO-001") || content_bad.contains("GUI-PRO-001"));
+    assert!(content_bad.contains("remediation_plan"));
+
+    // 2. Simulate a good commit (modifies src/mcp/ AND tests.rs)
+    let req_good = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_commit_work",
+            "arguments": {
+                "diff_paths": ["src/axon-core/src/mcp/tools_soll.rs", "src/axon-core/src/mcp/tests.rs", "SKILL.md"],
+                "message": "fix: update tools and tests",
+                "dry_run": true
+            }
+        },
+        "id": 2
+    });
+
+    let res_good = server.handle_request(serde_json::from_value(req_good).unwrap()).unwrap().result.unwrap();
+    let content_good = res_good.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    
+    // It should pass
+    assert!(!res_good.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(content_good.contains("Validation réussie"));
+}
+
+
+#[test]
+fn test_bootstrap_injects_global_guidelines() {
+    let server = create_test_server();
+    
+    // Check GUI-PRO-001
+    let count1 = server.graph_store.query_count(
+        "SELECT count(*) FROM soll.Node WHERE id = 'GUI-PRO-001' AND type = 'Guideline' AND project_slug = 'GLOBAL' AND project_code = 'PRO'"
+    ).unwrap();
+    assert_eq!(count1, 1, "GUI-PRO-001 should be injected at bootstrap");
+
+    let meta1_raw = server.graph_store.query_json(
+        "SELECT metadata FROM soll.Node WHERE id = 'GUI-PRO-001'"
+    ).unwrap();
+    println!("DEBUG META1 RAW: {}", meta1_raw);
+    let meta1: Vec<Vec<String>> = serde_json::from_str(&meta1_raw).unwrap();
+    assert!(meta1[0][0].contains("\"phase\":\"pre-code\"") || meta1[0][0].contains("\"phase\": \"pre-code\""), "GUI-PRO-001 should have phase: pre-code");
+
+    // Check GUI-PRO-002
+    let count2 = server.graph_store.query_count(
+        "SELECT count(*) FROM soll.Node WHERE id = 'GUI-PRO-002' AND type = 'Guideline' AND project_slug = 'GLOBAL' AND project_code = 'PRO'"
+    ).unwrap();
+    assert_eq!(count2, 1, "GUI-PRO-002 should be injected at bootstrap");
+
+    let meta2_raw = server.graph_store.query_json(
+        "SELECT metadata FROM soll.Node WHERE id = 'GUI-PRO-002'"
+    ).unwrap();
+    println!("DEBUG META2 RAW: {}", meta2_raw);
+    let meta2: Vec<Vec<String>> = serde_json::from_str(&meta2_raw).unwrap();
+    assert!(meta2[0][0].contains("\"phase\":\"post-code\"") || meta2[0][0].contains("\"phase\": \"post-code\""), "GUI-PRO-002 should have phase: post-code");
+}
+
+
+#[test]
+fn test_axon_init_project_returns_global_guidelines() {
+    let server = create_test_server();
+    
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_init_project",
+            "arguments": {
+                "project_name": "BookingSystem",
+                "project_slug": "BKS",
+                "concept_document_url_or_text": "We want a booking system."
+            }
+        },
+        "id": 1
+    });
+
+    let response = server.handle_request(serde_json::from_value(req).unwrap()).unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    
+    println!("DEBUG INIT OUTPUT: {}", content);
+
+    // Output should contain the global guidelines injected at bootstrap
+    assert!(content.contains("GUI-PRO-001"));
+    assert!(content.contains("GUI-PRO-002"));
+    assert!(content.contains("Voici les règles globales disponibles."));
+}
+
+
+#[test]
+fn test_axon_apply_guidelines_creates_local_copies() {
+    let server = create_test_server();
+    
+    // First init the project
+    server.graph_store.sync_project_code_registry_entry("BookingSystem", "BKS").unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_apply_guidelines",
+            "arguments": {
+                "project_slug": "AXO",
+                "accepted_global_rule_ids": ["GUI-PRO-001"]
+            }
+        },
+        "id": 1
+    });
+
+    let response = server.handle_request(serde_json::from_value(req).unwrap()).unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    
+    // Output should confirm creation
+    assert!(content.contains("GUI-AXO-001"));
+    assert!(content.contains("Héritage appliqué"));
+
+    // Verify in DB
+    let count = server.graph_store.query_count(
+        "SELECT count(*) FROM soll.Node WHERE id = 'GUI-AXO-001' AND type = 'Guideline' AND project_slug = 'AXO'"
+    ).unwrap();
+    assert_eq!(count, 1, "Local guideline should be created");
+
+    // Verify edge
+    let edge_count = server.graph_store.query_count(
+        "SELECT count(*) FROM soll.Edge WHERE relation_type = 'INHERITS_FROM' AND source_id = 'GUI-AXO-001' AND target_id = 'GUI-PRO-001'"
+    ).unwrap();
+    assert_eq!(edge_count, 1, "Inheritance edge should be created");
 }
