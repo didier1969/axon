@@ -5,6 +5,9 @@ defmodule AxonDashboardWeb.StatusLiveTest do
   import Phoenix.LiveViewTest
 
   setup do
+    if pid = Process.whereis(AxonDashboard.BridgeClient) do
+      :sys.get_state(pid)
+    end
     Axon.Watcher.Telemetry.reset!()
     :ok
   end

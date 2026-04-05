@@ -36,7 +36,8 @@ defmodule AxonDashboard.BridgeClient do
   def handle_cast(_message, state), do: {:noreply, state}
 
   def handle_info(:connect, state) do
-    case :gen_tcp.connect({:local, @socket_path}, 0, [:binary, active: true]) do
+    socket_path = Application.get_env(:axon_dashboard, :telemetry_socket_path, @socket_path)
+    case :gen_tcp.connect({:local, socket_path}, 0, [:binary, active: true]) do
       {:ok, socket} ->
         Logger.info("[BRIDGE] Connected to Data Plane")
         Axon.Watcher.Telemetry.mark_bridge_connected()

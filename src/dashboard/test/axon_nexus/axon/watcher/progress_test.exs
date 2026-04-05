@@ -68,7 +68,7 @@ defmodule Axon.Watcher.ProgressTest do
       [
         {"COALESCE(status", [["indexed", 2], ["pending", 1]]},
         {"COALESCE(file_stage", [["graph_indexed", 2], ["promoted", 1]]},
-        {"SUM(CASE WHEN graph_ready", [[2, 1]]}
+        {"SUM(CASE WHEN f.graph_ready", [[2, 1]]}
       ],
       fn ->
         status = Progress.get_status("progress-test")
