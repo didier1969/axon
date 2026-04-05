@@ -632,17 +632,31 @@ impl GraphStore {
             let (project_slug, project_code) = if !existing_project_slug.trim().is_empty()
                 && !existing_project_code.trim().is_empty()
             {
-                (existing_project_slug, existing_project_code)
+                (existing_project_slug.clone(), existing_project_code.clone())
             } else {
                 self.resolve_or_seed_existing_project_identity(project_part)?
             };
             let new_id = format!("CPT-{}-{:03}", project_code, number);
+
+            if new_id == existing_id
+                && existing_project_slug == project_slug
+                && existing_project_code == project_code
+            {
+                continue;
+            }
 
             if new_id != source_id && self.table_has_id("soll.Concept", &new_id)? {
                 self.replace_soll_id_references(&source_id, &new_id)?;
                 self.execute_param(
                     "DELETE FROM soll.Concept WHERE COALESCE(id,'') = ? AND name = ?",
                     &serde_json::json!([existing_id, stored_name]),
+                )?;
+            } else if new_id == existing_id {
+                self.execute_param(
+                    "UPDATE soll.Concept
+                     SET project_slug = ?, project_code = ?
+                     WHERE id = ?",
+                    &serde_json::json!([project_slug, project_code, existing_id]),
                 )?;
             } else {
                 self.execute_param(
@@ -690,7 +704,7 @@ impl GraphStore {
                 let (slug, code) = if !existing_project_slug.trim().is_empty()
                     && !existing_project_code.trim().is_empty()
                 {
-                    (existing_project_slug, existing_project_code)
+                    (existing_project_slug.clone(), existing_project_code.clone())
                 } else {
                     self.resolve_or_seed_existing_project_identity(project_part)?
                 };
@@ -699,7 +713,7 @@ impl GraphStore {
                 let slug = if existing_project_slug.trim().is_empty() {
                     "AXO".to_string()
                 } else {
-                    existing_project_slug
+                    existing_project_slug.clone()
                 };
                 let (_, code) = self.resolve_or_seed_existing_project_identity(&slug)?;
                 let next = match next_by_code.get(&code).copied() {
@@ -719,11 +733,25 @@ impl GraphStore {
                 )
             };
 
+            if new_id == existing_id
+                && existing_project_slug == project_slug
+                && existing_project_code == project_code
+            {
+                continue;
+            }
+
             if new_id != source_id && self.table_has_id("soll.Stakeholder", &new_id)? {
                 self.replace_soll_id_references(&source_id, &new_id)?;
                 self.execute_param(
                     "DELETE FROM soll.Stakeholder WHERE COALESCE(id,'') = ? AND name = ?",
                     &serde_json::json!([existing_id, name]),
+                )?;
+            } else if new_id == existing_id {
+                self.execute_param(
+                    "UPDATE soll.Stakeholder
+                     SET project_slug = ?, project_code = ?
+                     WHERE id = ?",
+                    &serde_json::json!([project_slug, project_code, existing_id]),
                 )?;
             } else {
                 self.execute_param(
