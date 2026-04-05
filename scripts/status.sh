@@ -74,7 +74,7 @@ check_socket() {
 main() {
   cd "$ROOT_DIR"
   printf "Axon status\n"
-  printf "------------\n"
+  printf '%s\n' "------------"
 
   if ! have_cmd curl; then
     fail "curl not found in PATH"
@@ -97,4 +97,3 @@ main() {
 }
 
 main "$@"
-

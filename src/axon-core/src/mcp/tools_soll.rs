@@ -1929,12 +1929,8 @@ impl McpServer {
 
     fn sync_project_code_registry_from_meta(&self) -> anyhow::Result<()> {
         for identity in discover_project_identities() {
-            self.graph_store.execute_param(
-                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
-                 VALUES (?, ?)
-                 ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
-                &json!([identity.slug, identity.code]),
-            )?;
+            self.graph_store
+                .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
         }
         Ok(())
     }
@@ -1944,12 +1940,8 @@ impl McpServer {
         project_slug: &str,
     ) -> anyhow::Result<(String, String)> {
         let identity = resolve_canonical_project_identity(project_slug)?;
-        self.graph_store.execute_param(
-            "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
-             VALUES (?, ?)
-             ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
-            &json!([identity.slug, identity.code]),
-        )?;
+        self.graph_store
+            .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
         Ok((identity.slug, identity.code))
     }
 
@@ -1965,12 +1957,8 @@ impl McpServer {
         }
 
         if let Ok(identity) = resolve_canonical_project_identity(project_slug) {
-            self.graph_store.execute_param(
-                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
-                 VALUES (?, ?)
-                 ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
-                &json!([identity.slug, identity.code]),
-            )?;
+            self.graph_store
+                .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
             return Ok(identity.code);
         }
 

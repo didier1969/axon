@@ -334,8 +334,8 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.Decision (id VARCHAR PRIMARY KEY, title VARCHAR, description VARCHAR, context VARCHAR, rationale VARCHAR, status VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Milestone (id VARCHAR PRIMARY KEY, title VARCHAR, status VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Validation (id VARCHAR PRIMARY KEY, method VARCHAR, result VARCHAR, timestamp BIGINT, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Concept (name VARCHAR PRIMARY KEY, explanation VARCHAR, rationale VARCHAR, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Stakeholder (name VARCHAR PRIMARY KEY, role VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Concept (id VARCHAR PRIMARY KEY, project_slug VARCHAR, project_code VARCHAR, name VARCHAR, explanation VARCHAR, rationale VARCHAR, metadata VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Stakeholder (id VARCHAR PRIMARY KEY, project_slug VARCHAR, project_code VARCHAR, name VARCHAR, role VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_slug VARCHAR, payload VARCHAR, created_at BIGINT)")?;
@@ -492,17 +492,64 @@ impl GraphStore {
 
     fn seed_project_code_registry(&self) -> Result<()> {
         for identity in discover_project_identities() {
-            self.execute_param(
-                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
-                 VALUES (?, ?)
-                 ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
-                &serde_json::json!([identity.slug, identity.code]),
-            )?;
+            self.sync_project_code_registry_entry(&identity.slug, &identity.code)?;
         }
-        self.execute(
-            "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code)
-             VALUES ('BookingSystem', 'BKS')
-             ON CONFLICT (project_slug) DO UPDATE SET project_code = EXCLUDED.project_code",
+        self.sync_project_code_registry_entry("BookingSystem", "BKS")?;
+        Ok(())
+    }
+
+    pub(crate) fn sync_project_code_registry_entry(
+        &self,
+        project_slug: &str,
+        project_code: &str,
+    ) -> Result<()> {
+        let normalized_slug = project_slug.trim();
+        let normalized_code = project_code.trim().to_ascii_uppercase();
+        if normalized_slug.is_empty()
+            || !crate::project_meta::is_valid_project_code(&normalized_code)
+        {
+            return Ok(());
+        }
+
+        let by_code = self.query_json(&format!(
+            "SELECT project_slug, project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
+            normalized_code.replace('\'', "''")
+        ))?;
+        let code_rows: Vec<Vec<String>> = serde_json::from_str(&by_code).unwrap_or_default();
+        if let Some(row) = code_rows.first() {
+            if row.len() >= 2 {
+                let current_slug = row[0].trim();
+                if current_slug != normalized_slug {
+                    self.execute_param(
+                        "UPDATE soll.ProjectCodeRegistry SET project_slug = ? WHERE project_code = ?",
+                        &serde_json::json!([normalized_slug, normalized_code]),
+                    )?;
+                }
+                return Ok(());
+            }
+        }
+
+        let by_slug = self.query_json(&format!(
+            "SELECT project_slug, project_code FROM soll.ProjectCodeRegistry WHERE project_slug = '{}'",
+            normalized_slug.replace('\'', "''")
+        ))?;
+        let slug_rows: Vec<Vec<String>> = serde_json::from_str(&by_slug).unwrap_or_default();
+        if let Some(row) = slug_rows.first() {
+            if row.len() >= 2 {
+                let current_code = row[1].trim().to_ascii_uppercase();
+                if current_code != normalized_code {
+                    self.execute_param(
+                        "UPDATE soll.ProjectCodeRegistry SET project_code = ? WHERE project_slug = ?",
+                        &serde_json::json!([normalized_code, normalized_slug]),
+                    )?;
+                }
+                return Ok(());
+            }
+        }
+
+        self.execute_param(
+            "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code) VALUES (?, ?)",
+            &serde_json::json!([normalized_slug, normalized_code]),
         )?;
         Ok(())
     }
@@ -570,10 +617,11 @@ impl GraphStore {
             let existing_project_code = row[2].clone();
             let stored_name = row[3].clone();
 
-            let (source_id, clean_name) = if !existing_id.trim().is_empty() {
-                (existing_id.clone(), stored_name.clone())
+            let source_id = if !existing_id.trim().is_empty() {
+                existing_id.clone()
             } else if let Some((parsed_id, parsed_name)) = split_prefixed_display_name(&stored_name) {
-                (parsed_id, parsed_name)
+                let _ = parsed_name;
+                parsed_id
             } else {
                 continue;
             };
@@ -599,13 +647,12 @@ impl GraphStore {
             } else {
                 self.execute_param(
                     "UPDATE soll.Concept
-                     SET id = ?, project_slug = ?, project_code = ?, name = ?
+                     SET id = ?, project_slug = ?, project_code = ?
                      WHERE COALESCE(id,'') = ? AND name = ?",
                     &serde_json::json!([
                         new_id,
                         project_slug,
                         project_code,
-                        clean_name,
                         existing_id,
                         stored_name
                     ]),
