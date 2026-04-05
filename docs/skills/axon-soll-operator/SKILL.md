@@ -106,7 +106,7 @@ MCP tools:
 Identity-sensitive arguments:
 - `axon_init_project`: creates project in registry and suggests global guidelines.
 - `axon_apply_guidelines`: applies selected global rule IDs (`GUI-PRO-XXX`) to the local project (`GUI-SLUG-XXX`) via inheritance.
-- `axon_commit_work`: MUST be used to validate/commit work; checks modified paths against triggered guidelines.
+- `axon_commit_work`: MUST be used to validate/commit work; checks modified paths against triggered guidelines. On success, it automatically generates a canonical Markdown export (Doc-as-Code backup) and executes the git commit.
 - `soll_manager create`: send `project_slug` plus business fields; the server returns `TYPE-CODE-NNN`.
 - `soll_manager update`: `id` is mandatory and must already be canonical.
 - `soll_manager link`: `source_id` and `target_id` must already exist; the server validates the pair of types and accepts, rejects, or defaults the relation.
@@ -234,19 +234,26 @@ Minimal example:
         "priority": "P1",
         "status": "current"
       }
+    ],
+    "decisions": [
+      {
+        "logical_key": "dec-rust-writer",
+        "title": "Rust Writer Engine",
+        "description": "Use Rust for ingestion"
+      }
     ]
   },
   "relations": [
     {
-      "source_id": "DEC-AXO-001",
-      "target_id": "REQ-AXO-001",
+      "source_id": "dec-rust-writer",
+      "target_id": "req-runtime-authority",
       "relation_type": "SOLVES"
     }
   ],
   "evidence": [
     {
       "entity_type": "requirement",
-      "entity_id": "REQ-AXO-001",
+      "entity_id": "req-runtime-authority",
       "artifacts": [
         {
           "artifact_type": "metric",
@@ -258,6 +265,10 @@ Minimal example:
   ]
 }
 ```
+
+*Note on Identifiers & Relations*: The `soll_apply_plan` endpoint supports Zero-Shot Payload resolution. You can define new entities with a `logical_key` (e.g. `"req-runtime-authority"`) and immediately use that exact same `logical_key` as `source_id` or `target_id` inside the `"relations"` array (or `"entity_id"` in `"evidence"`). The server resolves these into canonical IDs (e.g. `REQ-AXO-001`) atomically. 
+
+On success, `soll_apply_plan` returns an `identity_mapping` dictionary inside the `data` field bridging your `logical_key` inputs to the generated Canonical IDs (e.g. `{"req-runtime-authority": "REQ-AXO-001"}`).
 
 ## SOLL/IST Coherence Guidance
 
