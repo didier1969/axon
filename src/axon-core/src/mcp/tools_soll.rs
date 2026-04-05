@@ -1630,7 +1630,7 @@ impl McpServer {
             }
         };
 
-        let operations = self.build_plan_operations(&canonical_slug, plan);
+        let operations = self.build_plan_operations(&canonical_slug, args);
         let (_, project_code, _, next_preview) =
             match self.next_server_numeric_id(&canonical_slug, "preview") {
                 Ok(parts) => parts,
@@ -1837,10 +1837,20 @@ impl McpServer {
             return Some(json!({"content":[{"type":"text","text": format!("SOLL commit error (revision row): {}", e)}],"isError": true}));
         }
 
+        let mut identity_mapping = std::collections::HashMap::new();
         for op in &operations {
-            if let Err(e) = self.apply_operation_with_audit(&revision_id, op) {
-                let _ = self.graph_store.execute("ROLLBACK");
-                return Some(json!({"content":[{"type":"text","text": format!("SOLL commit error (operation): {}", e)}],"isError": true}));
+            match self.apply_operation_with_audit(&revision_id, op, &mut identity_mapping) {
+                Ok(generated_id) => {
+                    if !generated_id.is_empty() {
+                        if let Some(lk) = op.get("logical_key").and_then(|v| v.as_str()) {
+                            identity_mapping.insert(lk.to_string(), generated_id);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = self.graph_store.execute("ROLLBACK");
+                    return Some(json!({"content":[{"type":"text","text": format!("SOLL commit error (operation): {}", e)}],"isError": true}));
+                }
             }
         }
 
@@ -1852,7 +1862,11 @@ impl McpServer {
 
         Some(json!({
             "content": [{"type":"text","text": format!("SOLL revision committed: {} ({} operations)", revision_id, operations.len())}],
-            "data": {"revision_id": revision_id, "operations": operations.len()}
+            "data": {
+                "revision_id": revision_id, 
+                "operations": operations.len(),
+                "identity_mapping": identity_mapping
+            }
         }))
     }
 
@@ -2459,68 +2473,109 @@ impl McpServer {
         Some(json!({"content":[{"type":"text","text": format!("Revision rolled back: {}", revision_id)}]}))
     }
 
-    fn build_plan_operations(&self, project_slug: &str, plan: &Value) -> Vec<Value> {
+    fn build_plan_operations(&self, project_slug: &str, args: &Value) -> Vec<Value> {
         let mut operations = Vec::new();
-        for entity in ["pillar", "requirement", "decision", "milestone"] {
-            if let Some(items) = plan.get(format!("{}s", entity)).and_then(|v| v.as_array()) {
-                for item in items {
-                    if let Some(obj) = item.as_object() {
-                        let title = obj.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                        let logical_key = obj
-                            .get("logical_key")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(title);
-                        if logical_key.is_empty() {
-                            continue;
+        
+        // 1. Entities
+        if let Some(plan) = args.get("plan") {
+            for entity in ["pillar", "requirement", "decision", "milestone", "vision", "concept"] {
+                if let Some(items) = plan.get(format!("{}s", entity)).and_then(|v| v.as_array()) {
+                    for item in items {
+                        if let Some(obj) = item.as_object() {
+                            let title = obj.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                            let logical_key = obj
+                                .get("logical_key")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(title);
+                            if logical_key.is_empty() {
+                                continue;
+                            }
+                            let existing_id = self.resolve_soll_id(entity, title, logical_key);
+                            let kind = if existing_id.is_some() { "update" } else { "create" };
+                            operations.push(json!({
+                                "kind": kind,
+                                "entity": entity,
+                                "project_slug": project_slug,
+                                "logical_key": logical_key,
+                                "entity_id": existing_id,
+                                "payload": Value::Object(obj.clone())
+                            }));
                         }
-                        let existing_id = self.resolve_soll_id(entity, title, logical_key);
-                        let kind = if existing_id.is_some() { "update" } else { "create" };
-                        operations.push(json!({
-                            "kind": kind,
-                            "entity": entity,
-                            "project_slug": project_slug,
-                            "logical_key": logical_key,
-                            "entity_id": existing_id,
-                            "payload": Value::Object(obj.clone())
-                        }));
                     }
                 }
             }
         }
+        
+        // 2. Relations
+        if let Some(relations) = args.get("relations").and_then(|v| v.as_array()) {
+            for rel in relations {
+                if let Some(obj) = rel.as_object() {
+                    operations.push(json!({
+                        "kind": "link",
+                        "entity": "relation",
+                        "project_slug": project_slug,
+                        "payload": Value::Object(obj.clone())
+                    }));
+                }
+            }
+        }
+        
         operations
     }
 
-    fn apply_operation_with_audit(&self, revision_id: &str, op: &Value) -> anyhow::Result<()> {
+    fn apply_operation_with_audit(&self, revision_id: &str, op: &Value, identity_mapping: &mut std::collections::HashMap<String, String>) -> anyhow::Result<String> {
         let kind = op.get("kind").and_then(|v| v.as_str()).unwrap_or("create");
         let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("requirement");
-        let payload = op.get("payload").cloned().unwrap_or(json!({}));
+        let mut payload = op.get("payload").cloned().unwrap_or(serde_json::json!({}));
         let project_slug = op
             .get("project_slug")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
+            
+        if kind == "link" {
+            if let Some(obj) = payload.as_object_mut() {
+                if let Some(sid) = obj.get("source_id").and_then(|v| v.as_str()) {
+                    if let Some(canon) = identity_mapping.get(sid) {
+                        obj.insert("source_id".to_string(), serde_json::json!(canon));
+                    }
+                }
+                if let Some(tid) = obj.get("target_id").and_then(|v| v.as_str()) {
+                    if let Some(canon) = identity_mapping.get(tid) {
+                        obj.insert("target_id".to_string(), serde_json::json!(canon));
+                    }
+                }
+            }
+            
+            let result = self.axon_soll_manager(&serde_json::json!({"action":"link","entity":"relation","data":payload}));
+            if soll_tool_is_error(result.as_ref()) {
+                return Err(anyhow::anyhow!("{}", soll_tool_text(result.as_ref()).unwrap_or_else(|| "link error".to_string())));
+            }
+            return Ok("".to_string());
+        }
+            
         let entity_id_hint = op
             .get("entity_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
         let before = if let Some(id) = entity_id_hint.clone() {
-            self.snapshot_entity(entity, &id).unwrap_or(json!({}))
+            self.snapshot_entity(entity, &id).unwrap_or(serde_json::json!({}))
         } else {
-            json!({})
+            serde_json::json!({})
         };
 
         let result = if kind == "update" && entity_id_hint.is_some() {
             let mut data = payload.clone();
-            data["id"] = json!(entity_id_hint.clone().unwrap_or_default());
-            self.axon_soll_manager(&json!({"action":"update","entity":entity,"data":data}))
+            data["id"] = serde_json::json!(entity_id_hint.clone().unwrap_or_default());
+            self.axon_soll_manager(&serde_json::json!({"action":"update","entity":entity,"data":data}))
         } else {
             let mut data = payload.clone();
-            data["project_slug"] = json!(project_slug);
-            self.axon_soll_manager(&json!({"action":"create","entity":entity,"data":data}))
+            data["project_slug"] = serde_json::json!(project_slug);
+            self.axon_soll_manager(&serde_json::json!({"action":"create","entity":entity,"data":data}))
         };
 
         if soll_tool_is_error(result.as_ref()) {
-            return Err(anyhow!(
+            return Err(anyhow::anyhow!(
                 "{}",
                 soll_tool_text(result.as_ref()).unwrap_or_else(|| "unknown error".to_string())
             ));
@@ -2534,11 +2589,11 @@ impl McpServer {
                 .unwrap_or_else(|| "unknown".to_string())
         };
 
-        let after = self.snapshot_entity(entity, &entity_id).unwrap_or(json!({}));
+        let after = self.snapshot_entity(entity, &entity_id).unwrap_or(serde_json::json!({}));
         self.graph_store.execute_param(
             "INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, action, before_json, after_json, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
-            &json!([
+            &serde_json::json!([
                 revision_id,
                 entity,
                 entity_id,
@@ -2548,7 +2603,8 @@ impl McpServer {
                 now_unix_ms()
             ]),
         )?;
-        Ok(())
+
+        Ok(entity_id)
     }
 
     fn apply_rollback_operation(&self, op: &Value) -> anyhow::Result<()> {
@@ -2695,9 +2751,61 @@ impl McpServer {
             }));
         }
 
-        Some(serde_json::json!({
-            "content": [{ "type": "text", "text": format!("Validation réussie. Commit effectué avec le message: {}", message) }]
-        }))
+        // 1. Execute SOLL export
+        let export_args = serde_json::json!({});
+        let export_res = self.axon_export_soll(&export_args);
+        let mut export_report = String::new();
+        if let Some(res) = export_res {
+            if soll_tool_is_error(Some(&res)) {
+                return Some(res); // Early return if export fails
+            }
+            if let Some(txt) = soll_tool_text(Some(&res)) {
+                export_report = txt;
+            }
+        }
+
+        // 2. Perform Git Commit
+        let mut add_cmd = std::process::Command::new("git");
+        add_cmd.arg("add");
+        for p in diff_paths {
+            if let Some(path_str) = p.as_str() {
+                add_cmd.arg(path_str);
+            }
+        }
+        add_cmd.arg("docs/vision/");
+        
+        let add_out = add_cmd.output();
+        if let Err(e) = add_out {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Git add failed: {}", e) }],
+                "isError": true
+            }));
+        }
+
+        let commit_out = std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg(message)
+            .output();
+
+        match commit_out {
+            Ok(output) => {
+                let status = if output.status.success() {
+                    format!("Commit effectué avec succès.\n{}", String::from_utf8_lossy(&output.stdout))
+                } else {
+                    format!("Commit échoué.\n{}", String::from_utf8_lossy(&output.stderr))
+                };
+                Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Validation réussie.\n\n{}\n\nExport Report:\n{}", status, export_report) }]
+                }))
+            }
+            Err(e) => {
+                Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Git commit failed: {}", e) }],
+                    "isError": true
+                }))
+            }
+        }
     }
 
     pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {

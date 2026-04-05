@@ -3984,3 +3984,100 @@ fn test_axon_apply_guidelines_creates_local_copies() {
     ).unwrap();
     assert_eq!(edge_count, 1, "Inheritance edge should be created");
 }
+
+
+#[test]
+fn test_soll_commit_revision_returns_identity_mapping_and_resolves_relations() {
+    let server = create_test_server();
+    
+    // Create a plan with logical keys and a relation using those keys
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_slug": "AXO",
+                "author": "test",
+                "dry_run": false,
+                "plan": {
+                    "requirements": [
+                        { "logical_key": "req-1", "title": "Req A", "description": "Desc A" }
+                    ],
+                    "decisions": [
+                        { "logical_key": "dec-1", "title": "Dec B", "description": "Desc B" }
+                    ]
+                },
+                "relations": [
+                    {
+                        "source_id": "dec-1",
+                        "target_id": "req-1",
+                        "relation_type": "SOLVES"
+                    }
+                ]
+            }
+        },
+        "id": 1
+    });
+
+    let response = server.handle_request(serde_json::from_value(req).unwrap()).unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    
+    // Should be committed immediately because dry_run = false
+    assert!(content.contains("SOLL revision committed"), "{}", content);
+
+    // We expect identity_mapping in the result.data
+    let data = result.get("data").expect("Should have data field");
+    let identity_mapping = data.get("identity_mapping").expect("Should have identity_mapping");
+    
+    let dec_id = identity_mapping.get("dec-1").unwrap().as_str().unwrap();
+    let req_id = identity_mapping.get("req-1").unwrap().as_str().unwrap();
+    
+    assert!(dec_id.starts_with("DEC-AXO-"));
+    assert!(req_id.starts_with("REQ-AXO-"));
+
+    // Verify the edge in DB using the canonical IDs
+    let edge_count = server.graph_store.query_count(&format!(
+        "SELECT count(*) FROM soll.Edge WHERE source_id = '{}' AND target_id = '{}' AND relation_type = 'SOLVES'",
+        dec_id, req_id
+    )).unwrap();
+    assert_eq!(edge_count, 1, "The relation should be created using canonical IDs");
+}
+
+
+#[test]
+fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
+    let server = create_test_server();
+    
+    // Insert a dummy Guideline that passes trivially
+    server.graph_store.execute(
+        "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata) 
+         VALUES ('GUI-AXO-999', 'Guideline', 'AXO', 'AXO', 'Dummy', 'Dummy', 'active', '{\"trigger_path\":\"\",\"required_path\":\"\",\"enforcement\":\"strict\"}')"
+    ).unwrap();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_commit_work",
+            "arguments": {
+                "diff_paths": ["Cargo.toml"],
+                "message": "test: dummy commit from mcp tests",
+                "dry_run": false
+            }
+        },
+        "id": 1
+    });
+
+    let response = server.handle_request(serde_json::from_value(req).unwrap()).unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
+    
+    // It should not be an error
+    assert!(!result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false), "{}", content);
+    
+    // It should contain Git and Export mentions
+    assert!(content.contains("Commit effectué") || content.contains("Commit échoué"), "{}", content);
+    assert!(content.contains("Exported to"), "{}", content);
+}
