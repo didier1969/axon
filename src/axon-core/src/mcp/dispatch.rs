@@ -6,10 +6,13 @@ impl McpServer {
     pub(crate) fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
         let params = params?;
         let name = params.get("name")?.as_str()?;
-        let normalized_name = name.strip_prefix("axon_").unwrap_or(name);
+        let normalized_name = name
+            .strip_prefix("mcp_axon_")
+            .or_else(|| name.strip_prefix("axon_"))
+            .unwrap_or(name);
         let arguments = params.get("arguments")?;
 
-        match normalized_name {
+        let response = match normalized_name {
             "refine_lattice" => self.axon_refine_lattice(arguments),
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
@@ -46,6 +49,16 @@ impl McpServer {
             _ => Some(
                 json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true }),
             ),
-        }
+        };
+
+        Some(response.unwrap_or_else(|| {
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("Invalid arguments for tool: {}", normalized_name)
+                }],
+                "isError": true
+            })
+        }))
     }
 }

@@ -2109,10 +2109,14 @@ impl McpServer {
 
 fn query_first_sql_cell(server: &McpServer, query: &str) -> Option<String> {
     let raw = server.execute_raw_sql(query).ok()?;
-    let parsed: Value = serde_json::from_str(&raw).ok()?;
-    let rows = parsed.get("rows")?.as_array()?;
-    let first = rows.first()?.as_array()?;
-    first.first()?.as_str().map(|s| s.to_string())
+    let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).ok()?;
+    let first = rows.first()?;
+    let value = first.first()?;
+    if let Some(text) = value.as_str() {
+        Some(text.to_string())
+    } else {
+        Some(value.to_string())
+    }
 }
 
 impl McpServer {

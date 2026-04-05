@@ -1271,6 +1271,44 @@ fn test_axon_soll_manager_auto_id() {
 }
 
 #[test]
+fn test_axon_soll_manager_accepts_mcp_axon_prefixed_name() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Registry (project_slug, id, last_pil, last_req, last_cpt, last_dec) VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 11, 0)")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "mcp_axon_soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "concept",
+                "data": {
+                    "project_slug": "AXO",
+                    "name": "Prefixed concept",
+                    "explanation": "Should work through legacy prefixed tool names",
+                    "rationale": "Client compatibility"
+                }
+            }
+        })),
+        id: Some(json!(10001)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("CPT-AXO-012"), "{content}");
+}
+
+#[test]
 fn test_axon_soll_manager_rejects_legacy_project_without_canonical_meta() {
     let server = create_test_server();
 
@@ -1305,6 +1343,54 @@ fn test_axon_soll_manager_rejects_legacy_project_without_canonical_meta() {
     assert!(result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
     assert!(content.contains("meta.json"), "{content}");
     assert!(content.contains("BookingSystem"), "{content}");
+}
+
+#[test]
+fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_slug": "AXO",
+                "dry_run": false,
+                "author": "test",
+                "plan": {
+                    "requirements": [{
+                        "logical_key": "req-preview-commit",
+                        "title": "Preview Commit Requirement",
+                        "description": "Commit should read back the persisted preview",
+                        "priority": "P1",
+                        "status": "current"
+                    }]
+                }
+            }
+        })),
+        id: Some(json!(10002)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(
+        content.contains("SOLL revision committed"),
+        "{content}"
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count("SELECT count(*) FROM soll.Requirement WHERE title = 'Preview Commit Requirement'")
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
