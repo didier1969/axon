@@ -21,6 +21,9 @@ Identity rule:
 - `CODE` comes from the canonical project declaration in `.axon/meta.json`.
 - The client/LLM never chooses the final ID or numeric suffix.
 - `create` returns the canonical ID; every later `update`/`link` must reuse that ID.
+- Batch workflow IDs are also server-owned and canonical:
+  - `preview_id` uses `PRV-CODE-NNN`
+  - `revision_id` uses `REV-CODE-NNN`
 - `project_slug` must match the canonical slug declared in `.axon/meta.json`; aliases are rejected.
 
 ## SOLL Semantic Contract (Critical)
@@ -104,7 +107,8 @@ Identity-sensitive arguments:
 - `soll_manager create`: send `project_slug` plus business fields; the server returns `TYPE-CODE-NNN`.
 - `soll_manager update`: `id` is mandatory and must already be canonical.
 - `soll_manager link`: `source_id` and `target_id` must already exist; the server validates the pair of types and accepts, rejects, or defaults the relation.
-- `soll_apply_plan`: send canonical `project_slug`; the server prepares a revision preview and returns `preview_id`.
+- `soll_apply_plan`: send canonical `project_slug`; the server prepares a revision preview and returns canonical `preview_id` (`PRV-CODE-NNN`).
+- `soll_commit_revision`: consumes canonical `preview_id` and returns canonical `revision_id` (`REV-CODE-NNN`).
 - `soll_validate(project_slug=...)`: validates only one project when requested.
 - `soll_export(project_slug=...)`: exports only one project when requested.
 
@@ -202,6 +206,7 @@ Use only for canonical replay from reviewed markdown snapshots.
 Server-owned identity contract:
 - do not send final entity IDs for `create`
 - do send canonical IDs for `update`, `link`, evidence attachment, and any rollback target
+- do treat `preview_id` and `revision_id` as server-owned primary keys too
 - treat SOLL IDs exactly like database primary keys
 
 Top-level keys supported:

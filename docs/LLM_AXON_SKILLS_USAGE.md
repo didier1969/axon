@@ -17,6 +17,9 @@ Provide deterministic skill resolution and Axon-first operational behavior for S
 - `CODE` is resolved by Axon from the canonical project declaration in `.axon/meta.json`, not chosen by the client.
 - `project_slug` must match the canonical slug declared in `.axon/meta.json`; aliases are rejected.
 - All later SOLL mutations must use canonical IDs exactly, like primary keys.
+- Batch workflow IDs are also canonical and server-owned:
+  - `preview_id` -> `PRV-CODE-NNN`
+  - `revision_id` -> `REV-CODE-NNN`
 - SOLL relations are also server-governed: the LLM may propose `relation_type`, but Axon validates the source/target pair, applies a canonical default when available, or rejects the link.
 
 ## Verification Commands
@@ -53,7 +56,7 @@ Expected:
   - SOLL write: `soll_manager`, `soll_apply_plan`, `soll_commit_revision`, `soll_rollback_revision`, `soll_attach_evidence`
 
 ## SOLL Identity and Scope
-- Canonical examples: `VIS-AXO-001`, `DEC-BKS-001`, `STK-AXO-003`.
+- Canonical examples: `VIS-AXO-001`, `DEC-BKS-001`, `STK-AXO-003`, `PRV-FSC-001`, `REV-FSC-002`.
 - Non-canonical example: `DEC-BookingSystem-001`.
 - Use `soll_validate --project_slug <slug>` when the goal is project-scoped invariants rather than workspace-global triage.
 - Use `soll_export --project_slug <slug>` when the goal is a project snapshot rather than a mixed workspace export.
