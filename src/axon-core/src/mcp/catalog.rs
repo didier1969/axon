@@ -159,7 +159,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
-                "name": "export_soll",
+                "name": "soll_export",
                 "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Milestones, Requirements, Decisions, Concepts) dans un document Markdown horodaté. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",
@@ -181,7 +181,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
-                "name": "validate_soll",
+                "name": "soll_validate",
                 "description": "[SOLL] Exécute des garde-fous minimaux de cohérence sur le graphe intentionnel. Validation en lecture seule: détecte les états orphelins évidents sans modifier SOLL. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
                 "inputSchema": {
                     "type": "object",

@@ -88,7 +88,7 @@ Do not use this skill for IST indexing operations (`reindex-project`, ingestion 
 ## Canonical Tooling Surface
 
 MCP tools:
-- `validate_soll`
+- `soll_validate`
 - `soll_query_context`
 - `soll_work_plan`
 - `soll_manager`
@@ -97,7 +97,7 @@ MCP tools:
 - `soll_rollback_revision`
 - `soll_attach_evidence`
 - `soll_verify_requirements`
-- `export_soll`
+- `soll_export`
 - `restore_soll`
 
 Identity-sensitive arguments:
@@ -105,15 +105,15 @@ Identity-sensitive arguments:
 - `soll_manager update`: `id` is mandatory and must already be canonical.
 - `soll_manager link`: `source_id` and `target_id` must already exist; the server validates the pair of types and accepts, rejects, or defaults the relation.
 - `soll_apply_plan`: send canonical `project_slug`; the server prepares a revision preview and returns `preview_id`.
-- `validate_soll(project_slug=...)`: validates only one project when requested.
-- `export_soll(project_slug=...)`: exports only one project when requested.
+- `soll_validate(project_slug=...)`: validates only one project when requested.
+- `soll_export(project_slug=...)`: exports only one project when requested.
 
 Relation policy:
 - The client/LLM may propose `relation_type`, but Axon is the final authority.
 - If no `relation_type` is provided, Axon applies the canonical default when one exists.
 - If the proposed relation is not allowed for the source/target pair, Axon rejects it and returns the allowed relations.
 - Links are created only when both endpoints exist.
-- `validate_soll` also flags dangling or policy-invalid relations.
+- `soll_validate` also flags dangling or policy-invalid relations.
 
 CLI wrappers:
 - `./scripts/axon soll-import --input <file> --format md|json|ndjson|yaml [--dry-run] [--strict]`
@@ -123,12 +123,12 @@ CLI wrappers:
 
 ### 1) Safe unit workflow (recommended default)
 
-1. `validate_soll`
+1. `soll_validate`
 2. `soll_query_context` (project scope)
 3. targeted `soll_manager` (`create`/`update`/`link`)
    Creation returns server-owned IDs; keep them for all later mutations.
-4. `validate_soll`
-5. optional `export_soll`
+4. `soll_validate`
+5. optional `soll_export`
 
 Use this for:
 - fixing orphan links
@@ -139,7 +139,7 @@ Use this for:
 
 Use when an operator or MCP client needs an ordered execution view from SOLL without mutating the graph.
 
-1. `validate_soll`
+1. `soll_validate`
 2. `soll_query_context` (optional, project scope sanity)
 3. `soll_work_plan`
 4. review `blockers`, `cycles`, `ordered_waves`, `validation_gates`
@@ -159,7 +159,7 @@ Use when changes span many entities.
 2. review returned `preview_id` and operations
 3. `soll_commit_revision` with `preview_id`
 4. `soll_verify_requirements`
-5. optional `export_soll`
+5. optional `soll_export`
 
 If needed:
 - `soll_rollback_revision` on the committed revision.
@@ -169,9 +169,9 @@ If needed:
 Use only for canonical replay from reviewed markdown snapshots.
 
 1. `restore_soll` with a reviewed `SOLL_EXPORT_*.md`
-2. `validate_soll`
+2. `soll_validate`
 3. targeted repairs via `soll_manager link`/`update`
-4. `export_soll`
+4. `soll_export`
 
 ## Bulk Ingestion (CLI)
 
@@ -271,7 +271,7 @@ Practical rule:
 
 ## Fast Triage
 
-- `validate_soll` reports violations:
+- `soll_validate` reports violations:
   - inspect with `soll_query_context`
   - repair with targeted `soll_manager link/update`
   - verify again
@@ -359,10 +359,10 @@ Use this sequence when a project starts with no reliable SOLL:
 
 ### Phase 6: Certification loop
 
-1. `validate_soll`
+1. `soll_validate`
 2. targeted repairs (`soll_manager`)
-3. `validate_soll` again
-4. `export_soll` snapshot
+3. `soll_validate` again
+4. `soll_export` snapshot
 
 ### Recommended bootstrap execution mode
 

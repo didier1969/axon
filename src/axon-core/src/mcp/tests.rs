@@ -41,7 +41,7 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"fs_read"));
     assert!(tool_names.contains(&"query"));
     assert!(tool_names.contains(&"restore_soll"));
-    assert!(tool_names.contains(&"validate_soll"));
+    assert!(tool_names.contains(&"soll_validate"));
     assert!(tool_names.contains(&"soll_apply_plan"));
     assert!(tool_names.contains(&"soll_work_plan"));
     assert!(tool_names.contains(&"inspect"));
@@ -1553,7 +1553,7 @@ fn test_axon_export_soll() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "export_soll",
+            "name": "soll_export",
             "arguments": {}
         })),
         id: Some(json!(2)),
@@ -1594,7 +1594,7 @@ fn test_axon_export_soll_resolves_repo_root_docs_vision() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "export_soll",
+            "name": "soll_export",
             "arguments": {}
         })),
         id: Some(json!(401)),
@@ -1759,7 +1759,7 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "validate_soll",
+            "name": "soll_validate",
             "arguments": {}
         })),
         id: Some(json!(31)),
@@ -1817,7 +1817,7 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "validate_soll",
+            "name": "soll_validate",
             "arguments": {}
         })),
         id: Some(json!(32)),
@@ -1850,7 +1850,7 @@ fn test_axon_validate_soll_can_scope_by_project_slug() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "validate_soll",
+            "name": "soll_validate",
             "arguments": { "project_slug": "AXO" }
         })),
         id: Some(json!(3201)),
@@ -1877,7 +1877,7 @@ fn test_axon_validate_soll_rejects_non_canonical_project_alias() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "validate_soll",
+            "name": "soll_validate",
             "arguments": { "project_slug": "FSC" }
         })),
         id: Some(json!(3203)),
@@ -1924,7 +1924,7 @@ fn test_axon_validate_soll_reports_invalid_and_dangling_relations() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "validate_soll",
+            "name": "soll_validate",
             "arguments": { "project_slug": "AXO" }
         })),
         id: Some(json!(3204)),
@@ -1955,7 +1955,7 @@ fn test_axon_export_soll_can_scope_by_project_slug() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "export_soll",
+            "name": "soll_export",
             "arguments": { "project_slug": "BookingSystem" }
         })),
         id: Some(json!(3202)),
@@ -3083,7 +3083,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "export_soll",
+            "name": "soll_export",
             "arguments": {}
         })),
         id: Some(json!(200)),
@@ -3531,7 +3531,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
-            "name": "export_soll",
+            "name": "soll_export",
             "arguments": {}
         })),
         id: Some(json!(500)),

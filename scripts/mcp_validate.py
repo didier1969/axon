@@ -22,7 +22,7 @@ WRITE_CAPABLE_TOOLS = {
     "soll_commit_revision",
     "soll_attach_evidence",
     "soll_rollback_revision",
-    "export_soll",
+    "soll_export",
     "restore_soll",
     "resume_vectorization",
 }
@@ -125,10 +125,10 @@ def build_args(
             "entity": "requirement",
             "data": {"id": "REQ-DRY-RUN", "status": "planned"},
         },
-        "export_soll": {},
+        "soll_export": {},
         "restore_soll": {"path": "docs/vision/non-existent-file.md"},
         "resume_vectorization": {},
-        "validate_soll": {},
+        "soll_validate": {},
         "fs_read": {"uri": "README.md", "start_line": 1, "end_line": 20},
         "refine_lattice": {},
     }
