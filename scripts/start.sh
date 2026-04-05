@@ -7,6 +7,15 @@ set -euo pipefail
 PROJECT_ROOT="$(pwd)"
 DEFAULT_PROJECTS_ROOT="/home/dstadel/projects"
 cd "$PROJECT_ROOT"
+
+if [ -f "$PROJECT_ROOT/.env.worktree" ]; then
+    echo "🔧 Loading .env.worktree configuration..."
+    source "$PROJECT_ROOT/.env.worktree"
+fi
+
+AXON_ENV="${AXON_ENV:-prod}"
+TMUX_SESSION="${TMUX_SESSION:-axon}"
+
 WATCH_ROOT="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
 PROJECTS_ROOT="${AXON_PROJECTS_ROOT:-$WATCH_ROOT}"
 REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
