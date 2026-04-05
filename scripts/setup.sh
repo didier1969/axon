@@ -23,7 +23,7 @@ BIN_DIR="$PROJECT_ROOT/bin"
 RUST_CORE_DIR="$PROJECT_ROOT/src/axon-core"
 TARGET_BIN="$BIN_DIR/axon-core"
 CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
-RUST_RELEASE_BIN="$CARGO_TARGET_ROOT/release/axon-core"
+RUST_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -type f | head -n 1)
 
 mkdir -p "$BIN_DIR"
 

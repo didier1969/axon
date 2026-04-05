@@ -121,8 +121,8 @@ fi
 # 2. Synchronize binaries (handle 'Text file busy' via install)
 CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
 LEGACY_RELEASE_BIN="$PROJECT_ROOT/src/axon-core/target/release/axon-core"
-DEVENV_RELEASE_BIN="$CARGO_TARGET_ROOT/release/axon-core"
-DEVENV_TUNNEL_BIN="$CARGO_TARGET_ROOT/release/axon-mcp-tunnel"
+DEVENV_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -type f | head -n 1)
+DEVENV_TUNNEL_BIN=$(find "$PROJECT_ROOT" -name "axon-mcp-tunnel" -path "*/release/*" -type f | head -n 1)
 
 rebuild_core_release() {
     echo "🔧 Rebuilding axon-core release inside Devenv..."
