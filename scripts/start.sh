@@ -4,7 +4,7 @@ set -euo pipefail
 # Axon v2 - Daily Start Script
 # Canonical daily workflow entrypoint for running Axon in TMUX.
 
-PROJECT_ROOT="/home/dstadel/projects/axon"
+PROJECT_ROOT="$(pwd)"
 DEFAULT_PROJECTS_ROOT="/home/dstadel/projects"
 cd "$PROJECT_ROOT"
 WATCH_ROOT="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
@@ -221,18 +221,36 @@ if [ -f "$DEVENV_TUNNEL_BIN" ]; then
     install -m 755 "$DEVENV_TUNNEL_BIN" bin/axon-mcp-tunnel
 fi
 
-echo "🚀 Starting Axon in TMUX session 'axon'..."
+echo "🚀 Starting Axon in TMUX session '$TMUX_SESSION'..."
 echo "📂 Watch root: $WATCH_ROOT"
 echo "🗂️ Projects root: $PROJECTS_ROOT"
 echo "🧭 Runtime mode: $RUNTIME_MODE"
 
+if [ -f "$PROJECT_ROOT/.env.worktree" ]; then
+    echo "🔧 Loading .env.worktree configuration..."
+    source "$PROJECT_ROOT/.env.worktree"
+fi
+
+AXON_ENV="${AXON_ENV:-prod}"
+TMUX_SESSION="${TMUX_SESSION:-axon}"
+
 # Configuration
-export PHX_PORT=44127
-export HYDRA_TCP_PORT=44128
-export HYDRA_HTTP_PORT=44129
-export HYDRA_ODATA_PORT=44130
-export HYDRA_HTTP2_PORT=44131
-export HYDRA_MCP_PORT=44132
+if [ "$AXON_ENV" = "dev" ]; then
+    export PHX_PORT=44137
+    export HYDRA_TCP_PORT=44138
+    export HYDRA_HTTP_PORT=44139
+    export HYDRA_ODATA_PORT=44140
+    export HYDRA_HTTP2_PORT=44141
+    export HYDRA_MCP_PORT=44142
+    TMUX_SESSION="axon-dev"
+else
+    export PHX_PORT=44127
+    export HYDRA_TCP_PORT=44128
+    export HYDRA_HTTP_PORT=44129
+    export HYDRA_ODATA_PORT=44130
+    export HYDRA_HTTP2_PORT=44131
+    export HYDRA_MCP_PORT=44132
+fi
 export WSL_IP
 WSL_IP=$(ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
 if [ -z "$WSL_IP" ]; then
@@ -253,7 +271,7 @@ if [[ "${AXON_DROP_WAL_ON_START:-0}" == "1" ]]; then
 fi
 
 # Create TMUX session
-tmux new-session -d -s axon -n "core" 
+tmux new-session -d -s "$TMUX_SESSION" -n "core" 
 
 # Start Data Plane
 # We use 'devenv shell' to ensure the runtime matches the pinned project toolchain.
@@ -262,7 +280,7 @@ WORKER_CAP_EXPORT=""
 if [[ -n "${MAX_AXON_WORKERS:-}" ]]; then
     WORKER_CAP_EXPORT="export MAX_AXON_WORKERS=\"$MAX_AXON_WORKERS\"; "
 fi
-tmux send-keys -t axon:core "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; ${WORKER_CAP_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
+tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; ${WORKER_CAP_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
 
 if [ "$START_DASHBOARD" = "1" ]; then
     # Start Visualization Plane
@@ -328,14 +346,14 @@ echo ""
 echo "⚙️ Running MCP End-to-End Verification..."
 if [ -x "bin/axon-mcp-tunnel" ] && ! echo '{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}' | bin/axon-mcp-tunnel | grep -q "axon_query"; then
     echo "❌ MCP tunnel verification failed."
-    echo "   Inspect the TMUX session to debug."
+    echo "   Inspect the TMUX session ($TMUX_SESSION) to debug."
 elif [ -x "bin/axon-mcp-tunnel" ]; then
     echo "✅ MCP tunnel verification succeeded."
 elif verify_mcp_http; then
     echo "✅ MCP HTTP verification succeeded."
 else
     echo "❌ MCP HTTP verification failed."
-    echo "   Inspect the TMUX session to debug."
+    echo "   Inspect the TMUX session ($TMUX_SESSION) to debug."
     exit 1
 fi
 
@@ -352,8 +370,8 @@ fi
 
 # 6. Final Report
 echo ""
-echo "🛡️ Axon is rising in TMUX session 'axon'."
-echo "To view processes: 'tmux attach -t axon'"
+echo "🛡️ Axon is rising in TMUX session '$TMUX_SESSION'."
+echo "To view processes: 'tmux attach -t $TMUX_SESSION'"
 if [ "$START_DASHBOARD" = "1" ]; then
     echo "Dashboard: http://$WSL_IP:44127/cockpit"
 fi

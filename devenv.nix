@@ -47,9 +47,9 @@ in
     CXXFLAGS = "-include cstdint -mavx2 -msse4.2 -mpclmul";
     LIBCLANG_PATH = "${pkgs.llvmPackages_18.libclang.lib}/lib";
     
-    ELIXIR_HOME = "/home/dstadel/projects/axon/.axon/elixir_home";
-    MIX_HOME = "/home/dstadel/projects/axon/.axon/elixir_home/mix";
-    HEX_HOME = "/home/dstadel/projects/axon/.axon/elixir_home/hex";
+    ELIXIR_HOME = config.env.DEVENV_ROOT + "/.axon/elixir_home";
+    MIX_HOME = config.env.DEVENV_ROOT + "/.axon/elixir_home/mix";
+    HEX_HOME = config.env.DEVENV_ROOT + "/.axon/elixir_home/hex";
     
     # Port Isolation for Axon (Series 6000)
     PORT = 6000;
@@ -63,20 +63,20 @@ in
 
     # devenv-nix-best-practices: Isolation Patterns
     RELEASE_COOKIE = "axon_v1_isolated_cookie";
-    CARGO_TARGET_DIR = "/home/dstadel/projects/axon/.axon/cargo-target";
-    DATA_DIR = "/home/dstadel/projects/axon/.axon/data";
+    CARGO_TARGET_DIR = config.env.DEVENV_ROOT + "/.axon/cargo-target";
+    DATA_DIR = config.env.DEVENV_ROOT + "/.axon/data";
     ERL_AFLAGS = "-kernel shell_history enabled";
     
-    PYTHONPATH = "/home/dstadel/projects/axon/src";
+    PYTHONPATH = config.env.DEVENV_ROOT + "/src";
     FILESYSTEM_FSINOTIFY_EXECUTABLE_FILE = "${pkgs.inotify-tools}/bin/inotifywait";
   };
 
   # Managed Processes
   processes = {
-    core.exec = "/home/dstadel/projects/axon/bin/axon-core";
+    core.exec = config.env.DEVENV_ROOT + "/bin/axon-core";
     
     nexus.exec = ''
-      cd src/dashboard && mix ecto.setup && AXON_REPO_SLUG=axon AXON_WATCH_DIR="/home/dstadel/projects/axon" mix phx.server
+      cd src/dashboard && mix ecto.setup && AXON_REPO_SLUG=axon AXON_WATCH_DIR="${config.env.DEVENV_ROOT}" mix phx.server
     '';
   };
 

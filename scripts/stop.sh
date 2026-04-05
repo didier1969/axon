@@ -4,9 +4,22 @@ set -euo pipefail
 # Axon v2 - Industrial Precision Stop Script
 # Kills Axon-related processes while preserving other projects.
 
-PROJECT_ROOT="/home/dstadel/projects/axon"
+PROJECT_ROOT="$(pwd)"
 REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
-AXON_TCP_PORTS=(44127 44128 44129 44130 44131 44132)
+if [ -f "$PROJECT_ROOT/.env.worktree" ]; then
+    source "$PROJECT_ROOT/.env.worktree"
+fi
+
+AXON_ENV="${AXON_ENV:-prod}"
+TMUX_SESSION="${TMUX_SESSION:-axon}"
+
+if [ "$AXON_ENV" = "dev" ]; then
+    AXON_TCP_PORTS=(44137 44138 44139 44140 44141 44142)
+    TMUX_SESSION="axon-dev"
+else
+    AXON_TCP_PORTS=(44127 44128 44129 44130 44131 44132)
+fi
+
 HARD_MODE=0
 VERIFY_ONLY=0
 
@@ -159,8 +172,8 @@ kill_pids() {
 
 kill_tmux_session() {
     if tmux has-session -t axon 2>/dev/null; then
-        echo "Closing TMUX session 'axon'..."
-        tmux kill-session -t axon 2>/dev/null || true
+        echo "Closing TMUX session '$TMUX_SESSION'..."
+        tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
         for _ in {1..5}; do
             if ! tmux has-session -t axon 2>/dev/null; then
                 break
