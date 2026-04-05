@@ -213,11 +213,7 @@ Server-owned identity contract:
 - treat SOLL IDs exactly like database primary keys
 
 Top-level keys supported:
-- `plan` (for `soll_apply_plan`): `pillars`, `requirements`, `decisions`, `milestones`
-- `visions`
-- `concepts`
-- `stakeholders`
-- `validations`
+- `plan` (for `soll_apply_plan`): `pillars`, `requirements`, `decisions`, `milestones`, `visions`, `concepts`, `stakeholders`, `validations`, `guidelines`
 - `relations` (`source_id`, `target_id`, optional `relation_type`)
 - `evidence` (`entity_type`, `entity_id`, `artifacts[]`)
 
