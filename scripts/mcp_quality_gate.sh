@@ -26,6 +26,7 @@ for i in "${!PROJECTS[@]}"; do
     --project "$project"
     --query "$query"
     --strict
+    --timeout 60
     --json-out "$out"
   )
   if [[ "$*" == *"--allow-mutations"* ]]; then
