@@ -43,7 +43,3 @@ tower = { version = "0.5.3", features = ["util"] }
 [[bin]]
 name = "benchmark_soll"
 path = "src/bin/benchmark_soll.rs"
-
-[[bin]]
-name = "migrate_soll_db"
-path = "src/bin/migrate_soll_db.rs"
