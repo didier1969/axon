@@ -123,14 +123,16 @@ collect_process_pids() {
 
 is_axon_process_cmd() {
     local cmd="$1"
-
-    [[ "$cmd" == *"$PROJECT_ROOT/bin/axon-core"* ]] && return 0
-    [[ "$cmd" == *"bin/axon-core"* ]] && return 0
-    [[ "$cmd" == *"bin/axon-mcp-tunnel"* ]] && return 0
-    [[ "$cmd" == *"_build/esbuild-linux-x64"* ]] && return 0
-    [[ "$cmd" == *"_build/tailwind-linux-x64"* ]] && return 0
-    [[ "$cmd" == *"axon_nexus@127.0.0.1"* ]] && return 0
-    [[ "$cmd" == *"axon_nexus"* && "$cmd" == *"beam.smp"* ]] && return 0
+    
+    # We must ONLY kill processes that belong to our exact PROJECT_ROOT
+    if [[ "$cmd" == *"$PROJECT_ROOT"* ]]; then
+        [[ "$cmd" == *"/bin/axon-core"* ]] && return 0
+        [[ "$cmd" == *"/bin/axon-mcp-tunnel"* ]] && return 0
+        [[ "$cmd" == *"_build/esbuild"* ]] && return 0
+        [[ "$cmd" == *"_build/tailwind"* ]] && return 0
+        [[ "$cmd" == *"${ELIXIR_NODE_NAME}"* && "$cmd" == *"beam.smp"* ]] && return 0
+    fi
+    
     return 1
 }
 
