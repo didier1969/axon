@@ -12,6 +12,7 @@ PROJECTS_ROOT="${AXON_PROJECTS_ROOT:-$WATCH_ROOT}"
 REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
 RUNTIME_MODE="${AXON_RUNTIME_MODE:-full}"
 START_DASHBOARD=1
+RUN_MCP_TESTS=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,13 +34,17 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             cat <<'EOF'
-Usage: ./scripts/start.sh [--full|--read-only|--mcp-only] [--no-dashboard]
+Usage: ./scripts/start.sh [--full|--read-only|--mcp-only] [--no-dashboard] [--skip-mcp-tests]
 
 Modes:
-  --full        Full runtime: scan + watcher + ingestion + SQL/MCP + dashboard
-  --graph-only  Scan + watcher + graph indexing + SQL/MCP + dashboard, without semantic/vector workers
-  --read-only   SQL/MCP + dashboard only, without scan/watcher/ingestion workers
-  --mcp-only    SQL/MCP only, without dashboard and without scan/watcher/ingestion workers
+  --full           Full runtime: scan + watcher + ingestion + SQL/MCP + dashboard
+  --graph-only     Scan + watcher + graph indexing + SQL/MCP + dashboard, without semantic/vector workers
+  --read-only      SQL/MCP + dashboard only, without scan/watcher/ingestion workers
+  --mcp-only       SQL/MCP only, without dashboard and without scan/watcher/ingestion workers
+
+Options:
+  --no-dashboard   Disable Elixir LiveView dashboard
+  --skip-mcp-tests Skip automatic MCP quality gate validation after startup
 EOF
             exit 0
             ;;
@@ -332,6 +337,17 @@ else
     echo "❌ MCP HTTP verification failed."
     echo "   Inspect the TMUX session to debug."
     exit 1
+fi
+
+if [ "$RUN_MCP_TESTS" = "1" ]; then
+    echo ""
+    echo "🧪 Running MCP Quality Gate Validation..."
+    if devenv shell -- bash -lc './scripts/mcp_quality_gate.sh --allow-mutations'; then
+        echo "✅ MCP Quality Gate passed."
+    else
+        echo "❌ MCP Quality Gate failed."
+        exit 1
+    fi
 fi
 
 # 6. Final Report
