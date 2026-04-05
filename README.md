@@ -54,6 +54,9 @@ Le point important est celui-ci :
 - **Runtime canonique:** Rust + Canard DB (`DuckDB`)
 - **Surface opérateur:** Phoenix/LiveView
 - **Environnement local officiel:** Nix + Devenv
+- **Gouvernance et Isolation (SOTA):** Le système implémente une stratégie **Dual-Track** absolue.
+  - La **Production** tourne sur la branche `main` (Ports: `44129` pour MCP, `44127` pour Dashboard) et gère la base de données réelle (`.axon/`).
+  - Le **Développement IA** doit impérativement se faire dans un **Git Worktree** isolé (ex: `.worktrees/dev/feat-x`) pour garantir un *Zero Blast Radius*. Le système d'amorçage décale dynamiquement les ports (`44139`, `44137`) et clone la base de données (`.axon-dev/`) pour permettre aux LLMs de prototyper sans aucun risque de corrompre la production ou de bloquer ses I/O.
 - **HydraDB:** détachée du workflow quotidien actuel
 
 ## Workflow canonique

@@ -327,7 +327,7 @@ impl GraphStore {
             "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR)",
         )?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_gui BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
-        let _ = self.execute("ALTER TABLE soll.Registry ADD COLUMN last_gui BIGINT DEFAULT 0");
+        let _ = self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0");
         self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_slug VARCHAR PRIMARY KEY, project_code VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
@@ -413,7 +413,7 @@ impl GraphStore {
     }
 
     fn ensure_additive_soll_schema(&self) -> Result<()> {
-        let _ = self.execute("ALTER TABLE soll.Registry ADD COLUMN last_gui BIGINT DEFAULT 0");
+        let _ = self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0");
         self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_slug VARCHAR PRIMARY KEY, project_code VARCHAR)")?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx ON soll.ProjectCodeRegistry(project_code)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
