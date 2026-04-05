@@ -209,12 +209,11 @@ kill_hard_patterns() {
     local raw
     local pids
     local match_patterns=(
-        "bin/axon-core"
-        "bin/axon-mcp-tunnel"
-        "axon_nexus"
-        "_build/esbuild-linux-x64"
-        "_build/tailwind-linux-x64"
-        "axon-core"
+        "$PROJECT_ROOT/bin/axon-core"
+        "$PROJECT_ROOT/bin/axon-mcp-tunnel"
+        "${ELIXIR_NODE_NAME}"
+        "$PROJECT_ROOT/src/dashboard/_build/esbuild"
+        "$PROJECT_ROOT/src/dashboard/_build/tailwind"
     )
 
     pids=""
@@ -234,7 +233,7 @@ $raw"
     fi
 
     # Final hard fallback for stubborn visible names
-    for pattern in "bin/axon-core" "axon_nexus@127.0.0.1" "axon_nexus" "axon-core" "_build/esbuild-linux-x64" "_build/tailwind-linux-x64" "beam.smp.*axon_nexus@"; do
+    for pattern in "$PROJECT_ROOT/bin/axon-core" "${ELIXIR_NODE_NAME}@127.0.0.1" "$PROJECT_ROOT/src/dashboard/_build"; do
         pkill -9 -f "$pattern" 2>/dev/null || true
     done
 }
