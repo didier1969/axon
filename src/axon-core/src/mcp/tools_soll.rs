@@ -155,6 +155,21 @@ fn relation_policy_for_pair(source_type: &str, target_type: &str) -> Option<Rela
             default: Some("ORIGINATES"),
             allow_multiple_types: true,
         }),
+        ("GUI", "GUI") => Some(RelationPolicy {
+            allowed: &["INHERITS_FROM"],
+            default: Some("INHERITS_FROM"),
+            allow_multiple_types: false,
+        }),
+        ("REQ", "GUI") => Some(RelationPolicy {
+            allowed: &["BELONGS_TO", "COMPLIES_WITH"],
+            default: Some("BELONGS_TO"),
+            allow_multiple_types: true,
+        }),
+        ("DEC", "GUI") => Some(RelationPolicy {
+            allowed: &["COMPLIES_WITH"],
+            default: Some("COMPLIES_WITH"),
+            allow_multiple_types: false,
+        }),
         ("DEC", "DEC") => Some(RelationPolicy {
             allowed: &["SUPERSEDES", "REFINES"],
             default: None,
@@ -1264,6 +1279,7 @@ graph TD;
                 "MIL" => "MIL",
                 "VAL" => "VAL",
                 "STK" => "STK",
+                "GUI" => "GUI",
                 _ => return Err(anyhow!("Préfixe SOLL `{}` non géré", prefix)),
             };
             return Ok(LinkEndpointKind::Soll(canonical_prefix));
