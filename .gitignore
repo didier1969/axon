@@ -56,3 +56,4 @@ src/axon-core/docs/vision/SOLL_EXPORT_*.md
 
 # Generated native artifacts
 src/dashboard/priv/native/*.so
+/.worktrees/
