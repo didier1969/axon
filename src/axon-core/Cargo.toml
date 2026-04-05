@@ -36,5 +36,14 @@ async-trait = "0.1"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 
 [dev-dependencies]
+rand = "0.8"
 tempfile = "3.8"
 tower = { version = "0.5.3", features = ["util"] }
+
+[[bin]]
+name = "benchmark_soll"
+path = "src/bin/benchmark_soll.rs"
+
+[[bin]]
+name = "migrate_soll_db"
+path = "src/bin/migrate_soll_db.rs"
