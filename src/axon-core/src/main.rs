@@ -42,7 +42,9 @@ fn main() -> anyhow::Result<()> {
             let projects_root_env = std::env::var("AXON_PROJECTS_ROOT")
                 .unwrap_or_else(|_| "/home/dstadel/projects".to_string());
             let projects_root = projects_root_env.leak();
-            let db_root = "/home/dstadel/projects/axon/.axon/graph_v2";
+            let db_root_env = std::env::var("AXON_DB_ROOT")
+                .unwrap_or_else(|_| format!("{}/.axon/graph_v2", std::env::current_dir().unwrap().display()));
+            let db_root = db_root_env.leak();
             let runtime_mode = AxonRuntimeMode::from_env();
 
             info!("Starting Axon Core v2.2 (Nexus Seal - Zero-Sleep Edition)");
@@ -108,8 +110,9 @@ fn main() -> anyhow::Result<()> {
 
             let tel_listener = UnixListener::bind(tel_socket_path)?;
 
+            let http_port = std::env::var("HYDRA_HTTP_PORT").unwrap_or_else(|_| "44129".to_string());
             info!("Telemetry Server listening on {}", tel_socket_path);
-            info!("MCP HTTP/SSE Server listening on 127.0.0.1:44129");
+            info!("MCP HTTP/SSE Server listening on 127.0.0.1:{}", http_port);
 
             main_background::start_memory_watchdog();
 
