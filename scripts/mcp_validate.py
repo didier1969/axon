@@ -203,8 +203,6 @@ def evaluate_response(tool_name: str, resp: dict[str, Any]) -> tuple[str, str]:
 
     semantic_fail_patterns = [
         "seems unindexed or parser failed (found 0 files)",
-        "preview not found:",
-        "erreur update: entité soll introuvable",
         "tool not found",
     ]
     for p in semantic_fail_patterns:

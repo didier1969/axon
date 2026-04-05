@@ -28,6 +28,9 @@ for i in "${!PROJECTS[@]}"; do
     --strict
     --json-out "$out"
   )
+  if [[ "$*" == *"--allow-mutations"* ]]; then
+    cmd+=(--allow-mutations)
+  fi
   if [[ -n "$scenario_file" && -f "$scenario_file" ]]; then
     cmd+=(--scenario-file "$scenario_file")
   fi
