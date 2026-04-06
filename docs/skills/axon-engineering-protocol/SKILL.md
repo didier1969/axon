@@ -5,6 +5,14 @@ description: Core engineering protocol for Axon. MUST BE READ before any coding,
 
 # Axon Engineering Protocol
 
+## Environment Isolation & MCP Sandbox Rule
+- **Production Server (Port 44129):** The central Control Plane serving all projects. Must run H24.
+- **Development Worktree (e.g. `.worktrees/dev/...`):** Used strictly as a compilation/TDD laboratory with an offline copy of the database.
+- **Anti-Sandbox Rule for MCP:** LLM clients (Gemini, Claude) automatically sandbox MCP processes if they see a `devenv.nix` file, which corrupts the JSON-RPC stdio protocol. To prevent this:
+  - The MCP tunnel MUST be installed globally outside the project (`~/.local/bin/axon-mcp`).
+  - Or, local project settings (`.gemini/settings.json`) MUST explicitly declare `"sandbox": false`.
+- **Silent Dev Rule:** NEVER start the MCP server inside the development environment. Exposing two MCP servers with duplicate tool names crashes LLM clients.
+
 ## Core Principles & Identity Contract
 - **Read/Verify First:** Always query IST/SOLL before mutating. Certify after.
 - **Server-Owned Identity:** LLMs NEVER invent IDs.
