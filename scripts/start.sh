@@ -382,19 +382,3 @@ echo "SQL Gateway: http://$WSL_IP:44129/sql"
 echo "MCP Server: http://$WSL_IP:44129/mcp"
 echo "Stop services with: ./scripts/stop.sh"
 echo ""
-ality Gate failed."
-        exit 1
-    fi
-fi
-
-# 6. Final Report
-echo ""
-echo "🛡️ Axon is rising in TMUX session '$TMUX_SESSION'."
-echo "To view processes: 'tmux attach -t $TMUX_SESSION'"
-if [ "$START_DASHBOARD" = "1" ]; then
-    echo "Dashboard: http://$WSL_IP:44127/cockpit"
-fi
-echo "SQL Gateway: http://$WSL_IP:44129/sql"
-echo "MCP Server: http://$WSL_IP:44129/mcp"
-echo "Stop services with: ./scripts/stop.sh"
-echo ""
