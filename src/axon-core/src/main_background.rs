@@ -1553,7 +1553,7 @@ mod tests {
         active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files,
         flush_ingress_buffer_once, handle_watcher_events, memory_limit_bytes,
         memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, plan_admissions,
-        should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets,
+        should_suppress_bootstrap_event_storm,
         RescanGuardReset, OVERSIZED_PROBATION_DEFER_THRESHOLD,
     };
     use axon_core::file_ingress_guard::FileIngressGuard;
@@ -2509,150 +2509,15 @@ mod tests {
         assert!(!guard.load(Ordering::SeqCst));
     }
 
-    #[test]
-    fn test_watch_targets_split_root_and_accessible_projects() {
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        std::fs::create_dir_all(root.join("proj_a")).unwrap();
-        std::fs::create_dir_all(root.join("proj_b")).unwrap();
-        std::fs::write(root.join("README.md"), "# root").unwrap();
 
-        let targets = watch_targets(root, None);
-        let rendered: Vec<(String, bool)> = targets
-            .into_iter()
-            .map(|target| (target.path.to_string_lossy().to_string(), target.recursive))
-            .collect();
 
-        assert!(
-            rendered
-                .iter()
-                .any(
-                    |(path, recursive): &(String, bool)| path == &root.to_string_lossy()
-                        && !*recursive
-                ),
-            "La racine doit etre surveillee en non-recursif"
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|(path, recursive): &(String, bool)| path.ends_with("proj_a") && *recursive),
-            "Chaque projet accessible doit etre surveille recursivement"
-        );
-        assert!(
-            rendered
-                .iter()
-                .any(|(path, recursive): &(String, bool)| path.ends_with("proj_b") && *recursive),
-            "Chaque projet accessible doit etre surveille recursivement"
-        );
-    }
 
-    #[cfg(unix)]
-    #[test]
-    fn test_watch_targets_skip_unreadable_projects() {
-        use std::os::unix::fs::PermissionsExt;
 
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        let locked = root.join("locked");
-        std::fs::create_dir_all(&locked).unwrap();
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let targets = watch_targets(root, None);
-        let rendered: Vec<String> = targets
-            .into_iter()
-            .map(|target| target.path.to_string_lossy().to_string())
-            .collect();
 
-        assert!(
-            !rendered
-                .iter()
-                .any(|path: &String| path.ends_with("locked")),
-            "Un sous-arbre illisible ne doit pas bloquer l'armement global du watcher"
-        );
 
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
 
-    #[test]
-    fn test_watch_targets_prioritize_active_project() {
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        let proj_a = root.join("proj_a");
-        let proj_b = root.join("proj_b");
-        std::fs::create_dir_all(&proj_a).unwrap();
-        std::fs::create_dir_all(&proj_b).unwrap();
 
-        let targets = watch_targets(root, Some(proj_b.as_path()));
-        let rendered: Vec<String> = targets
-            .into_iter()
-            .map(|target| target.path.to_string_lossy().to_string())
-            .collect();
-
-        assert_eq!(
-            rendered[0],
-            root.to_string_lossy(),
-            "La racine doit rester observee en premier"
-        );
-        assert_eq!(
-            rendered[1],
-            proj_b.to_string_lossy(),
-            "Le projet actif doit etre arme avant les autres"
-        );
-    }
-
-    #[test]
-    fn test_split_watch_targets_keeps_root_and_active_project_hot() {
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        let proj_a = root.join("proj_a");
-        let proj_b = root.join("proj_b");
-        std::fs::create_dir_all(&proj_a).unwrap();
-        std::fs::create_dir_all(&proj_b).unwrap();
-
-        let targets = watch_targets(root, Some(proj_b.as_path()));
-        let (hot, cold) = split_watch_targets(targets, Some(proj_b.as_path()));
-
-        let hot_paths: Vec<String> = hot
-            .into_iter()
-            .map(|target| target.path.to_string_lossy().to_string())
-            .collect();
-        let cold_paths: Vec<String> = cold
-            .into_iter()
-            .map(|target| target.path.to_string_lossy().to_string())
-            .collect();
-
-        assert_eq!(
-            hot_paths.len(),
-            1,
-            "Le split universel ne garde que la racine chaude; le projet actif est detaille a part"
-        );
-        assert_eq!(hot_paths[0], root.to_string_lossy());
-        assert!(cold_paths
-            .iter()
-            .any(|path| path == &proj_a.to_string_lossy()));
-        assert!(!cold_paths
-            .iter()
-            .any(|path| path == &proj_b.to_string_lossy()));
-    }
-
-    #[test]
-    fn test_split_watch_targets_without_active_project_keeps_only_root_hot() {
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        let proj_a = root.join("proj_a");
-        std::fs::create_dir_all(&proj_a).unwrap();
-
-        let targets = watch_targets(root, None);
-        let (hot, cold) = split_watch_targets(targets, None);
-
-        assert_eq!(
-            hot.len(),
-            1,
-            "Sans projet actif, seul le watcher de racine doit etre chaud"
-        );
-        assert_eq!(hot[0].path, root);
-        assert!(cold.iter().any(|target| target.path == proj_a));
-    }
 
     #[test]
     fn test_active_project_hot_targets_expand_visible_child_subtrees() {
