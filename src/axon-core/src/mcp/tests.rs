@@ -341,6 +341,8 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
         )
         .unwrap();
 
+    store.refresh_reader_snapshot().unwrap();
+
     let response = server.axon_debug().expect("debug response");
     let content = response["content"][0]["text"].as_str().unwrap_or_default();
 
@@ -386,6 +388,8 @@ fn test_axon_debug_reports_top_pending_reasons() {
              ('src/d.rs', 'axon', 'pending', 'manual_or_system_requeue', 40, 1, 100)"
         )
         .unwrap();
+
+    store.refresh_reader_snapshot().unwrap();
 
     let response = server.axon_debug().expect("debug response");
     let content = response["content"][0]["text"].as_str().unwrap_or_default();
@@ -3823,12 +3827,12 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
 
 
 #[test]
-fn test_axon_commit_work_enforces_guideline() {
+fn test_axon_pre_flight_check_enforces_guideline() {
     let server = create_test_server();
-    
+
     // Insert a Guideline into SolDB requiring tests to be updated if src/mcp/ is modified
     server.graph_store.execute(
-        "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata) 
+        "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata)
          VALUES ('GUI-AXO-001', 'Guideline', 'AXO', 'AXO', 'Mise à jour des Tests', 'Les modifications de src/mcp/ doivent inclure des tests', 'active', '{\"trigger_path\":\"src/mcp/\",\"required_path\":\"tests.rs\",\"enforcement\":\"strict\"}')"
     ).unwrap();
 
@@ -3837,11 +3841,9 @@ fn test_axon_commit_work_enforces_guideline() {
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
-            "name": "axon_commit_work",
+            "name": "axon_pre_flight_check",
             "arguments": {
-                "diff_paths": ["src/axon-core/src/mcp/tools_soll.rs"],
-                "message": "fix: update tools",
-                "dry_run": true
+                "diff_paths": ["src/axon-core/src/mcp/tools_soll.rs"]
             }
         },
         "id": 1
@@ -3849,7 +3851,7 @@ fn test_axon_commit_work_enforces_guideline() {
 
     let res_bad = server.handle_request(serde_json::from_value(req_bad).unwrap()).unwrap().result.unwrap();
     let content_bad = res_bad.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-    
+
     println!("DEBUG CONTENT BAD: {}", content_bad);
 
     // It should be rejected
@@ -3862,11 +3864,9 @@ fn test_axon_commit_work_enforces_guideline() {
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
-            "name": "axon_commit_work",
+            "name": "axon_pre_flight_check",
             "arguments": {
-                "diff_paths": ["src/axon-core/src/mcp/tools_soll.rs", "src/axon-core/src/mcp/tests.rs", "SKILL.md"],
-                "message": "fix: update tools and tests",
-                "dry_run": true
+                "diff_paths": ["src/axon-core/src/mcp/tools_soll.rs", "src/axon-core/src/mcp/tests.rs", "SKILL.md"]
             }
         },
         "id": 2
@@ -3874,12 +3874,11 @@ fn test_axon_commit_work_enforces_guideline() {
 
     let res_good = server.handle_request(serde_json::from_value(req_good).unwrap()).unwrap().result.unwrap();
     let content_good = res_good.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
-    
+
     // It should pass
     assert!(!res_good.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
-    assert!(content_good.contains("Validation réussie"));
+    assert!(content_good.contains("Quality Gate Passed"));
 }
-
 
 #[test]
 fn test_bootstrap_injects_global_guidelines() {
@@ -4047,7 +4046,7 @@ fn test_soll_commit_revision_returns_identity_mapping_and_resolves_relations() {
 
 
 #[test]
-fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
+fn test_axon_pre_flight_check_exports_when_dry_run_false() {
     let server = create_test_server();
     
     // Insert a dummy Guideline that passes trivially
@@ -4060,11 +4059,9 @@ fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
-            "name": "axon_commit_work",
+            "name": "axon_pre_flight_check",
             "arguments": {
-                "diff_paths": ["Cargo.toml"],
-                "message": "test: dummy commit from mcp tests",
-                "dry_run": false
+                "diff_paths": ["Cargo.toml"]
             }
         },
         "id": 1
@@ -4077,8 +4074,8 @@ fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
     // It should not be an error
     assert!(!result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false), "{}", content);
     
-    // It should contain Git and Export mentions
-    assert!(content.contains("Commit effectué") || content.contains("Commit échoué"), "{}", content);
+    // It should contain Export mentions and success
+    assert!(content.contains("Quality Gate Passed"), "{}", content);
     assert!(content.contains("Exported to"), "{}", content);
 }
 

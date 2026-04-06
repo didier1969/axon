@@ -2421,10 +2421,10 @@ impl McpServer {
             .unwrap_or("AXO");
         let project_code = self.resolve_project_code(project_slug).ok()?;
         let query = format!(
-            "SELECT r.id, COALESCE(r.status,''), COALESCE(r.acceptance_criteria,''), COUNT(t.id)
-             FROM soll.Node r WHERE r.type='Requirement' AND
-             LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
-             WHERE r.id LIKE 'REQ-{}-%'
+            "SELECT r.id, COALESCE(r.status,''), COALESCE(r.metadata,''), COUNT(t.id)
+             FROM soll.Node r
+             LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'Requirement' AND t.soll_entity_id = r.id
+             WHERE r.type = 'Requirement' AND r.id LIKE 'REQ-{}-%'
              GROUP BY 1,2,3
              ORDER BY r.id",
             escape_sql(&project_code)
@@ -2717,10 +2717,8 @@ impl McpServer {
         }
     }
 
-    pub(crate) fn axon_commit_work(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+    pub(crate) fn axon_pre_flight_check(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         let diff_paths = args.get("diff_paths")?.as_array()?;
-        let message = args.get("message")?.as_str()?;
-        let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
         // Extract guidelines
         let rows_raw = self.graph_store.query_json(
@@ -2770,7 +2768,7 @@ impl McpServer {
                     violations.push(serde_json::json!({
                         "rule": format!("{} - {}", id, row[1]),
                         "diagnostic": format!("Le chemin modifié déclenche la règle {}{}, qui exige que le fichier requis '{}' soit modifié.", id, phase_str, required_path),
-                        "remediation_plan": format!("1. Mettez à jour le fichier '{}'.\n2. Rappelez axon_commit_work.", required_path)
+                        "remediation_plan": format!("1. Mettez à jour le fichier '{}'.\n2. Rappelez axon_pre_flight_check.", required_path)
                     }));
                 }
             }
@@ -2781,12 +2779,6 @@ impl McpServer {
                 "content": [{ "type": "text", "text": format!("Violation de {}\n\nVoici le remediation_plan:\n{}", violations[0]["rule"], violations[0]["remediation_plan"]) }],
                 "isError": true,
                 "data": { "violations": violations }
-            }));
-        }
-
-        if dry_run {
-            return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("Validation réussie (Dry Run). Aucun commit effectué. Le message '{}' est valide.", message) }]
             }));
         }
 
@@ -2803,48 +2795,9 @@ impl McpServer {
             }
         }
 
-        // 2. Perform Git Commit
-        let mut add_cmd = std::process::Command::new("git");
-        add_cmd.arg("add");
-        for p in diff_paths {
-            if let Some(path_str) = p.as_str() {
-                add_cmd.arg(path_str);
-            }
-        }
-        add_cmd.arg("docs/vision/");
-        
-        let add_out = add_cmd.output();
-        if let Err(e) = add_out {
-            return Some(serde_json::json!({
-                "content": [{ "type": "text", "text": format!("Git add failed: {}", e) }],
-                "isError": true
-            }));
-        }
-
-        let commit_out = std::process::Command::new("git")
-            .arg("commit")
-            .arg("-m")
-            .arg(message)
-            .output();
-
-        match commit_out {
-            Ok(output) => {
-                let status = if output.status.success() {
-                    format!("Commit effectué avec succès.\n{}", String::from_utf8_lossy(&output.stdout))
-                } else {
-                    format!("Commit échoué.\n{}", String::from_utf8_lossy(&output.stderr))
-                };
-                Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Validation réussie.\n\n{}\n\nExport Report:\n{}", status, export_report) }]
-                }))
-            }
-            Err(e) => {
-                Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Git commit failed: {}", e) }],
-                    "isError": true
-                }))
-            }
-        }
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": format!("✅ Quality Gate Passed. You are now authorized to execute your git commit.\n\nExport Report:\n{}", export_report) }]
+        }))
     }
 
     pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {

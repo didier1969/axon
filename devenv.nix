@@ -66,6 +66,7 @@ in
     CARGO_TARGET_DIR = config.env.DEVENV_ROOT + "/.axon/cargo-target";
     DATA_DIR = config.env.DEVENV_ROOT + "/.axon/data";
     ERL_AFLAGS = "-kernel shell_history enabled";
+    ELIXIR_ERL_OPTIONS = "+fnu";
     
     PYTHONPATH = config.env.DEVENV_ROOT + "/src";
     FILESYSTEM_FSINOTIFY_EXECUTABLE_FILE = "${pkgs.inotify-tools}/bin/inotifywait";
@@ -99,16 +100,16 @@ in
 
     # Auto Pre-warming (Necessary for Systemd or first setup)
     if [ ! -f "$MIX_HOME/archives/hex-"* ]; then
-      echo "📦 Pre-warming Elixir environment (Hex/Rebar)..."
+      echo "📦 Pre-warming Elixir environment (Hex/Rebar)..." >&2
       mix local.hex --force > /dev/null 2>&1
       mix local.rebar --force > /dev/null 2>&1
     fi
 
-    echo "--- AXON v1.0 - DEVENV ARCHITECTURE ---"
-    echo "Plane A (Visualization): Elixir $(elixir --version | awk '/Elixir/ {print $2}')"
-    echo "Plane B (Runtime+DuckDB): Rust $(rustc --version | awk '{print $2}')"
-    echo "Support Tooling:         Python $(python --version | awk '/Python/ {print $2}')"
-    echo "HydraDB:                 detached legacy workflow"
-    echo "---------------------------------------"
+    echo "--- AXON v1.0 - DEVENV ARCHITECTURE ---" >&2
+    echo "Plane A (Visualization): Elixir $(elixir --version | awk '/Elixir/ {print $2}')" >&2
+    echo "Plane B (Runtime+DuckDB): Rust $(rustc --version | awk '{print $2}')" >&2
+    echo "Support Tooling:         Python $(python --version | awk '/Python/ {print $2}')" >&2
+    echo "HydraDB:                 detached legacy workflow" >&2
+    echo "---------------------------------------" >&2
   '';
 }

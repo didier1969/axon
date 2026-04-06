@@ -93,8 +93,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
-                "name": "axon_commit_work",
-                "description": "[DX/SOLL] Outil OBLIGATOIRE pour valider et commiter le travail. Évalue les fichiers modifiés contre les Guidelines SOLL. Ne JAMAIS utiliser git commit via shell.",
+                "name": "axon_pre_flight_check",
+                "description": "[DX/SOLL] Outil OBLIGATOIRE avant tout commit. Évalue les fichiers modifiés contre les Guidelines SOLL. Cet outil ne commite PAS le code, il valide et donne l'autorisation de commiter via shell.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -102,11 +102,9 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Liste des chemins de fichiers modifiés."
-                        },
-                        "message": { "type": "string", "description": "Message de commit (Conventional Commits)." },
-                        "dry_run": { "type": "boolean", "description": "Si true, valide uniquement sans commiter." }
+                        }
                     },
-                    "required": ["diff_paths", "message"]
+                    "required": ["diff_paths"]
                 }
             },
             {
