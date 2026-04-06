@@ -724,9 +724,7 @@ fn fill_admission_plan(
                     file: candidate,
                     mode: ProcessingMode::StructureOnly,
                 });
-            } else if candidate.defer_count < OVERSIZED_PROBATION_DEFER_THRESHOLD {
-                plan.deferred.push(candidate);
-            } else if queue.can_fit_alone_in_mode(
+            } else if candidate.defer_count < OVERSIZED_PROBATION_DEFER_THRESHOLD || queue.can_fit_alone_in_mode(
                 &candidate.path,
                 candidate.size_bytes,
                 ProcessingMode::StructureOnly,
@@ -1403,6 +1401,7 @@ fn dynamic_claim_sleep(pressure: f64, mode: ClaimMode) -> std::time::Duration {
     std::time::Duration::from_millis(sleep_ms)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_watcher_events(
     store: Arc<GraphStore>,
     watch_root: std::path::PathBuf,

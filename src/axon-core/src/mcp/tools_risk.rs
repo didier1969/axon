@@ -69,7 +69,7 @@ impl McpServer {
         anchor: &str,
         depth: u64,
     ) -> Option<String> {
-        let radius = depth.max(1).min(2);
+        let radius = depth.clamp(1, 2);
         let anchor_id = self
             .graph_store
             .refresh_symbol_projection(anchor, radius)
@@ -199,12 +199,12 @@ impl McpServer {
                 if !soll_rows.is_empty() {
                     table.push_str("\n### 🏛️ SOLL Impact (Architecture Compromise)\n\n| Entité | Type | Titre |\n| --- | --- | --- |\n");
                     for row in soll_rows {
-                        let id = row.get(0).and_then(|v| v.as_str()).unwrap_or("-");
+                        let id = row.first().and_then(|v| v.as_str()).unwrap_or("-");
                         let t = row.get(1).and_then(|v| v.as_str()).unwrap_or("-");
                         let title = row.get(2).and_then(|v| v.as_str()).unwrap_or("-");
                         table.push_str(&format!("| `{}` | `{}` | {} |\n", id, t, title));
                     }
-                    table.push_str("\n");
+                    table.push('\n');
                 }
                 
                 let count_query = format!(

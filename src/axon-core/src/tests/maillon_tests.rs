@@ -2392,10 +2392,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            if let Ok(_) = buf_reader.read_line(&mut line).await {
+            if buf_reader.read_line(&mut line).await.is_ok() {
                 let command = line.trim();
-                if command.starts_with("PULL_PENDING ") {
-                    let count = command[13..].parse::<usize>().unwrap_or(1);
+                if let Some(stripped) = command.strip_prefix("PULL_PENDING ") {
+                    let count = stripped.parse::<usize>().unwrap_or(1);
                     let files = server_store.fetch_pending_batch(count).unwrap();
                     let response =
                         serde_json::json!({"event": "PENDING_BATCH_READY", "files": files});
@@ -2445,7 +2445,7 @@ mod tests {
         let result = parser.parse(content);
 
         assert!(
-            result.symbols.len() > 0,
+            !result.symbols.is_empty(),
             "Le parser doit extraire au moins un symbole"
         );
         let sym = &result.symbols[0];

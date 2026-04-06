@@ -186,7 +186,7 @@ impl WorkerPool {
                     }
 
                     let _ = graph_store.mark_claimed_file_writer_pending_commit(&task.path);
-                    return TaskDispatchOutcome::Enqueued;
+                    TaskDispatchOutcome::Enqueued
                 } else {
                     // Fallback for non-supported but discovered files
                     if db_sender
@@ -210,7 +210,7 @@ impl WorkerPool {
                     }
 
                     let _ = graph_store.mark_claimed_file_writer_pending_commit(&task.path);
-                    return TaskDispatchOutcome::Enqueued;
+                    TaskDispatchOutcome::Enqueued
                 }
             }
             Err(e) => {
@@ -235,7 +235,7 @@ impl WorkerPool {
                 }
 
                 let _ = graph_store.mark_claimed_file_writer_pending_commit(&task.path);
-                return TaskDispatchOutcome::Enqueued;
+                TaskDispatchOutcome::Enqueued
             }
         }
     }

@@ -9,6 +9,7 @@ use super::soll::{
 use super::McpServer;
 use crate::project_meta::{discover_project_identities, resolve_canonical_project_identity};
 
+#[allow(dead_code)]
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
     ("EPITOMIZES", "soll.EPITOMIZES"),
     ("BELONGS_TO", "soll.BELONGS_TO"),
@@ -50,6 +51,7 @@ impl WorkPlanEntityType {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct WorkPlanNode {
     id: String,
     title: String,
@@ -107,7 +109,7 @@ struct RelationPolicy {
     allow_multiple_types: bool,
 }
 
-fn relation_table_name(relation_type: &str) -> Option<&'static str> {
+fn relation_table_name(_relation_type: &str) -> Option<&'static str> {
     Some("soll.Edge")
 }
 
@@ -866,7 +868,7 @@ graph TD;
                 if meta != "{}" {
                     markdown.push_str(&format!("**Meta:** `{}`\n", meta));
                 }
-                markdown.push_str("\n");
+                markdown.push('\n');
             }
         }
 
@@ -1210,7 +1212,7 @@ graph TD;
         }
 
         for gui in restore.guidelines {
-            let mut meta_out: serde_json::Value = gui.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            let meta_out: serde_json::Value = gui.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Node (id, type, title, description, status, metadata) 
                  VALUES ($id, 'Guideline', $title, $description, $status, $metadata)
@@ -1542,9 +1544,7 @@ graph TD;
             return Ok(identity.code);
         }
 
-        if let Err(e) = resolve_canonical_project_identity(project_slug) {
-            return Err(e);
-        }
+        resolve_canonical_project_identity(project_slug)?;
 
         Err(anyhow!(
             "Projet canonique `{}` introuvable dans `.axon/meta.json` ou soll.ProjectCodeRegistry",
@@ -1626,6 +1626,7 @@ graph TD;
         self.next_server_numeric_id(project_slug, entity)
     }
 
+    #[allow(dead_code)]
     fn restore_soll_relation(
         &self,
         relation_type: &str,
@@ -1654,7 +1655,7 @@ impl McpServer {
             .get("dry_run")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let plan = args.get("plan")?;
+        let _plan = args.get("plan")?;
 
         let (canonical_slug, _) = match self.resolve_canonical_project_identity_for_mutation(project_slug) {
             Ok(identity) => identity,
@@ -2833,7 +2834,7 @@ impl McpServer {
             project_name, project_slug
         );
 
-        if let Some(concept) = concept_text {
+        if let Some(_concept) = concept_text {
             response_text.push_str(&format!(
                 "📄 Un document de concept a été détecté. Extrayez-en la Vision et les Piliers, et utilisez `soll_manager` pour les créer sous le projet {}.\n\n",
                 project_slug

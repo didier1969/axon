@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum BridgeEvent {
     SystemReady {
         start_time_utc: String,

@@ -7,6 +7,7 @@ pub struct YamlParser {
 }
 
 impl YamlParser {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             wasm_bytes: include_bytes!("../../parsers/tree-sitter-yaml.wasm"),

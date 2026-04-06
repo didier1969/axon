@@ -161,6 +161,7 @@ impl QueueStore {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_with_mode(
         &self,
         path: &str,
@@ -267,6 +268,7 @@ impl QueueStore {
         Ok(())
     }
 
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.priority_sender.len() + self.bulk_sender.len()
     }

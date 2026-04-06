@@ -87,6 +87,7 @@ pub(crate) fn spawn_runtime_telemetry(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_telemetry_connection(
     socket: UnixStream,
     store: Arc<GraphStore>,
@@ -155,14 +156,14 @@ pub(crate) async fn handle_telemetry_command(
 
     debug!("Telemetry: Received command [{}]", command);
 
-    if command.starts_with("EXECUTE_CYPHER ") {
-        let query = command[15..].trim().to_string();
+    if let Some(stripped) = command.strip_prefix("EXECUTE_CYPHER ") {
+        let query = stripped.trim().to_string();
         let _ = db_sender.send(axon_core::worker::DbWriteTask::ExecuteCypher { query });
         return;
     }
 
-    if command.starts_with("RAW_QUERY ") {
-        let query = command[10..].trim().to_string();
+    if let Some(stripped) = command.strip_prefix("RAW_QUERY ") {
+        let query = stripped.trim().to_string();
         tokio::spawn(async move {
             match store.execute_raw_sql_gateway(&query) {
                 Ok(res) => {
@@ -176,8 +177,7 @@ pub(crate) async fn handle_telemetry_command(
         return;
     }
 
-    if command.starts_with("SESSION_INIT ") {
-        let payload = &command[13..];
+    if let Some(payload) = command.strip_prefix("SESSION_INIT ") {
         if let Ok(data) = serde_json::from_str::<serde_json::Value>(payload) {
             let new_id = data["boot_id"].as_str().unwrap_or("unknown").to_string();
             let mut active_id = boot_id_lock.lock().await;
@@ -192,8 +192,7 @@ pub(crate) async fn handle_telemetry_command(
         return;
     }
 
-    if command.starts_with("PARSE_BATCH ") {
-        let payload = &command[12..];
+    if let Some(payload) = command.strip_prefix("PARSE_BATCH ") {
         if let Ok(batch_data) = serde_json::from_str::<serde_json::Value>(payload) {
             let batch_id = batch_data
                 .get("batch_id")
@@ -230,8 +229,8 @@ pub(crate) async fn handle_telemetry_command(
         return;
     }
 
-    if command.starts_with("PULL_PENDING ") {
-        let count = command[13..].trim().parse::<usize>().unwrap_or(10);
+    if let Some(stripped) = command.strip_prefix("PULL_PENDING ") {
+        let count = stripped.trim().parse::<usize>().unwrap_or(10);
         tokio::spawn(async move {
             if let Ok(files) = store.fetch_pending_batch(count) {
                 if !files.is_empty() {

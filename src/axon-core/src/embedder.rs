@@ -150,7 +150,7 @@ impl SemanticWorkerPool {
                                         Ok(embeddings) => {
                                             let updates: Vec<(String, String, Vec<f32>)> = chunks
                                                 .into_iter()
-                                                .zip(embeddings.into_iter())
+                                                .zip(embeddings)
                                                 .map(|((id, _, hash), emb)| (id, hash, emb))
                                                 .collect();
 
@@ -231,7 +231,7 @@ impl SemanticWorkerPool {
                         if this_work_done {
                             if let Err(err) =
                                 graph_store.mark_file_vectorization_done(
-                                    &[work.file_path.clone()],
+                                    std::slice::from_ref(&work.file_path),
                                     CHUNK_MODEL_ID,
                                 )
                             {
@@ -301,7 +301,7 @@ impl SemanticWorkerPool {
                         Ok(embeddings) => {
                             let updates: Vec<(String, Vec<f32>)> = symbols
                                 .into_iter()
-                                .zip(embeddings.into_iter())
+                                .zip(embeddings)
                                 .map(|((id, _), emb)| (id, emb))
                                 .collect();
 
@@ -407,7 +407,7 @@ impl SemanticWorkerPool {
                                         work.anchor_id
                                     );
                                     if let Err(err) =
-                                        graph_store.mark_graph_projection_work_done(&[work.clone()])
+                                        graph_store.mark_graph_projection_work_done(std::slice::from_ref(&work))
                                     {
                                         let reason = format!(
                                             "failed to drop stale symbol projection job: {:?}",
@@ -503,7 +503,7 @@ impl SemanticWorkerPool {
                                 let updates: Vec<(String, String, i64, String, String, Vec<f32>)> =
                                     to_embed
                                         .iter()
-                                        .zip(embeddings.into_iter())
+                                        .zip(embeddings)
                                         .map(
                                             |(
                                                 (work, source_signature, projection_version, _),
@@ -643,8 +643,7 @@ fn handle_pending_query_requests(
 
 fn serve_query_embedding_request(model: &mut TextEmbedding, request: QueryEmbeddingRequest) {
     let result = model
-        .embed(request.texts, None)
-        .map_err(anyhow::Error::from);
+        .embed(request.texts, None);
     let _ = request.reply.send(result);
 }
 
@@ -720,6 +719,7 @@ impl GraphStore {
         Ok(lines.join("\n"))
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn update_graph_embeddings(
         &self,
         model_id: &str,

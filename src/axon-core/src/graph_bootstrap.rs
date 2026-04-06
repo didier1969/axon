@@ -26,6 +26,7 @@ enum IstCompatibilityAction {
     HardRebuild,
 }
 
+#[allow(dead_code)]
 impl GraphStore {
     pub fn new(db_root: &str) -> Result<Self> {
         let plugin_path = Self::find_plugin_path()?;
@@ -882,11 +883,7 @@ impl GraphStore {
             "soll.Concept",
             "soll.Stakeholder",
         ] {
-            let id_col = if table == "soll.Concept" || table == "soll.Stakeholder" {
-                "id"
-            } else {
-                "id"
-            };
+            let id_col = "id";
             let raw = self.query_json(&format!(
                 "SELECT {} FROM {} WHERE {} LIKE '{}%'",
                 id_col,
@@ -1261,6 +1258,7 @@ impl GraphStore {
     }
 }
 
+#[allow(dead_code)]
 fn parse_prefixed_entity_id(value: &str) -> Option<(&str, &str, u64)> {
     let trimmed = value.trim();
     let mut parts = trimmed.splitn(3, '-');
@@ -1271,6 +1269,7 @@ fn parse_prefixed_entity_id(value: &str) -> Option<(&str, &str, u64)> {
     Some((prefix, project, number))
 }
 
+#[allow(dead_code)]
 fn split_prefixed_display_name(value: &str) -> Option<(String, String)> {
     let (id_part, name_part) = value.split_once(':')?;
     let id = id_part.trim();

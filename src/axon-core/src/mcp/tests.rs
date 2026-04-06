@@ -104,7 +104,7 @@ fn test_soll_work_plan_orders_decision_requirement_milestone_chain() {
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
     let data = result.get("data").expect("data payload");
-    let waves = data
+    let _waves = data
         .get("ordered_waves")
         .and_then(|v| v.as_array())
         .expect("waves array");

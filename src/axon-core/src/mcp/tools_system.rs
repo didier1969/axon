@@ -185,6 +185,7 @@ impl McpServer {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn axon_debug(&self) -> Option<Value> {
         self.axon_debug_with_args(&json!({}))
     }

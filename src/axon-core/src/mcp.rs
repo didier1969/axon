@@ -82,9 +82,7 @@ impl McpServer {
     }
 
     pub fn handle_request(&self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {
-        if request.id.is_none() {
-            return None;
-        }
+        request.id.as_ref()?;
 
         let result = match request.method.as_str() {
             "initialize" => Some(json!({

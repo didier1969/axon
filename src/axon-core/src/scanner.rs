@@ -594,6 +594,11 @@ fn discovery_policy(
     }
 }
 
+// Temporary stubs for dependency extraction
+fn extract_toml_dependencies(_content: &str) -> Vec<ProjectDependency> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{discovery_policy, Scanner};
@@ -767,9 +772,4 @@ mod tests {
         assert_eq!(count_a, 1);
         assert_eq!(count_b, 0);
     }
-}
-
-// Temporary stubs for dependency extraction
-fn extract_toml_dependencies(_content: &str) -> Vec<ProjectDependency> {
-    Vec::new()
 }

@@ -73,6 +73,7 @@ pub(crate) struct ParsedRequirement {
     pub metadata: Option<String>,
 }
 
+#[allow(dead_code)]
 pub(crate) struct ParsedDecision {
     pub id: String,
     pub title: String,
@@ -83,6 +84,7 @@ pub(crate) struct ParsedDecision {
     pub metadata: Option<String>,
 }
 
+#[allow(dead_code)]
 pub(crate) struct ParsedValidation {
     pub id: String,
     pub result: String,
@@ -238,6 +240,7 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
 
     Ok(parsed)
 }
+#[allow(dead_code)]
 fn parse_bold_bullet(line: &str) -> Option<(String, String)> {
     let rest = line.trim_start_matches('*').trim();
     let rest = rest.strip_prefix("**")?;
@@ -248,6 +251,7 @@ fn parse_bold_bullet(line: &str) -> Option<(String, String)> {
     Some((id, tail))
 }
 
+#[allow(dead_code)]
 fn split_title_paren(raw: String) -> (String, String) {
     if let Some(open) = raw.rfind(" (") {
         if raw.ends_with(')') {
@@ -259,6 +263,7 @@ fn split_title_paren(raw: String) -> (String, String) {
     (raw, String::new())
 }
 
+#[allow(dead_code)]
 fn parse_validation_line(line: &str) -> Option<ParsedValidation> {
     let trimmed = line.trim().trim_start_matches('*').trim();
     let after_first_tick = trimmed.strip_prefix('`')?;
@@ -289,6 +294,7 @@ fn parse_validation_line(line: &str) -> Option<ParsedValidation> {
     })
 }
 
+#[allow(dead_code)]
 fn parse_relation_line(line: &str) -> Option<ParsedRelation> {
     let trimmed = line.trim().trim_start_matches('*').trim();
     let after_kind_tick = trimmed.strip_prefix('`')?;
@@ -312,6 +318,7 @@ fn parse_relation_line(line: &str) -> Option<ParsedRelation> {
     })
 }
 
+#[allow(dead_code)]
 fn parse_optional_metadata_line<'a, I>(
     lines: &mut std::iter::Peekable<I>,
     prefix: &str,
@@ -322,6 +329,7 @@ where
     parse_optional_line(lines, prefix).map(|s| s.trim_matches('`').to_string())
 }
 
+#[allow(dead_code)]
 fn parse_optional_backticked_line<'a, I>(
     lines: &mut std::iter::Peekable<I>,
     prefix: &str,
@@ -332,6 +340,7 @@ where
     parse_optional_line(lines, prefix).map(|s| s.trim_matches('`').to_string())
 }
 
+#[allow(dead_code)]
 fn parse_optional_plain_line<'a, I>(
     lines: &mut std::iter::Peekable<I>,
     prefix: &str,
@@ -342,6 +351,7 @@ where
     parse_optional_line(lines, prefix)
 }
 
+#[allow(dead_code)]
 fn parse_optional_line<'a, I>(lines: &mut std::iter::Peekable<I>, prefix: &str) -> Option<String>
 where
     I: Iterator<Item = &'a str>,

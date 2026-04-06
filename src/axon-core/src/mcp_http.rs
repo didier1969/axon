@@ -148,6 +148,6 @@ mod tests {
         let body_json: Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(body_json["jsonrpc"], "2.0");
-        assert!(body_json["result"]["tools"].as_array().unwrap().len() > 0);
+        assert!(!body_json["result"]["tools"].as_array().unwrap().is_empty());
     }
 }

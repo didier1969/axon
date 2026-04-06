@@ -8,7 +8,7 @@ use tree_sitter::wasmtime::Engine;
 
 use tracing::{debug, warn};
 
-pub static WASM_ENGINE: Lazy<Engine> = Lazy::new(|| Engine::default());
+pub static WASM_ENGINE: Lazy<Engine> = Lazy::new(Engine::default);
 
 thread_local! {
     static PARSER_CACHE: RefCell<HashMap<String, tree_sitter::Parser>> = RefCell::new(HashMap::new());

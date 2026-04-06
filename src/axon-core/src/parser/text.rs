@@ -4,6 +4,7 @@ use std::collections::HashMap;
 pub struct TextParser;
 
 impl TextParser {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self
     }

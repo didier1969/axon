@@ -7,6 +7,7 @@ pub struct PythonParser {
 }
 
 impl PythonParser {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             wasm_bytes: include_bytes!("../../parsers/tree-sitter-python.wasm"),
@@ -32,6 +33,7 @@ impl PythonParser {
         }
     }
 
+    #[allow(clippy::manual_find)]
     fn find_child_by_type<'a>(&self, node: Node<'a>, kind: &str) -> Option<Node<'a>> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {

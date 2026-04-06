@@ -437,8 +437,8 @@ impl GraphStore {
     pub fn query_count_param(&self, query: &str, params: &serde_json::Value) -> Result<i64> {
         let res = self.query_json_param(query, params)?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res).unwrap_or_default();
-        if let Some(row) = rows.get(0) {
-            if let Some(val) = row.get(0) {
+        if let Some(row) = rows.first() {
+            if let Some(val) = row.first() {
                 if let Some(number) = val.as_i64() {
                     return Ok(number);
                 }
