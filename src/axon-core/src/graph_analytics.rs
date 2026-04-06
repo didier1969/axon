@@ -230,9 +230,9 @@ impl GraphStore {
         let escaped = project.replace('\'', "''");
         let base_calls = if scoped {
             format!(
-                "SELECT c.source_id, c.target_id 
-                 FROM CALLS c 
-                 JOIN Symbol s ON s.id = c.source_id 
+                "SELECT c.source_id, c.target_id
+                 FROM CALLS c
+                 JOIN Symbol s ON s.id = c.source_id
                  WHERE s.project_slug = '{}'",
                 escaped
             )
@@ -242,19 +242,33 @@ impl GraphStore {
 
         let query = format!(
             "
-            WITH RECURSIVE call_paths(source_id, target_id, path) AS (
-                SELECT source_id, target_id, [source_id]::VARCHAR[]
-                FROM ({}) base
+            WITH RECURSIVE call_paths(source_id, target_id, path_ids, path_names, is_cycle) AS (
+                SELECT 
+                    c.source_id, 
+                    c.target_id, 
+                    [c.source_id], 
+                    [s.name],
+                    false
+                FROM ({}) c
+                JOIN Symbol s ON s.id = c.source_id
+                
                 UNION ALL
-                SELECT p.source_id, c.target_id, list_append(p.path, p.target_id)
+                
+                SELECT 
+                    p.source_id, 
+                    c.target_id, 
+                    list_append(p.path_ids, c.source_id),
+                    list_append(p.path_names, s.name),
+                    list_contains(p.path_ids, c.target_id)
                 FROM call_paths p
                 JOIN CALLS c ON p.target_id = c.source_id
-                WHERE p.source_id != p.target_id 
-                  AND (NOT list_contains(p.path, c.target_id) OR c.target_id = p.source_id)
+                JOIN Symbol s ON s.id = c.source_id
+                WHERE NOT p.is_cycle AND len(p.path_ids) < 10 AND len(p.path_names) > 1
             )
-            SELECT array_to_string(list_append(path, target_id), ' -> ') AS cycle
-            FROM call_paths
-            WHERE source_id = target_id AND len(path) > 1;
+            SELECT array_to_string(list_append(path_names, s_target.name), ' -> ') as cycle_path
+            FROM call_paths p
+            JOIN Symbol s_target ON s_target.id = p.target_id
+            WHERE p.is_cycle = true;
             ",
             base_calls
         );
@@ -320,60 +334,56 @@ impl GraphStore {
     pub fn get_unsafe_exposure(&self, project: &str) -> Result<Vec<String>> {
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
-        let base_filter = if scoped {
-            format!("AND s_src.project_slug = '{}'", escaped)
+        let scope = if scoped {
+            format!(" AND s_src.project_slug = '{}'", escaped)
         } else {
             String::new()
         };
 
         let query = format!(
             "
-            WITH RECURSIVE call_paths(source_id, target_id, path_names, path_ids) AS (
+            WITH RECURSIVE call_paths(source_id, target_id, depth, path_ids, initial_name) AS (
                 SELECT 
                     c.source_id, 
                     c.target_id, 
-                    [s_src.name]::VARCHAR[], 
-                    [c.source_id]::VARCHAR[]
+                    1, 
+                    [c.source_id],
+                    s_src.name
                 FROM CALLS c
                 JOIN Symbol s_src ON s_src.id = c.source_id
-                WHERE COALESCE(s_src.is_public, false) = true {}
+                WHERE COALESCE(s_src.is_public, false) = true
+                {scope}
                 
                 UNION ALL
                 
                 SELECT 
                     p.source_id, 
                     c.target_id, 
-                    list_append(p.path_names, s_tgt.name),
-                    list_append(p.path_ids, c.target_id)
+                    p.depth + 1,
+                    list_append(p.path_ids, c.target_id),
+                    p.initial_name
                 FROM call_paths p
                 JOIN CALLS c ON p.target_id = c.source_id
-                JOIN Symbol s_tgt ON s_tgt.id = c.source_id
-                WHERE NOT list_contains(p.path_ids, c.target_id)
+                WHERE NOT list_contains(p.path_ids, c.target_id) AND p.depth < 10
             )
-            SELECT array_to_string(list_append(p.path_names, s_final.name), ' -> ')
+            SELECT DISTINCT p.initial_name || ' -> ... -> ' || s_tgt.name
             FROM call_paths p
-            JOIN Symbol s_final ON s_final.id = p.target_id
-            WHERE COALESCE(s_final.is_unsafe, false) = true OR s_final.name = 'unwrap';
+            JOIN Symbol s_tgt ON s_tgt.id = p.target_id
+            WHERE COALESCE(s_tgt.is_unsafe, false) = true OR lower(s_tgt.name) = 'unwrap';
             ",
-            base_filter
+            scope = scope
         );
 
         let res = self.query_json(&query)?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-        let mut findings = Vec::new();
-        for row in rows {
-            if let Some(exposure) = row.first() {
-                findings.push(exposure.clone());
-            }
-        }
-        Ok(findings)
+        Ok(rows.into_iter().filter_map(|row| row.first().cloned()).collect())
     }
 
     pub fn get_nif_blocking_risks(&self, project: &str) -> Result<Vec<String>> {
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
-        let base_filter = if scoped {
-            format!("AND s.project_slug = '{}'", escaped)
+        let scope = if scoped {
+            format!(" AND s_nif.project_slug = '{}'", escaped)
         } else {
             String::new()
         };
@@ -385,42 +395,36 @@ impl GraphStore {
                     c.source_id, 
                     c.target_id, 
                     1, 
-                    [c.source_id, c.target_id]::VARCHAR[],
+                    [c.source_id],
                     c.target_id,
-                    s.name
+                    s_nif.name
                 FROM CALLS_NIF c
-                JOIN Symbol s ON s.id = c.target_id
-                WHERE 1=1 {}
+                JOIN Symbol s_nif ON s_nif.id = c.target_id
+                WHERE 1=1 {scope}
                 
                 UNION ALL
                 
                 SELECT 
-                    p.target_id, 
+                    p.source_id, 
                     c.target_id, 
-                    p.depth + 1, 
+                    p.depth + 1,
                     list_append(p.path_ids, c.target_id),
                     p.initial_target_id,
                     p.initial_name
                 FROM call_depths p
                 JOIN CALLS c ON p.target_id = c.source_id
-                WHERE NOT list_contains(p.path_ids, c.target_id)
+                WHERE NOT list_contains(p.path_ids, c.target_id) AND p.depth < 20
             )
-            SELECT initial_name || ' (profondeur: ' || MAX(depth) || ')'
+            SELECT initial_name || ' (profondeur: ' || max(depth) || ')'
             FROM call_depths
             GROUP BY initial_target_id, initial_name
-            HAVING MAX(depth) > 5;
+            HAVING max(depth) > 5;
             ",
-            base_filter
+            scope = scope
         );
 
         let res = self.query_json(&query)?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-        let mut findings = Vec::new();
-        for row in rows {
-            if let Some(risk) = row.first() {
-                findings.push(risk.clone());
-            }
-        }
-        Ok(findings)
+        Ok(rows.into_iter().filter_map(|row| row.first().cloned()).collect())
     }
 }
