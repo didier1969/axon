@@ -302,6 +302,13 @@ impl McpServer {
             .graph_store
             .get_technical_debt(project)
             .unwrap_or_default();
+        let god_objects = self
+            .graph_store
+            .get_god_objects(project)
+            .unwrap_or_default();
+        let telemetry_score = self.graph_store.get_telemetry_score(project).unwrap_or(100);
+        let dead_code = self.graph_store.get_dead_code_count(project).unwrap_or(0);
+        let hygiene_score = (100 - (god_objects.len() as i64 * 10) - (dead_code * 2)).max(0);
 
         let mut evidence = String::new();
         if let Some(note) = self.project_scope_truth_note((project != "*").then_some(project)) {
@@ -338,6 +345,86 @@ impl McpServer {
         }
 
         evidence.push_str(&format!("\n### 🧪 Qualité & Tests : {}%\n", cov_score));
+        
+        evidence.push_str(&format!("\n### 🧹 Hygiène du Code (Clean-As-You-Go) : {}/100\n", hygiene_score));
+        if god_objects.is_empty() && dead_code == 0 {
+            evidence.push_str("✅ Codebase saine : Zéro God Object et zéro code mort détecté.\n");
+        } else {
+            if !god_objects.is_empty() {
+                evidence.push_str(&format!("* 🚨 {} God Objects (fichiers/fonctions monolithiques) détectés.\n", god_objects.len()));
+            }
+            if dead_code > 0 {
+                evidence.push_str(&format!("* 🗑️ {} fonctions mortes (non publiques et sans appelant) détectées. Veuillez les supprimer.\n", dead_code));
+            }
+        }
+
+        evidence.push_str(&format!("\n### 📡 Télémétrie & Observabilité : {}/100\n", telemetry_score));
+        if telemetry_score < 100 {
+            evidence.push_str("🚨 Appels à des fonctions de log textuelles brutes (`println!`, `console.log`, etc.) détectés. Utilisez la télémétrie structurée.\n");
+        } else {
+            evidence.push_str("✅ Observabilité conforme (zéro appel de log brut détecté).\n");
+        }
+
+        let circular_deps = self.graph_store.get_circular_dependencies(project).unwrap_or_default();
+        let domain_leaks = self.graph_store.get_domain_leakage(project, "domain", "infrastructure").unwrap_or_default();
+        let unsafe_exposure = self.graph_store.get_unsafe_exposure(project).unwrap_or_default();
+        let nif_blocking_risks = self.graph_store.get_nif_blocking_risks(project).unwrap_or_default();
+        
+        evidence.push_str("\n### 🌪️ Anti-Patterns Architecturaux\n");
+        if circular_deps.is_empty() {
+            evidence.push_str("✅ Aucune dépendance circulaire détectée.\n");
+        } else {
+            evidence.push_str(&format!("🚨 [{}] Dépendances circulaires détectées :\n", circular_deps.len()));
+            for path in circular_deps.iter().take(5) {
+                evidence.push_str(&format!("*   `{}`\n", path));
+            }
+            if circular_deps.len() > 5 {
+                evidence.push_str(&format!("*   ... et {} autres boucles.\n", circular_deps.len() - 5));
+            }
+        }
+
+        if domain_leaks.is_empty() {
+            evidence.push_str("✅ Aucune fuite de domaine détectée.\n");
+        } else {
+            evidence.push_str(&format!("🚨 [{}] Fuites de Domaine détectées :\n", domain_leaks.len()));
+            for leak in domain_leaks.iter().take(5) {
+                evidence.push_str(&format!("*   `{}`\n", leak));
+            }
+            if domain_leaks.len() > 5 {
+                evidence.push_str(&format!("*   ... et {} autres fuites.\n", domain_leaks.len() - 5));
+            }
+        }
+
+        if unsafe_exposure.is_empty() {
+            evidence.push_str("✅ Aucune exposition unsafe détectée.\n");
+        } else {
+            evidence.push_str(&format!("🚨 [{}] Expositions Unsafe détectées :\n", unsafe_exposure.len()));
+            for exp in unsafe_exposure.iter().take(5) {
+                evidence.push_str(&format!("*   `{}`\n", exp));
+            }
+            if unsafe_exposure.len() > 5 {
+                evidence.push_str(&format!("*   ... et {} autres expositions.\n", unsafe_exposure.len() - 5));
+            }
+        }
+
+        if nif_blocking_risks.is_empty() {
+            evidence.push_str("✅ Aucun risque de blocage NIF (Scheduler Starvation) détecté.\n");
+        } else {
+            evidence.push_str(&format!("🚨 [{}] Risques de Blocage NIF détectés (Profondeur d'appel critique) :\n", nif_blocking_risks.len()));
+            for risk in nif_blocking_risks.iter().take(5) {
+                evidence.push_str(&format!("*   `{}`\n", risk));
+            }
+            if nif_blocking_risks.len() > 5 {
+                evidence.push_str(&format!("*   ... et {} autres risques.\n", nif_blocking_risks.len() - 5));
+            }
+        }
+
+        let overall_score = if !circular_deps.is_empty() || !domain_leaks.is_empty() || !unsafe_exposure.is_empty() || !nif_blocking_risks.is_empty() {
+            0
+        } else {
+            (sec_score + cov_score + hygiene_score + telemetry_score) / 4
+        };
+        
         let report = format!(
             "## 🛡️ Audit de Conformité : {}\n\n{}",
             project,
@@ -346,8 +433,8 @@ impl McpServer {
                 "governance audit computed",
                 &format!("project:{}", project),
                 &evidence_by_mode(&evidence, mode),
-                &["review critical security paths first", "triage top technical debt items"],
-                if sec_score >= 90 { "high" } else { "medium" },
+                &["review critical security paths first", "delete dead code", "triage top technical debt items"],
+                if overall_score >= 90 { "high" } else { "medium" },
             )
         );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
@@ -462,15 +549,28 @@ impl McpServer {
         let target_layer = args.get("target_layer")?.as_str()?;
 
         let query = "
-            SELECT f1.path, s1.name, f2.path, s2.name 
-            FROM CALLS c
-            JOIN Symbol s1 ON c.source_id = s1.id
-            JOIN CONTAINS c1 ON s1.id = c1.target_id
-            JOIN File f1 ON f1.path = c1.source_id
-            JOIN Symbol s2 ON c.target_id = s2.id
+            WITH RECURSIVE call_paths(source_id, target_id, path) AS (
+                SELECT c.source_id, c.target_id, [c.source_id]
+                FROM CALLS c
+                JOIN Symbol s1 ON c.source_id = s1.id
+                JOIN CONTAINS c1 ON s1.id = c1.target_id
+                JOIN File f1 ON f1.path = c1.source_id
+                WHERE f1.path LIKE '%' || $s_layer || '%'
+                
+                UNION ALL
+                
+                SELECT cp.source_id, c.target_id, list_append(cp.path, cp.target_id)
+                FROM call_paths cp
+                JOIN CALLS c ON cp.target_id = c.source_id
+                WHERE len(cp.path) < 5
+            )
+            SELECT array_to_string(list_append(cp.path, cp.target_id), ' -> ')
+            FROM call_paths cp
+            JOIN Symbol s2 ON cp.target_id = s2.id
             JOIN CONTAINS c2 ON s2.id = c2.target_id
             JOIN File f2 ON f2.path = c2.source_id
-            WHERE f1.path LIKE '%' || $s_layer || '%' AND f2.path LIKE '%' || $t_layer || '%'
+            WHERE f2.path LIKE '%' || $t_layer || '%'
+            LIMIT 20
         "
         .to_string();
 
@@ -481,12 +581,19 @@ impl McpServer {
 
         match self.graph_store.query_json_param(&query, &params) {
             Ok(res) => {
-                let report = if res.len() > 5 && res != "[]" {
+                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+                let report = if !rows.is_empty() {
+                    let paths_str = rows
+                        .into_iter()
+                        .filter_map(|r| r.into_iter().next().and_then(|v| v.as_str().map(|s| s.to_string())))
+                        .map(|s| format!("* {}", s))
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     format!(
-                        "⚠️ **VIOLATION D'ARCHITECTURE DÉTECTÉE**\n\nLa couche '{}' appelle directement '{}' :\n\n{}",
+                        "⚠️ **VIOLATION D'ARCHITECTURE DÉTECTÉE**\n\nLa couche '{}' appelle directement ou indirectement '{}' :\n\n{}",
                         source_layer,
                         target_layer,
-                        format_table_from_json(&res, &["Source", "Symbole", "Cible", "Appelé"])
+                        paths_str
                     )
                 } else {
                     format!(

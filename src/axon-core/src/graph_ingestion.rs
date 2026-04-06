@@ -1369,8 +1369,20 @@ impl GraphStore {
                 claim_id, count
             );
 
-            if !exec_fn(*guard, CString::new(claim_query)?.as_ptr()) {
-                let _ = exec_fn(*guard, CString::new("ROLLBACK;")?.as_ptr());
+            let c_query = match CString::new(claim_query) {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Ok(rb) = CString::new("ROLLBACK;") {
+                        let _ = exec_fn(*guard, rb.as_ptr());
+                    }
+                    return Err(anyhow!("Pending Fetch Error (CString): {:?}", e));
+                }
+            };
+            
+            if !exec_fn(*guard, c_query.as_ptr()) {
+                if let Ok(rb) = CString::new("ROLLBACK;") {
+                    let _ = exec_fn(*guard, rb.as_ptr());
+                }
                 return Err(anyhow!("Pending Fetch Error: claim update failed"));
             }
         }
@@ -1382,7 +1394,19 @@ impl GraphStore {
              ORDER BY priority DESC",
             claim_id
         );
-        let res = self.query_on_ctx(&fetch_query, *guard)?;
+        let res = match self.query_on_ctx(&fetch_query, *guard) {
+            Ok(r) => r,
+            Err(e) => {
+                unsafe {
+                    if let Ok(exec_fn) = self.pool.lib.get::<LibSymbol<ExecFunc>>(b"duckdb_execute\0") {
+                        if let Ok(rb_query) = CString::new("ROLLBACK;") {
+                            let _ = exec_fn(*guard, rb_query.as_ptr());
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        };
 
         unsafe {
             let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
@@ -1458,8 +1482,20 @@ impl GraphStore {
                 claim_id, path_list
             );
 
-            if !exec_fn(*guard, CString::new(claim_query)?.as_ptr()) {
-                let _ = exec_fn(*guard, CString::new("ROLLBACK;")?.as_ptr());
+            let c_query = match CString::new(claim_query) {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Ok(rb) = CString::new("ROLLBACK;") {
+                        let _ = exec_fn(*guard, rb.as_ptr());
+                    }
+                    return Err(anyhow!("Claim Paths Error (CString): {:?}", e));
+                }
+            };
+            
+            if !exec_fn(*guard, c_query.as_ptr()) {
+                if let Ok(rb) = CString::new("ROLLBACK;") {
+                    let _ = exec_fn(*guard, rb.as_ptr());
+                }
                 return Err(anyhow!("Claim Paths Error: claim update failed"));
             }
         }
@@ -1471,7 +1507,19 @@ impl GraphStore {
              ORDER BY priority DESC, size ASC",
             claim_id
         );
-        let res = self.query_on_ctx(&fetch_query, *guard)?;
+        let res = match self.query_on_ctx(&fetch_query, *guard) {
+            Ok(r) => r,
+            Err(e) => {
+                unsafe {
+                    if let Ok(exec_fn) = self.pool.lib.get::<LibSymbol<ExecFunc>>(b"duckdb_execute\0") {
+                        if let Ok(rb_query) = CString::new("ROLLBACK;") {
+                            let _ = exec_fn(*guard, rb_query.as_ptr());
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        };
 
         unsafe {
             let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;

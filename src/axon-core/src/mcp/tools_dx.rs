@@ -781,6 +781,7 @@ impl McpServer {
             .graph_store
             .query_count("SELECT count(*) FROM CONTAINS")
             .unwrap_or(0);
+        println!("axon_query_without_contains: contains_count={} in DB {:?}", contains_count, self.graph_store.db_path);
         if contains_count > 0 {
             let diagnostic =
                 Self::query_diagnostic_block(query_intent, "structure_only_empty", "aucun", semantic_fallback_reason);

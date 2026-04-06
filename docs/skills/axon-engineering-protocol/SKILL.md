@@ -58,8 +58,13 @@ description: Core engineering protocol for Axon. MUST BE READ before any coding,
 **Context & Discovery:**
 - `mcp_axon_query` / `mcp_axon_inspect`: Read IST (Code).
 - `axon_impact(symbol)`: **CRITICAL for refactoring.** Traces a code symbol's impact all the way up through the call graph and across the bridge to SOLL (revealing compromised Decisions, Requirements, and Visions).
-- `soll_query_context`: Read SOLL state.
+- `axon_architectural_drift`: **CRITICAL for domain leakage.** Recursively traces pathfinding between layers (e.g., from `domain` to `infrastructure`) to explain why a boundary violation was detected.
+- `soll_query_context`: Read SOLL state. Supports native filtering by `status` (e.g. 'proposed') and `type` (e.g. 'Requirement').
 - `soll_work_plan(project_slug, json=true)`: Ordered execution view (blockers, waves).
+
+**Error Handling & AX (Agent Experience):**
+- MCP tools use Fail-Fast with Context. If you pass an invalid `project_slug`, the server returns the expected state and valid slugs.
+- Mutation tools (`soll_apply_plan`) are strictly idempotent (Upsert). Re-running a plan safely returns "No changes" instead of crashing on SQL constraint errors.
 
 ## IST-Driven Execution (Mandatory Workflow)
 Before coding or mutating SOLL, you MUST:

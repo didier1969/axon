@@ -602,7 +602,6 @@ fn extract_toml_dependencies(_content: &str) -> Vec<ProjectDependency> {
 #[cfg(test)]
 mod tests {
     use super::{discovery_policy, Scanner};
-    use crate::graph::GraphStore;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -759,7 +758,7 @@ mod tests {
         std::fs::write(project_b.join("skip.ex"), "defmodule Skip do\nend\n").unwrap();
 
         let scanner = Scanner::new(root.to_string_lossy().as_ref());
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         scanner.scan_subtree(store.clone(), &project_a);
 
         let count_a = store

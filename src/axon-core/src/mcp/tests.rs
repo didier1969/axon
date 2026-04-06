@@ -9,9 +9,9 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 fn create_test_server() -> McpServer {
-    let store = Arc::new(
-        GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap()),
-    );
+    let db = crate::tests::test_helpers::create_test_db().expect("failed to create isolated test db");
+    println!("TEST DB PATH: {:?}", db.db_path);
+    let store = Arc::new(db);
     McpServer::new(store)
 }
 
@@ -523,8 +523,7 @@ fn test_axon_fs_read() {
 #[test]
 fn test_send_notification() {
     let store = Arc::new(
-        GraphStore::new(":memory:")
-            .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_notif").unwrap()),
+        crate::tests::test_helpers::create_test_db().expect("failed isolated notif db"),
     );
     let server = McpServer::new(store);
     let notif = server.send_notification("notifications/tools/list_changed", None);
@@ -2597,7 +2596,8 @@ fn test_axon_query_falls_back_when_contains_is_absent() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("degrade structurel sans ancrage fichier"));
+    println!("TEST QUERY CONTENT:\n{}", content);
+    assert!(content.contains("degrade structurel sans ancrage fichier"), "{content}");
     assert!(content.contains("trigger_scan"));
 }
 
@@ -2650,6 +2650,7 @@ fn test_vcr2_impact_before_change_on_public_api() {
         id: Some(json!(22)),
     };
 
+    server.graph_store.refresh_reader_snapshot().unwrap();
     let impact_response = server.handle_request(impact_req);
     let impact_result = impact_response.unwrap().result.expect("Expected result");
     let impact_text = impact_result.get("content").unwrap()[0]
@@ -2658,10 +2659,11 @@ fn test_vcr2_impact_before_change_on_public_api() {
         .as_str()
         .unwrap();
 
+    println!("VCR2 IMPACT TEXT: \n{}", impact_text);
     assert!(impact_text.contains("parse_batch"));
     assert!(impact_text.contains("consumer_a"));
     assert!(impact_text.contains("consumer_b"));
-    assert!(impact_text.contains("Projection locale"));
+    assert!(impact_text.contains("Projection locale"), "{impact_text}");
 
     let api_break_req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -2704,6 +2706,7 @@ fn test_axon_impact_reports_missing_call_graph_truthfully() {
         id: Some(json!(221)),
     };
 
+    server.graph_store.refresh_reader_snapshot().unwrap();
     let impact_response = server.handle_request(impact_req);
     let impact_result = impact_response.unwrap().result.expect("Expected result");
     let impact_text = impact_result.get("content").unwrap()[0]
@@ -2712,7 +2715,7 @@ fn test_axon_impact_reports_missing_call_graph_truthfully() {
         .as_str()
         .unwrap();
 
-    assert!(impact_text.contains("le graphe d'appel n'est pas encore disponible"));
+    assert!(impact_text.contains("le graphe d'appel n'est pas encore disponible"), "{impact_text}");
     assert!(impact_text.contains("parse_batch"));
 }
 
@@ -2781,6 +2784,7 @@ fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
         id: Some(json!(199)),
     };
 
+    server.graph_store.refresh_reader_snapshot().unwrap();
     let impact_response = server.handle_request(impact_req);
     let impact_result = impact_response.unwrap().result.expect("Expected result");
     let impact_text = impact_result.get("content").unwrap()[0]
@@ -4125,4 +4129,46 @@ fn test_axon_impact_traces_through_soll_architecture() {
     assert!(content.contains("REQ-BKS-005"), "Should traverse to Requirement");
     assert!(content.contains("VIS-BKS-001"), "Should traverse to Vision");
     assert!(content.contains("Paiement sans friction"), "Should list vision title");
+}
+
+#[test]
+fn test_axon_architectural_drift_finds_deep_paths() {
+    let server = create_test_server();
+    
+    server.graph_store.execute("INSERT INTO File (path, project_slug) VALUES ('src/domain/entity.rs', 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO File (path, project_slug) VALUES ('src/application/service.rs', 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO File (path, project_slug) VALUES ('src/infrastructure/db.rs', 'global')").unwrap();
+
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::domain::Entity', 'Entity', 'struct', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::application::Service', 'Service', 'struct', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_slug) VALUES ('global::infrastructure::Db', 'Db', 'struct', false, true, false, 'global')").unwrap();
+
+    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/domain/entity.rs', 'global::domain::Entity')").unwrap();
+    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/application/service.rs', 'global::application::Service')").unwrap();
+    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/infrastructure/db.rs', 'global::infrastructure::Db')").unwrap();
+
+    server.graph_store.execute("INSERT INTO CALLS (source_id, target_id) VALUES ('global::domain::Entity', 'global::application::Service')").unwrap();
+    server.graph_store.execute("INSERT INTO CALLS (source_id, target_id) VALUES ('global::application::Service', 'global::infrastructure::Db')").unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "architectural_drift",
+            "arguments": { "source_layer": "domain", "target_layer": "infrastructure" }
+        })),
+        id: Some(json!(999)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    println!("DEEP PATH CONTENT: {}", content);
+    assert!(content.contains("VIOLATION D'ARCHITECTURE"), "Should detect violation");
+    assert!(content.contains("global::domain::Entity -> global::application::Service -> global::infrastructure::Db"), "Should contain the path");
 }

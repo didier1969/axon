@@ -456,7 +456,6 @@ fn claimed_paths_from_batch(batch: &[DbWriteTask]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{DbWriteTask, TaskDispatchOutcome, WorkerPool};
-    use crate::graph::GraphStore;
     use crate::queue::TaskLane;
     use crate::queue::{ProcessingMode, QueueStore, Task};
     use std::sync::Arc;
@@ -483,7 +482,7 @@ mod tests {
             mode: ProcessingMode::Full,
         };
 
-        let graph = Arc::new(GraphStore::new(":memory:").unwrap());
+        let graph = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let (db_sender, db_receiver) = crossbeam_channel::unbounded();
         let (results_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 
@@ -534,7 +533,7 @@ mod tests {
             mode: ProcessingMode::StructureOnly,
         };
 
-        let graph = Arc::new(GraphStore::new(":memory:").unwrap());
+        let graph = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let (db_sender, db_receiver) = crossbeam_channel::unbounded();
         let (results_tx, _) = tokio::sync::broadcast::channel::<String>(16);
 
@@ -652,7 +651,7 @@ mod tests {
         let path = temp.path().join("writer_ack.rs");
         std::fs::write(&path, "defmodule WriterAck do\nend\n").unwrap();
 
-        let graph = Arc::new(GraphStore::new(":memory:").unwrap());
+        let graph = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         graph
             .bulk_insert_files(&[(
                 path.to_string_lossy().to_string(),
@@ -702,7 +701,7 @@ mod tests {
         std::fs::write(&path, "defmodule WriterStage do\nend\n").unwrap();
         let path_str = path.to_string_lossy().to_string();
 
-        let graph = Arc::new(GraphStore::new(":memory:").unwrap());
+        let graph = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         graph
             .bulk_insert_files(&[(path_str.clone(), "proj".to_string(), 32, 1)])
             .unwrap();

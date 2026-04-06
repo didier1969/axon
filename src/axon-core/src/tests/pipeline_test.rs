@@ -2,7 +2,6 @@ use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use crate::graph::GraphStore;
 use crate::queue::QueueStore;
 use crate::worker::{DbWriteTask, TaskDispatchOutcome, WorkerPool};
 
@@ -12,7 +11,7 @@ fn test_full_pipeline_loop() {
 
     // 1. Setup GraphStore in memory
     println!("[TEST] Step 1: Init GraphStore...");
-    let graph = Arc::new(GraphStore::new(":memory:").expect("Failed to init GraphStore"));
+    let graph = Arc::new(crate::tests::test_helpers::create_test_db().expect("Failed to init GraphStore"));
 
     // 2. Setup QueueStore
     println!("[TEST] Step 2: Init QueueStore...");

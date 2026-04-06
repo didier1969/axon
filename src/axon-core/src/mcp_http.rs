@@ -116,7 +116,7 @@ mod tests {
     async fn test_mcp_http_endpoint_tools_list() {
         // Updated test server creation to use direct Arc (Zéro-Sleep)
         let store = Arc::new(
-            GraphStore::new(":memory:")
+            crate::tests::test_helpers::create_test_db()
                 .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_http").unwrap()),
         );
         let mcp_server = Arc::new(McpServer::new(store));

@@ -1544,11 +1544,12 @@ graph TD;
             return Ok(identity.code);
         }
 
-        resolve_canonical_project_identity(project_slug)?;
+        let _ = resolve_canonical_project_identity(project_slug);
 
-        Err(anyhow!(
-            "Projet canonique `{}` introuvable dans `.axon/meta.json` ou soll.ProjectCodeRegistry",
-            project_slug
+        let valid_slugs = self.query_single_column("SELECT project_slug FROM soll.ProjectCodeRegistry").unwrap_or_default().join(", ");
+        Err(anyhow::anyhow!(
+            "Projet canonique `{}` introuvable. Slugs valides : {}",
+            project_slug, valid_slugs
         ))
     }
 
@@ -1691,7 +1692,18 @@ impl McpServer {
              ON CONFLICT (preview_id) DO UPDATE SET author = EXCLUDED.author, project_slug = EXCLUDED.project_slug, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at",
             &json!([preview_id, author, canonical_slug, payload.to_string(), now_unix_ms()]),
         ) {
-            return Some(json!({
+            let err_msg = e.to_string();
+            if err_msg.to_lowercase().contains("constraint") || err_msg.to_lowercase().contains("unique") || err_msg.to_lowercase().contains("duplicate") {
+                return Some(serde_json::json!({
+                    "content": [{"type":"text","text": format!("No changes (idempotent application - constraint caught: {})", err_msg)}],
+                    "data": {
+                        "preview_id": preview_id,
+                        "project_slug": canonical_slug,
+                        "operations": operations.len()
+                    }
+                }));
+            }
+            return Some(serde_json::json!({
                 "content": [{"type":"text","text": format!("SOLL apply_plan error: {}", e)}],
                 "isError": true
             }));
@@ -1912,25 +1924,53 @@ impl McpServer {
             .get("project_slug")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
-        let project_code = self.resolve_project_code(project_slug).ok()?;
+            
+        let project_code = match self.resolve_project_code(project_slug) {
+            Ok(code) => code,
+            Err(e) => {
+                return Some(serde_json::json!({
+                    "content": [{"type":"text","text": e.to_string()}],
+                    "isError": true
+                }));
+            }
+        };
         let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(25).max(1);
 
-        let reqs = self.query_single_column(&format!(
-            "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Requirement' AND id LIKE 'REQ-{}-%' ORDER BY id DESC LIMIT {}",
-            escape_sql(&project_code),
-            limit
-        )).unwrap_or_default();
-        let decisions = self.query_single_column(&format!(
-            "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Decision' AND id LIKE 'DEC-{}-%' ORDER BY id DESC LIMIT {}",
-            escape_sql(&project_code),
-            limit
-        )).unwrap_or_default();
+        let mut status_filter = String::new();
+        if let Some(status) = args.get("status").and_then(|v| v.as_str()) {
+            status_filter = format!(" AND status = '{}'", escape_sql(status));
+        }
+
+        let type_opt = args.get("type").and_then(|v| v.as_str());
+
+        let reqs = if type_opt.is_none() || type_opt == Some("Requirement") {
+            self.query_single_column(&format!(
+                "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Requirement' AND id LIKE 'REQ-{}-%'{} ORDER BY id DESC LIMIT {}",
+                escape_sql(&project_code),
+                status_filter,
+                limit
+            )).unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        let decisions = if type_opt.is_none() || type_opt == Some("Decision") {
+            self.query_single_column(&format!(
+                "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Decision' AND id LIKE 'DEC-{}-%'{} ORDER BY id DESC LIMIT {}",
+                escape_sql(&project_code),
+                status_filter,
+                limit
+            )).unwrap_or_default()
+        } else {
+            vec![]
+        };
+
         let revisions = self.query_single_column(&format!(
             "SELECT revision_id || '|' || COALESCE(summary,'') || '|' || COALESCE(author,'') FROM soll.Revision ORDER BY committed_at DESC LIMIT {}",
             limit
         )).unwrap_or_default();
 
-        Some(json!({
+        Some(serde_json::json!({
             "content": [{"type":"text","text": format!("SOLL context for {} loaded.", project_slug)}],
             "data": {
                 "project_slug": project_slug,

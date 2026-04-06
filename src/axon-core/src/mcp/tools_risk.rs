@@ -404,6 +404,8 @@ impl McpServer {
             .graph_store
             .query_count("SELECT (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)")
             .unwrap_or(0);
+            
+        println!("axon_impact_without_calls: calls_count={} in DB {:?}", calls_count, self.graph_store.db_path);
         if calls_count > 0 {
             return Some(json!({
                 "content": [{

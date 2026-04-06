@@ -21,3 +21,4 @@ Votre communication est **strictement pragmatique, objective et froide**. Élimi
 ## 🛡️ Sécurité et Contexte Local
 *   **Oracle Shield :** Toute communication de diagnostic doit être protégée par le `Witness.Token`.
 *   **Zéro Impureté :** Utilisez exclusivement `write_file` et `replace`. Jamais de `cat` ou de redirection shell pour manipuler le code.
+*   **Disponibilité MCP :** Si les outils MCP spécifiques à Axon (ou autres) ne sont pas disponibles, produisent des erreurs inexpliquées ou semblent désynchronisés, la commande `/mcp reload` est INSUFFISANTE. Vous DEVEZ formellement exiger de l'utilisateur qu'il **quitte complètement la CLI Gemini et relance une nouvelle session**. Ne simulez jamais l'existence de ces outils.

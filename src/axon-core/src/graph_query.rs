@@ -469,8 +469,19 @@ impl GraphStore {
             }
 
             for q in queries {
-                if !exec_fn(*guard, CString::new(q.as_str())?.as_ptr()) {
-                    let _ = exec_fn(*guard, CString::new("ROLLBACK;")?.as_ptr());
+                let c_query = match CString::new(q.as_str()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        if let Ok(rb) = CString::new("ROLLBACK;") {
+                            let _ = exec_fn(*guard, rb.as_ptr());
+                        }
+                        return Err(anyhow!("Batch Writer Error (CString): {:?}", e));
+                    }
+                };
+                if !exec_fn(*guard, c_query.as_ptr()) {
+                    if let Ok(rb) = CString::new("ROLLBACK;") {
+                        let _ = exec_fn(*guard, rb.as_ptr());
+                    }
                     return Err(anyhow!("Batch Writer Error on query: {}", q));
                 }
             }
@@ -557,11 +568,10 @@ fn is_read_only_sql(query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::graph::GraphStore;
 
     #[test]
     fn execute_raw_sql_gateway_supports_read_only_and_mutating_queries() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
 
         let read = store.execute_raw_sql_gateway("SELECT 1").unwrap();
         assert!(read.contains("1"), "{read}");

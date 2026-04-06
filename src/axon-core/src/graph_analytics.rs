@@ -99,7 +99,7 @@ impl GraphStore {
             FROM File f
             JOIN CONTAINS c ON c.source_id = f.path
             JOIN Symbol s ON s.id = c.target_id
-            WHERE lower(s.name) LIKE '%todo%'
+            WHERE (lower(s.name) LIKE '%todo%'
                OR lower(s.name) LIKE '%fixme%'
                OR lower(s.name) LIKE '%secret%'
                OR lower(s.name) LIKE '%hardcoded credential%'
@@ -108,7 +108,7 @@ impl GraphStore {
                     JOIN Symbol target ON target.id = call.target_id
                     WHERE call.source_id = s.id
                       AND lower(target.name) IN ('unwrap', 'eval')
-               )
+               ))
             {}
         ",
             if scoped {
@@ -174,6 +174,251 @@ impl GraphStore {
             if row.len() >= 2 {
                 let count = row[1].parse::<i64>().unwrap_or(0);
                 findings.insert(row[0].clone(), serde_json::Value::Number(count.into()));
+            }
+        }
+        Ok(findings)
+    }
+
+    pub fn get_telemetry_score(&self, project: &str) -> Result<i64> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let query = format!(
+            "
+            SELECT count(*) 
+            FROM CALLS call
+            JOIN Symbol target ON target.id = call.target_id
+            WHERE lower(target.name) IN ('println!', 'dbg!', 'console.log', 'io.puts', 'print', 'printf')
+            {}
+            ",
+            if scoped {
+                format!(" AND call.source_id IN (SELECT id FROM Symbol WHERE project_slug = '{}')", escaped)
+            } else {
+                String::new()
+            }
+        );
+        let bad_logs = self.query_count(&query).unwrap_or(0);
+        Ok((100 - (bad_logs * 5)).max(0))
+    }
+
+    pub fn get_dead_code_count(&self, project: &str) -> Result<i64> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let query = format!(
+            "
+            SELECT count(*)
+            FROM Symbol s
+            JOIN CONTAINS c ON c.target_id = s.id
+            JOIN File f ON f.path = c.source_id
+            WHERE s.kind IN ('function', 'method')
+              AND COALESCE(s.is_public, false) = false
+              AND s.id NOT IN (SELECT target_id FROM CALLS)
+              AND s.id NOT IN (SELECT target_id FROM CALLS_NIF)
+              AND f.path NOT LIKE '%/tests/%' AND f.path NOT LIKE '%_test.rs' AND f.path NOT LIKE '%_test.exs'
+            {}
+            ",
+            if scoped {
+                format!(" AND s.project_slug = '{}'", escaped)
+            } else {
+                String::new()
+            }
+        );
+        Ok(self.query_count(&query).unwrap_or(0))
+    }
+
+    pub fn get_circular_dependencies(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let base_calls = if scoped {
+            format!(
+                "SELECT c.source_id, c.target_id 
+                 FROM CALLS c 
+                 JOIN Symbol s ON s.id = c.source_id 
+                 WHERE s.project_slug = '{}'",
+                escaped
+            )
+        } else {
+            "SELECT source_id, target_id FROM CALLS".to_string()
+        };
+
+        let query = format!(
+            "
+            WITH RECURSIVE call_paths(source_id, target_id, path) AS (
+                SELECT source_id, target_id, [source_id]::VARCHAR[]
+                FROM ({}) base
+                UNION ALL
+                SELECT p.source_id, c.target_id, list_append(p.path, p.target_id)
+                FROM call_paths p
+                JOIN CALLS c ON p.target_id = c.source_id
+                WHERE p.source_id != p.target_id 
+                  AND (NOT list_contains(p.path, c.target_id) OR c.target_id = p.source_id)
+            )
+            SELECT array_to_string(list_append(path, target_id), ' -> ') AS cycle
+            FROM call_paths
+            WHERE source_id = target_id AND len(path) > 1;
+            ",
+            base_calls
+        );
+
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        let mut findings = Vec::new();
+        for row in rows {
+            if !row.is_empty() {
+                findings.push(row[0].clone());
+            }
+        }
+        Ok(findings)
+    }
+
+    pub fn get_domain_leakage(
+        &self,
+        project: &str,
+        domain_path: &str,
+        infra_path: &str,
+    ) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped_project = project.replace('\'', "''");
+        let escaped_domain = domain_path.replace('\'', "''");
+        let escaped_infra = infra_path.replace('\'', "''");
+
+        let query = format!(
+            "
+            SELECT s_domain.name || ' (' || f_domain.path || ') -> ' || s_infra.name || ' (' || f_infra.path || ')'
+            FROM CALLS c
+            JOIN Symbol s_domain ON c.source_id = s_domain.id
+            JOIN CONTAINS c_domain ON c_domain.target_id = s_domain.id
+            JOIN File f_domain ON f_domain.path = c_domain.source_id
+            
+            JOIN Symbol s_infra ON c.target_id = s_infra.id
+            JOIN CONTAINS c_infra ON c_infra.target_id = s_infra.id
+            JOIN File f_infra ON f_infra.path = c_infra.source_id
+            
+            WHERE f_domain.path LIKE '%{}%'
+              AND f_infra.path LIKE '%{}%'
+            {}
+            ",
+            escaped_domain,
+            escaped_infra,
+            if scoped {
+                format!(" AND s_domain.project_slug = '{}'", escaped_project)
+            } else {
+                String::new()
+            }
+        );
+
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        let mut leaks = Vec::new();
+        for row in rows {
+            if let Some(leak) = row.first() {
+                leaks.push(leak.clone());
+            }
+        }
+        Ok(leaks)
+    }
+
+    pub fn get_unsafe_exposure(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let base_filter = if scoped {
+            format!("AND s_src.project_slug = '{}'", escaped)
+        } else {
+            String::new()
+        };
+
+        let query = format!(
+            "
+            WITH RECURSIVE call_paths(source_id, target_id, path_names, path_ids) AS (
+                SELECT 
+                    c.source_id, 
+                    c.target_id, 
+                    [s_src.name]::VARCHAR[], 
+                    [c.source_id]::VARCHAR[]
+                FROM CALLS c
+                JOIN Symbol s_src ON s_src.id = c.source_id
+                WHERE COALESCE(s_src.is_public, false) = true {}
+                
+                UNION ALL
+                
+                SELECT 
+                    p.source_id, 
+                    c.target_id, 
+                    list_append(p.path_names, s_tgt.name),
+                    list_append(p.path_ids, c.target_id)
+                FROM call_paths p
+                JOIN CALLS c ON p.target_id = c.source_id
+                JOIN Symbol s_tgt ON s_tgt.id = c.source_id
+                WHERE NOT list_contains(p.path_ids, c.target_id)
+            )
+            SELECT array_to_string(list_append(p.path_names, s_final.name), ' -> ')
+            FROM call_paths p
+            JOIN Symbol s_final ON s_final.id = p.target_id
+            WHERE COALESCE(s_final.is_unsafe, false) = true OR s_final.name = 'unwrap';
+            ",
+            base_filter
+        );
+
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        let mut findings = Vec::new();
+        for row in rows {
+            if let Some(exposure) = row.first() {
+                findings.push(exposure.clone());
+            }
+        }
+        Ok(findings)
+    }
+
+    pub fn get_nif_blocking_risks(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let base_filter = if scoped {
+            format!("AND s.project_slug = '{}'", escaped)
+        } else {
+            String::new()
+        };
+
+        let query = format!(
+            "
+            WITH RECURSIVE call_depths(source_id, target_id, depth, path_ids, initial_target_id, initial_name) AS (
+                SELECT 
+                    c.source_id, 
+                    c.target_id, 
+                    1, 
+                    [c.source_id, c.target_id]::VARCHAR[],
+                    c.target_id,
+                    s.name
+                FROM CALLS_NIF c
+                JOIN Symbol s ON s.id = c.target_id
+                WHERE 1=1 {}
+                
+                UNION ALL
+                
+                SELECT 
+                    p.target_id, 
+                    c.target_id, 
+                    p.depth + 1, 
+                    list_append(p.path_ids, c.target_id),
+                    p.initial_target_id,
+                    p.initial_name
+                FROM call_depths p
+                JOIN CALLS c ON p.target_id = c.source_id
+                WHERE NOT list_contains(p.path_ids, c.target_id)
+            )
+            SELECT initial_name || ' (profondeur: ' || MAX(depth) || ')'
+            FROM call_depths
+            GROUP BY initial_target_id, initial_name
+            HAVING MAX(depth) > 5;
+            ",
+            base_filter
+        );
+
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        let mut findings = Vec::new();
+        for row in rows {
+            if let Some(risk) = row.first() {
+                findings.push(risk.clone());
             }
         }
         Ok(findings)

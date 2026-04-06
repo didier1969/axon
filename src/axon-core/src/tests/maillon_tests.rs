@@ -33,7 +33,7 @@ mod tests {
     // --- MAILLON 1: LE SCANNER (Discovery) ---
     #[test]
     fn test_maillon_1_scanner_discovery() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         // Simuler un scan manuel
         let files = vec![("/tmp/test.rs".to_string(), "proj".to_string(), 100, 12345)];
         store.bulk_insert_files(&files).expect("Maillon 1 failed");
@@ -62,7 +62,7 @@ mod tests {
         let file_path = project.join("buffered.ex");
         std::fs::write(&file_path, "defmodule Buffered do\nend\n").unwrap();
 
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let ingress = shared_ingress_buffer();
         let scanner = crate::scanner::Scanner::new(&root.to_string_lossy());
         scanner.scan_with_guard_and_ingress(store.clone(), None, Some(&ingress));
@@ -111,7 +111,7 @@ mod tests {
         std::fs::write(root.join("docs").join("drop.md"), "# hidden").unwrap();
         std::fs::write(root.join("docs").join("open").join("keep.md"), "# visible").unwrap();
 
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let scanner = crate::scanner::Scanner::new(&root.to_string_lossy());
         scanner.scan(store.clone());
 
@@ -144,7 +144,7 @@ mod tests {
     // --- MAILLON 2: LE SÉLECTEUR (The Pull) ---
     #[test]
     fn test_maillon_2_selector_pull() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[("/tmp/a.rs".to_string(), "p".to_string(), 10, 1)])
             .unwrap();
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn test_file_ingress_guard_hydrates_and_skips_unchanged_file() {
         let _guard = lock_file_ingress_guard_env();
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[("/tmp/unchanged.rs".to_string(), "proj".to_string(), 10, 1)])
             .unwrap();
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn test_file_ingress_guard_stages_changed_file() {
         let _guard = lock_file_ingress_guard_env();
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[("/tmp/changed.rs".to_string(), "proj".to_string(), 10, 1)])
             .unwrap();
@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn test_file_ingress_guard_stages_unknown_file() {
         let _guard = lock_file_ingress_guard_env();
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let guard = FileIngressGuard::hydrate_from_store(&store).unwrap();
 
         let decision = guard.should_stage(Path::new("/tmp/new.rs"), 1, 10);
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn test_file_ingress_guard_stages_indexing_file_with_changed_metadata() {
         let _guard = lock_file_ingress_guard_env();
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[("/tmp/indexing.rs".to_string(), "proj".to_string(), 10, 1)])
             .unwrap();
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn test_file_ingress_guard_records_committed_tombstone_and_restages_recreated_file() {
         let _guard = lock_file_ingress_guard_env();
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[("/tmp/recreated.rs".to_string(), "proj".to_string(), 10, 1)])
             .unwrap();
@@ -255,7 +255,7 @@ mod tests {
         unsafe {
             std::env::set_var("AXON_ENABLE_FILE_INGRESS_GUARD", "0");
         }
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let guard = FileIngressGuard::hydrate_from_store(&store).unwrap();
 
         assert!(!guard.is_enabled());
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_ingress_promoter_batch_writes_single_canonical_pending_update() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let mut buffer = IngressBuffer::default();
 
         buffer.record_file(IngressFileEvent::new(
@@ -521,7 +521,7 @@ mod tests {
 
     #[test]
     fn test_scanner_requeue_records_metadata_changed_scan_reason() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/requeue_scan.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn test_hot_delta_requeue_records_metadata_changed_hot_reason() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/requeue_hot.rs";
         store
             .bulk_insert_files(&[(path.to_string(), "proj".to_string(), 10, 1)])
@@ -621,7 +621,7 @@ mod tests {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
@@ -684,7 +684,7 @@ mod tests {
         .unwrap();
         assert!(staged);
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let pre_flush = store
             .query_count("SELECT count(*) FROM File WHERE path LIKE '%buffered_live.ex'")
             .unwrap();
@@ -722,7 +722,7 @@ mod tests {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn test_maillon_2b_rescan_requeues_changed_file() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[("/tmp/a.rs".to_string(), "p".to_string(), 10, 1)])
             .unwrap();
@@ -1110,7 +1110,7 @@ mod tests {
         let file_path = project.join("live.ex");
         std::fs::write(&file_path, "defmodule Live do\nend\n").unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
@@ -1165,7 +1165,7 @@ mod tests {
         let file_path = ignored.join("skip.ex");
         std::fs::write(&file_path, "defmodule Skip do\nend\n").unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
@@ -1196,7 +1196,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let missing = root.join("proj").join("gone.ex");
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
 
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
@@ -1226,7 +1226,7 @@ mod tests {
         let file_path = project.join("burst.ex");
         std::fs::write(&file_path, "defmodule Burst do\nend\n").unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
 
         let staged = crate::fs_watcher::stage_hot_deltas(
             &store,
@@ -1260,7 +1260,7 @@ mod tests {
         let file_path = nested.join("dir_event.ex");
         std::fs::write(&file_path, "defmodule DirEvent do\nend\n").unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
@@ -1394,7 +1394,7 @@ mod tests {
         let file_path = project.join("live_reopen.ex");
         std::fs::write(&file_path, "defmodule LiveReopen do\nend\n").unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
@@ -1453,7 +1453,7 @@ mod tests {
         let file_path = project.join("live_changed.ex");
         std::fs::write(&file_path, "defmodule LiveChanged do\nend\n").unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
@@ -1547,7 +1547,7 @@ mod tests {
         let file_path = project.join("deleted_live.ex");
         std::fs::write(&file_path, "defmodule DeletedLive do\nend\n").unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
@@ -1647,7 +1647,7 @@ mod tests {
         let new_path = project.join("rename_new.ex");
         std::fs::write(&old_path, "defmodule RenameOld do\nend\n").unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[(
                 old_path.to_string_lossy().to_string(),
@@ -1817,7 +1817,7 @@ mod tests {
 
     #[test]
     fn test_maillon_2o_oversized_file_status_is_explicit_and_reversible_on_new_scan() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/oversized_file.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10_000, 1)])
@@ -1846,7 +1846,7 @@ mod tests {
 
     #[test]
     fn test_maillon_2q_degraded_commit_preserves_structure_without_chunk_materialization() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/degraded_file.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
@@ -1918,7 +1918,7 @@ mod tests {
 
     #[test]
     fn test_maillon_2r_full_commit_records_success_reason() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/full_success.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
@@ -1972,7 +1972,7 @@ mod tests {
 
     #[test]
     fn test_maillon_2r2_skipped_commit_marks_terminal_file_stage_without_graph_ready() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/skipped_file.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 32, 1)])
@@ -2002,7 +2002,7 @@ mod tests {
 
     #[test]
     fn test_maillon_2r3_bootstrap_adds_lifecycle_columns() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let columns = store
             .query_json("SELECT name FROM pragma_table_info('File')")
             .unwrap();
@@ -2014,7 +2014,7 @@ mod tests {
 
     #[test]
     fn test_maillon_2r4_vector_ready_flips_true_after_chunk_embeddings_land() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/vector_ready.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
@@ -2087,7 +2087,7 @@ mod tests {
 
     #[test]
     fn test_graph_only_policy_keeps_graph_ready_without_vector_queue_backlog() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/graph_only_ready.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
@@ -2148,7 +2148,7 @@ mod tests {
 
     #[test]
     fn test_maillon_2p_deferred_pending_file_builds_aging_debt_and_claim_reset() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/deferred_file.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 4_096, 1)])
@@ -2202,7 +2202,7 @@ mod tests {
 
     #[test]
     fn test_requeue_claimed_file_with_specific_reason_updates_status_reason() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/requeue_specific_reason.ex".to_string();
 
         store
@@ -2229,7 +2229,7 @@ mod tests {
 
     #[test]
     fn test_tombstoned_late_writer_update_keeps_deleted_reason() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/tombstoned_late.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
@@ -2269,7 +2269,7 @@ mod tests {
         let file_path = project.join("late_deleted.ex");
         std::fs::write(&file_path, "defmodule LateDeleted do\nend\n").unwrap();
 
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
@@ -2371,7 +2371,7 @@ mod tests {
             }
             Err(err) => panic!("Failed to bind unix socket: {}", err),
         };
-        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
 
         // Simuler un fichier en attente
         store
@@ -2475,7 +2475,7 @@ mod tests {
     // --- MAILLON 7: LE COMMITTER (Writer Actor) ---
     #[test]
     fn test_maillon_7_writer_commit() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/test.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 100, 12345)])
@@ -2533,7 +2533,7 @@ mod tests {
 
     #[test]
     fn test_maillon_7b_chunk_embedding_storage() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/test.rs".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "proj".to_string(), 100, 12345)])
@@ -2613,7 +2613,7 @@ mod tests {
 
     #[test]
     fn test_maillon_7e_chunk_invalidation_requeues_only_changed_file_embeddings() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path_a = "/tmp/chunk/a.rs".to_string();
         let path_b = "/tmp/chunk/b.rs".to_string();
         let path_c = "/tmp/other/c.rs".to_string();
@@ -2772,7 +2772,7 @@ mod tests {
 
     #[test]
     fn test_maillon_7f_fetch_unembedded_chunks_detects_source_hash_drift() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('chunk-drift', 'symbol', 'sym-drift', 'proj', 'function', 'fresh content', 'hash-fresh', 1, 1)")
             .unwrap();
@@ -2803,7 +2803,7 @@ mod tests {
 
     #[test]
     fn test_maillon_7c_writer_keeps_distinct_top_level_symbols_from_different_files() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path_a = "/tmp/scripts/a.py".to_string();
         let path_b = "/tmp/scripts/b.py".to_string();
         store
@@ -2897,7 +2897,7 @@ mod tests {
 
     #[test]
     fn test_maillon_7d_writer_coalesces_duplicate_symbol_names_inside_same_file() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/status_live.ex".to_string();
         store
             .bulk_insert_files(&[(path.clone(), "axon".to_string(), 100, 1)])
@@ -2967,7 +2967,7 @@ mod tests {
 
     #[test]
     fn test_graph_projection_symbol_radius_1_returns_useful_neighborhood() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/other.rs', 'proj')")
             .unwrap();
@@ -3008,7 +3008,7 @@ mod tests {
 
     #[test]
     fn test_graph_projection_symbol_radius_2_expands_but_stays_bounded() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/other.rs', 'proj')")
             .unwrap();
@@ -3048,7 +3048,7 @@ mod tests {
 
     #[test]
     fn test_graph_projection_file_anchor_is_stable_and_idempotent() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         let file_path = "/tmp/graph/file_anchor.rs";
         store
             .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/file_anchor.rs', 'proj'), ('/tmp/graph/helper.rs', 'proj')")
@@ -3098,7 +3098,7 @@ mod tests {
 
     #[test]
     fn test_graph_projection_refresh_reuses_unchanged_anchor_without_rebuild() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj')")
             .unwrap();
@@ -3155,7 +3155,7 @@ mod tests {
 
     #[test]
     fn test_graph_projection_refresh_rebuilds_only_changed_anchor() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/d.rs', 'proj')")
             .unwrap();
@@ -3217,7 +3217,7 @@ mod tests {
 
     #[test]
     fn test_graph_projection_symbol_includes_calls_nif_edges() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/b.rs', 'proj')")
             .unwrap();
@@ -3251,7 +3251,7 @@ mod tests {
 
     #[test]
     fn test_tombstone_missing_path_invalidates_dependent_graph_derivations() {
-        let store = GraphStore::new(":memory:").unwrap();
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/deleted.rs', 'proj'), ('/tmp/graph/keeper.rs', 'proj')")
             .unwrap();
@@ -3317,5 +3317,139 @@ mod tests {
         assert_eq!(projection_count, 0);
         assert_eq!(state_count, 0);
         assert_eq!(embedding_count, 0);
+    }
+
+    #[test]
+    fn test_graph_analytics_detects_circular_dependencies() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        
+        store
+            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/a.rs', 'proj')")
+            .unwrap();
+            
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES \
+                ('proj::A', 'A', 'function', 'proj'), \
+                ('proj::B', 'B', 'function', 'proj'), \
+                ('proj::C', 'C', 'function', 'proj')")
+            .unwrap();
+
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES \
+                ('proj::A', 'proj::B'), \
+                ('proj::B', 'proj::C'), \
+                ('proj::C', 'proj::A')")
+            .unwrap();
+
+        let deps = store.get_circular_dependencies("proj").unwrap();
+        
+        assert!(!deps.is_empty(), "Il devrait y avoir des dépendances circulaires");
+        
+        let expected_a = "proj::A -> proj::B -> proj::C -> proj::A".to_string();
+        let expected_b = "proj::B -> proj::C -> proj::A -> proj::B".to_string();
+        let expected_c = "proj::C -> proj::A -> proj::B -> proj::C".to_string();
+        
+        assert!(deps.contains(&expected_a) || deps.contains(&expected_b) || deps.contains(&expected_c));
+    }
+
+    #[test]
+    fn test_graph_analytics_detects_domain_leakage() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+
+        // 1. Insert Files
+        store
+            .execute("INSERT INTO File (path, project_slug) VALUES \
+                ('src/domain/user.rs', 'proj'), \
+                ('src/infrastructure/db.rs', 'proj')")
+            .unwrap();
+
+        // 2. Insert Symbols
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES \
+                ('proj::domain::User', 'User', 'class', 'proj'), \
+                ('proj::infra::Db', 'Db', 'class', 'proj')")
+            .unwrap();
+
+        // 3. Insert CONTAINS
+        store
+            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES \
+                ('src/domain/user.rs', 'proj::domain::User'), \
+                ('src/infrastructure/db.rs', 'proj::infra::Db')")
+            .unwrap();
+
+        // 4. Insert CALLS (Domain calling Infra = Leakage)
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES \
+                ('proj::domain::User', 'proj::infra::Db')")
+            .unwrap();
+
+        let leaks = store.get_domain_leakage("proj", "src/domain", "src/infrastructure").unwrap();
+        
+        assert_eq!(leaks.len(), 1, "There should be exactly one domain leakage");
+        assert_eq!(leaks[0], "User (src/domain/user.rs) -> Db (src/infrastructure/db.rs)");
+    }
+
+    #[test]
+    fn test_graph_analytics_detects_unsafe_exposure() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        
+        // 1. Setup Symbol table
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, project_slug, is_public, is_unsafe) VALUES \
+                ('PublicA', 'PublicFunc', 'function', 'test_proj', true, false), \
+                ('InterB', 'InterFunc', 'function', 'test_proj', false, false), \
+                ('UnwrapC', 'unwrap', 'method', 'test_proj', false, false), \
+                ('UnsafeD', 'UnsafeFunc', 'function', 'test_proj', false, true)")
+            .unwrap();
+
+        // 2. Setup CALLS
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES \
+                ('PublicA', 'InterB'), \
+                ('InterB', 'UnwrapC'), \
+                ('PublicA', 'UnsafeD')")
+            .unwrap();
+
+        let exposures = store.get_unsafe_exposure("test_proj").unwrap();
+        
+        assert_eq!(exposures.len(), 2, "There should be two unsafe exposures");
+        assert!(exposures.contains(&"PublicFunc -> InterFunc -> unwrap".to_string()));
+        assert!(exposures.contains(&"PublicFunc -> UnsafeFunc".to_string()));
+    }
+
+    #[test]
+    fn test_graph_analytics_detects_nif_blocking_risks() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        
+        // 1. Setup Symbol table
+        store
+            .execute("INSERT INTO Symbol (id, name, kind, project_slug, is_public, is_nif) VALUES \
+                ('ElixirFunc', 'elixir_func', 'function', 'test_proj', true, false), \
+                ('RustNif', 'rust::nif_func', 'function', 'test_proj', false, true), \
+                ('Node1', 'node1', 'function', 'test_proj', false, false), \
+                ('Node2', 'node2', 'function', 'test_proj', false, false), \
+                ('Node3', 'node3', 'function', 'test_proj', false, false), \
+                ('Node4', 'node4', 'function', 'test_proj', false, false), \
+                ('Node5', 'node5', 'function', 'test_proj', false, false)")
+            .unwrap();
+
+        // 2. Setup CALLS_NIF and CALLS
+        store
+            .execute("INSERT INTO CALLS_NIF (source_id, target_id) VALUES ('ElixirFunc', 'RustNif')")
+            .unwrap();
+
+        store
+            .execute("INSERT INTO CALLS (source_id, target_id) VALUES \
+                ('RustNif', 'Node1'), \
+                ('Node1', 'Node2'), \
+                ('Node2', 'Node3'), \
+                ('Node3', 'Node4'), \
+                ('Node4', 'Node5')")
+            .unwrap();
+
+        let risks = store.get_nif_blocking_risks("test_proj").unwrap();
+        
+        assert_eq!(risks.len(), 1, "There should be one NIF blocking risk");
+        assert_eq!(risks[0], "rust::nif_func (profondeur: 6)");
     }
 }

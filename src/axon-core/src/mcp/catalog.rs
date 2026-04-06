@@ -147,6 +147,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "project_slug": { "type": "string" },
+                        "status": { "type": "string", "description": "Filtre optionnel par statut (ex: 'proposed', 'accepted')" },
+                        "type": { "type": "string", "description": "Filtre optionnel par type (ex: 'Requirement', 'Decision')" },
                         "limit": { "type": "integer" }
                     },
                     "required": []

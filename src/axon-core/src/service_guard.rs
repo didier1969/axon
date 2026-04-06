@@ -71,14 +71,12 @@ fn current_pressure_at(now_ms: u64) -> ServicePressure {
             ServicePressure::Critical
         } else if peak >= 500 {
             ServicePressure::Degraded
+        } else if last_degraded != 0
+            && now_ms.saturating_sub(last_degraded) <= SERVICE_RECOVERY_WINDOW_MS
+        {
+            ServicePressure::Recovering
         } else {
-            if last_degraded != 0
-                && now_ms.saturating_sub(last_degraded) <= SERVICE_RECOVERY_WINDOW_MS
-            {
-                ServicePressure::Recovering
-            } else {
-                ServicePressure::Healthy
-            }
+            ServicePressure::Healthy
         }
     } else if last_degraded != 0
         && now_ms.saturating_sub(last_degraded) <= SERVICE_RECOVERY_WINDOW_MS
