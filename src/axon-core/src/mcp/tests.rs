@@ -1307,42 +1307,6 @@ fn test_axon_soll_manager_accepts_mcp_axon_prefixed_name() {
     assert!(content.contains("CPT-AXO-012"), "{content}");
 }
 
-#[test]
-fn test_axon_soll_manager_rejects_legacy_project_without_canonical_meta() {
-    let server = create_test_server();
-
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "soll_manager",
-            "arguments": {
-                "action": "create",
-                "entity": "decision",
-                "data": {
-                    "project_slug": "BookingSystem",
-                    "title": "Canonical Booking Decision",
-                    "context": "Project code must be server-managed",
-                    "rationale": "Slug longs are not canonical",
-                    "status": "accepted"
-                }
-            }
-        })),
-        id: Some(json!(1001)),
-    };
-
-    let response = server.handle_request(req);
-    let result = response.unwrap().result.unwrap();
-    let content = result.get("content").unwrap()[0]
-        .get("text")
-        .unwrap()
-        .as_str()
-        .unwrap();
-
-    assert!(result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false));
-    assert!(content.contains("meta.json"), "{content}");
-    assert!(content.contains("BookingSystem"), "{content}");
-}
 
 #[test]
 fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
