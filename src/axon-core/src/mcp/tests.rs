@@ -3919,7 +3919,7 @@ fn test_bootstrap_injects_global_guidelines() {
 #[test]
 fn test_axon_init_project_returns_global_guidelines() {
     let server = create_test_server();
-    
+
     let req = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "tools/call",
@@ -3928,12 +3928,12 @@ fn test_axon_init_project_returns_global_guidelines() {
             "arguments": {
                 "project_name": "BookingSystem",
                 "project_slug": "BKS",
+                "project_path": "/tmp/fake_path",
                 "concept_document_url_or_text": "We want a booking system."
             }
         },
         "id": 1
     });
-
     let response = server.handle_request(serde_json::from_value(req).unwrap()).unwrap();
     let result = response.result.unwrap();
     let content = result.get("content").unwrap()[0].get("text").unwrap().as_str().unwrap();
@@ -3952,7 +3952,7 @@ fn test_axon_apply_guidelines_creates_local_copies() {
     let server = create_test_server();
     
     // First init the project
-    server.graph_store.sync_project_code_registry_entry("BookingSystem", "BKS").unwrap();
+    server.graph_store.sync_project_code_registry_entry("BookingSystem", "BKS", None).unwrap();
 
     let req = serde_json::json!({
         "jsonrpc": "2.0",

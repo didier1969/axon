@@ -602,10 +602,10 @@ impl GraphStore {
 
     fn seed_project_code_registry(&self) -> Result<()> {
         for identity in discover_project_identities() {
-            self.sync_project_code_registry_entry(&identity.slug, &identity.code)?;
+            self.sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
         }
-        self.sync_project_code_registry_entry("BookingSystem", "BKS")?;
-        self.sync_project_code_registry_entry("GLOBAL", "PRO")?;
+        self.sync_project_code_registry_entry("BookingSystem", "BKS", None)?;
+        self.sync_project_code_registry_entry("GLOBAL", "PRO", None)?;
         Ok(())
     }
 
@@ -613,6 +613,7 @@ impl GraphStore {
         &self,
         project_slug: &str,
         project_code: &str,
+        project_path: Option<&str>,
     ) -> Result<()> {
         let normalized_slug = project_slug.trim();
         let normalized_code = project_code.trim().to_ascii_uppercase();
@@ -636,6 +637,12 @@ impl GraphStore {
                         &serde_json::json!([normalized_slug, normalized_code]),
                     )?;
                 }
+                if let Some(path) = project_path {
+                    self.execute_param(
+                        "UPDATE soll.ProjectCodeRegistry SET project_path = ? WHERE project_code = ?",
+                        &serde_json::json!([path, normalized_code]),
+                    )?;
+                }
                 return Ok(());
             }
         }
@@ -654,14 +661,27 @@ impl GraphStore {
                         &serde_json::json!([normalized_code, normalized_slug]),
                     )?;
                 }
+                if let Some(path) = project_path {
+                    self.execute_param(
+                        "UPDATE soll.ProjectCodeRegistry SET project_path = ? WHERE project_slug = ?",
+                        &serde_json::json!([path, normalized_slug]),
+                    )?;
+                }
                 return Ok(());
             }
         }
 
-        self.execute_param(
-            "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code) VALUES (?, ?)",
-            &serde_json::json!([normalized_slug, normalized_code]),
-        )?;
+        if let Some(path) = project_path {
+            self.execute_param(
+                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code, project_path) VALUES (?, ?, ?)",
+                &serde_json::json!([normalized_slug, normalized_code, path]),
+            )?;
+        } else {
+            self.execute_param(
+                "INSERT INTO soll.ProjectCodeRegistry (project_slug, project_code) VALUES (?, ?)",
+                &serde_json::json!([normalized_slug, normalized_code]),
+            )?;
+        }
         Ok(())
     }
 

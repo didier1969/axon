@@ -1512,7 +1512,7 @@ graph TD;
     fn sync_project_code_registry_from_meta(&self) -> anyhow::Result<()> {
         for identity in discover_project_identities() {
             self.graph_store
-                .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
+                .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
         }
         Ok(())
     }
@@ -1523,7 +1523,7 @@ graph TD;
     ) -> anyhow::Result<(String, String)> {
         let identity = resolve_canonical_project_identity(project_slug)?;
         self.graph_store
-            .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
+            .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
         Ok((identity.slug, identity.code))
     }
 
@@ -1540,7 +1540,7 @@ graph TD;
 
         if let Ok(identity) = resolve_canonical_project_identity(project_slug) {
             self.graph_store
-                .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
+                .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
             return Ok(identity.code);
         }
 
@@ -2844,10 +2844,11 @@ impl McpServer {
     pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         let project_name = args.get("project_name")?.as_str()?;
         let project_slug = args.get("project_slug")?.as_str()?;
+        let project_path = args.get("project_path")?.as_str()?;
         let concept_text = args.get("concept_document_url_or_text").and_then(|v| v.as_str());
 
         // 1. Register project
-        if let Err(e) = self.graph_store.sync_project_code_registry_entry(project_slug, project_slug) {
+        if let Err(e) = self.graph_store.sync_project_code_registry_entry(project_slug, project_slug, Some(project_path)) {
             return Some(serde_json::json!({
                 "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],
                 "isError": true
