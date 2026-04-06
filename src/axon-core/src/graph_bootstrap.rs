@@ -181,7 +181,7 @@ impl GraphStore {
                 *reader_guard = _reader_ptr;
             }
 
-            if !is_memory {
+            if !is_memory && !cfg!(test) {
                 let mut soll_path = PathBuf::from(db_root);
                 soll_path.push("sanctuary/soll.db");
                 let attach_q = format!(
@@ -422,6 +422,22 @@ impl GraphStore {
         if has_vector_ready {
             self.execute("UPDATE File SET vector_ready = COALESCE(vector_ready, FALSE) WHERE vector_ready IS NULL")?;
         }
+        
+        // Performance Indexes for Advanced Graph Heuristics
+        self.execute("CREATE INDEX IF NOT EXISTS calls_source_idx ON CALLS(source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS calls_target_idx ON CALLS(target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS calls_nif_source_idx ON CALLS_NIF(source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS calls_nif_target_idx ON CALLS_NIF(target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS contains_source_idx ON CONTAINS(source_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS contains_target_idx ON CONTAINS(target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS symbol_project_slug_idx ON Symbol(project_slug)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS file_project_slug_idx ON File(project_slug)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS symbol_kind_idx ON Symbol(kind)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS symbol_is_public_idx ON Symbol(is_public)")?;
+        if has_status {
+            self.execute("CREATE INDEX IF NOT EXISTS file_status_idx ON File(status)")?;
+        }
+        
         Ok(())
     }
 

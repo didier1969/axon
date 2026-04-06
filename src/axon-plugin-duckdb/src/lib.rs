@@ -21,12 +21,15 @@ pub unsafe extern "C" fn duckdb_init_db(path: *const c_char, read_only: bool) ->
     }
 
     let config = if read_only {
-        match Config::default().access_mode(AccessMode::ReadOnly) {
-            Ok(c) => c,
-            Err(_) => Config::default()
-        }
+        Config::default()
+            .access_mode(AccessMode::ReadOnly)
+            .unwrap_or_else(|_| Config::default())
+            .allow_unsigned_extensions()
+            .unwrap_or_else(|_| Config::default())
     } else {
         Config::default()
+            .allow_unsigned_extensions()
+            .unwrap_or_else(|_| Config::default())
     };
 
     let conn_res = if path_str == ":memory:" {
@@ -37,6 +40,9 @@ pub unsafe extern "C" fn duckdb_init_db(path: *const c_char, read_only: bool) ->
 
     match conn_res {
         Ok(conn) => {
+            if let Err(e) = conn.execute("LOAD '/home/dstadel/projects/duckdb-graph/build/release/extension/duckpgq/duckpgq.duckdb_extension'", []) {
+                eprintln!("Failed to load duckpgq extension: {:?}", e);
+            }
             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
             Box::into_raw(Box::new(PluginContext { conn }))
         }
@@ -99,11 +105,12 @@ pub unsafe extern "C" fn duckdb_query_json(ctx: *mut PluginContext, query: *cons
     let query_str = match CStr::from_ptr(query).to_str() { Ok(s) => s, Err(_) => return CString::new("[]").unwrap().into_raw() };
     let ctx_ref = &*ctx;
     
-    let is_select = query_str.trim().to_lowercase().starts_with("select") || 
-                    query_str.trim().to_lowercase().starts_with("with") || 
-                    query_str.trim().to_lowercase().starts_with("show") || 
-                    query_str.to_lowercase().contains("returning");
-    
+    let is_select = query_str.trim().to_lowercase().starts_with("select") ||
+                    query_str.trim().to_lowercase().starts_with("with") ||
+                    query_str.trim().to_lowercase().starts_with("show") ||
+                    query_str.trim().to_lowercase().starts_with("-from") ||
+                    query_str.trim().to_lowercase().starts_with("-match") ||
+                    query_str.to_lowercase().contains("returning");    
     if !is_select {
         match ctx_ref.conn.execute(query_str, []) {
             Ok(_) => return CString::new("[]").unwrap().into_raw(),

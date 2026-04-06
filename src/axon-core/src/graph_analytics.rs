@@ -263,12 +263,12 @@ impl GraphStore {
                 FROM call_paths p
                 JOIN CALLS c ON p.target_id = c.source_id
                 JOIN Symbol s ON s.id = c.source_id
-                WHERE NOT p.is_cycle AND len(p.path_ids) < 10 AND len(p.path_names) > 1
+                WHERE NOT p.is_cycle AND len(p.path_ids) < 10
             )
             SELECT array_to_string(list_append(path_names, s_target.name), ' -> ') as cycle_path
             FROM call_paths p
             JOIN Symbol s_target ON s_target.id = p.target_id
-            WHERE p.is_cycle = true;
+            WHERE p.is_cycle = true AND len(p.path_ids) > 1;
             ",
             base_calls
         );
