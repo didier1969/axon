@@ -14,7 +14,7 @@
   - Update tests in `src/axon-core/src/mcp/tests.rs` to include `project_path`.
   - Run tests and commit.
 
-- [ ] **Task 3: Le Polling Réactif de l'Orchestrateur**
+- [x] **Task 3: Le Polling Réactif de l'Orchestrateur**
   - Delete static discovery from `main.rs`.
   - Add `spawn_federation_orchestrator` loop in `main_background.rs` polling `soll.ProjectCodeRegistry` and spawning `spawn_hot_delta_watcher` / `spawn_initial_scan` dynamically.
   - Purge dead code (`discover_project_identities`, etc.) from `project_meta.rs`.
