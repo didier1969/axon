@@ -130,6 +130,7 @@ rebuild_core_release() {
         echo "❌ Automatic Devenv rebuild failed."
         return 1
     fi
+    DEVENV_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -type f | head -n 1)
     return 0
 }
 
@@ -139,6 +140,7 @@ rebuild_tunnel_release() {
         echo "❌ Automatic Devenv rebuild for axon-mcp-tunnel failed."
         return 1
     fi
+    DEVENV_TUNNEL_BIN=$(find "$PROJECT_ROOT" -name "axon-mcp-tunnel" -path "*/release/*" -type f | head -n 1)
     return 0
 }
 

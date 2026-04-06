@@ -23,12 +23,13 @@ BIN_DIR="$PROJECT_ROOT/bin"
 RUST_CORE_DIR="$PROJECT_ROOT/src/axon-core"
 TARGET_BIN="$BIN_DIR/axon-core"
 CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
-RUST_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -type f | head -n 1)
-
 mkdir -p "$BIN_DIR"
 
 echo "🔨 Building Rust core..."
 devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release"
+
+# Find the binary after building (it might be in .axon/cargo-target/release or target/release)
+RUST_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -type f | head -n 1)
 install -m 755 "$RUST_RELEASE_BIN" "$TARGET_BIN"
 echo "✅ Rust core available at bin/axon-core"
 
