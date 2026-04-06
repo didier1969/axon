@@ -49,12 +49,13 @@ description: Core engineering protocol for Axon. MUST BE READ before any coding,
 
 **Context & Discovery:**
 - `mcp_axon_query` / `mcp_axon_inspect`: Read IST (Code).
+- `axon_impact(symbol)`: **CRITICAL for refactoring.** Traces a code symbol's impact all the way up through the call graph and across the bridge to SOLL (revealing compromised Decisions, Requirements, and Visions).
 - `soll_query_context`: Read SOLL state.
 - `soll_work_plan(project_slug, json=true)`: Ordered execution view (blockers, waves).
 
 ## IST-Driven Execution (Mandatory Workflow)
 Before coding or mutating SOLL, you MUST:
-1. **Query IST:** Run `mcp_axon_query` or `mcp_axon_inspect` on the target component.
+1. **Query IST:** Run `mcp_axon_query` or `mcp_axon_inspect` on the target component. If refactoring, run `axon_impact` to assess strategic blast radius.
 2. **Verify Drift:** Compare IST with SOLL plan. Formulate the gap.
 3. **Plan & Execute:** Apply TDD. Write code.
 4. **Wire (Traceability):** Link new/modified IST symbols to SOLL origins (`SUBSTANTIATES` or `IMPACTS`) using `soll_manager link`.
