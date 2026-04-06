@@ -9,7 +9,6 @@ use libloading::{Library, Symbol as LibSymbol};
 use tracing::{info, warn};
 
 use crate::graph::{CloseDbFunc, ExecFunc, GraphStore, InitDbFunc, LatticePool};
-use crate::project_meta::discover_project_identities;
 use crate::runtime_mode::AxonRuntimeMode;
 
 const IST_SCHEMA_VERSION: &str = "3";
@@ -601,11 +600,9 @@ impl GraphStore {
     }
 
     fn seed_project_code_registry(&self) -> Result<()> {
-        for identity in discover_project_identities() {
-            self.sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
-        }
         self.sync_project_code_registry_entry("BookingSystem", "BKS", None)?;
         self.sync_project_code_registry_entry("GLOBAL", "PRO", None)?;
+        self.sync_project_code_registry_entry("AXO", "AXO", None)?;
         Ok(())
     }
 

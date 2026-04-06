@@ -1547,6 +1547,46 @@ fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>
         .collect()
 }
 
+pub(crate) fn spawn_federation_orchestrator(
+    store: Arc<GraphStore>,
+    file_ingress_guard: SharedFileIngressGuard,
+    ingress_buffer: SharedIngressBuffer,
+) {
+    std::thread::spawn(move || {
+        let mut known_projects = std::collections::HashSet::new();
+        info!("Fédération : Démarrage de l'orchestrateur de projets SOLL.");
+        loop {
+            std::thread::sleep(Duration::from_millis(1000));
+            if let Ok(json_str) = store.query_json("SELECT project_slug, project_path FROM soll.ProjectCodeRegistry WHERE project_slug NOT IN ('GLOBAL')") {
+                if let Ok(rows) = serde_json::from_str::<Vec<Vec<String>>>(&json_str) {
+                    for row in rows {
+                        if row.len() == 2 {
+                            let slug = &row[0];
+                            let path = &row[1];
+                            if !path.is_empty() && !known_projects.contains(slug) {
+                                known_projects.insert(slug.clone());
+                                info!("Fédération : Nouveau projet détecté et orchestré: {} ({})", slug, path);
+                                spawn_hot_delta_watcher(
+                                    store.clone(),
+                                    path.clone(),
+                                    file_ingress_guard.clone(),
+                                    ingress_buffer.clone(),
+                                );
+                                spawn_initial_scan(
+                                    store.clone(),
+                                    path.clone(),
+                                    file_ingress_guard.clone(),
+                                    ingress_buffer.clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -98,4 +98,4 @@ Before coding or mutating SOLL, you MUST:
 Update this file immediately if:
 - MCP tools are added/renamed/modified.
 - SOLL schema or relation taxonomy changes.
-- Governance policies evolve.
+- Governance policies evolve. 

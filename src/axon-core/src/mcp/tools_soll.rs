@@ -7,7 +7,6 @@ use super::soll::{
     canonical_soll_export_dir, find_latest_soll_export, parse_soll_export, SollRestoreCounts,
 };
 use super::McpServer;
-use crate::project_meta::{discover_project_identities, resolve_canonical_project_identity};
 
 #[allow(dead_code)]
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
@@ -1509,48 +1508,29 @@ graph TD;
         Ok(violations)
     }
 
-    fn sync_project_code_registry_from_meta(&self) -> anyhow::Result<()> {
-        for identity in discover_project_identities() {
-            self.graph_store
-                .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
-        }
-        Ok(())
-    }
-
     fn resolve_canonical_project_identity_for_mutation(
         &self,
         project_slug: &str,
     ) -> anyhow::Result<(String, String)> {
-        let identity = resolve_canonical_project_identity(project_slug)?;
-        self.graph_store
-            .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
-        Ok((identity.slug, identity.code))
-    }
-
-    fn resolve_project_code(&self, project_slug: &str) -> anyhow::Result<String> {
-        let _ = self.sync_project_code_registry_from_meta();
         let escaped = escape_sql(project_slug);
         let by_slug = self.query_single_column(&format!(
             "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_slug = '{}'",
             escaped
         ))?;
         if let Some(code) = by_slug.into_iter().next() {
-            return Ok(code);
+            return Ok((project_slug.to_string(), code));
         }
-
-        if let Ok(identity) = resolve_canonical_project_identity(project_slug) {
-            self.graph_store
-                .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
-            return Ok(identity.code);
-        }
-
-        let _ = resolve_canonical_project_identity(project_slug);
 
         let valid_slugs = self.query_single_column("SELECT project_slug FROM soll.ProjectCodeRegistry").unwrap_or_default().join(", ");
         Err(anyhow::anyhow!(
             "Projet canonique `{}` introuvable. Slugs valides : {}",
             project_slug, valid_slugs
         ))
+    }
+
+    fn resolve_project_code(&self, project_slug: &str) -> anyhow::Result<String> {
+        let (_, code) = self.resolve_canonical_project_identity_for_mutation(project_slug)?;
+        Ok(code)
     }
 
     fn next_server_numeric_id(

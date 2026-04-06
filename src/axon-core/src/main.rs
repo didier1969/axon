@@ -168,24 +168,11 @@ fn main() -> anyhow::Result<()> {
                 );
                 main_background::spawn_memory_reclaimer(queue_store.clone(), ingress_buffer.clone());
 
-                let identities = axon_core::project_meta::discover_project_identities();
-                for identity in identities {
-                    let project_path = identity.meta_path.parent().unwrap().parent().unwrap().to_string_lossy().to_string();
-
-                    main_background::spawn_hot_delta_watcher(
-                        graph_store.clone(),
-                        project_path.clone(),
-                        file_ingress_guard.clone(),
-                        ingress_buffer.clone(),
-                    );
-
-                    main_background::spawn_initial_scan(
-                        graph_store.clone(),
-                        project_path,
-                        file_ingress_guard.clone(),
-                        ingress_buffer.clone(),
-                    );
-                }
+                main_background::spawn_federation_orchestrator(
+                    graph_store.clone(),
+                    file_ingress_guard.clone(),
+                    ingress_buffer.clone(),
+                );
             } else {
                 info!("Ingress, watcher, scan and autonomous ingestion disabled by runtime mode.");
             }
