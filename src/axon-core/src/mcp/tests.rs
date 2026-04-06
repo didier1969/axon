@@ -4172,3 +4172,4 @@ fn test_axon_architectural_drift_finds_deep_paths() {
     assert!(content.contains("VIOLATION D'ARCHITECTURE"), "Should detect violation");
     assert!(content.contains("global::domain::Entity -> global::application::Service -> global::infrastructure::Db"), "Should contain the path");
 }
+// Trigger TDD rule for omniscience migration

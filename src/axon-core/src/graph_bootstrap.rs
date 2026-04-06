@@ -36,8 +36,7 @@ impl GraphStore {
         let is_memory = db_root == ":memory:";
 
         if !is_memory {
-            let mut soll_dir = PathBuf::from(db_root);
-            soll_dir.push("sanctuary");
+            let soll_dir = PathBuf::from(db_root);
             std::fs::create_dir_all(&soll_dir)?;
 
             let mut soll_path = soll_dir.clone();
@@ -89,7 +88,7 @@ impl GraphStore {
 
             if !is_memory {
                 let mut soll_path = PathBuf::from(db_root);
-                soll_path.push("sanctuary/soll.db");
+                soll_path.push("soll.db");
                 let attach_q = format!(
                     "ATTACH '{}' AS soll;",
                     soll_path.to_string_lossy().replace("'", "''")
@@ -183,7 +182,7 @@ impl GraphStore {
 
             if !is_memory && !cfg!(test) {
                 let mut soll_path = PathBuf::from(db_root);
-                soll_path.push("sanctuary/soll.db");
+                soll_path.push("soll.db");
                 let attach_q = format!(
                     "ATTACH '{}' AS soll;",
                     soll_path.to_string_lossy().replace("'", "''")
@@ -227,7 +226,7 @@ impl GraphStore {
                 .parent()
                 .ok_or_else(|| anyhow!("DB parent path unavailable for reader refresh"))?
                 .to_path_buf();
-            soll_path.push("sanctuary/soll.db");
+            soll_path.push("soll.db");
             let attach_q = format!("ATTACH '{}' AS soll;", soll_path.to_string_lossy().replace('\'', "''"));
             self.setup_session(new_reader, &attach_q)?;
 
@@ -330,14 +329,14 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding FLOAT[384], updated_at BIGINT)")?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_embedding_anchor_model_idx ON GraphEmbedding(anchor_type, anchor_id, radius, model_id)")?;
         self.execute("CREATE TABLE IF NOT EXISTS Project (name VARCHAR PRIMARY KEY)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS CALLS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR, project_slug VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_slug))")?;
+        self.execute("CREATE TABLE IF NOT EXISTS CALLS (source_id VARCHAR, target_id VARCHAR, project_slug VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_slug))")?;
         self.execute(
-            "CREATE TABLE IF NOT EXISTS CALLS_NIF (source_id VARCHAR, target_id VARCHAR)",
+            "CREATE TABLE IF NOT EXISTS CALLS_NIF (source_id VARCHAR, target_id VARCHAR, project_slug VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_slug))",
         )?;
-        self.execute("CREATE TABLE IF NOT EXISTS IMPACTS (source_id VARCHAR, target_id VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS IMPACTS (source_id VARCHAR, target_id VARCHAR, project_slug VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_slug))")?;
         self.execute(
-            "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR)",
+            "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR, project_slug VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_slug))",
         )?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_gui BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
         let _ = self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0");
@@ -423,13 +422,24 @@ impl GraphStore {
             self.execute("UPDATE File SET vector_ready = COALESCE(vector_ready, FALSE) WHERE vector_ready IS NULL")?;
         }
         
+        self.execute("ALTER TABLE CALLS ADD COLUMN IF NOT EXISTS project_slug VARCHAR DEFAULT 'proj'")?;
+        self.execute("ALTER TABLE CALLS_NIF ADD COLUMN IF NOT EXISTS project_slug VARCHAR DEFAULT 'proj'")?;
+        self.execute("ALTER TABLE CONTAINS ADD COLUMN IF NOT EXISTS project_slug VARCHAR DEFAULT 'proj'")?;
+        self.execute("ALTER TABLE IMPACTS ADD COLUMN IF NOT EXISTS project_slug VARCHAR DEFAULT 'proj'")?;
+        self.execute("ALTER TABLE SUBSTANTIATES ADD COLUMN IF NOT EXISTS project_slug VARCHAR DEFAULT 'proj'")?;
+
         // Performance Indexes for Advanced Graph Heuristics
         self.execute("CREATE INDEX IF NOT EXISTS calls_source_idx ON CALLS(source_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS calls_target_idx ON CALLS(target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS calls_project_slug_idx ON CALLS(project_slug)")?;
         self.execute("CREATE INDEX IF NOT EXISTS calls_nif_source_idx ON CALLS_NIF(source_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS calls_nif_target_idx ON CALLS_NIF(target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS calls_nif_project_slug_idx ON CALLS_NIF(project_slug)")?;
         self.execute("CREATE INDEX IF NOT EXISTS contains_source_idx ON CONTAINS(source_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS contains_target_idx ON CONTAINS(target_id)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS contains_project_slug_idx ON CONTAINS(project_slug)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS impacts_project_slug_idx ON IMPACTS(project_slug)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS substantiates_project_slug_idx ON SUBSTANTIATES(project_slug)")?;
         self.execute("CREATE INDEX IF NOT EXISTS symbol_project_slug_idx ON Symbol(project_slug)")?;
         self.execute("CREATE INDEX IF NOT EXISTS file_project_slug_idx ON File(project_slug)")?;
         self.execute("CREATE INDEX IF NOT EXISTS symbol_kind_idx ON Symbol(kind)")?;

@@ -1122,9 +1122,10 @@ impl GraphStore {
                         ));
 
                         contains_values.push(format!(
-                            "('{}', '{}')",
+                            "('{}', '{}', '{}')",
                             Self::escape_sql(path),
-                            Self::escape_sql(&symbol_id)
+                            Self::escape_sql(&symbol_id),
+                            Self::escape_sql(slug)
                         ));
 
                         if matches!(processing_mode, ProcessingMode::Full) {
@@ -1154,9 +1155,10 @@ impl GraphStore {
                         };
 
                         let relation_value = format!(
-                            "('{}', '{}')",
+                            "('{}', '{}', '{}')",
                             Self::escape_sql(&Self::symbol_id(slug, path, &relation.from)),
-                            Self::escape_sql(&Self::symbol_id(slug, path, &relation.to))
+                            Self::escape_sql(&Self::symbol_id(slug, path, &relation.to)),
+                            Self::escape_sql(slug)
                         );
 
                         match table {
@@ -1321,19 +1323,19 @@ impl GraphStore {
         }
         for chunk in contains_values.chunks(500) {
             queries.push(format!(
-                "INSERT INTO CONTAINS (source_id, target_id) VALUES {};",
+                "INSERT INTO CONTAINS (source_id, target_id, project_slug) VALUES {} ON CONFLICT DO NOTHING;",
                 chunk.join(",")
             ));
         }
         for chunk in calls_values.chunks(500) {
             queries.push(format!(
-                "INSERT INTO CALLS (source_id, target_id) VALUES {};",
+                "INSERT INTO CALLS (source_id, target_id, project_slug) VALUES {} ON CONFLICT DO NOTHING;",
                 chunk.join(",")
             ));
         }
         for chunk in calls_nif_values.chunks(500) {
             queries.push(format!(
-                "INSERT INTO CALLS_NIF (source_id, target_id) VALUES {};",
+                "INSERT INTO CALLS_NIF (source_id, target_id, project_slug) VALUES {} ON CONFLICT DO NOTHING;",
                 chunk.join(",")
             ));
         }
@@ -1916,8 +1918,8 @@ impl GraphStore {
 
     pub fn insert_project_dependency(&self, from: &str, to: &str, _path: &str) -> Result<()> {
         self.execute(&format!(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('{}', '{}');",
-            from, to
+            "INSERT INTO CONTAINS (source_id, target_id, project_slug) VALUES ('{}', '{}', '{}') ON CONFLICT DO NOTHING;",
+            from, to, from
         ))
     }
 }

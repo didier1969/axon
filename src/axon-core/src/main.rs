@@ -43,7 +43,15 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "/home/dstadel/projects".to_string());
             let projects_root = projects_root_env.leak();
             let db_root_env = std::env::var("AXON_DB_ROOT")
-                .unwrap_or_else(|_| format!("{}/.axon/graph_v2", std::env::current_dir().unwrap().display()));
+                .unwrap_or_else(|_| {
+                    std::env::var("HOME")
+                        .map(|home| format!("{}/.local/share/axon/db", home))
+                        .unwrap_or_else(|_| {
+                            std::env::current_dir()
+                                .map(|dir| format!("{}/.axon/graph_v2", dir.display()))
+                                .unwrap_or_else(|_| ".axon/graph_v2".to_string())
+                        })
+                });
             let db_root = db_root_env.leak();
             let runtime_mode = AxonRuntimeMode::from_env();
 
@@ -160,19 +168,24 @@ fn main() -> anyhow::Result<()> {
                 );
                 main_background::spawn_memory_reclaimer(queue_store.clone(), ingress_buffer.clone());
 
-                main_background::spawn_hot_delta_watcher(
-                    graph_store.clone(),
-                    projects_root_str.clone(),
-                    file_ingress_guard.clone(),
-                    ingress_buffer.clone(),
-                );
+                let identities = axon_core::project_meta::discover_project_identities();
+                for identity in identities {
+                    let project_path = identity.meta_path.parent().unwrap().parent().unwrap().to_string_lossy().to_string();
 
-                main_background::spawn_initial_scan(
-                    graph_store.clone(),
-                    projects_root_str.clone(),
-                    file_ingress_guard.clone(),
-                    ingress_buffer.clone(),
-                );
+                    main_background::spawn_hot_delta_watcher(
+                        graph_store.clone(),
+                        project_path.clone(),
+                        file_ingress_guard.clone(),
+                        ingress_buffer.clone(),
+                    );
+
+                    main_background::spawn_initial_scan(
+                        graph_store.clone(),
+                        project_path,
+                        file_ingress_guard.clone(),
+                        ingress_buffer.clone(),
+                    );
+                }
             } else {
                 info!("Ingress, watcher, scan and autonomous ingestion disabled by runtime mode.");
             }

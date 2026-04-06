@@ -813,42 +813,31 @@ fn enqueue_claimed_files(
 
 pub(crate) fn spawn_initial_scan(
     store: Arc<GraphStore>,
-    projects_root: String,
+    project_root: String,
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
 ) {
     std::thread::spawn(move || {
-        info!("🚀 Auto-Ignition: Beginning initial workspace mapping...");
-        let scanner = axon_core::scanner::Scanner::new(&projects_root);
-        if let Ok(preferred_project_root) = std::env::var("AXON_PROJECT_ROOT") {
-            let preferred_path = PathBuf::from(preferred_project_root);
-            if preferred_path.starts_with(&projects_root) && preferred_path.is_dir() {
-                scanner.scan_subtree_with_guard_and_ingress(
-                    store.clone(),
-                    &preferred_path,
-                    Some(&file_ingress_guard),
-                    Some(&ingress_buffer),
-                );
-            }
-        }
+        info!("🚀 Auto-Ignition: Beginning initial workspace mapping for {}...", project_root);
+        let scanner = axon_core::scanner::Scanner::new(&project_root);
         scanner.scan_with_guard_and_ingress(
             store,
             Some(&file_ingress_guard),
             Some(&ingress_buffer),
         );
-        info!("✅ Auto-Ignition: Initial mapping sequence complete.");
+        info!("✅ Auto-Ignition: Initial mapping sequence complete for {}.", project_root);
     });
 }
 
 pub(crate) fn spawn_hot_delta_watcher(
     store: Arc<GraphStore>,
-    projects_root: String,
+    project_root: String,
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
 ) {
     std::thread::spawn(move || {
-        let watch_root = PathBuf::from(projects_root);
-        let preferred_project_root = std::env::var("AXON_PROJECT_ROOT").ok().map(PathBuf::from);
+        let watch_root = PathBuf::from(project_root);
+        let preferred_project_root = Some(watch_root.clone());
         let watcher_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             info!(
                 "Rust FS watcher preparing targets under {}",
@@ -890,9 +879,7 @@ pub(crate) fn spawn_hot_delta_watcher(
                 }
             };
 
-            let targets = watch_targets(&watch_root, preferred_project_root.as_deref());
             let mut hot_targets = active_project_hot_targets(preferred_project_root.as_deref());
-            let (_, cold_targets) = split_watch_targets(targets, preferred_project_root.as_deref());
             hot_targets.insert(
                 0,
                 WatchTarget {
@@ -900,6 +887,7 @@ pub(crate) fn spawn_hot_delta_watcher(
                     recursive: false,
                 },
             );
+            let cold_targets: Vec<WatchTarget> = Vec::new(); // Children are now fully handled by hot_targets since watch_root == preferred_project_root
 
             let mut armed = 0usize;
             let hot_started_at = Instant::now();
@@ -1094,43 +1082,6 @@ fn memory_limit_bytes() -> u64 {
     gb * 1024 * 1024 * 1024
 }
 
-fn watch_targets(root: &Path, preferred_root: Option<&Path>) -> Vec<WatchTarget> {
-    let mut targets = vec![WatchTarget {
-        path: root.to_path_buf(),
-        recursive: false,
-    }];
-
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return targets,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if std::fs::read_dir(&path).is_err() {
-            continue;
-        }
-        targets.push(WatchTarget {
-            path,
-            recursive: true,
-        });
-    }
-
-    if let Some(preferred_root) = preferred_root {
-        if let Some(index) = targets
-            .iter()
-            .position(|target| target.recursive && target.path == preferred_root)
-        {
-            let preferred = targets.remove(index);
-            targets.insert(1, preferred);
-        }
-    }
-
-    targets
-}
 
 fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget> {
     let Some(preferred_root) = preferred_root else {
@@ -1192,28 +1143,6 @@ fn project_hot_target_rank(path: &Path) -> (u8, String) {
     (rank, name)
 }
 
-fn split_watch_targets(
-    targets: Vec<WatchTarget>,
-    preferred_root: Option<&Path>,
-) -> (Vec<WatchTarget>, Vec<WatchTarget>) {
-    let mut hot_targets = Vec::new();
-    let mut cold_targets = Vec::new();
-
-    for target in targets {
-        if !target.recursive {
-            hot_targets.push(target);
-            continue;
-        }
-
-        if preferred_root.is_some_and(|preferred| target.path == preferred) {
-            continue;
-        } else {
-            cold_targets.push(target);
-        }
-    }
-
-    (hot_targets, cold_targets)
-}
 
 #[derive(Debug, Clone, Copy)]
 struct ClaimPolicy {
