@@ -7,10 +7,7 @@
       "modelRouting": false
     }
   },
-  "mcpServers": {
-    "axon": {
-      "command": "/home/dstadel/projects/axon/scripts/mcp-stdio-proxy.py",
-      "args": []
-    }
+  "tools": {
+    "sandbox": false
   }
 }
