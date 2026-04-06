@@ -17,6 +17,7 @@ struct ProjectDependency {
 
 pub struct Scanner {
     root: PathBuf,
+    pub project_slug: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -25,9 +26,10 @@ struct DiscoveryPolicy {
 }
 
 impl Scanner {
-    pub fn new(root: &str) -> Self {
+    pub fn new(root: &str, project_slug: &str) -> Self {
         Self {
             root: PathBuf::from(root),
+            project_slug: project_slug.to_string(),
         }
     }
 
@@ -173,13 +175,8 @@ impl Scanner {
         "eligible".to_string()
     }
 
-    fn extract_project_slug(&self, path: &Path) -> String {
-        if let Ok(relative) = path.strip_prefix(&self.root) {
-            if let Some(first_dir) = relative.components().next() {
-                return first_dir.as_os_str().to_string_lossy().to_string();
-            }
-        }
-        "global".to_string()
+    fn extract_project_slug(&self, _path: &Path) -> String {
+        self.project_slug.clone()
     }
 
     fn build_walker_from(&self, start: &Path) -> WalkBuilder {
@@ -657,7 +654,7 @@ mod tests {
         std::fs::write(&kept, "defmodule Keep do\nend\n").unwrap();
         std::fs::write(&skipped, "defmodule Skip do\nend\n").unwrap();
 
-        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
         assert!(scanner.should_process_path(Path::new(&kept)));
         assert!(!scanner.should_process_path(Path::new(&skipped)));
     }
@@ -678,7 +675,7 @@ mod tests {
         std::fs::write(&top_level_file, "defmodule Drop do\nend\n").unwrap();
         std::fs::write(&project_file, "defmodule Keep do\nend\n").unwrap();
 
-        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
 
         assert!(
             !scanner.should_descend_into_directory(root.join(".worktrees").as_path()),
@@ -698,7 +695,7 @@ mod tests {
     fn test_hard_directory_noise_rejects_direnv_cache_and_ruff_cache_without_ignore_file() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
 
         for relative in [
             Path::new("proj/.direnv"),
@@ -719,7 +716,7 @@ mod tests {
     fn test_blocked_subtree_hint_segments_reject_build_like_directory_events() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
 
         for relative in [
             Path::new("proj/_build"),
@@ -757,12 +754,12 @@ mod tests {
         std::fs::write(project_a.join("keep.ex"), "defmodule Keep do\nend\n").unwrap();
         std::fs::write(project_b.join("skip.ex"), "defmodule Skip do\nend\n").unwrap();
 
-        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         scanner.scan_subtree(store.clone(), &project_a);
 
         let count_a = store
-            .query_count("SELECT count(*) FROM File WHERE project_slug = 'proj_a'")
+            .query_count("SELECT count(*) FROM File WHERE project_slug = 'proj'")
             .unwrap();
         let count_b = store
             .query_count("SELECT count(*) FROM File WHERE project_slug = 'proj_b'")

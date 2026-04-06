@@ -17,40 +17,44 @@ pub const HOT_PRIORITY: i64 = 900;
 pub fn stage_hot_delta(
     store: &GraphStore,
     watch_root: &Path,
+    project_slug: &str,
     path: &Path,
     priority: i64,
 ) -> Result<bool> {
-    Ok(stage_hot_path_delta_count(store, watch_root, path, priority, None)? > 0)
+    Ok(stage_hot_path_delta_count(store, watch_root, project_slug, path, priority, None)? > 0)
 }
 
 pub fn stage_hot_delta_with_guard(
     store: &GraphStore,
     watch_root: &Path,
+    project_slug: &str,
     path: &Path,
     priority: i64,
     guard: &SharedFileIngressGuard,
 ) -> Result<bool> {
-    Ok(stage_hot_path_delta_count(store, watch_root, path, priority, Some(guard))? > 0)
+    Ok(stage_hot_path_delta_count(store, watch_root, project_slug, path, priority, Some(guard))? > 0)
 }
 
 pub fn enqueue_hot_delta_with_guard(
     watch_root: &Path,
+    project_slug: &str,
     path: &Path,
     priority: i64,
     guard: &SharedFileIngressGuard,
     ingress: &SharedIngressBuffer,
 ) -> Result<bool> {
-    Ok(enqueue_hot_path_delta_count(watch_root, path, priority, Some(guard), ingress)? > 0)
+    Ok(enqueue_hot_path_delta_count(watch_root, project_slug, path, priority, Some(guard), ingress)? > 0)
 }
 
 fn stage_hot_path_delta_count(
     store: &GraphStore,
     watch_root: &Path,
+    project_slug: &str,
     path: &Path,
     priority: i64,
     guard: Option<&SharedFileIngressGuard>,
 ) -> Result<usize> {
-    let scanner = Scanner::new(watch_root.to_string_lossy().as_ref());
+    let scanner = Scanner::new(watch_root.to_string_lossy().as_ref(), project_slug);
     if scanner.is_ignore_control_path(path) {
         match store.reconcile_ignore_rules_for_scope(watch_root, &scanner) {
             Ok(stats) => watcher_probe::record(
@@ -72,7 +76,7 @@ fn stage_hot_path_delta_count(
             Some(path),
             format!("reason=ignore_control_changed action=rescan_root decision={}", scanner.explain_ignore_decision(path, false)),
         );
-        return stage_hot_path_delta_count(store, watch_root, watch_root, priority, guard);
+        return stage_hot_path_delta_count(store, watch_root, project_slug, watch_root, priority, guard);
     }
 
     let metadata = match std::fs::metadata(path) {
@@ -139,18 +143,20 @@ fn stage_hot_path_delta_count(
 pub fn stage_hot_deltas<I>(
     store: &GraphStore,
     watch_root: &Path,
+    project_slug: &str,
     paths: I,
     priority: i64,
 ) -> Result<usize>
 where
     I: IntoIterator<Item = PathBuf>,
 {
-    stage_hot_deltas_inner(store, watch_root, paths, priority, None)
+    stage_hot_deltas_inner(store, watch_root, project_slug, paths, priority, None)
 }
 
 pub fn stage_hot_deltas_with_guard<I>(
     store: &GraphStore,
     watch_root: &Path,
+    project_slug: &str,
     paths: I,
     priority: i64,
     guard: &SharedFileIngressGuard,
@@ -158,11 +164,12 @@ pub fn stage_hot_deltas_with_guard<I>(
 where
     I: IntoIterator<Item = PathBuf>,
 {
-    stage_hot_deltas_inner(store, watch_root, paths, priority, Some(guard))
+    stage_hot_deltas_inner(store, watch_root, project_slug, paths, priority, Some(guard))
 }
 
 pub fn enqueue_hot_deltas_with_guard<I>(
     watch_root: &Path,
+    project_slug: &str,
     paths: I,
     priority: i64,
     guard: &SharedFileIngressGuard,
@@ -171,12 +178,13 @@ pub fn enqueue_hot_deltas_with_guard<I>(
 where
     I: IntoIterator<Item = PathBuf>,
 {
-    enqueue_hot_deltas_inner(watch_root, paths, priority, Some(guard), ingress)
+    enqueue_hot_deltas_inner(watch_root, project_slug, paths, priority, Some(guard), ingress)
 }
 
 fn stage_hot_deltas_inner<I>(
     store: &GraphStore,
     watch_root: &Path,
+    project_slug: &str,
     paths: I,
     priority: i64,
     guard: Option<&SharedFileIngressGuard>,
@@ -193,7 +201,7 @@ where
             continue;
         }
 
-        staged += stage_hot_path_delta_count(store, watch_root, &path, priority, guard)?;
+        staged += stage_hot_path_delta_count(store, watch_root, project_slug, &path, priority, guard)?;
     }
 
     Ok(staged)
@@ -201,6 +209,7 @@ where
 
 fn enqueue_hot_deltas_inner<I>(
     watch_root: &Path,
+    project_slug: &str,
     paths: I,
     priority: i64,
     guard: Option<&SharedFileIngressGuard>,
@@ -218,7 +227,7 @@ where
             continue;
         }
 
-        staged += enqueue_hot_path_delta_count(watch_root, &path, priority, guard, ingress)?;
+        staged += enqueue_hot_path_delta_count(watch_root, project_slug, &path, priority, guard, ingress)?;
     }
 
     Ok(staged)
@@ -317,12 +326,13 @@ fn stage_single_file_delta(
 
 fn enqueue_hot_path_delta_count(
     watch_root: &Path,
+    project_slug: &str,
     path: &Path,
     priority: i64,
     guard: Option<&SharedFileIngressGuard>,
     ingress: &SharedIngressBuffer,
 ) -> Result<usize> {
-    let scanner = Scanner::new(watch_root.to_string_lossy().as_ref());
+    let scanner = Scanner::new(watch_root.to_string_lossy().as_ref(), project_slug);
     if scanner.is_ignore_control_path(path) {
         watcher_probe::record(
             "watcher.control_file",

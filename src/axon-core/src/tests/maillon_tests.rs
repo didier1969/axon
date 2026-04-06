@@ -64,7 +64,7 @@ mod tests {
 
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let ingress = shared_ingress_buffer();
-        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy());
+        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy(), "proj");
         scanner.scan_with_guard_and_ingress(store.clone(), None, Some(&ingress));
 
         let pre_flush = store
@@ -112,7 +112,7 @@ mod tests {
         std::fs::write(root.join("docs").join("open").join("keep.md"), "# visible").unwrap();
 
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy());
+        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy(), "proj");
         scanner.scan(store.clone());
 
         let files = store
@@ -643,6 +643,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta_with_guard(
             &store,
             root,
+            "proj",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -676,6 +677,7 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
+            "proj",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -741,7 +743,7 @@ mod tests {
         let guard = Arc::new(Mutex::new(
             FileIngressGuard::hydrate_from_store(&store).unwrap(),
         ));
-        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy());
+        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy(), "proj");
         scanner.scan_with_guard(store.clone(), Some(&guard));
 
         let pending = store
@@ -1129,6 +1131,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
+            "proj",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1169,6 +1172,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
+            "proj",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1201,6 +1205,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
+            "proj",
             &missing,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1231,6 +1236,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_deltas(
             &store,
             root,
+            "proj",
             vec![file_path.clone(), file_path.clone(), file_path.clone()],
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1264,6 +1270,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
+            "proj",
             &nested,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1301,6 +1308,7 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
+            "proj",
             &project.join("node_modules"),
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -1339,6 +1347,7 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
+            "proj",
             &project_worktree,
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -1368,6 +1377,7 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
+            "proj",
             &root.join("proj").join("_build"),
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -1597,6 +1607,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
+            "proj",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1697,6 +1708,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_deltas(
             &store,
             root,
+            "proj",
             vec![old_path.clone(), new_path.clone()],
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -2286,6 +2298,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
+            "proj",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
         )

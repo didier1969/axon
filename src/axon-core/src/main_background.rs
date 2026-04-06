@@ -478,7 +478,7 @@ fn flush_ingress_buffer_once(
     }
 
     if !batch.subtree_hints.is_empty() {
-        let scanner = Scanner::new(projects_root);
+        let scanner = Scanner::new(projects_root, "GLOBAL");
         for hint in &batch.subtree_hints {
             scanner.scan_subtree_with_guard_and_ingress(
                 store.clone(),
@@ -814,12 +814,13 @@ fn enqueue_claimed_files(
 pub(crate) fn spawn_initial_scan(
     store: Arc<GraphStore>,
     project_root: String,
+    project_slug: String,
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
 ) {
     std::thread::spawn(move || {
         info!("🚀 Auto-Ignition: Beginning initial workspace mapping for {}...", project_root);
-        let scanner = axon_core::scanner::Scanner::new(&project_root);
+        let scanner = axon_core::scanner::Scanner::new(&project_root, &project_slug);
         scanner.scan_with_guard_and_ingress(
             store,
             Some(&file_ingress_guard),
@@ -832,11 +833,13 @@ pub(crate) fn spawn_initial_scan(
 pub(crate) fn spawn_hot_delta_watcher(
     store: Arc<GraphStore>,
     project_root: String,
+    project_slug: String,
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
 ) {
     std::thread::spawn(move || {
         let watch_root = PathBuf::from(project_root);
+        let watcher_project_slug = project_slug.clone();
         let preferred_project_root = Some(watch_root.clone());
         let watcher_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             info!(
@@ -845,6 +848,7 @@ pub(crate) fn spawn_hot_delta_watcher(
             );
 
             let callback_root = watch_root.clone();
+            let callback_project_slug = watcher_project_slug.clone();
             let callback_store = store.clone();
             let callback_guard = file_ingress_guard.clone();
             let callback_ingress = ingress_buffer.clone();
@@ -862,6 +866,7 @@ pub(crate) fn spawn_hot_delta_watcher(
                     handle_watcher_events(
                         callback_store.clone(),
                         callback_root.clone(),
+                        callback_project_slug.clone(),
                         callback_guard.clone(),
                         callback_ingress.clone(),
                         callback_active_project_root.clone(),
@@ -1334,6 +1339,7 @@ fn dynamic_claim_sleep(pressure: f64, mode: ClaimMode) -> std::time::Duration {
 fn handle_watcher_events(
     store: Arc<GraphStore>,
     watch_root: std::path::PathBuf,
+    project_slug: String,
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
     active_project_root: Option<PathBuf>,
@@ -1375,6 +1381,7 @@ fn handle_watcher_events(
                 if !salvaged.is_empty() {
                     match fs_watcher::enqueue_hot_deltas_with_guard(
                         &watch_root,
+                        &project_slug,
                         salvaged.clone(),
                         HOT_PRIORITY,
                         &file_ingress_guard,
@@ -1429,6 +1436,7 @@ fn handle_watcher_events(
                     );
                     let rescan_store = store.clone();
                     let rescan_root = watch_root.clone();
+                    let rescan_project_slug = project_slug.clone();
                     let rescan_guard_state = file_ingress_guard.clone();
                     let rescan_ingress = ingress_buffer.clone();
                     let rescan_guard_release = rescan_guard.clone();
@@ -1443,7 +1451,7 @@ fn handle_watcher_events(
                             Some(&rescan_root),
                             "reason=notify_rescan",
                         );
-                        Scanner::new(rescan_root.to_string_lossy().as_ref())
+                        Scanner::new(rescan_root.to_string_lossy().as_ref(), &rescan_project_slug)
                             .scan_with_guard_and_ingress(
                                 rescan_store,
                                 Some(&rescan_guard_state),
@@ -1462,6 +1470,7 @@ fn handle_watcher_events(
 
             match fs_watcher::enqueue_hot_deltas_with_guard(
                 &watch_root,
+                &project_slug,
                 paths,
                 HOT_PRIORITY,
                 &file_ingress_guard,
@@ -1569,12 +1578,14 @@ pub(crate) fn spawn_federation_orchestrator(
                                 spawn_hot_delta_watcher(
                                     store.clone(),
                                     path.clone(),
+                                    slug.clone(),
                                     file_ingress_guard.clone(),
                                     ingress_buffer.clone(),
                                 );
                                 spawn_initial_scan(
                                     store.clone(),
                                     path.clone(),
+                                    slug.clone(),
                                     file_ingress_guard.clone(),
                                     ingress_buffer.clone(),
                                 );
@@ -1900,6 +1911,7 @@ mod tests {
         handle_watcher_events(
             store.clone(),
             root.to_path_buf(),
+            "proj".to_string(),
             guard.clone(),
             ingress_buffer.clone(),
             Some(project.clone()),
@@ -1963,6 +1975,7 @@ mod tests {
         handle_watcher_events(
             store.clone(),
             root.to_path_buf(),
+            "proj".to_string(),
             guard.clone(),
             ingress_buffer.clone(),
             Some(project.clone()),
@@ -2065,6 +2078,7 @@ mod tests {
         handle_watcher_events(
             store,
             root.to_path_buf(),
+            "proj".to_string(),
             test_file_ingress_guard(),
             ingress_buffer,
             Some(project),
@@ -2107,6 +2121,7 @@ mod tests {
         handle_watcher_events(
             store,
             root.to_path_buf(),
+            "proj".to_string(),
             test_file_ingress_guard(),
             ingress_buffer,
             Some(project),
@@ -2161,6 +2176,7 @@ mod tests {
         handle_watcher_events(
             store,
             root.to_path_buf(),
+            "proj".to_string(),
             test_file_ingress_guard(),
             ingress_buffer,
             Some(project),
@@ -2183,6 +2199,7 @@ mod tests {
         handle_watcher_events(
             Arc::new(GraphStore::new(":memory:").unwrap()),
             PathBuf::from("/tmp"),
+            "proj".to_string(),
             test_file_ingress_guard(),
             test_ingress_buffer(),
             None,
