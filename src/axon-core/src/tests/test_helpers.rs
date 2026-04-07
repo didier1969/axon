@@ -12,5 +12,8 @@ pub fn create_test_db() -> Result<GraphStore> {
         .unwrap()
         .as_nanos();
     let db_path = format!("/tmp/axon_test_db_{}_{}_{}", pid, now, count);
-    GraphStore::new(&db_path)
+    let store = GraphStore::new(&db_path)?;
+    let _ = store.sync_project_code_registry_entry("BKS", "BookingSystem", Some("/home/dstadel/projects/BookingSystem"));
+    let _ = store.sync_project_code_registry_entry("AXO", "Axon", Some("/home/dstadel/projects/axon"));
+    Ok(store)
 }

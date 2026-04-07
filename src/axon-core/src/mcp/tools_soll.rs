@@ -1513,18 +1513,33 @@ graph TD;
         project_slug: &str,
     ) -> anyhow::Result<(String, String)> {
         let escaped = escape_sql(project_slug);
-        let by_slug = self.query_single_column(&format!(
-            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_slug = '{}'",
+        
+        let by_code = self.graph_store.query_json(&format!(
+            "SELECT project_slug, project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
             escaped
         ))?;
-        if let Some(code) = by_slug.into_iter().next() {
-            return Ok((project_slug.to_string(), code));
+        let code_rows: Vec<Vec<String>> = serde_json::from_str(&by_code).unwrap_or_default();
+        if let Some(row) = code_rows.first() {
+            if row.len() >= 2 {
+                return Ok((row[0].clone(), row[1].clone()));
+            }
         }
 
-        let valid_slugs = self.query_single_column("SELECT project_slug FROM soll.ProjectCodeRegistry").unwrap_or_default().join(", ");
+        let by_slug = self.graph_store.query_json(&format!(
+            "SELECT project_slug, project_code FROM soll.ProjectCodeRegistry WHERE project_slug = '{}'",
+            escaped
+        ))?;
+        let slug_rows: Vec<Vec<String>> = serde_json::from_str(&by_slug).unwrap_or_default();
+        if let Some(row) = slug_rows.first() {
+            if row.len() >= 2 {
+                return Ok((row[0].clone(), row[1].clone()));
+            }
+        }
+
+        let valid_codes = self.query_single_column("SELECT project_code FROM soll.ProjectCodeRegistry").unwrap_or_default().join(", ");
         Err(anyhow::anyhow!(
             "Projet canonique `{}` introuvable. Slugs valides : {}",
-            project_slug, valid_slugs
+            project_slug, valid_codes
         ))
     }
 
@@ -1558,13 +1573,13 @@ graph TD;
         self.graph_store.execute_param(
             "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev) \
              VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING",
-            &json!([project_slug]),
+            &json!([project_code]),
         )?;
 
         let current_query = format!(
             "SELECT COALESCE({}, 0) FROM soll.Registry WHERE project_slug = '{}'",
             reg_col,
-            escape_sql(&project_slug)
+            escape_sql(&project_code)
         );
         let current = self
             .query_single_column(&current_query)?
@@ -1593,7 +1608,7 @@ graph TD;
             "UPDATE soll.Registry SET {} = {} WHERE project_slug = '{}'",
             reg_col,
             next,
-            escape_sql(&project_slug)
+            escape_sql(&project_code)
         ))?;
 
         Ok((project_slug, project_code, prefix, next))
@@ -2822,13 +2837,13 @@ impl McpServer {
     }
 
     pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
-        let project_name = args.get("project_name")?.as_str()?;
         let project_slug = args.get("project_slug")?.as_str()?;
+        let project_code = args.get("project_code")?.as_str()?;
         let project_path = args.get("project_path")?.as_str()?;
         let concept_text = args.get("concept_document_url_or_text").and_then(|v| v.as_str());
 
         // 1. Register project
-        if let Err(e) = self.graph_store.sync_project_code_registry_entry(project_slug, project_slug, Some(project_path)) {
+        if let Err(e) = self.graph_store.sync_project_code_registry_entry(project_code, project_slug, Some(project_path)) {
             return Some(serde_json::json!({
                 "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],
                 "isError": true
@@ -2852,7 +2867,7 @@ impl McpServer {
         // 3. Prepare response
         let mut response_text = format!(
             "Projet '{}' ({}) initialisé avec succès dans Axon.\n\n",
-            project_name, project_slug
+            project_slug, project_code
         );
 
         if let Some(_concept) = concept_text {

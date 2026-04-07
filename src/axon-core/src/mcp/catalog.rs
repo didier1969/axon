@@ -69,12 +69,12 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_name": { "type": "string", "description": "Le nom du projet (ex: BookingSystem)." },
-                        "project_slug": { "type": "string", "description": "Le slug en 3 lettres (ex: BKS)." },
+                        "project_slug": { "type": "string", "description": "Le nom complet du projet (ex: BookingSystem)." },
+                        "project_code": { "type": "string", "description": "Le code en 3 lettres (ex: BKS)." },
                         "project_path": { "type": "string", "description": "Chemin absolu vers la racine du projet" },
                         "concept_document_url_or_text": { "type": "string", "description": "Optionnel: le texte ou lien vers la vision du projet." }
                     },
-                    "required": ["project_name", "project_slug", "project_path"]
+                    "required": ["project_slug", "project_code", "project_path"]
                 }
             },
             {

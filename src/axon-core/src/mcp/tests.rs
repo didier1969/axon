@@ -311,6 +311,7 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     let root = temp.path().join("graph_v2");
     std::fs::create_dir_all(&root).unwrap();
     let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let _ = store.sync_project_code_registry_entry("AXO", "Axon", Some("/home/dstadel/projects/axon"));
     let server = McpServer::new(store.clone());
 
     store
@@ -377,6 +378,7 @@ fn test_axon_debug_reports_top_pending_reasons() {
     let root = temp.path().join("graph_v2");
     std::fs::create_dir_all(&root).unwrap();
     let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let _ = store.sync_project_code_registry_entry("AXO", "Axon", Some("/home/dstadel/projects/axon"));
     let server = McpServer::new(store.clone());
 
     store
@@ -1593,6 +1595,7 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
     let root = temp.path().join("graph_v2");
     std::fs::create_dir_all(&root).unwrap();
     let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let _ = store.sync_project_code_registry_entry("AXO", "Axon", Some("/home/dstadel/projects/axon"));
     let server = McpServer::new(store.clone());
 
     let req = JsonRpcRequest {
@@ -3236,13 +3239,13 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
         .unwrap();
 
     assert!(restore_text.contains("Restauration SOLL terminee"), "{}", restore_text);
-    assert!(restore_text.contains("Vision: 1"));
-    assert!(restore_text.contains("Pillars: 1"));
-    assert!(restore_text.contains("Concepts: 1"));
-    assert!(restore_text.contains("Milestones: 1"));
-    assert!(restore_text.contains("Requirements: 1"));
-    assert!(restore_text.contains("Decisions: 1"));
-    assert!(restore_text.contains("Validations: 1"));
+    assert!(restore_text.contains("Vision: 1"), "{}", restore_text);
+    assert!(restore_text.contains("Pillars: 1"), "{}", restore_text);
+    assert!(restore_text.contains("Concepts: 1"), "{}", restore_text);
+    assert!(restore_text.contains("Milestones: 1"), "{}", restore_text);
+    assert!(restore_text.contains("Requirements: 1"), "{}", restore_text);
+    assert!(restore_text.contains("Decisions: 1"), "{}", restore_text);
+    assert!(restore_text.contains("Validations: 1"), "{}", restore_text);
 
     assert_eq!(
         restore_server
@@ -3890,8 +3893,8 @@ fn test_axon_init_project_returns_global_guidelines() {
         "params": {
             "name": "axon_init_project",
             "arguments": {
-                "project_name": "BookingSystem",
-                "project_slug": "BKS",
+                "project_slug": "BookingSystem",
+                "project_code": "BKS",
                 "project_path": "/tmp/fake_path",
                 "concept_document_url_or_text": "We want a booking system."
             }
@@ -3916,7 +3919,7 @@ fn test_axon_apply_guidelines_creates_local_copies() {
     let server = create_test_server();
     
     // First init the project
-    server.graph_store.sync_project_code_registry_entry("BookingSystem", "BKS", None).unwrap();
+    server.graph_store.sync_project_code_registry_entry("AXO", "Axon", None).unwrap();
 
     let req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -3941,7 +3944,7 @@ fn test_axon_apply_guidelines_creates_local_copies() {
 
     // Verify in DB
     let count = server.graph_store.query_count(
-        "SELECT count(*) FROM soll.Node WHERE id = 'GUI-AXO-001' AND type = 'Guideline' AND project_slug = 'AXO'"
+        "SELECT count(*) FROM soll.Node WHERE id = 'GUI-AXO-001' AND type = 'Guideline' AND project_code = 'AXO'"
     ).unwrap();
     assert_eq!(count, 1, "Local guideline should be created");
 
