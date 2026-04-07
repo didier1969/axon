@@ -430,6 +430,10 @@ impl GraphStore {
         self.query_json_on_reader(&expanded)
     }
 
+    pub fn query_json_writer(&self, query: &str) -> Result<String> {
+        self.query_json_on_writer(query)
+    }
+
     pub fn query_count(&self, query: &str) -> Result<i64> {
         self.query_count_on_reader(query)
     }

@@ -2713,41 +2713,39 @@ impl McpServer {
             "decision" => format!("SELECT title, description, status, metadata FROM soll.Node WHERE type='Decision' AND id = '{}'", escape_sql(entity_id)),
             "milestone" => format!("SELECT title, status, metadata FROM soll.Node WHERE type='Milestone' AND id = '{}'", escape_sql(entity_id)),
             "guideline" => format!("SELECT title, description, status, metadata FROM soll.Node WHERE type='Guideline' AND id = '{}'", escape_sql(entity_id)),
+            "concept" => format!("SELECT title, description, metadata FROM soll.Node WHERE type='Concept' AND id = '{}'", escape_sql(entity_id)),
+            "stakeholder" => format!("SELECT title, metadata FROM soll.Node WHERE type='Stakeholder' AND id = '{}'", escape_sql(entity_id)),
+            "validation" => format!("SELECT status, metadata FROM soll.Node WHERE type='Validation' AND id = '{}'", escape_sql(entity_id)),
             _ => return None,
         };
-        let raw = self.graph_store.query_json(&query).ok()?;
+        // MUST query on writer context to see uncommitted updates during soll_apply_plan transaction
+        let raw = self.graph_store.query_json_writer(&query).ok()?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&raw).ok()?;
         let first = rows.first()?;
         match entity {
-            "pillar" => Some(json!({
+            "pillar" | "concept" => Some(json!({
                 "title": first.first().cloned().unwrap_or_default(),
                 "description": first.get(1).cloned().unwrap_or_default(),
                 "metadata": first.get(2).cloned().unwrap_or_else(|| "{}".to_string())
             })),
-            "requirement" => Some(json!({
+            "requirement" | "decision" | "guideline" => Some(json!({
                 "title": first.first().cloned().unwrap_or_default(),
                 "description": first.get(1).cloned().unwrap_or_default(),
                 "status": first.get(2).cloned().unwrap_or_default(),
-                "priority": first.get(3).cloned().unwrap_or_default(),
-                "metadata": first.get(4).cloned().unwrap_or_else(|| "{}".to_string()),
-                "owner": first.get(5).cloned().unwrap_or_default(),
-                "acceptance_criteria": first.get(6).cloned().unwrap_or_else(|| "[]".to_string()),
-                "evidence_refs": first.get(7).cloned().unwrap_or_else(|| "[]".to_string())
-            })),
-            "decision" => Some(json!({
-                "title": first.first().cloned().unwrap_or_default(),
-                "description": first.get(1).cloned().unwrap_or_default(),
-                "context": first.get(2).cloned().unwrap_or_default(),
-                "rationale": first.get(3).cloned().unwrap_or_default(),
-                "status": first.get(4).cloned().unwrap_or_default(),
-                "metadata": first.get(5).cloned().unwrap_or_else(|| "{}".to_string()),
-                "supersedes_decision_id": first.get(6).cloned().unwrap_or_default(),
-                "impact_scope": first.get(7).cloned().unwrap_or_default()
+                "metadata": first.get(3).cloned().unwrap_or_else(|| "{}".to_string())
             })),
             "milestone" => Some(json!({
                 "title": first.first().cloned().unwrap_or_default(),
                 "status": first.get(1).cloned().unwrap_or_default(),
                 "metadata": first.get(2).cloned().unwrap_or_else(|| "{}".to_string())
+            })),
+            "stakeholder" => Some(json!({
+                "role": first.first().cloned().unwrap_or_default(),
+                "metadata": first.get(1).cloned().unwrap_or_else(|| "{}".to_string())
+            })),
+            "validation" => Some(json!({
+                "result": first.first().cloned().unwrap_or_default(),
+                "metadata": first.get(1).cloned().unwrap_or_else(|| "{}".to_string())
             })),
             _ => None,
         }

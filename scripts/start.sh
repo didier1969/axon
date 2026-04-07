@@ -364,6 +364,17 @@ fi
 
 if [ "$RUN_MCP_TESTS" = "1" ]; then
     echo ""
+    echo "⏳ Waiting for initial ingestion to stabilize..."
+    for i in {1..30}; do
+        pending=$(curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" -H 'content-type: application/json' -d '{"query":"SELECT count(*) FROM File WHERE status IN ('\''pending'\'', '\''indexing'\'')"}' 2>/dev/null | grep -o '[0-9]\+' | head -n1 || echo "0")
+        indexed=$(curl -sS -X POST "http://127.0.0.1:$HYDRA_HTTP_PORT/sql" -H 'content-type: application/json' -d '{"query":"SELECT count(*) FROM File WHERE status IN ('\''indexed'\'', '\''indexed_degraded'\'')"}' 2>/dev/null | grep -o '[0-9]\+' | head -n1 || echo "0")
+        if [ "$pending" = "0" ]; then
+            echo "✅ Ingestion stabilized ($indexed files indexed)."
+            break
+        fi
+        sleep 2
+    done
+
     echo "🧪 Running MCP Quality Gate Validation..."
     if devenv shell -- bash -lc './scripts/mcp_quality_gate.sh --allow-mutations'; then
         echo "✅ MCP Quality Gate passed."

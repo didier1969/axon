@@ -111,11 +111,15 @@ Nous assurons une **Traçabilité Bidirectionnelle** intégrale entre l'intentio
 ## 8. Écosystème Technique & Environnement
 L'infrastructure Axon est bâtie sur un socle technologique de classe industrielle garantissant isolation et performance.
 
-### Stack Logicielle
-- **Control Plane (Orchestration) :** Elixir 1.18+ / OTP 27. Utilisation du modèle d'acteurs pour une résilience maximale.
-- **Data Plane (Calcul) :** Rust 1.80+ / Tokio. Parsing haute performance via Tree-sitter et inférence AI via FastEmbed (ONNX).
-- **Stockage Unifié :** KuzuDB (Graph Database Colonnaire). Support natif du MVCC pour des lectures concurrentes sans latence.
-- **Protocole d'Échange :** MCP (Model Context Protocol) via JSON-RPC sur UDS/HTTP.
+### Stack Logicielle & Topologie
+- **Topologie (Dual-Track) :** L'architecture repose sur trois systèmes distincts :
+  - **Système Démon (Omniscience) :** Le service global en arrière-plan qui traite de manière concurrente N projets. C'est l'autorité de runtime et d'ingestion.
+  - **Système de Production (La Forteresse) :** L'environnement "Live" de référence (racine du projet, ports `44129`/`44127`). Pour l'Agent IA, ce système est strictement **Read-Only** (le "Juge Officiel").
+  - **Système de Développement (Le Laboratoire) :** L'environnement d'isolation asymétrique pour TDD (Git Worktree, ports `44139`/`44137`). Clone la base de prod localement pour expérimenter sans Blast Radius. Validation locale avant promotion.
+- **Control Plane (Orchestration) :** Elixir 1.18+ / OTP 27. Interface Read-Only (Dashboard) et télémétrie.
+- **Data Plane (Calcul) :** Rust 1.80+ / Tokio. Parsing haute performance via Tree-sitter et inférence AI via FastEmbed (ONNX). Autorité canonique.
+- **Stockage Unifié :** DuckDB (Canard DB). Isolation physique SOLL/IST via `ATTACH DATABASE`. Support du MVCC pour des lectures concurrentes.
+- **Protocole d'Échange :** MCP (Model Context Protocol) via JSON-RPC sur HTTP/SSE.
 
 ### Environnement de Développement (Reproducibilité)
 Le projet utilise **Nix** et **Devenv** pour garantir une isolation totale :

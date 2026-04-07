@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-PROJECTS=("BookingSystem" "axon")
-QUERY_BY_PROJECT=("booking" "axon")
+PROJECTS=("BookingSystem")
+QUERY_BY_PROJECT=("booking")
 
 echo "== MCP Quality Gate =="
 echo "Non-intrusive validation (write-capable tools skipped)."

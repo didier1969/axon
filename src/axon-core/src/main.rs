@@ -85,7 +85,7 @@ fn main() -> anyhow::Result<()> {
             let graph_store = match GraphStore::new(db_root) {
                 Ok(store) => Arc::new(store),
                 Err(e) => {
-                    error!("Fatal Error initializing LadybugDB: {:?}", e);
+                    error!("Fatal Error initializing DuckDB: {:?}", e);
                     return Err(e);
                 }
             };

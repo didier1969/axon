@@ -142,6 +142,7 @@ impl PythonParser {
 
         // --- UNSAFE DETECTION ---
         let mut is_unsafe = false;
+        let mut is_nif = false;
         let body_text = node.utf8_text(source).unwrap_or("");
         if body_text.contains("eval(")
             || body_text.contains("exec(")
@@ -149,6 +150,9 @@ impl PythonParser {
             || body_text.contains("subprocess.run(")
         {
             is_unsafe = true;
+        }
+        if body_text.contains("ctypes") || body_text.contains("cffi") {
+            is_nif = true;
         }
 
         result.symbols.push(Symbol {
@@ -161,10 +165,10 @@ impl PythonParser {
             start_line: node.start_position().row + 1,
             end_line: node.end_position().row + 1,
             docstring: None,
-            is_entry_point: func_name == "main",
+            is_entry_point: func_name == "main" || is_nif,
             is_public: !func_name.starts_with("_") || func_name == "__init__",
             tested: is_test,
-            is_nif: false,
+            is_nif,
             is_unsafe,
             properties: props,
             embedding: None,

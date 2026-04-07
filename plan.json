@@ -1,0 +1,24 @@
+{
+  "name": "soll_apply_plan",
+  "arguments": {
+    "project_slug": "AXO",
+    "author": "gemini_cli",
+    "dry_run": false,
+    "plan": {
+      "decisions": [
+        {
+          "id": "DEC-AXO-025",
+          "title": "Ajout tests E2E SOLL",
+          "description": "Nous devons ajouter des tests end-to-end pour la partie SOLL si la couverture actuelle s'avère insuffisante, afin de garantir la robustesse globale du pipeline intentionnel.",
+          "metadata": {"status": "planned"}
+        },
+        {
+          "id": "DEC-AXO-026",
+          "title": "Refactoring des gros fichiers SOLL",
+          "description": "Il faut refactoriser les fichiers de code SOLL énormes qui accumulent de la dette technique pour faciliter la maintenance future et réduire la complexité cyclomatique.",
+          "metadata": {"status": "planned"}
+        }
+      ]
+    }
+  }
+}

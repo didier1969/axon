@@ -35,6 +35,11 @@ Ce document décrit l’état **prouvé** du projet, pas son récit aspiratoire.
 
 ## Contrat d’architecture actuel
 
+- **Topologie des Trois Systèmes (Dual-Track & Omniscience)**
+  - **Système Démon (Omniscience) :** Le service global en arrière-plan qui traite de manière concurrente N projets. C'est l'autorité de runtime et d'ingestion.
+  - **Système de Production (La Forteresse) :** L'environnement "Live" de référence (racine du projet, ports `44129`/`44127`). Pour l'Agent IA, ce système est strictement **Read-Only** (le "Juge Officiel").
+  - **Système de Développement (Le Laboratoire) :** L'environnement d'isolation asymétrique pour TDD (Git Worktree, ports `44139`/`44137`). Clone la base de prod localement pour expérimenter sans Blast Radius. Validation locale avant promotion (Hot Swap).
+
 - **Rust**
   - autorité de runtime
   - ingestion canonique

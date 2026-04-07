@@ -96,6 +96,7 @@ impl JavaParser {
             if let Ok(name) = name_node.utf8_text(content) {
                 let mut is_entry = false;
                 let mut is_public = false;
+                let mut is_nif = false;
                 let mut tested = false;
                 let mut decorators = Vec::new();
 
@@ -107,6 +108,9 @@ impl JavaParser {
                         if let Ok(mod_text) = child.utf8_text(content) {
                             if mod_text.contains("public") {
                                 is_public = true;
+                            }
+                            if mod_text.contains("native") {
+                                is_nif = true;
                             }
                         }
                     }
@@ -154,10 +158,10 @@ impl JavaParser {
                     start_line: node.start_position().row + 1,
                     end_line: node.end_position().row + 1,
                     docstring: None,
-                    is_entry_point: is_entry,
+                    is_entry_point: is_entry || is_nif,
                     is_public,
                     tested,
-                    is_nif: false,
+                    is_nif,
                     is_unsafe: false,
                     properties,
                     embedding: None,

@@ -269,6 +269,61 @@
             </div>
         </section>
 
+        <!-- 1.5. LES TROIS SYSTÈMES (DUAL-TRACK & OMNISCIENCE) -->
+        <section id="c4-systems">
+            <h2>Topologie d'Exécution : Les Trois Systèmes</h2>
+            <p>L'architecture opérationnelle repose sur une tripartition stricte garantissant à la fois l'omniscience globale et l'isolation totale (Zero Blast Radius) : un système Démon, un système de Production, et un système de Développement.</p>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>1. Le Système Démon (Omniscience)</h3>
+                    <p><strong>Rôle :</strong> Moteur de base (Data Plane) opérant en tant que service global en arrière-plan.<br/>
+                    <strong>Responsabilité :</strong> Traiter de manière concurrente les graphes de N projets (partitionnés par <code>project_slug</code>). Il exécute le scanner, le parsing AST, gère la mémoire, et interagit avec DuckDB. C'est l'autorité absolue sur le runtime.</p>
+                </div>
+                <div class="info-card">
+                    <h3>2. La Production (La Forteresse)</h3>
+                    <p><strong>Rôle :</strong> Environnement Live de référence.<br/>
+                    <strong>Emplacement :</strong> Racine du projet (branche <code>main</code>).<br/>
+                    <strong>Ports :</strong> <code>44129</code> (MCP/SQL), <code>44127</code> (Phoenix).<br/>
+                    <strong>Règle pour l'IA :</strong> Strictement <strong>Read-Only</strong>. C'est le "Juge Officiel" qui sert de source de vérité pour le système.</p>
+                </div>
+                <div class="info-card">
+                    <h3>3. Le Développement (Le Laboratoire)</h3>
+                    <p><strong>Rôle :</strong> Environnement d'isolation asymétrique pour TDD et agents IA.<br/>
+                    <strong>Emplacement :</strong> Confiné dans des Git Worktrees (ex: <code>.worktrees/dev/feat-x</code>).<br/>
+                    <strong>Ports décalés :</strong> <code>44139</code> (MCP/SQL), <code>44137</code> (Phoenix) pour éviter les collisions.<br/>
+                    <strong>Workflow :</strong> Clone local de <code>ist.db</code> via script pour expérimenter sans impacter la Prod. Validation via l'outil <code>axon_commit_work</code> sur le serveur MCP local avant de promouvoir en Prod (Hot Swap).</p>
+                </div>
+            </div>
+            <div class="mermaid">
+            graph TD
+                subgraph "Machine Hôte (Localhost)"
+                    Daemon[Démon Central Rust<br/>Autorité de Runtime & Stockage Multi-Projets]
+                    
+                    subgraph "Système Production (Racine)"
+                        Prod[Serveur MCP Prod : 44129<br/>Dashboard : 44127<br/>Base : .axon/graph_v2/ist.db]
+                    end
+                    
+                    subgraph "Système Développement (Git Worktree)"
+                        Dev[Serveur MCP Dev : 44139<br/>Dashboard : 44137<br/>Base isolée : .axon-dev/graph_v2/ist.db]
+                    end
+                    
+                    Daemon -- "Partitionnement (project_slug)" --> Prod
+                    Daemon -- "Partitionnement (project_slug)" --> Dev
+                    
+                    Agent((Agent IA)) -- "Query (Read-Only)" --> Prod
+                    Agent -- "Code & Validate (TDD)" --> Dev
+                    Dev -- "Promotion (axon_commit_work)" --> Prod
+                end
+                
+                style Daemon fill:#0ea5e9,color:#fff,stroke:#0284c7,stroke-width:3px
+                style Prod fill:#dcfce7,stroke:#16a34a,stroke-width:2px
+                style Dev fill:#fef3c7,stroke:#d97706,stroke-width:2px
+            </div>
+            <div class="llm-bubble">
+                "En tant qu'agent, je me connecte au MCP de Prod pour lire la vérité, mais j'opère exclusivement mes mutations (code, tests) via le MCP de Dev dans mon Worktree isolé pour garantir un Blast Radius de zéro."
+            </div>
+        </section>
+
         <!-- 2. ARCHITECTURE DES CONTENEURS (C4 LEVEL 2) -->
         <section id="c4-level-2">
             <h2>Architecture des Conteneurs (C4 Level 2)</h2>

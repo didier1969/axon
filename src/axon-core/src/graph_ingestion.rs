@@ -1067,6 +1067,9 @@ impl GraphStore {
         let mut indexed_paths = Vec::new();
         let mut degraded_paths = Vec::new();
         let mut skipped_paths = Vec::new();
+        let mut seen_symbols = std::collections::HashSet::new();
+        let mut seen_calls = std::collections::HashSet::new();
+        let mut seen_calls_nif = std::collections::HashSet::new();
         let mut symbol_values = Vec::new();
         let mut chunk_values = Vec::new();
         let mut contains_values = Vec::new();
@@ -1102,6 +1105,9 @@ impl GraphStore {
                     let slug = extraction.project_slug.as_deref().unwrap_or("global");
                     for sym in &extraction.symbols {
                         let symbol_id = Self::symbol_id(slug, path, &sym.name);
+                        if !seen_symbols.insert((symbol_id.clone(), slug.to_string())) {
+                            continue; // Prevent UNIQUE constraint violation in DuckDB ON CONFLICT batches
+                        }
                         let chunk_id = Self::chunk_id(&symbol_id);
                         let embedding_sql = if let Some(ref v) = sym.embedding {
                             format!("CAST({:?} AS FLOAT[384])", v)
@@ -1154,16 +1160,29 @@ impl GraphStore {
                             continue;
                         };
 
+                        let source_id = Self::symbol_id(slug, path, &relation.from);
+                        let target_id = Self::symbol_id(slug, path, &relation.to);
+
                         let relation_value = format!(
                             "('{}', '{}', '{}')",
-                            Self::escape_sql(&Self::symbol_id(slug, path, &relation.from)),
-                            Self::escape_sql(&Self::symbol_id(slug, path, &relation.to)),
+                            Self::escape_sql(&source_id),
+                            Self::escape_sql(&target_id),
                             Self::escape_sql(slug)
                         );
 
+                        let relation_key = (source_id, target_id, slug.to_string());
+
                         match table {
-                            "CALLS" => calls_values.push(relation_value),
-                            "CALLS_NIF" => calls_nif_values.push(relation_value),
+                            "CALLS" => {
+                                if seen_calls.insert(relation_key) {
+                                    calls_values.push(relation_value);
+                                }
+                            }
+                            "CALLS_NIF" => {
+                                if seen_calls_nif.insert(relation_key) {
+                                    calls_nif_values.push(relation_value);
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -1310,7 +1329,7 @@ impl GraphStore {
         }
         for chunk in symbol_values.chunks(500) {
             queries.push(format!(
-                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_slug=EXCLUDED.project_slug, embedding=EXCLUDED.embedding;",
+                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug, embedding) VALUES {} ON CONFLICT(id, project_slug) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, embedding=EXCLUDED.embedding;",
                 chunk.join(",")
             ));
         }
@@ -1323,19 +1342,19 @@ impl GraphStore {
         }
         for chunk in contains_values.chunks(500) {
             queries.push(format!(
-                "INSERT INTO CONTAINS (source_id, target_id, project_slug) VALUES {} ON CONFLICT DO NOTHING;",
+                "INSERT INTO CONTAINS (source_id, target_id, project_slug) VALUES {} ON CONFLICT(source_id, target_id, project_slug) DO NOTHING;",
                 chunk.join(",")
             ));
         }
         for chunk in calls_values.chunks(500) {
             queries.push(format!(
-                "INSERT INTO CALLS (source_id, target_id, project_slug) VALUES {} ON CONFLICT DO NOTHING;",
+                "INSERT INTO CALLS (source_id, target_id, project_slug) VALUES {} ON CONFLICT(source_id, target_id, project_slug) DO NOTHING;",
                 chunk.join(",")
             ));
         }
         for chunk in calls_nif_values.chunks(500) {
             queries.push(format!(
-                "INSERT INTO CALLS_NIF (source_id, target_id, project_slug) VALUES {} ON CONFLICT DO NOTHING;",
+                "INSERT INTO CALLS_NIF (source_id, target_id, project_slug) VALUES {} ON CONFLICT(source_id, target_id, project_slug) DO NOTHING;",
                 chunk.join(",")
             ));
         }

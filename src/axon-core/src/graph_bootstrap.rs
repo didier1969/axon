@@ -349,6 +349,10 @@ impl GraphStore {
     }
 
     fn ensure_additive_schema(&self) -> Result<()> {
+        // Drop indexes on File table to allow ALTER TABLE ... ADD COLUMN with DEFAULT values
+        let _ = self.execute("DROP INDEX IF EXISTS file_project_slug_idx");
+        let _ = self.execute("DROP INDEX IF EXISTS file_status_idx");
+
         self.execute(
             "ALTER TABLE File ADD COLUMN IF NOT EXISTS needs_reindex BOOLEAN DEFAULT FALSE",
         )?;

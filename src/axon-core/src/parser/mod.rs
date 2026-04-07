@@ -158,14 +158,20 @@ pub fn scan_secrets(content: &str, result: &mut ExtractionResult) {
     }
 }
 
+pub mod c;
+pub mod c_sharp;
+pub mod cpp;
 pub mod css;
 pub mod datalog;
 pub mod elixir;
 pub mod go;
 pub mod html;
 pub mod java;
+pub mod kotlin;
 pub mod markdown;
+pub mod php;
 pub mod python;
+pub mod ruby;
 pub mod rust;
 pub mod sql;
 pub mod text;
@@ -183,6 +189,12 @@ pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
         "js" | "jsx" => Some(Box::new(typescript::TypeScriptParser::new())),
         "go" => Some(Box::new(go::GoParser::new())),
         "java" => Some(Box::new(java::JavaParser::new())),
+        "c" | "h" => Some(Box::new(c::CParser::new())),
+        "cpp" | "hpp" | "cc" | "cxx" | "hxx" => Some(Box::new(cpp::CppParser::new())),
+        "cs" => Some(Box::new(c_sharp::CSharpParser::new())),
+        "rb" | "ruby" => Some(Box::new(ruby::RubyParser::new())),
+        "kt" | "kts" => Some(Box::new(kotlin::KotlinParser::new())),
+        "php" => Some(Box::new(php::PhpParser::new())),
         "yaml" | "yml" => Some(Box::new(yaml::YamlParser::new())),
         "html" | "htm" => Some(Box::new(html::HtmlParser::new())),
         "css" | "scss" => Some(Box::new(css::CssParser::new())),
