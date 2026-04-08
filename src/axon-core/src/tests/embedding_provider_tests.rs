@@ -1,7 +1,8 @@
 use crate::embedder::{
     configured_embedding_execution_backend, default_embedding_execution_backend,
     embedding_execution_backend_name, resolve_embedding_provider_truth,
-    embedding_execution_providers, EmbeddingExecutionBackend,
+    resolve_embedding_provider_truth_with_probe, EmbeddingExecutionBackend,
+    EmbeddingProviderStartupProbe, embedding_execution_providers,
 };
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -90,4 +91,38 @@ fn test_provider_truth_verifies_cpu_when_cpu_only_requested() {
 
     assert_eq!(truth.provider_effective, Some("cpu"));
     assert_eq!(truth.provider_status, "verified");
+}
+
+#[test]
+fn test_provider_truth_verifies_cuda_when_registration_probe_succeeds() {
+    let truth = resolve_embedding_provider_truth_with_probe(
+        EmbeddingExecutionBackend::GpuCuda,
+        false,
+        Some(&EmbeddingProviderStartupProbe::registration_succeeded()),
+    );
+
+    assert_eq!(truth.provider_effective, Some("cuda"));
+    assert_eq!(truth.provider_status, "verified");
+    assert_eq!(truth.provider_provenance, "ort_registration_probe");
+    assert_eq!(truth.provider_registration_outcome, Some("registered"));
+}
+
+#[test]
+fn test_provider_truth_marks_cuda_fallback_when_registration_probe_fails() {
+    let truth = resolve_embedding_provider_truth_with_probe(
+        EmbeddingExecutionBackend::GpuCuda,
+        true,
+        Some(&EmbeddingProviderStartupProbe::registration_failed(
+            "cuda ep registration failed".to_string(),
+        )),
+    );
+
+    assert_eq!(truth.provider_effective, None);
+    assert_eq!(truth.provider_status, "fallback");
+    assert_eq!(truth.provider_provenance, "ort_registration_probe");
+    assert_eq!(truth.provider_registration_outcome, Some("failed"));
+    assert!(
+        truth.provider_note.contains("failed"),
+        "the note should surface the registration failure"
+    );
 }

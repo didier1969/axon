@@ -222,6 +222,15 @@ Benchmark reports become operationally defensible even when the environment is u
 - explicit CUDA request is no longer misreported as proven GPU execution from request alone
 - the tranche intentionally does **not** claim exact CUDA provider proof from `fastembed/ort`; that remains a later problem if stronger introspection is required
 
+**Current truth after the ORT registration-probe extension:**
+- CUDA-requested startup now performs a bounded ORT preflight using `error_on_failure()`
+- the runtime truth now also carries:
+  - `provider_provenance`
+  - `provider_registration_outcome`
+- successful ORT registration is now reported as stronger startup evidence than the local GPU heuristic alone
+- failed ORT registration is now explicitly surfaced as a fallback-class outcome
+- this still does **not** prove the exact final effective provider for every inference op; it only proves stronger startup registration truth
+
 ## Tranche 5. Decouple Inference From Persistence
 
 ### Objective

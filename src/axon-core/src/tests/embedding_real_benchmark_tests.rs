@@ -4,7 +4,10 @@ use crate::embedding_benchmark::{
     RealEmbeddingBenchmarkConfig,
     BENCHMARK_TARGET_EMBEDDINGS_PER_HOUR,
 };
-use crate::embedder::{resolve_embedding_provider_truth, EmbeddingExecutionBackend};
+use crate::embedder::{
+    resolve_embedding_provider_truth, resolve_embedding_provider_truth_with_probe,
+    EmbeddingExecutionBackend, EmbeddingProviderStartupProbe,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -151,4 +154,17 @@ fn test_provider_truth_contract_separates_requested_heuristic_and_effective_fiel
     assert_eq!(truth.device_heuristic_backend, "cpu");
     assert_eq!(truth.provider_effective, None);
     assert_eq!(truth.provider_status, "unverified");
+}
+
+#[test]
+fn test_provider_truth_contract_surfaces_registration_probe_outcome() {
+    let truth = resolve_embedding_provider_truth_with_probe(
+        EmbeddingExecutionBackend::GpuCuda,
+        false,
+        Some(&EmbeddingProviderStartupProbe::registration_succeeded()),
+    );
+
+    assert_eq!(truth.provider_effective, Some("cuda"));
+    assert_eq!(truth.provider_provenance, "ort_registration_probe");
+    assert_eq!(truth.provider_registration_outcome, Some("registered"));
 }

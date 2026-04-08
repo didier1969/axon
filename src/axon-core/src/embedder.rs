@@ -4,6 +4,7 @@ use crate::queue::QueueStore;
 use crate::service_guard::{self, ServicePressure};
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use fastembed::{EmbeddingModel, ExecutionProviderDispatch, InitOptions, TextEmbedding};
+use ort::session::Session;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -85,7 +86,42 @@ pub struct EmbeddingProviderTruth {
     pub gpu_present: bool,
     pub provider_effective: Option<&'static str>,
     pub provider_status: &'static str,
+    pub provider_provenance: &'static str,
+    pub provider_registration_outcome: Option<&'static str>,
     pub provider_note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingProviderStartupProbe {
+    pub attempted: bool,
+    pub registration_succeeded: Option<bool>,
+    pub error: Option<String>,
+}
+
+impl EmbeddingProviderStartupProbe {
+    pub fn not_attempted() -> Self {
+        Self {
+            attempted: false,
+            registration_succeeded: None,
+            error: None,
+        }
+    }
+
+    pub fn registration_succeeded() -> Self {
+        Self {
+            attempted: true,
+            registration_succeeded: Some(true),
+            error: None,
+        }
+    }
+
+    pub fn registration_failed(error: String) -> Self {
+        Self {
+            attempted: true,
+            registration_succeeded: Some(false),
+            error: Some(error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +325,14 @@ pub fn resolve_embedding_provider_truth(
     requested_backend: EmbeddingExecutionBackend,
     gpu_present: bool,
 ) -> EmbeddingProviderTruth {
+    resolve_embedding_provider_truth_with_probe(requested_backend, gpu_present, None)
+}
+
+pub fn resolve_embedding_provider_truth_with_probe(
+    requested_backend: EmbeddingExecutionBackend,
+    gpu_present: bool,
+    probe: Option<&EmbeddingProviderStartupProbe>,
+) -> EmbeddingProviderTruth {
     let device_heuristic_backend = default_embedding_execution_backend(gpu_present);
     match requested_backend {
         EmbeddingExecutionBackend::Cpu => EmbeddingProviderTruth {
@@ -297,22 +341,56 @@ pub fn resolve_embedding_provider_truth(
             gpu_present,
             provider_effective: Some("cpu"),
             provider_status: "verified",
+            provider_provenance: "startup_request",
+            provider_registration_outcome: None,
             provider_note:
                 "CPU was explicitly requested and Axon configured a CPU-only provider path at startup."
                     .to_string(),
         },
-        EmbeddingExecutionBackend::GpuCuda => EmbeddingProviderTruth {
-            requested_backend: requested_backend.name(),
-            device_heuristic_backend: device_heuristic_backend.name(),
-            gpu_present,
-            provider_effective: None,
-            provider_status: "unverified",
-            provider_note: if gpu_present {
-                "CUDA was requested and the local device heuristic saw a GPU, but fastembed/ort do not expose the effective execution provider strongly enough here."
-                    .to_string()
-            } else {
-                "CUDA was requested, but the local device heuristic did not observe a GPU; fastembed/ort do not expose whether startup fell back to CPU here."
-                    .to_string()
+        EmbeddingExecutionBackend::GpuCuda => match probe.and_then(|probe| probe.registration_succeeded)
+        {
+            Some(true) => EmbeddingProviderTruth {
+                requested_backend: requested_backend.name(),
+                device_heuristic_backend: device_heuristic_backend.name(),
+                gpu_present,
+                provider_effective: Some("cuda"),
+                provider_status: "verified",
+                provider_provenance: "ort_registration_probe",
+                provider_registration_outcome: Some("registered"),
+                provider_note:
+                    "CUDA was requested and ONNX Runtime accepted CUDA provider registration during startup preflight."
+                        .to_string(),
+            },
+            Some(false) => EmbeddingProviderTruth {
+                requested_backend: requested_backend.name(),
+                device_heuristic_backend: device_heuristic_backend.name(),
+                gpu_present,
+                provider_effective: None,
+                provider_status: "fallback",
+                provider_provenance: "ort_registration_probe",
+                provider_registration_outcome: Some("failed"),
+                provider_note: format!(
+                    "CUDA was requested but ONNX Runtime provider registration failed during startup preflight: {}",
+                    probe
+                        .and_then(|probe| probe.error.as_deref())
+                        .unwrap_or("unknown registration error")
+                ),
+            },
+            None => EmbeddingProviderTruth {
+                requested_backend: requested_backend.name(),
+                device_heuristic_backend: device_heuristic_backend.name(),
+                gpu_present,
+                provider_effective: None,
+                provider_status: "unverified",
+                provider_provenance: "startup_request",
+                provider_registration_outcome: None,
+                provider_note: if gpu_present {
+                    "CUDA was requested and the local device heuristic saw a GPU, but fastembed/ort do not expose the effective execution provider strongly enough here."
+                        .to_string()
+                } else {
+                    "CUDA was requested, but the local device heuristic did not observe a GPU; fastembed/ort do not expose whether startup fell back to CPU here."
+                        .to_string()
+                },
             },
         },
         EmbeddingExecutionBackend::Unspecified => EmbeddingProviderTruth {
@@ -321,10 +399,26 @@ pub fn resolve_embedding_provider_truth(
             gpu_present,
             provider_effective: None,
             provider_status: "unverified",
+            provider_provenance: "startup_request",
+            provider_registration_outcome: None,
             provider_note:
                 "The embedding backend remained unspecified, so Axon cannot prove an effective execution provider from startup intent alone."
                     .to_string(),
         },
+    }
+}
+
+pub fn probe_embedding_provider_startup(
+    backend: EmbeddingExecutionBackend,
+) -> EmbeddingProviderStartupProbe {
+    if backend != EmbeddingExecutionBackend::GpuCuda {
+        return EmbeddingProviderStartupProbe::not_attempted();
+    }
+
+    let cuda_probe = ort::ep::CUDA::default().build().error_on_failure();
+    match Session::builder().and_then(|builder| builder.with_execution_providers([cuda_probe])) {
+        Ok(_) => EmbeddingProviderStartupProbe::registration_succeeded(),
+        Err(err) => EmbeddingProviderStartupProbe::registration_failed(err.to_string()),
     }
 }
 
@@ -662,13 +756,20 @@ impl SemanticWorkerPool {
             "Semantic Worker: Initializing embedding profile stack [{}] in isolated thread...",
             profile_labels
         );
-        let provider_truth = resolve_embedding_provider_truth(backend, runtime_profile.gpu_present);
+        let provider_probe = probe_embedding_provider_startup(backend);
+        let provider_truth = resolve_embedding_provider_truth_with_probe(
+            backend,
+            runtime_profile.gpu_present,
+            Some(&provider_probe),
+        );
         info!(
-            "Semantic Worker: embedding backend requested={} heuristic_backend={} gpu_present={} provider_status={} note={}",
+            "Semantic Worker: embedding backend requested={} heuristic_backend={} gpu_present={} provider_status={} provider_provenance={} registration_outcome={:?} note={}",
             provider_truth.requested_backend,
             provider_truth.device_heuristic_backend,
             provider_truth.gpu_present,
             provider_truth.provider_status,
+            provider_truth.provider_provenance,
+            provider_truth.provider_registration_outcome,
             provider_truth.provider_note
         );
         let (mut model, profile) =

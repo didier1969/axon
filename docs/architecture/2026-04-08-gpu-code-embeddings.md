@@ -421,6 +421,43 @@ Current semantics:
 - if CUDA is requested, Axon now reports that as `provider_status=unverified` unless a stronger runtime proof exists
 - the worker log uses the same truth model at startup, so runtime telemetry and benchmark semantics no longer diverge
 
+### ORT registration-probe tranche on `2026-04-08`
+
+Axon now performs a small ONNX Runtime startup preflight when CUDA is requested:
+
+- it builds an ORT `SessionBuilder`
+- it attempts CUDA provider registration with `error_on_failure()`
+- it records the registration outcome before `fastembed` model initialization
+
+This adds two stronger fields to the runtime truth:
+- `provider_provenance`
+  - `startup_request` or `ort_registration_probe`
+- `provider_registration_outcome`
+  - `registered`, `failed`, or absent
+
+Current semantics after this tranche:
+- explicit `cpu` request remains `provider_effective=cpu`, `provider_status=verified`
+- explicit `cuda` request + successful ORT registration preflight is now reported as:
+  - `provider_effective=cuda`
+  - `provider_status=verified`
+  - `provider_provenance=ort_registration_probe`
+  - `provider_registration_outcome=registered`
+- explicit `cuda` request + failed ORT registration preflight is now reported as:
+  - `provider_effective` unset
+  - `provider_status=fallback`
+  - `provider_provenance=ort_registration_probe`
+  - `provider_registration_outcome=failed`
+- if no preflight signal exists, Axon still reports CUDA as `unverified`
+
+What this tranche proves:
+- Axon no longer depends only on `gpu_present` to talk about CUDA startup readiness
+- Axon can now distinguish “CUDA requested and ORT accepted registration” from “CUDA requested but registration failed”
+- benchmark JSON and worker startup logs carry materially stronger startup evidence
+
+What it still does not prove:
+- successful ORT provider registration is still not the same as introspecting the exact provider that executed every model op
+- the `fastembed` / `ort` stack still does not expose a clean final effective-provider API in our current integration
+
 What this tranche proves:
 - Axon no longer over-interprets `gpu_present`
 - Axon no longer treats `requested_backend=cuda` as proof of GPU execution

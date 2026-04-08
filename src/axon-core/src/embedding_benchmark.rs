@@ -1,7 +1,8 @@
 use crate::embedder::{
     apply_embedding_batch_overrides, calibrated_embedding_profile_without_overrides,
     configured_embedding_batch_overrides, embedding_execution_providers,
-    embedding_profile_for_key, resolve_embedding_provider_truth, EmbeddingExecutionBackend,
+    embedding_profile_for_key, probe_embedding_provider_startup,
+    resolve_embedding_provider_truth_with_probe, EmbeddingExecutionBackend,
     EmbeddingProfileKey,
 };
 use crate::parser::get_parser_for_file;
@@ -146,6 +147,8 @@ pub struct RealEmbeddingBenchmarkReport {
     pub effective_profile_batches: BenchmarkProfileBatchReport,
     pub provider_effective: Option<String>,
     pub provider_status: &'static str,
+    pub provider_provenance: &'static str,
+    pub provider_registration_outcome: Option<&'static str>,
     pub provider_note: String,
     pub corpus: RepoBenchmarkCorpus,
     pub targets: Vec<BenchmarkTargetReport>,
@@ -302,7 +305,12 @@ pub fn run_real_embedding_benchmark(
     config: &RealEmbeddingBenchmarkConfig,
 ) -> Result<RealEmbeddingBenchmarkReport> {
     let runtime_profile = RuntimeProfile::detect();
-    let provider_truth = resolve_embedding_provider_truth(config.backend, runtime_profile.gpu_present);
+    let provider_probe = probe_embedding_provider_startup(config.backend);
+    let provider_truth = resolve_embedding_provider_truth_with_probe(
+        config.backend,
+        runtime_profile.gpu_present,
+        Some(&provider_probe),
+    );
     let base_profile = embedding_profile_for_key(config.profile_key);
     let canonical_profile =
         calibrated_embedding_profile_without_overrides(&base_profile, config.backend);
@@ -373,6 +381,8 @@ pub fn run_real_embedding_benchmark(
         effective_profile_batches: BenchmarkProfileBatchReport::from_profile(&profile),
         provider_effective: provider_truth.provider_effective.map(str::to_string),
         provider_status: provider_truth.provider_status,
+        provider_provenance: provider_truth.provider_provenance,
+        provider_registration_outcome: provider_truth.provider_registration_outcome,
         provider_note: provider_truth.provider_note,
         corpus,
         targets,
