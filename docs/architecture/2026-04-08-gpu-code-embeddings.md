@@ -306,6 +306,47 @@ Operational conclusion:
   - `prepare_embed` now carries explicit `prepare_seconds`
   - `prepare_embed` and `full_pipeline` include preparation time in `total_seconds`
 
+### CPU layer-split runs on `2026-04-08`
+
+These runs used the same reduced local corpus and `16` measured samples per target.
+
+#### `jinaai/jina-embeddings-v2-base-code` (`768d`)
+
+- `model_only`
+  - file: about `5_470 embeddings/h`
+  - type: about `12_366 embeddings/h`
+  - procedure: about `9_562 embeddings/h`
+- `prepare_embed`
+  - file: about `7_464 embeddings/h`
+  - type: about `14_746 embeddings/h`
+  - procedure: about `13_793 embeddings/h`
+- `full_pipeline`
+  - file: about `5_345 embeddings/h`
+  - type: about `7_784 embeddings/h`
+  - procedure: about `7_356 embeddings/h`
+
+#### `BAAI/bge-base-en-v1.5` (`768d`)
+
+- `model_only`
+  - file: about `13_691 embeddings/h`
+  - type: about `12_139 embeddings/h`
+  - procedure: about `15_555 embeddings/h`
+- `prepare_embed`
+  - file: about `12_849 embeddings/h`
+  - type: about `11_470 embeddings/h`
+  - procedure: about `13_454 embeddings/h`
+- `full_pipeline`
+  - file: about `6_833 embeddings/h`
+  - type: about `6_535 embeddings/h`
+  - procedure: about `7_546 embeddings/h`
+
+What these layer-split CPU runs prove:
+- `bge-base` is currently faster than `jina` on this harness for the same `768d` storage contract
+- the measured `prepare_seconds` remain effectively negligible in this reduced harness
+- the dominant loss is still not payload preparation; it is the embedding/model path, then the broader full-pipeline overhead
+- full-pipeline throughput drops materially relative to `model_only`, especially on `bge-base`, so the pipeline outside raw inference is still expensive
+- even the best observed CPU layer result remains far below `300_000 embeddings/h`
+
 Additional runtime truth discovered after the first benchmark pass:
 - production was still underusing the calibrated profile in part of the worker loop
 - specifically, symbol and graph fetch waves were still pinned to `32` and `6` through legacy constants

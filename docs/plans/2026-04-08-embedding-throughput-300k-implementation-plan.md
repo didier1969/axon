@@ -17,7 +17,7 @@ Known truth entering this plan:
 
 ## Tranche 1. Split Measurement Layers
 
-**Status:** In progress on `2026-04-08`
+**Status:** Completed on `2026-04-08`
 
 ### Objective
 
@@ -72,6 +72,12 @@ One benchmark command can now emit clearly attributed results for each measureme
   - `model_only` prebuilds payload batches before entering the timed inference loop
   - `prepare_embed` now carries explicit `prepare_seconds`
   - `prepare_embed` and `full_pipeline` include preparation time in the measured total
+- first measured CPU layer matrix now exists for both `jina` and `bge-base`
+- current evidence from that matrix:
+  - `bge-base` is faster than `jina` on the reduced CPU harness
+  - measured preparation cost is negligible in this harness
+  - the dominant ceiling remains embedding/inference, followed by wider full-pipeline overhead
+  - the target `300_000 embeddings/h` is still missed by a very large margin
 
 ## Tranche 2. Make Batch Sizes Runtime-Tunable
 
