@@ -68,4 +68,28 @@ if [ "$missing_env" -ne 0 ] || [ "$missing_tools" -ne 0 ]; then
   exit 1
 fi
 
+if [ "${AXON_EMBEDDING_BACKEND:-auto}" = "cuda" ]; then
+  echo ""
+  echo "CUDA runtime validation:"
+
+  if ! ldconfig -p 2>/dev/null | grep -q 'libcudnn\.so\.9'; then
+    echo "  MISSING libcudnn.so.9"
+    echo "❌ Le shell Devenv courant ne peut pas enregistrer le provider CUDA ORT."
+    echo "   Cause prouvée: libcudnn.so.9 est absente du runtime visible."
+    exit 1
+  fi
+
+  provider_lib="${CARGO_TARGET_DIR:-}/debug/libonnxruntime_providers_cuda.so"
+  if [ -f "$provider_lib" ]; then
+    if ldd "$provider_lib" | grep -q 'not found'; then
+      echo "  BROKEN  $provider_lib"
+      ldd "$provider_lib" | sed 's/^/    /'
+      echo "❌ Le provider CUDA ORT a des dépendances runtime non résolues."
+      exit 1
+    fi
+  fi
+
+  echo "  OK      libcudnn.so.9 visible"
+fi
+
 echo "✅ Les variables et outils principaux sont présents."

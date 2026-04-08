@@ -243,6 +243,10 @@ Benchmark reports become operationally defensible even when the environment is u
   - it is now “CUDA runtime dependency chain incomplete in the active shell/runtime”
 - consequence:
   - no current `cuda` benchmark result on this host should be counted as valid GPU-throughput proof until `provider_registration_outcome=registered`
+- a shell-level preflight now exists too:
+  - `env AXON_EMBEDDING_BACKEND=cuda devenv shell -- bash scripts/validate-devenv.sh`
+  - current result on this host: fails early on missing `libcudnn.so.9`
+  - this is now the preferred red/green gate before any further CUDA benchmark run
 
 ## Tranche 5. Decouple Inference From Persistence
 

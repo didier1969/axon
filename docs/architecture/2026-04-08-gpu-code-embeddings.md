@@ -482,6 +482,11 @@ What this means operationally:
 - the active blocker is now “runtime CUDA dependencies are incomplete for this shell / machine path”
 - therefore any current `cuda` benchmark outcome on this host is still fallback-class and not valid proof of real GPU throughput
 
+An explicit shell-level guard now exists as well:
+- `env AXON_EMBEDDING_BACKEND=cuda devenv shell -- bash scripts/validate-devenv.sh`
+- this check now fails early when `libcudnn.so.9` is not visible in the active Devenv shell
+- therefore Axon can now reject a CUDA-invalid shell before wasting time on startup or throughput runs
+
 What this tranche proves:
 - Axon no longer over-interprets `gpu_present`
 - Axon no longer treats `requested_backend=cuda` as proof of GPU execution
