@@ -5,6 +5,7 @@ mod main_services;
 mod main_telemetry;
 
 use axon_core::bridge::BridgeEvent;
+use axon_core::embedder::{default_embedding_execution_backend, embedding_execution_backend_name};
 use axon_core::file_ingress_guard::{FileIngressGuard, SharedFileIngressGuard};
 use axon_core::graph::GraphStore;
 use axon_core::ingress_buffer::{IngressBuffer, SharedIngressBuffer};
@@ -60,6 +61,12 @@ fn main() -> anyhow::Result<()> {
                 profile.recommended_workers,
                 profile.max_blocking_threads,
                 profile.queue_capacity
+            );
+            info!(
+                "Embedding backend selected at boot: {}",
+                embedding_execution_backend_name(default_embedding_execution_backend(
+                    profile.gpu_present
+                ))
             );
 
             unsafe {

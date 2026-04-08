@@ -3,7 +3,7 @@ use crate::graph_ingestion::{FileVectorizationWork, GraphProjectionWork};
 use crate::queue::QueueStore;
 use crate::service_guard::{self, ServicePressure};
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{EmbeddingModel, ExecutionProviderDispatch, InitOptions, TextEmbedding};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -33,13 +33,23 @@ pub struct EmbeddingKindConfig {
 pub enum EmbeddingExecutionBackend {
     Unspecified,
     Cpu,
+    GpuCuda,
 }
 
 impl EmbeddingExecutionBackend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Cpu => "cpu",
+            Self::GpuCuda => "cuda",
+        }
+    }
+
     fn execution_provider(self) -> Option<&'static str> {
         match self {
             Self::Unspecified => None,
             Self::Cpu => Some("cpu"),
+            Self::GpuCuda => Some("cuda"),
         }
     }
 }
@@ -140,6 +150,32 @@ pub fn default_embedding_profile() -> EmbeddingProfile {
     )
 }
 
+pub fn default_embedding_execution_backend(gpu_present: bool) -> EmbeddingExecutionBackend {
+    if gpu_present {
+        EmbeddingExecutionBackend::GpuCuda
+    } else {
+        EmbeddingExecutionBackend::Cpu
+    }
+}
+
+pub fn embedding_execution_backend_name(backend: EmbeddingExecutionBackend) -> &'static str {
+    backend.name()
+}
+
+pub fn embedding_execution_providers(
+    backend: EmbeddingExecutionBackend,
+) -> Vec<ExecutionProviderDispatch> {
+    match backend {
+        EmbeddingExecutionBackend::Unspecified | EmbeddingExecutionBackend::Cpu => {
+            vec![ort::ep::CPU::default().build()]
+        }
+        EmbeddingExecutionBackend::GpuCuda => vec![
+            ort::ep::CUDA::default().build(),
+            ort::ep::CPU::default().build(),
+        ],
+    }
+}
+
 pub fn default_runtime_embedding_model() -> RuntimeEmbeddingModel {
     default_embedding_profile().runtime_model
 }
@@ -203,15 +239,23 @@ impl SemanticWorkerPool {
     }
 
     fn worker_loop(graph_store: Arc<GraphStore>, queue_store: Arc<QueueStore>) {
+        let runtime_profile = crate::runtime_profile::RuntimeProfile::detect();
         let profile = default_embedding_profile();
+        let backend = default_embedding_execution_backend(runtime_profile.gpu_present);
         info!(
             "Semantic Worker: Initializing {} Model ({}d) in isolated thread...",
             profile.runtime_model.startup_label(),
             profile.dimension
         );
+        info!(
+            "Semantic Worker: embedding backend selected = {} (gpu_present={})",
+            backend.name(),
+            runtime_profile.gpu_present
+        );
 
         let mut options = InitOptions::new(profile.runtime_model.fastembed_model());
         options.show_download_progress = true;
+        options = options.with_execution_providers(embedding_execution_providers(backend));
 
         let mut model = match TextEmbedding::try_new(options) {
             Ok(m) => {

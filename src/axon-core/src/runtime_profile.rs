@@ -1,3 +1,4 @@
+use crate::embedder::EmbeddingExecutionBackend;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -34,6 +35,14 @@ impl RuntimeProfile {
             recommended_workers,
             max_blocking_threads: sizing.max_blocking_threads,
             queue_capacity: sizing.queue_capacity,
+        }
+    }
+
+    pub fn embedding_execution_backend(&self) -> EmbeddingExecutionBackend {
+        if self.gpu_present {
+            EmbeddingExecutionBackend::GpuCuda
+        } else {
+            EmbeddingExecutionBackend::Cpu
         }
     }
 }
@@ -119,8 +128,8 @@ fn recommend_sizing(cpu_cores: usize, ram_total_gb: u64, gpu_present: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        configured_max_worker_cap, detect_ingestion_memory_budget_gb, detect_ram_budget_gb,
-        recommend_sizing,
+        EmbeddingExecutionBackend, RuntimeProfile, configured_max_worker_cap,
+        detect_ingestion_memory_budget_gb, detect_ram_budget_gb, recommend_sizing,
     };
 
     #[test]
@@ -168,5 +177,32 @@ mod tests {
         std::env::set_var("MAX_AXON_WORKERS", "1");
         assert_eq!(configured_max_worker_cap(), Some(1));
         std::env::remove_var("MAX_AXON_WORKERS");
+    }
+
+    #[test]
+    fn test_embedding_execution_backend_tracks_gpu_presence() {
+        let cpu_only = RuntimeProfile {
+            cpu_cores: 4,
+            ram_total_gb: 16,
+            ram_budget_gb: 12,
+            ingestion_memory_budget_gb: 4,
+            gpu_present: false,
+            recommended_workers: 2,
+            max_blocking_threads: 4,
+            queue_capacity: 20_000,
+        };
+        let gpu_ready = RuntimeProfile {
+            gpu_present: true,
+            ..cpu_only.clone()
+        };
+
+        assert_eq!(
+            cpu_only.embedding_execution_backend(),
+            EmbeddingExecutionBackend::Cpu
+        );
+        assert_eq!(
+            gpu_ready.embedding_execution_backend(),
+            EmbeddingExecutionBackend::GpuCuda
+        );
     }
 }
