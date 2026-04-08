@@ -154,6 +154,12 @@ pub struct RealEmbeddingBenchmarkReport {
     pub targets: Vec<BenchmarkTargetReport>,
 }
 
+impl RealEmbeddingBenchmarkReport {
+    pub fn has_verified_gpu_backend(&self) -> bool {
+        self.provider_status == "verified" && self.provider_effective.as_deref() == Some("cuda")
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BenchmarkProfileBatchReport {
     pub chunk_batch_size: usize,

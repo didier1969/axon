@@ -231,6 +231,19 @@ Benchmark reports become operationally defensible even when the environment is u
 - failed ORT registration is now explicitly surfaced as a fallback-class outcome
 - this still does **not** prove the exact final effective provider for every inference op; it only proves stronger startup registration truth
 
+**Current truth after the CUDA feature activation tranche:**
+- `src/axon-core/Cargo.toml` now explicitly enables `ort/cuda`
+- `cargo tree -e features -i ort` proves `ort feature "cuda"` is active
+- `cargo tree -e features -i ort-sys` proves `ort-sys feature "cuda"` is active
+- the reduced smoke benchmark still does **not** register CUDA successfully at runtime
+- the new failure is now explicit and lower-level:
+  - `libonnxruntime_providers_cuda.so` fails to load because `libcudnn.so.9` is missing
+- therefore the blocking truth has changed:
+  - it is no longer “CUDA feature not enabled in the build”
+  - it is now “CUDA runtime dependency chain incomplete in the active shell/runtime”
+- consequence:
+  - no current `cuda` benchmark result on this host should be counted as valid GPU-throughput proof until `provider_registration_outcome=registered`
+
 ## Tranche 5. Decouple Inference From Persistence
 
 ### Objective

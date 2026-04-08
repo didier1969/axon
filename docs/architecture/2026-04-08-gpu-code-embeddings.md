@@ -458,6 +458,30 @@ What it still does not prove:
 - successful ORT provider registration is still not the same as introspecting the exact provider that executed every model op
 - the `fastembed` / `ort` stack still does not expose a clean final effective-provider API in our current integration
 
+### CUDA build/runtime qualification on `2026-04-08`
+
+The CUDA story is now split into two distinct truths that were previously conflated:
+
+- build truth
+- runtime dependency truth
+
+What is now proven:
+- `ort/cuda` is explicitly enabled in `src/axon-core/Cargo.toml`
+- `cargo tree -e features -i ort` now shows `ort feature "cuda"`
+- `cargo tree -e features -i ort-sys` now shows `ort-sys feature "cuda"`
+
+What the reduced smoke benchmark on a one-file repository proved after that build change:
+- backend requested: `cuda`
+- provider provenance: `ort_registration_probe`
+- provider registration outcome: `failed`
+- failure reason:
+  - `Failed to load library libonnxruntime_providers_cuda.so with error: libcudnn.so.9: cannot open shared object file: No such file or directory`
+
+What this means operationally:
+- the first blocker is no longer “CUDA feature not compiled”
+- the active blocker is now “runtime CUDA dependencies are incomplete for this shell / machine path”
+- therefore any current `cuda` benchmark outcome on this host is still fallback-class and not valid proof of real GPU throughput
+
 What this tranche proves:
 - Axon no longer over-interprets `gpu_present`
 - Axon no longer treats `requested_backend=cuda` as proof of GPU execution
@@ -524,7 +548,8 @@ Additional runtime truth discovered after the first benchmark pass:
 
 ## Next Logical Steps
 
-- expose stronger effective-provider runtime truth instead of relying on external correlation
-- make batch sizes fully runtime-tunable and sweep them under the new layer-split harness
-- decouple preparation, inference, and persistence further so `full_pipeline` stops masking the inference ceiling
+- make the CUDA runtime dependency path explicit and reproducible, starting with `libcudnn.so.9`
+- rerun the reduced smoke benchmark until `provider_registration_outcome=registered`
+- only then resume GPU saturation work and comparative throughput claims
+- after real CUDA registration works, continue with deeper decoupling of preparation, inference, and persistence
 - add retrieval-quality evaluation on code queries

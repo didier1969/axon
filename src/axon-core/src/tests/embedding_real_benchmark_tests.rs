@@ -1,7 +1,8 @@
 use crate::embedding_benchmark::{
     benchmark_target_for_symbol_kind, collect_repo_benchmark_corpus, expand_benchmark_samples,
-    BenchmarkMeasurementLayer, BenchmarkSample, BenchmarkTargetKind, CorpusCollectionLimits,
-    RealEmbeddingBenchmarkConfig,
+    BenchmarkMeasurementLayer, BenchmarkProfileBatchReport, BenchmarkSample,
+    BenchmarkTargetKind, CorpusCollectionLimits, RealEmbeddingBenchmarkConfig,
+    RealEmbeddingBenchmarkReport, RepoBenchmarkCorpus,
     BENCHMARK_TARGET_EMBEDDINGS_PER_HOUR,
 };
 use crate::embedder::{
@@ -167,4 +168,66 @@ fn test_provider_truth_contract_surfaces_registration_probe_outcome() {
     assert_eq!(truth.provider_effective, Some("cuda"));
     assert_eq!(truth.provider_provenance, "ort_registration_probe");
     assert_eq!(truth.provider_registration_outcome, Some("registered"));
+}
+
+#[test]
+fn test_benchmark_report_does_not_treat_requested_cuda_fallback_as_valid_gpu_benchmark() {
+    let report = benchmark_report_fixture(Some("cuda"), "fallback");
+
+    assert!(!report.has_verified_gpu_backend());
+}
+
+#[test]
+fn test_benchmark_report_treats_verified_cuda_as_valid_gpu_benchmark() {
+    let report = benchmark_report_fixture(Some("cuda"), "verified");
+
+    assert!(report.has_verified_gpu_backend());
+}
+
+fn benchmark_report_fixture(
+    provider_effective: Option<&str>,
+    provider_status: &'static str,
+) -> RealEmbeddingBenchmarkReport {
+    RealEmbeddingBenchmarkReport {
+        mode: "real",
+        measurement_layer: BenchmarkMeasurementLayer::ModelOnly,
+        repo_path: "/tmp/repo".into(),
+        model_name: "fixture".to_string(),
+        dimension: 768,
+        requested_backend: "cuda",
+        gpu_present: true,
+        device_heuristic_backend: "cuda",
+        target_embeddings_per_hour: BENCHMARK_TARGET_EMBEDDINGS_PER_HOUR,
+        target_embeddings_per_second: BENCHMARK_TARGET_EMBEDDINGS_PER_HOUR as f64 / 3600.0,
+        warmup_batches: 1,
+        min_samples_per_target: 1,
+        batch_override_active: false,
+        batch_override_source: "canonical",
+        canonical_profile_batches: BenchmarkProfileBatchReport {
+            chunk_batch_size: 16,
+            symbol_batch_size: 32,
+            file_vectorization_batch_size: 8,
+            graph_batch_size: 6,
+        },
+        effective_profile_batches: BenchmarkProfileBatchReport {
+            chunk_batch_size: 16,
+            symbol_batch_size: 32,
+            file_vectorization_batch_size: 8,
+            graph_batch_size: 6,
+        },
+        provider_effective: provider_effective.map(str::to_string),
+        provider_status,
+        provider_provenance: "fixture",
+        provider_registration_outcome: None,
+        provider_note: "fixture".to_string(),
+        corpus: RepoBenchmarkCorpus {
+            root: "/tmp/repo".into(),
+            scanned_files: 0,
+            supported_files: 0,
+            files: Vec::new(),
+            types: Vec::new(),
+            procedures: Vec::new(),
+        },
+        targets: Vec::new(),
+    }
 }
