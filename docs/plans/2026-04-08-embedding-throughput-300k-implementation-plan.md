@@ -72,10 +72,11 @@ One benchmark command can now emit clearly attributed results for each measureme
   - `model_only` prebuilds payload batches before entering the timed inference loop
   - `prepare_embed` now carries explicit `prepare_seconds`
   - `prepare_embed` and `full_pipeline` include preparation time in the measured total
-- first measured CPU layer matrix now exists for both `jina` and `bge-base`
-- current evidence from that matrix:
+- first measured CPU and CUDA-requested layer matrices now exist for both `jina` and `bge-base`
+- current evidence from those matrices:
   - `bge-base` is faster than `jina` on the reduced CPU harness
   - measured preparation cost is negligible in this harness
+  - CUDA request does not currently produce a decisive throughput jump
   - the dominant ceiling remains embedding/inference, followed by wider full-pipeline overhead
   - the target `300_000 embeddings/h` is still missed by a very large margin
 

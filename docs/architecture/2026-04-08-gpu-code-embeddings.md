@@ -347,6 +347,51 @@ What these layer-split CPU runs prove:
 - full-pipeline throughput drops materially relative to `model_only`, especially on `bge-base`, so the pipeline outside raw inference is still expensive
 - even the best observed CPU layer result remains far below `300_000 embeddings/h`
 
+### CUDA-requested layer-split runs on `2026-04-08`
+
+These runs used the same reduced local corpus and `16` measured samples per target.
+External GPU activity had already been confirmed separately on this machine, but the
+benchmark JSON still reports `gpu_present=false`, so the internal runtime truth remains
+incomplete.
+
+#### `jinaai/jina-embeddings-v2-base-code` (`768d`)
+
+- `model_only`
+  - file: about `9_119 embeddings/h`
+  - type: about `9_614 embeddings/h`
+  - procedure: about `11_339 embeddings/h`
+- `prepare_embed`
+  - file: about `8_333 embeddings/h`
+  - type: about `14_161 embeddings/h`
+  - procedure: about `12_558 embeddings/h`
+- `full_pipeline`
+  - file: about `5_768 embeddings/h`
+  - type: about `6_293 embeddings/h`
+  - procedure: about `5_995 embeddings/h`
+
+#### `BAAI/bge-base-en-v1.5` (`768d`)
+
+- `model_only`
+  - file: about `12_114 embeddings/h`
+  - type: about `12_293 embeddings/h`
+  - procedure: about `14_208 embeddings/h`
+- `prepare_embed`
+  - file: about `12_312 embeddings/h`
+  - type: about `11_495 embeddings/h`
+  - procedure: about `13_356 embeddings/h`
+- `full_pipeline`
+  - file: about `6_853 embeddings/h`
+  - type: about `6_604 embeddings/h`
+  - procedure: about `7_514 embeddings/h`
+
+What these layer-split CUDA-requested runs prove:
+- the first complete CPU/CUDA layer matrix now exists for both `jina` and `bge-base`
+- requesting CUDA does not currently create a decisive throughput jump on this harness
+- `bge-base` remains faster than `jina` on raw `model_only` and comparable on `full_pipeline`
+- the largest remaining ceiling is still not the measured preparation step; it is the model path and the broader pipeline around it
+- even with CUDA requested, the best observed layer result remains far below `300_000 embeddings/h`
+- the next high-leverage question is no longer "can Axon request CUDA?" but "why does the effective path remain this close to CPU, and which batch/pipeline changes materially move the curve?"
+
 Additional runtime truth discovered after the first benchmark pass:
 - production was still underusing the calibrated profile in part of the worker loop
 - specifically, symbol and graph fetch waves were still pinned to `32` and `6` through legacy constants
@@ -354,7 +399,7 @@ Additional runtime truth discovered after the first benchmark pass:
 
 ## Next Logical Steps
 
-- add a real benchmark mode with cold/warm timings
-- expose effective provider telemetry
-- finish removing legacy `*-384` assumptions from MCP and tests
+- expose stronger effective-provider runtime truth instead of relying on external correlation
+- make batch sizes fully runtime-tunable and sweep them under the new layer-split harness
+- decouple preparation, inference, and persistence further so `full_pipeline` stops masking the inference ceiling
 - add retrieval-quality evaluation on code queries
