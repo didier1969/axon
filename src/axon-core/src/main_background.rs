@@ -90,10 +90,15 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub ingress_subtree_hint_accepted_total: u64,
     pub ingress_subtree_hint_blocked_total: u64,
     pub ingress_subtree_hint_suppressed_total: u64,
+    pub ingress_subtree_hint_productive_total: u64,
+    pub ingress_subtree_hint_unproductive_total: u64,
+    pub ingress_subtree_hint_dropped_total: u64,
     pub ingress_collapsed_total: u64,
     pub ingress_flush_count: u64,
     pub ingress_last_flush_duration_ms: u64,
     pub ingress_last_promoted_count: u64,
+    pub memory_trim_attempts_total: u64,
+    pub memory_trim_successes_total: u64,
     pub cpu_load: f64,
     pub ram_load: f64,
     pub io_wait: f64,
@@ -174,22 +179,32 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>, ingress_buffer: Sha
             continue;
         }
 
-        if queue.common_len() > 0 {
-            continue;
-        }
-
         let ingress_metrics = ingress_buffer
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .metrics_snapshot();
-        if ingress_metrics.buffered_entries > 0 || ingress_metrics.subtree_hints > 0 {
+        let process_memory = process_memory_snapshot();
+        let min_anon_bytes = memory_reclaimer_min_anon_bytes();
+        if !should_attempt_memory_reclaim(
+            queue.common_len(),
+            &ingress_metrics,
+            process_memory,
+            min_anon_bytes,
+        ) {
             continue;
         }
 
-        let process_memory = process_memory_snapshot();
-        let min_anon_bytes = memory_reclaimer_min_anon_bytes();
-        if process_memory.rss_anon_bytes < min_anon_bytes {
-            continue;
+        if ingress_metrics.subtree_hints > 0 {
+            let dropped = ingress_buffer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .shed_subtree_hints_for_memory_pressure();
+            if dropped > 0 {
+                warn!(
+                    "Memory reclaimer shed {} subtree hint(s) under memory pressure before trim.",
+                    dropped
+                );
+            }
         }
 
         MEMORY_TRIM_ATTEMPTS_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -209,6 +224,19 @@ fn reader_refresh_interval_ms() -> u64 {
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|v| *v >= 250)
         .unwrap_or(5_000)
+}
+
+fn should_attempt_memory_reclaim(
+    queue_len: usize,
+    ingress_metrics: &IngressMetricsSnapshot,
+    process_memory: axon_core::runtime_observability::ProcessMemorySnapshot,
+    min_anon_bytes: u64,
+) -> bool {
+    if queue_len > 0 || ingress_metrics.buffered_entries > 0 {
+        return false;
+    }
+
+    process_memory.rss_anon_bytes >= min_anon_bytes
 }
 
 pub(crate) fn spawn_reader_snapshot_refresher(store: Arc<GraphStore>) {
@@ -374,10 +402,15 @@ pub(crate) fn runtime_telemetry_snapshot(
         ingress_subtree_hint_accepted_total: ingress_metrics.subtree_hint_accepted_total,
         ingress_subtree_hint_blocked_total: ingress_metrics.subtree_hint_blocked_total,
         ingress_subtree_hint_suppressed_total: ingress_metrics.subtree_hint_suppressed_total,
+        ingress_subtree_hint_productive_total: ingress_metrics.subtree_hint_productive_total,
+        ingress_subtree_hint_unproductive_total: ingress_metrics.subtree_hint_unproductive_total,
+        ingress_subtree_hint_dropped_total: ingress_metrics.subtree_hint_dropped_total,
         ingress_collapsed_total: ingress_metrics.collapsed_total,
         ingress_flush_count: ingress_metrics.flush_count,
         ingress_last_flush_duration_ms: ingress_metrics.last_flush_duration_ms,
         ingress_last_promoted_count: ingress_metrics.last_promoted_count,
+        memory_trim_attempts_total: MEMORY_TRIM_ATTEMPTS_TOTAL.load(Ordering::Relaxed),
+        memory_trim_successes_total: MEMORY_TRIM_SUCCESSES_TOTAL.load(Ordering::Relaxed),
         cpu_load: host_pressure.cpu_load,
         ram_load: host_pressure.ram_load,
         io_wait: host_pressure.io_wait,
@@ -480,7 +513,7 @@ fn flush_ingress_buffer_once(
     if !batch.subtree_hints.is_empty() {
         let scanner = Scanner::new(projects_root);
         for hint in &batch.subtree_hints {
-            scanner.scan_subtree_with_guard_and_ingress(
+            let promoted_hint_files = scanner.scan_subtree_with_guard_and_ingress(
                 store.clone(),
                 Path::new(&hint.path),
                 Some(file_ingress_guard),
@@ -489,7 +522,7 @@ fn flush_ingress_buffer_once(
             ingress_buffer
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .complete_subtree_hint(&hint.path);
+                .complete_subtree_hint_with_stats(&hint.path, promoted_hint_files);
         }
     }
 
@@ -1625,8 +1658,9 @@ mod tests {
         active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files,
         flush_ingress_buffer_once, handle_watcher_events, memory_limit_bytes,
         memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, plan_admissions,
-        should_suppress_bootstrap_event_storm, split_watch_targets, watch_targets,
-        RescanGuardReset, OVERSIZED_PROBATION_DEFER_THRESHOLD,
+        runtime_telemetry_snapshot, should_suppress_bootstrap_event_storm, split_watch_targets,
+        watch_targets, RescanGuardReset, MEMORY_TRIM_ATTEMPTS_TOTAL,
+        MEMORY_TRIM_SUCCESSES_TOTAL, OVERSIZED_PROBATION_DEFER_THRESHOLD,
     };
     use axon_core::file_ingress_guard::FileIngressGuard;
     use axon_core::graph::{GraphStore, PendingFile};
@@ -1904,6 +1938,73 @@ mod tests {
         );
         assert_eq!(policy.mode.label(), "paused");
         assert_eq!(policy.claim_count, 0);
+    }
+
+    #[test]
+    fn test_runtime_telemetry_snapshot_exposes_ingress_and_trim_counters() {
+        let store = GraphStore::new(":memory:").unwrap();
+        let queue = QueueStore::new(32);
+        let ingress_buffer = test_ingress_buffer();
+        let baseline_metrics = {
+            let ingress = ingress_buffer.lock().unwrap();
+            ingress.metrics_snapshot()
+        };
+
+        MEMORY_TRIM_ATTEMPTS_TOTAL.store(7, Ordering::Relaxed);
+        MEMORY_TRIM_SUCCESSES_TOTAL.store(3, Ordering::Relaxed);
+
+        {
+            let mut ingress = ingress_buffer.lock().unwrap();
+            ingress.record_subtree_hint(
+                "/tmp/productive",
+                10,
+                axon_core::ingress_buffer::IngressSource::Watcher,
+            );
+            let batch = ingress.drain_batch(10);
+            assert!(
+                batch.subtree_hints
+                    .iter()
+                    .any(|hint| hint.path == "/tmp/productive")
+            );
+            ingress.complete_subtree_hint_with_stats("/tmp/productive", 4);
+
+            ingress.record_subtree_hint(
+                "/tmp/unproductive",
+                5,
+                axon_core::ingress_buffer::IngressSource::Watcher,
+            );
+            let batch = ingress.drain_batch(10);
+            assert!(
+                batch.subtree_hints
+                    .iter()
+                    .any(|hint| hint.path == "/tmp/unproductive")
+            );
+            ingress.complete_subtree_hint_with_stats("/tmp/unproductive", 0);
+
+            ingress.record_subtree_hint(
+                "/tmp/dropped",
+                1,
+                axon_core::ingress_buffer::IngressSource::Watcher,
+            );
+            ingress.shed_subtree_hints_for_memory_pressure();
+        }
+
+        let snapshot = runtime_telemetry_snapshot(&store, &queue, &ingress_buffer);
+
+        assert!(
+            snapshot.ingress_subtree_hint_productive_total
+                >= baseline_metrics.subtree_hint_productive_total + 1
+        );
+        assert!(
+            snapshot.ingress_subtree_hint_unproductive_total
+                >= baseline_metrics.subtree_hint_unproductive_total + 1
+        );
+        assert!(
+            snapshot.ingress_subtree_hint_dropped_total
+                >= baseline_metrics.subtree_hint_dropped_total + 1
+        );
+        assert_eq!(snapshot.memory_trim_attempts_total, 7);
+        assert_eq!(snapshot.memory_trim_successes_total, 3);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
+use crate::embedder::default_embedding_profile;
 
 impl McpServer {
     fn json_to_i64(value: &Value) -> Option<i64> {
@@ -213,6 +214,7 @@ impl McpServer {
     }
 
     fn build_graph_clone_section(&self, symbol: &str) -> Option<String> {
+        let graph_model_id = default_embedding_profile().graph.model_id.replace('\'', "''");
         let anchor_res = self
             .graph_store
             .query_json_param(
@@ -222,7 +224,8 @@ impl McpServer {
             .ok()?;
         let anchor_rows: Vec<Vec<Value>> = serde_json::from_str(&anchor_res).unwrap_or_default();
         let anchor_id = anchor_rows.first()?.first()?.as_str()?;
-        let query = "
+        let query = format!(
+            "
             SELECT other.name, other.kind, array_cosine_distance(anchor.embedding, peer.embedding) AS score
             FROM GraphEmbedding anchor
             JOIN GraphProjectionState anchor_state
@@ -246,13 +249,14 @@ impl McpServer {
               ON other.id = peer.anchor_id
             WHERE anchor.anchor_type = 'symbol'
               AND anchor.anchor_id = $anchor
-              AND anchor.model_id = 'graph-bge-small-en-v1.5-384'
+              AND anchor.model_id = '{graph_model_id}'
               AND array_cosine_distance(anchor.embedding, peer.embedding) < 0.05
             ORDER BY score ASC
-            LIMIT 5";
+            LIMIT 5"
+        );
         let res = self
             .graph_store
-            .query_json_param(query, &json!({"anchor": anchor_id}))
+            .query_json_param(&query, &json!({"anchor": anchor_id}))
             .ok()?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
         if rows.is_empty() {

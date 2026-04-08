@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
+use crate::embedder::default_embedding_profile;
 use crate::ingress_buffer::ingress_metrics_snapshot;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_observability::{
@@ -214,14 +215,18 @@ impl McpServer {
             canonical_count("SELECT count(*) FROM File WHERE status = 'oversized_for_current_budget'");
         let skipped_count = canonical_count("SELECT count(*) FROM File WHERE status = 'skipped'");
         let graph_ready_count = canonical_count("SELECT count(*) FROM File WHERE graph_ready = TRUE");
-        let vector_ready_count = canonical_count(
+        let chunk_model_id = default_embedding_profile()
+            .chunk
+            .model_id
+            .replace('\'', "''");
+        let vector_ready_count = canonical_count(&format!(
             "WITH pending_vector_chunks AS ( \
                SELECT co.source_id AS file_path \
                FROM Chunk c \
                JOIN CONTAINS co ON co.target_id = c.source_id \
                LEFT JOIN ChunkEmbedding ce \
                  ON ce.chunk_id = c.id \
-                AND ce.model_id = 'chunk-bge-small-en-v1.5-384' \
+                AND ce.model_id = '{}' \
                 AND ce.source_hash = c.content_hash \
                WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash \
                GROUP BY 1 \
@@ -230,17 +235,22 @@ impl McpServer {
              FROM File f \
              LEFT JOIN pending_vector_chunks pvc ON pvc.file_path = f.path \
              WHERE f.graph_ready = TRUE AND pvc.file_path IS NULL",
-        );
-        let (graph_projection_queue_queued, graph_projection_queue_inflight) = self
-            .graph_store
-            .fetch_graph_projection_queue_counts()
-            .unwrap_or((0, 0));
+            chunk_model_id
+        ));
+        let graph_projection_queue_queued =
+            canonical_count("SELECT count(*) FROM GraphProjectionQueue WHERE status = 'queued'")
+                .max(0) as usize;
+        let graph_projection_queue_inflight =
+            canonical_count("SELECT count(*) FROM GraphProjectionQueue WHERE status = 'inflight'")
+                .max(0) as usize;
         let graph_projection_queue_depth =
             graph_projection_queue_queued + graph_projection_queue_inflight;
-        let (file_vectorization_queue_queued, file_vectorization_queue_inflight) = self
-            .graph_store
-            .fetch_file_vectorization_queue_counts()
-            .unwrap_or((0, 0));
+        let file_vectorization_queue_queued =
+            canonical_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'queued'")
+                .max(0) as usize;
+        let file_vectorization_queue_inflight =
+            canonical_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'")
+                .max(0) as usize;
         let file_vectorization_queue_depth =
             file_vectorization_queue_queued + file_vectorization_queue_inflight;
         let reader_snapshot_age_ms = self.graph_store.reader_snapshot_age_ms();

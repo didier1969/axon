@@ -1,6 +1,7 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
 use super::*;
+use crate::embedder::default_embedding_profile;
 use crate::graph::GraphStore;
 use crate::parser;
 use crate::queue::ProcessingMode;
@@ -13,6 +14,31 @@ fn create_test_server() -> McpServer {
         GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap()),
     );
     McpServer::new(store)
+}
+
+fn current_graph_model_id() -> String {
+    default_embedding_profile().graph.model_id
+}
+
+fn graph_embedding_sql(seed: &[f32]) -> String {
+    let dimension = default_embedding_profile().dimension;
+    assert!(seed.len() <= dimension);
+    let mut values = vec![0.0_f32; dimension];
+    for (idx, value) in seed.iter().enumerate() {
+        values[idx] = *value;
+    }
+    let literal = values
+        .iter()
+        .map(|value| {
+            let mut rendered = format!("{value}");
+            if !rendered.contains('.') {
+                rendered.push_str(".0");
+            }
+            rendered
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("CAST([{literal}] AS FLOAT[{dimension}])")
 }
 
 #[test]
@@ -568,6 +594,9 @@ fn test_axon_inspect() {
 #[test]
 fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
     let server = create_test_server();
+    let graph_model_id = current_graph_model_id();
+    let anchor_embedding = graph_embedding_sql(&[1.0]);
+    let peer_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
         .execute("INSERT INTO File (path, project_slug) VALUES ('src/auth.rs', 'global')")
@@ -588,8 +617,8 @@ fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
         .unwrap();
     server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
     server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'sig-access', '1', 1001)").unwrap();
-    server.graph_store.execute("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'graph-bge-small-en-v1.5-384', 'sig-auth', '1', CAST([1.0] || repeat([0.0], 383) AS FLOAT[384]), 1000)").unwrap();
-    server.graph_store.execute("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'graph-bge-small-en-v1.5-384', 'sig-access', '1', CAST([0.99, 0.01] || repeat([0.0], 382) AS FLOAT[384]), 1001)").unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::authorize_request', 1, '{}', 'sig-auth', '1', {}, 1000)", graph_model_id, anchor_embedding)).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, '{}', 'sig-access', '1', {}, 1001)", graph_model_id, peer_embedding)).unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -616,6 +645,9 @@ fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
 #[test]
 fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
     let server = create_test_server();
+    let graph_model_id = current_graph_model_id();
+    let anchor_embedding = graph_embedding_sql(&[1.0]);
+    let stale_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
         .execute("INSERT INTO File (path, project_slug) VALUES ('src/auth.rs', 'global')")
@@ -636,8 +668,8 @@ fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
         .unwrap();
     server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
     server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'sig-access-current', '1', 1001)").unwrap();
-    server.graph_store.execute("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'graph-bge-small-en-v1.5-384', 'sig-auth', '1', CAST([1.0] || repeat([0.0], 383) AS FLOAT[384]), 1000)").unwrap();
-    server.graph_store.execute("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'graph-bge-small-en-v1.5-384', 'sig-access-stale', '1', CAST([0.99, 0.01] || repeat([0.0], 382) AS FLOAT[384]), 1001)").unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::authorize_request', 1, '{}', 'sig-auth', '1', {}, 1000)", graph_model_id, anchor_embedding)).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, '{}', 'sig-access-stale', '1', {}, 1001)", graph_model_id, stale_embedding)).unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),

@@ -8,6 +8,20 @@
 
 **Tech Stack:** Rust, fastembed, ONNX Runtime, DuckDB plugin Axon, tests cargo, benchmarks Axon sur corpus reel.
 
+**Etat de certification globale au `2026-04-08`:**
+- le blocage de compilation global sur `RuntimeTelemetrySnapshot` a ete corrige en realignant les compteurs ingress et `malloc_trim` entre `main_background.rs`, `main_telemetry.rs` et `bridge.rs`
+- la suite complete `cargo test -- --nocapture` recompile a nouveau le binaire et le bridge
+- les trois echecs MCP de certification ont ete corriges:
+  - `semantic_clones` utilise maintenant le `graph.model_id` canonique du profil runtime, pas un `graph-bge-small-en-v1.5-384` fige
+  - les fixtures `GraphEmbedding` des tests MCP sont construites a la dimension canonique courante, plus en `FLOAT[384]`
+  - `axon_debug` calcule les files `GraphProjectionQueue` et `FileVectorizationQueue` sur la verite canonique SQL, pas sur une vue reader potentiellement en retard
+- validation finale executee:
+  - `cargo test --manifest-path src/axon-core/Cargo.toml -- --nocapture`
+  - resultat: `251` tests lib verts, `48` tests bin verts, doc-tests verts
+- bruit residuel connu:
+  - plusieurs tests bootstrap impriment encore `ALTER TABLE soll.Registry ADD COLUMN last_gui ... already exists`
+  - ce signal n'est pas bloquant pour la certification fonctionnelle, mais reste une dette de hygiene de bootstrap a traiter separement
+
 ---
 
 ### Task 1: Exposer le contrat de verite du pipeline embeddings actuel
