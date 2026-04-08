@@ -33,6 +33,11 @@ const LEGACY_BGE_SMALL_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
 const LEGACY_BGE_SMALL_MODEL_SLUG: &str = "bge-small-en-v1.5";
 const LEGACY_BGE_SMALL_MODEL_VERSION: &str = "1";
 const LEGACY_BGE_SMALL_EMBEDDING_DIMENSION: usize = 384;
+const AXON_EMBEDDING_CHUNK_BATCH_SIZE: &str = "AXON_EMBEDDING_CHUNK_BATCH_SIZE";
+const AXON_EMBEDDING_SYMBOL_BATCH_SIZE: &str = "AXON_EMBEDDING_SYMBOL_BATCH_SIZE";
+const AXON_EMBEDDING_FILE_VECTORIZATION_BATCH_SIZE: &str =
+    "AXON_EMBEDDING_FILE_VECTORIZATION_BATCH_SIZE";
+const AXON_EMBEDDING_GRAPH_BATCH_SIZE: &str = "AXON_EMBEDDING_GRAPH_BATCH_SIZE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingProfileKey {
@@ -303,6 +308,23 @@ pub struct EmbeddingRuntimeContract {
     pub execution_provider: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingBatchOverrides {
+    pub chunk_batch_size: Option<usize>,
+    pub symbol_batch_size: Option<usize>,
+    pub file_vectorization_batch_size: Option<usize>,
+    pub graph_batch_size: Option<usize>,
+}
+
+impl EmbeddingBatchOverrides {
+    pub fn is_active(self) -> bool {
+        self.chunk_batch_size.is_some()
+            || self.symbol_batch_size.is_some()
+            || self.file_vectorization_batch_size.is_some()
+            || self.graph_batch_size.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingProfileBenchmarkRow {
     pub profile_key: EmbeddingProfileKey,
@@ -338,25 +360,9 @@ pub fn calibrated_embedding_profile_for_backend(
     profile: &EmbeddingProfile,
     backend: EmbeddingExecutionBackend,
 ) -> EmbeddingProfile {
-    if backend != EmbeddingExecutionBackend::GpuCuda {
-        return profile.clone();
-    }
+    let calibrated = calibrated_embedding_profile_without_overrides(profile, backend);
 
-    EmbeddingProfile::new(
-        profile.key,
-        profile.model_name,
-        profile.model_slug,
-        profile.model_version,
-        profile.dimension,
-        profile.runtime_model,
-        backend,
-        profile.chunk.batch_size.max(GPU_CHUNK_BATCH_SIZE),
-        profile.symbol.batch_size.max(GPU_SYMBOL_BATCH_SIZE),
-        profile
-            .file_vectorization_batch_size
-            .max(GPU_FILE_VECTORIZATION_BATCH_SIZE),
-        profile.graph.batch_size.max(GPU_GRAPH_BATCH_SIZE),
-    )
+    apply_embedding_batch_overrides(&calibrated, configured_embedding_batch_overrides())
 }
 
 pub fn file_vectorization_runtime_budget(
@@ -421,7 +427,84 @@ pub fn embedding_runtime_contract_for_profile(profile: &EmbeddingProfile) -> Emb
 }
 
 pub fn embedding_runtime_contract() -> EmbeddingRuntimeContract {
-    embedding_runtime_contract_for_profile(&default_embedding_profile())
+    embedding_runtime_contract_for_profile(&calibrated_embedding_profile_for_backend(
+        &default_embedding_profile(),
+        EmbeddingExecutionBackend::Unspecified,
+    ))
+}
+
+pub fn configured_embedding_batch_overrides() -> EmbeddingBatchOverrides {
+    EmbeddingBatchOverrides {
+        chunk_batch_size: parse_optional_batch_size_env(AXON_EMBEDDING_CHUNK_BATCH_SIZE),
+        symbol_batch_size: parse_optional_batch_size_env(AXON_EMBEDDING_SYMBOL_BATCH_SIZE),
+        file_vectorization_batch_size: parse_optional_batch_size_env(
+            AXON_EMBEDDING_FILE_VECTORIZATION_BATCH_SIZE,
+        ),
+        graph_batch_size: parse_optional_batch_size_env(AXON_EMBEDDING_GRAPH_BATCH_SIZE),
+    }
+}
+
+pub fn apply_embedding_batch_overrides(
+    profile: &EmbeddingProfile,
+    overrides: EmbeddingBatchOverrides,
+) -> EmbeddingProfile {
+    if !overrides.is_active() {
+        return profile.clone();
+    }
+
+    EmbeddingProfile::new(
+        profile.key,
+        profile.model_name,
+        profile.model_slug,
+        profile.model_version,
+        profile.dimension,
+        profile.runtime_model,
+        match profile.execution_provider {
+            Some("cpu") => EmbeddingExecutionBackend::Cpu,
+            Some("cuda") => EmbeddingExecutionBackend::GpuCuda,
+            _ => EmbeddingExecutionBackend::Unspecified,
+        },
+        overrides.chunk_batch_size.unwrap_or(profile.chunk.batch_size),
+        overrides
+            .symbol_batch_size
+            .unwrap_or(profile.symbol.batch_size),
+        overrides
+            .file_vectorization_batch_size
+            .unwrap_or(profile.file_vectorization_batch_size),
+        overrides.graph_batch_size.unwrap_or(profile.graph.batch_size),
+    )
+}
+
+pub fn calibrated_embedding_profile_without_overrides(
+    profile: &EmbeddingProfile,
+    backend: EmbeddingExecutionBackend,
+) -> EmbeddingProfile {
+    if backend != EmbeddingExecutionBackend::GpuCuda {
+        return profile.clone();
+    }
+
+    EmbeddingProfile::new(
+        profile.key,
+        profile.model_name,
+        profile.model_slug,
+        profile.model_version,
+        profile.dimension,
+        profile.runtime_model,
+        backend,
+        profile.chunk.batch_size.max(GPU_CHUNK_BATCH_SIZE),
+        profile.symbol.batch_size.max(GPU_SYMBOL_BATCH_SIZE),
+        profile
+            .file_vectorization_batch_size
+            .max(GPU_FILE_VECTORIZATION_BATCH_SIZE),
+        profile.graph.batch_size.max(GPU_GRAPH_BATCH_SIZE),
+    )
+}
+
+fn parse_optional_batch_size_env(key: &str) -> Option<usize> {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
 }
 
 fn benchmark_row_for_profile(

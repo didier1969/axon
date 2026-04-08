@@ -1,5 +1,6 @@
 use crate::embedder::{
-    calibrated_embedding_profile_for_backend, embedding_execution_providers,
+    apply_embedding_batch_overrides, calibrated_embedding_profile_without_overrides,
+    configured_embedding_batch_overrides, embedding_execution_providers,
     embedding_profile_for_key, EmbeddingExecutionBackend, EmbeddingProfileKey,
 };
 use crate::parser::get_parser_for_file;
@@ -137,10 +138,22 @@ pub struct RealEmbeddingBenchmarkReport {
     pub target_embeddings_per_second: f64,
     pub warmup_batches: usize,
     pub min_samples_per_target: usize,
+    pub batch_override_active: bool,
+    pub batch_override_source: &'static str,
+    pub canonical_profile_batches: BenchmarkProfileBatchReport,
+    pub effective_profile_batches: BenchmarkProfileBatchReport,
     pub provider_effective: Option<String>,
     pub provider_note: String,
     pub corpus: RepoBenchmarkCorpus,
     pub targets: Vec<BenchmarkTargetReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BenchmarkProfileBatchReport {
+    pub chunk_batch_size: usize,
+    pub symbol_batch_size: usize,
+    pub file_vectorization_batch_size: usize,
+    pub graph_batch_size: usize,
 }
 
 impl Default for RealEmbeddingBenchmarkConfig {
@@ -287,7 +300,10 @@ pub fn run_real_embedding_benchmark(
 ) -> Result<RealEmbeddingBenchmarkReport> {
     let runtime_profile = RuntimeProfile::detect();
     let base_profile = embedding_profile_for_key(config.profile_key);
-    let profile = calibrated_embedding_profile_for_backend(&base_profile, config.backend);
+    let canonical_profile =
+        calibrated_embedding_profile_without_overrides(&base_profile, config.backend);
+    let overrides = configured_embedding_batch_overrides();
+    let profile = apply_embedding_batch_overrides(&canonical_profile, overrides);
     let mut options = InitOptions::new(profile.runtime_model.fastembed_model());
     options.show_download_progress = true;
     options = options.with_execution_providers(embedding_execution_providers(config.backend));
@@ -342,11 +358,30 @@ pub fn run_real_embedding_benchmark(
         target_embeddings_per_second: BENCHMARK_TARGET_EMBEDDINGS_PER_HOUR as f64 / 3600.0,
         warmup_batches: config.warmup_batches,
         min_samples_per_target: config.min_samples_per_target,
+        batch_override_active: overrides.is_active(),
+        batch_override_source: if overrides.is_active() {
+            "runtime_env"
+        } else {
+            "canonical"
+        },
+        canonical_profile_batches: BenchmarkProfileBatchReport::from_profile(&canonical_profile),
+        effective_profile_batches: BenchmarkProfileBatchReport::from_profile(&profile),
         provider_effective: None,
         provider_note: "The harness proves real inference throughput, but fastembed/ort do not currently expose the effective execution provider strongly enough here; correlate with external GPU telemetry if required.".to_string(),
         corpus,
         targets,
     })
+}
+
+impl BenchmarkProfileBatchReport {
+    fn from_profile(profile: &crate::embedder::EmbeddingProfile) -> Self {
+        Self {
+            chunk_batch_size: profile.chunk.batch_size,
+            symbol_batch_size: profile.symbol.batch_size,
+            file_vectorization_batch_size: profile.file_vectorization_batch_size,
+            graph_batch_size: profile.graph.batch_size,
+        }
+    }
 }
 
 fn benchmark_target_report(

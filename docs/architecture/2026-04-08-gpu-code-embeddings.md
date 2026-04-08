@@ -79,7 +79,13 @@ But the remaining distinction matters:
 Current truth:
 - Axon can request CUDA explicitly
 - operators can now force backend selection with `AXON_EMBEDDING_BACKEND`, independently from the local `gpu_present` heuristic
+- operators can now override embedding batch sizes explicitly with:
+  - `AXON_EMBEDDING_CHUNK_BATCH_SIZE`
+  - `AXON_EMBEDDING_SYMBOL_BATCH_SIZE`
+  - `AXON_EMBEDDING_FILE_VECTORIZATION_BATCH_SIZE`
+  - `AXON_EMBEDDING_GRAPH_BATCH_SIZE`
 - the benchmark harness can compare CPU and requested-GPU contracts
+- the benchmark harness now records whether a run used canonical calibrated batches or runtime override batches, and exposes both `canonical_profile_batches` and `effective_profile_batches`
 - the branch does not yet prove the effective provider through runtime telemetry strong enough to certify real GPU execution in production terms
 
 So the correct wording is:
@@ -391,6 +397,30 @@ What these layer-split CUDA-requested runs prove:
 - the largest remaining ceiling is still not the measured preparation step; it is the model path and the broader pipeline around it
 - even with CUDA requested, the best observed layer result remains far below `300_000 embeddings/h`
 - the next high-leverage question is no longer "can Axon request CUDA?" but "why does the effective path remain this close to CPU, and which batch/pipeline changes materially move the curve?"
+
+### Batch override smoke proof on `2026-04-08`
+
+The harness now also proves a different truth: explicit runtime batch overrides are no longer
+hidden.
+
+A reduced smoke run with `legacy-bge-small`, `cpu`, and `model_only` produced:
+- `batch_override_active = true`
+- `batch_override_source = runtime_env`
+- canonical profile batches:
+  - chunk: `16`
+  - symbol: `32`
+  - file vectorization: `8`
+  - graph: `6`
+- effective profile batches:
+  - chunk: `32`
+  - symbol: `64`
+  - file vectorization: `16`
+  - graph: `8`
+
+What this proves:
+- batch tuning no longer requires code edits
+- the report now makes override usage explicit instead of silently mutating comparisons
+- the next sweep can compare canonical vs tuned runs honestly
 
 Additional runtime truth discovered after the first benchmark pass:
 - production was still underusing the calibrated profile in part of the worker loop

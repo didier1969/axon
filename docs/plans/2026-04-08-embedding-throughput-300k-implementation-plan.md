@@ -89,21 +89,21 @@ Stop treating GPU batching as compile-time constants.
 ### Files
 
 - Modify: `src/axon-core/src/embedder.rs`
-- Modify: `src/axon-core/src/tests/file_vectorization_throughput_tests.rs`
-- Modify: `src/axon-core/src/tests/embedding_provider_tests.rs`
-- Modify: `README.md`
-- Modify: `docs/getting-started.md`
+- Modify: `src/axon-core/src/embedding_benchmark.rs`
+- Modify: `src/axon-core/src/tests/embedding_config_tests.rs`
+- Modify: `docs/architecture/2026-04-08-gpu-code-embeddings.md`
 
 ### Red
 
 Add failing tests that require:
 - runtime overrides for batch sizes
-- calibrated profile to reflect the overrides
-- semantic worker fetch limits to follow the effective runtime values
+- runtime contract to expose the overrides
+- calibrated profile to reflect the overrides even under the GPU floor
 
 Run:
 ```bash
-cargo test file_vectorization_throughput --manifest-path src/axon-core/Cargo.toml -- --nocapture
+cargo test embedding_runtime_contract_applies_explicit_batch_overrides --manifest-path src/axon-core/Cargo.toml -- --nocapture
+cargo test explicit_batch_overrides_win_over_gpu_floor --manifest-path src/axon-core/Cargo.toml -- --nocapture
 ```
 
 ### Green
@@ -113,18 +113,23 @@ Add explicit env/config overrides for:
 - symbol batch size
 - file vectorization batch size
 - graph batch size
+- benchmark reports to expose canonical calibrated batches vs effective override batches
 
 ### Validate
 
 Run:
 ```bash
-cargo test file_vectorization_throughput --manifest-path src/axon-core/Cargo.toml -- --nocapture
-cargo test embedding_provider --manifest-path src/axon-core/Cargo.toml -- --nocapture
+cargo test embedding_config --manifest-path src/axon-core/Cargo.toml -- --nocapture
+cargo test embedding_real_benchmark --manifest-path src/axon-core/Cargo.toml -- --nocapture
+cargo run --manifest-path src/axon-core/Cargo.toml --bin embedding_benchmark -- --help
 ```
 
 ### Exit Proof
 
-The branch can run a real batch sweep without code edits.
+The branch can run a real batch sweep without code edits, and each run can now distinguish:
+- canonical calibrated batch sizes
+- effective override batch sizes
+- whether the run used runtime overrides at all
 
 ## Tranche 3. Produce a Saturation Matrix
 

@@ -1,7 +1,7 @@
 use crate::embedder::{
-    configured_embedding_profile_stack, default_embedding_profile, default_runtime_embedding_model,
-    embedding_runtime_contract, EmbeddingExecutionBackend, EmbeddingProfile,
-    EmbeddingProfileKey, RuntimeEmbeddingModel,
+    calibrated_embedding_profile_for_backend, configured_embedding_profile_stack,
+    default_embedding_profile, default_runtime_embedding_model, embedding_runtime_contract,
+    EmbeddingExecutionBackend, EmbeddingProfile, EmbeddingProfileKey, RuntimeEmbeddingModel,
 };
 
 #[test]
@@ -95,4 +95,47 @@ fn test_default_embedding_profile_stack_prefers_jina_with_bge_fallback() {
         stack.fallback.as_ref().map(|profile| profile.key),
         Some(EmbeddingProfileKey::BgeBaseEnv15)
     );
+}
+
+#[test]
+fn test_embedding_runtime_contract_applies_explicit_batch_overrides() {
+    std::env::set_var("AXON_EMBEDDING_CHUNK_BATCH_SIZE", "20");
+    std::env::set_var("AXON_EMBEDDING_SYMBOL_BATCH_SIZE", "40");
+    std::env::set_var("AXON_EMBEDDING_FILE_VECTORIZATION_BATCH_SIZE", "10");
+    std::env::set_var("AXON_EMBEDDING_GRAPH_BATCH_SIZE", "7");
+
+    let contract = embedding_runtime_contract();
+
+    std::env::remove_var("AXON_EMBEDDING_CHUNK_BATCH_SIZE");
+    std::env::remove_var("AXON_EMBEDDING_SYMBOL_BATCH_SIZE");
+    std::env::remove_var("AXON_EMBEDDING_FILE_VECTORIZATION_BATCH_SIZE");
+    std::env::remove_var("AXON_EMBEDDING_GRAPH_BATCH_SIZE");
+
+    assert_eq!(contract.chunk_batch_size, 20);
+    assert_eq!(contract.symbol_batch_size, 40);
+    assert_eq!(contract.file_vectorization_batch_size, 10);
+    assert_eq!(contract.graph_batch_size, 7);
+}
+
+#[test]
+fn test_explicit_batch_overrides_win_over_gpu_floor() {
+    std::env::set_var("AXON_EMBEDDING_CHUNK_BATCH_SIZE", "20");
+    std::env::set_var("AXON_EMBEDDING_SYMBOL_BATCH_SIZE", "40");
+    std::env::set_var("AXON_EMBEDDING_FILE_VECTORIZATION_BATCH_SIZE", "10");
+    std::env::set_var("AXON_EMBEDDING_GRAPH_BATCH_SIZE", "7");
+
+    let calibrated = calibrated_embedding_profile_for_backend(
+        &default_embedding_profile(),
+        EmbeddingExecutionBackend::GpuCuda,
+    );
+
+    std::env::remove_var("AXON_EMBEDDING_CHUNK_BATCH_SIZE");
+    std::env::remove_var("AXON_EMBEDDING_SYMBOL_BATCH_SIZE");
+    std::env::remove_var("AXON_EMBEDDING_FILE_VECTORIZATION_BATCH_SIZE");
+    std::env::remove_var("AXON_EMBEDDING_GRAPH_BATCH_SIZE");
+
+    assert_eq!(calibrated.chunk.batch_size, 20);
+    assert_eq!(calibrated.symbol.batch_size, 40);
+    assert_eq!(calibrated.file_vectorization_batch_size, 10);
+    assert_eq!(calibrated.graph.batch_size, 7);
 }
