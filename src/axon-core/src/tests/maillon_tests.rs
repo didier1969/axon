@@ -11,6 +11,7 @@ use crate::worker::DbWriteTask;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedder::default_embedding_profile;
     use crate::file_ingress_guard::{FileIngressGuard, GuardDecision};
     use crate::ingress_buffer::{
         IngressBuffer, IngressCause, IngressDrainBatch, IngressFileEvent, IngressSource,
@@ -28,6 +29,22 @@ mod tests {
 
     fn shared_ingress_buffer() -> SharedIngressBuffer {
         Arc::new(Mutex::new(IngressBuffer::default()))
+    }
+
+    fn current_chunk_model_id() -> String {
+        default_embedding_profile().chunk.model_id
+    }
+
+    fn current_graph_model_id() -> String {
+        default_embedding_profile().graph.model_id
+    }
+
+    fn current_embedding_dimension() -> i64 {
+        default_embedding_profile().dimension as i64
+    }
+
+    fn zero_embedding() -> Vec<f32> {
+        vec![0.0_f32; default_embedding_profile().dimension]
     }
 
     // --- MAILLON 1: LE SCANNER (Discovery) ---
@@ -2120,9 +2137,10 @@ mod tests {
         let rows: Vec<Vec<String>> = serde_json::from_str(&chunk_rows).unwrap();
         let chunk_id = rows[0][0].clone();
         let content_hash = rows[0][1].clone();
+        let chunk_model_id = current_chunk_model_id();
 
         store
-            .update_chunk_embeddings("test-model", &[(chunk_id, content_hash, vec![0.0; 384])])
+            .update_chunk_embeddings(&chunk_model_id, &[(chunk_id, content_hash, zero_embedding())])
             .unwrap();
 
         let after = store
@@ -2627,18 +2645,19 @@ mod tests {
         store
             .insert_file_data_batch(&[task])
             .expect("Chunk setup failed");
+        let chunk_model_id = current_chunk_model_id();
         store
             .ensure_embedding_model(
-                "chunk-bge-small-en-v1.5-384",
+                &chunk_model_id,
                 "chunk",
-                "BAAI/bge-small-en-v1.5",
-                384,
-                "1",
+                default_embedding_profile().model_name,
+                current_embedding_dimension(),
+                default_embedding_profile().model_version,
             )
             .unwrap();
 
         let pending = store
-            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
+            .fetch_unembedded_chunks(&chunk_model_id, 10)
             .unwrap();
         assert_eq!(
             pending.len(),
@@ -2646,11 +2665,10 @@ mod tests {
             "Le store doit détecter le chunk non vectorisé"
         );
 
-        let vector = vec![0.0_f32; 384];
         store
             .update_chunk_embeddings(
-                "chunk-bge-small-en-v1.5-384",
-                &[(pending[0].0.clone(), pending[0].2.clone(), vector)],
+                &chunk_model_id,
+                &[(pending[0].0.clone(), pending[0].2.clone(), zero_embedding())],
             )
             .unwrap();
 
@@ -2742,18 +2760,19 @@ mod tests {
             ])
             .unwrap();
 
+        let chunk_model_id = current_chunk_model_id();
         store
             .ensure_embedding_model(
-                "chunk-bge-small-en-v1.5-384",
+                &chunk_model_id,
                 "chunk",
-                "BAAI/bge-small-en-v1.5",
-                384,
-                "1",
+                default_embedding_profile().model_name,
+                current_embedding_dimension(),
+                default_embedding_profile().model_version,
             )
             .unwrap();
 
         let initial_pending = store
-            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
+            .fetch_unembedded_chunks(&chunk_model_id, 10)
             .unwrap();
         assert_eq!(
             initial_pending.len(),
@@ -2769,10 +2788,10 @@ mod tests {
             .clone();
         let updates: Vec<(String, String, Vec<f32>)> = initial_pending
             .iter()
-            .map(|(id, _, hash)| (id.clone(), hash.clone(), vec![0.0_f32; 384]))
+            .map(|(id, _, hash)| (id.clone(), hash.clone(), zero_embedding()))
             .collect();
         store
-            .update_chunk_embeddings("chunk-bge-small-en-v1.5-384", &updates)
+            .update_chunk_embeddings(&chunk_model_id, &updates)
             .unwrap();
         assert_eq!(
             store
@@ -2811,7 +2830,7 @@ mod tests {
         );
 
         let pending = store
-            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
+            .fetch_unembedded_chunks(&chunk_model_id, 10)
             .unwrap();
         assert_eq!(
             pending.len(),
@@ -2828,21 +2847,25 @@ mod tests {
         store
             .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('chunk-drift', 'symbol', 'sym-drift', 'proj', 'function', 'fresh content', 'hash-fresh', 1, 1)")
             .unwrap();
+        let chunk_model_id = current_chunk_model_id();
         store
             .ensure_embedding_model(
-                "chunk-bge-small-en-v1.5-384",
+                &chunk_model_id,
                 "chunk",
-                "BAAI/bge-small-en-v1.5",
-                384,
-                "1",
+                default_embedding_profile().model_name,
+                current_embedding_dimension(),
+                default_embedding_profile().model_version,
             )
             .unwrap();
         store
-            .execute("INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash) VALUES ('chunk-drift', 'chunk-bge-small-en-v1.5-384', 'hash-stale')")
+            .execute(&format!(
+                "INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash) VALUES ('chunk-drift', '{}', 'hash-stale')",
+                chunk_model_id
+            ))
             .unwrap();
 
         let pending = store
-            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
+            .fetch_unembedded_chunks(&chunk_model_id, 10)
             .unwrap();
         assert_eq!(
             pending.len(),
@@ -3329,11 +3352,16 @@ mod tests {
             .refresh_symbol_projection("Keeper", 1)
             .unwrap()
             .expect("anchor should resolve");
+        let graph_model_id = current_graph_model_id();
+        let graph_dimension = default_embedding_profile().dimension;
         store
             .execute(&format!(
                 "INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) \
-                 VALUES ('symbol', '{}', 1, 'graph-bge-small-en-v1.5-384', 'sig-keeper', '1', CAST([1.0] || repeat([0.0], 383) AS FLOAT[384]), 1000)",
-                keeper_anchor
+                 VALUES ('symbol', '{}', 1, '{}', 'sig-keeper', '1', CAST([1.0] || repeat([0.0], {}) AS FLOAT[{}]), 1000)",
+                keeper_anchor,
+                graph_model_id,
+                graph_dimension.saturating_sub(1),
+                graph_dimension
             ))
             .unwrap();
 

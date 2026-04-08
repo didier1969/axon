@@ -269,6 +269,48 @@ git commit -m "feat: add jina code embedding profile with bge fallback"
 
 ### Task 6: Recaler le pipeline de vectorisation sur le GPU
 
+**Status:** Complete le `2026-04-08`
+
+**Diagnostic confirme le `2026-04-08`:**
+- le provider CUDA doit etre prouve explicitement au chargement du modele; la simple detection `gpu_present` ne suffit pas
+- le hot path actuel sous-alimente le GPU:
+  - un seul worker semantique
+  - batchs conservateurs (`16/32/8/6`)
+  - boucle fichier-par-fichier avec allers-retours `fetch -> embed -> write -> re-fetch`
+- le goulot prioritaire n'est pas seulement la taille des batchs, mais l'absence de lot cross-file sous budget runtime
+- la couture TDD retenue est mixte:
+  - fonctions pures de calibration et de budget runtime
+  - methode `GraphStore` capable de recuperer des chunks non vectorises sur plusieurs fichiers en une vague
+
+**Resultat implemente:**
+- le runtime embeddings sait maintenant calibrer le profil par backend demande:
+  - lots plus grands en mode `cuda`
+  - profil inchange en mode `cpu`
+- la vectorisation fichier est pilotee par un budget runtime explicite:
+  - `file_fetch_limit`
+  - `total_chunk_budget`
+  - `pause`
+- le hot path fichier n'est plus strictement fichier-par-fichier:
+  - le worker reclame plusieurs fichiers
+  - recupere un lot global de chunks non vectorises sur plusieurs chemins
+  - execute un seul `model.embed(...)` pour la vague
+  - ne vide la queue que pour les fichiers devenus `vector_ready`
+- les tests maillon proches du stockage embeddings ont ete realignes sur le contrat `768d` actuel
+
+**Validation executee:**
+- `cargo test --lib file_vectorization_throughput -- --nocapture`
+- `cargo test --lib embedding_config -- --nocapture`
+- `cargo test --lib embedding_benchmark -- --nocapture`
+- `cargo test --lib test_maillon_2r4_vector_ready_flips_true_after_chunk_embeddings_land -- --nocapture`
+- `cargo test --lib test_maillon_7b_chunk_embedding_storage -- --nocapture`
+- `cargo test --lib test_maillon_7e_chunk_invalidation_requeues_only_changed_file_embeddings -- --nocapture`
+- `cargo test --lib test_tombstone_missing_path_invalidates_dependent_graph_derivations -- --nocapture`
+
+**Vigilance residuelle hors perimetre Task 6:**
+- le provider GPU reel reste encore infere a partir du backend demande; la preuve definitive du provider effectivement retenu au runtime devra etre durcie plus tard
+- plusieurs outils MCP et tests hors de cette tranche restent encore couples a des identifiants `*-384`
+- les messages `ALTER TABLE ... last_gui already exists` restent visibles au bootstrap de test; ce bruit n'a pas ete traite dans cette tranche
+
 **Files:**
 - Modify: `src/axon-core/src/embedder.rs`
 - Modify: `src/axon-core/src/graph_ingestion.rs`

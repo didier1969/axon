@@ -17,6 +17,10 @@ const FILE_VECTORIZATION_BATCH_SIZE: usize = 8;
 const GRAPH_BATCH_SIZE: usize = 6;
 const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
 const EMBEDDING_KINDS: [&str; 3] = ["symbol", "chunk", "graph"];
+const GPU_CHUNK_BATCH_SIZE: usize = 32;
+const GPU_SYMBOL_BATCH_SIZE: usize = 64;
+const GPU_FILE_VECTORIZATION_BATCH_SIZE: usize = 16;
+const GPU_GRAPH_BATCH_SIZE: usize = 8;
 const JINA_CODE_MODEL_NAME: &str = "jinaai/jina-embeddings-v2-base-code";
 const JINA_CODE_MODEL_SLUG: &str = "jina-embeddings-v2-base-code";
 const JINA_CODE_MODEL_VERSION: &str = "1";
@@ -286,6 +290,74 @@ pub struct EmbeddingRuntimeContract {
     pub execution_provider: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileVectorizationRuntimeBudget {
+    pub pause: bool,
+    pub file_fetch_limit: usize,
+    pub total_chunk_budget: usize,
+}
+
+pub fn calibrated_embedding_profile_for_backend(
+    profile: &EmbeddingProfile,
+    backend: EmbeddingExecutionBackend,
+) -> EmbeddingProfile {
+    if backend != EmbeddingExecutionBackend::GpuCuda {
+        return profile.clone();
+    }
+
+    EmbeddingProfile::new(
+        profile.key,
+        profile.model_name,
+        profile.model_slug,
+        profile.model_version,
+        profile.dimension,
+        profile.runtime_model,
+        backend,
+        profile.chunk.batch_size.max(GPU_CHUNK_BATCH_SIZE),
+        profile.symbol.batch_size.max(GPU_SYMBOL_BATCH_SIZE),
+        profile
+            .file_vectorization_batch_size
+            .max(GPU_FILE_VECTORIZATION_BATCH_SIZE),
+        profile.graph.batch_size.max(GPU_GRAPH_BATCH_SIZE),
+    )
+}
+
+pub fn file_vectorization_runtime_budget(
+    profile: &EmbeddingProfile,
+    service_pressure: ServicePressure,
+    queue_depth: usize,
+) -> FileVectorizationRuntimeBudget {
+    if service_pressure == ServicePressure::Critical || queue_depth >= 4_000 {
+        return FileVectorizationRuntimeBudget {
+            pause: true,
+            file_fetch_limit: 0,
+            total_chunk_budget: 0,
+        };
+    }
+
+    if service_pressure == ServicePressure::Degraded || queue_depth >= 2_000 {
+        return FileVectorizationRuntimeBudget {
+            pause: false,
+            file_fetch_limit: (profile.file_vectorization_batch_size / 2).max(2),
+            total_chunk_budget: (profile.chunk.batch_size * 2).max(profile.chunk.batch_size),
+        };
+    }
+
+    if service_pressure == ServicePressure::Recovering || queue_depth >= 1_000 {
+        return FileVectorizationRuntimeBudget {
+            pause: false,
+            file_fetch_limit: (profile.file_vectorization_batch_size * 3 / 4).max(2),
+            total_chunk_budget: (profile.chunk.batch_size * 3).max(profile.chunk.batch_size),
+        };
+    }
+
+    FileVectorizationRuntimeBudget {
+        pause: false,
+        file_fetch_limit: profile.file_vectorization_batch_size,
+        total_chunk_budget: profile.chunk.batch_size * 4,
+    }
+}
+
 pub fn embedding_runtime_contract_for_profile(profile: &EmbeddingProfile) -> EmbeddingRuntimeContract {
     EmbeddingRuntimeContract {
         model_name: profile.model_name.to_string(),
@@ -362,6 +434,7 @@ impl SemanticWorkerPool {
                     return;
                 }
             };
+        let profile = calibrated_embedding_profile_for_backend(&profile, backend);
 
         let (query_tx, query_rx) = unbounded();
         register_query_embedding_sender(query_tx);
@@ -413,168 +486,145 @@ impl SemanticWorkerPool {
             let policy =
                 semantic_policy(queue_store.common_len(), service_guard::current_pressure());
             let mut file_vectorization_backlog_active = false;
-            match graph_store
-                .fetch_pending_file_vectorization_work(profile.file_vectorization_batch_size)
-            {
+            let file_queue_depth = graph_store
+                .fetch_file_vectorization_queue_counts()
+                .map(|(queued, inflight)| queued + inflight)
+                .unwrap_or_default();
+            let file_budget = file_vectorization_runtime_budget(
+                &profile,
+                service_guard::current_pressure(),
+                file_queue_depth,
+            );
+            match graph_store.fetch_pending_file_vectorization_work(file_budget.file_fetch_limit) {
                 Ok(pending) if !pending.is_empty() => {
                     file_vectorization_backlog_active = true;
+                    if file_budget.pause {
+                        wait_for_query_request(&mut model, &query_rx, policy.sleep);
+                        continue;
+                    }
                     debug!(
                         "Semantic Worker: Embedding {} file vectorization jobs...",
                         pending.len()
                     );
 
-                    let mut completed_works: Vec<FileVectorizationWork> = Vec::new();
+                    let pending_paths: Vec<String> =
+                        pending.iter().map(|work| work.file_path.clone()).collect();
                     let mut failed: HashMap<String, Vec<FileVectorizationWork>> = HashMap::new();
 
-                    for work in pending {
-                        let mut this_work_done = false;
-                        let mut this_work_failed = false;
-                        let mut iteration_reason = String::new();
+                    match graph_store.fetch_unembedded_chunks_for_files(
+                        &pending_paths,
+                        &profile.chunk.model_id,
+                        file_budget.total_chunk_budget,
+                    ) {
+                        Ok(chunks) => {
+                            if !chunks.is_empty() {
+                                let texts: Vec<String> = chunks
+                                    .iter()
+                                    .map(|(_, _, content, _)| content.clone())
+                                    .collect();
+                                match model.embed(texts, None) {
+                                    Ok(embeddings) => {
+                                        let updates: Vec<(String, String, Vec<f32>)> = chunks
+                                            .into_iter()
+                                            .zip(embeddings.into_iter())
+                                            .map(|((_, chunk_id, _, hash), emb)| {
+                                                (chunk_id, hash, emb)
+                                            })
+                                            .collect();
 
-                        loop {
-                            match graph_store.fetch_unembedded_chunks_for_file(
-                                &work.file_path,
-                                &profile.chunk.model_id,
-                                profile.chunk.batch_size,
-                            ) {
-                                Ok(chunks) if chunks.is_empty() => {
-                                    this_work_done = true;
-                                    break;
-                                }
-                                Ok(chunks) => {
-                                    let texts: Vec<String> = chunks
-                                        .iter()
-                                        .map(|(_, content, _)| content.clone())
-                                        .collect();
-                                    match model.embed(texts, None) {
-                                        Ok(embeddings) => {
-                                            let updates: Vec<(String, String, Vec<f32>)> = chunks
-                                                .into_iter()
-                                                .zip(embeddings.into_iter())
-                                                .map(|((id, _, hash), emb)| (id, hash, emb))
-                                                .collect();
-
-                                            if let Err(err) = graph_store
-                                                .update_chunk_embeddings(
-                                                    &profile.chunk.model_id,
-                                                    &updates,
-                                                )
-                                            {
-                                                this_work_failed = true;
-                                                iteration_reason = format!(
+                                        if let Err(err) = graph_store
+                                            .update_chunk_embeddings(
+                                                &profile.chunk.model_id,
+                                                &updates,
+                                            )
+                                        {
+                                            failed
+                                                .entry(format!(
                                                     "failed to persist chunk embeddings: {:?}",
                                                     err
-                                                );
-                                                error!(
-                                                    "Semantic Worker: Chunk DB write error for file {}: {:?}",
-                                                    work.file_path, err
-                                                );
-                                                break;
-                                            }
-
-                                            match graph_store.file_has_unembedded_chunks(
-                                                &work.file_path,
-                                                &profile.chunk.model_id,
-                                            ) {
-                                                Ok(has_pending) if has_pending => {
-                                                    continue;
-                                                }
-                                                Ok(_) => {
-                                                    this_work_done = true;
-                                                    break;
-                                                }
-                                                Err(err) => {
-                                                    this_work_failed = true;
-                                                    iteration_reason = format!(
-                                                        "failed to check pending chunks: {:?}",
-                                                        err
-                                                    );
-                                                    error!(
-                                                        "Semantic Worker: failed to check chunk completion for {}: {:?}",
-                                                        work.file_path, err
-                                                    );
-                                                    break;
-                                                }
-                                            }
+                                                ))
+                                                .or_default()
+                                                .extend(pending.iter().cloned());
                                         }
-                                        Err(e) => {
-                                            this_work_failed = true;
-                                            iteration_reason =
-                                                format!("chunk embedding failed: {:?}", e);
-                                            if is_fatal_embedding_error(&e) {
-                                                error!(
-                                                    "Semantic Worker: fatal chunk embedding error, disabling semantic worker: {:?}",
-                                                    e
-                                                );
-                                                return;
-                                            }
+                                    }
+                                    Err(e) => {
+                                        if is_fatal_embedding_error(&e) {
                                             error!(
-                                                "Semantic Worker: Chunk embedding failed for {}: {:?}",
-                                                work.file_path, e
+                                                "Semantic Worker: fatal chunk embedding error, disabling semantic worker: {:?}",
+                                                e
                                             );
-                                            break;
+                                            return;
+                                        }
+                                        failed
+                                            .entry(format!("chunk embedding failed: {:?}", e))
+                                            .or_default()
+                                            .extend(pending.iter().cloned());
+                                    }
+                                }
+                            }
+
+                            if failed.is_empty() {
+                                if let Err(err) = graph_store.mark_file_vectorization_done(
+                                    &pending_paths,
+                                    &profile.chunk.model_id,
+                                ) {
+                                    failed
+                                        .entry(format!(
+                                            "failed to refresh file vector readiness: {:?}",
+                                            err
+                                        ))
+                                        .or_default()
+                                        .extend(pending.iter().cloned());
+                                } else {
+                                    let ready_paths = graph_store
+                                        .fetch_vector_ready_file_paths(&pending_paths)
+                                        .unwrap_or_default();
+                                    let completed_works: Vec<FileVectorizationWork> = pending
+                                        .iter()
+                                        .filter(|work| ready_paths.contains(&work.file_path))
+                                        .cloned()
+                                        .collect();
+
+                                    if let Err(err) = graph_store
+                                        .mark_file_vectorization_work_done(&completed_works)
+                                    {
+                                        failed
+                                            .entry(format!(
+                                                "failed to clear file vector queue: {:?}",
+                                                err
+                                            ))
+                                            .or_default()
+                                            .extend(completed_works.iter().cloned());
+                                    } else {
+                                        for work in &completed_works {
+                                            if let Err(err) = graph_store
+                                                .enqueue_graph_projection_refresh(
+                                                    "file",
+                                                    &work.file_path,
+                                                    FILE_PROJECTION_RADIUS,
+                                                )
+                                            {
+                                                failed
+                                                    .entry(format!(
+                                                        "failed to enqueue file projection for {}: {:?}",
+                                                        work.file_path, err
+                                                    ))
+                                                    .or_default()
+                                                    .push(work.clone());
+                                            }
                                         }
                                     }
                                 }
-                                Err(err) => {
-                                    this_work_failed = true;
-                                    iteration_reason = format!(
-                                        "chunk fetch failed for file {}: {:?}",
-                                        work.file_path, err
-                                    );
-                                    error!(
-                                        "Semantic Worker: failed to fetch unembedded chunks for {}: {:?}",
-                                        work.file_path, err
-                                    );
-                                    break;
-                                }
                             }
                         }
-
-                        if this_work_done {
-                            if let Err(err) =
-                                graph_store.mark_file_vectorization_done(
-                                    &[work.file_path.clone()],
-                                    &profile.chunk.model_id,
-                                )
-                            {
-                                failed
-                                    .entry(format!(
-                                        "failed to mark vectorization completion for {}: {:?}",
-                                        work.file_path, err
-                                    ))
-                                    .or_default()
-                                    .push(work);
-                            } else {
-                                completed_works.push(work.clone());
-                            }
-                        } else if this_work_failed {
-                            failed.entry(iteration_reason).or_default().push(work);
-                        }
-                    }
-
-                    if let Err(err) =
-                        graph_store.mark_file_vectorization_work_done(&completed_works)
-                    {
-                        failed
-                            .entry(format!("failed to clear file vector queue: {:?}", err))
-                            .or_default()
-                            .extend(completed_works.iter().cloned());
-                    } else {
-                        for work in &completed_works {
-                            if let Err(err) = graph_store.enqueue_graph_projection_refresh(
-                                "file",
-                                &work.file_path,
-                                FILE_PROJECTION_RADIUS,
-                            ) {
-                                failed
-                                    .entry(format!(
-                                        "failed to enqueue file projection for {}: {:?}",
-                                        work.file_path, err
-                                    ))
-                                    .or_default()
-                                    .push(work.clone());
-                            }
+                        Err(err) => {
+                            failed
+                                .entry(format!(
+                                    "failed to fetch cross-file chunk batch: {:?}",
+                                    err
+                                ))
+                                .or_default()
+                                .extend(pending.iter().cloned());
                         }
                     }
 

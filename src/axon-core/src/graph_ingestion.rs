@@ -1660,6 +1660,59 @@ impl GraphStore {
         Ok(chunks)
     }
 
+    pub fn fetch_unembedded_chunks_for_files(
+        &self,
+        file_paths: &[String],
+        model_id: &str,
+        count: usize,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        if file_paths.is_empty() || count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let filter = file_paths
+            .iter()
+            .map(|path| format!("'{}'", Self::escape_sql(path)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!(
+            "SELECT co.source_id, c.id, c.content, c.content_hash \
+             FROM Chunk c \
+             JOIN CONTAINS co ON co.target_id = c.source_id \
+             LEFT JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{}' \
+             WHERE co.source_id IN ({}) \
+             AND (ce.chunk_id IS NULL OR ce.source_hash <> c.content_hash) \
+             ORDER BY co.source_id, c.id \
+             LIMIT {}",
+            Self::escape_sql(model_id),
+            filter,
+            count
+        );
+        let res = self.query_json_on_reader(&query)?;
+
+        if res == "[]" || res.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res)?;
+        let chunks = raw
+            .into_iter()
+            .filter_map(|row| {
+                if row.len() >= 4 {
+                    Some((
+                        row[0].as_str()?.to_string(),
+                        row[1].as_str()?.to_string(),
+                        row[2].as_str()?.to_string(),
+                        row[3].as_str()?.to_string(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Ok(chunks)
+    }
+
     pub fn file_has_unembedded_chunks(&self, file_path: &str, model_id: &str) -> Result<bool> {
         let query = format!(
             "SELECT EXISTS (\
@@ -1712,6 +1765,32 @@ impl GraphStore {
             Self::escape_sql(model_id),
             filter
         ))
+    }
+
+    pub fn fetch_vector_ready_file_paths(&self, paths: &[String]) -> Result<Vec<String>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let filter = paths
+            .iter()
+            .map(|path| format!("'{}'", Self::escape_sql(path)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let raw = self.query_json_on_reader(&format!(
+            "SELECT path FROM File WHERE vector_ready = TRUE AND path IN ({}) ORDER BY path",
+            filter
+        ))?;
+
+        if raw == "[]" || raw.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.first().and_then(|value| value.as_str()).map(str::to_string))
+            .collect())
     }
 
     pub fn ensure_embedding_model(
