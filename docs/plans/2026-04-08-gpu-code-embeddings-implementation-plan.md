@@ -8,6 +8,15 @@
 
 **Tech Stack:** Rust, fastembed, ONNX Runtime, DuckDB plugin Axon, tests cargo, benchmarks Axon sur corpus reel.
 
+**Etat de la cible de performance au `2026-04-08`:**
+- objectif strategique a prouver: `300_000 embeddings/heure` soit `83.33 embeddings/s`
+- cible materielle: GPU `8 Go VRAM`
+- surfaces visees: `file`, `type`, `procedure`
+- verite actuelle:
+  - le harness benchmark reel existe et est versionne
+  - la cible est mesuree comme non atteinte, y compris sur des runs `cuda` avec preuve externe `nvidia-smi`
+  - le prochain travail n'est plus de "rendre benchmarkable", mais d'expliquer l'ecart de debit
+
 **Etat de certification globale au `2026-04-08`:**
 - le blocage de compilation global sur `RuntimeTelemetrySnapshot` a ete corrige en realignant les compteurs ingress et `malloc_trim` entre `main_background.rs`, `main_telemetry.rs` et `bridge.rs`
 - la suite complete `cargo test -- --nocapture` recompile a nouveau le binaire et le bridge
@@ -258,6 +267,70 @@ Ecrire des tests qui echouent tant que:
 - le fallback `bge-base` n'existe pas
 
 **Step 2: Run test to verify it fails**
+
+---
+
+### Task 9: Benchmarker reellement le debit embeddings contre la cible strategique
+
+**Status:** Complete le `2026-04-08`
+
+**Resultat implemente:**
+- un vrai harness benchmark existe maintenant dans:
+  - `src/axon-core/src/embedding_benchmark.rs`
+  - `src/axon-core/src/bin/embedding_benchmark.rs`
+- il extrait un corpus local reel et mesure les surfaces:
+  - `file`
+  - `type`
+  - `procedure`
+- il produit un rapport JSON avec:
+  - modele
+  - dimension
+  - backend demande
+  - corpus reel
+  - debit par cible
+  - verdict versus `300_000 embeddings/h`
+- la branche distingue explicitement:
+  - `backend requested`
+  - preuve externe GPU
+  - absence encore d'un `provider_effective` fort dans la telemetrie runtime
+
+**Validation executee:**
+- `cargo test embedding_real_benchmark --manifest-path src/axon-core/Cargo.toml -- --nocapture`
+- `cargo run --manifest-path src/axon-core/Cargo.toml --bin embedding_benchmark -- --help`
+
+**Mesures reelles obtenues:**
+
+CPU, `BAAI/bge-small-en-v1.5`:
+- `file`: `~28_992 embeddings/h`
+- `type`: `~33_549 embeddings/h`
+- `procedure`: `~28_974 embeddings/h`
+
+CPU, `jinaai/jina-embeddings-v2-base-code`:
+- `file`: `~7_902 embeddings/h`
+- `type`: `~14_464 embeddings/h`
+- `procedure`: `~13_209 embeddings/h`
+
+CUDA demande, `BAAI/bge-small-en-v1.5`:
+- preuve externe: `nvidia-smi` a observe `~41%` GPU et `~798 MiB` VRAM utilises
+- `file`: `~27_252 embeddings/h`
+- `type`: `~22_153 embeddings/h`
+- `procedure`: `~26_302 embeddings/h`
+
+CUDA demande, `jinaai/jina-embeddings-v2-base-code`:
+- preuve externe: `nvidia-smi` a observe `~28-34%` GPU et `~798-810 MiB` VRAM utilises
+- `file`: `~7_973 embeddings/h`
+- `type`: `~8_889 embeddings/h`
+- `procedure`: `~12_519 embeddings/h`
+
+**Conclusion ferme de Task 9:**
+- la cible `300_000 embeddings/h` n'est pas atteinte
+- l'ecart n'est pas marginal; il est massif
+- le systeme est maintenant benchmarke reellement
+- le probleme ouvert n'est plus un manque d'observabilite benchmark, mais un manque de debit effectif
+
+**Vigilance residuelle hors perimetre Task 9:**
+- `RuntimeProfile::detect()` continue a reporter `gpu_present=false` dans cet environnement alors qu'un GPU est bien visible par `nvidia-smi`
+- `provider_effective` reste `null` dans le rapport JSON; la preuve actuelle de CUDA repose sur telemetrie externe, pas sur un signal runtime interne robuste
 
 Run: `cargo test jina_embedding_profile -- --nocapture`
 Expected: FAIL

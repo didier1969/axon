@@ -221,20 +221,26 @@ Not yet fully certified:
 Measured on `2026-04-08` from the worktree corpus in `src/axon-core`, using the new
 `embedding_benchmark` binary and local corpus extraction.
 
-Environment truth observed by the harness:
-- backend requested for measured runs: `cpu`
-- `gpu_present`: `false`
-- result: this environment does not currently expose a usable GPU to the benchmark runtime
+Important distinction:
+- the harness reports `gpu_present=false`
+- this comes from Axon's current device-node heuristic in `RuntimeProfile::detect()`
+- that heuristic is incomplete in this environment
+- external GPU truth was confirmed separately with `nvidia-smi` during the CUDA runs
 
-Measured CPU runs:
+External machine truth observed:
+- GPU present: `NVIDIA GeForce RTX 3070 Laptop GPU`
+- VRAM: `8192 MiB`
+- driver: `581.83`
 
-### Legacy baseline: `BAAI/bge-small-en-v1.5` (`384d`)
+### CPU runs
+
+#### Legacy baseline: `BAAI/bge-small-en-v1.5` (`384d`)
 
 - file target: about `28_992 embeddings/h`
 - type target: about `33_549 embeddings/h`
 - procedure target: about `28_974 embeddings/h`
 
-### Primary target: `jinaai/jina-embeddings-v2-base-code` (`768d`)
+#### Primary target: `jinaai/jina-embeddings-v2-base-code` (`768d`)
 
 Fast downsampled run (`16` measured samples per target) used to obtain a first real reading:
 
@@ -242,10 +248,36 @@ Fast downsampled run (`16` measured samples per target) used to obtain a first r
 - type target: about `14_464 embeddings/h`
 - procedure target: about `13_209 embeddings/h`
 
+### CUDA-requested runs with external GPU confirmation
+
+#### Legacy baseline: `BAAI/bge-small-en-v1.5` (`384d`)
+
+During the run, external telemetry observed:
+- GPU utilization: about `41%`
+- VRAM used: about `798 MiB / 8192 MiB`
+
+Measured throughput:
+- file target: about `27_252 embeddings/h`
+- type target: about `22_153 embeddings/h`
+- procedure target: about `26_302 embeddings/h`
+
+#### Primary target: `jinaai/jina-embeddings-v2-base-code` (`768d`)
+
+During the run, external telemetry observed:
+- GPU utilization: about `28%` to `34%`
+- VRAM used: about `798` to `810 MiB / 8192 MiB`
+
+Measured throughput:
+- file target: about `7_973 embeddings/h`
+- type target: about `8_889 embeddings/h`
+- procedure target: about `12_519 embeddings/h`
+
 Operational conclusion:
-- the CPU path is far below the strategic target `300_000 embeddings/h`
-- on this machine, the branch is now benchmark-capable, but the target remains unproven and currently unattainable on CPU
-- the next proof required is a real `cuda requested` run on a runtime that actually exposes the GPU, plus an external confirmation of GPU activity
+- the branch now supports real measured CPU and CUDA-requested benchmark runs
+- CUDA execution was externally confirmed on this machine, even though Axon's internal `gpu_present` heuristic still reports `false`
+- the strategic target `300_000 embeddings/h` is not remotely reached in the current implementation
+- on this machine, both CPU and current CUDA runs remain far below the target
+- the next proof required is not "can we ask for CUDA?" but "why does real GPU throughput remain this low, and what change would move the curve materially?"
 
 ## Next Logical Steps
 
