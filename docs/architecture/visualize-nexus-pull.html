@@ -291,7 +291,7 @@
                     <p><strong>Rôle :</strong> Environnement d'isolation asymétrique pour TDD et agents IA.<br/>
                     <strong>Emplacement :</strong> Confiné dans des Git Worktrees (ex: <code>.worktrees/dev/feat-x</code>).<br/>
                     <strong>Ports décalés :</strong> <code>44139</code> (MCP/SQL), <code>44137</code> (Phoenix) pour éviter les collisions.<br/>
-                    <strong>Workflow :</strong> Clone local de <code>ist.db</code> via script pour expérimenter sans impacter la Prod. Validation via l'outil <code>axon_commit_work</code> sur le serveur MCP local avant de promouvoir en Prod (Hot Swap).</p>
+                    <strong>Workflow :</strong> Clone local de <code>ist.db</code> via script pour expérimenter sans impacter la Prod. Validation via l'outil <code>axon_pre_flight_check</code> sur le serveur MCP local avant commit et promotion en Prod (Hot Swap).</p>
                 </div>
             </div>
             <div class="mermaid">
@@ -312,7 +312,7 @@
                     
                     Agent((Agent IA)) -- "Query (Read-Only)" --> Prod
                     Agent -- "Code & Validate (TDD)" --> Dev
-                    Dev -- "Promotion (axon_commit_work)" --> Prod
+                    Dev -- "Promotion (axon_pre_flight_check)" --> Prod
                 end
                 
                 style Daemon fill:#0ea5e9,color:#fff,stroke:#0284c7,stroke-width:3px

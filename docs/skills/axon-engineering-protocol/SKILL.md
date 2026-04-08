@@ -1,6 +1,6 @@
 ---
 name: axon-engineering-protocol
-description: Core engineering protocol for Axon. MUST BE READ before any coding, refactoring, or SOLL mutation. Defines IST-driven execution, TDD mandates, and the mandatory axon_commit_work MCP workflow.
+description: Core engineering protocol for Axon. MUST BE READ before any coding, refactoring, or SOLL mutation. Defines IST-driven execution, TDD mandates, and the mandatory axon_pre_flight_check MCP workflow.
 ---
 
 # Axon Engineering Protocol
@@ -49,7 +49,7 @@ description: Core engineering protocol for Axon. MUST BE READ before any coding,
 - `soll_rollback_revision(revision_id)`: Reverts.
 
 **Audit & Traceability:**
-- `axon_commit_work(diff_paths, message, dry_run)`: **MANDATORY** for code commits. Validates IST against SOLL Guidelines. Generates Markdown Doc-As-Code, executes Git.
+- `axon_pre_flight_check(diff_paths)`: **MANDATORY** before any code commit. Validates IST against SOLL Guidelines. If successful, you are authorized to execute `git commit` via shell.
 - `soll_validate(project_slug)`: Audits graph invariants.
 - `soll_verify_requirements()`: Computes requirement coverage.
 - `soll_export(project_slug)`: Generates canonical Markdown backup.

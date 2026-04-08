@@ -27,7 +27,7 @@ Pour éviter toute collision (Ports, Filesystem, Locks SQLite, Erlang EPMD), l'a
 1. **Isolation Git :** L'agent IA DOIT créer un Git Worktree dans `.worktrees/dev/`. Il lui est interdit de développer dans le dossier racine.
 2. **Synchronisation Médico-légale :** Avant de démarrer, l'agent IA exécute `scripts/sync_to_dev.sh`. Ce script copie la base de données DuckDB de Production (`.axon/graph_v2/ist.db`) vers le dossier de Dev (`.axon-dev/graph_v2/ist.db`) afin d'offrir des données réalistes sans impacter les I/O de la Prod.
 3. **Expérimentation :** L'agent lance le serveur local (`scripts/start.sh`) qui tournera en parallèle de la Prod sans interférence.
-4. **Validation (Commit) :** L'agent utilise le serveur MCP de Dev (`44139`) pour exécuter l'outil `axon_commit_work`. L'outil vérifie les règles et valide le commit sur la branche de Dev.
+4. **Validation (Commit) :** L'agent utilise le serveur MCP de Dev (`44139`) pour exécuter l'outil `axon_pre_flight_check`. L'outil vérifie les règles. En cas de succès, l'agent valide le commit sur la branche de Dev via `git commit`.
 5. **Promotion (Zero Downtime) :** L'humain fusionne la branche dans `main`. Un script de déploiement en Prod tire le code (`git pull`), compile la release Rust en arrière-plan (`cargo build --release`), puis redémarre la session TMUX `axon` en quelques millisecondes (Hot Swap).
 
 ## 4. Configuration LLM (Dual-MCP)

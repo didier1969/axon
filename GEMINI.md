@@ -16,7 +16,7 @@ Votre communication est **strictement pragmatique, objective et froide**. Élimi
 1.  **TDD Sémantique :** Les tests doivent valider la réalité physique du rendu (via `assert_witness_rendered`) en plus de la logique serveur.
 2.  **Audit Forensic :** Toute erreur (JS, 500, Timeout) doit être capturée par l'Oracle OOB et routée vers la télémétrie.
 3.  **Contrats de Confiance :** Utilisez le protocole MCP pour fournir aux agents IA une mémoire structurelle exacte, sans hallucinations.
-4.  **Gouvernance Axon Init & Commit :** Utilisez `axon_init_project` pour initier de nouveaux domaines. L'utilisation de `axon_commit_work` est OBLIGATOIRE en remplacement de `git commit` pour valider le respect des Guidelines (`GUI-`) avant toute sauvegarde de code.
+4.  **Gouvernance Axon Init & Pre-Flight :** Utilisez `axon_init_project` pour initier de nouveaux domaines. L'utilisation de `axon_pre_flight_check` est OBLIGATOIRE avant de lancer un `git commit` classique. Cet outil valide le respect des Guidelines (`GUI-`) avant toute sauvegarde de code.
 
 ## 🛡️ Sécurité et Contexte Local
 *   **Oracle Shield :** Toute communication de diagnostic doit être protégée par le `Witness.Token`.
