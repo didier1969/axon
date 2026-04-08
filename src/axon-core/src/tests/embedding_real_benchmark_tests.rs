@@ -114,3 +114,23 @@ fn test_measurement_layer_labels_are_stable() {
         "full_pipeline"
     );
 }
+
+#[test]
+fn test_measurement_layers_expose_distinct_timing_semantics() {
+    assert!(
+        BenchmarkMeasurementLayer::FullPipeline
+            .includes_corpus_collection_in_total_seconds()
+    );
+    assert!(
+        !BenchmarkMeasurementLayer::PrepareEmbed
+            .includes_corpus_collection_in_total_seconds()
+    );
+    assert!(
+        !BenchmarkMeasurementLayer::ModelOnly
+            .includes_corpus_collection_in_total_seconds()
+    );
+
+    assert!(BenchmarkMeasurementLayer::ModelOnly.prebuilds_batches());
+    assert!(!BenchmarkMeasurementLayer::PrepareEmbed.prebuilds_batches());
+    assert!(!BenchmarkMeasurementLayer::FullPipeline.prebuilds_batches());
+}

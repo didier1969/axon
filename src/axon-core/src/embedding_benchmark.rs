@@ -29,6 +29,14 @@ impl BenchmarkMeasurementLayer {
             Self::FullPipeline => "full_pipeline",
         }
     }
+
+    pub fn includes_corpus_collection_in_total_seconds(self) -> bool {
+        matches!(self, Self::FullPipeline)
+    }
+
+    pub fn prebuilds_batches(self) -> bool {
+        matches!(self, Self::ModelOnly)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -98,6 +106,9 @@ pub struct BenchmarkTargetReport {
     pub unique_samples: usize,
     pub measured_samples: usize,
     pub batch_size: usize,
+    pub measurement_layer: BenchmarkMeasurementLayer,
+    pub corpus_collection_seconds_included: bool,
+    pub corpus_collection_seconds: f64,
     pub total_embeddings: usize,
     pub total_seconds: f64,
     pub embeddings_per_second: f64,
@@ -277,13 +288,17 @@ pub fn run_real_embedding_benchmark(
     let mut model =
         TextEmbedding::try_new(options).context("failed to initialize embedding model")?;
 
+    let corpus_started = Instant::now();
     let corpus = collect_repo_benchmark_corpus(&config.repo_path, &config.limits)?;
+    let corpus_collection_seconds = corpus_started.elapsed().as_secs_f64();
     let targets = vec![
         benchmark_target_report(
             &mut model,
             BenchmarkTargetKind::File,
             &corpus.files,
             profile.file_vectorization_batch_size,
+            config.measurement_layer,
+            corpus_collection_seconds,
             config.warmup_batches,
             config.min_samples_per_target,
         )?,
@@ -292,6 +307,8 @@ pub fn run_real_embedding_benchmark(
             BenchmarkTargetKind::Type,
             &corpus.types,
             profile.symbol.batch_size,
+            config.measurement_layer,
+            corpus_collection_seconds,
             config.warmup_batches,
             config.min_samples_per_target,
         )?,
@@ -300,6 +317,8 @@ pub fn run_real_embedding_benchmark(
             BenchmarkTargetKind::Procedure,
             &corpus.procedures,
             profile.symbol.batch_size,
+            config.measurement_layer,
+            corpus_collection_seconds,
             config.warmup_batches,
             config.min_samples_per_target,
         )?,
@@ -329,6 +348,8 @@ fn benchmark_target_report(
     target: BenchmarkTargetKind,
     unique: &[BenchmarkSample],
     batch_size: usize,
+    measurement_layer: BenchmarkMeasurementLayer,
+    corpus_collection_seconds: f64,
     warmup_batches: usize,
     min_samples_per_target: usize,
 ) -> Result<BenchmarkTargetReport> {
@@ -339,6 +360,10 @@ fn benchmark_target_report(
             unique_samples: unique.len(),
             measured_samples: 0,
             batch_size,
+            measurement_layer,
+            corpus_collection_seconds_included: measurement_layer
+                .includes_corpus_collection_in_total_seconds(),
+            corpus_collection_seconds,
             total_embeddings: 0,
             total_seconds: 0.0,
             embeddings_per_second: 0.0,
@@ -353,18 +378,38 @@ fn benchmark_target_report(
     warmup_model(model, &texts, batch_size, warmup_batches)?;
 
     let mut latencies_ms = Vec::new();
-    let started = Instant::now();
     let mut total_embeddings = 0usize;
-    for chunk in texts.chunks(batch_size.max(1)) {
-        let payload: Vec<String> = chunk.to_vec();
-        let t0 = Instant::now();
-        let embeddings = model
-            .embed(payload, None)
-            .with_context(|| format!("embedding batch failed for {:?}", target))?;
-        latencies_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
-        total_embeddings += embeddings.len();
+    let measurement_started = Instant::now();
+    if measurement_layer.prebuilds_batches() {
+        let payloads: Vec<Vec<String>> = texts
+            .chunks(batch_size.max(1))
+            .map(|chunk| chunk.to_vec())
+            .collect();
+        for payload in payloads {
+            let t0 = Instant::now();
+            let embeddings = model
+                .embed(payload, None)
+                .with_context(|| format!("embedding batch failed for {:?}", target))?;
+            latencies_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+            total_embeddings += embeddings.len();
+        }
+    } else {
+        for chunk in texts.chunks(batch_size.max(1)) {
+            let payload: Vec<String> = chunk.to_vec();
+            let t0 = Instant::now();
+            let embeddings = model
+                .embed(payload, None)
+                .with_context(|| format!("embedding batch failed for {:?}", target))?;
+            latencies_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+            total_embeddings += embeddings.len();
+        }
     }
-    let total_seconds = started.elapsed().as_secs_f64();
+    let measured_seconds = measurement_started.elapsed().as_secs_f64();
+    let total_seconds = if measurement_layer.includes_corpus_collection_in_total_seconds() {
+        measured_seconds + corpus_collection_seconds
+    } else {
+        measured_seconds
+    };
     let embeddings_per_second = if total_seconds > 0.0 {
         total_embeddings as f64 / total_seconds
     } else {
@@ -377,6 +422,10 @@ fn benchmark_target_report(
         unique_samples: unique.len(),
         measured_samples: measured.len(),
         batch_size,
+        measurement_layer,
+        corpus_collection_seconds_included: measurement_layer
+            .includes_corpus_collection_in_total_seconds(),
+        corpus_collection_seconds,
         total_embeddings,
         total_seconds,
         embeddings_per_second,

@@ -300,6 +300,10 @@ Operational conclusion:
 - on this machine, both CPU and current CUDA runs remain far below the target
 - the next proof required is not "can we ask for CUDA?" but "why does real GPU throughput remain this low, and what change would move the curve materially?"
 - the benchmark contract now explicitly distinguishes the measurement layer, even if the first implementation still routes all real runs through the historical benchmark path
+- the branch now applies a first real semantic split:
+  - `full_pipeline` includes corpus collection in `total_seconds`
+  - `model_only` prebuilds batches before timing the inference loop
+  - `prepare_embed` remains the midpoint contract for the next tranche
 
 Additional runtime truth discovered after the first benchmark pass:
 - production was still underusing the calibrated profile in part of the worker loop

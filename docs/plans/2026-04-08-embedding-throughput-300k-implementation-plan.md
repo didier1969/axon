@@ -67,7 +67,10 @@ One benchmark command can now emit clearly attributed results for each measureme
 - the benchmark contract now carries an explicit `measurement_layer`
 - CLI supports `--measurement-layer model_only|prepare_embed|full_pipeline`
 - tests and `--help` output are green
-- the internal execution path is not yet split; this first pass stabilizes the public contract before the real benchmark-layer separation
+- the internal execution path now has a first real split:
+  - `full_pipeline` includes corpus collection in the measured total
+  - `model_only` prebuilds payload batches before entering the timed inference loop
+  - `prepare_embed` is still the next refinement target
 
 ## Tranche 2. Make Batch Sizes Runtime-Tunable
 
