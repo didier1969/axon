@@ -290,6 +290,24 @@ pub struct EmbeddingRuntimeContract {
     pub execution_provider: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingProfileBenchmarkRow {
+    pub profile_key: EmbeddingProfileKey,
+    pub mode: &'static str,
+    pub backend: EmbeddingExecutionBackend,
+    pub model_name: String,
+    pub dimension: usize,
+    pub symbol_model_id: String,
+    pub chunk_model_id: String,
+    pub graph_model_id: String,
+    pub chunk_batch_size: usize,
+    pub symbol_batch_size: usize,
+    pub file_vectorization_batch_size: usize,
+    pub graph_batch_size: usize,
+    pub file_fetch_limit: usize,
+    pub total_chunk_budget: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileVectorizationRuntimeBudget {
     pub pause: bool,
@@ -376,6 +394,65 @@ pub fn embedding_runtime_contract_for_profile(profile: &EmbeddingProfile) -> Emb
 
 pub fn embedding_runtime_contract() -> EmbeddingRuntimeContract {
     embedding_runtime_contract_for_profile(&default_embedding_profile())
+}
+
+fn benchmark_row_for_profile(
+    key: EmbeddingProfileKey,
+    backend: EmbeddingExecutionBackend,
+    queue_depth: usize,
+) -> EmbeddingProfileBenchmarkRow {
+    let base = embedding_profile_for_key(key);
+    let calibrated = calibrated_embedding_profile_for_backend(&base, backend);
+    let budget =
+        file_vectorization_runtime_budget(&calibrated, ServicePressure::Healthy, queue_depth);
+    let contract = embedding_runtime_contract_for_profile(&calibrated);
+
+    EmbeddingProfileBenchmarkRow {
+        profile_key: key,
+        mode: "proxy",
+        backend,
+        model_name: contract.model_name,
+        dimension: contract.dimension,
+        symbol_model_id: contract.symbol_model_id,
+        chunk_model_id: contract.chunk_model_id,
+        graph_model_id: contract.graph_model_id,
+        chunk_batch_size: contract.chunk_batch_size,
+        symbol_batch_size: contract.symbol_batch_size,
+        file_vectorization_batch_size: contract.file_vectorization_batch_size,
+        graph_batch_size: contract.graph_batch_size,
+        file_fetch_limit: budget.file_fetch_limit,
+        total_chunk_budget: budget.total_chunk_budget,
+    }
+}
+
+pub fn embedding_profile_benchmark_matrix() -> Vec<EmbeddingProfileBenchmarkRow> {
+    vec![
+        benchmark_row_for_profile(
+            EmbeddingProfileKey::JinaCodeV2Base,
+            EmbeddingExecutionBackend::Cpu,
+            120,
+        ),
+        benchmark_row_for_profile(
+            EmbeddingProfileKey::BgeBaseEnv15,
+            EmbeddingExecutionBackend::Cpu,
+            120,
+        ),
+        benchmark_row_for_profile(
+            EmbeddingProfileKey::LegacyBgeSmallEnv15,
+            EmbeddingExecutionBackend::Cpu,
+            120,
+        ),
+        benchmark_row_for_profile(
+            EmbeddingProfileKey::JinaCodeV2Base,
+            EmbeddingExecutionBackend::GpuCuda,
+            120,
+        ),
+        benchmark_row_for_profile(
+            EmbeddingProfileKey::BgeBaseEnv15,
+            EmbeddingExecutionBackend::GpuCuda,
+            120,
+        ),
+    ]
 }
 
 // NEXUS v10.5: Sovereign Semantic Engine

@@ -350,6 +350,32 @@ git commit -m "perf: calibrate vectorization pipeline for gpu execution"
 
 ### Task 7: Ecrire le benchmark comparatif modele/qualite/debit
 
+**Status:** Complete le `2026-04-08`
+
+**Resultat implemente:**
+- un harness comparatif pur existe maintenant pour les profils embeddings Axon
+- la matrice couvre:
+  - `jinaai/jina-embeddings-v2-base-code`
+  - `BAAI/bge-base-en-v1.5`
+  - `BAAI/bge-small-en-v1.5`
+- le reporting est volontairement en mode `proxy`, pour rester stable en TDD locale:
+  - `profile_key`
+  - `backend`
+  - `model_name`
+  - `dimension`
+  - `symbol/chunk/graph model_id`
+  - batch sizes calibres
+  - budget runtime de vectorisation fichier
+- la comparaison expose aussi les lignes GPU demandees pour `jina` et `bge-base`, sans charger les modeles ni telecharger quoi que ce soit
+
+**Validation executee:**
+- `cargo test --lib embedding_profile_benchmark -- --nocapture`
+
+**Vigilance residuelle hors perimetre Task 7:**
+- ce harness mesure un contrat comparatif stable, pas encore une inference reelle ni un vrai debit `embeddings/s`
+- le mode benchmark reel devra etre ajoute dans une tranche suivante si l'on veut chronometrer `cold_start`, `warm_infer` et `db_write`
+- la qualite retrieval reste encore hors de ce harness proxy
+
 **Files:**
 - Create: `src/axon-core/src/tests/embedding_profile_benchmark_tests.rs`
 - Modify: `src/axon-core/src/embedder.rs`
