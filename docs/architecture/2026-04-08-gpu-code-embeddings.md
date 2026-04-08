@@ -303,7 +303,8 @@ Operational conclusion:
 - the branch now applies a first real semantic split:
   - `full_pipeline` includes corpus collection in `total_seconds`
   - `model_only` prebuilds batches before timing the inference loop
-  - `prepare_embed` remains the midpoint contract for the next tranche
+  - `prepare_embed` now carries explicit `prepare_seconds`
+  - `prepare_embed` and `full_pipeline` include preparation time in `total_seconds`
 
 Additional runtime truth discovered after the first benchmark pass:
 - production was still underusing the calibrated profile in part of the worker loop

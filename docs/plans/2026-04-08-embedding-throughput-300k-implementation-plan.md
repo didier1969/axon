@@ -70,7 +70,8 @@ One benchmark command can now emit clearly attributed results for each measureme
 - the internal execution path now has a first real split:
   - `full_pipeline` includes corpus collection in the measured total
   - `model_only` prebuilds payload batches before entering the timed inference loop
-  - `prepare_embed` is still the next refinement target
+  - `prepare_embed` now carries explicit `prepare_seconds`
+  - `prepare_embed` and `full_pipeline` include preparation time in the measured total
 
 ## Tranche 2. Make Batch Sizes Runtime-Tunable
 

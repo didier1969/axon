@@ -134,3 +134,10 @@ fn test_measurement_layers_expose_distinct_timing_semantics() {
     assert!(!BenchmarkMeasurementLayer::PrepareEmbed.prebuilds_batches());
     assert!(!BenchmarkMeasurementLayer::FullPipeline.prebuilds_batches());
 }
+
+#[test]
+fn test_measurement_layers_expose_distinct_preparation_accounting() {
+    assert!(!BenchmarkMeasurementLayer::ModelOnly.includes_prepare_seconds_in_total_seconds());
+    assert!(BenchmarkMeasurementLayer::PrepareEmbed.includes_prepare_seconds_in_total_seconds());
+    assert!(BenchmarkMeasurementLayer::FullPipeline.includes_prepare_seconds_in_total_seconds());
+}

@@ -34,6 +34,10 @@ impl BenchmarkMeasurementLayer {
         matches!(self, Self::FullPipeline)
     }
 
+    pub fn includes_prepare_seconds_in_total_seconds(self) -> bool {
+        matches!(self, Self::PrepareEmbed | Self::FullPipeline)
+    }
+
     pub fn prebuilds_batches(self) -> bool {
         matches!(self, Self::ModelOnly)
     }
@@ -109,6 +113,8 @@ pub struct BenchmarkTargetReport {
     pub measurement_layer: BenchmarkMeasurementLayer,
     pub corpus_collection_seconds_included: bool,
     pub corpus_collection_seconds: f64,
+    pub prepare_seconds_included: bool,
+    pub prepare_seconds: f64,
     pub total_embeddings: usize,
     pub total_seconds: f64,
     pub embeddings_per_second: f64,
@@ -364,6 +370,9 @@ fn benchmark_target_report(
             corpus_collection_seconds_included: measurement_layer
                 .includes_corpus_collection_in_total_seconds(),
             corpus_collection_seconds,
+            prepare_seconds_included: measurement_layer
+                .includes_prepare_seconds_in_total_seconds(),
+            prepare_seconds: 0.0,
             total_embeddings: 0,
             total_seconds: 0.0,
             embeddings_per_second: 0.0,
@@ -377,15 +386,23 @@ fn benchmark_target_report(
     let texts: Vec<String> = measured.iter().map(|sample| sample.text.clone()).collect();
     warmup_model(model, &texts, batch_size, warmup_batches)?;
 
+    let prepare_started = Instant::now();
+    let prebuilt_payloads = if measurement_layer.prebuilds_batches() {
+        Some(
+            texts.chunks(batch_size.max(1))
+                .map(|chunk| chunk.to_vec())
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+    let prepare_seconds = prepare_started.elapsed().as_secs_f64();
+
     let mut latencies_ms = Vec::new();
     let mut total_embeddings = 0usize;
     let measurement_started = Instant::now();
     if measurement_layer.prebuilds_batches() {
-        let payloads: Vec<Vec<String>> = texts
-            .chunks(batch_size.max(1))
-            .map(|chunk| chunk.to_vec())
-            .collect();
-        for payload in payloads {
+        for payload in prebuilt_payloads.unwrap_or_default() {
             let t0 = Instant::now();
             let embeddings = model
                 .embed(payload, None)
@@ -405,11 +422,13 @@ fn benchmark_target_report(
         }
     }
     let measured_seconds = measurement_started.elapsed().as_secs_f64();
-    let total_seconds = if measurement_layer.includes_corpus_collection_in_total_seconds() {
-        measured_seconds + corpus_collection_seconds
-    } else {
-        measured_seconds
-    };
+    let mut total_seconds = measured_seconds;
+    if measurement_layer.includes_prepare_seconds_in_total_seconds() {
+        total_seconds += prepare_seconds;
+    }
+    if measurement_layer.includes_corpus_collection_in_total_seconds() {
+        total_seconds += corpus_collection_seconds;
+    }
     let embeddings_per_second = if total_seconds > 0.0 {
         total_embeddings as f64 / total_seconds
     } else {
@@ -426,6 +445,8 @@ fn benchmark_target_report(
         corpus_collection_seconds_included: measurement_layer
             .includes_corpus_collection_in_total_seconds(),
         corpus_collection_seconds,
+        prepare_seconds_included: measurement_layer.includes_prepare_seconds_in_total_seconds(),
+        prepare_seconds,
         total_embeddings,
         total_seconds,
         embeddings_per_second,
