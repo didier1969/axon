@@ -130,11 +130,6 @@ fn file_vectorization_queue_upsert(file_path: &str, now_ms: i64) -> String {
     )
 }
 
-fn sort_and_dedup_sql_tuples(values: &mut Vec<String>) {
-    values.sort_unstable();
-    values.dedup();
-}
-
 impl GraphStore {
     fn chunk_embedding_model_id() -> &'static str {
         default_embedding_profile().chunk.model_id
@@ -1314,9 +1309,6 @@ impl GraphStore {
                 queries.push(file_vectorization_queue_upsert(&path, now_ms));
             }
         }
-        sort_and_dedup_sql_tuples(&mut contains_values);
-        sort_and_dedup_sql_tuples(&mut calls_values);
-        sort_and_dedup_sql_tuples(&mut calls_nif_values);
         for chunk in symbol_values.chunks(500) {
             queries.push(format!(
                 "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_slug=EXCLUDED.project_slug, embedding=EXCLUDED.embedding;",
@@ -1882,33 +1874,6 @@ impl GraphStore {
             "INSERT INTO CONTAINS (source_id, target_id) VALUES ('{}', '{}');",
             from, to
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::sort_and_dedup_sql_tuples;
-
-    #[test]
-    fn sort_and_dedup_sql_tuples_removes_duplicate_relation_rows() {
-        let mut values = vec![
-            "('b', 'c')".to_string(),
-            "('a', 'b')".to_string(),
-            "('b', 'c')".to_string(),
-            "('a', 'b')".to_string(),
-            "('c', 'd')".to_string(),
-        ];
-
-        sort_and_dedup_sql_tuples(&mut values);
-
-        assert_eq!(
-            values,
-            vec![
-                "('a', 'b')".to_string(),
-                "('b', 'c')".to_string(),
-                "('c', 'd')".to_string(),
-            ]
-        );
     }
 }
 
