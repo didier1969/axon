@@ -55,6 +55,11 @@ Le point important est celui-ci :
 - **Surface opérateur:** Phoenix/LiveView
 - **Environnement local officiel:** Nix + Devenv
 - **HydraDB:** détachée du workflow quotidien actuel
+- **Embeddings code actuels:** profil primaire `jinaai/jina-embeddings-v2-base-code`, fallback `BAAI/bge-base-en-v1.5`, stockage dimensionnel gouverné par le runtime
+
+Référence d’architecture pour cette filière:
+
+- `docs/architecture/2026-04-08-gpu-code-embeddings.md`
 
 ## Workflow canonique
 
@@ -98,6 +103,13 @@ Arrêt propre:
   - attend le dashboard et le runtime
   - vérifie la surface SQL live quand le core est prêt
 
+- `dev-fast.sh`
+  - boucle courte Rust avec `cargo check` ou tests filtrés
+  - réutilise un `target-dir` partagé
+  - active l’incrémental par défaut
+  - permet `sccache` en opt-in via `AXON_RUST_CACHE_MODE=sccache`
+  - évite de relancer une suite complète pour chaque micro-changement
+
 - `stop.sh`
   - arrête uniquement les processus Axon
   - ferme la session `tmux`
@@ -133,3 +145,4 @@ curl -sS -X POST http://127.0.0.1:44129/sql \
 - HydraDB ne fait plus partie du chemin nominal journalier
 - les docs archivées dans `docs/archive/` ne doivent pas être lues comme contrat courant
 - `Titan` ne fait plus partie du contrat d’ingestion courant; la règle canonique est le budget mémoire Rust
+- les embeddings ne sont plus un contrat figé `384d`; toute bascule de profil doit suivre le runbook documenté dans `docs/architecture/2026-04-08-gpu-code-embeddings.md`

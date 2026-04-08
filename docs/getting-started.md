@@ -84,6 +84,28 @@ Le script arrête uniquement les processus Axon et nettoie sockets, locks et WAL
 
 ## Notes utiles
 
+- boucle courte Rust:
+```bash
+./scripts/dev-fast.sh check
+./scripts/dev-fast.sh changed
+./scripts/dev-fast.sh test scanner::tests
+AXON_RUST_CACHE_MODE=sccache ./scripts/dev-fast.sh build
+```
+
+- embeddings code:
+  - profil primaire actuel: `jinaai/jina-embeddings-v2-base-code`
+  - fallback: `BAAI/bge-base-en-v1.5`
+  - référence opératoire: `docs/architecture/2026-04-08-gpu-code-embeddings.md`
+
+- exemple de démarrage avec profil explicite:
+```bash
+AXON_EMBEDDING_PROFILE=jina \
+AXON_EMBEDDING_FALLBACK_PROFILE=bge-base \
+./scripts/start.sh
+```
+
+- en cas de changement de modèle ou de dimension, considérer la couche embeddings comme une revectorisation gouvernée par le runtime, pas comme un simple redémarrage
+
 - `IST` est la vérité technique reconstructible
 - `SOLL` est la vérité conceptuelle protégée
 - le chemin live des exports `SOLL` est `docs/vision/`
