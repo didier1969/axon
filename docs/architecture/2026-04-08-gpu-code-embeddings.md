@@ -208,12 +208,44 @@ Implemented and verified:
 - Jina primary + BGE base fallback
 - GPU-calibrated file-vectorization runtime budgeting
 - proxy benchmark matrix across profiles
+- real benchmark harness with local corpus extraction and JSON output
 
 Not yet fully certified:
 - effective provider proof in production runtime telemetry
-- real `embeddings/s` benchmark on your machine
+- full GPU benchmark on the target machine with visible CUDA provider
 - retrieval-quality benchmark on a representative Axon corpus
 - full MCP/tooling migration away from all legacy `*-384` identifiers
+
+## Real Benchmark Truth On This Machine
+
+Measured on `2026-04-08` from the worktree corpus in `src/axon-core`, using the new
+`embedding_benchmark` binary and local corpus extraction.
+
+Environment truth observed by the harness:
+- backend requested for measured runs: `cpu`
+- `gpu_present`: `false`
+- result: this environment does not currently expose a usable GPU to the benchmark runtime
+
+Measured CPU runs:
+
+### Legacy baseline: `BAAI/bge-small-en-v1.5` (`384d`)
+
+- file target: about `28_992 embeddings/h`
+- type target: about `33_549 embeddings/h`
+- procedure target: about `28_974 embeddings/h`
+
+### Primary target: `jinaai/jina-embeddings-v2-base-code` (`768d`)
+
+Fast downsampled run (`16` measured samples per target) used to obtain a first real reading:
+
+- file target: about `7_902 embeddings/h`
+- type target: about `14_464 embeddings/h`
+- procedure target: about `13_209 embeddings/h`
+
+Operational conclusion:
+- the CPU path is far below the strategic target `300_000 embeddings/h`
+- on this machine, the branch is now benchmark-capable, but the target remains unproven and currently unattainable on CPU
+- the next proof required is a real `cuda requested` run on a runtime that actually exposes the GPU, plus an external confirmation of GPU activity
 
 ## Next Logical Steps
 

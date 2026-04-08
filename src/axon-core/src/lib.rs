@@ -2,6 +2,7 @@
 
 pub mod bridge;
 pub mod config;
+pub mod embedding_benchmark;
 pub mod embedder;
 pub mod file_ingress_guard;
 pub mod fs_watcher;

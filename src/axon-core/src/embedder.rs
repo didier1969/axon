@@ -81,7 +81,7 @@ pub enum RuntimeEmbeddingModel {
 }
 
 impl RuntimeEmbeddingModel {
-    fn fastembed_model(self) -> EmbeddingModel {
+    pub(crate) fn fastembed_model(self) -> EmbeddingModel {
         match self {
             Self::JinaEmbeddingsV2BaseCode => EmbeddingModel::JinaEmbeddingsV2BaseCode,
             Self::BGEBaseENV15 => EmbeddingModel::BGEBaseENV15,
@@ -89,7 +89,7 @@ impl RuntimeEmbeddingModel {
         }
     }
 
-    fn startup_label(self) -> &'static str {
+    pub(crate) fn startup_label(self) -> &'static str {
         match self {
             Self::JinaEmbeddingsV2BaseCode => "Jina-Code-V2-Base",
             Self::BGEBaseENV15 => "BGE-Base",

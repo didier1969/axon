@@ -475,9 +475,32 @@ git commit -m "docs: document gpu code embeddings architecture and runbook"
 
 ### Task 9: Validation finale
 
+**Pivot de realite constate le `2026-04-08`:**
+- la branche n'expose encore qu'une matrice proxy, pas un benchmark reel d'inference
+- cette task doit donc etre executee comme une vraie tranche d'implementation:
+  - harness de benchmark reel
+  - corpus local representatif
+  - sortie JSON stable
+  - verdict explicite contre la cible `300_000 embeddings/h`
+  - distinction claire `backend demande` vs `backend observe`
+
 **Files:**
-- Modify: none
+- Modify: `src/axon-core/src/embedder.rs`
+- Create: `src/axon-core/src/embedding_benchmark.rs`
+- Create: `src/axon-core/src/tests/embedding_real_benchmark_tests.rs`
+- Create: `src/axon-core/src/bin/embedding_benchmark.rs`
+- Modify: `src/axon-core/src/lib.rs`
 - Test: tests cibles + benchmark Axon reel
+
+**Etat courant du `2026-04-08`:**
+- harness reel implemente
+- tests de contrat du harness verts
+- benchmark CPU reel execute
+- verite mesuree:
+  - `bge-small 384d`: environ `29k` a `33.5k embeddings/h`
+  - `jina 768d`: environ `7.9k` a `14.5k embeddings/h` sur un run reduit
+- cible `300k/h` non atteinte en CPU
+- `gpu_present=false` dans cet environnement, donc aucune certification GPU possible ici
 
 **Step 1: Run targeted verification**
 
