@@ -56,6 +56,7 @@ Le point important est celui-ci :
 - **Environnement local officiel:** Nix + Devenv
 - **HydraDB:** détachée du workflow quotidien actuel
 - **Embeddings code actuels:** profil primaire `jinaai/jina-embeddings-v2-base-code`, fallback `BAAI/bge-base-en-v1.5`, stockage dimensionnel gouverné par le runtime
+- **Sélection du backend embeddings:** `AXON_EMBEDDING_BACKEND=auto|cpu|cuda` permet maintenant de forcer le backend indépendamment de l’heuristique locale `gpu_present`
 
 Référence d’architecture pour cette filière:
 

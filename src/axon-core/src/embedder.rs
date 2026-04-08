@@ -253,6 +253,19 @@ pub fn default_embedding_execution_backend(gpu_present: bool) -> EmbeddingExecut
     }
 }
 
+pub fn configured_embedding_execution_backend(gpu_present: bool) -> EmbeddingExecutionBackend {
+    match std::env::var("AXON_EMBEDDING_BACKEND")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("cpu") => EmbeddingExecutionBackend::Cpu,
+        Some("cuda") | Some("gpu") => EmbeddingExecutionBackend::GpuCuda,
+        Some("auto") | None => default_embedding_execution_backend(gpu_present),
+        Some(_) => default_embedding_execution_backend(gpu_present),
+    }
+}
+
 pub fn embedding_execution_backend_name(backend: EmbeddingExecutionBackend) -> &'static str {
     backend.name()
 }
@@ -499,7 +512,7 @@ impl SemanticWorkerPool {
     fn worker_loop(graph_store: Arc<GraphStore>, queue_store: Arc<QueueStore>) {
         let runtime_profile = crate::runtime_profile::RuntimeProfile::detect();
         let profile_stack = configured_embedding_profile_stack();
-        let backend = default_embedding_execution_backend(runtime_profile.gpu_present);
+        let backend = configured_embedding_execution_backend(runtime_profile.gpu_present);
         let mut candidate_profiles = vec![profile_stack.primary.clone()];
         if let Some(fallback) = profile_stack.fallback.clone() {
             candidate_profiles.push(fallback);

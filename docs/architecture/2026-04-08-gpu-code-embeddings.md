@@ -25,6 +25,7 @@ The current default contract is:
 - profile selection driven by environment:
   - `AXON_EMBEDDING_PROFILE`
   - `AXON_EMBEDDING_FALLBACK_PROFILE`
+  - `AXON_EMBEDDING_BACKEND` with values `auto | cpu | cuda`
 
 The canonical code lives in:
 - [embedder.rs](/home/dstadel/projects/axon/.worktrees/dev/feat-workflow-hardening/src/axon-core/src/embedder.rs)
@@ -73,6 +74,7 @@ But the remaining distinction matters:
 
 Current truth:
 - Axon can request CUDA explicitly
+- operators can now force backend selection with `AXON_EMBEDDING_BACKEND`, independently from the local `gpu_present` heuristic
 - the benchmark harness can compare CPU and requested-GPU contracts
 - the branch does not yet prove the effective provider through runtime telemetry strong enough to certify real GPU execution in production terms
 
@@ -187,6 +189,17 @@ Examples:
 ```bash
 AXON_EMBEDDING_PROFILE=jina \
 AXON_EMBEDDING_FALLBACK_PROFILE=bge-base \
+AXON_EMBEDDING_BACKEND=auto \
+./scripts/start.sh
+```
+
+Force CUDA request explicitly when the process can reach the provider but the local
+device-file heuristic is not trustworthy:
+
+```bash
+AXON_EMBEDDING_PROFILE=jina \
+AXON_EMBEDDING_FALLBACK_PROFILE=bge-base \
+AXON_EMBEDDING_BACKEND=cuda \
 ./scripts/start.sh
 ```
 

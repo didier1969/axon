@@ -101,6 +101,15 @@ AXON_RUST_CACHE_MODE=sccache ./scripts/dev-fast.sh build
 ```bash
 AXON_EMBEDDING_PROFILE=jina \
 AXON_EMBEDDING_FALLBACK_PROFILE=bge-base \
+AXON_EMBEDDING_BACKEND=auto \
+./scripts/start.sh
+```
+
+- exemple de forçage CUDA quand le process voit mal les device files mais peut quand même charger le provider:
+```bash
+AXON_EMBEDDING_PROFILE=jina \
+AXON_EMBEDDING_FALLBACK_PROFILE=bge-base \
+AXON_EMBEDDING_BACKEND=cuda \
 ./scripts/start.sh
 ```
 
