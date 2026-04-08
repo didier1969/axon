@@ -162,6 +162,15 @@ Run targeted tests, then real matrix runs on the target machine.
 
 One best-known stable batch profile is selected from measured evidence, not intuition.
 
+**Current truth after the first reduced saturation probe:**
+- the first parallel sweep attempt was invalid for comparison because concurrent benchmark processes contaminated throughput
+- the first sequential reduced probe was run on `bge-base + cuda + model_only`
+- on the reduced harness, `procedure` throughput at `symbol_batch_size=64` (`~38.5k/h`) was better than both:
+  - `symbol_batch_size=96` (`~30.0k/h`)
+  - `symbol_batch_size=128` (`~30.1k/h`)
+- therefore, increasing `symbol_batch_size` above the current calibrated GPU batch does not improve throughput on this path
+- the next tranche should not be “push batch higher again blindly”; it should focus on stronger runtime/provider truth and deeper inference-path diagnosis
+
 ## Tranche 4. Expose Stronger Runtime Backend Truth
 
 ### Objective

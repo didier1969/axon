@@ -422,6 +422,32 @@ What this proves:
 - the report now makes override usage explicit instead of silently mutating comparisons
 - the next sweep can compare canonical vs tuned runs honestly
 
+### Reduced saturation probe on `2026-04-08`
+
+The first directionally honest saturation probe was run sequentially, not in parallel, because
+parallel benchmark processes contaminated the measurement. The reduced probe used:
+
+- profile: `BAAI/bge-base-en-v1.5`
+- backend requested: `cuda`
+- layer: `model_only`
+- corpus limits: `max_files=16`, `max_samples_per_target=16`
+- measured samples per target: `8`
+- target under comparison: `procedure`
+
+Results:
+- canonical `symbol_batch_size=64`:
+  - `~38_467 embeddings/h`
+- override `symbol_batch_size=96`:
+  - `~29_955 embeddings/h`
+- override `symbol_batch_size=128`:
+  - `~30_081 embeddings/h`
+
+What this reduced probe proves:
+- on this harness, the current calibrated GPU symbol batch `64` is already better than the first larger neighbors `96` and `128`
+- the curve is not monotonically increasing with larger batch sizes
+- the next large performance win is unlikely to come from simply pushing `symbol_batch_size` upward on the current path
+- batching still matters, but the dominant remaining ceiling is likely deeper in the effective inference/runtime path than in this one knob alone
+
 Additional runtime truth discovered after the first benchmark pass:
 - production was still underusing the calibrated profile in part of the worker loop
 - specifically, symbol and graph fetch waves were still pinned to `32` and `6` through legacy constants
