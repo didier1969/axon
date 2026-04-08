@@ -1,6 +1,7 @@
 use crate::embedding_benchmark::{
     benchmark_target_for_symbol_kind, collect_repo_benchmark_corpus, expand_benchmark_samples,
-    BenchmarkSample, BenchmarkTargetKind, CorpusCollectionLimits,
+    BenchmarkMeasurementLayer, BenchmarkSample, BenchmarkTargetKind, CorpusCollectionLimits,
+    RealEmbeddingBenchmarkConfig,
     BENCHMARK_TARGET_EMBEDDINGS_PER_HOUR,
 };
 use tempfile::tempdir;
@@ -94,5 +95,22 @@ impl Greeter {
     assert!(
         corpus.procedures.iter().any(|sample| sample.label == "hello"),
         "procedure snippets should include the parsed method"
+    );
+}
+
+#[test]
+fn test_real_benchmark_config_defaults_to_full_pipeline_mode() {
+    let config = RealEmbeddingBenchmarkConfig::default();
+
+    assert_eq!(config.measurement_layer, BenchmarkMeasurementLayer::FullPipeline);
+}
+
+#[test]
+fn test_measurement_layer_labels_are_stable() {
+    assert_eq!(BenchmarkMeasurementLayer::ModelOnly.label(), "model_only");
+    assert_eq!(BenchmarkMeasurementLayer::PrepareEmbed.label(), "prepare_embed");
+    assert_eq!(
+        BenchmarkMeasurementLayer::FullPipeline.label(),
+        "full_pipeline"
     );
 }

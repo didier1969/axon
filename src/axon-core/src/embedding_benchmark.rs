@@ -15,6 +15,24 @@ pub const BENCHMARK_TARGET_EMBEDDINGS_PER_HOUR: u64 = 300_000;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum BenchmarkMeasurementLayer {
+    ModelOnly,
+    PrepareEmbed,
+    FullPipeline,
+}
+
+impl BenchmarkMeasurementLayer {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ModelOnly => "model_only",
+            Self::PrepareEmbed => "prepare_embed",
+            Self::FullPipeline => "full_pipeline",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum BenchmarkTargetKind {
     File,
     Type,
@@ -68,6 +86,7 @@ pub struct RealEmbeddingBenchmarkConfig {
     pub repo_path: PathBuf,
     pub profile_key: EmbeddingProfileKey,
     pub backend: EmbeddingExecutionBackend,
+    pub measurement_layer: BenchmarkMeasurementLayer,
     pub warmup_batches: usize,
     pub min_samples_per_target: usize,
     pub limits: CorpusCollectionLimits,
@@ -91,6 +110,7 @@ pub struct BenchmarkTargetReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct RealEmbeddingBenchmarkReport {
     pub mode: &'static str,
+    pub measurement_layer: BenchmarkMeasurementLayer,
     pub repo_path: PathBuf,
     pub model_name: String,
     pub dimension: usize,
@@ -112,6 +132,7 @@ impl Default for RealEmbeddingBenchmarkConfig {
             repo_path: PathBuf::from("."),
             profile_key: EmbeddingProfileKey::JinaCodeV2Base,
             backend: EmbeddingExecutionBackend::Cpu,
+            measurement_layer: BenchmarkMeasurementLayer::FullPipeline,
             warmup_batches: 4,
             min_samples_per_target: 1_024,
             limits: CorpusCollectionLimits {
@@ -286,6 +307,7 @@ pub fn run_real_embedding_benchmark(
 
     Ok(RealEmbeddingBenchmarkReport {
         mode: "real",
+        measurement_layer: config.measurement_layer,
         repo_path: config.repo_path.clone(),
         model_name: profile.model_name.to_string(),
         dimension: profile.dimension,

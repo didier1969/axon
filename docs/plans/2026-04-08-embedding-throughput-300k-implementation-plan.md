@@ -17,6 +17,8 @@ Known truth entering this plan:
 
 ## Tranche 1. Split Measurement Layers
 
+**Status:** In progress on `2026-04-08`
+
 ### Objective
 
 Separate:
@@ -60,6 +62,12 @@ cargo run --manifest-path src/axon-core/Cargo.toml --bin embedding_benchmark -- 
 ### Exit Proof
 
 One benchmark command can now emit clearly attributed results for each measurement layer.
+
+**Current truth after the first Red/Green pass:**
+- the benchmark contract now carries an explicit `measurement_layer`
+- CLI supports `--measurement-layer model_only|prepare_embed|full_pipeline`
+- tests and `--help` output are green
+- the internal execution path is not yet split; this first pass stabilizes the public contract before the real benchmark-layer separation
 
 ## Tranche 2. Make Batch Sizes Runtime-Tunable
 

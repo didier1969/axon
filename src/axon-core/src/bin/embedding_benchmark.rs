@@ -1,5 +1,5 @@
 use axon_core::embedding_benchmark::{
-    run_real_embedding_benchmark, RealEmbeddingBenchmarkConfig,
+    run_real_embedding_benchmark, BenchmarkMeasurementLayer, RealEmbeddingBenchmarkConfig,
 };
 use axon_core::embedder::{EmbeddingExecutionBackend, EmbeddingProfileKey};
 use anyhow::{bail, Context, Result};
@@ -20,6 +20,10 @@ fn main() -> Result<()> {
             }
             "--backend" => {
                 config.backend = parse_backend(&next_arg(&mut args, "--backend")?)?;
+            }
+            "--measurement-layer" | "--mode" => {
+                config.measurement_layer =
+                    parse_measurement_layer(&next_arg(&mut args, "--measurement-layer")?)?;
             }
             "--warmup-batches" => {
                 config.warmup_batches = next_arg(&mut args, "--warmup-batches")?
@@ -104,6 +108,19 @@ fn parse_backend(value: &str) -> Result<EmbeddingExecutionBackend> {
     }
 }
 
+fn parse_measurement_layer(value: &str) -> Result<BenchmarkMeasurementLayer> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "model_only" | "model-only" | "model" => Ok(BenchmarkMeasurementLayer::ModelOnly),
+        "prepare_embed" | "prepare-embed" | "prepare" => {
+            Ok(BenchmarkMeasurementLayer::PrepareEmbed)
+        }
+        "full_pipeline" | "full-pipeline" | "pipeline" | "full" => {
+            Ok(BenchmarkMeasurementLayer::FullPipeline)
+        }
+        other => bail!("unsupported --measurement-layer value: {other}"),
+    }
+}
+
 fn print_help() {
     println!(
         "\
@@ -111,6 +128,7 @@ embedding_benchmark
   --repo-path <path>
   [--profile jina|bge-base|legacy-bge-small]
   [--backend cpu|cuda]
+  [--measurement-layer model_only|prepare_embed|full_pipeline]
   [--warmup-batches <n>]
   [--min-samples <n>]
   [--max-files <n>]
