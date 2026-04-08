@@ -58,10 +58,15 @@ pub enum BridgeEvent {
         ingress_subtree_hint_accepted_total: u64,
         ingress_subtree_hint_blocked_total: u64,
         ingress_subtree_hint_suppressed_total: u64,
+        ingress_subtree_hint_productive_total: u64,
+        ingress_subtree_hint_unproductive_total: u64,
+        ingress_subtree_hint_dropped_total: u64,
         ingress_collapsed_total: u64,
         ingress_flush_count: u64,
         ingress_last_flush_duration_ms: u64,
         ingress_last_promoted_count: u64,
+        memory_trim_attempts_total: u64,
+        memory_trim_successes_total: u64,
         cpu_load: f64,
         ram_load: f64,
         io_wait: f64,
@@ -121,10 +126,15 @@ mod tests {
             ingress_subtree_hint_accepted_total: 15,
             ingress_subtree_hint_blocked_total: 4,
             ingress_subtree_hint_suppressed_total: 2,
+            ingress_subtree_hint_productive_total: 9,
+            ingress_subtree_hint_unproductive_total: 6,
+            ingress_subtree_hint_dropped_total: 3,
             ingress_collapsed_total: 19,
             ingress_flush_count: 5,
             ingress_last_flush_duration_ms: 44,
             ingress_last_promoted_count: 8,
+            memory_trim_attempts_total: 11,
+            memory_trim_successes_total: 5,
             cpu_load: 61.5,
             ram_load: 47.0,
             io_wait: 12.2,
@@ -174,10 +184,15 @@ mod tests {
         assert!(json.contains("\"ingress_subtree_hint_accepted_total\":15"));
         assert!(json.contains("\"ingress_subtree_hint_blocked_total\":4"));
         assert!(json.contains("\"ingress_subtree_hint_suppressed_total\":2"));
+        assert!(json.contains("\"ingress_subtree_hint_productive_total\":9"));
+        assert!(json.contains("\"ingress_subtree_hint_unproductive_total\":6"));
+        assert!(json.contains("\"ingress_subtree_hint_dropped_total\":3"));
         assert!(json.contains("\"ingress_collapsed_total\":19"));
         assert!(json.contains("\"ingress_flush_count\":5"));
         assert!(json.contains("\"ingress_last_flush_duration_ms\":44"));
         assert!(json.contains("\"ingress_last_promoted_count\":8"));
+        assert!(json.contains("\"memory_trim_attempts_total\":11"));
+        assert!(json.contains("\"memory_trim_successes_total\":5"));
         assert!(json.contains("\"cpu_load\":61.5"));
         assert!(json.contains("\"ram_load\":47.0"));
         assert!(json.contains("\"io_wait\":12.2"));

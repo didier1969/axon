@@ -11,6 +11,7 @@ pub mod graph_bootstrap;
 pub mod graph_ingestion;
 pub mod graph_query;
 pub mod ingress_buffer;
+pub mod indexing_policy;
 pub mod mcp;
 pub mod mcp_http;
 pub mod parser;

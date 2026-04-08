@@ -359,6 +359,9 @@ impl McpServer {
             *   Subtree hints acceptés : {}\n\
             *   Subtree hints bloqués : {}\n\
             *   Subtree hints supprimés : {}\n\
+            *   Subtree hints productifs : {}\n\
+            *   Subtree hints non productifs : {}\n\
+            *   Subtree hints abandonnés : {}\n\
             *   Événements collapsés : {}\n\
             *   Flushs : {}\n\
             *   Dernier flush : {} ms\n\
@@ -401,6 +404,9 @@ impl McpServer {
             ingress.subtree_hint_accepted_total,
             ingress.subtree_hint_blocked_total,
             ingress.subtree_hint_suppressed_total,
+            ingress.subtree_hint_productive_total,
+            ingress.subtree_hint_unproductive_total,
+            ingress.subtree_hint_dropped_total,
             ingress.collapsed_total,
             ingress.flush_count,
             ingress.last_flush_duration_ms,

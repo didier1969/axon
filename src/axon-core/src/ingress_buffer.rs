@@ -11,6 +11,9 @@ static INGRESS_SUBTREE_HINT_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_SUBTREE_HINT_BLOCKED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_SUBTREE_HINT_PRODUCTIVE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_SUBTREE_HINT_UNPRODUCTIVE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_SUBTREE_HINT_DROPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_COLLAPSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
 static INGRESS_LAST_FLUSH_DURATION_MS: AtomicU64 = AtomicU64::new(0);
@@ -109,6 +112,9 @@ pub struct IngressMetricsSnapshot {
     pub subtree_hint_accepted_total: u64,
     pub subtree_hint_blocked_total: u64,
     pub subtree_hint_suppressed_total: u64,
+    pub subtree_hint_productive_total: u64,
+    pub subtree_hint_unproductive_total: u64,
+    pub subtree_hint_dropped_total: u64,
     pub hot_entries: usize,
     pub scan_entries: usize,
     pub collapsed_total: u64,
@@ -275,6 +281,12 @@ impl IngressBuffer {
             subtree_hint_blocked_total: INGRESS_SUBTREE_HINT_BLOCKED_TOTAL.load(Ordering::Relaxed),
             subtree_hint_suppressed_total: INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL
                 .load(Ordering::Relaxed),
+            subtree_hint_productive_total: INGRESS_SUBTREE_HINT_PRODUCTIVE_TOTAL
+                .load(Ordering::Relaxed),
+            subtree_hint_unproductive_total: INGRESS_SUBTREE_HINT_UNPRODUCTIVE_TOTAL
+                .load(Ordering::Relaxed),
+            subtree_hint_dropped_total: INGRESS_SUBTREE_HINT_DROPPED_TOTAL
+                .load(Ordering::Relaxed),
             hot_entries,
             scan_entries,
             collapsed_total: INGRESS_COLLAPSED_TOTAL.load(Ordering::Relaxed),
@@ -358,6 +370,43 @@ impl IngressBuffer {
         self.sync_metrics();
     }
 
+    pub fn complete_subtree_hint_with_stats(&mut self, path: &str, promoted_count: usize) {
+        let now = current_time_ms();
+        let mut drop_hint = false;
+        if let Some(state) = self.subtree_hints.get_mut(path) {
+            state.in_flight = false;
+            state.last_seen_ms = now;
+            if promoted_count > 0 {
+                state.execution_count = 0;
+                INGRESS_SUBTREE_HINT_PRODUCTIVE_TOTAL.fetch_add(1, Ordering::Relaxed);
+            } else {
+                state.execution_count = state.execution_count.saturating_add(1);
+                INGRESS_SUBTREE_HINT_UNPRODUCTIVE_TOTAL.fetch_add(1, Ordering::Relaxed);
+            }
+            state.cooldown_until_ms = now.saturating_add(subtree_hint_cooldown_ms());
+            if promoted_count == 0 && state.execution_count >= subtree_hint_retry_budget() {
+                INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
+                drop_hint = true;
+            }
+        }
+        if drop_hint && self.subtree_hints.remove(path).is_some() {
+            INGRESS_SUBTREE_HINT_DROPPED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        self.prune_idle_subtree_hints(now);
+        self.sync_metrics();
+    }
+
+    pub fn shed_subtree_hints_for_memory_pressure(&mut self) -> usize {
+        let dropped = self.subtree_hints.len();
+        if dropped == 0 {
+            return 0;
+        }
+        self.subtree_hints.clear();
+        INGRESS_SUBTREE_HINT_DROPPED_TOTAL.fetch_add(dropped as u64, Ordering::Relaxed);
+        self.sync_metrics();
+        dropped
+    }
+
     fn prune_idle_subtree_hints(&mut self, now: u64) {
         self.subtree_hints.retain(|_, state| {
             state.in_flight || state.cooldown_until_ms == 0 || now < state.cooldown_until_ms
@@ -432,6 +481,12 @@ pub fn ingress_metrics_snapshot() -> IngressMetricsSnapshot {
         subtree_hint_blocked_total: INGRESS_SUBTREE_HINT_BLOCKED_TOTAL.load(Ordering::Relaxed),
         subtree_hint_suppressed_total: INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL
             .load(Ordering::Relaxed),
+        subtree_hint_productive_total: INGRESS_SUBTREE_HINT_PRODUCTIVE_TOTAL
+            .load(Ordering::Relaxed),
+        subtree_hint_unproductive_total: INGRESS_SUBTREE_HINT_UNPRODUCTIVE_TOTAL
+            .load(Ordering::Relaxed),
+        subtree_hint_dropped_total: INGRESS_SUBTREE_HINT_DROPPED_TOTAL
+            .load(Ordering::Relaxed),
         hot_entries: 0,
         scan_entries: 0,
         collapsed_total: INGRESS_COLLAPSED_TOTAL.load(Ordering::Relaxed),
@@ -475,5 +530,50 @@ fn subtree_hint_retry_budget() -> u64 {
 impl Default for IngressBuffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IngressBuffer, IngressSource};
+
+    #[test]
+    fn test_subtree_hint_is_evicted_after_retry_budget_when_unproductive() {
+        let mut buffer = IngressBuffer::default();
+        let path = "/tmp/project/_build_truth";
+
+        buffer.record_subtree_hint(path, 900, IngressSource::Watcher);
+        assert_eq!(buffer.subtree_hint_entries(), 1);
+
+        let batch = buffer.drain_batch(10);
+        assert_eq!(batch.subtree_hints.len(), 1);
+
+        for _ in 0..3 {
+            buffer.complete_subtree_hint_with_stats(path, 0);
+        }
+
+        assert_eq!(
+            buffer.subtree_hint_entries(),
+            0,
+            "Un subtree hint non productif doit etre abandonne apres epuisement du budget"
+        );
+    }
+
+    #[test]
+    fn test_subtree_hint_is_preserved_when_it_produces_work() {
+        let mut buffer = IngressBuffer::default();
+        let path = "/tmp/project/src";
+
+        buffer.record_subtree_hint(path, 900, IngressSource::Watcher);
+        let batch = buffer.drain_batch(10);
+        assert_eq!(batch.subtree_hints.len(), 1);
+
+        buffer.complete_subtree_hint_with_stats(path, 4);
+
+        assert_eq!(
+            buffer.subtree_hint_entries(),
+            1,
+            "Un subtree hint productif doit rester eligible pour de futures rafales"
+        );
     }
 }

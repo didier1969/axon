@@ -1,5 +1,6 @@
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use crate::indexing_policy::EcosystemId;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::catch_unwind;
@@ -172,6 +173,28 @@ pub mod text;
 pub mod typeql;
 pub mod typescript;
 pub mod yaml;
+
+const SUPPORTED_PARSER_ECOSYSTEMS: &[EcosystemId] = &[
+    EcosystemId::JavaScript,
+    EcosystemId::TypeScript,
+    EcosystemId::Python,
+    EcosystemId::Elixir,
+    EcosystemId::Erlang,
+    EcosystemId::Rust,
+    EcosystemId::Go,
+    EcosystemId::Jvm,
+    EcosystemId::C,
+    EcosystemId::Cpp,
+    EcosystemId::CSharp,
+    EcosystemId::Ruby,
+    EcosystemId::Php,
+    EcosystemId::WebAssets,
+    EcosystemId::DataLogic,
+];
+
+pub fn supported_parser_ecosystems() -> &'static [EcosystemId] {
+    SUPPORTED_PARSER_ECOSYSTEMS
+}
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
     let ext = path.extension()?.to_str()?.to_lowercase();

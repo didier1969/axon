@@ -54,10 +54,18 @@ pub(crate) fn spawn_runtime_telemetry(
                 ingress_subtree_hint_blocked_total: snapshot.ingress_subtree_hint_blocked_total,
                 ingress_subtree_hint_suppressed_total: snapshot
                     .ingress_subtree_hint_suppressed_total,
+                ingress_subtree_hint_productive_total: snapshot
+                    .ingress_subtree_hint_productive_total,
+                ingress_subtree_hint_unproductive_total: snapshot
+                    .ingress_subtree_hint_unproductive_total,
+                ingress_subtree_hint_dropped_total: snapshot
+                    .ingress_subtree_hint_dropped_total,
                 ingress_collapsed_total: snapshot.ingress_collapsed_total,
                 ingress_flush_count: snapshot.ingress_flush_count,
                 ingress_last_flush_duration_ms: snapshot.ingress_last_flush_duration_ms,
                 ingress_last_promoted_count: snapshot.ingress_last_promoted_count,
+                memory_trim_attempts_total: snapshot.memory_trim_attempts_total,
+                memory_trim_successes_total: snapshot.memory_trim_successes_total,
                 cpu_load: snapshot.cpu_load,
                 ram_load: snapshot.ram_load,
                 io_wait: snapshot.io_wait,

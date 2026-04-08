@@ -15,6 +15,8 @@ pub struct IndexingConfig {
     pub ignored_directory_segments: Vec<String>,
     #[serde(default = "default_blocked_subtree_hint_segments")]
     pub blocked_subtree_hint_segments: Vec<String>,
+    #[serde(default = "default_soft_excluded_directory_segments_allowlist")]
+    pub soft_excluded_directory_segments_allowlist: Vec<String>,
     #[serde(default = "default_subtree_hint_cooldown_ms")]
     pub subtree_hint_cooldown_ms: u64,
     #[serde(default = "default_subtree_hint_retry_budget")]
@@ -35,6 +37,8 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| {
             supported_extensions: default_supported_extensions(),
             ignored_directory_segments: default_ignored_directory_segments(),
             blocked_subtree_hint_segments: default_blocked_subtree_hint_segments(),
+            soft_excluded_directory_segments_allowlist:
+                default_soft_excluded_directory_segments_allowlist(),
             subtree_hint_cooldown_ms: default_subtree_hint_cooldown_ms(),
             subtree_hint_retry_budget: default_subtree_hint_retry_budget(),
             use_git_global_ignore: default_use_git_global_ignore(),
@@ -76,45 +80,18 @@ fn default_supported_extensions() -> Vec<String> {
 
 fn default_ignored_directory_segments() -> Vec<String> {
     vec![
-        ".git".to_string(),
-        ".svn".to_string(),
-        ".hg".to_string(),
-        ".mypy_cache".to_string(),
-        ".pytest_cache".to_string(),
-        ".ruff_cache".to_string(),
-        "__pycache__".to_string(),
-        ".venv".to_string(),
         ".fastembed_cache".to_string(),
-        ".direnv".to_string(),
-        ".devenv".to_string(),
-        ".cache".to_string(),
-        "node_modules".to_string(),
-        "target".to_string(),
-        "_build".to_string(),
-        "deps".to_string(),
-        "build".to_string(),
-        "dist".to_string(),
-        "vendor".to_string(),
     ]
 }
 
 fn default_blocked_subtree_hint_segments() -> Vec<String> {
     vec![
-        ".git".to_string(),
-        ".svn".to_string(),
-        ".hg".to_string(),
-        ".direnv".to_string(),
-        ".devenv".to_string(),
-        ".cache".to_string(),
-        "node_modules".to_string(),
-        "target".to_string(),
-        "_build".to_string(),
-        "deps".to_string(),
-        "build".to_string(),
-        "dist".to_string(),
-        "vendor".to_string(),
         "pg_wal".to_string(),
     ]
+}
+
+fn default_soft_excluded_directory_segments_allowlist() -> Vec<String> {
+    Vec::new()
 }
 
 fn default_subtree_hint_cooldown_ms() -> u64 {
