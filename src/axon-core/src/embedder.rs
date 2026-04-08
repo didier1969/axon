@@ -22,6 +22,51 @@ const FILE_VECTORIZATION_BATCH_SIZE: usize = 8;
 const GRAPH_BATCH_SIZE: usize = 6;
 const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
 const EMBEDDING_KINDS: [&str; 3] = ["symbol", "chunk", "graph"];
+const EMBEDDING_DIMENSION: usize = 384;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingKindConfig {
+    pub kind: &'static str,
+    pub model_id: &'static str,
+    pub batch_size: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingProfile {
+    pub model_name: &'static str,
+    pub model_version: &'static str,
+    pub dimension: usize,
+    pub symbol: EmbeddingKindConfig,
+    pub chunk: EmbeddingKindConfig,
+    pub graph: EmbeddingKindConfig,
+    pub file_vectorization_batch_size: usize,
+    pub execution_provider: Option<&'static str>,
+}
+
+pub fn default_embedding_profile() -> EmbeddingProfile {
+    EmbeddingProfile {
+        model_name: MODEL_NAME,
+        model_version: MODEL_VERSION,
+        dimension: EMBEDDING_DIMENSION,
+        symbol: EmbeddingKindConfig {
+            kind: "symbol",
+            model_id: SYMBOL_MODEL_ID,
+            batch_size: SYMBOL_BATCH_SIZE,
+        },
+        chunk: EmbeddingKindConfig {
+            kind: "chunk",
+            model_id: CHUNK_MODEL_ID,
+            batch_size: CHUNK_BATCH_SIZE,
+        },
+        graph: EmbeddingKindConfig {
+            kind: "graph",
+            model_id: GRAPH_MODEL_ID,
+            batch_size: GRAPH_BATCH_SIZE,
+        },
+        file_vectorization_batch_size: FILE_VECTORIZATION_BATCH_SIZE,
+        execution_provider: None,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbeddingRuntimeContract {
@@ -39,18 +84,19 @@ pub struct EmbeddingRuntimeContract {
 }
 
 pub fn embedding_runtime_contract() -> EmbeddingRuntimeContract {
+    let profile = default_embedding_profile();
     EmbeddingRuntimeContract {
-        model_name: MODEL_NAME,
-        symbol_model_id: SYMBOL_MODEL_ID,
-        chunk_model_id: CHUNK_MODEL_ID,
-        graph_model_id: GRAPH_MODEL_ID,
-        dimension: 384,
-        chunk_batch_size: CHUNK_BATCH_SIZE,
-        symbol_batch_size: SYMBOL_BATCH_SIZE,
-        file_vectorization_batch_size: FILE_VECTORIZATION_BATCH_SIZE,
-        graph_batch_size: GRAPH_BATCH_SIZE,
+        model_name: profile.model_name,
+        symbol_model_id: profile.symbol.model_id,
+        chunk_model_id: profile.chunk.model_id,
+        graph_model_id: profile.graph.model_id,
+        dimension: profile.dimension,
+        chunk_batch_size: profile.chunk.batch_size,
+        symbol_batch_size: profile.symbol.batch_size,
+        file_vectorization_batch_size: profile.file_vectorization_batch_size,
+        graph_batch_size: profile.graph.batch_size,
         kinds: &EMBEDDING_KINDS,
-        execution_provider: None,
+        execution_provider: profile.execution_provider,
     }
 }
 
@@ -100,12 +146,14 @@ impl SemanticWorkerPool {
         let (query_tx, query_rx) = unbounded();
         register_query_embedding_sender(query_tx);
 
+        let profile = default_embedding_profile();
+
         if let Err(e) = graph_store.ensure_embedding_model(
-            SYMBOL_MODEL_ID,
-            "symbol",
-            MODEL_NAME,
-            384,
-            MODEL_VERSION,
+            profile.symbol.model_id,
+            profile.symbol.kind,
+            profile.model_name,
+            profile.dimension as i64,
+            profile.model_version,
         ) {
             error!(
                 "Semantic Worker: failed to register symbol embedding model: {:?}",
@@ -113,11 +161,11 @@ impl SemanticWorkerPool {
             );
         }
         if let Err(e) = graph_store.ensure_embedding_model(
-            CHUNK_MODEL_ID,
-            "chunk",
-            MODEL_NAME,
-            384,
-            MODEL_VERSION,
+            profile.chunk.model_id,
+            profile.chunk.kind,
+            profile.model_name,
+            profile.dimension as i64,
+            profile.model_version,
         ) {
             error!(
                 "Semantic Worker: failed to register chunk embedding model: {:?}",
@@ -125,11 +173,11 @@ impl SemanticWorkerPool {
             );
         }
         if let Err(e) = graph_store.ensure_embedding_model(
-            GRAPH_MODEL_ID,
-            "graph",
-            MODEL_NAME,
-            384,
-            MODEL_VERSION,
+            profile.graph.model_id,
+            profile.graph.kind,
+            profile.model_name,
+            profile.dimension as i64,
+            profile.model_version,
         ) {
             error!(
                 "Semantic Worker: failed to register graph embedding model: {:?}",

@@ -11,11 +11,11 @@ use tracing::{info, warn};
 use crate::graph::{CloseDbFunc, ExecFunc, GraphStore, InitDbFunc, LatticePool};
 use crate::project_meta::discover_project_identities;
 use crate::runtime_mode::AxonRuntimeMode;
+use crate::embedder::default_embedding_profile;
 
 const IST_SCHEMA_VERSION: &str = "3";
 const IST_INGESTION_VERSION: &str = "3";
 const IST_EMBEDDING_VERSION: &str = "1";
-const GRAPH_MODEL_ID: &str = "graph-bge-small-en-v1.5-384";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IstCompatibilityAction {
@@ -27,6 +27,10 @@ enum IstCompatibilityAction {
 }
 
 impl GraphStore {
+    fn graph_embedding_model_id() -> &'static str {
+        default_embedding_profile().graph.model_id
+    }
+
     pub fn new(db_root: &str) -> Result<Self> {
         let plugin_path = Self::find_plugin_path()?;
         let lib = Arc::new(unsafe { Library::new(&plugin_path)? });
@@ -112,7 +116,7 @@ impl GraphStore {
             store.recover_interrupted_indexing()?;
             let _ = store.clear_stale_inflight_graph_projection_work();
             let _ = store.clear_stale_inflight_file_vectorization_work();
-            match store.backfill_graph_projection_queue_for_model(GRAPH_MODEL_ID) {
+            match store.backfill_graph_projection_queue_for_model(Self::graph_embedding_model_id()) {
                 Ok(count) if count > 0 => {
                     info!(
                         "Backfilled {} graph projection queue entries for graph embeddings",

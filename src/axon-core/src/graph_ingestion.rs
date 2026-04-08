@@ -9,6 +9,7 @@ use anyhow::{anyhow, Result};
 use libloading::Symbol as LibSymbol;
 
 use crate::file_ingress_guard::FileIngressRow;
+use crate::embedder::default_embedding_profile;
 use crate::graph::{ExecFunc, GraphStore, PendingFile};
 use crate::ingress_buffer::{IngressDrainBatch, IngressPromotionStats, IngressSource};
 use crate::queue::ProcessingMode;
@@ -16,8 +17,6 @@ use crate::runtime_mode::AxonRuntimeMode;
 use crate::watcher_probe;
 
 const DEFAULT_GRAPH_EMBEDDING_RADIUS: i64 = 2;
-const CHUNK_EMBEDDING_MODEL_ID: &str = "chunk-bge-small-en-v1.5-384";
-
 #[derive(Debug, Clone, Copy)]
 enum FileUpsertSource {
     Scan,
@@ -131,7 +130,16 @@ fn file_vectorization_queue_upsert(file_path: &str, now_ms: i64) -> String {
     )
 }
 
+fn sort_and_dedup_sql_tuples(values: &mut Vec<String>) {
+    values.sort_unstable();
+    values.dedup();
+}
+
 impl GraphStore {
+    fn chunk_embedding_model_id() -> &'static str {
+        default_embedding_profile().chunk.model_id
+    }
+
     fn escape_sql(value: &str) -> String {
         value.replace("'", "''")
     }
@@ -928,7 +936,7 @@ impl GraphStore {
                    WHERE co.source_id = File.path \
                      AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
                )",
-            Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
+            Self::escape_sql(Self::chunk_embedding_model_id())
         );
         let raw = self.query_json(&query)?;
         if raw == "[]" || raw.is_empty() {
@@ -1246,7 +1254,7 @@ impl GraphStore {
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
-                Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID),
+                Self::escape_sql(Self::chunk_embedding_model_id()),
                 indexed_paths.join(",")
             ));
         }
@@ -1277,7 +1285,7 @@ impl GraphStore {
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
-                Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID),
+                Self::escape_sql(Self::chunk_embedding_model_id()),
                 degraded_paths.join(",")
             ));
         }
@@ -1306,6 +1314,9 @@ impl GraphStore {
                 queries.push(file_vectorization_queue_upsert(&path, now_ms));
             }
         }
+        sort_and_dedup_sql_tuples(&mut contains_values);
+        sort_and_dedup_sql_tuples(&mut calls_values);
+        sort_and_dedup_sql_tuples(&mut calls_nif_values);
         for chunk in symbol_values.chunks(500) {
             queries.push(format!(
                 "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_slug=EXCLUDED.project_slug, embedding=EXCLUDED.embedding;",
@@ -1871,6 +1882,33 @@ impl GraphStore {
             "INSERT INTO CONTAINS (source_id, target_id) VALUES ('{}', '{}');",
             from, to
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sort_and_dedup_sql_tuples;
+
+    #[test]
+    fn sort_and_dedup_sql_tuples_removes_duplicate_relation_rows() {
+        let mut values = vec![
+            "('b', 'c')".to_string(),
+            "('a', 'b')".to_string(),
+            "('b', 'c')".to_string(),
+            "('a', 'b')".to_string(),
+            "('c', 'd')".to_string(),
+        ];
+
+        sort_and_dedup_sql_tuples(&mut values);
+
+        assert_eq!(
+            values,
+            vec![
+                "('a', 'b')".to_string(),
+                "('b', 'c')".to_string(),
+                "('c', 'd')".to_string(),
+            ]
+        );
     }
 }
 
