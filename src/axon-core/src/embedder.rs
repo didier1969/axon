@@ -21,6 +21,38 @@ const SYMBOL_BATCH_SIZE: usize = 32;
 const FILE_VECTORIZATION_BATCH_SIZE: usize = 8;
 const GRAPH_BATCH_SIZE: usize = 6;
 const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
+const EMBEDDING_KINDS: [&str; 3] = ["symbol", "chunk", "graph"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingRuntimeContract {
+    pub model_name: &'static str,
+    pub symbol_model_id: &'static str,
+    pub chunk_model_id: &'static str,
+    pub graph_model_id: &'static str,
+    pub dimension: usize,
+    pub chunk_batch_size: usize,
+    pub symbol_batch_size: usize,
+    pub file_vectorization_batch_size: usize,
+    pub graph_batch_size: usize,
+    pub kinds: &'static [&'static str],
+    pub execution_provider: Option<&'static str>,
+}
+
+pub fn embedding_runtime_contract() -> EmbeddingRuntimeContract {
+    EmbeddingRuntimeContract {
+        model_name: MODEL_NAME,
+        symbol_model_id: SYMBOL_MODEL_ID,
+        chunk_model_id: CHUNK_MODEL_ID,
+        graph_model_id: GRAPH_MODEL_ID,
+        dimension: 384,
+        chunk_batch_size: CHUNK_BATCH_SIZE,
+        symbol_batch_size: SYMBOL_BATCH_SIZE,
+        file_vectorization_batch_size: FILE_VECTORIZATION_BATCH_SIZE,
+        graph_batch_size: GRAPH_BATCH_SIZE,
+        kinds: &EMBEDDING_KINDS,
+        execution_provider: None,
+    }
+}
 
 // NEXUS v10.5: Sovereign Semantic Engine
 // We isolate the ONNX runtime inside a pure OS thread to prevent Tokio/jemalloc aborts.
