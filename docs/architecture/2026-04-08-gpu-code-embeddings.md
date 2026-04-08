@@ -117,6 +117,10 @@ The current implementation reduces this waste by:
 - collapsing chunk embedding work into cross-file waves
 - clearing queue entries only when files are truly `vector_ready`
 
+Correction now applied on this branch:
+- the semantic worker no longer computes a GPU-calibrated profile and then partially ignores it
+- symbol embedding fetch size and graph projection fetch size now follow the calibrated runtime profile instead of staying pinned to legacy CPU constants
+
 ## Benchmarking Truth
 
 Axon now exposes a proxy benchmark matrix for embedding profiles.
@@ -278,6 +282,11 @@ Operational conclusion:
 - the strategic target `300_000 embeddings/h` is not remotely reached in the current implementation
 - on this machine, both CPU and current CUDA runs remain far below the target
 - the next proof required is not "can we ask for CUDA?" but "why does real GPU throughput remain this low, and what change would move the curve materially?"
+
+Additional runtime truth discovered after the first benchmark pass:
+- production was still underusing the calibrated profile in part of the worker loop
+- specifically, symbol and graph fetch waves were still pinned to `32` and `6` through legacy constants
+- this branch now aligns those fetch limits with the calibrated profile, but that correction alone does not explain the full gap to `300_000 embeddings/h`
 
 ## Next Logical Steps
 

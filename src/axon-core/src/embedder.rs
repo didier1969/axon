@@ -315,6 +315,12 @@ pub struct FileVectorizationRuntimeBudget {
     pub total_chunk_budget: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticWorkerFetchLimits {
+    pub symbol_fetch_batch_size: usize,
+    pub graph_projection_batch_size: usize,
+}
+
 pub fn calibrated_embedding_profile_for_backend(
     profile: &EmbeddingProfile,
     backend: EmbeddingExecutionBackend,
@@ -373,6 +379,15 @@ pub fn file_vectorization_runtime_budget(
         pause: false,
         file_fetch_limit: profile.file_vectorization_batch_size,
         total_chunk_budget: profile.chunk.batch_size * 4,
+    }
+}
+
+pub fn semantic_worker_fetch_limits_for_profile(
+    profile: &EmbeddingProfile,
+) -> SemanticWorkerFetchLimits {
+    SemanticWorkerFetchLimits {
+        symbol_fetch_batch_size: profile.symbol.batch_size,
+        graph_projection_batch_size: profile.graph.batch_size,
     }
 }
 
@@ -555,6 +570,8 @@ impl SemanticWorkerPool {
 
         info!("Semantic Worker: Hunting for unembedded symbols...");
 
+        let fetch_limits = semantic_worker_fetch_limits_for_profile(&profile);
+
         loop {
             if handle_pending_query_requests(&mut model, &query_rx, 8) {
                 continue;
@@ -721,7 +738,7 @@ impl SemanticWorkerPool {
             }
 
             let mut symbol_backlog_active = false;
-            match graph_store.fetch_unembedded_symbols(SYMBOL_BATCH_SIZE) {
+            match graph_store.fetch_unembedded_symbols(fetch_limits.symbol_fetch_batch_size) {
                 Ok(symbols) if !symbols.is_empty() => {
                     symbol_backlog_active = true;
                     debug!("Semantic Worker: Embedding {} symbols...", symbols.len());
@@ -764,7 +781,9 @@ impl SemanticWorkerPool {
                 continue;
             }
 
-            match graph_store.fetch_pending_graph_projection_work(GRAPH_BATCH_SIZE) {
+            match graph_store
+                .fetch_pending_graph_projection_work(fetch_limits.graph_projection_batch_size)
+            {
                 Ok(pending) if !pending.is_empty() => {
                     debug!(
                         "Semantic Worker: Embedding {} graph projection jobs...",

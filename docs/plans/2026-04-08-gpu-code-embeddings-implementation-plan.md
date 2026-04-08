@@ -327,6 +327,10 @@ CUDA demande, `jinaai/jina-embeddings-v2-base-code`:
 - l'ecart n'est pas marginal; il est massif
 - le systeme est maintenant benchmarke reellement
 - le probleme ouvert n'est plus un manque d'observabilite benchmark, mais un manque de debit effectif
+- une incoherence de prod a aussi ete identifiee apres benchmark:
+  - le worker calculait bien un profil GPU calibre
+  - mais continuait a fetcher les symboles et projections graphe avec des constantes CPU historiques
+  - cette derive a ete corrigee ensuite, avec tests cibles
 
 **Vigilance residuelle hors perimetre Task 9:**
 - `RuntimeProfile::detect()` continue a reporter `gpu_present=false` dans cet environnement alors qu'un GPU est bien visible par `nvidia-smi`

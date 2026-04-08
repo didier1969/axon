@@ -1,6 +1,7 @@
 use crate::embedder::{
     calibrated_embedding_profile_for_backend, default_embedding_profile,
-    file_vectorization_runtime_budget, EmbeddingExecutionBackend,
+    file_vectorization_runtime_budget, semantic_worker_fetch_limits_for_profile,
+    EmbeddingExecutionBackend,
 };
 use crate::graph::GraphStore;
 use crate::parser::{ExtractionResult, Symbol};
@@ -107,6 +108,27 @@ fn test_file_vectorization_runtime_budget_throttles_under_pressure() {
     assert!(critical.pause, "critical runtime must pause file vectorization");
     assert_eq!(critical.file_fetch_limit, 0);
     assert_eq!(critical.total_chunk_budget, 0);
+}
+
+#[test]
+fn test_semantic_worker_fetch_limits_follow_gpu_calibrated_profile() {
+    let profile = calibrated_embedding_profile_for_backend(
+        &default_embedding_profile(),
+        EmbeddingExecutionBackend::GpuCuda,
+    );
+
+    let limits = semantic_worker_fetch_limits_for_profile(&profile);
+
+    assert_eq!(
+        limits.symbol_fetch_batch_size,
+        profile.symbol.batch_size,
+        "symbol fetch size must follow the calibrated runtime profile"
+    );
+    assert_eq!(
+        limits.graph_projection_batch_size,
+        profile.graph.batch_size,
+        "graph projection fetch size must follow the calibrated runtime profile"
+    );
 }
 
 #[test]
