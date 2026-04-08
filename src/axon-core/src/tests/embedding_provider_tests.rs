@@ -1,8 +1,12 @@
 use crate::embedder::{
     configured_embedding_execution_backend, default_embedding_execution_backend,
-    embedding_execution_backend_name,
+    embedding_execution_backend_name, resolve_embedding_provider_truth,
     embedding_execution_providers, EmbeddingExecutionBackend,
 };
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+
+static EMBEDDING_BACKEND_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[test]
 fn test_embedding_backend_tracks_runtime_gpu_presence() {
@@ -39,6 +43,7 @@ fn test_embedding_backend_builds_execution_provider_dispatches() {
 
 #[test]
 fn test_embedding_backend_can_be_forced_to_cuda_by_env() {
+    let _guard = EMBEDDING_BACKEND_ENV_LOCK.lock().unwrap();
     std::env::set_var("AXON_EMBEDDING_BACKEND", "cuda");
 
     let backend = configured_embedding_execution_backend(false);
@@ -49,10 +54,40 @@ fn test_embedding_backend_can_be_forced_to_cuda_by_env() {
 
 #[test]
 fn test_embedding_backend_can_be_forced_to_cpu_by_env() {
+    let _guard = EMBEDDING_BACKEND_ENV_LOCK.lock().unwrap();
     std::env::set_var("AXON_EMBEDDING_BACKEND", "cpu");
 
     let backend = configured_embedding_execution_backend(true);
 
     std::env::remove_var("AXON_EMBEDDING_BACKEND");
     assert_eq!(backend, EmbeddingExecutionBackend::Cpu);
+}
+
+#[test]
+fn test_provider_truth_keeps_requested_backend_distinct_from_device_heuristic() {
+    let truth = resolve_embedding_provider_truth(EmbeddingExecutionBackend::GpuCuda, false);
+
+    assert_eq!(truth.requested_backend, "cuda");
+    assert!(!truth.gpu_present);
+    assert_eq!(truth.device_heuristic_backend, "cpu");
+}
+
+#[test]
+fn test_provider_truth_does_not_claim_cuda_effective_from_request_alone() {
+    let truth = resolve_embedding_provider_truth(EmbeddingExecutionBackend::GpuCuda, true);
+
+    assert_eq!(truth.provider_effective, None);
+    assert_eq!(truth.provider_status, "unverified");
+    assert!(
+        truth.provider_note.contains("requested"),
+        "the note should explain that CUDA was requested, not proven"
+    );
+}
+
+#[test]
+fn test_provider_truth_verifies_cpu_when_cpu_only_requested() {
+    let truth = resolve_embedding_provider_truth(EmbeddingExecutionBackend::Cpu, true);
+
+    assert_eq!(truth.provider_effective, Some("cpu"));
+    assert_eq!(truth.provider_status, "verified");
 }

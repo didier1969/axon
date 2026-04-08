@@ -179,10 +179,11 @@ Stop relying on `gpu_present` as the only runtime truth.
 
 ### Files
 
-- Modify: `src/axon-core/src/runtime_profile.rs`
 - Modify: `src/axon-core/src/embedder.rs`
 - Modify: `src/axon-core/src/embedding_benchmark.rs`
 - Modify: `src/axon-core/src/tests/embedding_provider_tests.rs`
+- Modify: `src/axon-core/src/tests/embedding_real_benchmark_tests.rs`
+- Modify: `docs/architecture/2026-04-08-gpu-code-embeddings.md`
 
 ### Red
 
@@ -195,7 +196,8 @@ Add failing tests that require:
 Implement the minimal truth model:
 - local GPU accessibility
 - backend requested
-- provider effective if known, otherwise `unknown`
+- heuristic backend derived from local visibility
+- provider effective only if operationally provable, otherwise `unknown/unverified`
 
 ### Validate
 
@@ -207,6 +209,18 @@ cargo test embedding_provider --manifest-path src/axon-core/Cargo.toml -- --noca
 ### Exit Proof
 
 Benchmark reports become operationally defensible even when the environment is unusual.
+
+**Current truth after Tranche 4:**
+- benchmark and worker startup now distinguish:
+  - `requested_backend`
+  - `gpu_present`
+  - `device_heuristic_backend`
+  - `provider_effective`
+  - `provider_status`
+  - `provider_note`
+- explicit CPU request is now treated as operationally verifiable
+- explicit CUDA request is no longer misreported as proven GPU execution from request alone
+- the tranche intentionally does **not** claim exact CUDA provider proof from `fastembed/ort`; that remains a later problem if stronger introspection is required
 
 ## Tranche 5. Decouple Inference From Persistence
 

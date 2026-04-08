@@ -1,7 +1,8 @@
 use crate::embedder::{
     apply_embedding_batch_overrides, calibrated_embedding_profile_without_overrides,
     configured_embedding_batch_overrides, embedding_execution_providers,
-    embedding_profile_for_key, EmbeddingExecutionBackend, EmbeddingProfileKey,
+    embedding_profile_for_key, resolve_embedding_provider_truth, EmbeddingExecutionBackend,
+    EmbeddingProfileKey,
 };
 use crate::parser::get_parser_for_file;
 use crate::runtime_profile::RuntimeProfile;
@@ -134,6 +135,7 @@ pub struct RealEmbeddingBenchmarkReport {
     pub dimension: usize,
     pub requested_backend: &'static str,
     pub gpu_present: bool,
+    pub device_heuristic_backend: &'static str,
     pub target_embeddings_per_hour: u64,
     pub target_embeddings_per_second: f64,
     pub warmup_batches: usize,
@@ -143,6 +145,7 @@ pub struct RealEmbeddingBenchmarkReport {
     pub canonical_profile_batches: BenchmarkProfileBatchReport,
     pub effective_profile_batches: BenchmarkProfileBatchReport,
     pub provider_effective: Option<String>,
+    pub provider_status: &'static str,
     pub provider_note: String,
     pub corpus: RepoBenchmarkCorpus,
     pub targets: Vec<BenchmarkTargetReport>,
@@ -299,6 +302,7 @@ pub fn run_real_embedding_benchmark(
     config: &RealEmbeddingBenchmarkConfig,
 ) -> Result<RealEmbeddingBenchmarkReport> {
     let runtime_profile = RuntimeProfile::detect();
+    let provider_truth = resolve_embedding_provider_truth(config.backend, runtime_profile.gpu_present);
     let base_profile = embedding_profile_for_key(config.profile_key);
     let canonical_profile =
         calibrated_embedding_profile_without_overrides(&base_profile, config.backend);
@@ -352,8 +356,9 @@ pub fn run_real_embedding_benchmark(
         repo_path: config.repo_path.clone(),
         model_name: profile.model_name.to_string(),
         dimension: profile.dimension,
-        requested_backend: config.backend.name(),
-        gpu_present: runtime_profile.gpu_present,
+        requested_backend: provider_truth.requested_backend,
+        gpu_present: provider_truth.gpu_present,
+        device_heuristic_backend: provider_truth.device_heuristic_backend,
         target_embeddings_per_hour: BENCHMARK_TARGET_EMBEDDINGS_PER_HOUR,
         target_embeddings_per_second: BENCHMARK_TARGET_EMBEDDINGS_PER_HOUR as f64 / 3600.0,
         warmup_batches: config.warmup_batches,
@@ -366,8 +371,9 @@ pub fn run_real_embedding_benchmark(
         },
         canonical_profile_batches: BenchmarkProfileBatchReport::from_profile(&canonical_profile),
         effective_profile_batches: BenchmarkProfileBatchReport::from_profile(&profile),
-        provider_effective: None,
-        provider_note: "The harness proves real inference throughput, but fastembed/ort do not currently expose the effective execution provider strongly enough here; correlate with external GPU telemetry if required.".to_string(),
+        provider_effective: provider_truth.provider_effective.map(str::to_string),
+        provider_status: provider_truth.provider_status,
+        provider_note: provider_truth.provider_note,
         corpus,
         targets,
     })

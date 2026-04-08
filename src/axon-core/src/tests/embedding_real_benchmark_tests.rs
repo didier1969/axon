@@ -4,6 +4,7 @@ use crate::embedding_benchmark::{
     RealEmbeddingBenchmarkConfig,
     BENCHMARK_TARGET_EMBEDDINGS_PER_HOUR,
 };
+use crate::embedder::{resolve_embedding_provider_truth, EmbeddingExecutionBackend};
 use tempfile::tempdir;
 
 #[test]
@@ -140,4 +141,14 @@ fn test_measurement_layers_expose_distinct_preparation_accounting() {
     assert!(!BenchmarkMeasurementLayer::ModelOnly.includes_prepare_seconds_in_total_seconds());
     assert!(BenchmarkMeasurementLayer::PrepareEmbed.includes_prepare_seconds_in_total_seconds());
     assert!(BenchmarkMeasurementLayer::FullPipeline.includes_prepare_seconds_in_total_seconds());
+}
+
+#[test]
+fn test_provider_truth_contract_separates_requested_heuristic_and_effective_fields() {
+    let truth = resolve_embedding_provider_truth(EmbeddingExecutionBackend::GpuCuda, false);
+
+    assert_eq!(truth.requested_backend, "cuda");
+    assert_eq!(truth.device_heuristic_backend, "cpu");
+    assert_eq!(truth.provider_effective, None);
+    assert_eq!(truth.provider_status, "unverified");
 }

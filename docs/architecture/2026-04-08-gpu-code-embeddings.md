@@ -357,8 +357,8 @@ What these layer-split CPU runs prove:
 
 These runs used the same reduced local corpus and `16` measured samples per target.
 External GPU activity had already been confirmed separately on this machine, but the
-benchmark JSON still reports `gpu_present=false`, so the internal runtime truth remains
-incomplete.
+benchmark JSON still reports `gpu_present=false`, so the internal runtime truth remained
+incomplete until the provider-truth tranche below.
 
 #### `jinaai/jina-embeddings-v2-base-code` (`768d`)
 
@@ -397,6 +397,38 @@ What these layer-split CUDA-requested runs prove:
 - the largest remaining ceiling is still not the measured preparation step; it is the model path and the broader pipeline around it
 - even with CUDA requested, the best observed layer result remains far below `300_000 embeddings/h`
 - the next high-leverage question is no longer "can Axon request CUDA?" but "why does the effective path remain this close to CPU, and which batch/pipeline changes materially move the curve?"
+
+### Provider-truth tranche on `2026-04-08`
+
+Axon now exposes a stricter runtime truth model for embedding runs and worker startup:
+
+- `requested_backend`
+  - what the operator or benchmark asked for
+- `gpu_present`
+  - a local device heuristic only
+- `device_heuristic_backend`
+  - the backend Axon would have inferred from the local heuristic alone
+- `provider_effective`
+  - populated only when the startup path makes the provider operationally provable
+- `provider_status`
+  - currently `verified` or `unverified`
+- `provider_note`
+  - a short explanation of why the provider claim is, or is not, strong
+
+Current semantics:
+- explicit `cpu` request is reported as `provider_effective=cpu` and `provider_status=verified`
+- explicit `cuda` request is not reported as proven CUDA execution from request alone
+- if CUDA is requested, Axon now reports that as `provider_status=unverified` unless a stronger runtime proof exists
+- the worker log uses the same truth model at startup, so runtime telemetry and benchmark semantics no longer diverge
+
+What this tranche proves:
+- Axon no longer over-interprets `gpu_present`
+- Axon no longer treats `requested_backend=cuda` as proof of GPU execution
+- benchmark JSON and worker startup logs are now operationally defensible even on hosts where the local heuristic is false-negative
+
+What it still does not prove:
+- the exact effective ONNX provider for CUDA-requested runs remains unproven from the current `fastembed` / `ort` integration alone
+- external evidence such as `nvidia-smi` is still required when that level of proof matters
 
 ### Batch override smoke proof on `2026-04-08`
 

@@ -78,6 +78,16 @@ impl EmbeddingExecutionBackend {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingProviderTruth {
+    pub requested_backend: &'static str,
+    pub device_heuristic_backend: &'static str,
+    pub gpu_present: bool,
+    pub provider_effective: Option<&'static str>,
+    pub provider_status: &'static str,
+    pub provider_note: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeEmbeddingModel {
     JinaEmbeddingsV2BaseCode,
@@ -273,6 +283,49 @@ pub fn configured_embedding_execution_backend(gpu_present: bool) -> EmbeddingExe
 
 pub fn embedding_execution_backend_name(backend: EmbeddingExecutionBackend) -> &'static str {
     backend.name()
+}
+
+pub fn resolve_embedding_provider_truth(
+    requested_backend: EmbeddingExecutionBackend,
+    gpu_present: bool,
+) -> EmbeddingProviderTruth {
+    let device_heuristic_backend = default_embedding_execution_backend(gpu_present);
+    match requested_backend {
+        EmbeddingExecutionBackend::Cpu => EmbeddingProviderTruth {
+            requested_backend: requested_backend.name(),
+            device_heuristic_backend: device_heuristic_backend.name(),
+            gpu_present,
+            provider_effective: Some("cpu"),
+            provider_status: "verified",
+            provider_note:
+                "CPU was explicitly requested and Axon configured a CPU-only provider path at startup."
+                    .to_string(),
+        },
+        EmbeddingExecutionBackend::GpuCuda => EmbeddingProviderTruth {
+            requested_backend: requested_backend.name(),
+            device_heuristic_backend: device_heuristic_backend.name(),
+            gpu_present,
+            provider_effective: None,
+            provider_status: "unverified",
+            provider_note: if gpu_present {
+                "CUDA was requested and the local device heuristic saw a GPU, but fastembed/ort do not expose the effective execution provider strongly enough here."
+                    .to_string()
+            } else {
+                "CUDA was requested, but the local device heuristic did not observe a GPU; fastembed/ort do not expose whether startup fell back to CPU here."
+                    .to_string()
+            },
+        },
+        EmbeddingExecutionBackend::Unspecified => EmbeddingProviderTruth {
+            requested_backend: requested_backend.name(),
+            device_heuristic_backend: device_heuristic_backend.name(),
+            gpu_present,
+            provider_effective: None,
+            provider_status: "unverified",
+            provider_note:
+                "The embedding backend remained unspecified, so Axon cannot prove an effective execution provider from startup intent alone."
+                    .to_string(),
+        },
+    }
 }
 
 pub fn embedding_execution_providers(
@@ -609,10 +662,14 @@ impl SemanticWorkerPool {
             "Semantic Worker: Initializing embedding profile stack [{}] in isolated thread...",
             profile_labels
         );
+        let provider_truth = resolve_embedding_provider_truth(backend, runtime_profile.gpu_present);
         info!(
-            "Semantic Worker: embedding backend selected = {} (gpu_present={})",
-            backend.name(),
-            runtime_profile.gpu_present
+            "Semantic Worker: embedding backend requested={} heuristic_backend={} gpu_present={} provider_status={} note={}",
+            provider_truth.requested_backend,
+            provider_truth.device_heuristic_backend,
+            provider_truth.gpu_present,
+            provider_truth.provider_status,
+            provider_truth.provider_note
         );
         let (mut model, profile) =
             match Self::load_text_embedding_with_fallback(&candidate_profiles, backend) {
