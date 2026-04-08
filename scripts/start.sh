@@ -73,10 +73,10 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 echo "📦 Validating Devenv environment..."
-devenv shell -- bash -lc './scripts/validate-devenv.sh'
+"$PROJECT_ROOT/scripts/devenv-shell.sh" ./scripts/validate-devenv.sh
 
 echo "📦 Pre-warming Elixir environment (Hex/Rebar)..."
-devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null"
+"$PROJECT_ROOT/scripts/devenv-shell.sh" bash -lc "cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null"
 
 if [ ! -x "bin/axon-core" ]; then
     echo "❌ Missing bin/axon-core"
@@ -126,7 +126,7 @@ DEVENV_TUNNEL_BIN=$(find "$PROJECT_ROOT" -name "axon-mcp-tunnel" -path "*/releas
 
 rebuild_core_release() {
     echo "🔧 Rebuilding axon-core release inside Devenv..."
-    if ! devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/axon-core' && cargo build --release"; then
+    if ! "$PROJECT_ROOT/scripts/devenv-shell.sh" bash -lc "cd '$PROJECT_ROOT/src/axon-core' && cargo build --release"; then
         echo "❌ Automatic Devenv rebuild failed."
         return 1
     fi
@@ -135,7 +135,7 @@ rebuild_core_release() {
 
 rebuild_tunnel_release() {
     echo "🔧 Rebuilding axon-mcp-tunnel release inside Devenv..."
-    if ! devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/axon-mcp-tunnel' && cargo build --release"; then
+    if ! "$PROJECT_ROOT/scripts/devenv-shell.sh" bash -lc "cd '$PROJECT_ROOT/src/axon-mcp-tunnel' && cargo build --release"; then
         echo "❌ Automatic Devenv rebuild for axon-mcp-tunnel failed."
         return 1
     fi
@@ -283,12 +283,12 @@ WORKER_CAP_EXPORT=""
 if [[ -n "${MAX_AXON_WORKERS:-}" ]]; then
     WORKER_CAP_EXPORT="export MAX_AXON_WORKERS=\"$MAX_AXON_WORKERS\"; "
 fi
-tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; ${WORKER_CAP_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
+tmux send-keys -t "$TMUX_SESSION:core" "\"$PROJECT_ROOT/scripts/devenv-shell.sh\" bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; ${WORKER_CAP_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
 
 if [ "$START_DASHBOARD" = "1" ]; then
     # Start Visualization Plane
     tmux new-window -t "$TMUX_SESSION" -n "nexus"
-    tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+    tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && \"$PROJECT_ROOT/scripts/devenv-shell.sh\" bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 fi
 
 echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 120s)..."

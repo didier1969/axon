@@ -38,7 +38,7 @@ Pour qualifier explicitement un shell CUDA avant benchmark ou démarrage forcé:
 
 ```bash
 AXON_EMBEDDING_BACKEND=cuda \
-devenv shell -- bash ./scripts/validate-devenv.sh
+bash ./scripts/devenv-shell.sh ./scripts/validate-devenv.sh
 ```
 
 Ce préflight doit être vert avant de compter un run `cuda` comme preuve GPU.
@@ -117,7 +117,7 @@ AXON_EMBEDDING_BACKEND=auto \
 - exemple de forçage CUDA quand le process voit mal les device files mais peut quand même charger le provider:
 ```bash
 AXON_EMBEDDING_BACKEND=cuda \
-devenv shell -- bash ./scripts/validate-devenv.sh
+bash ./scripts/devenv-shell.sh ./scripts/validate-devenv.sh
 
 AXON_EMBEDDING_PROFILE=jina \
 AXON_EMBEDDING_FALLBACK_PROFILE=bge-base \

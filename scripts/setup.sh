@@ -17,7 +17,7 @@ if ! command -v devenv &> /dev/null; then
 fi
 
 echo "📦 Validating Devenv environment..."
-devenv shell -- bash -lc './scripts/validate-devenv.sh'
+"$PROJECT_ROOT/scripts/devenv-shell.sh" ./scripts/validate-devenv.sh
 
 # 2. Rust Core build
 BIN_DIR="$PROJECT_ROOT/bin"
@@ -28,24 +28,24 @@ RUST_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -t
 mkdir -p "$BIN_DIR"
 
 echo "🔨 Building Rust core..."
-devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release"
+"$PROJECT_ROOT/scripts/devenv-shell.sh" bash -lc "cd '$RUST_CORE_DIR' && cargo build --release"
 install -m 755 "$RUST_RELEASE_BIN" "$TARGET_BIN"
 echo "✅ Rust core available at bin/axon-core"
 
 # 3. Dashboard dependencies and compile
 DASHBOARD_DIR="$PROJECT_ROOT/src/dashboard"
 echo "💧 Preparing Elixir dashboard..."
-devenv shell -- bash -lc "cd '$DASHBOARD_DIR' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && mix deps.get && mix compile"
+"$PROJECT_ROOT/scripts/devenv-shell.sh" bash -lc "cd '$DASHBOARD_DIR' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && mix deps.get && mix compile"
 echo "✅ Elixir dashboard compiled"
 
 # 4. Core validation
 echo "🧪 Running validation suite..."
 
 echo "--- Rust Unit Tests ---"
-devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo test"
+"$PROJECT_ROOT/scripts/devenv-shell.sh" bash -lc "cd '$RUST_CORE_DIR' && cargo test"
 
 echo "--- Elixir Dashboard Tests ---"
-devenv shell -- bash -lc "cd '$DASHBOARD_DIR' && mix test"
+"$PROJECT_ROOT/scripts/devenv-shell.sh" bash -lc "cd '$DASHBOARD_DIR' && mix test"
 
 echo "🏁 Bootstrap complete."
 echo "Next step: ./scripts/start.sh"

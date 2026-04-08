@@ -4,6 +4,24 @@ set -euo pipefail
 PROJECT_ROOT="/home/dstadel/projects/axon"
 cd "$PROJECT_ROOT"
 
+have_shared_lib() {
+  local lib_name="$1"
+  if ldconfig -p 2>/dev/null | grep -q "$lib_name"; then
+    return 0
+  fi
+
+  local dir
+  IFS=':' read -r -a lib_dirs <<< "${LD_LIBRARY_PATH:-}"
+  for dir in "${lib_dirs[@]}"; do
+    [ -n "$dir" ] || continue
+    if [ -e "$dir/$lib_name" ]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 if ! command -v devenv >/dev/null 2>&1; then
   echo "❌ devenv n'est pas disponible dans le PATH."
   exit 1
@@ -72,7 +90,7 @@ if [ "${AXON_EMBEDDING_BACKEND:-auto}" = "cuda" ]; then
   echo ""
   echo "CUDA runtime validation:"
 
-  if ! ldconfig -p 2>/dev/null | grep -q 'libcudnn\.so\.9'; then
+  if ! have_shared_lib 'libcudnn.so.9'; then
     echo "  MISSING libcudnn.so.9"
     echo "❌ Le shell Devenv courant ne peut pas enregistrer le provider CUDA ORT."
     echo "   Cause prouvée: libcudnn.so.9 est absente du runtime visible."
@@ -81,9 +99,9 @@ if [ "${AXON_EMBEDDING_BACKEND:-auto}" = "cuda" ]; then
 
   provider_lib="${CARGO_TARGET_DIR:-}/debug/libonnxruntime_providers_cuda.so"
   if [ -f "$provider_lib" ]; then
-    if ldd "$provider_lib" | grep -q 'not found'; then
+    if ldd "$provider_lib" 2>/dev/null | grep -q 'not found'; then
       echo "  BROKEN  $provider_lib"
-      ldd "$provider_lib" | sed 's/^/    /'
+      ldd "$provider_lib" 2>/dev/null | sed 's/^/    /'
       echo "❌ Le provider CUDA ORT a des dépendances runtime non résolues."
       exit 1
     fi

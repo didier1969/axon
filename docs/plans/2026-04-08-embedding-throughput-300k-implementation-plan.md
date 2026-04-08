@@ -248,6 +248,18 @@ Benchmark reports become operationally defensible even when the environment is u
   - current result on this host: fails early on missing `libcudnn.so.9`
   - this is now the preferred red/green gate before any further CUDA benchmark run
 
+**Current truth after the bounded CUDA runtime-shell tranche:**
+- `scripts/devenv-shell.sh` now provides a bounded CUDA path for script-driven commands
+- in `cuda` mode, it no longer injects whole host library directories
+- instead, it builds a local `.axon/cuda-runtime` symlink set for the minimum required CUDA libraries
+- `AXON_EMBEDDING_BACKEND=cuda ./scripts/devenv-shell.sh ./scripts/validate-devenv.sh` is now green
+- the reduced smoke benchmark moves past the former `libcudnn.so.9` loading failure
+- the active CUDA blocker is now deeper and different:
+  - `CUDA driver version is insufficient for CUDA runtime version`
+- consequence:
+  - the next tranche is no longer about cuDNN visibility
+  - it must diagnose and reconcile the host driver/runtime mismatch before any GPU throughput claim is credible
+
 ## Tranche 5. Decouple Inference From Persistence
 
 ### Objective

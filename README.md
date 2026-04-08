@@ -75,7 +75,7 @@ Pour toute qualification CUDA:
 
 ```bash
 AXON_EMBEDDING_BACKEND=cuda \
-devenv shell -- bash ./scripts/validate-devenv.sh
+bash ./scripts/devenv-shell.sh ./scripts/validate-devenv.sh
 ```
 
 Bootstrap initial ou après dérive importante:

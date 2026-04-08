@@ -487,6 +487,31 @@ An explicit shell-level guard now exists as well:
 - this check now fails early when `libcudnn.so.9` is not visible in the active Devenv shell
 - therefore Axon can now reject a CUDA-invalid shell before wasting time on startup or throughput runs
 
+### Bounded CUDA runtime path on `2026-04-08`
+
+The project now also has a bounded CUDA shell entrypoint:
+- [devenv-shell.sh](/home/dstadel/projects/axon/.worktrees/dev/feat-workflow-hardening/scripts/devenv-shell.sh)
+
+Current semantics:
+- normal CPU/default flows still use a standard `devenv shell`
+- when `AXON_EMBEDDING_BACKEND=cuda`, the wrapper:
+  - resolves a host cuDNN runtime from a bounded set of known locations
+  - materializes a local symlink farm under `.axon/cuda-runtime`
+  - exposes only the required CUDA `.so` files via `LD_LIBRARY_PATH`
+  - avoids injecting entire host system library directories into the Nix shell
+
+What this newly proves:
+- the shell-level failure is no longer `libcudnn.so.9 missing`
+- the smoke benchmark now gets past ORT CUDA provider loading and reaches model initialization
+
+What the latest smoke now proves instead:
+- the next blocker is:
+  - `CUDA driver version is insufficient for CUDA runtime version`
+- so the active bottleneck has moved again:
+  - from build features
+  - to missing runtime libraries
+  - to host driver/runtime compatibility
+
 What this tranche proves:
 - Axon no longer over-interprets `gpu_present`
 - Axon no longer treats `requested_backend=cuda` as proof of GPU execution
