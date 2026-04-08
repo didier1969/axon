@@ -7,6 +7,7 @@ set -euo pipefail
 PROJECT_ROOT="$(pwd)"
 DEFAULT_PROJECTS_ROOT="/home/dstadel/projects"
 cd "$PROJECT_ROOT"
+source "$PROJECT_ROOT/scripts/cargo-env.sh"
 
 if [ -f "$PROJECT_ROOT/.env.worktree" ]; then
     echo "🔧 Loading .env.worktree configuration..."
@@ -119,7 +120,6 @@ if ! nix store info >/dev/null 2>&1; then
 fi
 
 # 2. Synchronize binaries (handle 'Text file busy' via install)
-CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
 LEGACY_RELEASE_BIN="$PROJECT_ROOT/src/axon-core/target/release/axon-core"
 DEVENV_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -type f | head -n 1)
 DEVENV_TUNNEL_BIN=$(find "$PROJECT_ROOT" -name "axon-mcp-tunnel" -path "*/release/*" -type f | head -n 1)

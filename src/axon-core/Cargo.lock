@@ -203,6 +203,7 @@ dependencies = [
  "log",
  "notify-debouncer-full",
  "once_cell",
+ "ort",
  "parking_lot",
  "rand 0.8.5",
  "rayon",

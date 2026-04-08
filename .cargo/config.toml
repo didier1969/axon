@@ -1,0 +1,8 @@
+[build]
+target-dir = ".axon/cargo-target"
+
+[profile.dev]
+incremental = true
+
+[profile.test]
+incremental = true

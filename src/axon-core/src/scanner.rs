@@ -3,6 +3,8 @@ use crate::graph::GraphStore;
 use crate::ingress_buffer::{
     IngressBuffer, IngressCause, IngressFileEvent, IngressSource, SharedIngressBuffer,
 };
+use crate::indexing_policy::{classify_path, classify_subtree_hint_path, PathDisposition};
+use crate::parser::supported_parser_ecosystems;
 use crate::service_guard;
 use ignore::{gitignore::Gitignore, WalkBuilder};
 use std::fs;
@@ -56,8 +58,8 @@ impl Scanner {
         );
     }
 
-    pub fn scan_subtree(&self, graph: Arc<GraphStore>, subtree: &Path) {
-        self.scan_subtree_with_guard_and_ingress(graph, subtree, None, None);
+    pub fn scan_subtree(&self, graph: Arc<GraphStore>, subtree: &Path) -> usize {
+        self.scan_subtree_with_guard_and_ingress(graph, subtree, None, None)
     }
 
     pub fn scan_subtree_with_guard(
@@ -65,8 +67,8 @@ impl Scanner {
         graph: Arc<GraphStore>,
         subtree: &Path,
         guard: Option<&SharedFileIngressGuard>,
-    ) {
-        self.scan_subtree_with_guard_and_ingress(graph, subtree, guard, None);
+    ) -> usize {
+        self.scan_subtree_with_guard_and_ingress(graph, subtree, guard, None)
     }
 
     pub fn scan_subtree_with_guard_and_ingress(
@@ -75,7 +77,7 @@ impl Scanner {
         subtree: &Path,
         guard: Option<&SharedFileIngressGuard>,
         ingress: Option<&SharedIngressBuffer>,
-    ) {
+    ) -> usize {
         info!(
             "Lattice Engine: Prioritizing hot subtree traversal on {:?}",
             subtree
@@ -85,6 +87,7 @@ impl Scanner {
             "🔥 Hot subtree scan complete: {} files mapped from {:?}.",
             total_files, subtree
         );
+        total_files
     }
 
     pub fn should_process_path(&self, path: &Path) -> bool {
@@ -331,37 +334,33 @@ impl Scanner {
     }
 
     fn path_has_ignored_directory_noise(&self, path: &Path) -> bool {
-        let relative = match path.strip_prefix(&self.root) {
-            Ok(path) => path,
-            Err(_) => return true,
-        };
-        relative.components().any(|component| {
-            let Some(segment) = component.as_os_str().to_str() else {
-                return false;
-            };
-            crate::config::CONFIG
-                .indexing
-                .ignored_directory_segments
-                .iter()
-                .any(|ignored| ignored == segment)
-        })
+        self.path_has_ignored_directory_noise_with_config(path, &crate::config::CONFIG.indexing)
     }
 
     fn path_has_blocked_subtree_hint_segment(&self, path: &Path) -> bool {
-        let relative = match path.strip_prefix(&self.root) {
-            Ok(path) => path,
-            Err(_) => return true,
-        };
-        relative.components().any(|component| {
-            let Some(segment) = component.as_os_str().to_str() else {
-                return false;
-            };
-            crate::config::CONFIG
-                .indexing
-                .blocked_subtree_hint_segments
-                .iter()
-                .any(|blocked| blocked == segment)
-        })
+        self.path_has_blocked_subtree_hint_segment_with_config(path, &crate::config::CONFIG.indexing)
+    }
+
+    fn path_has_ignored_directory_noise_with_config(
+        &self,
+        path: &Path,
+        config: &crate::config::IndexingConfig,
+    ) -> bool {
+        !matches!(
+            classify_path(&self.root, path, config, supported_parser_ecosystems()),
+            PathDisposition::Allow
+        )
+    }
+
+    fn path_has_blocked_subtree_hint_segment_with_config(
+        &self,
+        path: &Path,
+        config: &crate::config::IndexingConfig,
+    ) -> bool {
+        !matches!(
+            classify_subtree_hint_path(&self.root, path, config, supported_parser_ecosystems()),
+            PathDisposition::Allow
+        )
     }
 
     fn is_workspace_root_worktrees_dir(&self, path: &Path) -> bool {
@@ -597,9 +596,32 @@ fn discovery_policy(
 #[cfg(test)]
 mod tests {
     use super::{discovery_policy, Scanner};
+    use crate::config::IndexingConfig;
     use crate::graph::GraphStore;
     use std::path::Path;
     use std::sync::Arc;
+
+    fn test_config() -> IndexingConfig {
+        IndexingConfig {
+            supported_extensions: vec![
+                "ex".to_string(),
+                "rs".to_string(),
+                "js".to_string(),
+                "ts".to_string(),
+                "py".to_string(),
+                "rb".to_string(),
+            ],
+            ignored_directory_segments: vec![],
+            blocked_subtree_hint_segments: vec![],
+            soft_excluded_directory_segments_allowlist: vec![],
+            subtree_hint_cooldown_ms: 15_000,
+            subtree_hint_retry_budget: 3,
+            use_git_global_ignore: false,
+            legacy_axonignore_additive: true,
+            ignore_reconcile_enabled: true,
+            ignore_reconcile_dry_run: true,
+        }
+    }
 
     #[test]
     fn test_discovery_policy_is_fast_when_backlog_is_low() {
@@ -733,13 +755,88 @@ mod tests {
     }
 
     #[test]
+    fn test_generated_artifact_prefixes_are_treated_as_build_noise() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+
+        for relative in [
+            Path::new("proj/_build_truth_dashboard_ui"),
+            Path::new("proj/_build_truth_journeys"),
+            Path::new("proj/deps/pkg/.mix"),
+            Path::new("proj/deps/pkg/ebin"),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(&path).unwrap();
+            assert!(
+                !scanner.should_descend_into_directory(path.as_path()),
+                "Le scanner doit traiter {:?} comme un artefact genere non indexable",
+                relative
+            );
+            assert!(
+                !scanner.should_buffer_subtree_hint(path.as_path()),
+                "Le watcher ne doit pas bufferiser {:?} comme subtree_hint",
+                relative
+            );
+        }
+    }
+
+    #[test]
+    fn test_ecosystem_policy_blocks_framework_and_cache_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+        let config = test_config();
+
+        for relative in [
+            Path::new("proj/.next"),
+            Path::new("proj/.gradle"),
+            Path::new("proj/__pycache__"),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(&path).unwrap();
+            assert!(
+                scanner.path_has_ignored_directory_noise_with_config(path.as_path(), &config),
+                "La politique d'ecosysteme doit bloquer {:?}",
+                relative
+            );
+        }
+    }
+
+    #[test]
+    fn test_soft_excluded_vendor_can_be_reopened_for_scanner_and_subtree_hints() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let scanner = Scanner::new(root.to_string_lossy().as_ref());
+        let mut config = test_config();
+        let vendor = root.join("proj/vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+
+        assert!(scanner.path_has_ignored_directory_noise_with_config(vendor.as_path(), &config));
+        assert!(scanner.path_has_blocked_subtree_hint_segment_with_config(vendor.as_path(), &config));
+
+        config.soft_excluded_directory_segments_allowlist = vec!["vendor".to_string()];
+
+        assert!(!scanner.path_has_ignored_directory_noise_with_config(vendor.as_path(), &config));
+        assert!(!scanner.path_has_blocked_subtree_hint_segment_with_config(vendor.as_path(), &config));
+    }
+
+    #[test]
     fn test_default_config_exposes_ignored_directory_segments() {
-        let ignored = &crate::config::CONFIG.indexing.ignored_directory_segments;
-        assert!(ignored.iter().any(|segment| segment == ".devenv"));
-        assert!(ignored.iter().any(|segment| segment == "_build"));
-        assert!(ignored.iter().any(|segment| segment == "node_modules"));
-        assert!(crate::config::CONFIG.indexing.subtree_hint_cooldown_ms >= 1);
-        assert!(crate::config::CONFIG.indexing.subtree_hint_retry_budget >= 1);
+        let parsed: crate::config::Config = toml::from_str("[indexing]\n").unwrap();
+        let ignored = &parsed.indexing.ignored_directory_segments;
+        let blocked_hints = &parsed.indexing.blocked_subtree_hint_segments;
+        assert!(ignored.iter().any(|segment| segment == ".fastembed_cache"));
+        assert!(blocked_hints.iter().any(|segment| segment == "pg_wal"));
+        assert!(!ignored.iter().any(|segment| segment == "vendor"));
+        assert!(!ignored.iter().any(|segment| segment == "build"));
+        assert!(!ignored.iter().any(|segment| segment == "dist"));
+        assert!(parsed
+            .indexing
+            .soft_excluded_directory_segments_allowlist
+            .is_empty());
+        assert!(parsed.indexing.subtree_hint_cooldown_ms >= 1);
+        assert!(parsed.indexing.subtree_hint_retry_budget >= 1);
     }
 
     #[test]

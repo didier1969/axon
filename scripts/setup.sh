@@ -4,8 +4,9 @@ set -euo pipefail
 # Axon v2 - Bootstrap Script
 # Use this script for first-time setup or after significant dependency changes.
 
-PROJECT_ROOT="/home/dstadel/projects/axon"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
+source "$PROJECT_ROOT/scripts/cargo-env.sh"
 
 echo "🚀 Starting Axon bootstrap..."
 
@@ -22,7 +23,6 @@ devenv shell -- bash -lc './scripts/validate-devenv.sh'
 BIN_DIR="$PROJECT_ROOT/bin"
 RUST_CORE_DIR="$PROJECT_ROOT/src/axon-core"
 TARGET_BIN="$BIN_DIR/axon-core"
-CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
 RUST_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -type f | head -n 1)
 
 mkdir -p "$BIN_DIR"
