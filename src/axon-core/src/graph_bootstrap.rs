@@ -15,7 +15,7 @@ use crate::embedder::default_embedding_profile;
 
 const IST_SCHEMA_VERSION: &str = "3";
 const IST_INGESTION_VERSION: &str = "3";
-const IST_EMBEDDING_VERSION: &str = "1";
+const IST_EMBEDDING_VERSION: &str = "2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IstCompatibilityAction {
@@ -25,6 +25,27 @@ enum IstCompatibilityAction {
     SoftEmbeddingInvalidation,
     HardRebuild,
 }
+
+pub fn embedding_column_type_sql(dimension: usize) -> String {
+    format!("FLOAT[{dimension}]")
+}
+
+fn expected_runtime_metadata() -> Vec<(&'static str, String)> {
+    let profile = default_embedding_profile();
+    vec![
+        ("schema_version", IST_SCHEMA_VERSION.to_string()),
+        ("ingestion_version", IST_INGESTION_VERSION.to_string()),
+        ("embedding_version", IST_EMBEDDING_VERSION.to_string()),
+        ("embedding_dimension", profile.dimension.to_string()),
+        ("embedding_model_name", profile.model_name.to_string()),
+    ]
+}
+
+const EMBEDDING_COLUMNS: [(&str, &str); 3] = [
+    ("Symbol", "embedding"),
+    ("ChunkEmbedding", "embedding"),
+    ("GraphEmbedding", "embedding"),
+];
 
 impl GraphStore {
     fn graph_embedding_model_id() -> String {
@@ -306,21 +327,33 @@ impl GraphStore {
     }
 
     fn init_schema(&self, _is_memory: bool) -> Result<()> {
+        let embedding_dimension = default_embedding_profile().dimension;
+        let embedding_type = embedding_column_type_sql(embedding_dimension);
+
         self.execute(
             "CREATE TABLE IF NOT EXISTS RuntimeMetadata (key VARCHAR PRIMARY KEY, value VARCHAR)",
         )?;
         self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT, file_stage VARCHAR DEFAULT 'promoted', graph_ready BOOLEAN DEFAULT FALSE, vector_ready BOOLEAN DEFAULT FALSE)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384])")?;
+        self.execute(&format!(
+            "CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding {})",
+            embedding_type
+        ))?;
         self.execute("CREATE TABLE IF NOT EXISTS Chunk (id VARCHAR PRIMARY KEY, source_type VARCHAR, source_id VARCHAR, project_slug VARCHAR, kind VARCHAR, content VARCHAR, content_hash VARCHAR, start_line BIGINT, end_line BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS EmbeddingModel (id VARCHAR PRIMARY KEY, kind VARCHAR, model_name VARCHAR, dimension BIGINT, version VARCHAR, created_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS ChunkEmbedding (chunk_id VARCHAR, model_id VARCHAR, embedding FLOAT[384], source_hash VARCHAR)")?;
+        self.execute(&format!(
+            "CREATE TABLE IF NOT EXISTS ChunkEmbedding (chunk_id VARCHAR, model_id VARCHAR, embedding {}, source_hash VARCHAR)",
+            embedding_type
+        ))?;
         self.execute("CREATE TABLE IF NOT EXISTS GraphProjection (anchor_type VARCHAR, anchor_id VARCHAR, target_type VARCHAR, target_id VARCHAR, edge_kind VARCHAR, distance BIGINT, radius BIGINT, projection_version VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS GraphProjectionState (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, source_signature VARCHAR, projection_version VARCHAR, updated_at BIGINT)")?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_projection_state_anchor_idx ON GraphProjectionState(anchor_type, anchor_id, radius)")?;
         self.execute("CREATE TABLE IF NOT EXISTS GraphProjectionQueue (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT)")?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_projection_queue_anchor_idx ON GraphProjectionQueue(anchor_type, anchor_id, radius)")?;
         self.execute("CREATE TABLE IF NOT EXISTS FileVectorizationQueue (file_path VARCHAR PRIMARY KEY, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding FLOAT[384], updated_at BIGINT)")?;
+        self.execute(&format!(
+            "CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding {}, updated_at BIGINT)",
+            embedding_type
+        ))?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_embedding_anchor_model_idx ON GraphEmbedding(anchor_type, anchor_id, radius, model_id)")?;
         self.execute("CREATE TABLE IF NOT EXISTS Project (name VARCHAR PRIMARY KEY)")?;
         self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR)")?;
@@ -998,11 +1031,9 @@ impl GraphStore {
     }
 
     fn ensure_runtime_compatibility(&self) -> Result<()> {
-        let expected = [
-            ("schema_version", IST_SCHEMA_VERSION),
-            ("ingestion_version", IST_INGESTION_VERSION),
-            ("embedding_version", IST_EMBEDDING_VERSION),
-        ];
+        let expected = expected_runtime_metadata();
+        let expected_embedding_type =
+            embedding_column_type_sql(default_embedding_profile().dimension);
 
         let before_graph_ready = self
             .query_count("SELECT count(*) FROM File WHERE graph_ready = TRUE")
@@ -1018,27 +1049,44 @@ impl GraphStore {
             .unwrap_or(0);
 
         let current = self.load_runtime_metadata()?;
-        let schema_matches = current
-            .get("schema_version")
-            .is_some_and(|v| v == IST_SCHEMA_VERSION);
-        let ingestion_matches = current
-            .get("ingestion_version")
-            .is_some_and(|v| v == IST_INGESTION_VERSION);
-        let embedding_matches = current
-            .get("embedding_version")
-            .is_some_and(|v| v == IST_EMBEDDING_VERSION);
+        let schema_matches = expected
+            .iter()
+            .find(|(key, _)| *key == "schema_version")
+            .is_some_and(|(key, value)| current.get(*key).is_some_and(|v| v == value));
+        let ingestion_matches = expected
+            .iter()
+            .find(|(key, _)| *key == "ingestion_version")
+            .is_some_and(|(key, value)| current.get(*key).is_some_and(|v| v == value));
+        let embedding_matches = expected
+            .iter()
+            .filter(|(key, _)| key.starts_with("embedding_"))
+            .all(|(key, value)| current.get(*key).is_some_and(|v| v == value));
+        let embedding_storage_matches = self
+            .embedding_storage_matches(&expected_embedding_type)
+            .unwrap_or(false);
 
         info!(
-            "IST compatibility preflight: current(schema={}, ingestion={}, embedding={}) expected(schema={}, ingestion={}, embedding={}) matches(schema={}, ingestion={}, embedding={}) before(graph_ready={}, vector_ready={}, vec_queue_queued={}, vec_queue_inflight={})",
+            "IST compatibility preflight: current(schema={}, ingestion={}, embedding_version={}, embedding_dimension={}, embedding_model_name={}) expected(schema={}, ingestion={}, embedding_version={}, embedding_dimension={}, embedding_model_name={}) matches(schema={}, ingestion={}, embedding={}, embedding_storage={}) before(graph_ready={}, vector_ready={}, vec_queue_queued={}, vec_queue_inflight={})",
             current.get("schema_version").map(String::as_str).unwrap_or("missing"),
             current.get("ingestion_version").map(String::as_str).unwrap_or("missing"),
             current.get("embedding_version").map(String::as_str).unwrap_or("missing"),
+            current
+                .get("embedding_dimension")
+                .map(String::as_str)
+                .unwrap_or("missing"),
+            current
+                .get("embedding_model_name")
+                .map(String::as_str)
+                .unwrap_or("missing"),
             IST_SCHEMA_VERSION,
             IST_INGESTION_VERSION,
             IST_EMBEDDING_VERSION,
+            default_embedding_profile().dimension,
+            default_embedding_profile().model_name,
             schema_matches,
             ingestion_matches,
             embedding_matches,
+            embedding_storage_matches,
             before_graph_ready,
             before_vector_ready,
             before_vec_queue_queued,
@@ -1067,6 +1115,17 @@ impl GraphStore {
                 "IST embedding drift detected. Soft-invalidating semantic embedding layers only."
             );
             self.soft_invalidate_embedding_state()?;
+            self.ensure_embedding_storage_shape(&expected_embedding_type)?;
+            applied.push(IstCompatibilityAction::SoftEmbeddingInvalidation);
+        } else if !embedding_storage_matches
+            && !applied.contains(&IstCompatibilityAction::HardRebuild)
+        {
+            warn!(
+                "IST embedding storage drift detected. Re-shaping embedding columns to {}.",
+                expected_embedding_type
+            );
+            self.soft_invalidate_embedding_state()?;
+            self.ensure_embedding_storage_shape(&expected_embedding_type)?;
             applied.push(IstCompatibilityAction::SoftEmbeddingInvalidation);
         }
 
@@ -1139,7 +1198,7 @@ impl GraphStore {
         Ok(current)
     }
 
-    fn write_runtime_metadata(&self, expected: &[(&str, &str)]) -> Result<()> {
+    fn write_runtime_metadata(&self, expected: &[(&str, String)]) -> Result<()> {
         self.execute("DELETE FROM RuntimeMetadata")?;
         for (key, value) in expected {
             self.execute(&format!(
@@ -1187,6 +1246,60 @@ impl GraphStore {
             .filter_map(|row| row.into_iter().next())
             .collect();
         Ok(columns)
+    }
+
+    fn table_column_type(&self, table: &str, column: &str) -> Result<Option<String>> {
+        let existing = self.query_json(&format!(
+            "SELECT type FROM pragma_table_info('{}') WHERE name = '{}'",
+            table.replace('\'', "''"),
+            column.replace('\'', "''")
+        ))?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&existing).unwrap_or_default();
+        Ok(rows.into_iter().find_map(|row| row.into_iter().next()))
+    }
+
+    fn embedding_storage_matches(&self, expected_type: &str) -> Result<bool> {
+        for (table, column) in EMBEDDING_COLUMNS {
+            let current_type = self.table_column_type(table, column)?;
+            if current_type.as_deref() != Some(expected_type) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn ensure_embedding_storage_shape(&self, expected_type: &str) -> Result<()> {
+        for (table, column) in EMBEDDING_COLUMNS {
+            if self.table_column_type(table, column)?.as_deref() == Some(expected_type) {
+                continue;
+            }
+            match table {
+                "Symbol" => {
+                    self.execute(&format!(
+                        "ALTER TABLE {} ALTER COLUMN {} TYPE {};",
+                        table, column, expected_type
+                    ))?;
+                }
+                "ChunkEmbedding" => {
+                    self.execute("DROP TABLE IF EXISTS ChunkEmbedding")?;
+                    self.execute(&format!(
+                        "CREATE TABLE IF NOT EXISTS ChunkEmbedding (chunk_id VARCHAR, model_id VARCHAR, embedding {}, source_hash VARCHAR)",
+                        expected_type
+                    ))?;
+                }
+                "GraphEmbedding" => {
+                    self.execute("DROP INDEX IF EXISTS graph_embedding_anchor_model_idx")?;
+                    self.execute("DROP TABLE IF EXISTS GraphEmbedding")?;
+                    self.execute(&format!(
+                        "CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding {}, updated_at BIGINT)",
+                        expected_type
+                    ))?;
+                    self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_embedding_anchor_model_idx ON GraphEmbedding(anchor_type, anchor_id, radius, model_id)")?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     fn reset_ist_state(&self) -> Result<()> {

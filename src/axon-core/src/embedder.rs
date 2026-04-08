@@ -1,5 +1,5 @@
 use crate::graph::GraphStore;
-use crate::graph_ingestion::{FileVectorizationWork, GraphProjectionWork};
+use crate::graph_ingestion::{embedding_cast_sql, FileVectorizationWork, GraphProjectionWork};
 use crate::queue::QueueStore;
 use crate::service_guard::{self, ServicePressure};
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
@@ -960,14 +960,14 @@ impl GraphStore {
             .map(
                 |(anchor_type, anchor_id, radius, source_signature, projection_version, vector)| {
                     format!(
-                        "('{}', '{}', {}, '{}', '{}', '{}', CAST({:?} AS FLOAT[384]), {})",
+                        "('{}', '{}', {}, '{}', '{}', '{}', {}, {})",
                         Self::escape_embedding_sql(anchor_type),
                         Self::escape_embedding_sql(anchor_id),
                         radius,
                         Self::escape_embedding_sql(model_id),
                         Self::escape_embedding_sql(source_signature),
                         Self::escape_embedding_sql(projection_version),
-                        vector,
+                        embedding_cast_sql(vector, default_embedding_profile().dimension),
                         now
                     )
                 },

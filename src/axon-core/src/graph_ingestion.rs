@@ -130,6 +130,10 @@ fn file_vectorization_queue_upsert(file_path: &str, now_ms: i64) -> String {
     )
 }
 
+pub fn embedding_cast_sql(vector: &[f32], dimension: usize) -> String {
+    format!("CAST({vector:?} AS FLOAT[{dimension}])")
+}
+
 impl GraphStore {
     fn chunk_embedding_model_id() -> String {
         default_embedding_profile().chunk.model_id
@@ -1106,8 +1110,9 @@ impl GraphStore {
                     for sym in &extraction.symbols {
                         let symbol_id = Self::symbol_id(slug, path, &sym.name);
                         let chunk_id = Self::chunk_id(&symbol_id);
+                        let embedding_dimension = default_embedding_profile().dimension;
                         let embedding_sql = if let Some(ref v) = sym.embedding {
-                            format!("CAST({:?} AS FLOAT[384])", v)
+                            embedding_cast_sql(v, embedding_dimension)
                         } else {
                             "NULL".to_string()
                         };
@@ -1784,7 +1789,8 @@ impl GraphStore {
 
         for chunk in updates.chunks(100) {
             for (id, vector) in chunk {
-                let embedding_sql = format!("CAST({:?} AS FLOAT[384])", vector);
+                let embedding_sql =
+                    embedding_cast_sql(vector, default_embedding_profile().dimension);
                 queries.push(format!(
                     "UPDATE Symbol SET embedding = {} WHERE id = '{}';",
                     embedding_sql,
@@ -1820,10 +1826,10 @@ impl GraphStore {
             .iter()
             .map(|(chunk_id, source_hash, vector)| {
                 format!(
-                    "('{}', '{}', CAST({:?} AS FLOAT[384]), '{}')",
+                    "('{}', '{}', {}, '{}')",
                     Self::escape_sql(chunk_id),
                     Self::escape_sql(model_id),
-                    vector,
+                    embedding_cast_sql(vector, default_embedding_profile().dimension),
                     Self::escape_sql(source_hash)
                 )
             })

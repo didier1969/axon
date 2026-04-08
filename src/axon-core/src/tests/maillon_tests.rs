@@ -843,6 +843,7 @@ mod tests {
         std::fs::create_dir_all(&db_root).unwrap();
 
         let db_root_str = db_root.to_string_lossy().to_string();
+        let profile = crate::embedder::default_embedding_profile();
         let store = GraphStore::new(&db_root_str).unwrap();
 
         store.execute("DROP TABLE File;").unwrap();
@@ -864,7 +865,19 @@ mod tests {
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '3')")
             .unwrap();
         store
-            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '1')")
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '2')")
+            .unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_dimension', '{}')",
+                profile.dimension
+            ))
+            .unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_model_name', '{}')",
+                profile.model_name
+            ))
             .unwrap();
         drop(store);
 
@@ -901,6 +914,7 @@ mod tests {
         std::fs::create_dir_all(&db_root).unwrap();
 
         let db_root_str = db_root.to_string_lossy().to_string();
+        let profile = crate::embedder::default_embedding_profile();
         let store = GraphStore::new(&db_root_str).unwrap();
 
         store
@@ -932,6 +946,18 @@ mod tests {
             .unwrap();
         store
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '0')")
+            .unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_dimension', '{}')",
+                profile.dimension
+            ))
+            .unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_model_name', '{}')",
+                profile.model_name
+            ))
             .unwrap();
         drop(store);
 
@@ -980,6 +1006,7 @@ mod tests {
         std::fs::create_dir_all(&db_root).unwrap();
 
         let db_root_str = db_root.to_string_lossy().to_string();
+        let profile = crate::embedder::default_embedding_profile();
         let store = GraphStore::new(&db_root_str).unwrap();
 
         store
@@ -1007,7 +1034,19 @@ mod tests {
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '2')")
             .unwrap();
         store
-            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '1')")
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '2')")
+            .unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_dimension', '{}')",
+                profile.dimension
+            ))
+            .unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_model_name', '{}')",
+                profile.model_name
+            ))
             .unwrap();
         drop(store);
 
@@ -1056,6 +1095,7 @@ mod tests {
         std::fs::create_dir_all(&db_root).unwrap();
 
         let db_root_str = db_root.to_string_lossy().to_string();
+        let profile = crate::embedder::default_embedding_profile();
         let store = GraphStore::new(&db_root_str).unwrap();
 
         store.execute("DROP TABLE File;").unwrap();
@@ -1077,7 +1117,19 @@ mod tests {
             .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('ingestion_version', '3')")
             .unwrap();
         store
-            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '1')")
+            .execute("INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_version', '2')")
+            .unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_dimension', '{}')",
+                profile.dimension
+            ))
+            .unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO RuntimeMetadata (key, value) VALUES ('embedding_model_name', '{}')",
+                profile.model_name
+            ))
             .unwrap();
         drop(store);
 

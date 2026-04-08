@@ -141,6 +141,29 @@ git commit -m "feat: make embedding execution provider explicit"
 
 ### Task 4: Migrer le schema pour supprimer l'hypothese `FLOAT[384]`
 
+**Status:** Complete le `2026-04-08`
+
+**Resultat implemente:**
+- le bootstrap cree maintenant `Symbol.embedding`, `ChunkEmbedding.embedding` et `GraphEmbedding.embedding` a partir de la dimension canonique du profil actif, au lieu d'un `FLOAT[384]` fige
+- `RuntimeMetadata` persiste desormais le contrat embeddings minimal necessaire a la compatibilite runtime:
+  - `embedding_version`
+  - `embedding_dimension`
+  - `embedding_model_name`
+- un drift embeddings ne se contente plus d'invalider les donnees semantiques; il remet aussi le stockage physique au bon format:
+  - `ALTER COLUMN` pour `Symbol.embedding`
+  - recreation controlee de `ChunkEmbedding`
+  - recreation controlee de `GraphEmbedding` et de son index unique
+- les chemins d'ecriture runtime ne sont plus figes a `FLOAT[384]` pour `Symbol`, `ChunkEmbedding` et `GraphEmbedding`
+
+**Validation executee:**
+- `cargo test --lib embedding_schema_migration -- --nocapture`
+- `cargo test --lib test_maillon_2c_ -- --nocapture`
+- `cargo test --lib embedding_provider -- --nocapture`
+
+**Vigilance residuelle hors perimetre Task 4:**
+- plusieurs outils MCP et tests restent encore couples a des `model_id` historiques `*-bge-small-en-v1.5-384`
+- ces usages ne bloquent plus la migration physique du stockage embeddings, mais devront etre realignes avant la bascule vers un nouveau profil primaire
+
 **Files:**
 - Modify: `src/axon-core/src/graph_bootstrap.rs`
 - Modify: `src/axon-core/src/graph_ingestion.rs`
