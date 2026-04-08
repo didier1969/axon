@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Ecrire le benchmark de verite du pipeline actuel
+### Task 1: Exposer le contrat de verite du pipeline embeddings actuel
 
 **Files:**
 - Create: `src/axon-core/src/tests/embedding_benchmark_tests.rs`
@@ -19,10 +19,9 @@
 
 **Step 1: Write the failing test**
 
-Ecrire un test/benchmark minimal qui:
+Ecrire un test minimal qui:
 - instancie le runtime embeddings actuel
-- encode un petit corpus representatif `symbol/file/chunk`
-- capture le modele actif, la dimension active et le throughput observe
+- capture le modele actif, la dimension active, les kinds actifs, les batch sizes et le provider d'execution si disponible
 - echoue si ces informations ne sont pas disponibles
 
 **Step 2: Run test to verify it fails**
@@ -35,7 +34,11 @@ Expected: FAIL car Axon n'expose pas encore proprement ce contrat runtime.
 Ajouter les hooks de lecture necessaires sans changer encore le modele:
 - exposition du modele actif
 - exposition de la dimension
+- exposition des kinds et batch sizes
 - exposition du provider d'execution si disponible
+
+Contrainte documentee:
+- le debit observe n'est pas mesure ici, car un benchmark fidele necessite le chargement effectif du modele et doit rester dans la Task 7 pour ne pas rendre la TDD locale fragile ou dependante du cache modele
 
 **Step 4: Run test to verify it passes**
 
