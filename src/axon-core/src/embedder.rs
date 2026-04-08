@@ -17,10 +17,25 @@ const FILE_VECTORIZATION_BATCH_SIZE: usize = 8;
 const GRAPH_BATCH_SIZE: usize = 6;
 const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
 const EMBEDDING_KINDS: [&str; 3] = ["symbol", "chunk", "graph"];
-const DEFAULT_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
-const DEFAULT_MODEL_SLUG: &str = "bge-small-en-v1.5";
-const DEFAULT_MODEL_VERSION: &str = "1";
-const DEFAULT_EMBEDDING_DIMENSION: usize = 384;
+const JINA_CODE_MODEL_NAME: &str = "jinaai/jina-embeddings-v2-base-code";
+const JINA_CODE_MODEL_SLUG: &str = "jina-embeddings-v2-base-code";
+const JINA_CODE_MODEL_VERSION: &str = "1";
+const JINA_CODE_EMBEDDING_DIMENSION: usize = 768;
+const BGE_BASE_MODEL_NAME: &str = "BAAI/bge-base-en-v1.5";
+const BGE_BASE_MODEL_SLUG: &str = "bge-base-en-v1.5";
+const BGE_BASE_MODEL_VERSION: &str = "1";
+const BGE_BASE_EMBEDDING_DIMENSION: usize = 768;
+const LEGACY_BGE_SMALL_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
+const LEGACY_BGE_SMALL_MODEL_SLUG: &str = "bge-small-en-v1.5";
+const LEGACY_BGE_SMALL_MODEL_VERSION: &str = "1";
+const LEGACY_BGE_SMALL_EMBEDDING_DIMENSION: usize = 384;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingProfileKey {
+    JinaCodeV2Base,
+    BgeBaseEnv15,
+    LegacyBgeSmallEnv15,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingKindConfig {
@@ -56,18 +71,24 @@ impl EmbeddingExecutionBackend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeEmbeddingModel {
+    JinaEmbeddingsV2BaseCode,
+    BGEBaseENV15,
     BGESmallENV15,
 }
 
 impl RuntimeEmbeddingModel {
     fn fastembed_model(self) -> EmbeddingModel {
         match self {
+            Self::JinaEmbeddingsV2BaseCode => EmbeddingModel::JinaEmbeddingsV2BaseCode,
+            Self::BGEBaseENV15 => EmbeddingModel::BGEBaseENV15,
             Self::BGESmallENV15 => EmbeddingModel::BGESmallENV15,
         }
     }
 
     fn startup_label(self) -> &'static str {
         match self {
+            Self::JinaEmbeddingsV2BaseCode => "Jina-Code-V2-Base",
+            Self::BGEBaseENV15 => "BGE-Base",
             Self::BGESmallENV15 => "BGE-Small",
         }
     }
@@ -75,6 +96,7 @@ impl RuntimeEmbeddingModel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingProfile {
+    pub key: EmbeddingProfileKey,
     pub model_name: &'static str,
     pub model_slug: &'static str,
     pub model_version: &'static str,
@@ -87,6 +109,12 @@ pub struct EmbeddingProfile {
     pub execution_provider: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingProfileStack {
+    pub primary: EmbeddingProfile,
+    pub fallback: Option<EmbeddingProfile>,
+}
+
 fn embedding_model_id(kind: &'static str, model_slug: &'static str, dimension: usize) -> String {
     let prefix = match kind {
         "symbol" => "sym",
@@ -97,6 +125,7 @@ fn embedding_model_id(kind: &'static str, model_slug: &'static str, dimension: u
 
 impl EmbeddingProfile {
     pub fn new(
+        key: EmbeddingProfileKey,
         model_name: &'static str,
         model_slug: &'static str,
         model_version: &'static str,
@@ -109,6 +138,7 @@ impl EmbeddingProfile {
         graph_batch_size: usize,
     ) -> Self {
         Self {
+            key,
             model_name,
             model_slug,
             model_version,
@@ -135,19 +165,80 @@ impl EmbeddingProfile {
     }
 }
 
+pub fn embedding_profile_for_key(key: EmbeddingProfileKey) -> EmbeddingProfile {
+    match key {
+        EmbeddingProfileKey::JinaCodeV2Base => EmbeddingProfile::new(
+            EmbeddingProfileKey::JinaCodeV2Base,
+            JINA_CODE_MODEL_NAME,
+            JINA_CODE_MODEL_SLUG,
+            JINA_CODE_MODEL_VERSION,
+            JINA_CODE_EMBEDDING_DIMENSION,
+            RuntimeEmbeddingModel::JinaEmbeddingsV2BaseCode,
+            EmbeddingExecutionBackend::Unspecified,
+            CHUNK_BATCH_SIZE,
+            SYMBOL_BATCH_SIZE,
+            FILE_VECTORIZATION_BATCH_SIZE,
+            GRAPH_BATCH_SIZE,
+        ),
+        EmbeddingProfileKey::BgeBaseEnv15 => EmbeddingProfile::new(
+            EmbeddingProfileKey::BgeBaseEnv15,
+            BGE_BASE_MODEL_NAME,
+            BGE_BASE_MODEL_SLUG,
+            BGE_BASE_MODEL_VERSION,
+            BGE_BASE_EMBEDDING_DIMENSION,
+            RuntimeEmbeddingModel::BGEBaseENV15,
+            EmbeddingExecutionBackend::Unspecified,
+            CHUNK_BATCH_SIZE,
+            SYMBOL_BATCH_SIZE,
+            FILE_VECTORIZATION_BATCH_SIZE,
+            GRAPH_BATCH_SIZE,
+        ),
+        EmbeddingProfileKey::LegacyBgeSmallEnv15 => EmbeddingProfile::new(
+            EmbeddingProfileKey::LegacyBgeSmallEnv15,
+            LEGACY_BGE_SMALL_MODEL_NAME,
+            LEGACY_BGE_SMALL_MODEL_SLUG,
+            LEGACY_BGE_SMALL_MODEL_VERSION,
+            LEGACY_BGE_SMALL_EMBEDDING_DIMENSION,
+            RuntimeEmbeddingModel::BGESmallENV15,
+            EmbeddingExecutionBackend::Unspecified,
+            CHUNK_BATCH_SIZE,
+            SYMBOL_BATCH_SIZE,
+            FILE_VECTORIZATION_BATCH_SIZE,
+            GRAPH_BATCH_SIZE,
+        ),
+    }
+}
+
+fn embedding_profile_key_from_env(value: &str) -> Option<EmbeddingProfileKey> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "jina" | "jina-code" | "jina-code-v2-base" => Some(EmbeddingProfileKey::JinaCodeV2Base),
+        "bge-base" | "bge-base-en-v1.5" => Some(EmbeddingProfileKey::BgeBaseEnv15),
+        "bge-small" | "bge-small-en-v1.5" | "legacy-bge-small" => {
+            Some(EmbeddingProfileKey::LegacyBgeSmallEnv15)
+        }
+        _ => None,
+    }
+}
+
+pub fn configured_embedding_profile_stack() -> EmbeddingProfileStack {
+    let primary_key = std::env::var("AXON_EMBEDDING_PROFILE")
+        .ok()
+        .and_then(|value| embedding_profile_key_from_env(&value))
+        .unwrap_or(EmbeddingProfileKey::JinaCodeV2Base);
+    let fallback_key = std::env::var("AXON_EMBEDDING_FALLBACK_PROFILE")
+        .ok()
+        .and_then(|value| embedding_profile_key_from_env(&value))
+        .or(Some(EmbeddingProfileKey::BgeBaseEnv15))
+        .filter(|fallback| *fallback != primary_key);
+
+    EmbeddingProfileStack {
+        primary: embedding_profile_for_key(primary_key),
+        fallback: fallback_key.map(embedding_profile_for_key),
+    }
+}
+
 pub fn default_embedding_profile() -> EmbeddingProfile {
-    EmbeddingProfile::new(
-        DEFAULT_MODEL_NAME,
-        DEFAULT_MODEL_SLUG,
-        DEFAULT_MODEL_VERSION,
-        DEFAULT_EMBEDDING_DIMENSION,
-        RuntimeEmbeddingModel::BGESmallENV15,
-        EmbeddingExecutionBackend::Unspecified,
-        CHUNK_BATCH_SIZE,
-        SYMBOL_BATCH_SIZE,
-        FILE_VECTORIZATION_BATCH_SIZE,
-        GRAPH_BATCH_SIZE,
-    )
+    configured_embedding_profile_stack().primary
 }
 
 pub fn default_embedding_execution_backend(gpu_present: bool) -> EmbeddingExecutionBackend {
@@ -195,8 +286,7 @@ pub struct EmbeddingRuntimeContract {
     pub execution_provider: Option<&'static str>,
 }
 
-pub fn embedding_runtime_contract() -> EmbeddingRuntimeContract {
-    let profile = default_embedding_profile();
+pub fn embedding_runtime_contract_for_profile(profile: &EmbeddingProfile) -> EmbeddingRuntimeContract {
     EmbeddingRuntimeContract {
         model_name: profile.model_name.to_string(),
         symbol_model_id: profile.symbol.model_id.clone(),
@@ -210,6 +300,10 @@ pub fn embedding_runtime_contract() -> EmbeddingRuntimeContract {
         kinds: &EMBEDDING_KINDS,
         execution_provider: profile.execution_provider,
     }
+}
+
+pub fn embedding_runtime_contract() -> EmbeddingRuntimeContract {
+    embedding_runtime_contract_for_profile(&default_embedding_profile())
 }
 
 // NEXUS v10.5: Sovereign Semantic Engine
@@ -240,36 +334,34 @@ impl SemanticWorkerPool {
 
     fn worker_loop(graph_store: Arc<GraphStore>, queue_store: Arc<QueueStore>) {
         let runtime_profile = crate::runtime_profile::RuntimeProfile::detect();
-        let profile = default_embedding_profile();
+        let profile_stack = configured_embedding_profile_stack();
         let backend = default_embedding_execution_backend(runtime_profile.gpu_present);
+        let mut candidate_profiles = vec![profile_stack.primary.clone()];
+        if let Some(fallback) = profile_stack.fallback.clone() {
+            candidate_profiles.push(fallback);
+        }
+        let profile_labels = candidate_profiles
+            .iter()
+            .map(|profile| profile.runtime_model.startup_label())
+            .collect::<Vec<_>>()
+            .join(" -> ");
         info!(
-            "Semantic Worker: Initializing {} Model ({}d) in isolated thread...",
-            profile.runtime_model.startup_label(),
-            profile.dimension
+            "Semantic Worker: Initializing embedding profile stack [{}] in isolated thread...",
+            profile_labels
         );
         info!(
             "Semantic Worker: embedding backend selected = {} (gpu_present={})",
             backend.name(),
             runtime_profile.gpu_present
         );
-
-        let mut options = InitOptions::new(profile.runtime_model.fastembed_model());
-        options.show_download_progress = true;
-        options = options.with_execution_providers(embedding_execution_providers(backend));
-
-        let mut model = match TextEmbedding::try_new(options) {
-            Ok(m) => {
-                info!(
-                    "✅ Semantic Worker: {} model loaded successfully.",
-                    profile.runtime_model.startup_label()
-                );
-                m
-            }
-            Err(e) => {
-                error!("❌ Semantic Worker: FATAL ONNX INIT ERROR: {:?}", e);
-                return;
-            }
-        };
+        let (mut model, profile) =
+            match Self::load_text_embedding_with_fallback(&candidate_profiles, backend) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    error!("❌ Semantic Worker: FATAL ONNX INIT ERROR: {:?}", e);
+                    return;
+                }
+            };
 
         let (query_tx, query_rx) = unbounded();
         register_query_embedding_sender(query_tx);
@@ -802,6 +894,41 @@ impl SemanticWorkerPool {
                 }
             }
         }
+    }
+
+    fn load_text_embedding_with_fallback(
+        candidate_profiles: &[EmbeddingProfile],
+        backend: EmbeddingExecutionBackend,
+    ) -> anyhow::Result<(TextEmbedding, EmbeddingProfile)> {
+        let mut last_error = None;
+
+        for profile in candidate_profiles {
+            let mut options = InitOptions::new(profile.runtime_model.fastembed_model());
+            options.show_download_progress = true;
+            options = options.with_execution_providers(embedding_execution_providers(backend));
+
+            match TextEmbedding::try_new(options) {
+                Ok(model) => {
+                    info!(
+                        "✅ Semantic Worker: {} model loaded successfully.",
+                        profile.runtime_model.startup_label()
+                    );
+                    return Ok((model, profile.clone()));
+                }
+                Err(err) => {
+                    error!(
+                        "Semantic Worker: failed to initialize {} ({}d): {:?}",
+                        profile.runtime_model.startup_label(),
+                        profile.dimension,
+                        err
+                    );
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("no embedding profile candidates configured")))
     }
 }
 

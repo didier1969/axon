@@ -203,6 +203,34 @@ git commit -m "feat: migrate embedding storage beyond 384 dimensions"
 
 ### Task 5: Integrer `jinaai/jina-embeddings-v2-base-code` comme cible primaire
 
+**Status:** Complete le `2026-04-08`
+
+**Resultat implemente:**
+- un catalogue de profils embeddings existe desormais dans `embedder.rs`:
+  - `JinaCodeV2Base`
+  - `BgeBaseEnv15`
+  - `LegacyBgeSmallEnv15`
+- la pile par defaut est maintenant:
+  - primaire: `jinaai/jina-embeddings-v2-base-code`
+  - fallback: `BAAI/bge-base-en-v1.5`
+- les deux profils modernes sont alignes en `768d`, ce qui evite une derive de stockage entre primaire et fallback
+- le worker embeddings sait maintenant tenter une pile de profils plutot qu'un modele unique
+- le contrat runtime peut etre derive d'un profil explicite, pas seulement du profil par defaut
+- la selection est pilotable par environnement:
+  - `AXON_EMBEDDING_PROFILE`
+  - `AXON_EMBEDDING_FALLBACK_PROFILE`
+
+**Validation executee:**
+- `cargo test --lib jina_embedding_profile -- --nocapture`
+- `cargo test --lib embedding_config -- --nocapture`
+- `cargo test --lib test_embedding_runtime_contract_exposes_current_runtime_truth -- --nocapture`
+- `cargo test --lib embedding_provider -- --nocapture`
+- `cargo test --lib embedding_schema_migration -- --nocapture`
+
+**Vigilance residuelle hors perimetre Task 5:**
+- le bootstrap/runtime continue encore a raisonner surtout sur le profil canonique; la synchronisation explicite du profil effectivement charge reste a durcir si l'on veut une semantique parfaite du fallback au redemarrage
+- plusieurs outils MCP et tests hors de cette tranche restent encore couples a des `model_id` historiques `*-384`
+
 **Files:**
 - Modify: `src/axon-core/src/embedder.rs`
 - Modify: `src/axon-core/src/config.rs`

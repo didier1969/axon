@@ -3,5 +3,6 @@ pub mod embedding_benchmark_tests;
 pub mod embedding_config_tests;
 pub mod embedding_provider_tests;
 pub mod embedding_schema_migration_tests;
+pub mod jina_embedding_profile_tests;
 pub mod maillon_tests;
 pub mod pipeline_test;

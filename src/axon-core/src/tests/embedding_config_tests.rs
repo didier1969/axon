@@ -1,21 +1,23 @@
 use crate::embedder::{
-    default_embedding_profile, embedding_runtime_contract, default_runtime_embedding_model,
-    EmbeddingExecutionBackend, EmbeddingProfile, RuntimeEmbeddingModel,
+    configured_embedding_profile_stack, default_embedding_profile, default_runtime_embedding_model,
+    embedding_runtime_contract, EmbeddingExecutionBackend, EmbeddingProfile,
+    EmbeddingProfileKey, RuntimeEmbeddingModel,
 };
 
 #[test]
 fn test_embedding_profile_exposes_canonical_model_contract() {
     let profile = default_embedding_profile();
 
-    assert_eq!(profile.model_name, "BAAI/bge-small-en-v1.5");
+    assert_eq!(profile.key, EmbeddingProfileKey::JinaCodeV2Base);
+    assert_eq!(profile.model_name, "jinaai/jina-embeddings-v2-base-code");
     assert_eq!(profile.model_version, "1");
-    assert_eq!(profile.dimension, 384);
+    assert_eq!(profile.dimension, 768);
     assert_eq!(profile.symbol.kind, "symbol");
-    assert_eq!(profile.symbol.model_id, "sym-bge-small-en-v1.5-384");
+    assert_eq!(profile.symbol.model_id, "sym-jina-embeddings-v2-base-code-768");
     assert_eq!(profile.chunk.kind, "chunk");
-    assert_eq!(profile.chunk.model_id, "chunk-bge-small-en-v1.5-384");
+    assert_eq!(profile.chunk.model_id, "chunk-jina-embeddings-v2-base-code-768");
     assert_eq!(profile.graph.kind, "graph");
-    assert_eq!(profile.graph.model_id, "graph-bge-small-en-v1.5-384");
+    assert_eq!(profile.graph.model_id, "graph-jina-embeddings-v2-base-code-768");
     assert_eq!(profile.symbol.batch_size, 32);
     assert_eq!(profile.chunk.batch_size, 16);
     assert_eq!(profile.file_vectorization_batch_size, 8);
@@ -45,21 +47,25 @@ fn test_embedding_runtime_contract_is_derived_from_embedding_profile() {
 fn test_default_runtime_embedding_model_is_derived_from_profile() {
     let profile = default_embedding_profile();
 
-    assert_eq!(profile.runtime_model, RuntimeEmbeddingModel::BGESmallENV15);
+    assert_eq!(
+        profile.runtime_model,
+        RuntimeEmbeddingModel::JinaEmbeddingsV2BaseCode
+    );
     assert_eq!(
         default_runtime_embedding_model(),
-        RuntimeEmbeddingModel::BGESmallENV15
+        RuntimeEmbeddingModel::JinaEmbeddingsV2BaseCode
     );
 }
 
 #[test]
 fn test_embedding_profile_can_be_constructed_from_custom_canonical_values() {
     let profile = EmbeddingProfile::new(
+        EmbeddingProfileKey::BgeBaseEnv15,
         "test/model",
         "test-model",
         "7",
         768,
-        RuntimeEmbeddingModel::BGESmallENV15,
+        RuntimeEmbeddingModel::BGEBaseENV15,
         EmbeddingExecutionBackend::Cpu,
         24,
         48,
@@ -78,4 +84,15 @@ fn test_embedding_profile_can_be_constructed_from_custom_canonical_values() {
     assert_eq!(profile.chunk.batch_size, 24);
     assert_eq!(profile.graph.batch_size, 10);
     assert_eq!(profile.file_vectorization_batch_size, 12);
+}
+
+#[test]
+fn test_default_embedding_profile_stack_prefers_jina_with_bge_fallback() {
+    let stack = configured_embedding_profile_stack();
+
+    assert_eq!(stack.primary.key, EmbeddingProfileKey::JinaCodeV2Base);
+    assert_eq!(
+        stack.fallback.as_ref().map(|profile| profile.key),
+        Some(EmbeddingProfileKey::BgeBaseEnv15)
+    );
 }
