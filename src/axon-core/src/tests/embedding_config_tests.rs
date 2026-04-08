@@ -1,4 +1,7 @@
-use crate::embedder::{default_embedding_profile, embedding_runtime_contract};
+use crate::embedder::{
+    default_embedding_profile, embedding_runtime_contract, default_runtime_embedding_model,
+    EmbeddingExecutionBackend, EmbeddingProfile, RuntimeEmbeddingModel,
+};
 
 #[test]
 fn test_embedding_profile_exposes_canonical_model_contract() {
@@ -36,4 +39,43 @@ fn test_embedding_runtime_contract_is_derived_from_embedding_profile() {
         profile.file_vectorization_batch_size
     );
     assert_eq!(contract.graph_batch_size, profile.graph.batch_size);
+}
+
+#[test]
+fn test_default_runtime_embedding_model_is_derived_from_profile() {
+    let profile = default_embedding_profile();
+
+    assert_eq!(profile.runtime_model, RuntimeEmbeddingModel::BGESmallENV15);
+    assert_eq!(
+        default_runtime_embedding_model(),
+        RuntimeEmbeddingModel::BGESmallENV15
+    );
+}
+
+#[test]
+fn test_embedding_profile_can_be_constructed_from_custom_canonical_values() {
+    let profile = EmbeddingProfile::new(
+        "test/model",
+        "test-model",
+        "7",
+        768,
+        RuntimeEmbeddingModel::BGESmallENV15,
+        EmbeddingExecutionBackend::Cpu,
+        24,
+        48,
+        12,
+        10,
+    );
+
+    assert_eq!(profile.model_name, "test/model");
+    assert_eq!(profile.model_version, "7");
+    assert_eq!(profile.dimension, 768);
+    assert_eq!(profile.execution_provider, Some("cpu"));
+    assert_eq!(profile.symbol.model_id, "sym-test-model-768");
+    assert_eq!(profile.chunk.model_id, "chunk-test-model-768");
+    assert_eq!(profile.graph.model_id, "graph-test-model-768");
+    assert_eq!(profile.symbol.batch_size, 48);
+    assert_eq!(profile.chunk.batch_size, 24);
+    assert_eq!(profile.graph.batch_size, 10);
+    assert_eq!(profile.file_vectorization_batch_size, 12);
 }

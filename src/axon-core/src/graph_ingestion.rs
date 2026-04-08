@@ -131,7 +131,7 @@ fn file_vectorization_queue_upsert(file_path: &str, now_ms: i64) -> String {
 }
 
 impl GraphStore {
-    fn chunk_embedding_model_id() -> &'static str {
+    fn chunk_embedding_model_id() -> String {
         default_embedding_profile().chunk.model_id
     }
 
@@ -931,7 +931,7 @@ impl GraphStore {
                    WHERE co.source_id = File.path \
                      AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
                )",
-            Self::escape_sql(Self::chunk_embedding_model_id())
+            Self::escape_sql(&Self::chunk_embedding_model_id())
         );
         let raw = self.query_json(&query)?;
         if raw == "[]" || raw.is_empty() {
@@ -1249,7 +1249,7 @@ impl GraphStore {
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
-                Self::escape_sql(Self::chunk_embedding_model_id()),
+                Self::escape_sql(&Self::chunk_embedding_model_id()),
                 indexed_paths.join(",")
             ));
         }
@@ -1280,7 +1280,7 @@ impl GraphStore {
                      defer_count = 0, \
                      last_deferred_at_ms = NULL \
                  WHERE path IN ({});",
-                Self::escape_sql(Self::chunk_embedding_model_id()),
+                Self::escape_sql(&Self::chunk_embedding_model_id()),
                 degraded_paths.join(",")
             ));
         }

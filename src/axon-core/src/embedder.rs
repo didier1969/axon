@@ -10,32 +10,66 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, info};
 
-const SYMBOL_MODEL_ID: &str = "sym-bge-small-en-v1.5-384";
-const CHUNK_MODEL_ID: &str = "chunk-bge-small-en-v1.5-384";
-const GRAPH_MODEL_ID: &str = "graph-bge-small-en-v1.5-384";
 const FILE_PROJECTION_RADIUS: i64 = 2;
-const MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
-const MODEL_VERSION: &str = "1";
 const CHUNK_BATCH_SIZE: usize = 16;
 const SYMBOL_BATCH_SIZE: usize = 32;
 const FILE_VECTORIZATION_BATCH_SIZE: usize = 8;
 const GRAPH_BATCH_SIZE: usize = 6;
 const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
 const EMBEDDING_KINDS: [&str; 3] = ["symbol", "chunk", "graph"];
-const EMBEDDING_DIMENSION: usize = 384;
+const DEFAULT_MODEL_NAME: &str = "BAAI/bge-small-en-v1.5";
+const DEFAULT_MODEL_SLUG: &str = "bge-small-en-v1.5";
+const DEFAULT_MODEL_VERSION: &str = "1";
+const DEFAULT_EMBEDDING_DIMENSION: usize = 384;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingKindConfig {
     pub kind: &'static str,
-    pub model_id: &'static str,
+    pub model_id: String,
     pub batch_size: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingExecutionBackend {
+    Unspecified,
+    Cpu,
+}
+
+impl EmbeddingExecutionBackend {
+    fn execution_provider(self) -> Option<&'static str> {
+        match self {
+            Self::Unspecified => None,
+            Self::Cpu => Some("cpu"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeEmbeddingModel {
+    BGESmallENV15,
+}
+
+impl RuntimeEmbeddingModel {
+    fn fastembed_model(self) -> EmbeddingModel {
+        match self {
+            Self::BGESmallENV15 => EmbeddingModel::BGESmallENV15,
+        }
+    }
+
+    fn startup_label(self) -> &'static str {
+        match self {
+            Self::BGESmallENV15 => "BGE-Small",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingProfile {
     pub model_name: &'static str,
+    pub model_slug: &'static str,
     pub model_version: &'static str,
     pub dimension: usize,
+    pub runtime_model: RuntimeEmbeddingModel,
     pub symbol: EmbeddingKindConfig,
     pub chunk: EmbeddingKindConfig,
     pub graph: EmbeddingKindConfig,
@@ -43,37 +77,79 @@ pub struct EmbeddingProfile {
     pub execution_provider: Option<&'static str>,
 }
 
-pub fn default_embedding_profile() -> EmbeddingProfile {
-    EmbeddingProfile {
-        model_name: MODEL_NAME,
-        model_version: MODEL_VERSION,
-        dimension: EMBEDDING_DIMENSION,
-        symbol: EmbeddingKindConfig {
-            kind: "symbol",
-            model_id: SYMBOL_MODEL_ID,
-            batch_size: SYMBOL_BATCH_SIZE,
-        },
-        chunk: EmbeddingKindConfig {
-            kind: "chunk",
-            model_id: CHUNK_MODEL_ID,
-            batch_size: CHUNK_BATCH_SIZE,
-        },
-        graph: EmbeddingKindConfig {
-            kind: "graph",
-            model_id: GRAPH_MODEL_ID,
-            batch_size: GRAPH_BATCH_SIZE,
-        },
-        file_vectorization_batch_size: FILE_VECTORIZATION_BATCH_SIZE,
-        execution_provider: None,
+fn embedding_model_id(kind: &'static str, model_slug: &'static str, dimension: usize) -> String {
+    let prefix = match kind {
+        "symbol" => "sym",
+        other => other,
+    };
+    format!("{prefix}-{model_slug}-{dimension}")
+}
+
+impl EmbeddingProfile {
+    pub fn new(
+        model_name: &'static str,
+        model_slug: &'static str,
+        model_version: &'static str,
+        dimension: usize,
+        runtime_model: RuntimeEmbeddingModel,
+        backend: EmbeddingExecutionBackend,
+        chunk_batch_size: usize,
+        symbol_batch_size: usize,
+        file_vectorization_batch_size: usize,
+        graph_batch_size: usize,
+    ) -> Self {
+        Self {
+            model_name,
+            model_slug,
+            model_version,
+            dimension,
+            runtime_model,
+            symbol: EmbeddingKindConfig {
+                kind: "symbol",
+                model_id: embedding_model_id("symbol", model_slug, dimension),
+                batch_size: symbol_batch_size,
+            },
+            chunk: EmbeddingKindConfig {
+                kind: "chunk",
+                model_id: embedding_model_id("chunk", model_slug, dimension),
+                batch_size: chunk_batch_size,
+            },
+            graph: EmbeddingKindConfig {
+                kind: "graph",
+                model_id: embedding_model_id("graph", model_slug, dimension),
+                batch_size: graph_batch_size,
+            },
+            file_vectorization_batch_size,
+            execution_provider: backend.execution_provider(),
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub fn default_embedding_profile() -> EmbeddingProfile {
+    EmbeddingProfile::new(
+        DEFAULT_MODEL_NAME,
+        DEFAULT_MODEL_SLUG,
+        DEFAULT_MODEL_VERSION,
+        DEFAULT_EMBEDDING_DIMENSION,
+        RuntimeEmbeddingModel::BGESmallENV15,
+        EmbeddingExecutionBackend::Unspecified,
+        CHUNK_BATCH_SIZE,
+        SYMBOL_BATCH_SIZE,
+        FILE_VECTORIZATION_BATCH_SIZE,
+        GRAPH_BATCH_SIZE,
+    )
+}
+
+pub fn default_runtime_embedding_model() -> RuntimeEmbeddingModel {
+    default_embedding_profile().runtime_model
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingRuntimeContract {
-    pub model_name: &'static str,
-    pub symbol_model_id: &'static str,
-    pub chunk_model_id: &'static str,
-    pub graph_model_id: &'static str,
+    pub model_name: String,
+    pub symbol_model_id: String,
+    pub chunk_model_id: String,
+    pub graph_model_id: String,
     pub dimension: usize,
     pub chunk_batch_size: usize,
     pub symbol_batch_size: usize,
@@ -86,10 +162,10 @@ pub struct EmbeddingRuntimeContract {
 pub fn embedding_runtime_contract() -> EmbeddingRuntimeContract {
     let profile = default_embedding_profile();
     EmbeddingRuntimeContract {
-        model_name: profile.model_name,
-        symbol_model_id: profile.symbol.model_id,
-        chunk_model_id: profile.chunk.model_id,
-        graph_model_id: profile.graph.model_id,
+        model_name: profile.model_name.to_string(),
+        symbol_model_id: profile.symbol.model_id.clone(),
+        chunk_model_id: profile.chunk.model_id.clone(),
+        graph_model_id: profile.graph.model_id.clone(),
         dimension: profile.dimension,
         chunk_batch_size: profile.chunk.batch_size,
         symbol_batch_size: profile.symbol.batch_size,
@@ -127,14 +203,22 @@ impl SemanticWorkerPool {
     }
 
     fn worker_loop(graph_store: Arc<GraphStore>, queue_store: Arc<QueueStore>) {
-        info!("Semantic Worker: Initializing BGE-Small Model (384d) in isolated thread...");
+        let profile = default_embedding_profile();
+        info!(
+            "Semantic Worker: Initializing {} Model ({}d) in isolated thread...",
+            profile.runtime_model.startup_label(),
+            profile.dimension
+        );
 
-        let mut options = InitOptions::new(EmbeddingModel::BGESmallENV15);
+        let mut options = InitOptions::new(profile.runtime_model.fastembed_model());
         options.show_download_progress = true;
 
         let mut model = match TextEmbedding::try_new(options) {
             Ok(m) => {
-                info!("✅ Semantic Worker: BGE-Small Model loaded successfully.");
+                info!(
+                    "✅ Semantic Worker: {} model loaded successfully.",
+                    profile.runtime_model.startup_label()
+                );
                 m
             }
             Err(e) => {
@@ -146,10 +230,8 @@ impl SemanticWorkerPool {
         let (query_tx, query_rx) = unbounded();
         register_query_embedding_sender(query_tx);
 
-        let profile = default_embedding_profile();
-
         if let Err(e) = graph_store.ensure_embedding_model(
-            profile.symbol.model_id,
+            &profile.symbol.model_id,
             profile.symbol.kind,
             profile.model_name,
             profile.dimension as i64,
@@ -161,7 +243,7 @@ impl SemanticWorkerPool {
             );
         }
         if let Err(e) = graph_store.ensure_embedding_model(
-            profile.chunk.model_id,
+            &profile.chunk.model_id,
             profile.chunk.kind,
             profile.model_name,
             profile.dimension as i64,
@@ -173,7 +255,7 @@ impl SemanticWorkerPool {
             );
         }
         if let Err(e) = graph_store.ensure_embedding_model(
-            profile.graph.model_id,
+            &profile.graph.model_id,
             profile.graph.kind,
             profile.model_name,
             profile.dimension as i64,
@@ -195,7 +277,9 @@ impl SemanticWorkerPool {
             let policy =
                 semantic_policy(queue_store.common_len(), service_guard::current_pressure());
             let mut file_vectorization_backlog_active = false;
-            match graph_store.fetch_pending_file_vectorization_work(FILE_VECTORIZATION_BATCH_SIZE) {
+            match graph_store
+                .fetch_pending_file_vectorization_work(profile.file_vectorization_batch_size)
+            {
                 Ok(pending) if !pending.is_empty() => {
                     file_vectorization_backlog_active = true;
                     debug!(
@@ -214,8 +298,8 @@ impl SemanticWorkerPool {
                         loop {
                             match graph_store.fetch_unembedded_chunks_for_file(
                                 &work.file_path,
-                                CHUNK_MODEL_ID,
-                                CHUNK_BATCH_SIZE,
+                                &profile.chunk.model_id,
+                                profile.chunk.batch_size,
                             ) {
                                 Ok(chunks) if chunks.is_empty() => {
                                     this_work_done = true;
@@ -235,7 +319,10 @@ impl SemanticWorkerPool {
                                                 .collect();
 
                                             if let Err(err) = graph_store
-                                                .update_chunk_embeddings(CHUNK_MODEL_ID, &updates)
+                                                .update_chunk_embeddings(
+                                                    &profile.chunk.model_id,
+                                                    &updates,
+                                                )
                                             {
                                                 this_work_failed = true;
                                                 iteration_reason = format!(
@@ -251,7 +338,7 @@ impl SemanticWorkerPool {
 
                                             match graph_store.file_has_unembedded_chunks(
                                                 &work.file_path,
-                                                CHUNK_MODEL_ID,
+                                                &profile.chunk.model_id,
                                             ) {
                                                 Ok(has_pending) if has_pending => {
                                                     continue;
@@ -312,7 +399,7 @@ impl SemanticWorkerPool {
                             if let Err(err) =
                                 graph_store.mark_file_vectorization_done(
                                     &[work.file_path.clone()],
-                                    CHUNK_MODEL_ID,
+                                    &profile.chunk.model_id,
                                 )
                             {
                                 failed
@@ -518,7 +605,7 @@ impl SemanticWorkerPool {
                                 &work.anchor_type,
                                 &work.anchor_id,
                                 work.radius,
-                                GRAPH_MODEL_ID,
+                                &profile.graph.model_id,
                                 &source_signature,
                                 &projection_version,
                             ) {
@@ -605,7 +692,10 @@ impl SemanticWorkerPool {
                                     .map(|(work, _, _, _)| work.clone())
                                     .collect();
                                 if let Err(err) =
-                                    graph_store.update_graph_embeddings(GRAPH_MODEL_ID, &updates)
+                                    graph_store.update_graph_embeddings(
+                                        &profile.graph.model_id,
+                                        &updates,
+                                    )
                                 {
                                     let reason =
                                         format!("graph embedding DB write failed: {:?}", err);

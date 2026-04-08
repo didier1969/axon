@@ -27,7 +27,7 @@ enum IstCompatibilityAction {
 }
 
 impl GraphStore {
-    fn graph_embedding_model_id() -> &'static str {
+    fn graph_embedding_model_id() -> String {
         default_embedding_profile().graph.model_id
     }
 
@@ -116,7 +116,9 @@ impl GraphStore {
             store.recover_interrupted_indexing()?;
             let _ = store.clear_stale_inflight_graph_projection_work();
             let _ = store.clear_stale_inflight_file_vectorization_work();
-            match store.backfill_graph_projection_queue_for_model(Self::graph_embedding_model_id()) {
+            match store.backfill_graph_projection_queue_for_model(
+                &Self::graph_embedding_model_id(),
+            ) {
                 Ok(count) if count > 0 => {
                     info!(
                         "Backfilled {} graph projection queue entries for graph embeddings",
