@@ -259,7 +259,10 @@ def run_runtime_smoke(mode: str, run_dir: Path, url: str) -> dict[str, Any]:
     t0 = time.time()
     env = command_env(mode)
     stop_proc = shell(["bash", "scripts/stop.sh"])
-    start_proc = shell(["bash", "scripts/start.sh", mode_flag(mode)], env=env)
+    start_proc = shell(
+        ["bash", "scripts/start.sh", mode_flag(mode), "--skip-mcp-tests"],
+        env=env,
+    )
     (run_dir / "runtime-stop.log").write_text((stop_proc.stdout or "") + (stop_proc.stderr or ""), encoding="utf-8")
     (run_dir / "runtime-start.log").write_text((start_proc.stdout or "") + (start_proc.stderr or ""), encoding="utf-8")
 

@@ -1,7 +1,6 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
 use super::*;
-use crate::embedder::default_embedding_profile;
 use crate::graph::GraphStore;
 use crate::parser;
 use crate::queue::ProcessingMode;
@@ -49,11 +48,11 @@ fn wait_for_job_status(server: &McpServer, job_id: &str) -> Value {
 }
 
 fn current_graph_model_id() -> String {
-    default_embedding_profile().graph.model_id
+    "graph-bge-small-en-v1.5-384".to_string()
 }
 
 fn graph_embedding_sql(seed: &[f32]) -> String {
-    let dimension = default_embedding_profile().dimension;
+    let dimension = 384usize;
     assert!(seed.len() <= dimension);
     let mut values = vec![0.0_f32; dimension];
     for (idx, value) in seed.iter().enumerate() {
@@ -4406,7 +4405,7 @@ fn test_axon_apply_guidelines_creates_local_copies() {
     // First init the project
     server
         .graph_store
-        .sync_project_code_registry_entry("BookingSystem", "BKS")
+        .sync_project_code_registry_entry("BookingSystem", "BKS", None)
         .unwrap();
 
     let req = serde_json::json!({

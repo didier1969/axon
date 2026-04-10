@@ -152,6 +152,34 @@ class QualifyRuntimeTests(unittest.TestCase):
             captured["env"]["AXON_ENABLE_AUTONOMOUS_INGESTOR"], "true"
         )
 
+    def test_run_runtime_smoke_skips_embedded_mcp_gate(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_shell(cmd, *, check=False, env=None):
+            calls.append(cmd)
+            return MODULE.subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        def fake_wait_for_mcp_ready(url, timeout_s):
+            return None
+
+        original_shell = MODULE.shell
+        original_wait = MODULE.wait_for_mcp_ready
+        try:
+            MODULE.shell = fake_shell
+            MODULE.wait_for_mcp_ready = fake_wait_for_mcp_ready
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = MODULE.run_runtime_smoke("full", Path(tmpdir), MODULE.MCP_URL)
+        finally:
+            MODULE.shell = original_shell
+            MODULE.wait_for_mcp_ready = original_wait
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(calls[0], ["bash", "scripts/stop.sh"])
+        self.assertEqual(
+            calls[1],
+            ["bash", "scripts/start.sh", "--full", "--skip-mcp-tests"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

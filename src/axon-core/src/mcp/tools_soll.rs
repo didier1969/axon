@@ -1679,7 +1679,7 @@ graph TD;
     fn sync_project_code_registry_from_meta(&self) -> anyhow::Result<()> {
         for identity in discover_project_identities() {
             self.graph_store
-                .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
+                .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
         }
         Ok(())
     }
@@ -1690,7 +1690,7 @@ graph TD;
     ) -> anyhow::Result<(String, String)> {
         let identity = resolve_canonical_project_identity(project_slug)?;
         self.graph_store
-            .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
+            .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
         Ok((identity.slug, identity.code))
     }
 
@@ -1707,7 +1707,7 @@ graph TD;
 
         if let Ok(identity) = resolve_canonical_project_identity(project_slug) {
             self.graph_store
-                .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
+                .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
             return Ok(identity.code);
         }
 
@@ -3132,7 +3132,7 @@ impl McpServer {
         // 1. Register project
         if let Err(e) = self
             .graph_store
-            .sync_project_code_registry_entry(project_slug, project_slug)
+            .sync_project_code_registry_entry(project_slug, project_slug, None)
         {
             return Some(serde_json::json!({
                 "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],

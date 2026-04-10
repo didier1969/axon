@@ -12,8 +12,10 @@ use crate::graph::{CloseDbFunc, ExecFunc, GraphStore, InitDbFunc, LatticePool};
 use crate::runtime_mode::AxonRuntimeMode;
 
 const IST_SCHEMA_VERSION: &str = "3";
-const IST_INGESTION_VERSION: &str = "3";
-const IST_EMBEDDING_VERSION: &str = "1";
+const IST_INGESTION_VERSION: &str = "4";
+// Bump to force a one-time rebuild of derived embedding storage after the
+// crash-safe table reconstruction path was introduced.
+const IST_EMBEDDING_VERSION: &str = "2";
 const GRAPH_MODEL_ID: &str = "graph-bge-small-en-v1.5-384";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,16 +319,8 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT, file_stage VARCHAR DEFAULT 'promoted', graph_ready BOOLEAN DEFAULT FALSE, vector_ready BOOLEAN DEFAULT FALSE)")?;
         self.execute("CREATE TABLE IF NOT EXISTS Symbol (id VARCHAR PRIMARY KEY, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384])")?;
         self.execute("CREATE TABLE IF NOT EXISTS Chunk (id VARCHAR PRIMARY KEY, source_type VARCHAR, source_id VARCHAR, project_slug VARCHAR, kind VARCHAR, content VARCHAR, content_hash VARCHAR, start_line BIGINT, end_line BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS EmbeddingModel (id VARCHAR PRIMARY KEY, kind VARCHAR, model_name VARCHAR, dimension BIGINT, version VARCHAR, created_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS ChunkEmbedding (chunk_id VARCHAR, model_id VARCHAR, embedding FLOAT[384], source_hash VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS GraphProjection (anchor_type VARCHAR, anchor_id VARCHAR, target_type VARCHAR, target_id VARCHAR, edge_kind VARCHAR, distance BIGINT, radius BIGINT, projection_version VARCHAR, created_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS GraphProjectionState (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, source_signature VARCHAR, projection_version VARCHAR, updated_at BIGINT)")?;
-        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_projection_state_anchor_idx ON GraphProjectionState(anchor_type, anchor_id, radius)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS GraphProjectionQueue (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT)")?;
-        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_projection_queue_anchor_idx ON GraphProjectionQueue(anchor_type, anchor_id, radius)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS FileVectorizationQueue (file_path VARCHAR PRIMARY KEY, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding FLOAT[384], updated_at BIGINT)")?;
-        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_embedding_anchor_model_idx ON GraphEmbedding(anchor_type, anchor_id, radius, model_id)")?;
+        self.ensure_embedding_runtime_tables()?;
+        self.ensure_graph_projection_runtime_tables()?;
         self.execute("CREATE TABLE IF NOT EXISTS Project (name VARCHAR PRIMARY KEY)")?;
         self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR, project_slug VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_slug))")?;
         self.execute("CREATE TABLE IF NOT EXISTS CALLS (source_id VARCHAR, target_id VARCHAR, project_slug VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_slug))")?;
@@ -346,6 +340,40 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_slug VARCHAR, payload VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
         Ok(())
+    }
+
+    fn ensure_embedding_runtime_tables(&self) -> Result<()> {
+        self.execute("CREATE TABLE IF NOT EXISTS EmbeddingModel (id VARCHAR PRIMARY KEY, kind VARCHAR, model_name VARCHAR, dimension BIGINT, version VARCHAR, created_at BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS ChunkEmbedding (chunk_id VARCHAR, model_id VARCHAR, embedding FLOAT[384], source_hash VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS FileVectorizationQueue (file_path VARCHAR PRIMARY KEY, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding FLOAT[384], updated_at BIGINT)")?;
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_embedding_anchor_model_idx ON GraphEmbedding(anchor_type, anchor_id, radius, model_id)")?;
+        Ok(())
+    }
+
+    fn ensure_graph_projection_runtime_tables(&self) -> Result<()> {
+        self.execute("CREATE TABLE IF NOT EXISTS GraphProjection (anchor_type VARCHAR, anchor_id VARCHAR, target_type VARCHAR, target_id VARCHAR, edge_kind VARCHAR, distance BIGINT, radius BIGINT, projection_version VARCHAR, created_at BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS GraphProjectionState (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, source_signature VARCHAR, projection_version VARCHAR, updated_at BIGINT)")?;
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_projection_state_anchor_idx ON GraphProjectionState(anchor_type, anchor_id, radius)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS GraphProjectionQueue (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT)")?;
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_projection_queue_anchor_idx ON GraphProjectionQueue(anchor_type, anchor_id, radius)")?;
+        Ok(())
+    }
+
+    fn rebuild_embedding_runtime_tables(&self) -> Result<()> {
+        // Rebuild instead of row-level DELETE to tolerate corrupted vector pages.
+        self.execute("DROP TABLE IF EXISTS GraphEmbedding")?;
+        self.execute("DROP TABLE IF EXISTS ChunkEmbedding")?;
+        self.execute("DROP TABLE IF EXISTS EmbeddingModel")?;
+        self.execute("DROP TABLE IF EXISTS FileVectorizationQueue")?;
+        self.ensure_embedding_runtime_tables()
+    }
+
+    fn rebuild_graph_projection_runtime_tables(&self) -> Result<()> {
+        self.execute("DROP TABLE IF EXISTS GraphProjectionState")?;
+        self.execute("DROP TABLE IF EXISTS GraphProjection")?;
+        self.execute("DROP TABLE IF EXISTS GraphProjectionQueue")?;
+        self.ensure_graph_projection_runtime_tables()
     }
 
     fn ensure_additive_schema(&self) -> Result<()> {
@@ -454,6 +482,7 @@ impl GraphStore {
                 self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx ON soll.ProjectCodeRegistry(project_code)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_slug VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Edge (source_id VARCHAR, target_id VARCHAR, relation_type VARCHAR, metadata VARCHAR, PRIMARY KEY (source_id, target_id, relation_type))")?;
+        self.execute("CREATE TABLE IF NOT EXISTS soll.McpJob (job_id VARCHAR PRIMARY KEY, tool_name VARCHAR, status VARCHAR, submitted_at BIGINT, started_at BIGINT, finished_at BIGINT, request_json VARCHAR, reserved_ids_json VARCHAR, result_json VARCHAR, error_text VARCHAR)")?;
         
         // Performance Indexes
         self.execute("CREATE INDEX IF NOT EXISTS soll_node_type_idx ON soll.Node(type)")?;
@@ -461,6 +490,8 @@ impl GraphStore {
         self.execute("CREATE INDEX IF NOT EXISTS soll_edge_source_idx ON soll.Edge(source_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS soll_edge_target_idx ON soll.Edge(target_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS soll_edge_relation_idx ON soll.Edge(relation_type)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_mcp_job_status_idx ON soll.McpJob(status)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS soll_mcp_job_submitted_idx ON soll.McpJob(submitted_at)")?;
 
         self.execute(
             "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_pil BIGINT DEFAULT 0",
@@ -1338,13 +1369,6 @@ impl GraphStore {
             "DELETE FROM CONTAINS",
             "DELETE FROM IMPACTS",
             "DELETE FROM SUBSTANTIATES",
-            "DELETE FROM ChunkEmbedding",
-            "DELETE FROM GraphEmbedding",
-            "DELETE FROM GraphProjectionState",
-            "DELETE FROM GraphProjection",
-            "DELETE FROM GraphProjectionQueue",
-            "DELETE FROM FileVectorizationQueue",
-            "DELETE FROM EmbeddingModel",
             "DELETE FROM Chunk",
             "DELETE FROM Symbol",
             "DELETE FROM Project",
@@ -1353,6 +1377,9 @@ impl GraphStore {
         for query in cleanup_queries {
             self.execute(query)?;
         }
+
+        self.rebuild_graph_projection_runtime_tables()?;
+        self.rebuild_embedding_runtime_tables()?;
 
         self.execute("DROP TABLE IF EXISTS File;")?;
         self.execute(
@@ -1370,13 +1397,6 @@ impl GraphStore {
             "DELETE FROM CONTAINS",
             "DELETE FROM IMPACTS",
             "DELETE FROM SUBSTANTIATES",
-            "DELETE FROM ChunkEmbedding",
-            "DELETE FROM GraphEmbedding",
-            "DELETE FROM GraphProjectionState",
-            "DELETE FROM GraphProjection",
-            "DELETE FROM GraphProjectionQueue",
-            "DELETE FROM FileVectorizationQueue",
-            "DELETE FROM EmbeddingModel",
             "DELETE FROM Chunk",
             "DELETE FROM Symbol",
             "UPDATE File SET status = 'pending', worker_id = NULL, needs_reindex = FALSE, status_reason = 'soft_invalidated', file_stage = 'promoted', graph_ready = FALSE, vector_ready = FALSE",
@@ -1386,26 +1406,71 @@ impl GraphStore {
             self.execute(query)?;
         }
 
+        self.rebuild_file_runtime_table()?;
+        self.rebuild_graph_projection_runtime_tables()?;
+        self.rebuild_embedding_runtime_tables()?;
+
         info!("IST derived structural layers soft-invalidated. File backlog preserved for replay.");
         Ok(())
     }
 
     fn soft_invalidate_embedding_state(&self) -> Result<()> {
         let cleanup_queries = [
-            "DELETE FROM ChunkEmbedding",
-            "DELETE FROM GraphEmbedding",
-            "DELETE FROM EmbeddingModel",
-            "UPDATE Symbol SET embedding = NULL",
             "UPDATE File SET vector_ready = FALSE WHERE graph_ready = TRUE",
-            "DELETE FROM FileVectorizationQueue",
         ];
 
         for query in cleanup_queries {
             self.execute(query)?;
         }
 
+        self.rebuild_embedding_runtime_tables()?;
+
         info!("IST embedding layers soft-invalidated. Structural truth preserved.");
         Ok(())
+    }
+
+    fn rebuild_file_runtime_table(&self) -> Result<()> {
+        self.execute("DROP TABLE IF EXISTS File_rebuilt;")?;
+        self.execute(
+            "CREATE TABLE File_rebuilt (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN DEFAULT FALSE, last_error_reason VARCHAR, status_reason VARCHAR, defer_count BIGINT DEFAULT 0, last_deferred_at_ms BIGINT, file_stage VARCHAR DEFAULT 'promoted', graph_ready BOOLEAN DEFAULT FALSE, vector_ready BOOLEAN DEFAULT FALSE)",
+        )?;
+        self.execute(
+            "INSERT INTO File_rebuilt (path, project_slug, status, size, priority, mtime, worker_id, trace_id, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms, file_stage, graph_ready, vector_ready) \
+             SELECT path, project_slug, status, size, priority, mtime, worker_id, trace_id, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms, file_stage, graph_ready, vector_ready \
+             FROM ( \
+                 SELECT path, project_slug, status, size, priority, mtime, worker_id, trace_id, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms, file_stage, graph_ready, vector_ready, \
+                        ROW_NUMBER() OVER (PARTITION BY path ORDER BY COALESCE(mtime, 0) DESC, COALESCE(priority, 0) DESC, path ASC) AS rownum \
+                 FROM File \
+             ) ranked \
+             WHERE rownum = 1;",
+        )?;
+        self.execute("DROP TABLE File;")?;
+        self.execute("ALTER TABLE File_rebuilt RENAME TO File;")?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod graph_bootstrap_tests {
+    use crate::tests::test_helpers::create_test_db;
+
+    #[test]
+    fn test_soft_invalidate_embedding_state_rebuilds_embedding_tables() {
+        let store = create_test_db().unwrap();
+        store.execute("INSERT INTO EmbeddingModel (id, kind, model_name, dimension, version, created_at) VALUES ('chunk-bge-small-en-v1.5-384', 'chunk', 'bge-small-en-v1.5', 384, '1', 1)").unwrap();
+        store.execute("INSERT INTO ChunkEmbedding (chunk_id, model_id, embedding, source_hash) VALUES ('chunk-1', 'chunk-bge-small-en-v1.5-384', CAST([1.0] || repeat([0.0], 383) AS FLOAT[384]), 'hash-1')").unwrap();
+        store.execute("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::demo', 1, 'graph-bge-small-en-v1.5-384', 'sig-1', '1', CAST([1.0] || repeat([0.0], 383) AS FLOAT[384]), 1)").unwrap();
+        store.execute("INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES ('/tmp/demo.rs', 'queued', 1)").unwrap();
+        store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug, embedding) VALUES ('global::demo', 'demo', 'function', FALSE, TRUE, FALSE, FALSE, 'AXO', CAST([1.0] || repeat([0.0], 383) AS FLOAT[384]))").unwrap();
+        store.execute("INSERT INTO File (path, project_slug, status, size, priority, mtime, graph_ready, vector_ready) VALUES ('/tmp/demo.rs', 'AXO', 'indexed', 1, 1, 1, TRUE, TRUE)").unwrap();
+
+        store.soft_invalidate_embedding_state().unwrap();
+
+        assert_eq!(store.query_count("SELECT count(*) FROM EmbeddingModel").unwrap(), 0);
+        assert_eq!(store.query_count("SELECT count(*) FROM ChunkEmbedding").unwrap(), 0);
+        assert_eq!(store.query_count("SELECT count(*) FROM GraphEmbedding").unwrap(), 0);
+        assert_eq!(store.query_count("SELECT count(*) FROM FileVectorizationQueue").unwrap(), 0);
+        assert_eq!(store.query_count("SELECT count(*) FROM File WHERE vector_ready = TRUE").unwrap(), 0);
     }
 }
 

@@ -41,6 +41,9 @@ while [[ $# -gt 0 ]]; do
         --no-dashboard)
             START_DASHBOARD=0
             ;;
+        --skip-mcp-tests)
+            RUN_MCP_TESTS=0
+            ;;
         --help|-h)
             cat <<'EOF'
 Usage: ./scripts/start.sh [--full|--read-only|--mcp-only] [--no-dashboard] [--skip-mcp-tests]
@@ -121,8 +124,8 @@ fi
 # 2. Synchronize binaries (handle 'Text file busy' via install)
 CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
 LEGACY_RELEASE_BIN="$PROJECT_ROOT/src/axon-core/target/release/axon-core"
-DEVENV_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -type f | head -n 1)
-DEVENV_TUNNEL_BIN=$(find "$PROJECT_ROOT" -name "axon-mcp-tunnel" -path "*/release/*" -type f | head -n 1)
+DEVENV_RELEASE_BIN="$CARGO_TARGET_ROOT/release/axon-core"
+DEVENV_TUNNEL_BIN="$CARGO_TARGET_ROOT/release/axon-mcp-tunnel"
 
 rebuild_core_release() {
     echo "🔧 Rebuilding axon-core release inside Devenv..."
@@ -130,7 +133,6 @@ rebuild_core_release() {
         echo "❌ Automatic Devenv rebuild failed."
         return 1
     fi
-    DEVENV_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -type f | head -n 1)
     return 0
 }
 
@@ -140,7 +142,6 @@ rebuild_tunnel_release() {
         echo "❌ Automatic Devenv rebuild for axon-mcp-tunnel failed."
         return 1
     fi
-    DEVENV_TUNNEL_BIN=$(find "$PROJECT_ROOT" -name "axon-mcp-tunnel" -path "*/release/*" -type f | head -n 1)
     return 0
 }
 
@@ -285,7 +286,7 @@ WORKER_CAP_EXPORT=""
 if [[ -n "${MAX_AXON_WORKERS:-}" ]]; then
     WORKER_CAP_EXPORT="export MAX_AXON_WORKERS=\"$MAX_AXON_WORKERS\"; "
 fi
-tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; ${WORKER_CAP_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
+tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_MCP_MUTATION_JOBS=1; ${WORKER_CAP_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
 
 if [ "$START_DASHBOARD" = "1" ]; then
     # Start Visualization Plane

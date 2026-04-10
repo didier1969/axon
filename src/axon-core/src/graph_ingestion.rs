@@ -131,6 +131,49 @@ fn file_vectorization_queue_upsert(file_path: &str, now_ms: i64) -> String {
     )
 }
 
+fn sort_and_dedup_sql_tuples(values: &mut Vec<String>) {
+    values.sort_unstable();
+    values.dedup();
+}
+
+fn insert_unique_relation_queries(table: &str, values: &[String]) -> Vec<String> {
+    let mut queries = Vec::new();
+    for chunk in values.chunks(500) {
+        queries.push(format!(
+            "INSERT INTO {table} (source_id, target_id, project_slug) \
+             SELECT v.source_id, v.target_id, v.project_slug \
+             FROM (VALUES {rows}) AS v(source_id, target_id, project_slug) \
+             LEFT JOIN {table} existing \
+               ON existing.source_id = v.source_id \
+              AND existing.target_id = v.target_id \
+              AND existing.project_slug = v.project_slug \
+             WHERE existing.source_id IS NULL;",
+            table = table,
+            rows = chunk.join(",")
+        ));
+    }
+    queries
+}
+
+fn dedup_file_batch_rows(
+    rows: &[(String, String, i64, i64, i64, FileUpsertSource)],
+) -> Vec<(String, String, i64, i64, i64, FileUpsertSource)> {
+    let mut deduped = std::collections::BTreeMap::new();
+    for (path, project, size, mtime, priority, source) in rows {
+        deduped.insert(
+            path.clone(),
+            (project.clone(), *size, *mtime, *priority, *source),
+        );
+    }
+
+    deduped
+        .into_iter()
+        .map(|(path, (project, size, mtime, priority, source))| {
+            (path, project, size, mtime, priority, source)
+        })
+        .collect()
+}
+
 impl GraphStore {
     fn escape_sql(value: &str) -> String {
         value.replace("'", "''")
@@ -240,14 +283,27 @@ impl GraphStore {
 
     pub fn bulk_insert_files(&self, file_paths: &[(String, String, i64, i64)]) -> Result<()> {
         let mut queries = Vec::new();
-        for (path, project, size, mtime) in file_paths {
+        let batch = file_paths
+            .iter()
+            .map(|(path, project, size, mtime)| {
+                (
+                    path.clone(),
+                    project.clone(),
+                    *size,
+                    *mtime,
+                    100,
+                    FileUpsertSource::Scan,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (path, project, size, mtime, priority, source) in dedup_file_batch_rows(&batch) {
             queries.extend(Self::upsert_file_queries(
-                path,
-                project,
-                *size,
-                *mtime,
-                100,
-                FileUpsertSource::Scan,
+                &path,
+                &project,
+                size,
+                mtime,
+                priority,
+                source,
             ));
         }
         self.execute_batch(&queries)
@@ -286,18 +342,33 @@ impl GraphStore {
         batch: &IngressDrainBatch,
     ) -> Result<IngressPromotionStats> {
         let mut queries = Vec::new();
+        let file_rows = batch
+            .files
+            .iter()
+            .map(|file| {
+                let source = match file.source {
+                    IngressSource::Watcher => FileUpsertSource::HotDelta,
+                    IngressSource::Scan => FileUpsertSource::Scan,
+                };
+                (
+                    file.path.clone(),
+                    file.project_slug.clone(),
+                    file.size,
+                    file.mtime,
+                    file.priority,
+                    source,
+                )
+            })
+            .collect::<Vec<_>>();
 
-        for file in &batch.files {
-            let source = match file.source {
-                IngressSource::Watcher => FileUpsertSource::HotDelta,
-                IngressSource::Scan => FileUpsertSource::Scan,
-            };
+        for (path, project_slug, size, mtime, priority, source) in dedup_file_batch_rows(&file_rows)
+        {
             queries.extend(Self::upsert_file_queries(
-                &file.path,
-                &file.project_slug,
-                file.size,
-                file.mtime,
-                file.priority,
+                &path,
+                &project_slug,
+                size,
+                mtime,
+                priority,
                 source,
             ));
         }
@@ -1327,9 +1398,12 @@ impl GraphStore {
                 queries.push(file_vectorization_queue_upsert(&path, now_ms));
             }
         }
+        sort_and_dedup_sql_tuples(&mut contains_values);
+        sort_and_dedup_sql_tuples(&mut calls_values);
+        sort_and_dedup_sql_tuples(&mut calls_nif_values);
         for chunk in symbol_values.chunks(500) {
             queries.push(format!(
-                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug, embedding) VALUES {} ON CONFLICT(id, project_slug) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, embedding=EXCLUDED.embedding;",
+                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_slug=EXCLUDED.project_slug, embedding=EXCLUDED.embedding;",
                 chunk.join(",")
             ));
         }
@@ -1340,24 +1414,9 @@ impl GraphStore {
                 chunk.join(",")
             ));
         }
-        for chunk in contains_values.chunks(500) {
-            queries.push(format!(
-                "INSERT INTO CONTAINS (source_id, target_id, project_slug) VALUES {} ON CONFLICT(source_id, target_id, project_slug) DO NOTHING;",
-                chunk.join(",")
-            ));
-        }
-        for chunk in calls_values.chunks(500) {
-            queries.push(format!(
-                "INSERT INTO CALLS (source_id, target_id, project_slug) VALUES {} ON CONFLICT(source_id, target_id, project_slug) DO NOTHING;",
-                chunk.join(",")
-            ));
-        }
-        for chunk in calls_nif_values.chunks(500) {
-            queries.push(format!(
-                "INSERT INTO CALLS_NIF (source_id, target_id, project_slug) VALUES {} ON CONFLICT(source_id, target_id, project_slug) DO NOTHING;",
-                chunk.join(",")
-            ));
-        }
+        queries.extend(insert_unique_relation_queries("CONTAINS", &contains_values));
+        queries.extend(insert_unique_relation_queries("CALLS", &calls_values));
+        queries.extend(insert_unique_relation_queries("CALLS_NIF", &calls_nif_values));
         self.execute_batch(&queries)
     }
 
@@ -1943,6 +2002,192 @@ impl GraphStore {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        dedup_file_batch_rows, insert_unique_relation_queries, sort_and_dedup_sql_tuples,
+        FileUpsertSource,
+    };
+    use crate::parser::{ExtractionResult, Relation, Symbol};
+    use crate::queue::ProcessingMode;
+    use crate::worker::DbWriteTask;
+
+    #[test]
+    fn sort_and_dedup_sql_tuples_removes_duplicate_relation_rows() {
+        let mut values = vec![
+            "('b', 'c', 'proj')".to_string(),
+            "('a', 'b', 'proj')".to_string(),
+            "('b', 'c', 'proj')".to_string(),
+            "('a', 'b', 'proj')".to_string(),
+            "('c', 'd', 'proj')".to_string(),
+        ];
+
+        sort_and_dedup_sql_tuples(&mut values);
+
+        assert_eq!(
+            values,
+            vec![
+                "('a', 'b', 'proj')".to_string(),
+                "('b', 'c', 'proj')".to_string(),
+                "('c', 'd', 'proj')".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_unique_relation_queries_uses_anti_join_instead_of_on_conflict() {
+        let queries = insert_unique_relation_queries(
+            "CALLS",
+            &[
+                "('a', 'b', 'proj')".to_string(),
+                "('c', 'd', 'proj')".to_string(),
+            ],
+        );
+
+        assert_eq!(queries.len(), 1);
+        assert!(queries[0].contains("LEFT JOIN CALLS existing"));
+        assert!(queries[0].contains("WHERE existing.source_id IS NULL"));
+        assert!(!queries[0].contains("ON CONFLICT"));
+    }
+
+    #[test]
+    fn dedup_file_batch_rows_collapses_duplicate_paths() {
+        let rows = vec![
+            (
+                "/tmp/a.rs".to_string(),
+                "proj".to_string(),
+                10,
+                1,
+                100,
+                FileUpsertSource::Scan,
+            ),
+            (
+                "/tmp/a.rs".to_string(),
+                "proj".to_string(),
+                20,
+                2,
+                200,
+                FileUpsertSource::HotDelta,
+            ),
+            (
+                "/tmp/b.rs".to_string(),
+                "proj".to_string(),
+                30,
+                3,
+                100,
+                FileUpsertSource::Scan,
+            ),
+        ];
+
+        let deduped = dedup_file_batch_rows(&rows);
+
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].0, "/tmp/a.rs");
+        assert_eq!(deduped[0].2, 20);
+        assert_eq!(deduped[0].3, 2);
+        assert_eq!(deduped[0].4, 200);
+        assert!(matches!(deduped[0].5, FileUpsertSource::HotDelta));
+        assert_eq!(deduped[1].0, "/tmp/b.rs");
+    }
+
+    #[test]
+    fn insert_file_data_batch_replay_does_not_duplicate_calls_edges() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path = "/tmp/replay_calls.rs".to_string();
+
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 42, 1)])
+            .unwrap();
+
+        let make_extraction = || ExtractionResult {
+            project_slug: Some("proj".to_string()),
+            symbols: vec![
+                Symbol {
+                    name: "Proj.Source.call".to_string(),
+                    kind: "function".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: Default::default(),
+                    embedding: None,
+                },
+                Symbol {
+                    name: "Proj.Target.case".to_string(),
+                    kind: "function".to_string(),
+                    start_line: 2,
+                    end_line: 2,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: Default::default(),
+                    embedding: None,
+                },
+            ],
+            relations: vec![Relation {
+                from: "Proj.Source.call".to_string(),
+                to: "Proj.Target.case".to_string(),
+                rel_type: "calls".to_string(),
+                properties: Default::default(),
+            }],
+        };
+
+        let make_task = || DbWriteTask::FileExtraction {
+            reservation_id: "res-1".to_string(),
+            path: path.clone(),
+            content: Some("fn a() {}".to_string()),
+            extraction: make_extraction(),
+            processing_mode: ProcessingMode::Full,
+            trace_id: "trace-1".to_string(),
+            observed_cost_bytes: 1,
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            t3: 0,
+        };
+
+        store.insert_file_data_batch(&[make_task()]).unwrap();
+        store.insert_file_data_batch(&[make_task()]).unwrap();
+
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM CALLS WHERE project_slug = 'proj'")
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn bulk_insert_files_replay_keeps_single_row_per_path() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path = "/tmp/replay_file_row.rs".to_string();
+
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
+            .unwrap();
+
+        assert_eq!(
+            store
+                .query_count(&format!(
+                    "SELECT count(*) FROM File WHERE path = '{}'",
+                    path
+                ))
+                .unwrap(),
+            1
+        );
+    }
+}
+
 impl GraphStore {
     fn upsert_file_queries(
         path: &str,
@@ -1956,25 +2201,27 @@ impl GraphStore {
             FileUpsertSource::Scan => "metadata_changed_scan",
             FileUpsertSource::HotDelta => "metadata_changed_hot_delta",
         };
+        let safe_path = Self::escape_sql(path);
+        let safe_project = Self::escape_sql(project);
+        let safe_reason = Self::escape_sql(metadata_changed_reason);
 
         vec![
             format!(
                 "INSERT INTO Project (name) VALUES ('{}') ON CONFLICT DO NOTHING;",
-                Self::escape_sql(project)
+                safe_project
             ),
             format!(
-                "INSERT INTO File (path, project_slug, size, mtime, status, priority, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms) VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE, NULL, 'discovered_new', 0, NULL) \
-                 ON CONFLICT(path) DO UPDATE SET \
-                    project_slug=EXCLUDED.project_slug, \
-                    size=EXCLUDED.size, \
-                    mtime=EXCLUDED.mtime, \
+                "UPDATE File SET \
+                    project_slug='{safe_project}', \
+                    size={size}, \
+                    mtime={mtime}, \
                     status = CASE \
                         WHEN File.status = 'indexing' THEN File.status \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'pending' \
-                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN 'pending' \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN 'pending' \
                         ELSE File.status \
                     END, \
-                    priority = EXCLUDED.priority, \
+                    priority = {priority}, \
                     worker_id = CASE \
                         WHEN File.status = 'indexing' THEN File.worker_id \
                         ELSE NULL \
@@ -1986,61 +2233,68 @@ impl GraphStore {
                     status_reason = CASE \
                         WHEN File.status = 'indexing' THEN File.status_reason \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'manual_or_system_requeue' \
-                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size THEN '{}' \
-                        WHEN File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN 'manual_or_system_requeue' \
-                        WHEN File.priority IS DISTINCT FROM EXCLUDED.priority THEN 'priority_adjusted_no_requeue' \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} THEN '{safe_reason}' \
+                        WHEN File.project_slug IS DISTINCT FROM '{safe_project}' THEN 'manual_or_system_requeue' \
+                        WHEN File.priority IS DISTINCT FROM {priority} THEN 'priority_adjusted_no_requeue' \
                         ELSE COALESCE(File.status_reason, 'stable_metadata_no_requeue') \
                     END, \
                     file_stage = CASE \
                         WHEN File.status = 'indexing' THEN File.file_stage \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'promoted' \
-                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN 'promoted' \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN 'promoted' \
                         ELSE File.file_stage \
                     END, \
                     graph_ready = CASE \
                         WHEN File.status = 'indexing' THEN File.graph_ready \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
-                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN FALSE \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN FALSE \
                         ELSE File.graph_ready \
                     END, \
                     vector_ready = CASE \
                         WHEN File.status = 'indexing' THEN File.vector_ready \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
-                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN FALSE \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN FALSE \
                         ELSE File.vector_ready \
                     END, \
                     defer_count = CASE \
                         WHEN File.status = 'indexing' THEN File.defer_count \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 0 \
-                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN 0 \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN 0 \
                         ELSE File.defer_count \
                     END, \
                     last_deferred_at_ms = CASE \
                         WHEN File.status = 'indexing' THEN File.last_deferred_at_ms \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN NULL \
-                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN NULL \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN NULL \
                         ELSE File.last_deferred_at_ms \
                     END, \
                     needs_reindex = CASE \
                         WHEN File.status = 'indexing' \
-                             AND (File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size) \
+                             AND (File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size}) \
                         THEN TRUE \
                         WHEN File.status = 'indexing' THEN File.needs_reindex \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
-                        WHEN File.mtime IS DISTINCT FROM EXCLUDED.mtime OR File.size IS DISTINCT FROM EXCLUDED.size OR File.project_slug IS DISTINCT FROM EXCLUDED.project_slug THEN FALSE \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN FALSE \
                         ELSE File.needs_reindex \
                     END \
-                 WHERE File.project_slug IS DISTINCT FROM EXCLUDED.project_slug \
-                    OR File.mtime IS DISTINCT FROM EXCLUDED.mtime \
-                    OR File.size IS DISTINCT FROM EXCLUDED.size \
+                 WHERE path = '{safe_path}' AND ( \
+                    File.project_slug IS DISTINCT FROM '{safe_project}' \
+                    OR File.mtime IS DISTINCT FROM {mtime} \
+                    OR File.size IS DISTINCT FROM {size} \
                     OR File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') \
-                    OR File.priority IS DISTINCT FROM EXCLUDED.priority;",
-                Self::escape_sql(path),
-                Self::escape_sql(project),
+                    OR File.priority IS DISTINCT FROM {priority} \
+                 );"
+            ),
+            format!(
+                "INSERT INTO File (path, project_slug, size, mtime, status, priority, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms) \
+                 SELECT '{}', '{}', {}, {}, 'pending', {}, FALSE, NULL, 'discovered_new', 0, NULL \
+                 WHERE NOT EXISTS (SELECT 1 FROM File WHERE path = '{}');",
+                safe_path,
+                safe_project,
                 size,
                 mtime,
                 priority,
-                metadata_changed_reason
+                safe_path
             ),
         ]
     }
