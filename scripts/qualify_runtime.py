@@ -157,13 +157,24 @@ def build_mode_comparison(mode_reports: list[dict[str, Any]]) -> dict[str, Any]:
     return {"baseline": baseline["mode"], "comparisons": comparisons}
 
 
-def shell(args: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+def command_env(mode: str) -> dict[str, str]:
+    env = os.environ.copy()
+    if mode == "full":
+        env["AXON_ENABLE_AUTONOMOUS_INGESTOR"] = "true"
+        env["AXON_RUNTIME_PROFILE"] = "full_autonomous"
+    return env
+
+
+def shell(
+    args: list[str], *, check: bool = False, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
         cwd=PROJECT_ROOT,
         text=True,
         capture_output=True,
         check=check,
+        env=env,
     )
 
 
@@ -246,8 +257,9 @@ def step_result(name: str, status: str, duration_ms: int, note: str, summary: An
 
 def run_runtime_smoke(mode: str, run_dir: Path, url: str) -> dict[str, Any]:
     t0 = time.time()
+    env = command_env(mode)
     stop_proc = shell(["bash", "scripts/stop.sh"])
-    start_proc = shell(["bash", "scripts/start.sh", mode_flag(mode)])
+    start_proc = shell(["bash", "scripts/start.sh", mode_flag(mode)], env=env)
     (run_dir / "runtime-stop.log").write_text((stop_proc.stdout or "") + (stop_proc.stderr or ""), encoding="utf-8")
     (run_dir / "runtime-start.log").write_text((start_proc.stdout or "") + (start_proc.stderr or ""), encoding="utf-8")
 
@@ -273,9 +285,11 @@ def run_mcp_validate(args: argparse.Namespace, mode: str, run_dir: Path) -> dict
         "--json-out",
         str(json_out),
     ]
+    if mode == "full":
+        cmd.append("--allow-mutations")
     if args.symbol:
         cmd.extend(["--symbol", args.symbol])
-    proc = shell(cmd)
+    proc = shell(cmd, env=command_env(mode))
     (run_dir / "mcp_validate.stdout.log").write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
     summary = {}
     if json_out.exists():
@@ -332,7 +346,7 @@ def run_mcp_robustness(args: argparse.Namespace, mode: str, run_dir: Path) -> di
         cmd.extend(["--symbol", args.symbol])
     if args.reset_ist:
         cmd.append("--reset-ist")
-    proc = shell(cmd)
+    proc = shell(cmd, env=command_env(mode))
     (run_dir / "mcp_robustness.stdout.log").write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
     summary_path = discover_summary_file(output_root)
     summary = {}
@@ -372,7 +386,7 @@ def run_ingestion_qualify(args: argparse.Namespace, mode: str, run_dir: Path) ->
         cmd.append("--stop-after")
     if args.enforce_gate:
         cmd.append("--enforce-gate")
-    proc = shell(cmd)
+    proc = shell(cmd, env=command_env(mode))
     (run_dir / "ingestion_qualify.stdout.log").write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
     summary_path = discover_summary_file(output_root)
     summary = {}
