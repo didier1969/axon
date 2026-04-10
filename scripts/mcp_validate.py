@@ -48,6 +48,15 @@ class ScenarioStep:
     fail_if_contains: list[str]
 
 
+def extract_result_data(result_payload: dict[str, Any]) -> dict[str, Any]:
+    result = result_payload.get("result")
+    if isinstance(result, dict):
+        data = result.get("data")
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
 def rpc_call(url: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -218,6 +227,65 @@ def evaluate_response(tool_name: str, resp: dict[str, Any]) -> tuple[str, str]:
     return "ok", "ok"
 
 
+def poll_job_status(url: str, job_id: str, timeout: int) -> tuple[str, str]:
+    deadline = time.time() + max(timeout, 1)
+    last_status = "unknown"
+    last_error = ""
+    while time.time() < deadline:
+        resp = rpc_call(
+            url,
+            {
+                "jsonrpc": "2.0",
+                "id": 9001,
+                "method": "tools/call",
+                "params": {"name": "job_status", "arguments": {"job_id": job_id}},
+            },
+            timeout,
+        )
+        data = extract_result_data(resp)
+        status = str(data.get("status", "unknown") or "unknown")
+        error_text = str(data.get("error_text", "") or "")
+        last_status = status
+        last_error = error_text
+        if status in {"succeeded", "failed"}:
+            return status, error_text
+        time.sleep(0.1)
+    return last_status, last_error
+
+
+def evaluate_tool_result(
+    tool_name: str, resp: dict[str, Any], url: str, timeout: int
+) -> tuple[str, str]:
+    status, note = evaluate_response(tool_name, resp)
+    if status == "fail":
+        return status, note
+
+    if tool_name not in WRITE_CAPABLE_TOOLS:
+        return status, note
+
+    data = extract_result_data(resp)
+    if not data:
+        return "fail", "mutation tool did not return result.data"
+    if data.get("accepted") is not True:
+        return "fail", "mutation tool did not acknowledge job acceptance"
+
+    job_id = data.get("job_id")
+    if not isinstance(job_id, str) or not job_id.strip():
+        return "fail", "mutation tool did not return job_id"
+
+    try:
+        final_status, error_text = poll_job_status(url, job_id, timeout)
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
+        return "warn", f"mutation job accepted but status polling failed: {type(e).__name__}: {e}"
+
+    if final_status == "succeeded":
+        return "ok", f"mutation job succeeded ({job_id})"
+    if final_status == "failed":
+        # Synthetic validation args can still produce semantic failures; the async contract remains valid.
+        return "warn", f"mutation job accepted but finished failed ({job_id}): {error_text or 'no error text'}"
+    return "warn", f"mutation job accepted but did not finish in time ({job_id})"
+
+
 def truncate_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -342,7 +410,7 @@ def run_query_sequence_scenario(
         t0 = time.time()
         try:
             resp = rpc_call(url, payload, timeout)
-            status, note = evaluate_response(step.tool, resp)
+            status, note = evaluate_tool_result(step.tool, resp, url, timeout)
             excerpt, response_size = summarize_response(resp, excerpt_limit)
             text = extract_text(resp)
             if status == "ok":
@@ -470,7 +538,7 @@ def run(args: argparse.Namespace) -> int:
         t0 = time.time()
         try:
             resp = rpc_call(args.url, payload, args.timeout)
-            status, note = evaluate_response(name, resp)
+            status, note = evaluate_tool_result(name, resp, args.url, args.timeout)
             excerpt, response_size = summarize_response(resp, args.excerpt)
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
             status, note = "fail", f"{type(e).__name__}: {e}"
