@@ -1,6 +1,9 @@
 use serde_json::{json, Value};
 
+use super::catalog::requires_indexed_runtime;
 use super::McpServer;
+use crate::runtime_mode::AxonRuntimeMode;
+use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
 
 impl McpServer {
     pub(crate) fn handle_call_tool(&self, params: Option<Value>) -> Option<Value> {
@@ -12,46 +15,34 @@ impl McpServer {
             .unwrap_or(name);
         let arguments = params.get("arguments")?;
 
-        let response = match normalized_name {
-            "refine_lattice" => self.axon_refine_lattice(arguments),
-            "fs_read" => self.axon_fs_read(arguments),
-            "restore_soll" => self.axon_restore_soll(arguments),
-            "soll_validate" => self.axon_validate_soll(arguments),
-            "soll_apply_plan" => self.axon_soll_apply_plan(arguments),
-            "soll_commit_revision" => self.axon_soll_commit_revision(arguments),
-            "soll_query_context" => self.axon_soll_query_context(arguments),
-            "soll_work_plan" => self.axon_soll_work_plan(arguments),
-            "soll_attach_evidence" => self.axon_soll_attach_evidence(arguments),
-            "soll_verify_requirements" => self.axon_soll_verify_requirements(arguments),
-            "soll_rollback_revision" => self.axon_soll_rollback_revision(arguments),
-            "query" => self.axon_query(arguments),
-            "soll_manager" => self.axon_soll_manager(arguments),
-            "init_project" => self.axon_init_project(arguments),
-            "apply_guidelines" => self.axon_apply_guidelines(arguments),
-            "pre_flight_check" => self.axon_pre_flight_check(arguments),
-            "soll_export" => self.axon_export_soll(arguments),
-            "diagnose_indexing" => self.axon_diagnose_indexing(arguments),
-            "inspect" => self.axon_inspect(arguments),
-            "audit" => self.axon_audit(arguments),
-            "impact" => self.axon_impact(arguments),
-            "health" => self.axon_health(arguments),
-            "diff" => self.axon_diff(arguments),
-            "batch" => self.axon_batch(arguments),
-            "cypher" => self.axon_cypher(arguments),
-            "semantic_clones" => self.axon_semantic_clones(arguments),
-            "architectural_drift" => self.axon_architectural_drift(arguments),
-            "bidi_trace" => self.axon_bidi_trace(arguments),
-            "api_break_check" => self.axon_api_break_check(arguments),
-            "simulate_mutation" => self.axon_simulate_mutation(arguments),
-            "debug" => self.axon_debug_with_args(arguments),
-            "schema_overview" => self.axon_schema_overview(arguments),
-            "list_labels_tables" => self.axon_list_labels_tables(arguments),
-            "query_examples" => self.axon_query_examples(arguments),
-            "truth_check" => self.axon_truth_check(arguments),
-            "resume_vectorization" => self.axon_resume_vectorization(arguments),
-            _ => Some(
-                json!({ "content": [{ "type": "text", "text": "Tool not found" }], "isError": true }),
-            ),
+        let runtime_mode = AxonRuntimeMode::from_env();
+        let runtime_profile = AxonRuntimeOperationalProfile::from_mode_and_strings(
+            runtime_mode.as_str(),
+            std::env::var("AXON_ENABLE_AUTONOMOUS_INGESTOR").ok().as_deref(),
+        );
+
+        if requires_indexed_runtime(normalized_name)
+            && !matches!(runtime_profile, AxonRuntimeOperationalProfile::FullAutonomous)
+        {
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "Tool '{}' is unavailable in runtime mode '{}' with profile '{}'. Start Axon in `full_autonomous` mode for indexed graph diagnostics.",
+                        normalized_name,
+                        runtime_mode.as_str(),
+                        runtime_profile.as_str()
+                    )
+                }],
+                "isError": true
+            }));
+        }
+
+        let response = if Self::mcp_mutation_jobs_enabled() && Self::is_mutating_tool(normalized_name)
+        {
+            self.launch_mutation_job(normalized_name, arguments)
+        } else {
+            self.execute_tool_direct(normalized_name, arguments)
         };
 
         Some(response.unwrap_or_else(|| {

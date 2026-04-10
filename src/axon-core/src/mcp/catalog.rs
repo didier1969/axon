@@ -1,3 +1,5 @@
+use crate::runtime_mode::AxonRuntimeMode;
+use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
 use serde_json::{json, Value};
 
 fn is_public_tool(name: &str) -> bool {
@@ -20,6 +22,44 @@ fn is_public_tool(name: &str) -> bool {
             | "simulate_mutation"
             | "resume_vectorization"
     )
+}
+
+pub(crate) fn requires_indexed_runtime(name: &str) -> bool {
+    matches!(
+        name,
+        "query"
+            | "inspect"
+            | "audit"
+            | "impact"
+            | "health"
+            | "diagnose_indexing"
+            | "diff"
+            | "semantic_clones"
+            | "architectural_drift"
+            | "bidi_trace"
+            | "api_break_check"
+            | "simulate_mutation"
+            | "truth_check"
+    )
+}
+
+fn tool_available_in_runtime(name: &str) -> bool {
+    let runtime_mode = AxonRuntimeMode::from_env();
+    let runtime_profile = AxonRuntimeOperationalProfile::from_mode_and_strings(
+        runtime_mode.as_str(),
+        std::env::var("AXON_ENABLE_AUTONOMOUS_INGESTOR").ok().as_deref(),
+    );
+
+    if requires_indexed_runtime(name) {
+        return matches!(runtime_profile, AxonRuntimeOperationalProfile::FullAutonomous);
+    }
+
+    match runtime_mode {
+        AxonRuntimeMode::Full
+        | AxonRuntimeMode::GraphOnly
+        | AxonRuntimeMode::ReadOnly
+        | AxonRuntimeMode::McpOnly => true,
+    }
 }
 
 pub(crate) fn tools_catalog(include_internal: bool) -> Value {
@@ -69,12 +109,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_slug": { "type": "string", "description": "Le nom complet du projet (ex: BookingSystem)." },
-                        "project_code": { "type": "string", "description": "Le code en 3 lettres (ex: BKS)." },
-                        "project_path": { "type": "string", "description": "Chemin absolu vers la racine du projet" },
+                        "project_name": { "type": "string", "description": "Le nom du projet (ex: BookingSystem)." },
+                        "project_slug": { "type": "string", "description": "Le slug en 3 lettres (ex: BKS)." },
                         "concept_document_url_or_text": { "type": "string", "description": "Optionnel: le texte ou lien vers la vision du projet." }
                     },
-                    "required": ["project_slug", "project_code", "project_path"]
+                    "required": ["project_name", "project_slug"]
                 }
             },
             {
@@ -84,8 +123,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "project_slug": { "type": "string", "description": "Le slug en 3 lettres du projet cible." },
-                        "accepted_global_rule_ids": { 
-                            "type": "array", 
+                        "accepted_global_rule_ids": {
+                            "type": "array",
                             "items": { "type": "string" },
                             "description": "Liste des IDs canoniques des règles globales à appliquer (ex: GUI-PRO-001)."
                         }
@@ -94,8 +133,8 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
-                "name": "axon_pre_flight_check",
-                "description": "[DX/SOLL] Outil OBLIGATOIRE avant tout commit. Évalue les fichiers modifiés contre les Guidelines SOLL. Cet outil ne commite PAS le code, il valide et donne l'autorisation de commiter via shell.",
+                "name": "axon_commit_work",
+                "description": "[DX/SOLL] Outil OBLIGATOIRE pour valider et commiter le travail. Évalue les fichiers modifiés contre les Guidelines SOLL. Ne JAMAIS utiliser git commit via shell.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -103,9 +142,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Liste des chemins de fichiers modifiés."
-                        }
+                        },
+                        "message": { "type": "string", "description": "Message de commit (Conventional Commits)." },
+                        "dry_run": { "type": "boolean", "description": "Si true, valide uniquement sans commiter." }
                     },
-                    "required": ["diff_paths"]
+                    "required": ["diff_paths", "message"]
                 }
             },
             {
@@ -148,8 +189,6 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "project_slug": { "type": "string" },
-                        "status": { "type": "string", "description": "Filtre optionnel par statut (ex: 'proposed', 'accepted')" },
-                        "type": { "type": "string", "description": "Filtre optionnel par type (ex: 'Requirement', 'Decision')" },
                         "limit": { "type": "integer" }
                     },
                     "required": []
@@ -236,6 +275,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "project_slug": { "type": "string", "description": "Filtre la validation au projet demandé." }
                     },
                     "required": []
+                }
+            },
+            {
+                "name": "job_status",
+                "description": "[SYSTEM] Retourne l'état détaillé d'un job MCP mutateur accepté par le serveur partagé.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": { "type": "string", "description": "Identifiant du job (ex: JOB-1712851200000)." }
+                    },
+                    "required": ["job_id"]
                 }
             },
             {
@@ -476,14 +526,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
         ]
     });
 
-    if !include_internal {
-        if let Some(tools) = catalog.get_mut("tools").and_then(|value| value.as_array_mut()) {
-            tools.retain(|tool| {
-                tool.get("name")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(is_public_tool)
-            });
-        }
+    if let Some(tools) = catalog
+        .get_mut("tools")
+        .and_then(|value| value.as_array_mut())
+    {
+        tools.retain(|tool| {
+            tool.get("name")
+                .and_then(|value| value.as_str())
+                .is_some_and(|name| {
+                    tool_available_in_runtime(name)
+                        && (include_internal || is_public_tool(name))
+                })
+        });
     }
 
     catalog

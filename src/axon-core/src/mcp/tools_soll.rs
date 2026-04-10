@@ -7,8 +7,8 @@ use super::soll::{
     canonical_soll_export_dir, find_latest_soll_export, parse_soll_export, SollRestoreCounts,
 };
 use super::McpServer;
+use crate::project_meta::{discover_project_identities, resolve_canonical_project_identity};
 
-#[allow(dead_code)]
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
     ("EPITOMIZES", "soll.EPITOMIZES"),
     ("BELONGS_TO", "soll.BELONGS_TO"),
@@ -50,7 +50,6 @@ impl WorkPlanEntityType {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 struct WorkPlanNode {
     id: String,
     title: String,
@@ -108,7 +107,7 @@ struct RelationPolicy {
     allow_multiple_types: bool,
 }
 
-fn relation_table_name(_relation_type: &str) -> Option<&'static str> {
+fn relation_table_name(relation_type: &str) -> Option<&'static str> {
     Some("soll.Edge")
 }
 
@@ -394,7 +393,8 @@ fn filter_adjacency(
         let neighbors = adjacency
             .get(id)
             .map(|items| {
-                items.iter()
+                items
+                    .iter()
                     .filter(|child| allowed_ids.contains(*child))
                     .cloned()
                     .collect::<BTreeSet<_>>()
@@ -538,7 +538,11 @@ fn build_waves(
                 .score
                 .cmp(&left.score)
                 .then_with(|| right.descendants.cmp(&left.descendants))
-                .then_with(|| left.entity_type.sort_rank().cmp(&right.entity_type.sort_rank()))
+                .then_with(|| {
+                    left.entity_type
+                        .sort_rank()
+                        .cmp(&right.entity_type.sort_rank())
+                })
                 .then_with(|| left.id.cmp(&right.id))
         });
         waves.push(WorkPlanWave { wave_index, items });
@@ -630,46 +634,95 @@ impl McpServer {
 
         match action {
             "create" => {
-                let project_slug = data
+                let project_slug = args
                     .get("project_slug")
                     .and_then(|v| v.as_str())
+                    .or_else(|| data.get("project_slug").and_then(|v| v.as_str()))
                     .unwrap_or("AXO");
-                let (project_slug, project_code, formatted_id) = match self.next_soll_numeric_id(project_slug, entity) {
-                    Ok((canonical_slug, project_code, prefix, next_num)) => (
-                        canonical_slug,
-                        project_code.clone(),
-                        format!("{}-{}-{:03}", prefix, project_code, next_num),
-                    ),
-                    Err(e) => {
-                        return Some(
-                            json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }),
-                        )
+                let reserved_id = args.get("reserved_id").and_then(|value| value.as_str());
+                let (project_slug, project_code, formatted_id) = if let Some(reserved_id) = reserved_id
+                {
+                    match self.resolve_canonical_project_identity_for_mutation(project_slug) {
+                        Ok((canonical_slug, project_code)) => {
+                            (canonical_slug, project_code, reserved_id.to_string())
+                        }
+                        Err(e) => {
+                            return Some(
+                                json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }),
+                            )
+                        }
+                    }
+                } else {
+                    match self.next_soll_numeric_id(project_slug, entity) {
+                        Ok((canonical_slug, project_code, prefix, next_num)) => (
+                            canonical_slug,
+                            project_code.clone(),
+                            format!("{}-{}-{:03}", prefix, project_code, next_num),
+                        ),
+                        Err(e) => {
+                            return Some(
+                                json!({ "content": [{ "type": "text", "text": format!("Erreur registre: {}", e) }], "isError": true }),
+                            )
+                        }
                     }
                 };
 
-                
                 let mut meta = data.get("metadata").cloned().unwrap_or(json!({}));
-                let title = data.get("title").or_else(|| data.get("name")).and_then(|v| v.as_str()).unwrap_or("");
-                let description = data.get("description").or_else(|| data.get("explanation")).and_then(|v| v.as_str()).unwrap_or("");
+                let title = data
+                    .get("title")
+                    .or_else(|| data.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let description = data
+                    .get("description")
+                    .or_else(|| data.get("explanation"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("");
                 let status = if entity == "validation" {
-                    data.get("result").and_then(|v| v.as_str()).unwrap_or(status)
+                    data.get("result")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(status)
                 } else {
                     status
                 };
-                
-                if let Some(goal) = data.get("goal") { meta["goal"] = goal.clone(); }
-                if let Some(priority) = data.get("priority") { meta["priority"] = priority.clone(); }
-                if let Some(owner) = data.get("owner") { meta["owner"] = owner.clone(); }
-                if let Some(ac) = data.get("acceptance_criteria") { meta["acceptance_criteria"] = ac.clone(); }
-                if let Some(er) = data.get("evidence_refs") { meta["evidence_refs"] = er.clone(); }
-                if let Some(rat) = data.get("rationale") { meta["rationale"] = rat.clone(); }
-                if let Some(ctx) = data.get("context") { meta["context"] = ctx.clone(); }
-                if let Some(sup) = data.get("supersedes_decision_id") { meta["supersedes_decision_id"] = sup.clone(); }
-                if let Some(imp) = data.get("impact_scope") { meta["impact_scope"] = imp.clone(); }
-                if let Some(role) = data.get("role") { meta["role"] = role.clone(); }
-                if let Some(method) = data.get("method") { meta["method"] = method.clone(); }
-                if let Some(result) = data.get("result") { meta["result"] = result.clone(); }
+
+                if let Some(goal) = data.get("goal") {
+                    meta["goal"] = goal.clone();
+                }
+                if let Some(priority) = data.get("priority") {
+                    meta["priority"] = priority.clone();
+                }
+                if let Some(owner) = data.get("owner") {
+                    meta["owner"] = owner.clone();
+                }
+                if let Some(ac) = data.get("acceptance_criteria") {
+                    meta["acceptance_criteria"] = ac.clone();
+                }
+                if let Some(er) = data.get("evidence_refs") {
+                    meta["evidence_refs"] = er.clone();
+                }
+                if let Some(rat) = data.get("rationale") {
+                    meta["rationale"] = rat.clone();
+                }
+                if let Some(ctx) = data.get("context") {
+                    meta["context"] = ctx.clone();
+                }
+                if let Some(sup) = data.get("supersedes_decision_id") {
+                    meta["supersedes_decision_id"] = sup.clone();
+                }
+                if let Some(imp) = data.get("impact_scope") {
+                    meta["impact_scope"] = imp.clone();
+                }
+                if let Some(role) = data.get("role") {
+                    meta["role"] = role.clone();
+                }
+                if let Some(method) = data.get("method") {
+                    meta["method"] = method.clone();
+                }
+                if let Some(result) = data.get("result") {
+                    meta["result"] = result.clone();
+                }
 
                 meta["updated_at"] = json!(now_unix_ms());
 
@@ -682,17 +735,28 @@ impl McpServer {
                     "milestone" => "Milestone",
                     "stakeholder" => "Stakeholder",
                     "validation" => "Validation",
-                    "guideline" => "Guideline",
-                    _ => return Some(json!({ "content": [{ "type": "text", "text": "Unknown entity" }], "isError": true })),
+                    _ => {
+                        return Some(
+                            json!({ "content": [{ "type": "text", "text": "Unknown entity" }], "isError": true }),
+                        )
+                    }
                 };
 
                 let q = "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET project_slug = EXCLUDED.project_slug, project_code = EXCLUDED.project_code, title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata";
-                
+
                 let insert_res = self.graph_store.execute_param(
                     q,
-                    &json!([formatted_id, entity_type_cap, project_slug, project_code, title, description, status, meta.to_string()]),
+                    &json!([
+                        formatted_id,
+                        entity_type_cap,
+                        project_slug,
+                        project_code,
+                        title,
+                        description,
+                        status,
+                        meta.to_string()
+                    ]),
                 );
-
 
                 match insert_res {
                     Ok(_) => {
@@ -706,17 +770,28 @@ impl McpServer {
             }
             "update" => {
                 let id = data.get("id")?.as_str()?;
-                
+
                 let update_res: anyhow::Result<()> = (|| {
                     let current = self.query_named_row(
                         &format!("SELECT title, description, status, metadata FROM soll.Node WHERE id = '{}'", escape_sql(id)),
                         4,
                     )?;
                     let mut meta: Value = serde_json::from_str(&current[3]).unwrap_or(json!({}));
-                    
-                    let title = data.get("title").or_else(|| data.get("name")).and_then(|v| v.as_str()).unwrap_or(&current[0]);
-                    let description = data.get("description").or_else(|| data.get("explanation")).and_then(|v| v.as_str()).unwrap_or(&current[1]);
-                    let status = data.get("status").and_then(|v| v.as_str()).unwrap_or(&current[2]);
+
+                    let title = data
+                        .get("title")
+                        .or_else(|| data.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&current[0]);
+                    let description = data
+                        .get("description")
+                        .or_else(|| data.get("explanation"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&current[1]);
+                    let status = data
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&current[2]);
 
                     if let Some(m) = data.get("metadata") {
                         if let Some(obj) = m.as_object() {
@@ -725,19 +800,43 @@ impl McpServer {
                             }
                         }
                     }
-                    if let Some(goal) = data.get("goal") { meta["goal"] = goal.clone(); }
-                    if let Some(priority) = data.get("priority") { meta["priority"] = priority.clone(); }
-                    if let Some(owner) = data.get("owner") { meta["owner"] = owner.clone(); }
-                    if let Some(ac) = data.get("acceptance_criteria") { meta["acceptance_criteria"] = ac.clone(); }
-                    if let Some(er) = data.get("evidence_refs") { meta["evidence_refs"] = er.clone(); }
-                    if let Some(rat) = data.get("rationale") { meta["rationale"] = rat.clone(); }
-                    if let Some(ctx) = data.get("context") { meta["context"] = ctx.clone(); }
-                    if let Some(sup) = data.get("supersedes_decision_id") { meta["supersedes_decision_id"] = sup.clone(); }
-                    if let Some(imp) = data.get("impact_scope") { meta["impact_scope"] = imp.clone(); }
-                    if let Some(role) = data.get("role") { meta["role"] = role.clone(); }
-                    if let Some(method) = data.get("method") { meta["method"] = method.clone(); }
-                    if let Some(result) = data.get("result") { meta["result"] = result.clone(); }
-                    
+                    if let Some(goal) = data.get("goal") {
+                        meta["goal"] = goal.clone();
+                    }
+                    if let Some(priority) = data.get("priority") {
+                        meta["priority"] = priority.clone();
+                    }
+                    if let Some(owner) = data.get("owner") {
+                        meta["owner"] = owner.clone();
+                    }
+                    if let Some(ac) = data.get("acceptance_criteria") {
+                        meta["acceptance_criteria"] = ac.clone();
+                    }
+                    if let Some(er) = data.get("evidence_refs") {
+                        meta["evidence_refs"] = er.clone();
+                    }
+                    if let Some(rat) = data.get("rationale") {
+                        meta["rationale"] = rat.clone();
+                    }
+                    if let Some(ctx) = data.get("context") {
+                        meta["context"] = ctx.clone();
+                    }
+                    if let Some(sup) = data.get("supersedes_decision_id") {
+                        meta["supersedes_decision_id"] = sup.clone();
+                    }
+                    if let Some(imp) = data.get("impact_scope") {
+                        meta["impact_scope"] = imp.clone();
+                    }
+                    if let Some(role) = data.get("role") {
+                        meta["role"] = role.clone();
+                    }
+                    if let Some(method) = data.get("method") {
+                        meta["method"] = method.clone();
+                    }
+                    if let Some(result) = data.get("result") {
+                        meta["result"] = result.clone();
+                    }
+
                     meta["updated_at"] = json!(now_unix_ms());
 
                     let q = "UPDATE soll.Node SET title = ?, description = ?, status = ?, metadata = ? WHERE id = ?";
@@ -798,27 +897,37 @@ impl McpServer {
                 }))
             }
         };
-        let mut markdown = String::from("# SOLL Extraction
+        let mut markdown = String::from(
+            "# SOLL Extraction
 
-");
+",
+        );
 
         let now = std::time::SystemTime::now();
         let datetime: chrono::DateTime<chrono::Local> = now.into();
         let timestamp_str = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
-        markdown.push_str(&format!("*Généré le : {}*
+        markdown.push_str(&format!(
+            "*Généré le : {}*
 
-", timestamp_str));
+",
+            timestamp_str
+        ));
 
         if let Some(slug) = project_slug {
-            markdown.push_str(&format!("*Portée : projet `{}`*
+            markdown.push_str(&format!(
+                "*Portée : projet `{}`*
 
-", slug));
+",
+                slug
+            ));
         }
-        
-        markdown.push_str("## Topologie (Mermaid)
+
+        markdown.push_str(
+            "## Topologie (Mermaid)
 ```mermaid
 graph TD;
-");
+",
+        );
         if let Ok(res) = self.graph_store.query_json(&format!(
             "SELECT source_id, target_id, relation_type FROM soll.Edge{}",
             project_scope_clause_for_relation(project_code.as_deref())
@@ -826,14 +935,19 @@ graph TD;
             let edges: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
             for edge in edges {
                 if edge.len() >= 3 {
-                    markdown.push_str(&format!("  {} -- {} --> {};
-", edge[0], edge[2], edge[1]));
+                    markdown.push_str(&format!(
+                        "  {} -- {} --> {};
+",
+                        edge[0], edge[2], edge[1]
+                    ));
                 }
             }
         }
-        markdown.push_str("```
+        markdown.push_str(
+            "```
 
-");
+",
+        );
 
         if let Ok(res) = self
             .graph_store
@@ -867,7 +981,7 @@ graph TD;
                 if meta != "{}" {
                     markdown.push_str(&format!("**Meta:** `{}`\n", meta));
                 }
-                markdown.push('\n');
+                markdown.push_str("\n");
             }
         }
 
@@ -951,8 +1065,9 @@ graph TD;
             )
             .ok()?;
 
-        let relation_policy_violations =
-            self.collect_relation_policy_violations(project_code.as_deref()).ok()?;
+        let relation_policy_violations = self
+            .collect_relation_policy_violations(project_code.as_deref())
+            .ok()?;
 
         let violation_count = orphan_requirements.len()
             + validations_without_verifies.len()
@@ -998,7 +1113,11 @@ graph TD;
         } else {
             "warn_soll_invariants"
         };
-        let confidence = if violation_count == 0 { "high" } else { "medium" };
+        let confidence = if violation_count == 0 {
+            "high"
+        } else {
+            "medium"
+        };
         let summary = if violation_count == 0 {
             "minimal soll invariants verified"
         } else {
@@ -1014,7 +1133,10 @@ graph TD;
                     None => "workspace:*".to_string(),
                 },
                 &evidence,
-                &["run `soll_verify_requirements` for requirement-level coverage", "apply targeted SOLL links with `soll_manager` if needed"],
+                &[
+                    "run `soll_verify_requirements` for requirement-level coverage",
+                    "apply targeted SOLL links with `soll_manager` if needed"
+                ],
                 confidence,
             )
         );
@@ -1062,8 +1184,13 @@ graph TD;
         let mut restored = SollRestoreCounts::default();
 
         for vision in restore.vision {
-            let mut meta_out: serde_json::Value = vision.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
-            if !vision.goal.is_empty() { let goal = vision.goal.clone();
+            let mut meta_out: serde_json::Value = vision
+                .metadata
+                .unwrap_or_else(|| "{}".to_string())
+                .parse()
+                .unwrap_or(serde_json::json!({}));
+            if !vision.goal.is_empty() {
+                let goal = vision.goal.clone();
                 if let Some(obj) = meta_out.as_object_mut() {
                     obj.insert("goal".to_string(), serde_json::Value::String(goal));
                 }
@@ -1102,11 +1229,27 @@ graph TD;
         }
 
         for req in restore.requirements {
-            let mut meta_out: serde_json::Value = req.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            let mut meta_out: serde_json::Value = req
+                .metadata
+                .unwrap_or_else(|| "{}".to_string())
+                .parse()
+                .unwrap_or(serde_json::json!({}));
             if let Some(obj) = meta_out.as_object_mut() {
-                if !req.priority.is_empty() { let priority = req.priority.clone(); obj.insert("priority".to_string(), serde_json::Value::String(priority)); }
-                if false { let owner = String::new(); obj.insert("owner".to_string(), serde_json::Value::String(owner)); }
-                if false { let ac = String::new(); obj.insert("acceptance_criteria".to_string(), serde_json::Value::String(ac)); }
+                if !req.priority.is_empty() {
+                    let priority = req.priority.clone();
+                    obj.insert("priority".to_string(), serde_json::Value::String(priority));
+                }
+                if false {
+                    let owner = String::new();
+                    obj.insert("owner".to_string(), serde_json::Value::String(owner));
+                }
+                if false {
+                    let ac = String::new();
+                    obj.insert(
+                        "acceptance_criteria".to_string(),
+                        serde_json::Value::String(ac),
+                    );
+                }
             }
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Node (id, type, title, description, status, metadata)
@@ -1126,10 +1269,20 @@ graph TD;
         }
 
         for dec in restore.decisions {
-            let mut meta_out: serde_json::Value = dec.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            let mut meta_out: serde_json::Value = dec
+                .metadata
+                .unwrap_or_else(|| "{}".to_string())
+                .parse()
+                .unwrap_or(serde_json::json!({}));
             if let Some(obj) = meta_out.as_object_mut() {
-                if false { let ctx = String::new(); obj.insert("context".to_string(), serde_json::Value::String(ctx)); }
-                if false { let rat = String::new(); obj.insert("rationale".to_string(), serde_json::Value::String(rat)); }
+                if false {
+                    let ctx = String::new();
+                    obj.insert("context".to_string(), serde_json::Value::String(ctx));
+                }
+                if false {
+                    let rat = String::new();
+                    obj.insert("rationale".to_string(), serde_json::Value::String(rat));
+                }
             }
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Node (id, type, title, description, status, metadata)
@@ -1167,10 +1320,20 @@ graph TD;
         }
 
         for val in restore.validations {
-            let mut meta_out: serde_json::Value = val.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            let mut meta_out: serde_json::Value = val
+                .metadata
+                .unwrap_or_else(|| "{}".to_string())
+                .parse()
+                .unwrap_or(serde_json::json!({}));
             if let Some(obj) = meta_out.as_object_mut() {
-                if false { let m = String::new(); obj.insert("method".to_string(), serde_json::Value::String(m)); }
-                if false { let t: i64 = 0; obj.insert("timestamp".to_string(), serde_json::Value::Number(t.into())); }
+                if false {
+                    let m = String::new();
+                    obj.insert("method".to_string(), serde_json::Value::String(m));
+                }
+                if false {
+                    let t: i64 = 0;
+                    obj.insert("timestamp".to_string(), serde_json::Value::Number(t.into()));
+                }
             }
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Node (id, type, status, metadata)
@@ -1188,9 +1351,16 @@ graph TD;
         }
 
         for cpt in restore.concepts {
-            let mut meta_out: serde_json::Value = cpt.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
+            let mut meta_out: serde_json::Value = cpt
+                .metadata
+                .unwrap_or_else(|| "{}".to_string())
+                .parse()
+                .unwrap_or(serde_json::json!({}));
             if let Some(obj) = meta_out.as_object_mut() {
-                if !cpt.rationale.is_empty() { let rat = cpt.rationale.clone(); obj.insert("rationale".to_string(), serde_json::Value::String(rat)); }
+                if !cpt.rationale.is_empty() {
+                    let rat = cpt.rationale.clone();
+                    obj.insert("rationale".to_string(), serde_json::Value::String(rat));
+                }
             }
             if let Err(e) = self.graph_store.execute_param(
                 "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, metadata)
@@ -1208,25 +1378,6 @@ graph TD;
                 return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore concept error: {}", e) }], "isError": true }));
             }
             restored.concepts += 1;
-        }
-
-        for gui in restore.guidelines {
-            let meta_out: serde_json::Value = gui.metadata.unwrap_or_else(|| "{}".to_string()).parse().unwrap_or(serde_json::json!({}));
-            if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Node (id, type, title, description, status, metadata) 
-                 VALUES ($id, 'Guideline', $title, $description, $status, $metadata)
-                 ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata",
-                &serde_json::json!({
-                    "id": gui.id,
-                    "title": gui.title,
-                    "description": gui.description,
-                    "status": gui.status,
-                    "metadata": meta_out.to_string()
-                }),
-            ) {
-                return Some(serde_json::json!({ "content": [{ "type": "text", "text": format!("SOLL restore guideline error: {}", e) }], "isError": true }));
-            }
-            restored.guidelines += 1;
         }
 
         for rel in restore.relations {
@@ -1368,7 +1519,12 @@ graph TD;
             .iter()
             .find(|allowed| **allowed == selected)
             .copied()
-            .ok_or_else(|| anyhow!("Relation `{}` introuvable dans la politique canonique", selected))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "Relation `{}` introuvable dans la politique canonique",
+                    selected
+                )
+            })?;
 
         Ok((selected_static, policy))
     }
@@ -1425,7 +1581,10 @@ graph TD;
         project_code: Option<&str>,
     ) -> anyhow::Result<Vec<String>> {
         let mut violations = Vec::new();
-        let mut exclusive_pairs: std::collections::HashMap<(String, String), std::collections::HashSet<String>> = std::collections::HashMap::new();
+        let mut exclusive_pairs: std::collections::HashMap<
+            (String, String),
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
 
         let rows_raw = self.graph_store.query_json("SELECT source_id, target_id, relation_type FROM soll.Edge ORDER BY source_id, target_id")?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
@@ -1443,20 +1602,25 @@ graph TD;
             let source_kind = match self.classify_existing_link_endpoint(source_id) {
                 Ok(kind) => kind,
                 Err(e) => {
-                    violations.push(format!("{}: {} -> {} ({})", relation_type, source_id, target_id, e));
+                    violations.push(format!(
+                        "{}: {} -> {} ({})",
+                        relation_type, source_id, target_id, e
+                    ));
                     continue;
                 }
             };
             let target_kind = match self.classify_existing_link_endpoint(target_id) {
                 Ok(kind) => kind,
                 Err(e) => {
-                    violations.push(format!("{}: {} -> {} ({})", relation_type, source_id, target_id, e));
+                    violations.push(format!(
+                        "{}: {} -> {} ({})",
+                        relation_type, source_id, target_id, e
+                    ));
                     continue;
                 }
             };
 
-            let Some(policy) =
-                relation_policy_for_pair(source_kind.label(), target_kind.label())
+            let Some(policy) = relation_policy_for_pair(source_kind.label(), target_kind.label())
             else {
                 violations.push(format!(
                     "{}: {} -> {} (paire {} -> {} interdite)",
@@ -1469,7 +1633,11 @@ graph TD;
                 continue;
             };
 
-            if !policy.allowed.iter().any(|allowed| *allowed == relation_type) {
+            if !policy
+                .allowed
+                .iter()
+                .any(|allowed| *allowed == relation_type)
+            {
                 violations.push(format!(
                     "{}: {} -> {} (non autorisée pour {} -> {}; autorisées: {})",
                     relation_type,
@@ -1508,47 +1676,52 @@ graph TD;
         Ok(violations)
     }
 
+    fn sync_project_code_registry_from_meta(&self) -> anyhow::Result<()> {
+        for identity in discover_project_identities() {
+            self.graph_store
+                .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
+        }
+        Ok(())
+    }
+
     fn resolve_canonical_project_identity_for_mutation(
         &self,
         project_slug: &str,
     ) -> anyhow::Result<(String, String)> {
-        let escaped = escape_sql(project_slug);
-        
-        let by_code = self.graph_store.query_json(&format!(
-            "SELECT project_slug, project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
-            escaped
-        ))?;
-        let code_rows: Vec<Vec<String>> = serde_json::from_str(&by_code).unwrap_or_default();
-        if let Some(row) = code_rows.first() {
-            if row.len() >= 2 {
-                return Ok((row[0].clone(), row[1].clone()));
-            }
-        }
-
-        let by_slug = self.graph_store.query_json(&format!(
-            "SELECT project_slug, project_code FROM soll.ProjectCodeRegistry WHERE project_slug = '{}'",
-            escaped
-        ))?;
-        let slug_rows: Vec<Vec<String>> = serde_json::from_str(&by_slug).unwrap_or_default();
-        if let Some(row) = slug_rows.first() {
-            if row.len() >= 2 {
-                return Ok((row[0].clone(), row[1].clone()));
-            }
-        }
-
-        let valid_codes = self.query_single_column("SELECT project_code FROM soll.ProjectCodeRegistry").unwrap_or_default().join(", ");
-        Err(anyhow::anyhow!(
-            "Projet canonique `{}` introuvable. Slugs valides : {}",
-            project_slug, valid_codes
-        ))
+        let identity = resolve_canonical_project_identity(project_slug)?;
+        self.graph_store
+            .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
+        Ok((identity.slug, identity.code))
     }
 
     fn resolve_project_code(&self, project_slug: &str) -> anyhow::Result<String> {
-        let (_, code) = self.resolve_canonical_project_identity_for_mutation(project_slug)?;
-        Ok(code)
+        let _ = self.sync_project_code_registry_from_meta();
+        let escaped = escape_sql(project_slug);
+        let by_slug = self.query_single_column(&format!(
+            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_slug = '{}'",
+            escaped
+        ))?;
+        if let Some(code) = by_slug.into_iter().next() {
+            return Ok(code);
+        }
+
+        if let Ok(identity) = resolve_canonical_project_identity(project_slug) {
+            self.graph_store
+                .sync_project_code_registry_entry(&identity.slug, &identity.code)?;
+            return Ok(identity.code);
+        }
+
+        if let Err(e) = resolve_canonical_project_identity(project_slug) {
+            return Err(e);
+        }
+
+        Err(anyhow!(
+            "Projet canonique `{}` introuvable dans `.axon/meta.json` ou soll.ProjectCodeRegistry",
+            project_slug
+        ))
     }
 
-    fn next_server_numeric_id(
+    pub(crate) fn next_server_numeric_id(
         &self,
         project_slug: &str,
         kind: &str,
@@ -1573,13 +1746,13 @@ graph TD;
         self.graph_store.execute_param(
             "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev) \
              VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING",
-            &json!([project_code]),
+            &json!([project_slug]),
         )?;
 
         let current_query = format!(
             "SELECT COALESCE({}, 0) FROM soll.Registry WHERE project_slug = '{}'",
             reg_col,
-            escape_sql(&project_code)
+            escape_sql(&project_slug)
         );
         let current = self
             .query_single_column(&current_query)?
@@ -1608,13 +1781,13 @@ graph TD;
             "UPDATE soll.Registry SET {} = {} WHERE project_slug = '{}'",
             reg_col,
             next,
-            escape_sql(&project_code)
+            escape_sql(&project_slug)
         ))?;
 
         Ok((project_slug, project_code, prefix, next))
     }
 
-    fn next_soll_numeric_id(
+    pub(crate) fn next_soll_numeric_id(
         &self,
         project_slug: &str,
         entity: &str,
@@ -1622,7 +1795,6 @@ graph TD;
         self.next_server_numeric_id(project_slug, entity)
     }
 
-    #[allow(dead_code)]
     fn restore_soll_relation(
         &self,
         relation_type: &str,
@@ -1651,9 +1823,11 @@ impl McpServer {
             .get("dry_run")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let _plan = args.get("plan")?;
+        let plan = args.get("plan")?;
 
-        let (canonical_slug, _) = match self.resolve_canonical_project_identity_for_mutation(project_slug) {
+        let (canonical_slug, _) = match self
+            .resolve_canonical_project_identity_for_mutation(project_slug)
+        {
             Ok(identity) => identity,
             Err(e) => {
                 return Some(json!({
@@ -1664,17 +1838,24 @@ impl McpServer {
         };
 
         let operations = self.build_plan_operations(&canonical_slug, args);
-        let (_, project_code, _, next_preview) =
-            match self.next_server_numeric_id(&canonical_slug, "preview") {
-                Ok(parts) => parts,
-                Err(e) => {
-                    return Some(json!({
-                        "content": [{"type":"text","text": format!("SOLL apply_plan preview id error: {}", e)}],
-                        "isError": true
-                    }))
-                }
-            };
-        let preview_id = format!("PRV-{}-{:03}", project_code, next_preview);
+        let preview_id = if let Some(reserved_preview_id) = args
+            .get("reserved_preview_id")
+            .and_then(|value| value.as_str())
+        {
+            reserved_preview_id.to_string()
+        } else {
+            let (_, project_code, _, next_preview) =
+                match self.next_server_numeric_id(&canonical_slug, "preview") {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        return Some(json!({
+                            "content": [{"type":"text","text": format!("SOLL apply_plan preview id error: {}", e)}],
+                            "isError": true
+                        }))
+                    }
+                };
+            format!("PRV-{}-{:03}", project_code, next_preview)
+        };
         let payload = json!({
             "project_slug": canonical_slug,
             "author": author,
@@ -1687,18 +1868,7 @@ impl McpServer {
              ON CONFLICT (preview_id) DO UPDATE SET author = EXCLUDED.author, project_slug = EXCLUDED.project_slug, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at",
             &json!([preview_id, author, canonical_slug, payload.to_string(), now_unix_ms()]),
         ) {
-            let err_msg = e.to_string();
-            if err_msg.to_lowercase().contains("constraint") || err_msg.to_lowercase().contains("unique") || err_msg.to_lowercase().contains("duplicate") {
-                return Some(serde_json::json!({
-                    "content": [{"type":"text","text": format!("No changes (idempotent application - constraint caught: {})", err_msg)}],
-                    "data": {
-                        "preview_id": preview_id,
-                        "project_slug": canonical_slug,
-                        "operations": operations.len()
-                    }
-                }));
-            }
-            return Some(serde_json::json!({
+            return Some(json!({
                 "content": [{"type":"text","text": format!("SOLL apply_plan error: {}", e)}],
                 "isError": true
             }));
@@ -1859,17 +2029,24 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
 
-        let (_, project_code, _, next_revision) =
-            match self.next_server_numeric_id(project_slug, "revision") {
-                Ok(parts) => parts,
-                Err(e) => {
-                    return Some(json!({
-                        "content": [{"type":"text","text": format!("SOLL commit error (revision id): {}", e)}],
-                        "isError": true
-                    }))
-                }
-            };
-        let revision_id = format!("REV-{}-{:03}", project_code, next_revision);
+        let revision_id = if let Some(reserved_revision_id) = args
+            .get("reserved_revision_id")
+            .and_then(|value| value.as_str())
+        {
+            reserved_revision_id.to_string()
+        } else {
+            let (_, project_code, _, next_revision) =
+                match self.next_server_numeric_id(project_slug, "revision") {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        return Some(json!({
+                            "content": [{"type":"text","text": format!("SOLL commit error (revision id): {}", e)}],
+                            "isError": true
+                        }))
+                    }
+                };
+            format!("REV-{}-{:03}", project_code, next_revision)
+        };
         let now = now_unix_ms();
         let _ = self.graph_store.execute("BEGIN TRANSACTION");
 
@@ -1893,7 +2070,9 @@ impl McpServer {
                 }
                 Err(e) => {
                     let _ = self.graph_store.execute("ROLLBACK");
-                    return Some(json!({"content":[{"type":"text","text": format!("SOLL commit error (operation): {}", e)}],"isError": true}));
+                    return Some(
+                        json!({"content":[{"type":"text","text": format!("SOLL commit error (operation): {}", e)}],"isError": true}),
+                    );
                 }
             }
         }
@@ -1907,7 +2086,7 @@ impl McpServer {
         Some(json!({
             "content": [{"type":"text","text": format!("SOLL revision committed: {} ({} operations)", revision_id, operations.len())}],
             "data": {
-                "revision_id": revision_id, 
+                "revision_id": revision_id,
                 "operations": operations.len(),
                 "identity_mapping": identity_mapping
             }
@@ -1919,53 +2098,29 @@ impl McpServer {
             .get("project_slug")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
-            
-        let project_code = match self.resolve_project_code(project_slug) {
-            Ok(code) => code,
-            Err(e) => {
-                return Some(serde_json::json!({
-                    "content": [{"type":"text","text": e.to_string()}],
-                    "isError": true
-                }));
-            }
-        };
-        let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(25).max(1);
+        let project_code = self.resolve_project_code(project_slug).ok()?;
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(25)
+            .max(1);
 
-        let mut status_filter = String::new();
-        if let Some(status) = args.get("status").and_then(|v| v.as_str()) {
-            status_filter = format!(" AND status = '{}'", escape_sql(status));
-        }
-
-        let type_opt = args.get("type").and_then(|v| v.as_str());
-
-        let reqs = if type_opt.is_none() || type_opt == Some("Requirement") {
-            self.query_single_column(&format!(
-                "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Requirement' AND id LIKE 'REQ-{}-%'{} ORDER BY id DESC LIMIT {}",
-                escape_sql(&project_code),
-                status_filter,
-                limit
-            )).unwrap_or_default()
-        } else {
-            vec![]
-        };
-
-        let decisions = if type_opt.is_none() || type_opt == Some("Decision") {
-            self.query_single_column(&format!(
-                "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Decision' AND id LIKE 'DEC-{}-%'{} ORDER BY id DESC LIMIT {}",
-                escape_sql(&project_code),
-                status_filter,
-                limit
-            )).unwrap_or_default()
-        } else {
-            vec![]
-        };
-
+        let reqs = self.query_single_column(&format!(
+            "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Requirement' AND id LIKE 'REQ-{}-%' ORDER BY id DESC LIMIT {}",
+            escape_sql(&project_code),
+            limit
+        )).unwrap_or_default();
+        let decisions = self.query_single_column(&format!(
+            "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Decision' AND id LIKE 'DEC-{}-%' ORDER BY id DESC LIMIT {}",
+            escape_sql(&project_code),
+            limit
+        )).unwrap_or_default();
         let revisions = self.query_single_column(&format!(
             "SELECT revision_id || '|' || COALESCE(summary,'') || '|' || COALESCE(author,'') FROM soll.Revision ORDER BY committed_at DESC LIMIT {}",
             limit
         )).unwrap_or_default();
 
-        Some(serde_json::json!({
+        Some(json!({
             "content": [{"type":"text","text": format!("SOLL context for {} loaded.", project_slug)}],
             "data": {
                 "project_slug": project_slug,
@@ -1983,11 +2138,7 @@ impl McpServer {
             .and_then(|v| v.as_u64())
             .unwrap_or(50)
             .max(1) as usize;
-        let top = args
-            .get("top")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5)
-            .max(1) as usize;
+        let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(5).max(1) as usize;
         let include_ist = args
             .get("include_ist")
             .and_then(|v| v.as_bool())
@@ -2073,7 +2224,8 @@ impl McpServer {
 
         let (limited_waves, returned_items, truncated) = apply_wave_limit(&waves, limit);
         let top_recommendations = build_top_recommendations(&limited_waves, top);
-        let global_validation = self.axon_soll_verify_requirements(&json!({ "project_slug": project_slug }));
+        let global_validation =
+            self.axon_soll_verify_requirements(&json!({ "project_slug": project_slug }));
         let soll_validation = self.axon_validate_soll(&json!({ "project_slug": project_slug }));
         let validation_gates = json!({
             "requirement_verification": global_validation
@@ -2156,7 +2308,11 @@ impl McpServer {
                 .get("confidence")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.8);
-            let metadata = art.get("metadata").cloned().unwrap_or(json!({})).to_string();
+            let metadata = art
+                .get("metadata")
+                .cloned()
+                .unwrap_or(json!({}))
+                .to_string();
             let trace_id = format!("TRC-{}-{}-{}", entity_id, now, idx);
 
             if self.graph_store.execute_param(
@@ -2194,9 +2350,18 @@ impl McpServer {
                 if row.len() < 5 {
                     continue;
                 }
-                let meta: serde_json::Value = serde_json::from_str(&row[3]).unwrap_or(serde_json::json!({}));
-                let priority = meta.get("priority").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let criteria = meta.get("acceptance_criteria").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let meta: serde_json::Value =
+                    serde_json::from_str(&row[3]).unwrap_or(serde_json::json!({}));
+                let priority = meta
+                    .get("priority")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let criteria = meta
+                    .get("acceptance_criteria")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let evidence_count = row[4].parse::<usize>().unwrap_or(0);
                 let status = row[2].clone();
                 let requirement_state =
@@ -2391,10 +2556,7 @@ impl McpServer {
             evidence.push_str("Immediate actions:\n");
             for rec in top_recommendations {
                 let id = rec.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                let kind = rec
-                    .get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("task");
+                let kind = rec.get("kind").and_then(|v| v.as_str()).unwrap_or("task");
                 let reason = rec
                     .get("reason")
                     .and_then(|v| v.as_str())
@@ -2444,7 +2606,10 @@ impl McpServer {
                 "work plan computed from SOLL",
                 &format!("project:{}", project_slug),
                 &evidence,
-                &["review blockers before execution", "use `format=json` for machine consumption"],
+                &[
+                    "review blockers before execution",
+                    "use `format=json` for machine consumption"
+                ],
                 "medium",
             )
         )
@@ -2457,10 +2622,10 @@ impl McpServer {
             .unwrap_or("AXO");
         let project_code = self.resolve_project_code(project_slug).ok()?;
         let query = format!(
-            "SELECT r.id, COALESCE(r.status,''), COALESCE(r.metadata,''), COUNT(t.id)
-             FROM soll.Node r
-             LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'Requirement' AND t.soll_entity_id = r.id
-             WHERE r.type = 'Requirement' AND r.id LIKE 'REQ-{}-%'
+            "SELECT r.id, COALESCE(r.status,''), COALESCE(r.acceptance_criteria,''), COUNT(t.id)
+             FROM soll.Node r WHERE r.type='Requirement' AND
+             LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
+             WHERE r.id LIKE 'REQ-{}-%'
              GROUP BY 1,2,3
              ORDER BY r.id",
             escape_sql(&project_code)
@@ -2482,7 +2647,10 @@ impl McpServer {
             let evidence_count = row[3].parse::<usize>().unwrap_or(0);
             let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
 
-            let state = if evidence_count > 0 && has_criteria && (status == "current" || status == "accepted") {
+            let state = if evidence_count > 0
+                && has_criteria
+                && (status == "current" || status == "accepted")
+            {
                 done += 1;
                 "done"
             } else if evidence_count > 0 || has_criteria {
@@ -2533,7 +2701,9 @@ impl McpServer {
 
             if let Err(e) = self.apply_rollback_operation(&op) {
                 let _ = self.graph_store.execute("ROLLBACK");
-                return Some(json!({"content":[{"type":"text","text": format!("Rollback failed: {}", e)}],"isError": true}));
+                return Some(
+                    json!({"content":[{"type":"text","text": format!("Rollback failed: {}", e)}],"isError": true}),
+                );
             }
         }
 
@@ -2542,15 +2712,24 @@ impl McpServer {
             "UPDATE soll.Revision SET status = 'rolled_back' WHERE revision_id = '{}'",
             escape_sql(revision_id)
         ));
-        Some(json!({"content":[{"type":"text","text": format!("Revision rolled back: {}", revision_id)}]}))
+        Some(
+            json!({"content":[{"type":"text","text": format!("Revision rolled back: {}", revision_id)}]}),
+        )
     }
 
     fn build_plan_operations(&self, project_slug: &str, args: &Value) -> Vec<Value> {
         let mut operations = Vec::new();
-        
+
         // 1. Entities
         if let Some(plan) = args.get("plan") {
-            for entity in ["pillar", "requirement", "decision", "milestone", "vision", "concept", "stakeholder", "validation", "guideline"] {
+            for entity in [
+                "pillar",
+                "requirement",
+                "decision",
+                "milestone",
+                "vision",
+                "concept",
+            ] {
                 if let Some(items) = plan.get(format!("{}s", entity)).and_then(|v| v.as_array()) {
                     for item in items {
                         if let Some(obj) = item.as_object() {
@@ -2563,7 +2742,11 @@ impl McpServer {
                                 continue;
                             }
                             let existing_id = self.resolve_soll_id(entity, title, logical_key);
-                            let kind = if existing_id.is_some() { "update" } else { "create" };
+                            let kind = if existing_id.is_some() {
+                                "update"
+                            } else {
+                                "create"
+                            };
                             operations.push(json!({
                                 "kind": kind,
                                 "entity": entity,
@@ -2577,12 +2760,9 @@ impl McpServer {
                 }
             }
         }
-        
-        // 2. Relations (Can be root-level args or nested inside plan)
-        let relations_array = args.get("relations").and_then(|v| v.as_array())
-            .or_else(|| args.get("plan").and_then(|p| p.get("relations")).and_then(|v| v.as_array()));
 
-        if let Some(relations) = relations_array {
+        // 2. Relations
+        if let Some(relations) = args.get("relations").and_then(|v| v.as_array()) {
             for rel in relations {
                 if let Some(obj) = rel.as_object() {
                     operations.push(json!({
@@ -2594,19 +2774,27 @@ impl McpServer {
                 }
             }
         }
-        
+
         operations
     }
 
-    fn apply_operation_with_audit(&self, revision_id: &str, op: &Value, identity_mapping: &mut std::collections::HashMap<String, String>) -> anyhow::Result<String> {
+    fn apply_operation_with_audit(
+        &self,
+        revision_id: &str,
+        op: &Value,
+        identity_mapping: &mut std::collections::HashMap<String, String>,
+    ) -> anyhow::Result<String> {
         let kind = op.get("kind").and_then(|v| v.as_str()).unwrap_or("create");
-        let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("requirement");
+        let entity = op
+            .get("entity")
+            .and_then(|v| v.as_str())
+            .unwrap_or("requirement");
         let mut payload = op.get("payload").cloned().unwrap_or(serde_json::json!({}));
         let project_slug = op
             .get("project_slug")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
-            
+
         if kind == "link" {
             if let Some(obj) = payload.as_object_mut() {
                 if let Some(sid) = obj.get("source_id").and_then(|v| v.as_str()) {
@@ -2620,21 +2808,27 @@ impl McpServer {
                     }
                 }
             }
-            
-            let result = self.axon_soll_manager(&serde_json::json!({"action":"link","entity":"relation","data":payload}));
+
+            let result = self.axon_soll_manager(
+                &serde_json::json!({"action":"link","entity":"relation","data":payload}),
+            );
             if soll_tool_is_error(result.as_ref()) {
-                return Err(anyhow::anyhow!("{}", soll_tool_text(result.as_ref()).unwrap_or_else(|| "link error".to_string())));
+                return Err(anyhow::anyhow!(
+                    "{}",
+                    soll_tool_text(result.as_ref()).unwrap_or_else(|| "link error".to_string())
+                ));
             }
             return Ok("".to_string());
         }
-            
+
         let entity_id_hint = op
             .get("entity_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
         let before = if let Some(id) = entity_id_hint.clone() {
-            self.snapshot_entity(entity, &id).unwrap_or(serde_json::json!({}))
+            self.snapshot_entity(entity, &id)
+                .unwrap_or(serde_json::json!({}))
         } else {
             serde_json::json!({})
         };
@@ -2642,11 +2836,15 @@ impl McpServer {
         let result = if kind == "update" && entity_id_hint.is_some() {
             let mut data = payload.clone();
             data["id"] = serde_json::json!(entity_id_hint.clone().unwrap_or_default());
-            self.axon_soll_manager(&serde_json::json!({"action":"update","entity":entity,"data":data}))
+            self.axon_soll_manager(
+                &serde_json::json!({"action":"update","entity":entity,"data":data}),
+            )
         } else {
             let mut data = payload.clone();
             data["project_slug"] = serde_json::json!(project_slug);
-            self.axon_soll_manager(&serde_json::json!({"action":"create","entity":entity,"data":data}))
+            self.axon_soll_manager(
+                &serde_json::json!({"action":"create","entity":entity,"data":data}),
+            )
         };
 
         if soll_tool_is_error(result.as_ref()) {
@@ -2664,7 +2862,9 @@ impl McpServer {
                 .unwrap_or_else(|| "unknown".to_string())
         };
 
-        let after = self.snapshot_entity(entity, &entity_id).unwrap_or(serde_json::json!({}));
+        let after = self
+            .snapshot_entity(entity, &entity_id)
+            .unwrap_or(serde_json::json!({}));
         self.graph_store.execute_param(
             "INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, action, before_json, after_json, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -2688,17 +2888,33 @@ impl McpServer {
         let entity_id = op.get("entity_id").and_then(|v| v.as_str()).unwrap_or("");
 
         match (kind, entity) {
-            ("delete", "pillar") => self.graph_store.execute(&format!("DELETE FROM soll.Node WHERE type='Pillar' AND id = '{}'", escape_sql(entity_id)))?,
-            ("delete", "requirement") => self.graph_store.execute(&format!("DELETE FROM soll.Node WHERE type='Requirement' AND id = '{}'", escape_sql(entity_id)))?,
-            ("delete", "decision") => self.graph_store.execute(&format!("DELETE FROM soll.Node WHERE type='Decision' AND id = '{}'", escape_sql(entity_id)))?,
-            ("delete", "milestone") => self.graph_store.execute(&format!("DELETE FROM soll.Node WHERE type='Milestone' AND id = '{}'", escape_sql(entity_id)))?,
+            ("delete", "pillar") => self.graph_store.execute(&format!(
+                "DELETE FROM soll.Node WHERE type='Pillar' AND id = '{}'",
+                escape_sql(entity_id)
+            ))?,
+            ("delete", "requirement") => self.graph_store.execute(&format!(
+                "DELETE FROM soll.Node WHERE type='Requirement' AND id = '{}'",
+                escape_sql(entity_id)
+            ))?,
+            ("delete", "decision") => self.graph_store.execute(&format!(
+                "DELETE FROM soll.Node WHERE type='Decision' AND id = '{}'",
+                escape_sql(entity_id)
+            ))?,
+            ("delete", "milestone") => self.graph_store.execute(&format!(
+                "DELETE FROM soll.Node WHERE type='Milestone' AND id = '{}'",
+                escape_sql(entity_id)
+            ))?,
             ("restore", _) => {
                 let before = op.get("before").cloned().unwrap_or(json!({}));
                 let mut data = before;
                 data["id"] = json!(entity_id);
-                let resp = self.axon_soll_manager(&json!({"action":"update","entity":entity,"data":data}));
+                let resp =
+                    self.axon_soll_manager(&json!({"action":"update","entity":entity,"data":data}));
                 if soll_tool_is_error(resp.as_ref()) {
-                    return Err(anyhow!("{}", soll_tool_text(resp.as_ref()).unwrap_or_default()));
+                    return Err(anyhow!(
+                        "{}",
+                        soll_tool_text(resp.as_ref()).unwrap_or_default()
+                    ));
                 }
             }
             _ => {}
@@ -2713,64 +2929,83 @@ impl McpServer {
             "decision" => format!("SELECT title, description, status, metadata FROM soll.Node WHERE type='Decision' AND id = '{}'", escape_sql(entity_id)),
             "milestone" => format!("SELECT title, status, metadata FROM soll.Node WHERE type='Milestone' AND id = '{}'", escape_sql(entity_id)),
             "guideline" => format!("SELECT title, description, status, metadata FROM soll.Node WHERE type='Guideline' AND id = '{}'", escape_sql(entity_id)),
-            "concept" => format!("SELECT title, description, metadata FROM soll.Node WHERE type='Concept' AND id = '{}'", escape_sql(entity_id)),
-            "stakeholder" => format!("SELECT title, metadata FROM soll.Node WHERE type='Stakeholder' AND id = '{}'", escape_sql(entity_id)),
-            "validation" => format!("SELECT status, metadata FROM soll.Node WHERE type='Validation' AND id = '{}'", escape_sql(entity_id)),
             _ => return None,
         };
-        // MUST query on writer context to see uncommitted updates during soll_apply_plan transaction
-        let raw = self.graph_store.query_json_writer(&query).ok()?;
+        let raw = self.graph_store.query_json(&query).ok()?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&raw).ok()?;
         let first = rows.first()?;
         match entity {
-            "pillar" | "concept" => Some(json!({
+            "pillar" => Some(json!({
                 "title": first.first().cloned().unwrap_or_default(),
                 "description": first.get(1).cloned().unwrap_or_default(),
                 "metadata": first.get(2).cloned().unwrap_or_else(|| "{}".to_string())
             })),
-            "requirement" | "decision" | "guideline" => Some(json!({
+            "requirement" => Some(json!({
                 "title": first.first().cloned().unwrap_or_default(),
                 "description": first.get(1).cloned().unwrap_or_default(),
                 "status": first.get(2).cloned().unwrap_or_default(),
-                "metadata": first.get(3).cloned().unwrap_or_else(|| "{}".to_string())
+                "priority": first.get(3).cloned().unwrap_or_default(),
+                "metadata": first.get(4).cloned().unwrap_or_else(|| "{}".to_string()),
+                "owner": first.get(5).cloned().unwrap_or_default(),
+                "acceptance_criteria": first.get(6).cloned().unwrap_or_else(|| "[]".to_string()),
+                "evidence_refs": first.get(7).cloned().unwrap_or_else(|| "[]".to_string())
+            })),
+            "decision" => Some(json!({
+                "title": first.first().cloned().unwrap_or_default(),
+                "description": first.get(1).cloned().unwrap_or_default(),
+                "context": first.get(2).cloned().unwrap_or_default(),
+                "rationale": first.get(3).cloned().unwrap_or_default(),
+                "status": first.get(4).cloned().unwrap_or_default(),
+                "metadata": first.get(5).cloned().unwrap_or_else(|| "{}".to_string()),
+                "supersedes_decision_id": first.get(6).cloned().unwrap_or_default(),
+                "impact_scope": first.get(7).cloned().unwrap_or_default()
             })),
             "milestone" => Some(json!({
                 "title": first.first().cloned().unwrap_or_default(),
                 "status": first.get(1).cloned().unwrap_or_default(),
                 "metadata": first.get(2).cloned().unwrap_or_else(|| "{}".to_string())
             })),
-            "stakeholder" => Some(json!({
-                "role": first.first().cloned().unwrap_or_default(),
-                "metadata": first.get(1).cloned().unwrap_or_else(|| "{}".to_string())
-            })),
-            "validation" => Some(json!({
-                "result": first.first().cloned().unwrap_or_default(),
-                "metadata": first.get(1).cloned().unwrap_or_else(|| "{}".to_string())
-            })),
             _ => None,
         }
     }
 
-    pub(crate) fn axon_pre_flight_check(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+    pub(crate) fn axon_commit_work(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         let diff_paths = args.get("diff_paths")?.as_array()?;
+        let message = args.get("message")?.as_str()?;
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Extract guidelines
         let rows_raw = self.graph_store.query_json(
             "SELECT id, title, description, metadata FROM soll.Node WHERE type='Guideline' AND status='active'"
         ).unwrap_or_else(|_| "[]".to_string());
-        
+
         let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
-        
+
         let mut violations = Vec::new();
 
         for row in rows {
-            if row.len() < 4 { continue; }
+            if row.len() < 4 {
+                continue;
+            }
             let id = &row[0];
-            let meta: serde_json::Value = serde_json::from_str(&row[3]).unwrap_or_else(|_| serde_json::json!({}));
-            
-            let trigger_path = meta.get("trigger_path").and_then(|v| v.as_str()).unwrap_or("");
-            let required_path = meta.get("required_path").and_then(|v| v.as_str()).unwrap_or("");
-            let enforcement = meta.get("enforcement").and_then(|v| v.as_str()).unwrap_or("");
+            let meta: serde_json::Value =
+                serde_json::from_str(&row[3]).unwrap_or_else(|_| serde_json::json!({}));
+
+            let trigger_path = meta
+                .get("trigger_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let required_path = meta
+                .get("required_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let enforcement = meta
+                .get("enforcement")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             if trigger_path.is_empty() || required_path.is_empty() || enforcement != "strict" {
                 continue;
@@ -2798,11 +3033,15 @@ impl McpServer {
 
                 if !satisfied {
                     let phase = meta.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-                    let phase_str = if phase.is_empty() { "".to_string() } else { format!(" [Phase: {}]", phase) };
+                    let phase_str = if phase.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!(" [Phase: {}]", phase)
+                    };
                     violations.push(serde_json::json!({
                         "rule": format!("{} - {}", id, row[1]),
                         "diagnostic": format!("Le chemin modifié déclenche la règle {}{}, qui exige que le fichier requis '{}' soit modifié.", id, phase_str, required_path),
-                        "remediation_plan": format!("1. Mettez à jour le fichier '{}'.\n2. Rappelez axon_pre_flight_check.", required_path)
+                        "remediation_plan": format!("1. Mettez à jour le fichier '{}'.\n2. Rappelez axon_commit_work.", required_path)
                     }));
                 }
             }
@@ -2813,6 +3052,12 @@ impl McpServer {
                 "content": [{ "type": "text", "text": format!("Violation de {}\n\nVoici le remediation_plan:\n{}", violations[0]["rule"], violations[0]["remediation_plan"]) }],
                 "isError": true,
                 "data": { "violations": violations }
+            }));
+        }
+
+        if dry_run {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Validation réussie (Dry Run). Aucun commit effectué. Le message '{}' est valide.", message) }]
             }));
         }
 
@@ -2829,19 +3074,66 @@ impl McpServer {
             }
         }
 
-        Some(serde_json::json!({
-            "content": [{ "type": "text", "text": format!("✅ Quality Gate Passed. You are now authorized to execute your git commit.\n\nExport Report:\n{}", export_report) }]
-        }))
+        // 2. Perform Git Commit
+        let mut add_cmd = std::process::Command::new("git");
+        add_cmd.arg("add");
+        for p in diff_paths {
+            if let Some(path_str) = p.as_str() {
+                add_cmd.arg(path_str);
+            }
+        }
+        add_cmd.arg("docs/vision/");
+
+        let add_out = add_cmd.output();
+        if let Err(e) = add_out {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Git add failed: {}", e) }],
+                "isError": true
+            }));
+        }
+
+        let commit_out = std::process::Command::new("git")
+            .arg("commit")
+            .arg("-m")
+            .arg(message)
+            .output();
+
+        match commit_out {
+            Ok(output) => {
+                let status = if output.status.success() {
+                    format!(
+                        "Commit effectué avec succès.\n{}",
+                        String::from_utf8_lossy(&output.stdout)
+                    )
+                } else {
+                    format!(
+                        "Commit échoué.\n{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )
+                };
+                Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Validation réussie.\n\n{}\n\nExport Report:\n{}", status, export_report) }]
+                }))
+            }
+            Err(e) => Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Git commit failed: {}", e) }],
+                "isError": true
+            })),
+        }
     }
 
     pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+        let project_name = args.get("project_name")?.as_str()?;
         let project_slug = args.get("project_slug")?.as_str()?;
-        let project_code = args.get("project_code")?.as_str()?;
-        let project_path = args.get("project_path")?.as_str()?;
-        let concept_text = args.get("concept_document_url_or_text").and_then(|v| v.as_str());
+        let concept_text = args
+            .get("concept_document_url_or_text")
+            .and_then(|v| v.as_str());
 
         // 1. Register project
-        if let Err(e) = self.graph_store.sync_project_code_registry_entry(project_code, project_slug, Some(project_path)) {
+        if let Err(e) = self
+            .graph_store
+            .sync_project_code_registry_entry(project_slug, project_slug)
+        {
             return Some(serde_json::json!({
                 "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],
                 "isError": true
@@ -2852,9 +3144,9 @@ impl McpServer {
         let rows_raw = self.graph_store.query_json(
             "SELECT id, title, description, metadata FROM soll.Node WHERE type='Guideline' AND project_slug='GLOBAL'"
         ).unwrap_or_else(|_| "[]".to_string());
-        
+
         let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
-        
+
         let mut rules_text = String::new();
         for row in rows {
             if row.len() >= 3 {
@@ -2865,10 +3157,10 @@ impl McpServer {
         // 3. Prepare response
         let mut response_text = format!(
             "Projet '{}' ({}) initialisé avec succès dans Axon.\n\n",
-            project_slug, project_code
+            project_name, project_slug
         );
 
-        if let Some(_concept) = concept_text {
+        if let Some(concept) = concept_text {
             response_text.push_str(&format!(
                 "📄 Un document de concept a été détecté. Extrayez-en la Vision et les Piliers, et utilisez `soll_manager` pour les créer sous le projet {}.\n\n",
                 project_slug
@@ -2877,36 +3169,44 @@ impl McpServer {
 
         response_text.push_str("Voici les règles globales disponibles. Lesquelles souhaitez-vous activer, ignorer ou spécialiser pour ce projet ?\n");
         response_text.push_str(&rules_text);
-        response_text.push_str("\n(Utilisez l'outil `axon_apply_guidelines` pour appliquer ces choix).");
+        response_text
+            .push_str("\n(Utilisez l'outil `axon_apply_guidelines` pour appliquer ces choix).");
 
         Some(serde_json::json!({
             "content": [{ "type": "text", "text": response_text }]
         }))
     }
 
-    pub(crate) fn axon_apply_guidelines(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
+    pub(crate) fn axon_apply_guidelines(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
         let project_slug = args.get("project_slug")?.as_str()?;
         let accepted_ids = args.get("accepted_global_rule_ids")?.as_array()?;
 
         let mut applied = Vec::new();
         for id_val in accepted_ids {
             let global_id = id_val.as_str().unwrap_or("");
-            
+
             // Fetch global rule
             let row_raw = self.graph_store.query_json(&format!(
                 "SELECT title, description, metadata FROM soll.Node WHERE id = '{}' AND type='Guideline'",
                 escape_sql(global_id)
             )).unwrap_or_else(|_| "[]".to_string());
-            
+
             let rows: Vec<Vec<String>> = serde_json::from_str(&row_raw).unwrap_or_default();
             if let Some(row) = rows.first() {
-                if row.len() < 3 { continue; }
+                if row.len() < 3 {
+                    continue;
+                }
                 let title = &row[0];
                 let desc = &row[1];
                 let meta = &row[2];
 
                 // Create local rule
-                let (p_slug, p_code, prefix, num) = self.next_soll_numeric_id(project_slug, "guideline").unwrap();
+                let (p_slug, p_code, prefix, num) = self
+                    .next_soll_numeric_id(project_slug, "guideline")
+                    .unwrap();
                 let local_id = format!("{}-{}-{:03}", prefix, p_code, num);
 
                 // Insert local rule
