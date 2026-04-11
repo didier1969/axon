@@ -58,6 +58,16 @@ Le script:
 - attend le dashboard et la surface SQL
 - vérifie `MCP`
 
+Modes utiles:
+
+```bash
+./scripts/start.sh --graph-only
+./scripts/start.sh --full
+```
+
+- `graph_only`: surface graphe/MCP légère, sans ingestion autonome complète
+- `full`: serveur partagé complet, avec surface MCP complète et mutations routées via jobs
+
 ## 4. Vérifier la surface live
 
 Sur une instance démarrée:
@@ -74,7 +84,39 @@ curl -sS -X POST http://127.0.0.1:44129/sql \
   --data '{"query":"SELECT count(*) FROM File"}'
 ```
 
-## 5. Arrêter Axon
+Vérification opératoire rapide:
+
+```bash
+./scripts/status.sh
+python3 scripts/qualify_runtime.py --profile smoke --mode graph_only
+python3 scripts/qualify_runtime.py --profile smoke --mode full
+```
+
+La qualification smoke vérifie le démarrage runtime, la surface MCP et le cockpit en conditions réelles.
+
+## 5. Contrat MCP `0.1`
+
+- le serveur MCP partagé expose les outils de lecture et les outils mutateurs
+- les outils mutateurs ne modifient pas l’état en ligne directement: ils créent un job serveur
+- la réponse mutatrice doit rendre immédiatement les identifiants utiles quand ils existent déjà:
+  - `job_id`
+  - `entity_id`
+  - `preview_id`
+  - `revision_id`
+- l’état détaillé du serveur et des jobs se lit depuis le dashboard, en lecture seule
+
+## 6. Dashboard
+
+Le cockpit `http://127.0.0.1:44127/cockpit` est la surface de lecture opératoire:
+
+- santé runtime
+- disponibilité SQL/MCP
+- progression graph/embedding
+- jobs MCP récents et leurs statuts
+
+Le dashboard n’est pas une surface d’action. Les mutations passent par MCP, puis sont observées dans le cockpit.
+
+## 7. Arrêter Axon
 
 ```bash
 ./scripts/stop.sh
@@ -86,6 +128,7 @@ Le script arrête uniquement les processus Axon et nettoie sockets, locks et WAL
 
 - `IST` est la vérité technique reconstructible
 - `SOLL` est la vérité conceptuelle protégée
+- `SOLL` contient des données de production: ne jamais la purger ni la réinitialiser
 - le chemin live des exports `SOLL` est `docs/vision/`
 - les snapshots historiques déplacés vivent dans `docs/archive/soll-exports/`
 - Python reste présent surtout pour les bridges Datalog/TypeQL
