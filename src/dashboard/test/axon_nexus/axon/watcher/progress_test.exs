@@ -68,13 +68,21 @@ defmodule Axon.Watcher.ProgressTest do
       [
         {"COALESCE(status", [["indexed", 2], ["pending", 1]]},
         {"COALESCE(file_stage", [["graph_indexed", 2], ["promoted", 1]]},
-        {"SUM(CASE WHEN f.graph_ready", [[2, 1]]}
+        {"SUM(CASE WHEN f.graph_ready", [[2, 1]]},
+        {"SELECT COUNT(*) FROM File WHERE vector_ready = TRUE", [[5]]},
+        {"SELECT COUNT(*) FROM ChunkEmbedding", [[8]]},
+        {"COUNT(DISTINCT anchor_type || ':' || anchor_id) FROM GraphEmbedding", [[3]]},
+        {"SELECT COUNT(*) FROM Symbol", [[10]]},
+        {"links_count", [[12]]}
       ],
       fn ->
         status = Progress.get_status("progress-test")
 
         assert status["graph_ready"] == 2
         assert status["vector_ready"] == 1
+        assert status["vector_ready_file_raw"] == 5
+        assert status["chunk_embeddings_count"] == 8
+        assert status["graph_embeddings_count"] == 3
         assert status["stage_graph_indexed"] == 2
         assert status["stage_promoted"] == 1
       end
@@ -102,7 +110,12 @@ defmodule Axon.Watcher.ProgressTest do
            ["project_ready", "beta", "ready", 0, 0],
            ["backlog_reason", nil, "oversized_for_current_budget", 3, nil],
            ["backlog_reason", nil, "claimed_for_indexing", 1, nil]
-         ]}
+         ]},
+        {"SELECT COUNT(*) FROM File WHERE vector_ready = TRUE", [[4]]},
+        {"SELECT COUNT(*) FROM ChunkEmbedding", [[6]]},
+        {"COUNT(DISTINCT anchor_type || ':' || anchor_id) FROM GraphEmbedding", [[1]]},
+        {"SELECT COUNT(*) FROM Symbol", [[7]]},
+        {"links_count", [[9]]}
       ],
       fn ->
         snapshot = Progress.get_snapshot("progress-test")
@@ -114,6 +127,9 @@ defmodule Axon.Watcher.ProgressTest do
         assert snapshot.workspace["oversized"] == 3
         assert snapshot.workspace["graph_ready"] == 3
         assert snapshot.workspace["vector_ready"] == 2
+        assert snapshot.workspace["vector_ready_file_raw"] == 4
+        assert snapshot.workspace["chunk_embeddings_count"] == 6
+        assert snapshot.workspace["graph_embeddings_count"] == 1
         assert snapshot.workspace["stage_graph_indexed"] == 3
 
         assert alpha.known == 3

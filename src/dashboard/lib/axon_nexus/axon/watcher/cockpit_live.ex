@@ -172,16 +172,28 @@ defmodule Axon.Watcher.CockpitLive do
             hint="Fichiers avec projection graphe validée."
           />
           <.metric_card
-            label="Vector Ready File"
+            label="Vector Ready File (Derived)"
             value={"#{@workspace["vector_ready_file"]} (#{@workspace["vector_ready_file_pct"] || 0}%)"}
             tone={:info}
-            hint="Fichiers marqués vectorisés côté File."
+            hint="Fichiers graph_ready sans chunk embedding manquant pour le modèle chunk actif."
           />
           <.metric_card
-            label="Vector Ready Graph"
+            label="Vector Ready File Flag"
+            value={@workspace["vector_ready_file_raw"]}
+            tone={:info}
+            hint="Compteur brut de File.vector_ready = TRUE."
+          />
+          <.metric_card
+            label="Chunk Embeddings"
+            value={@workspace["chunk_embeddings_count"]}
+            tone={:info}
+            hint="Nombre total de lignes persistées dans ChunkEmbedding."
+          />
+          <.metric_card
+            label="Graph Embeddings"
             value={"#{@workspace["vector_ready_graph"]} (#{@workspace["vector_ready_graph_pct"] || 0}%)"}
             tone={:info}
-            hint="Ancres graphe avec embedding dans GraphEmbedding."
+            hint="Ancres graphe avec embedding persistant dans GraphEmbedding."
           />
           <.metric_card label="Nodes" value={@workspace["nodes_count"]} tone={:neutral} hint="Nombre de nœuds (Symbol)." />
           <.metric_card label="Links" value={@workspace["links_count"]} tone={:neutral} hint="Nombre de liens structurels (CALLS/CONTAINS/IMPACTS/SUBSTANTIATES)." />
@@ -501,11 +513,11 @@ defmodule Axon.Watcher.CockpitLive do
                 <.signal_stat label="Oversized" value={Integer.to_string(project.oversized)} />
                 <.signal_stat label="Skipped" value={Integer.to_string(project.skipped)} />
                 <.signal_stat
-                  label="Vector File"
+                  label="Vector File (Derived)"
                   value={"#{project.vector_ready_file} (#{project.vector_ready_file_pct || 0}%)"}
                 />
                 <.signal_stat
-                  label="Vector Graph"
+                  label="Graph Embeddings"
                   value={"#{project.vector_ready_graph} (#{project.vector_ready_graph_pct || 0}%)"}
                 />
                 <.signal_stat label="Nodes" value={Integer.to_string(project.nodes_count)} />
@@ -807,8 +819,11 @@ defmodule Axon.Watcher.CockpitLive do
       "vector_ready" => 0,
       "vector_ready_file" => 0,
       "vector_ready_file_pct" => 0,
+      "vector_ready_file_raw" => 0,
       "vector_ready_graph" => 0,
       "vector_ready_graph_pct" => 0,
+      "graph_embeddings_count" => 0,
+      "chunk_embeddings_count" => 0,
       "nodes_count" => 0,
       "links_count" => 0,
       "stage_promoted" => 0,

@@ -18,6 +18,8 @@ defmodule Axon.Watcher.Progress do
     soll_coverage = query_rows(soll_coverage_query())
     soll_revision = query_rows(soll_revision_query())
     global_graph_vectors = query_rows(global_graph_vector_query())
+    global_chunk_embeddings = query_rows(global_chunk_embedding_query())
+    global_file_vector_flags = query_rows(global_file_vector_flag_query())
     global_nodes = query_rows(global_nodes_query())
     global_links = query_rows(global_links_query())
     project_nodes = query_rows(project_nodes_query()) |> decode_scope_counts()
@@ -114,7 +116,10 @@ defmodule Axon.Watcher.Progress do
       "vector_ready" => vector_ready,
       "vector_ready_file" => vector_ready,
       "vector_ready_file_pct" => percentage(vector_ready, total),
+      "vector_ready_file_raw" => decode_single_count(global_file_vector_flags),
       "vector_ready_graph" => decode_single_count(global_graph_vectors),
+      "graph_embeddings_count" => decode_single_count(global_graph_vectors),
+      "chunk_embeddings_count" => decode_single_count(global_chunk_embeddings),
       "nodes_count" => decode_single_count(global_nodes),
       "vector_ready_graph_pct" =>
         percentage(decode_single_count(global_graph_vectors), decode_single_count(global_nodes)),
@@ -176,7 +181,10 @@ defmodule Axon.Watcher.Progress do
       "vector_ready" => vector_ready,
       "vector_ready_file" => vector_ready,
       "vector_ready_file_pct" => percentage(vector_ready, total),
+      "vector_ready_file_raw" => decode_single_count(query_rows(global_file_vector_flag_query())),
       "vector_ready_graph" => decode_single_count(query_rows(global_graph_vector_query())),
+      "graph_embeddings_count" => decode_single_count(query_rows(global_graph_vector_query())),
+      "chunk_embeddings_count" => decode_single_count(query_rows(global_chunk_embedding_query())),
       "vector_ready_graph_pct" =>
         percentage(
           decode_single_count(query_rows(global_graph_vector_query())),
@@ -668,6 +676,14 @@ defmodule Axon.Watcher.Progress do
 
   defp global_graph_vector_query do
     "SELECT COUNT(DISTINCT anchor_type || ':' || anchor_id) FROM GraphEmbedding"
+  end
+
+  defp global_chunk_embedding_query do
+    "SELECT COUNT(*) FROM ChunkEmbedding"
+  end
+
+  defp global_file_vector_flag_query do
+    "SELECT COUNT(*) FROM File WHERE vector_ready = TRUE"
   end
 
   defp global_nodes_query do
