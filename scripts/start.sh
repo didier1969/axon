@@ -286,7 +286,11 @@ WORKER_CAP_EXPORT=""
 if [[ -n "${MAX_AXON_WORKERS:-}" ]]; then
     WORKER_CAP_EXPORT="export MAX_AXON_WORKERS=\"$MAX_AXON_WORKERS\"; "
 fi
-tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_MCP_MUTATION_JOBS=1; ${WORKER_CAP_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
+PROFILE_EXPORT=""
+if [[ "$RUNTIME_MODE" == "full" ]]; then
+    PROFILE_EXPORT="export AXON_ENABLE_AUTONOMOUS_INGESTOR=true; export AXON_RUNTIME_PROFILE=full_autonomous; "
+fi
+tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_MCP_MUTATION_JOBS=1; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
 
 if [ "$START_DASHBOARD" = "1" ]; then
     # Start Visualization Plane
