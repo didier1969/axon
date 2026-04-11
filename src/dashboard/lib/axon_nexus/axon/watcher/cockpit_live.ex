@@ -162,55 +162,90 @@ defmodule Axon.Watcher.CockpitLive do
           </div>
         </div>
 
-        <div class="hero-grid">
-          <.metric_card label="Known Files" value={@workspace["known"]} tone={:neutral} hint="Total fichiers détectés dans le workspace." />
-          <.metric_card label="Completed" value={@workspace["completed"]} tone={:ok} hint="Fichiers en statut terminal: indexed + indexed_degraded + skipped + deleted." />
-          <.metric_card
-            label="Graph Ready"
-            value={"#{@workspace["graph_ready"]} (#{@workspace["graph_ready_pct"] || 0}%)"}
-            tone={:ok}
-            hint="Fichiers avec projection graphe validée."
-          />
-          <.metric_card
-            label="Vector Ready File (Derived)"
-            value={"#{@workspace["vector_ready_file"]} (#{@workspace["vector_ready_file_pct"] || 0}%)"}
-            tone={:info}
-            hint="Fichiers graph_ready sans chunk embedding manquant pour le modèle chunk actif."
-          />
-          <.metric_card
-            label="Vector Ready File Flag"
-            value={@workspace["vector_ready_file_raw"]}
-            tone={:info}
-            hint="Compteur brut de File.vector_ready = TRUE."
-          />
-          <.metric_card
-            label="Chunk Embeddings"
-            value={@workspace["chunk_embeddings_count"]}
-            tone={:info}
-            hint="Nombre total de lignes persistées dans ChunkEmbedding."
-          />
-          <.metric_card
-            label="Graph Embeddings"
-            value={"#{@workspace["vector_ready_graph"]} (#{@workspace["vector_ready_graph_pct"] || 0}%)"}
-            tone={:info}
-            hint="Ancres graphe avec embedding persistant dans GraphEmbedding."
-          />
-          <.metric_card label="Nodes" value={@workspace["nodes_count"]} tone={:neutral} hint="Nombre de nœuds (Symbol)." />
-          <.metric_card label="Links" value={@workspace["links_count"]} tone={:neutral} hint="Nombre de liens structurels (CALLS/CONTAINS/IMPACTS/SUBSTANTIATES)." />
-          <.metric_card label="Indexing" value={@workspace["indexing"]} tone={:info} hint="Fichiers en traitement actif." />
-          <.metric_card label="Pending" value={@workspace["pending"]} tone={:warn} hint="Fichiers encore en attente de traitement." />
-          <.metric_card label="Degraded" value={@workspace["indexed_degraded"]} tone={:warn} hint="Indexation partielle (fallback/dégradé)." />
-          <.metric_card label="Oversized" value={@workspace["oversized"]} tone={:danger} hint="Fichiers refusés pour contrainte de taille/budget." />
-          <.metric_card label="Skipped" value={@workspace["skipped"]} tone={:neutral} hint="Fichiers ignorés intentionnellement." />
-          <.metric_card label="Deleted" value={@workspace["deleted"]} tone={:neutral} hint="Fichiers supprimés côté source." />
-          <.metric_card label="SOLL Done" value={@workspace["soll_done"]} tone={:ok} />
-          <.metric_card label="SOLL Partial" value={@workspace["soll_partial"]} tone={:warn} />
-          <.metric_card label="SOLL Missing" value={@workspace["soll_missing"]} tone={:danger} />
-          <.metric_card
-            label="SOLL Revision"
-            value={@workspace["soll_last_revision"] || "none"}
-            tone={:info}
-          />
+        <div class="workspace-metric-groups">
+          <section class="metric-group">
+            <div class="metric-group-head">
+              <p class="eyebrow">Flux 1</p>
+              <h3>Couverture fichiers</h3>
+            </div>
+            <div class="hero-grid">
+              <.metric_card label="Known Files" value={@workspace["known"]} tone={:neutral} hint="Total fichiers détectés dans le workspace." />
+              <.metric_card label="Files Completed" value={@workspace["completed"]} tone={:ok} hint="Fichiers en statut terminal: indexed + indexed_degraded + skipped + deleted." />
+              <.metric_card label="Indexing" value={@workspace["indexing"]} tone={:info} hint="Fichiers en traitement actif." />
+              <.metric_card label="Pending" value={@workspace["pending"]} tone={:warn} hint="Fichiers encore en attente de traitement." />
+              <.metric_card label="Degraded" value={@workspace["indexed_degraded"]} tone={:warn} hint="Indexation partielle (fallback/dégradé)." />
+              <.metric_card label="Oversized" value={@workspace["oversized"]} tone={:danger} hint="Fichiers refusés pour contrainte de taille/budget." />
+              <.metric_card label="Skipped" value={@workspace["skipped"]} tone={:neutral} hint="Fichiers ignorés intentionnellement." />
+              <.metric_card label="Deleted" value={@workspace["deleted"]} tone={:neutral} hint="Fichiers supprimés côté source." />
+            </div>
+          </section>
+
+          <section class="metric-group">
+            <div class="metric-group-head">
+              <p class="eyebrow">Flux 2</p>
+              <h3>Structure graphe</h3>
+            </div>
+            <div class="hero-grid">
+              <.metric_card
+                label="Files Graph Ready"
+                value={"#{@workspace["graph_ready"]} (#{@workspace["graph_ready_pct"] || 0}%)"}
+                tone={:ok}
+                hint="Fichiers avec projection graphe validée."
+              />
+              <.metric_card label="Nodes" value={@workspace["nodes_count"]} tone={:neutral} hint="Nombre de nœuds (Symbol)." />
+              <.metric_card label="Links" value={@workspace["links_count"]} tone={:neutral} hint="Nombre de liens structurels (CALLS/CONTAINS/IMPACTS/SUBSTANTIATES)." />
+            </div>
+          </section>
+
+          <section class="metric-group">
+            <div class="metric-group-head">
+              <p class="eyebrow">Flux 3</p>
+              <h3>Enrichissement sémantique</h3>
+            </div>
+            <div class="hero-grid">
+              <.metric_card
+                label="Files With Semantic Coverage (Derived)"
+                value={"#{@workspace["vector_ready_file"]} (#{@workspace["vector_ready_file_pct"] || 0}%)"}
+                tone={:info}
+                hint="Fichiers graph_ready sans chunk embedding manquant pour le modèle chunk actif."
+              />
+              <.metric_card
+                label="Chunk Embeddings"
+                value={@workspace["chunk_embeddings_count"]}
+                tone={:info}
+                hint="Nombre total de lignes persistées dans ChunkEmbedding."
+              />
+              <.metric_card
+                label="Vector Ready File Flag"
+                value={@workspace["vector_ready_file_raw"]}
+                tone={:neutral}
+                hint="Compteur brut de File.vector_ready = TRUE. Signal avancé seulement."
+              />
+              <.metric_card
+                label="Graph Embeddings"
+                value={"#{@workspace["vector_ready_graph"]} (#{@workspace["vector_ready_graph_pct"] || 0}%)"}
+                tone={:neutral}
+                hint="Signal avancé expérimental, hors chemin critique principal."
+              />
+            </div>
+          </section>
+
+          <section class="metric-group">
+            <div class="metric-group-head">
+              <p class="eyebrow">Flux 4</p>
+              <h3>Alignement SOLL</h3>
+            </div>
+            <div class="hero-grid">
+              <.metric_card label="SOLL Done" value={@workspace["soll_done"]} tone={:ok} />
+              <.metric_card label="SOLL Partial" value={@workspace["soll_partial"]} tone={:warn} />
+              <.metric_card label="SOLL Missing" value={@workspace["soll_missing"]} tone={:danger} />
+              <.metric_card
+                label="SOLL Revision"
+                value={@workspace["soll_last_revision"] || "none"}
+                tone={:info}
+              />
+            </div>
+          </section>
         </div>
 
         <div class="progress-rail">

@@ -69,6 +69,15 @@ EOF
     shift
 done
 
+STARTUP_TIMEOUT_S="${AXON_STARTUP_TIMEOUT_S:-}"
+if [[ -z "$STARTUP_TIMEOUT_S" ]]; then
+    if [[ "$RUNTIME_MODE" == "full" ]]; then
+        STARTUP_TIMEOUT_S=240
+    else
+        STARTUP_TIMEOUT_S=120
+    fi
+fi
+
 if ! command -v tmux >/dev/null 2>&1; then
     echo "❌ tmux is required to start Axon via scripts/start.sh"
     exit 1
@@ -298,14 +307,14 @@ if [ "$START_DASHBOARD" = "1" ]; then
     tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
 fi
 
-echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: 120s)..."
+echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: ${STARTUP_TIMEOUT_S}s)..."
 
 # Parallel wait loop for both services
 CORE_READY=false
 DASHBOARD_READY=false
 
-# Wait up to 120 * 1s = 120s
-for i in {1..120}; do
+# Wait up to STARTUP_TIMEOUT_S * 1s
+for ((i=1; i<=STARTUP_TIMEOUT_S; i++)); do
     if [ "$CORE_READY" = false ]; then
         if probe_sql_gateway && verify_mcp_http; then
             echo "✅ Axon Data Plane and MCP Gateway are Ready."

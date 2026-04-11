@@ -325,11 +325,15 @@ impl SemanticWorkerPool {
                 }
             }
 
-            if file_vectorization_backlog_active || symbol_backlog_active {
+            if !graph_projection_stage_allowed(
+                file_vectorization_backlog_active,
+                symbol_backlog_active,
+            ) {
                 continue;
             }
 
-            if policy.pause || service_guard::current_pressure() != ServicePressure::Healthy {
+            let service_pressure = service_guard::current_pressure();
+            if !graph_projection_allowed(queue_store.common_len(), service_pressure) {
                 wait_for_query_request(&mut model, &query_rx, policy.sleep);
                 continue;
             }
@@ -785,6 +789,21 @@ fn query_embedding_allowed(service_pressure: ServicePressure) -> bool {
     )
 }
 
+fn graph_projection_allowed(_queue_len: usize, service_pressure: ServicePressure) -> bool {
+    if service_pressure != ServicePressure::Healthy {
+        return false;
+    }
+
+    true
+}
+
+fn graph_projection_stage_allowed(
+    _file_vectorization_backlog_active: bool,
+    symbol_backlog_active: bool,
+) -> bool {
+    !symbol_backlog_active
+}
+
 fn semantic_policy(queue_len: usize, service_pressure: ServicePressure) -> SemanticPolicy {
     if service_pressure == ServicePressure::Critical || queue_len >= 3_000 {
         return SemanticPolicy {
@@ -849,8 +868,8 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_fatal_embedding_error, query_embedding_allowed, request_query_embedding,
-        semantic_policy, QueryEmbeddingRequest,
+        graph_projection_allowed, graph_projection_stage_allowed, is_fatal_embedding_error,
+        query_embedding_allowed, request_query_embedding, semantic_policy, QueryEmbeddingRequest,
     };
     use crate::service_guard::ServicePressure;
     use crossbeam_channel::unbounded;
@@ -877,6 +896,29 @@ mod tests {
         let policy = semantic_policy(2_000, ServicePressure::Healthy);
         assert!(policy.pause);
         assert_eq!(policy.sleep, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_graph_projection_allowed_under_queue_pressure_when_service_is_healthy() {
+        assert!(graph_projection_allowed(2_000, ServicePressure::Healthy));
+    }
+
+    #[test]
+    fn test_graph_projection_disallowed_when_service_is_not_healthy() {
+        assert!(!graph_projection_allowed(100, ServicePressure::Recovering));
+        assert!(!graph_projection_allowed(100, ServicePressure::Degraded));
+        assert!(!graph_projection_allowed(100, ServicePressure::Critical));
+    }
+
+    #[test]
+    fn test_graph_projection_stage_runs_after_file_vectorization_batch() {
+        assert!(graph_projection_stage_allowed(true, false));
+    }
+
+    #[test]
+    fn test_graph_projection_stage_stays_blocked_while_symbol_backlog_is_active() {
+        assert!(!graph_projection_stage_allowed(false, true));
+        assert!(!graph_projection_stage_allowed(true, true));
     }
 
     #[test]
