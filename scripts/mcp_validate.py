@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -97,7 +98,9 @@ def build_args(
     project: str,
     query: str,
     symbol_probe: str,
+    state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    state = state or {}
     # Safe, deterministic overrides for known tools.
     overrides: dict[str, dict[str, Any]] = {
         "query": {"query": query, "project": project},
@@ -121,8 +124,11 @@ def build_args(
         "soll_query_context": {"project_slug": "AXO", "limit": 5},
         "soll_work_plan": {"project_slug": "AXO", "limit": 10, "include_ist": True, "format": "json"},
         "soll_verify_requirements": {"project_slug": "AXO"},
-        "soll_apply_plan": {"project_slug": "AXO", "dry_run": True, "plan": {}},
-        "soll_commit_revision": {"preview_id": "dry-run-preview"},
+        "soll_apply_plan": {"project_slug": "AXO", "author": "mcp-validate", "dry_run": True, "plan": {}},
+        "soll_commit_revision": {
+            "preview_id": str(state.get("preview_id") or "dry-run-preview"),
+            "author": "mcp-validate",
+        },
         "soll_rollback_revision": {"revision_id": "dry-run-revision"},
         "soll_attach_evidence": {
             "entity_type": "requirement",
@@ -130,12 +136,19 @@ def build_args(
             "artifacts": [{"kind": "metric", "value": "dry-run"}],
         },
         "soll_manager": {
-            "action": "update",
+            "action": "create",
             "entity": "requirement",
-            "data": {"id": "REQ-DRY-RUN", "status": "planned"},
+            "data": {
+                "project_slug": "AXO",
+                "title": "MCP Validate Requirement",
+                "description": "Synthetic MCP validation requirement",
+                "priority": "P3",
+            },
         },
         "soll_export": {},
-        "restore_soll": {"path": "docs/vision/non-existent-file.md"},
+        "restore_soll": {
+            "path": str(state.get("latest_soll_export_path") or "docs/vision/non-existent-file.md")
+        },
         "resume_vectorization": {},
         "soll_validate": {},
         "fs_read": {"uri": "README.md", "start_line": 1, "end_line": 20},
@@ -300,6 +313,45 @@ def summarize_response(resp: dict[str, Any], excerpt_limit: int) -> tuple[str, i
     if resp.get("error") is not None:
         return truncate_text(json.dumps(resp.get("error"), ensure_ascii=False), excerpt_limit), len(raw)
     return truncate_text(raw, excerpt_limit), len(raw)
+
+
+def latest_soll_export_path() -> str | None:
+    export_dir = Path("docs/vision")
+    if not export_dir.exists():
+        return None
+    candidates = sorted(
+        export_dir.glob("SOLL_EXPORT_*.md"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return None
+    return str(candidates[0])
+
+
+def update_validation_state(
+    state: dict[str, Any],
+    tool_name: str,
+    request_args: dict[str, Any],
+    resp: dict[str, Any],
+) -> None:
+    data = extract_result_data(resp)
+    if tool_name == "soll_apply_plan":
+        preview_id = data.get("preview_id")
+        if not isinstance(preview_id, str) or not preview_id.strip():
+            reserved_ids = data.get("reserved_ids")
+            if isinstance(reserved_ids, dict):
+                preview_id = reserved_ids.get("preview_id")
+        if isinstance(preview_id, str) and preview_id.strip():
+            state["preview_id"] = preview_id
+    elif tool_name == "soll_export":
+        latest = latest_soll_export_path()
+        if latest:
+            state["latest_soll_export_path"] = latest
+    elif tool_name == "restore_soll":
+        path = request_args.get("path")
+        if isinstance(path, str) and path.strip():
+            state["latest_soll_export_path"] = path
 
 
 def discover_symbol_probe(url: str, project: str, query: str, timeout: int) -> str:
@@ -504,6 +556,7 @@ def run(args: argparse.Namespace) -> int:
         symbol_probe = discovered or (args.query if args.query.strip() else "booking")
 
     tool_results: list[ToolResult] = []
+    validation_state: dict[str, Any] = {}
     for i, tool in enumerate(tools, start=100):
         name = str(tool.get("name", "")).strip()
         schema = tool.get("inputSchema", {}) if isinstance(tool, dict) else {}
@@ -528,6 +581,7 @@ def run(args: argparse.Namespace) -> int:
             project,
             args.query,
             symbol_probe,
+            validation_state,
         )
         payload = {
             "jsonrpc": "2.0",
@@ -539,6 +593,7 @@ def run(args: argparse.Namespace) -> int:
         try:
             resp = rpc_call(args.url, payload, args.timeout)
             status, note = evaluate_tool_result(name, resp, args.url, args.timeout)
+            update_validation_state(validation_state, name, call_args, resp)
             excerpt, response_size = summarize_response(resp, args.excerpt)
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
             status, note = "fail", f"{type(e).__name__}: {e}"

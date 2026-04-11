@@ -13,6 +13,29 @@ SPEC.loader.exec_module(MODULE)
 
 
 class McpValidateTests(unittest.TestCase):
+    def test_build_args_reuses_preview_id_from_validation_state(self) -> None:
+        args = MODULE.build_args(
+            "soll_commit_revision",
+            {},
+            "BookingSystem",
+            "booking",
+            "Bookings",
+            {"preview_id": "PRV-AXO-123"},
+        )
+
+        self.assertEqual(args["preview_id"], "PRV-AXO-123")
+
+    def test_update_validation_state_tracks_latest_soll_export_path(self) -> None:
+        original_latest = MODULE.latest_soll_export_path
+        try:
+            MODULE.latest_soll_export_path = lambda: "docs/vision/SOLL_EXPORT_TEST.md"
+            state = {}
+            MODULE.update_validation_state(state, "soll_export", {}, {"result": {"data": {}}})
+        finally:
+            MODULE.latest_soll_export_path = original_latest
+
+        self.assertEqual(state["latest_soll_export_path"], "docs/vision/SOLL_EXPORT_TEST.md")
+
     def test_evaluate_tool_result_passes_non_mutating_ok_response(self) -> None:
         resp = {"result": {"content": [{"type": "text", "text": "ok"}]}}
 
