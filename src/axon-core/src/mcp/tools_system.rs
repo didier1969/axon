@@ -2,11 +2,27 @@ use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
+use crate::embedding_contract::{
+    CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION, STORAGE_TYPE,
+};
+use crate::embedder::{
+    allowed_gpu_vector_workers, current_embedding_provider_diagnostics,
+    current_gpu_memory_pressure_active, current_gpu_memory_snapshot,
+    current_vector_batch_controller_diagnostics, gpu_memory_soft_limit_mb,
+    gpu_pressure_embed_batch_chunks, gpu_pressure_files_per_cycle,
+    gpu_telemetry_backend_name, gpu_telemetry_cache_ttl_ms, gpu_telemetry_device_index,
+    current_vector_drain_state, embedding_lane_config_from_env,
+};
 use crate::ingress_buffer::ingress_metrics_snapshot;
+use crate::optimizer::{
+    collect_host_snapshot, collect_operator_policy_snapshot, collect_recent_analytics_window,
+    collect_runtime_signals_window,
+};
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_observability::{
     duckdb_memory_snapshot, duckdb_storage_snapshot, process_memory_snapshot,
 };
+use crate::service_guard;
 
 fn format_bytes_human(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
@@ -215,14 +231,14 @@ impl McpServer {
             canonical_count("SELECT count(*) FROM File WHERE status = 'oversized_for_current_budget'");
         let skipped_count = canonical_count("SELECT count(*) FROM File WHERE status = 'skipped'");
         let graph_ready_count = canonical_count("SELECT count(*) FROM File WHERE graph_ready = TRUE");
-        let vector_ready_count = canonical_count(
+        let vector_ready_query = format!(
             "WITH pending_vector_chunks AS ( \
                SELECT co.source_id AS file_path \
                FROM Chunk c \
                JOIN CONTAINS co ON co.target_id = c.source_id \
                LEFT JOIN ChunkEmbedding ce \
                  ON ce.chunk_id = c.id \
-                AND ce.model_id = 'chunk-bge-small-en-v1.5-384' \
+                AND ce.model_id = '{CHUNK_MODEL_ID}' \
                 AND ce.source_hash = c.content_hash \
                WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash \
                GROUP BY 1 \
@@ -230,8 +246,9 @@ impl McpServer {
              SELECT COUNT(*) \
              FROM File f \
              LEFT JOIN pending_vector_chunks pvc ON pvc.file_path = f.path \
-             WHERE f.graph_ready = TRUE AND pvc.file_path IS NULL",
+             WHERE f.graph_ready = TRUE AND pvc.file_path IS NULL"
         );
+        let vector_ready_count = canonical_count(&vector_ready_query);
         let (graph_projection_queue_queued, graph_projection_queue_inflight) = self
             .graph_store
             .fetch_graph_projection_queue_counts()
@@ -265,6 +282,124 @@ impl McpServer {
         let storage = duckdb_storage_snapshot(&self.graph_store);
         let duckdb_memory = duckdb_memory_snapshot(&self.graph_store);
         let ingress = ingress_metrics_snapshot();
+        let provider = current_embedding_provider_diagnostics();
+        let lane_config = embedding_lane_config_from_env();
+        let vector_runtime = service_guard::vector_runtime_metrics();
+        let vector_latency = service_guard::vector_runtime_latency_summaries();
+        let vector_controller = current_vector_batch_controller_diagnostics(&lane_config);
+        let optimizer_host_snapshot = collect_host_snapshot();
+        let optimizer_policy_snapshot = collect_operator_policy_snapshot(&optimizer_host_snapshot);
+        let optimizer_runtime_signals = collect_runtime_signals_window(&self.graph_store);
+        let optimizer_recent_analytics = collect_recent_analytics_window(&self.graph_store);
+        let gpu_memory_snapshot = current_gpu_memory_snapshot();
+        let gpu_memory_pressure = current_gpu_memory_pressure_active();
+        let gpu_memory_soft_limit = gpu_memory_soft_limit_mb();
+        let interactive_active = service_guard::interactive_priority_active()
+            || service_guard::interactive_requests_in_flight() > 0;
+        let gpu_present = std::env::var("AXON_EMBEDDING_GPU_PRESENT")
+            .ok()
+            .map(|value| value.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let provider_gpu_mismatch = provider.provider_requested.eq_ignore_ascii_case("cuda")
+            && !provider.provider_effective.eq_ignore_ascii_case("cuda");
+        let acceleration_state = if provider.provider_effective == "cpu_missing_cuda_provider" {
+            "gpu_runtime_missing_provider"
+        } else if provider_gpu_mismatch && !gpu_present {
+            "gpu_requested_but_unavailable"
+        } else if provider.provider_effective.eq_ignore_ascii_case("cuda") {
+            "gpu_active"
+        } else {
+            "cpu_only"
+        };
+        let drain_state = current_vector_drain_state(
+            file_vectorization_queue_depth,
+            service_guard::current_pressure(),
+            interactive_active,
+            &provider.provider_requested,
+            &provider.provider_effective,
+        );
+        let gpu_background_worker_cap = if provider.provider_effective.eq_ignore_ascii_case("cuda") {
+            allowed_gpu_vector_workers(
+                file_vectorization_queue_depth,
+                service_guard::current_pressure(),
+            )
+        } else {
+            0
+        };
+        let avg_chunks_per_embed_call = if vector_runtime.embed_calls_total > 0 {
+            vector_runtime.chunks_embedded_total as f64 / vector_runtime.embed_calls_total as f64
+        } else {
+            0.0
+        };
+        let avg_files_per_embed_call = if vector_runtime.embed_calls_total > 0 {
+            vector_runtime.files_touched_total as f64 / vector_runtime.embed_calls_total as f64
+        } else {
+            0.0
+        };
+        let embed_ms_per_chunk = if vector_runtime.chunks_embedded_total > 0 {
+            vector_runtime.embed_ms_total as f64 / vector_runtime.chunks_embedded_total as f64
+        } else {
+            0.0
+        };
+        let fetch_ms_per_chunk = if vector_runtime.chunks_embedded_total > 0 {
+            vector_runtime.fetch_ms_total as f64 / vector_runtime.chunks_embedded_total as f64
+        } else {
+            0.0
+        };
+        let db_write_ms_per_chunk = if vector_runtime.chunks_embedded_total > 0 {
+            vector_runtime.db_write_ms_total as f64 / vector_runtime.chunks_embedded_total as f64
+        } else {
+            0.0
+        };
+        let mark_done_ms_per_completed_file = if vector_runtime.files_completed_total > 0 {
+            vector_runtime.mark_done_ms_total as f64 / vector_runtime.files_completed_total as f64
+        } else {
+            0.0
+        };
+        let avg_embed_input_texts_per_call = if vector_runtime.embed_calls_total > 0 {
+            vector_runtime.embed_input_texts_total as f64 / vector_runtime.embed_calls_total as f64
+        } else {
+            0.0
+        };
+        let avg_embed_input_bytes_per_call = if vector_runtime.embed_calls_total > 0 {
+            vector_runtime.embed_input_text_bytes_total as f64
+                / vector_runtime.embed_calls_total as f64
+        } else {
+            0.0
+        };
+        let avg_embed_input_bytes_per_chunk = if vector_runtime.chunks_embedded_total > 0 {
+            vector_runtime.embed_input_text_bytes_total as f64
+                / vector_runtime.chunks_embedded_total as f64
+        } else {
+            0.0
+        };
+        let embed_clone_ms_per_call = if vector_runtime.embed_calls_total > 0 {
+            vector_runtime.embed_clone_ms_total as f64 / vector_runtime.embed_calls_total as f64
+        } else {
+            0.0
+        };
+        let embed_transform_ms_per_call = if vector_runtime.embed_calls_total > 0 {
+            vector_runtime.embed_transform_ms_total as f64 / vector_runtime.embed_calls_total as f64
+        } else {
+            0.0
+        };
+        let embed_export_ms_per_call = if vector_runtime.embed_calls_total > 0 {
+            vector_runtime.embed_export_ms_total as f64 / vector_runtime.embed_calls_total as f64
+        } else {
+            0.0
+        };
+        let embed_transform_ms_per_chunk = if vector_runtime.chunks_embedded_total > 0 {
+            vector_runtime.embed_transform_ms_total as f64
+                / vector_runtime.chunks_embedded_total as f64
+        } else {
+            0.0
+        };
+        let embed_export_ms_per_chunk = if vector_runtime.chunks_embedded_total > 0 {
+            vector_runtime.embed_export_ms_total as f64
+                / vector_runtime.chunks_embedded_total as f64
+        } else {
+            0.0
+        };
         let stage_rows = canonical_json(
             "SELECT COALESCE(file_stage, 'unknown'), count(*) \
              FROM File \
@@ -281,7 +416,34 @@ impl McpServer {
              ORDER BY count(*) DESC, 1 ASC \
              LIMIT 5",
         );
+        let vector_queue_status_rows = canonical_json(
+            "SELECT status, count(*) \
+             FROM FileVectorizationQueue \
+             GROUP BY 1 \
+             ORDER BY count(*) DESC, 1 ASC",
+        );
+        let latest_optimizer_decision_row = canonical_json(
+            "SELECT decision_id, mode, action_profile_id, at_ms, would_apply, applied, evaluation_window_start_ms, evaluation_window_end_ms \
+             FROM OptimizerDecisionLog \
+             ORDER BY at_ms DESC \
+             LIMIT 1",
+        );
+        let latest_optimizer_reward_row = canonical_json(
+            "SELECT decision_id, observed_at_ms, throughput_chunks_per_hour, throughput_files_per_hour \
+             FROM RewardObservationLog \
+             ORDER BY observed_at_ms DESC \
+             LIMIT 1",
+        );
+        let vector_queue_statuses = parse_reason_count_rows(&vector_queue_status_rows);
         let backlog_reasons = parse_reason_count_rows(&backlog_reason_rows);
+        let latest_optimizer_decision =
+            serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&latest_optimizer_decision_row)
+                .ok()
+                .and_then(|rows| rows.into_iter().next());
+        let latest_optimizer_reward =
+            serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&latest_optimizer_reward_row)
+                .ok()
+                .and_then(|rows| rows.into_iter().next());
         let backlog_reason_section = if backlog_reasons.is_empty() {
             if pending_count + indexing_count > 0 {
                 format!(
@@ -308,6 +470,16 @@ impl McpServer {
                 .collect::<Vec<_>>()
                 .join("\n");
             format!("**Stages canoniques :**\n{}\n\n", lines)
+        };
+        let vector_queue_status_section = if vector_queue_statuses.is_empty() {
+            "*   File vectorization queue statuses : aucune donnée.\n\n".to_string()
+        } else {
+            let lines = vector_queue_statuses
+                .iter()
+                .map(|(status, count)| format!("*   `{}` : {}", status, count))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("**File vectorization queue statuses :**\n{}\n\n", lines)
         };
 
         let mut evidence = format!(
@@ -345,6 +517,7 @@ impl McpServer {
             *   File Vectorization Queue Pending : {}\n\n\
             {}\
             {}\
+            {}\
             **Stockage DuckDB :**\n\
             *   Fichier principal : {}\n\
             *   WAL : {}\n\
@@ -360,10 +533,99 @@ impl McpServer {
             *   Subtree hints acceptés : {}\n\
             *   Subtree hints bloqués : {}\n\
             *   Subtree hints supprimés : {}\n\
+            *   Subtree hints productifs : {}\n\
+            *   Subtree hints non productifs : {}\n\
+            *   Subtree hints abandonnés : {}\n\
             *   Événements collapsés : {}\n\
             *   Flushs : {}\n\
             *   Dernier flush : {} ms\n\
             *   Dernier lot promu : {}\n\n\
+            **Embedding Runtime :**\n\
+            *   GPU Present Detected : {}\n\
+            *   Embedding Provider Requested : {}\n\
+            *   Embedding Provider Effective : {}\n\
+            *   Embedding Acceleration State : {}\n\
+            *   Drain State : {}\n\
+            *   GPU Background Worker Cap : {}\n\
+            *   ORT Strategy : {}\n\
+            *   Query Workers : {}\n\
+            *   Vector Workers : {}\n\
+            *   Graph Workers : {}\n\
+            *   Chunk Batch Size : {}\n\
+            *   File Vectorization Batch Size : {}\n\
+            *   Graph Batch Size : {}\n\n\
+            *   Max Chunks Per File : {}\n\
+            *   Max Embed Batch Bytes : {}\n\n\
+            **Vector Runtime Breakdown :**\n\
+            *   Fetch ms total : {}\n\
+            *   Embed ms total : {}\n\
+            *   DB write ms total : {}\n\
+            *   Completion check ms total : {}\n\
+            *   Mark done ms total : {}\n\
+            *   Prepare dispatch total : {}\n\
+            *   Prepare prefetch total : {}\n\
+            *   Prepare fallback inline total : {}\n\
+            *   Prepare reply wait ms total : {}\n\
+            *   Prepare send wait ms total : {}\n\
+            *   Prepare queue wait ms total : {}\n\
+*   Prepare queue depth current/max : {}/{}\n\
+*   Embed input texts total : {}\n\
+*   Embed input text bytes total : {}\n\
+*   Embed clone ms total : {}\n\
+*   Embed transform ms total : {}\n\
+*   Embed export ms total : {}\n\
+*   Finalize enqueued total : {}\n\
+            *   Finalize fallback inline total : {}\n\
+            *   Finalize send wait ms total : {}\n\
+            *   Finalize queue wait ms total : {}\n\
+            *   Finalize queue depth current/max : {}/{}\n\
+            *   Batches total : {}\n\
+            *   Chunks embedded total : {}\n\
+            *   Files completed total : {}\n\
+            *   Embed calls total : {}\n\
+            *   Claimed work items total : {}\n\
+            *   Partial file cycles total : {}\n\
+            *   Mark done calls total : {}\n\
+            *   Files touched total : {}\n\
+*   Avg chunks per embed call : {:.2}\n\
+*   Avg files per embed call : {:.2}\n\
+*   Avg embed input texts per call : {:.2}\n\
+*   Avg embed input bytes per call : {:.2}\n\
+*   Avg embed input bytes per chunk : {:.2}\n\
+*   Embed clone ms per call : {:.2}\n\
+*   Embed transform ms per call : {:.2}\n\
+*   Embed export ms per call : {:.2}\n\
+*   Embed ms per chunk : {:.2}\n\
+*   Embed transform ms per chunk : {:.2}\n\
+*   Embed export ms per chunk : {:.2}\n\
+            *   Fetch ms per chunk : {:.2}\n\
+            *   DB write ms per chunk : {:.2}\n\
+            *   Mark done ms per completed file : {:.2}\n\n\
+            **Vector Stage Latencies (recent window) :**\n\
+            *   Fetch p50/p95/max ms : {}/{}/{} (samples: {})\n\
+            *   Embed p50/p95/max ms : {}/{}/{} (samples: {})\n\
+            *   DB write p50/p95/max ms : {}/{}/{} (samples: {})\n\
+            *   Mark done p50/p95/max ms : {}/{}/{} (samples: {})\n\n\
+            **Vector Batch Controller :**\n\
+            *   State : {}\n\
+            *   Reason : {}\n\
+            *   Adjustments total : {}\n\
+            *   Last adjustment ms : {}\n\
+            *   Target embed batch chunks : {}\n\
+            *   Target files per cycle : {}\n\
+            *   Window embed calls : {}\n\
+            *   Window chunks : {}\n\
+            *   Window files touched : {}\n\n\
+            **Shadow Optimizer :**\n\
+            *   Latest decision id : {}\n\
+            *   Latest decision mode : {}\n\
+            *   Latest action profile : {}\n\
+            *   Latest decision at ms : {}\n\
+            *   Latest would_apply/applied : {}/{}\n\
+            *   Latest reward decision id : {}\n\
+            *   Latest reward at ms : {}\n\
+            *   Latest throughput chunks/hour : {:.2}\n\
+            *   Latest throughput files/hour : {:.2}\n\n\
             *Note aux Agents IA : Toute erreur 'TCP auth closed' observée dans des logs Elixir n'est pas liée à ce serveur MCP. Axon Core V2 est 100% autonome.*",
             format_bytes_human(memory.rss_bytes),
             format_bytes_human(memory.rss_anon_bytes),
@@ -390,6 +652,7 @@ impl McpServer {
             file_vectorization_queue_depth,
             file_stage_section,
             backlog_reason_section,
+            vector_queue_status_section,
             format_bytes_human(storage.db_file_bytes),
             format_bytes_human(storage.db_wal_bytes),
             format_bytes_human(storage.db_total_bytes),
@@ -402,10 +665,149 @@ impl McpServer {
             ingress.subtree_hint_accepted_total,
             ingress.subtree_hint_blocked_total,
             ingress.subtree_hint_suppressed_total,
+            ingress.subtree_hint_productive_total,
+            ingress.subtree_hint_unproductive_total,
+            ingress.subtree_hint_dropped_total,
             ingress.collapsed_total,
             ingress.flush_count,
             ingress.last_flush_duration_ms,
             ingress.last_promoted_count,
+            if gpu_present { "yes" } else { "no" },
+            provider.provider_requested,
+            provider.provider_effective,
+            acceleration_state,
+            drain_state.as_str(),
+            gpu_background_worker_cap,
+            provider.ort_strategy,
+            lane_config.query_workers,
+            lane_config.vector_workers,
+            lane_config.graph_workers,
+            lane_config.chunk_batch_size,
+            lane_config.file_vectorization_batch_size,
+            lane_config.graph_batch_size,
+            lane_config.max_chunks_per_file,
+            lane_config.max_embed_batch_bytes,
+            vector_runtime.fetch_ms_total,
+            vector_runtime.embed_ms_total,
+            vector_runtime.db_write_ms_total,
+            vector_runtime.completion_check_ms_total,
+            vector_runtime.mark_done_ms_total,
+            vector_runtime.prepare_dispatch_total,
+            vector_runtime.prepare_prefetch_total,
+            vector_runtime.prepare_fallback_inline_total,
+            vector_runtime.prepare_reply_wait_ms_total,
+            vector_runtime.prepare_send_wait_ms_total,
+            vector_runtime.prepare_queue_wait_ms_total,
+            vector_runtime.prepare_queue_depth_current,
+            vector_runtime.prepare_queue_depth_max,
+            vector_runtime.embed_input_texts_total,
+            vector_runtime.embed_input_text_bytes_total,
+            vector_runtime.embed_clone_ms_total,
+            vector_runtime.embed_transform_ms_total,
+            vector_runtime.embed_export_ms_total,
+            vector_runtime.finalize_enqueued_total,
+            vector_runtime.finalize_fallback_inline_total,
+            vector_runtime.finalize_send_wait_ms_total,
+            vector_runtime.finalize_queue_wait_ms_total,
+            vector_runtime.finalize_queue_depth_current,
+            vector_runtime.finalize_queue_depth_max,
+            vector_runtime.batches_total,
+            vector_runtime.chunks_embedded_total,
+            vector_runtime.files_completed_total,
+            vector_runtime.embed_calls_total,
+            vector_runtime.claimed_work_items_total,
+            vector_runtime.partial_file_cycles_total,
+            vector_runtime.mark_done_calls_total,
+            vector_runtime.files_touched_total,
+            avg_chunks_per_embed_call,
+            avg_files_per_embed_call,
+            avg_embed_input_texts_per_call,
+            avg_embed_input_bytes_per_call,
+            avg_embed_input_bytes_per_chunk,
+            embed_clone_ms_per_call,
+            embed_transform_ms_per_call,
+            embed_export_ms_per_call,
+            embed_ms_per_chunk,
+            embed_transform_ms_per_chunk,
+            embed_export_ms_per_chunk,
+            fetch_ms_per_chunk,
+            db_write_ms_per_chunk,
+            mark_done_ms_per_completed_file,
+            vector_latency.fetch.p50_ms,
+            vector_latency.fetch.p95_ms,
+            vector_latency.fetch.max_ms,
+            vector_latency.fetch.samples,
+            vector_latency.embed.p50_ms,
+            vector_latency.embed.p95_ms,
+            vector_latency.embed.max_ms,
+            vector_latency.embed.samples,
+            vector_latency.db_write.p50_ms,
+            vector_latency.db_write.p95_ms,
+            vector_latency.db_write.max_ms,
+            vector_latency.db_write.samples,
+            vector_latency.mark_done.p50_ms,
+            vector_latency.mark_done.p95_ms,
+            vector_latency.mark_done.max_ms,
+            vector_latency.mark_done.samples,
+            vector_controller.state.as_str(),
+            vector_controller.reason.clone(),
+            vector_controller.adjustments_total,
+            vector_controller.last_adjustment_ms,
+            vector_controller.target_embed_batch_chunks,
+            vector_controller.target_files_per_cycle,
+            vector_controller.window_embed_calls,
+            vector_controller.window_chunks,
+            vector_controller.window_files_touched,
+            latest_optimizer_decision
+                .as_ref()
+                .and_then(|row| row.first())
+                .and_then(|value| value.as_str())
+                .unwrap_or("none"),
+            latest_optimizer_decision
+                .as_ref()
+                .and_then(|row| row.get(1))
+                .and_then(|value| value.as_str())
+                .unwrap_or("none"),
+            latest_optimizer_decision
+                .as_ref()
+                .and_then(|row| row.get(2))
+                .and_then(|value| value.as_str())
+                .unwrap_or("hold"),
+            latest_optimizer_decision
+                .as_ref()
+                .and_then(|row| row.get(3))
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
+            latest_optimizer_decision
+                .as_ref()
+                .and_then(|row| row.get(4))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            latest_optimizer_decision
+                .as_ref()
+                .and_then(|row| row.get(5))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            latest_optimizer_reward
+                .as_ref()
+                .and_then(|row| row.first())
+                .and_then(|value| value.as_str())
+                .unwrap_or("none"),
+            latest_optimizer_reward
+                .as_ref()
+                .and_then(|row| row.get(1))
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
+            latest_optimizer_reward
+                .as_ref()
+                .and_then(|row| row.get(2))
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0),
+            latest_optimizer_reward
+                .as_ref()
+                .and_then(|row| row.get(3))
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0),
         );
         if reader_snapshot_age_ms == u64::MAX {
             evidence
@@ -431,7 +833,182 @@ impl McpServer {
                 "high",
             )
         );
-        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+                "data": {
+                "embedding_contract": {
+                    "model_name": MODEL_NAME,
+                    "dimension": DIMENSION,
+                    "native_dimension": NATIVE_DIMENSION,
+                    "max_length": MAX_LENGTH,
+                    "storage_type": STORAGE_TYPE,
+                    "gpu_present_detected": gpu_present,
+                    "execution_provider": provider.provider_effective,
+                    "provider_requested": provider.provider_requested,
+                    "provider_effective": provider.provider_effective,
+                    "provider_init_error": provider.provider_init_error,
+                    "provider_gpu_mismatch": provider_gpu_mismatch,
+                    "acceleration_state": acceleration_state,
+                    "drain_state": drain_state.as_str(),
+                    "gpu_background_worker_cap": gpu_background_worker_cap,
+                    "ort_strategy": provider.ort_strategy,
+                    "ort_dylib_path": provider.ort_dylib_path,
+                    "query_workers": lane_config.query_workers,
+                    "vector_workers": lane_config.vector_workers,
+                    "graph_workers": lane_config.graph_workers,
+                    "chunk_batch_size": lane_config.chunk_batch_size,
+                    "file_vectorization_batch_size": lane_config.file_vectorization_batch_size,
+                    "graph_batch_size": lane_config.graph_batch_size,
+                    "max_chunks_per_file": lane_config.max_chunks_per_file,
+                    "max_embed_batch_bytes": lane_config.max_embed_batch_bytes,
+                    "gpu_memory": {
+                        "backend": gpu_telemetry_backend_name(),
+                        "device_index": gpu_telemetry_device_index(),
+                        "cache_ttl_ms": gpu_telemetry_cache_ttl_ms(),
+                        "soft_limit_mb": gpu_memory_soft_limit,
+                        "pressure_embed_batch_chunks": gpu_pressure_embed_batch_chunks(
+                            lane_config.chunk_batch_size,
+                            (lane_config.chunk_batch_size.max(1) / 2).max(8),
+                        ),
+                        "pressure_files_per_cycle": gpu_pressure_files_per_cycle(
+                            lane_config.file_vectorization_batch_size,
+                        ),
+                        "pressure_active": gpu_memory_pressure,
+                        "available": gpu_memory_snapshot.is_some(),
+                        "total_mb": gpu_memory_snapshot.map(|snapshot| snapshot.total_mb),
+                        "used_mb": gpu_memory_snapshot.map(|snapshot| snapshot.used_mb),
+                        "free_mb": gpu_memory_snapshot.map(|snapshot| snapshot.free_mb),
+                    },
+                    "vector_runtime": {
+                        "fetch_ms_total": vector_runtime.fetch_ms_total,
+                        "embed_ms_total": vector_runtime.embed_ms_total,
+                        "db_write_ms_total": vector_runtime.db_write_ms_total,
+                        "completion_check_ms_total": vector_runtime.completion_check_ms_total,
+                        "mark_done_ms_total": vector_runtime.mark_done_ms_total,
+                        "prepare_dispatch_total": vector_runtime.prepare_dispatch_total,
+                        "prepare_prefetch_total": vector_runtime.prepare_prefetch_total,
+                        "prepare_fallback_inline_total": vector_runtime.prepare_fallback_inline_total,
+                        "prepared_work_items_total": vector_runtime.prepared_work_items_total,
+                        "prepare_empty_batches_total": vector_runtime.prepare_empty_batches_total,
+                        "prepare_immediate_completed_total": vector_runtime.prepare_immediate_completed_total,
+                        "prepare_failed_fetches_total": vector_runtime.prepare_failed_fetches_total,
+                        "prepare_reply_wait_ms_total": vector_runtime.prepare_reply_wait_ms_total,
+                        "prepare_send_wait_ms_total": vector_runtime.prepare_send_wait_ms_total,
+                        "prepare_queue_wait_ms_total": vector_runtime.prepare_queue_wait_ms_total,
+                        "prepare_queue_depth_current": vector_runtime.prepare_queue_depth_current,
+                        "prepare_queue_depth_max": vector_runtime.prepare_queue_depth_max,
+                        "embed_input_texts_total": vector_runtime.embed_input_texts_total,
+                        "embed_input_text_bytes_total": vector_runtime.embed_input_text_bytes_total,
+                        "embed_clone_ms_total": vector_runtime.embed_clone_ms_total,
+                        "embed_transform_ms_total": vector_runtime.embed_transform_ms_total,
+                        "embed_export_ms_total": vector_runtime.embed_export_ms_total,
+                        "embed_attempts_total": vector_runtime.embed_attempts_total,
+                        "embed_inflight_started_at_ms": vector_runtime.embed_inflight_started_at_ms,
+                        "embed_inflight_texts_current": vector_runtime.embed_inflight_texts_current,
+                        "embed_inflight_text_bytes_current": vector_runtime.embed_inflight_text_bytes_current,
+                        "vector_workers_started_total": vector_runtime.vector_workers_started_total,
+                        "vector_workers_stopped_total": vector_runtime.vector_workers_stopped_total,
+                        "vector_workers_active_current": vector_runtime.vector_workers_active_current,
+                        "vector_worker_heartbeat_at_ms": vector_runtime.vector_worker_heartbeat_at_ms,
+                        "finalize_enqueued_total": vector_runtime.finalize_enqueued_total,
+                        "finalize_fallback_inline_total": vector_runtime.finalize_fallback_inline_total,
+                        "finalize_send_wait_ms_total": vector_runtime.finalize_send_wait_ms_total,
+                        "finalize_queue_wait_ms_total": vector_runtime.finalize_queue_wait_ms_total,
+                        "finalize_queue_depth_current": vector_runtime.finalize_queue_depth_current,
+                        "finalize_queue_depth_max": vector_runtime.finalize_queue_depth_max,
+                        "batches_total": vector_runtime.batches_total,
+                        "chunks_embedded_total": vector_runtime.chunks_embedded_total,
+                        "files_completed_total": vector_runtime.files_completed_total,
+                        "embed_calls_total": vector_runtime.embed_calls_total,
+                        "claimed_work_items_total": vector_runtime.claimed_work_items_total,
+                        "partial_file_cycles_total": vector_runtime.partial_file_cycles_total,
+                        "mark_done_calls_total": vector_runtime.mark_done_calls_total,
+                        "files_touched_total": vector_runtime.files_touched_total,
+                        "avg_chunks_per_embed_call": avg_chunks_per_embed_call,
+                        "avg_files_per_embed_call": avg_files_per_embed_call,
+                        "avg_embed_input_texts_per_call": avg_embed_input_texts_per_call,
+                        "avg_embed_input_bytes_per_call": avg_embed_input_bytes_per_call,
+                        "avg_embed_input_bytes_per_chunk": avg_embed_input_bytes_per_chunk,
+                        "embed_clone_ms_per_call": embed_clone_ms_per_call,
+                        "embed_transform_ms_per_call": embed_transform_ms_per_call,
+                        "embed_export_ms_per_call": embed_export_ms_per_call,
+                        "embed_ms_per_chunk": embed_ms_per_chunk,
+                        "embed_transform_ms_per_chunk": embed_transform_ms_per_chunk,
+                        "embed_export_ms_per_chunk": embed_export_ms_per_chunk,
+                        "fetch_ms_per_chunk": fetch_ms_per_chunk,
+                        "db_write_ms_per_chunk": db_write_ms_per_chunk,
+                        "mark_done_ms_per_completed_file": mark_done_ms_per_completed_file,
+                        "latency_recent": {
+                            "fetch": {
+                                "samples": vector_latency.fetch.samples,
+                                "p50_ms": vector_latency.fetch.p50_ms,
+                                "p95_ms": vector_latency.fetch.p95_ms,
+                                "max_ms": vector_latency.fetch.max_ms
+                            },
+                            "embed": {
+                                "samples": vector_latency.embed.samples,
+                                "p50_ms": vector_latency.embed.p50_ms,
+                                "p95_ms": vector_latency.embed.p95_ms,
+                                "max_ms": vector_latency.embed.max_ms
+                            },
+                            "db_write": {
+                                "samples": vector_latency.db_write.samples,
+                                "p50_ms": vector_latency.db_write.p50_ms,
+                                "p95_ms": vector_latency.db_write.p95_ms,
+                                "max_ms": vector_latency.db_write.max_ms
+                            },
+                            "mark_done": {
+                                "samples": vector_latency.mark_done.samples,
+                                "p50_ms": vector_latency.mark_done.p50_ms,
+                                "p95_ms": vector_latency.mark_done.p95_ms,
+                                "max_ms": vector_latency.mark_done.max_ms
+                            }
+                        }
+                    },
+                    "file_vectorization_queue_statuses": vector_queue_statuses
+                        .iter()
+                        .map(|(status, count)| json!({"status": status, "count": count}))
+                        .collect::<Vec<_>>(),
+                    "vector_batch_controller": {
+                        "state": vector_controller.state.as_str(),
+                        "reason": vector_controller.reason,
+                        "adjustments_total": vector_controller.adjustments_total,
+                        "last_adjustment_ms": vector_controller.last_adjustment_ms,
+                        "target_embed_batch_chunks": vector_controller.target_embed_batch_chunks,
+                        "target_files_per_cycle": vector_controller.target_files_per_cycle,
+                        "window_embed_calls": vector_controller.window_embed_calls,
+                        "window_chunks": vector_controller.window_chunks,
+                        "window_files_touched": vector_controller.window_files_touched,
+                        "avg_chunks_per_embed_call": vector_controller.avg_chunks_per_embed_call,
+                        "avg_files_per_embed_call": vector_controller.avg_files_per_embed_call,
+                        "embed_ms_per_chunk": vector_controller.embed_ms_per_chunk
+                    },
+                    "chunk_model_id": CHUNK_MODEL_ID
+                },
+                "traceability": {
+                    "host_snapshot": serde_json::to_value(&optimizer_host_snapshot).unwrap_or_else(|_| json!({})),
+                    "policy_snapshot": serde_json::to_value(&optimizer_policy_snapshot).unwrap_or_else(|_| json!({})),
+                    "runtime_signals_window": serde_json::to_value(&optimizer_runtime_signals).unwrap_or_else(|_| json!({})),
+                    "recent_analytics_window": serde_json::to_value(&optimizer_recent_analytics).unwrap_or_else(|_| json!({})),
+                    "latest_optimizer_decision": latest_optimizer_decision.as_ref().map(|row| json!({
+                        "decision_id": row.first().and_then(|value| value.as_str()),
+                        "mode": row.get(1).and_then(|value| value.as_str()),
+                        "action_profile_id": row.get(2).and_then(|value| value.as_str()),
+                        "at_ms": row.get(3).and_then(|value| value.as_i64()),
+                        "would_apply": row.get(4).and_then(|value| value.as_bool()),
+                        "applied": row.get(5).and_then(|value| value.as_bool()),
+                        "evaluation_window_start_ms": row.get(6).and_then(|value| value.as_i64()),
+                        "evaluation_window_end_ms": row.get(7).and_then(|value| value.as_i64())
+                    })),
+                    "latest_reward_observation": latest_optimizer_reward.as_ref().map(|row| json!({
+                        "decision_id": row.first().and_then(|value| value.as_str()),
+                        "observed_at_ms": row.get(1).and_then(|value| value.as_i64()),
+                        "throughput_chunks_per_hour": row.get(2).and_then(|value| value.as_f64()),
+                        "throughput_files_per_hour": row.get(3).and_then(|value| value.as_f64())
+                    }))
+                }
+            }
+        }))
     }
 
     pub(crate) fn axon_schema_overview(&self, _args: &Value) -> Option<Value> {
@@ -503,7 +1080,7 @@ impl McpServer {
 `SELECT status, count(*) FROM File GROUP BY 1 ORDER BY 2 DESC;`
 
 2) Project health
-`SELECT project_slug, count(*) AS known, SUM(CASE WHEN status IN ('indexed','indexed_degraded','skipped','deleted') THEN 1 ELSE 0 END) AS completed FROM File GROUP BY 1 ORDER BY known DESC;`
+`SELECT project_code, count(*) AS known, SUM(CASE WHEN status IN ('indexed','indexed_degraded','skipped','deleted') THEN 1 ELSE 0 END) AS completed FROM File GROUP BY 1 ORDER BY known DESC;`
 
 3) Top backlog reasons
 `SELECT COALESCE(status_reason,'unknown'), count(*) FROM File WHERE status IN ('pending','indexing') GROUP BY 1 ORDER BY 2 DESC LIMIT 10;`
@@ -515,7 +1092,7 @@ impl McpServer {
 `SELECT COUNT(*) AS calls, (SELECT COUNT(*) FROM CALLS_NIF) AS calls_nif FROM CALLS;`
 
 6) Symbol lookup by project
-`SELECT id, name, kind FROM Symbol WHERE project_slug = 'BookingSystem' ORDER BY name LIMIT 50;`
+`SELECT id, name, kind FROM Symbol WHERE project_code = 'BookingSystem' ORDER BY name LIMIT 50;`
 "#;
         Some(json!({ "content": [{ "type": "text", "text": examples }] }))
     }

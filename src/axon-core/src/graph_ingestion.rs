@@ -3,11 +3,12 @@
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{anyhow, Result};
 use libloading::Symbol as LibSymbol;
 
+use crate::embedding_contract::{CHUNK_MODEL_ID as CHUNK_EMBEDDING_MODEL_ID, DIMENSION};
 use crate::file_ingress_guard::FileIngressRow;
 use crate::graph::{ExecFunc, GraphStore, PendingFile};
 use crate::ingress_buffer::{IngressDrainBatch, IngressPromotionStats, IngressSource};
@@ -16,7 +17,10 @@ use crate::runtime_mode::AxonRuntimeMode;
 use crate::watcher_probe;
 
 const DEFAULT_GRAPH_EMBEDDING_RADIUS: i64 = 2;
-const CHUNK_EMBEDDING_MODEL_ID: &str = "chunk-bge-small-en-v1.5-384";
+pub const INTERACTIVE_VECTORIZATION_REQUEUE_COOLDOWN_MS: i64 = 5_000;
+pub const INTERACTIVE_VECTORIZATION_REQUEUE_LIMIT: i64 = 2;
+static FILE_VECTORIZATION_CLAIM_SEQ: AtomicU64 = AtomicU64::new(1);
+const CHUNK_EMBEDDING_UPSERT_BATCH_ROWS: usize = 500;
 
 #[derive(Debug, Clone, Copy)]
 enum FileUpsertSource {
@@ -34,6 +38,38 @@ pub struct GraphProjectionWork {
 #[derive(Debug, Clone)]
 pub struct FileVectorizationWork {
     pub file_path: String,
+    pub resumed_after_interactive_pause: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileLifecycleEvent {
+    pub file_path: String,
+    pub project_code: String,
+    pub stage: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub at_ms: i64,
+    pub worker_id: Option<i64>,
+    pub trace_id: Option<String>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VectorBatchRun {
+    pub run_id: String,
+    pub started_at_ms: i64,
+    pub finished_at_ms: i64,
+    pub provider: String,
+    pub model_id: String,
+    pub chunk_count: u64,
+    pub file_count: u64,
+    pub input_bytes: u64,
+    pub fetch_ms: u64,
+    pub embed_ms: u64,
+    pub db_write_ms: u64,
+    pub mark_done_ms: u64,
+    pub success: bool,
+    pub error_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -116,19 +152,30 @@ fn graph_projection_queue_upsert(
     )
 }
 
-fn file_vectorization_queue_upsert(file_path: &str, now_ms: i64) -> String {
+fn file_vectorization_queue_upsert_if_needed(file_path: &str, now_ms: i64) -> String {
     let safe_path = file_path.replace('\'', "''");
     format!(
-        "INSERT INTO FileVectorizationQueue (file_path, status, attempts, queued_at, last_error_reason, last_attempt_at) \
-         VALUES ('{}', 'queued', 0, {}, NULL, NULL) \
+        "INSERT INTO FileVectorizationQueue (file_path, status, status_reason, attempts, queued_at, last_error_reason, last_attempt_at, claim_token, claimed_at_ms) \
+         SELECT path, 'queued', NULL, 0, {}, NULL, NULL, NULL, NULL \
+         FROM File \
+         WHERE path = '{}' \
+           AND graph_ready = TRUE \
+           AND vector_ready = FALSE \
          ON CONFLICT(file_path) DO UPDATE \
          SET status = 'queued', \
+         status_reason = NULL, \
          attempts = 0, \
          queued_at = {}, \
          last_error_reason = NULL, \
-         last_attempt_at = NULL",
-        safe_path, now_ms, now_ms
+         last_attempt_at = NULL, \
+         claim_token = NULL, \
+         claimed_at_ms = NULL",
+        now_ms, safe_path, now_ms
     )
+}
+
+fn hourly_bucket_start_ms(at_ms: i64) -> i64 {
+    (at_ms / 3_600_000) * 3_600_000
 }
 
 fn sort_and_dedup_sql_tuples(values: &mut Vec<String>) {
@@ -137,21 +184,42 @@ fn sort_and_dedup_sql_tuples(values: &mut Vec<String>) {
 }
 
 fn insert_unique_relation_queries(table: &str, values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|row| {
+            format!(
+                "INSERT INTO {table} (source_id, target_id, project_code) VALUES {row} \
+                 ON CONFLICT DO NOTHING;",
+                table = table,
+                row = row
+            )
+        })
+        .collect()
+}
+
+fn replace_relation_queries(table: &str, values: &[String], chunk_size: usize) -> Vec<String> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+
     let mut queries = Vec::new();
-    for chunk in values.chunks(500) {
+    for chunk in values.chunks(chunk_size.max(1)) {
+        let values_sql = chunk.join(",");
         queries.push(format!(
-            "INSERT INTO {table} (source_id, target_id, project_slug) \
-             SELECT v.source_id, v.target_id, v.project_slug \
-             FROM (VALUES {rows}) AS v(source_id, target_id, project_slug) \
-             LEFT JOIN {table} existing \
-               ON existing.source_id = v.source_id \
-              AND existing.target_id = v.target_id \
-              AND existing.project_slug = v.project_slug \
-             WHERE existing.source_id IS NULL;",
+            "DELETE FROM {table} USING (VALUES {values_sql}) AS incoming(source_id, target_id, project_code) \
+             WHERE {table}.source_id = incoming.source_id \
+               AND {table}.target_id = incoming.target_id \
+               AND {table}.project_code = incoming.project_code;",
             table = table,
-            rows = chunk.join(",")
+            values_sql = values_sql
+        ));
+        queries.push(format!(
+            "INSERT INTO {table} (source_id, target_id, project_code) VALUES {values_sql};",
+            table = table,
+            values_sql = values_sql
         ));
     }
+
     queries
 }
 
@@ -175,15 +243,290 @@ fn dedup_file_batch_rows(
 }
 
 impl GraphStore {
-    fn escape_sql(value: &str) -> String {
-        value.replace("'", "''")
+    pub fn append_file_lifecycle_events(&self, events: &[FileLifecycleEvent]) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let values = events
+            .iter()
+            .map(|event| {
+                format!(
+                    "('{}', '{}', '{}', '{}', {}, {}, {}, {}, {})",
+                    Self::escape_sql(&event.file_path),
+                    Self::escape_sql(&event.project_code),
+                    Self::escape_sql(&event.stage),
+                    Self::escape_sql(&event.status),
+                    event
+                        .reason
+                        .as_ref()
+                        .map(|reason| format!("'{}'", Self::escape_sql(reason)))
+                        .unwrap_or_else(|| "NULL".to_string()),
+                    event.at_ms,
+                    event
+                        .worker_id
+                        .map(|worker_id| worker_id.to_string())
+                        .unwrap_or_else(|| "NULL".to_string()),
+                    event
+                        .trace_id
+                        .as_ref()
+                        .map(|trace_id| format!("'{}'", Self::escape_sql(trace_id)))
+                        .unwrap_or_else(|| "NULL".to_string()),
+                    event
+                        .run_id
+                        .as_ref()
+                        .map(|run_id| format!("'{}'", Self::escape_sql(run_id)))
+                        .unwrap_or_else(|| "NULL".to_string())
+                )
+            })
+            .collect::<Vec<_>>();
+
+        self.execute(&format!(
+            "INSERT INTO FileLifecycleEvent (file_path, project_code, stage, status, reason, at_ms, worker_id, trace_id, run_id) VALUES {};",
+            values.join(",")
+        ))
     }
 
-    fn symbol_id(slug: &str, path: &str, name: &str) -> String {
+    pub fn record_vector_batch_run(&self, run: &VectorBatchRun) -> Result<()> {
+        self.execute(&format!(
+            "INSERT OR REPLACE INTO VectorBatchRun (run_id, started_at_ms, finished_at_ms, provider, model_id, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, db_write_ms, mark_done_ms, success, error_reason) \
+             VALUES ('{}', {}, {}, '{}', '{}', {}, {}, {}, {}, {}, {}, {}, {}, {});",
+            Self::escape_sql(&run.run_id),
+            run.started_at_ms,
+            run.finished_at_ms,
+            Self::escape_sql(&run.provider),
+            Self::escape_sql(&run.model_id),
+            run.chunk_count,
+            run.file_count,
+            run.input_bytes,
+            run.fetch_ms,
+            run.embed_ms,
+            run.db_write_ms,
+            run.mark_done_ms,
+            if run.success { "TRUE" } else { "FALSE" },
+            run.error_reason
+                .as_ref()
+                .map(|reason| format!("'{}'", Self::escape_sql(reason)))
+                .unwrap_or_else(|| "NULL".to_string())
+        ))
+    }
+
+    pub fn refresh_hourly_vectorization_rollup(
+        &self,
+        bucket_start_ms: i64,
+        model_id: &str,
+    ) -> Result<()> {
+        let bucket_end_ms = bucket_start_ms.saturating_add(3_600_000);
+        let model_id = Self::escape_sql(model_id);
+        self.execute(&format!(
+            "DELETE FROM HourlyVectorizationRollup WHERE bucket_start_ms = {} AND model_id = '{}';",
+            bucket_start_ms, model_id
+        ))?;
+        self.execute(&format!(
+            "INSERT INTO HourlyVectorizationRollup (bucket_start_ms, project_code, model_id, chunks_embedded, files_vector_ready, batches, fetch_ms_total, embed_ms_total, db_write_ms_total, mark_done_ms_total) \
+             WITH chunk_rollup AS ( \
+                 SELECT c.project_code AS project_code, COUNT(*) AS chunks_embedded \
+                 FROM ChunkEmbedding ce \
+                 JOIN Chunk c ON c.id = ce.chunk_id \
+                 WHERE ce.model_id = '{}' \
+                   AND ce.embedded_at_ms >= {} \
+                   AND ce.embedded_at_ms < {} \
+                 GROUP BY c.project_code \
+             ), \
+             file_rollup AS ( \
+                 SELECT project_code, COUNT(*) AS files_vector_ready \
+                 FROM File \
+                 WHERE vector_ready = TRUE \
+                   AND vector_ready_at_ms IS NOT NULL \
+                   AND vector_ready_at_ms >= {} \
+                   AND vector_ready_at_ms < {} \
+                 GROUP BY project_code \
+             ), \
+             project_keys AS ( \
+                 SELECT project_code FROM chunk_rollup \
+                 UNION \
+                 SELECT project_code FROM file_rollup \
+             ), \
+             batch_rollup AS ( \
+                 SELECT COUNT(*) AS batches, \
+                        COALESCE(SUM(fetch_ms), 0) AS fetch_ms_total, \
+                        COALESCE(SUM(embed_ms), 0) AS embed_ms_total, \
+                        COALESCE(SUM(db_write_ms), 0) AS db_write_ms_total, \
+                        COALESCE(SUM(mark_done_ms), 0) AS mark_done_ms_total \
+                 FROM VectorBatchRun \
+                 WHERE model_id = '{}' \
+                   AND finished_at_ms >= {} \
+                   AND finished_at_ms < {} \
+             ) \
+             SELECT {}, \
+                    pk.project_code, \
+                    '{}', \
+                    COALESCE(cr.chunks_embedded, 0), \
+                    COALESCE(fr.files_vector_ready, 0), \
+                    CASE \
+                        WHEN row_number() OVER (ORDER BY pk.project_code) = 1 \
+                        THEN COALESCE(br.batches, 0) \
+                        ELSE 0 \
+                    END AS batches, \
+                    CASE \
+                        WHEN row_number() OVER (ORDER BY pk.project_code) = 1 \
+                        THEN COALESCE(br.fetch_ms_total, 0) \
+                        ELSE 0 \
+                    END AS fetch_ms_total, \
+                    CASE \
+                        WHEN row_number() OVER (ORDER BY pk.project_code) = 1 \
+                        THEN COALESCE(br.embed_ms_total, 0) \
+                        ELSE 0 \
+                    END AS embed_ms_total, \
+                    CASE \
+                        WHEN row_number() OVER (ORDER BY pk.project_code) = 1 \
+                        THEN COALESCE(br.db_write_ms_total, 0) \
+                        ELSE 0 \
+                    END AS db_write_ms_total, \
+                    CASE \
+                        WHEN row_number() OVER (ORDER BY pk.project_code) = 1 \
+                        THEN COALESCE(br.mark_done_ms_total, 0) \
+                        ELSE 0 \
+                    END AS mark_done_ms_total \
+             FROM project_keys pk \
+             LEFT JOIN chunk_rollup cr ON cr.project_code = pk.project_code \
+             LEFT JOIN file_rollup fr ON fr.project_code = pk.project_code \
+             CROSS JOIN batch_rollup br;",
+            model_id,
+            bucket_start_ms,
+            bucket_end_ms,
+            bucket_start_ms,
+            bucket_end_ms,
+            model_id,
+            bucket_start_ms,
+            bucket_end_ms,
+            bucket_start_ms,
+            model_id
+        ))
+    }
+
+    pub fn fetch_file_project_metadata(
+        &self,
+        paths: &[String],
+    ) -> Result<std::collections::HashMap<String, (String, Option<i64>, Option<String>)>> {
+        if paths.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let selector = paths
+            .iter()
+            .map(|path| format!("'{}'", Self::escape_sql(path)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let raw = self.query_json(&format!(
+            "SELECT path, COALESCE(project_code, 'global'), worker_id, trace_id \
+             FROM File \
+             WHERE path IN ({})",
+            selector
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut result = std::collections::HashMap::new();
+        for row in rows {
+            let Some(path) = row.first().and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let project_code = row
+                .get(1)
+                .and_then(|value| value.as_str())
+                .unwrap_or("global")
+                .to_string();
+            let worker_id = row.get(2).and_then(parse_i64_field);
+            let trace_id = row
+                .get(3)
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string());
+            result.insert(path.to_string(), (project_code, worker_id, trace_id));
+        }
+        Ok(result)
+    }
+
+    pub fn log_optimizer_decision(
+        &self,
+        decision_id: &str,
+        at_ms: i64,
+        mode: &str,
+        host_snapshot_json: &str,
+        policy_snapshot_json: &str,
+        signal_snapshot_json: &str,
+        analytics_snapshot_json: &str,
+        action_profile_id: &str,
+        decision_json: &str,
+        constraints_triggered_json: &str,
+        would_apply: bool,
+        applied: bool,
+        evaluation_window_start_ms: i64,
+        evaluation_window_end_ms: i64,
+    ) -> Result<()> {
+        self.execute(&format!(
+            "INSERT OR REPLACE INTO OptimizerDecisionLog (decision_id, at_ms, mode, host_snapshot_json, policy_snapshot_json, signal_snapshot_json, analytics_snapshot_json, action_profile_id, decision_json, constraints_triggered_json, would_apply, applied, evaluation_window_start_ms, evaluation_window_end_ms) \
+             VALUES ('{}', {}, '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {}, {});",
+            Self::escape_sql(decision_id),
+            at_ms,
+            Self::escape_sql(mode),
+            Self::escape_sql(host_snapshot_json),
+            Self::escape_sql(policy_snapshot_json),
+            Self::escape_sql(signal_snapshot_json),
+            Self::escape_sql(analytics_snapshot_json),
+            Self::escape_sql(action_profile_id),
+            Self::escape_sql(decision_json),
+            Self::escape_sql(constraints_triggered_json),
+            if would_apply { "TRUE" } else { "FALSE" },
+            if applied { "TRUE" } else { "FALSE" },
+            evaluation_window_start_ms,
+            evaluation_window_end_ms
+        ))
+    }
+
+    pub fn log_reward_observation(
+        &self,
+        decision_id: &str,
+        observed_at_ms: i64,
+        window_start_ms: i64,
+        window_end_ms: i64,
+        reward_json: &str,
+        throughput_chunks_per_hour: f64,
+        throughput_files_per_hour: f64,
+        constraint_violations_json: &str,
+        pressure_summary_json: &str,
+    ) -> Result<()> {
+        self.execute(&format!(
+            "INSERT INTO RewardObservationLog (decision_id, observed_at_ms, window_start_ms, window_end_ms, reward_json, throughput_chunks_per_hour, throughput_files_per_hour, constraint_violations_json, pressure_summary_json) \
+             VALUES ('{}', {}, {}, {}, '{}', {}, {}, '{}', '{}');",
+            Self::escape_sql(decision_id),
+            observed_at_ms,
+            window_start_ms,
+            window_end_ms,
+            Self::escape_sql(reward_json),
+            throughput_chunks_per_hour,
+            throughput_files_per_hour,
+            Self::escape_sql(constraint_violations_json),
+            Self::escape_sql(pressure_summary_json)
+        ))
+    }
+
+    fn next_file_vectorization_claim_token(now_ms: i64) -> String {
+        let seq = FILE_VECTORIZATION_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
+        format!("fvq-{}-{}", now_ms, seq)
+    }
+
+    fn canonicalize_sql_text(value: &str) -> String {
+        value.replace('\0', " ")
+    }
+
+    fn escape_sql(value: &str) -> String {
+        Self::canonicalize_sql_text(value).replace('\'', "''")
+    }
+
+    fn symbol_id(project_code: &str, path: &str, name: &str) -> String {
         if Self::is_globally_qualified_symbol(name) {
-            format!("{}::{}", slug, name)
+            format!("{}::{}", project_code, name)
         } else {
-            format!("{}::{}::{}", slug, Self::symbol_path_namespace(path), name)
+            format!("{}::{}::{}", project_code, Self::symbol_path_namespace(path), name)
         }
     }
 
@@ -241,7 +584,7 @@ impl GraphStore {
 
     fn stable_content_hash(value: &str) -> String {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        value.hash(&mut hasher);
+        Self::canonicalize_sql_text(value).hash(&mut hasher);
         format!("{:016x}", hasher.finish())
     }
 
@@ -352,7 +695,7 @@ impl GraphStore {
                 };
                 (
                     file.path.clone(),
-                    file.project_slug.clone(),
+                    file.project_code.clone(),
                     file.size,
                     file.mtime,
                     file.priority,
@@ -361,11 +704,11 @@ impl GraphStore {
             })
             .collect::<Vec<_>>();
 
-        for (path, project_slug, size, mtime, priority, source) in dedup_file_batch_rows(&file_rows)
+        for (path, project_code, size, mtime, priority, source) in dedup_file_batch_rows(&file_rows)
         {
             queries.extend(Self::upsert_file_queries(
                 &path,
-                &project_slug,
+                &project_code,
                 size,
                 mtime,
                 priority,
@@ -469,7 +812,7 @@ impl GraphStore {
         let escaped_scope = Self::escape_sql(&scope_str);
 
         let raw = self.query_json(&format!(
-            "SELECT path, COALESCE(project_slug, 'global'), status FROM File \
+            "SELECT path, COALESCE(project_code, 'global'), status FROM File \
              WHERE path = '{}' OR path LIKE '{}';",
             escaped_scope, prefix
         ))?;
@@ -576,7 +919,7 @@ impl GraphStore {
                 if !metadata.is_file() {
                     continue;
                 }
-                let project = scanner.project_slug_for_path(path_obj);
+                let project = scanner.project_code_for_path(path_obj);
                 let size = metadata.len() as i64;
                 let mtime = metadata
                     .modified()
@@ -662,6 +1005,25 @@ impl GraphStore {
             radius,
             now_ms,
         ))
+    }
+
+    pub fn enqueue_graph_projection_refresh_batch(
+        &self,
+        work: &[(&str, &str, i64)],
+    ) -> Result<()> {
+        if work.is_empty() {
+            return Ok(());
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let queries = work
+            .iter()
+            .map(|(anchor_type, anchor_id, radius)| {
+                graph_projection_queue_upsert(anchor_type, anchor_id, *radius, now_ms)
+            })
+            .collect::<Vec<_>>();
+
+        self.execute_batch(&queries)
     }
 
     pub fn fetch_pending_graph_projection_work(
@@ -869,7 +1231,7 @@ impl GraphStore {
 
     pub fn enqueue_file_vectorization_refresh(&self, file_path: &str) -> Result<()> {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        self.execute(&file_vectorization_queue_upsert(file_path, now_ms))
+        self.execute(&file_vectorization_queue_upsert_if_needed(file_path, now_ms))
     }
 
     pub fn fetch_pending_file_vectorization_work(
@@ -880,19 +1242,61 @@ impl GraphStore {
             return Ok(Vec::new());
         }
 
-        let query = format!(
-            "SELECT file_path \
-             FROM FileVectorizationQueue \
-             WHERE status = 'queued' \
-             ORDER BY COALESCE(queued_at, 0), file_path \
-             LIMIT {}",
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let claim_token = Self::next_file_vectorization_claim_token(now_ms);
+        self.execute(&format!(
+            "UPDATE FileVectorizationQueue \
+             SET status = 'inflight', \
+                 status_reason = CASE \
+                     WHEN status = 'paused_for_interactive_priority' THEN 'resumed_after_interactive_pause' \
+                     ELSE NULL \
+                 END, \
+                 next_eligible_at_ms = NULL, \
+                 last_attempt_at = {}, \
+                 attempts = attempts + 1, \
+                 claim_token = '{}', \
+                 claimed_at_ms = {} \
+             WHERE status IN ('queued', 'paused_for_interactive_priority') \
+               AND file_path IN ( \
+                   SELECT file_path \
+                   FROM FileVectorizationQueue \
+                   WHERE status IN ('queued', 'paused_for_interactive_priority') \
+                     AND (next_eligible_at_ms IS NULL OR next_eligible_at_ms <= {}) \
+                   ORDER BY COALESCE(queued_at, 0), file_path \
+                   LIMIT {} \
+               )",
+            now_ms,
+            Self::escape_sql(&claim_token),
+            now_ms,
+            now_ms,
             count
-        );
-        let raw = self.query_json(&query)?;
+        ))?;
+        self.execute(&format!(
+            "UPDATE File \
+             SET vectorization_started_at_ms = COALESCE(vectorization_started_at_ms, {}), \
+                 last_state_change_at_ms = {} \
+             WHERE path IN ( \
+                 SELECT file_path \
+                 FROM FileVectorizationQueue \
+                 WHERE claim_token = '{}' \
+             )",
+            now_ms,
+            now_ms,
+            Self::escape_sql(&claim_token)
+        ))?;
+
+        let raw = self.query_json(&format!(
+            "SELECT file_path, COALESCE(status_reason, '') \
+             FROM FileVectorizationQueue \
+             WHERE claim_token = '{}' \
+             ORDER BY COALESCE(queued_at, 0), file_path",
+            Self::escape_sql(&claim_token)
+        ))?;
 
         if raw == "[]" || raw.is_empty() {
             return Ok(Vec::new());
         }
+
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         let mut queue = Vec::new();
         for row in rows {
@@ -900,31 +1304,72 @@ impl GraphStore {
                 continue;
             };
 
+            let resumed_after_interactive_pause = row
+                .get(1)
+                .and_then(|value| value.as_str())
+                .map(|value| value == "resumed_after_interactive_pause")
+                .unwrap_or(false);
+
             queue.push(FileVectorizationWork {
                 file_path: file_path.to_string(),
+                resumed_after_interactive_pause,
             });
         }
 
-        if queue.is_empty() {
-            return Ok(queue);
+        Ok(queue)
+    }
+
+    pub fn pause_file_vectorization_work_for_interactive_priority(
+        &self,
+        work: &[FileVectorizationWork],
+        cooldown_ms: i64,
+        max_interruptions: i64,
+    ) -> Result<usize> {
+        if work.is_empty() {
+            return Ok(0);
         }
 
-        let predicates = queue
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let next_eligible_at_ms = now_ms.saturating_add(cooldown_ms.max(0));
+        let predicates = work
             .iter()
             .map(|item| format!("(file_path = '{}')", Self::escape_sql(&item.file_path)))
             .collect::<Vec<_>>()
             .join(" OR ");
 
+        let affected_query = format!(
+            "SELECT count(*) \
+             FROM FileVectorizationQueue \
+             WHERE status = 'inflight' \
+               AND COALESCE(interactive_pause_count, 0) < {} \
+               AND ({})",
+            max_interruptions.max(0),
+            predicates
+        );
+        let affected = usize::try_from(self.query_count(&affected_query)?).unwrap_or(0);
+
+        if affected == 0 {
+            return Ok(0);
+        }
+
         self.execute(&format!(
             "UPDATE FileVectorizationQueue \
-             SET status = 'inflight', \
-                 last_attempt_at = {}, \
-                 attempts = attempts + 1 \
-             WHERE status = 'queued' AND ({})",
-            chrono::Utc::now().timestamp_millis(),
+             SET status = 'paused_for_interactive_priority', \
+                 status_reason = 'requeued_for_interactive_priority', \
+                 last_error_reason = 'requeued_for_interactive_priority', \
+                 next_eligible_at_ms = {}, \
+                 interactive_pause_count = COALESCE(interactive_pause_count, 0) + 1, \
+                 claim_token = NULL, \
+                 claimed_at_ms = NULL \
+             WHERE status = 'inflight' \
+               AND COALESCE(interactive_pause_count, 0) < {} \
+               AND ({})",
+            next_eligible_at_ms,
+            max_interruptions.max(0),
             predicates
         ))?;
-        Ok(queue)
+
+        Ok(affected)
     }
 
     pub fn mark_file_vectorization_work_done(&self, work: &[FileVectorizationWork]) -> Result<()> {
@@ -963,22 +1408,74 @@ impl GraphStore {
         self.execute(&format!(
             "UPDATE FileVectorizationQueue \
              SET status = 'queued', \
-                 last_error_reason = '{}', \
-                 last_attempt_at = {}, \
-                 attempts = attempts + 1 \
+                status_reason = NULL, \
+                last_error_reason = '{}', \
+                last_attempt_at = {}, \
+                attempts = attempts + 1, \
+                claim_token = NULL, \
+                claimed_at_ms = NULL \
              WHERE status = 'inflight' AND ({})",
             Self::escape_sql(reason),
             chrono::Utc::now().timestamp_millis(),
             predicates
+        ))?;
+        self.execute(&format!(
+            "UPDATE File \
+             SET last_error_reason = '{}', \
+                 last_error_at_ms = {}, \
+                 last_state_change_at_ms = {} \
+             WHERE ({})",
+            Self::escape_sql(reason),
+            chrono::Utc::now().timestamp_millis(),
+            chrono::Utc::now().timestamp_millis(),
+            predicates.replace("file_path", "path")
         ))
     }
 
     pub fn clear_stale_inflight_file_vectorization_work(&self) -> Result<()> {
         self.execute(
             "UPDATE FileVectorizationQueue \
-             SET status = 'queued' \
+             SET status = 'queued', \
+                 status_reason = 'recovered_after_stale_inflight', \
+                 claim_token = NULL, \
+                 claimed_at_ms = NULL \
              WHERE status = 'inflight'",
         )
+    }
+
+    pub fn recover_stale_inflight_file_vectorization_work(
+        &self,
+        now_ms: i64,
+        max_claim_age_ms: i64,
+    ) -> Result<usize> {
+        let cutoff_ms = now_ms.saturating_sub(max_claim_age_ms.max(0));
+        let recovered = usize::try_from(self.query_count(&format!(
+            "SELECT count(*) \
+             FROM FileVectorizationQueue \
+             WHERE status = 'inflight' \
+               AND claimed_at_ms IS NOT NULL \
+               AND claimed_at_ms <= {}",
+            cutoff_ms
+        ))?)
+        .unwrap_or(0);
+
+        if recovered == 0 {
+            return Ok(0);
+        }
+
+        self.execute(&format!(
+            "UPDATE FileVectorizationQueue \
+             SET status = 'queued', \
+                 status_reason = 'recovered_after_stale_inflight', \
+                 claim_token = NULL, \
+                 claimed_at_ms = NULL \
+             WHERE status = 'inflight' \
+               AND claimed_at_ms IS NOT NULL \
+               AND claimed_at_ms <= {}",
+            cutoff_ms
+        ))?;
+
+        Ok(recovered)
     }
 
     pub fn backfill_file_vectorization_queue(&self) -> Result<usize> {
@@ -988,6 +1485,11 @@ impl GraphStore {
              WHERE status IN ('indexed', 'indexed_degraded') \
                AND file_stage = 'graph_indexed' \
                AND graph_ready = TRUE \
+               AND NOT EXISTS ( \
+                   SELECT 1 \
+                   FROM FileVectorizationQueue fvq \
+                   WHERE fvq.file_path = File.path \
+               ) \
                AND EXISTS ( \
                    SELECT 1 \
                    FROM Chunk c \
@@ -1017,7 +1519,7 @@ impl GraphStore {
             let Some(file_path) = row.first().and_then(|value| value.as_str()) else {
                 continue;
             };
-            queries.push(file_vectorization_queue_upsert(file_path, now_ms));
+                queries.push(file_vectorization_queue_upsert_if_needed(file_path, now_ms));
         }
 
         let inserted = queries.len();
@@ -1031,7 +1533,7 @@ impl GraphStore {
 
     pub fn fetch_file_vectorization_queue_counts(&self) -> Result<(usize, usize)> {
         let queued = self
-            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'queued'")?;
+            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status IN ('queued', 'paused_for_interactive_priority')")?;
         let inflight = self
             .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'")?;
         let queued = usize::try_from(queued).unwrap_or(0);
@@ -1147,6 +1649,7 @@ impl GraphStore {
         let mut calls_values = Vec::new();
         let mut calls_nif_values = Vec::new();
         let mut file_vectorization_paths = Vec::new();
+        let mut vectorizable_paths = std::collections::HashSet::new();
 
         for task in tasks {
             match task {
@@ -1173,15 +1676,15 @@ impl GraphStore {
                     ) {
                         file_vectorization_paths.push(path.clone());
                     }
-                    let slug = extraction.project_slug.as_deref().unwrap_or("global");
+                    let project_code = extraction.project_code.as_deref().unwrap_or("global");
                     for sym in &extraction.symbols {
-                        let symbol_id = Self::symbol_id(slug, path, &sym.name);
-                        if !seen_symbols.insert((symbol_id.clone(), slug.to_string())) {
+                        let symbol_id = Self::symbol_id(project_code, path, &sym.name);
+                        if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
                             continue; // Prevent UNIQUE constraint violation in DuckDB ON CONFLICT batches
                         }
                         let chunk_id = Self::chunk_id(&symbol_id);
                         let embedding_sql = if let Some(ref v) = sym.embedding {
-                            format!("CAST({:?} AS FLOAT[384])", v)
+                            format!("CAST({:?} AS FLOAT[{DIMENSION}])", v)
                         } else {
                             "NULL".to_string()
                         };
@@ -1194,7 +1697,7 @@ impl GraphStore {
                             sym.is_public,
                             sym.is_nif,
                             sym.is_unsafe,
-                            Self::escape_sql(slug),
+                            Self::escape_sql(project_code),
                             embedding_sql
                         ));
 
@@ -1202,7 +1705,7 @@ impl GraphStore {
                             "('{}', '{}', '{}')",
                             Self::escape_sql(path),
                             Self::escape_sql(&symbol_id),
-                            Self::escape_sql(slug)
+                            Self::escape_sql(project_code)
                         ));
 
                         if matches!(processing_mode, ProcessingMode::Full) {
@@ -1213,16 +1716,18 @@ impl GraphStore {
                             );
                             let chunk_hash = Self::stable_content_hash(&chunk_content);
                             chunk_values.push(format!(
-                                "('{}', 'symbol', '{}', '{}', '{}', '{}', '{}', {}, {})",
+                                "('{}', 'symbol', '{}', '{}', '{}', '{}', '{}', '{}', {}, {})",
                                 Self::escape_sql(&chunk_id),
                                 Self::escape_sql(&symbol_id),
-                                Self::escape_sql(slug),
+                                Self::escape_sql(project_code),
+                                Self::escape_sql(path),
                                 Self::escape_sql(&sym.kind),
                                 Self::escape_sql(&chunk_content),
                                 Self::escape_sql(&chunk_hash),
                                 sym.start_line,
                                 sym.end_line
                             ));
+                            vectorizable_paths.insert(path.clone());
                         }
                     }
 
@@ -1231,17 +1736,17 @@ impl GraphStore {
                             continue;
                         };
 
-                        let source_id = Self::symbol_id(slug, path, &relation.from);
-                        let target_id = Self::symbol_id(slug, path, &relation.to);
+                        let source_id = Self::symbol_id(project_code, path, &relation.from);
+                        let target_id = Self::symbol_id(project_code, path, &relation.to);
 
                         let relation_value = format!(
                             "('{}', '{}', '{}')",
                             Self::escape_sql(&source_id),
                             Self::escape_sql(&target_id),
-                            Self::escape_sql(slug)
+                            Self::escape_sql(project_code)
                         );
 
-                        let relation_key = (source_id, target_id, slug.to_string());
+                        let relation_key = (source_id, target_id, project_code.to_string());
 
                         match table {
                             "CALLS" => {
@@ -1280,7 +1785,8 @@ impl GraphStore {
                 deleted_paths.join(",")
             ));
             queries.push(format!(
-                "UPDATE File SET status = 'deleted', worker_id = NULL, needs_reindex = FALSE, defer_count = 0, last_deferred_at_ms = NULL, file_stage = 'deleted', graph_ready = FALSE, vector_ready = FALSE WHERE path IN ({});",
+                "UPDATE File SET status = 'deleted', worker_id = NULL, needs_reindex = FALSE, defer_count = 0, last_deferred_at_ms = NULL, file_stage = 'deleted', graph_ready = FALSE, vector_ready = FALSE, last_state_change_at_ms = {}, last_error_at_ms = NULL WHERE path IN ({});",
+                chrono::Utc::now().timestamp_millis(),
                 deleted_paths.join(",")
             ));
         }
@@ -1297,6 +1803,10 @@ impl GraphStore {
             queries.push(format!(
                 "DELETE FROM CALLS_NIF WHERE source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})) OR target_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
                 indexed_filter, indexed_filter
+            ));
+            queries.push(format!(
+                "DELETE FROM ChunkEmbedding WHERE chunk_id IN (SELECT id FROM Chunk WHERE source_type = 'symbol' AND source_id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({})));",
+                indexed_filter
             ));
             queries.push(format!(
                 "DELETE FROM Symbol WHERE id IN (SELECT target_id FROM CONTAINS WHERE source_id IN ({}));",
@@ -1336,9 +1846,14 @@ impl GraphStore {
                      last_error_reason = NULL, \
                      status_reason = CASE WHEN needs_reindex THEN 'needs_reindex_while_indexing' ELSE 'indexed_success_full' END, \
                      defer_count = 0, \
-                     last_deferred_at_ms = NULL \
+                     last_deferred_at_ms = NULL, \
+                     graph_ready_at_ms = CASE WHEN needs_reindex THEN File.graph_ready_at_ms ELSE COALESCE(File.graph_ready_at_ms, {}) END, \
+                     last_state_change_at_ms = {}, \
+                     last_error_at_ms = NULL \
                  WHERE path IN ({});",
                 Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID),
+                chrono::Utc::now().timestamp_millis(),
+                chrono::Utc::now().timestamp_millis(),
                 indexed_paths.join(",")
             ));
         }
@@ -1367,9 +1882,15 @@ impl GraphStore {
                      last_error_reason = 'degraded_structure_only', \
                      status_reason = CASE WHEN needs_reindex THEN 'needs_reindex_while_indexing' ELSE 'degraded_structure_only' END, \
                      defer_count = 0, \
-                     last_deferred_at_ms = NULL \
+                     last_deferred_at_ms = NULL, \
+                     graph_ready_at_ms = CASE WHEN needs_reindex THEN File.graph_ready_at_ms ELSE COALESCE(File.graph_ready_at_ms, {}) END, \
+                     last_state_change_at_ms = {}, \
+                     last_error_at_ms = CASE WHEN needs_reindex THEN File.last_error_at_ms ELSE {} END \
                  WHERE path IN ({});",
                 Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID),
+                chrono::Utc::now().timestamp_millis(),
+                chrono::Utc::now().timestamp_millis(),
+                chrono::Utc::now().timestamp_millis(),
                 degraded_paths.join(",")
             ));
         }
@@ -1385,39 +1906,83 @@ impl GraphStore {
                      last_error_reason = 'worker_skipped_file', \
                      status_reason = CASE WHEN needs_reindex THEN 'needs_reindex_while_indexing' ELSE 'worker_skipped_file' END, \
                      defer_count = 0, \
-                     last_deferred_at_ms = NULL \
+                     last_deferred_at_ms = NULL, \
+                     last_state_change_at_ms = {}, \
+                     last_error_at_ms = {} \
                  WHERE path IN ({});",
+                chrono::Utc::now().timestamp_millis(),
+                chrono::Utc::now().timestamp_millis(),
                 skipped_paths.join(",")
             ));
-        }
-        if !file_vectorization_paths.is_empty() {
-            file_vectorization_paths.sort();
-            file_vectorization_paths.dedup();
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            for path in file_vectorization_paths {
-                queries.push(file_vectorization_queue_upsert(&path, now_ms));
-            }
         }
         sort_and_dedup_sql_tuples(&mut contains_values);
         sort_and_dedup_sql_tuples(&mut calls_values);
         sort_and_dedup_sql_tuples(&mut calls_nif_values);
         for chunk in symbol_values.chunks(500) {
             queries.push(format!(
-                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_slug=EXCLUDED.project_slug, embedding=EXCLUDED.embedding;",
+                "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code, embedding) VALUES {} ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, kind=EXCLUDED.kind, tested=EXCLUDED.tested, is_public=EXCLUDED.is_public, is_nif=EXCLUDED.is_nif, is_unsafe=EXCLUDED.is_unsafe, project_code=EXCLUDED.project_code, embedding=EXCLUDED.embedding;",
                 chunk.join(",")
             ));
         }
         for chunk in chunk_values.chunks(500) {
             queries.push(format!(
-                "INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES {} \
-                 ON CONFLICT(id) DO UPDATE SET source_type=EXCLUDED.source_type, source_id=EXCLUDED.source_id, project_slug=EXCLUDED.project_slug, kind=EXCLUDED.kind, content=EXCLUDED.content, content_hash=EXCLUDED.content_hash, start_line=EXCLUDED.start_line, end_line=EXCLUDED.end_line;",
+                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES {} \
+                 ON CONFLICT(id) DO UPDATE SET source_type=EXCLUDED.source_type, source_id=EXCLUDED.source_id, project_code=EXCLUDED.project_code, file_path=EXCLUDED.file_path, kind=EXCLUDED.kind, content=EXCLUDED.content, content_hash=EXCLUDED.content_hash, start_line=EXCLUDED.start_line, end_line=EXCLUDED.end_line;",
                 chunk.join(",")
             ));
         }
         queries.extend(insert_unique_relation_queries("CONTAINS", &contains_values));
-        queries.extend(insert_unique_relation_queries("CALLS", &calls_values));
-        queries.extend(insert_unique_relation_queries("CALLS_NIF", &calls_nif_values));
-        self.execute_batch(&queries)
+        queries.extend(replace_relation_queries("CALLS", &calls_values, 200));
+        queries.extend(replace_relation_queries("CALLS_NIF", &calls_nif_values, 200));
+        if !file_vectorization_paths.is_empty() {
+            file_vectorization_paths.sort();
+            file_vectorization_paths.dedup();
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            for path in file_vectorization_paths {
+                if vectorizable_paths.contains(&path) {
+                    queries.push(file_vectorization_queue_upsert_if_needed(&path, now_ms));
+                } else {
+                    queries.push(format!(
+                        "DELETE FROM FileVectorizationQueue WHERE file_path = '{}';",
+                        Self::escape_sql(&path)
+                    ));
+                }
+            }
+        }
+        self.execute_batch(&queries)?;
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let graph_ready_paths = indexed_paths
+            .iter()
+            .chain(degraded_paths.iter())
+            .map(|path| path.trim_matches('\'').to_string())
+            .collect::<Vec<_>>();
+        if !graph_ready_paths.is_empty() {
+            let metadata = self.fetch_file_project_metadata(&graph_ready_paths)?;
+            let events = graph_ready_paths
+                .into_iter()
+                .filter_map(|path| {
+                    metadata.get(&path).map(|(project_code, worker_id, trace_id)| {
+                        FileLifecycleEvent {
+                            file_path: path,
+                            project_code: project_code.clone(),
+                            stage: "graph".to_string(),
+                            status: "ready".to_string(),
+                            reason: None,
+                            at_ms: now_ms,
+                            worker_id: *worker_id,
+                            trace_id: trace_id.clone(),
+                            run_id: None,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !events.is_empty() {
+                self.append_file_lifecycle_events(&events)?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn fetch_pending_batch(&self, count: usize) -> Result<Vec<PendingFile>> {
@@ -1439,14 +2004,14 @@ impl GraphStore {
 
             let claim_query = format!(
                 "UPDATE File
-                 SET status = 'indexing', worker_id = {}, status_reason = 'claimed_for_indexing', defer_count = 0, last_deferred_at_ms = NULL, file_stage = 'claimed'
+                 SET status = 'indexing', worker_id = {}, status_reason = 'claimed_for_indexing', defer_count = 0, last_deferred_at_ms = NULL, file_stage = 'claimed', indexing_started_at_ms = COALESCE(indexing_started_at_ms, {}), last_state_change_at_ms = {}
                  WHERE path IN (
                     SELECT path FROM File
                     WHERE status = 'pending'
                     ORDER BY priority DESC, COALESCE(defer_count, 0) DESC, COALESCE(last_deferred_at_ms, 9223372036854775807) ASC, size ASC
                     LIMIT {}
                  );",
-                claim_id, count
+                claim_id, chrono::Utc::now().timestamp_millis(), chrono::Utc::now().timestamp_millis(), count
             );
 
             let c_query = match CString::new(claim_query) {
@@ -1557,9 +2122,9 @@ impl GraphStore {
 
             let claim_query = format!(
                 "UPDATE File
-                 SET status = 'indexing', worker_id = {}, status_reason = 'claimed_for_indexing', defer_count = 0, last_deferred_at_ms = NULL, file_stage = 'claimed'
+                 SET status = 'indexing', worker_id = {}, status_reason = 'claimed_for_indexing', defer_count = 0, last_deferred_at_ms = NULL, file_stage = 'claimed', indexing_started_at_ms = COALESCE(indexing_started_at_ms, {}), last_state_change_at_ms = {}
                  WHERE status = 'pending' AND path IN ({});",
-                claim_id, path_list
+                claim_id, chrono::Utc::now().timestamp_millis(), chrono::Utc::now().timestamp_millis(), path_list
             );
 
             let c_query = match CString::new(claim_query) {
@@ -1718,7 +2283,7 @@ impl GraphStore {
             "SELECT id, name || ': ' || kind FROM Symbol WHERE embedding IS NULL LIMIT {}",
             count
         );
-        let res = self.query_json_on_reader(&query)?;
+        let res = self.query_json_writer(&query)?;
 
         if res == "[]" || res.is_empty() {
             return Ok(vec![]);
@@ -1747,16 +2312,54 @@ impl GraphStore {
         let query = format!(
             "SELECT c.id, c.content, c.content_hash \
              FROM Chunk c \
-             JOIN CONTAINS co ON co.target_id = c.source_id \
-             LEFT JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{}' \
-             WHERE co.source_id = '{}' \
-             AND (ce.chunk_id IS NULL OR ce.source_hash <> c.content_hash) \
+             WHERE c.file_path = '{}' \
+             AND NOT EXISTS ( \
+                 SELECT 1 \
+                 FROM ChunkEmbedding ce \
+                 WHERE ce.chunk_id = c.id \
+                   AND ce.model_id = '{}' \
+                   AND ce.source_hash = c.content_hash \
+             ) \
              LIMIT {}",
-            Self::escape_sql(model_id),
             Self::escape_sql(file_path),
+            Self::escape_sql(model_id),
             count
         );
-        let res = self.query_json_on_reader(&query)?;
+        let res = self.query_json_writer(&query)?;
+
+        if res == "[]" || res.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let raw: Vec<Vec<serde_json::Value>> = serde_json::from_str(&res)?;
+        let chunks: Vec<(String, String, String)> = raw
+            .into_iter()
+            .filter_map(|row| {
+                if row.len() >= 3 {
+                    Some((
+                        row[0].as_str()?.to_string(),
+                        row[1].as_str()?.to_string(),
+                        row[2].as_str()?.to_string(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Ok(chunks)
+    }
+
+    pub fn fetch_segments_for_file(&self, file_path: &str) -> Result<Vec<(String, String, String)>> {
+        let query = format!(
+            "SELECT c.id, c.content, c.content_hash \
+             FROM Chunk c \
+             WHERE c.file_path = '{}' \
+             ORDER BY COALESCE(c.start_line, 9223372036854775807) ASC, \
+                      COALESCE(c.end_line, 9223372036854775807) ASC, \
+                      c.id ASC",
+            Self::escape_sql(file_path),
+        );
+        let res = self.query_json_writer(&query)?;
 
         if res == "[]" || res.is_empty() {
             return Ok(vec![]);
@@ -1785,16 +2388,21 @@ impl GraphStore {
             "SELECT EXISTS (\
              SELECT 1 \
              FROM Chunk c \
-             JOIN CONTAINS co ON co.target_id = c.source_id \
-             LEFT JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{}' \
-             WHERE co.source_id = '{}' \
-             AND (ce.chunk_id IS NULL OR ce.source_hash <> c.content_hash) \
+             WHERE c.file_path = '{}' \
+             AND NOT EXISTS ( \
+                 SELECT 1 \
+                 FROM ChunkEmbedding ce \
+                 WHERE ce.chunk_id = c.id \
+                   AND ce.model_id = '{}' \
+                   AND ce.source_hash = c.content_hash \
+             ) \
             )",
-            Self::escape_sql(model_id),
             Self::escape_sql(file_path)
+            ,
+            Self::escape_sql(model_id)
         );
 
-        let raw = self.query_json_on_reader(&query)?;
+        let raw = self.query_json_writer(&query)?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
         let Some(row) = rows.first() else {
             return Ok(false);
@@ -1805,11 +2413,12 @@ impl GraphStore {
             .unwrap_or(false))
     }
 
-    pub fn mark_file_vectorization_done(&self, paths: &[String], model_id: &str) -> Result<()> {
+    pub fn mark_file_vectorization_done(&self, paths: &[String], _model_id: &str) -> Result<()> {
         if paths.is_empty() {
             return Ok(());
         }
 
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let filter = paths
             .iter()
             .map(|path| format!("'{}'", Self::escape_sql(path)))
@@ -1817,21 +2426,86 @@ impl GraphStore {
             .join(",");
         self.execute(&format!(
             "UPDATE File \
-             SET vector_ready = NOT EXISTS ( \
-                 SELECT 1 \
-                 FROM Chunk c \
-                 JOIN CONTAINS co ON co.target_id = c.source_id \
-                 LEFT JOIN ChunkEmbedding ce \
-                   ON ce.chunk_id = c.id \
-                  AND ce.model_id = '{}' \
-                  AND ce.source_hash = c.content_hash \
-                 WHERE co.source_id = File.path \
-                   AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
-             ) \
+             SET vector_ready = TRUE, \
+                 vector_ready_at_ms = COALESCE(vector_ready_at_ms, {}), \
+                 last_state_change_at_ms = {} \
              WHERE graph_ready = TRUE AND path IN ({})",
-            Self::escape_sql(model_id),
+            now_ms,
+            now_ms,
             filter
         ))
+    }
+
+    pub fn finalize_file_vectorization_success_batch(
+        &self,
+        work: &[FileVectorizationWork],
+        _model_id: &str,
+        projection_radius: i64,
+    ) -> Result<()> {
+        if work.is_empty() {
+            return Ok(());
+        }
+
+        let paths = work
+            .iter()
+            .map(|item| format!("'{}'", Self::escape_sql(&item.file_path)))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut queries = vec![
+            format!(
+                "UPDATE File \
+                 SET vector_ready = TRUE, \
+                     vector_ready_at_ms = COALESCE(vector_ready_at_ms, {}), \
+                     last_state_change_at_ms = {} \
+                 WHERE graph_ready = TRUE AND path IN ({})",
+                now_ms,
+                now_ms,
+                paths
+            ),
+            format!(
+                "DELETE FROM FileVectorizationQueue \
+                 WHERE status = 'inflight' AND file_path IN ({})",
+                paths
+            ),
+        ];
+
+        for item in work {
+            queries.push(graph_projection_queue_upsert(
+                "file",
+                &item.file_path,
+                projection_radius,
+                now_ms,
+            ));
+        }
+
+        self.execute_batch(&queries)?;
+        let metadata =
+            self.fetch_file_project_metadata(&work.iter().map(|item| item.file_path.clone()).collect::<Vec<_>>())?;
+        let events = work
+            .iter()
+            .filter_map(|item| {
+                metadata.get(&item.file_path).map(|(project_code, worker_id, trace_id)| {
+                    FileLifecycleEvent {
+                        file_path: item.file_path.clone(),
+                        project_code: project_code.clone(),
+                        stage: "vectorization".to_string(),
+                        status: "ready".to_string(),
+                        reason: None,
+                        at_ms: now_ms,
+                        worker_id: *worker_id,
+                        trace_id: trace_id.clone(),
+                        run_id: None,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if !events.is_empty() {
+            self.append_file_lifecycle_events(&events)?;
+        }
+        self.refresh_hourly_vectorization_rollup(hourly_bucket_start_ms(now_ms), CHUNK_EMBEDDING_MODEL_ID)?;
+        Ok(())
     }
 
     pub fn ensure_embedding_model(
@@ -1871,13 +2545,18 @@ impl GraphStore {
         let query = format!(
             "SELECT c.id, c.content, c.content_hash \
              FROM Chunk c \
-             LEFT JOIN ChunkEmbedding ce ON ce.chunk_id = c.id AND ce.model_id = '{}' \
-             WHERE ce.chunk_id IS NULL OR ce.source_hash <> c.content_hash \
+             WHERE NOT EXISTS ( \
+                 SELECT 1 \
+                 FROM ChunkEmbedding ce \
+                 WHERE ce.chunk_id = c.id \
+                   AND ce.model_id = '{}' \
+                   AND ce.source_hash = c.content_hash \
+             ) \
              LIMIT {}",
             Self::escape_sql(model_id),
             count
         );
-        let res = self.query_json_on_reader(&query)?;
+        let res = self.query_json_writer(&query)?;
 
         if res == "[]" || res.is_empty() {
             return Ok(vec![]);
@@ -1909,7 +2588,7 @@ impl GraphStore {
 
         for chunk in updates.chunks(100) {
             for (id, vector) in chunk {
-                let embedding_sql = format!("CAST({:?} AS FLOAT[384])", vector);
+                let embedding_sql = format!("CAST({:?} AS FLOAT[{DIMENSION}])", vector);
                 queries.push(format!(
                     "UPDATE Symbol SET embedding = {} WHERE id = '{}';",
                     embedding_sql,
@@ -1929,74 +2608,37 @@ impl GraphStore {
             return Ok(());
         }
 
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let mut queries = Vec::new();
-        let chunk_ids: Vec<String> = updates
-            .iter()
-            .map(|(chunk_id, _, _)| format!("'{}'", Self::escape_sql(chunk_id)))
-            .collect();
-
-        queries.push(format!(
-            "DELETE FROM ChunkEmbedding WHERE model_id = '{}' AND chunk_id IN ({});",
-            Self::escape_sql(model_id),
-            chunk_ids.join(",")
-        ));
-
         let values: Vec<String> = updates
             .iter()
             .map(|(chunk_id, source_hash, vector)| {
                 format!(
-                    "('{}', '{}', CAST({:?} AS FLOAT[384]), '{}')",
+                    "('{}', '{}', CAST({:?} AS FLOAT[{DIMENSION}]), '{}', {})",
                     Self::escape_sql(chunk_id),
                     Self::escape_sql(model_id),
                     vector,
-                    Self::escape_sql(source_hash)
+                    Self::escape_sql(source_hash),
+                    now_ms
                 )
             })
             .collect();
 
-        for chunk in values.chunks(100) {
+        for chunk in values.chunks(CHUNK_EMBEDDING_UPSERT_BATCH_ROWS) {
             queries.push(format!(
-                "INSERT INTO ChunkEmbedding (chunk_id, model_id, embedding, source_hash) VALUES {};",
+                "INSERT OR REPLACE INTO ChunkEmbedding (chunk_id, model_id, embedding, source_hash, embedded_at_ms) VALUES {};",
                 chunk.join(",")
             ));
         }
 
-        let impacted_chunks = updates
-            .iter()
-            .map(|(chunk_id, _, _)| format!("'{}'", Self::escape_sql(chunk_id)))
-            .collect::<Vec<_>>()
-            .join(",");
-
-        queries.push(format!(
-            "UPDATE File \
-             SET vector_ready = NOT EXISTS ( \
-                 SELECT 1 \
-                 FROM Chunk c \
-                 JOIN CONTAINS co ON co.target_id = c.source_id \
-                 LEFT JOIN ChunkEmbedding ce \
-                   ON ce.chunk_id = c.id \
-                  AND ce.model_id = '{}' \
-                  AND ce.source_hash = c.content_hash \
-                 WHERE co.source_id = File.path \
-                   AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
-             ) \
-             WHERE graph_ready = TRUE \
-               AND path IN ( \
-                   SELECT DISTINCT co.source_id \
-                   FROM Chunk c \
-                   JOIN CONTAINS co ON co.target_id = c.source_id \
-                   WHERE c.id IN ({}) \
-               );",
-            Self::escape_sql(model_id),
-            impacted_chunks
-        ));
-
-        self.execute_batch(&queries)
+        self.execute_batch(&queries)?;
+        self.refresh_hourly_vectorization_rollup(hourly_bucket_start_ms(now_ms), model_id)?;
+        Ok(())
     }
 
     pub fn insert_project_dependency(&self, from: &str, to: &str, _path: &str) -> Result<()> {
         self.execute(&format!(
-            "INSERT INTO CONTAINS (source_id, target_id, project_slug) VALUES ('{}', '{}', '{}') ON CONFLICT DO NOTHING;",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('{}', '{}', '{}') ON CONFLICT DO NOTHING;",
             from, to, from
         ))
     }
@@ -2005,9 +2647,10 @@ impl GraphStore {
 #[cfg(test)]
 mod tests {
     use super::{
-        dedup_file_batch_rows, insert_unique_relation_queries, sort_and_dedup_sql_tuples,
-        FileUpsertSource,
+        dedup_file_batch_rows, insert_unique_relation_queries, replace_relation_queries,
+        sort_and_dedup_sql_tuples, FileUpsertSource, FileVectorizationWork,
     };
+    use crate::embedding_contract::CHUNK_MODEL_ID;
     use crate::parser::{ExtractionResult, Relation, Symbol};
     use crate::queue::ProcessingMode;
     use crate::worker::DbWriteTask;
@@ -2035,7 +2678,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_unique_relation_queries_uses_anti_join_instead_of_on_conflict() {
+    fn insert_unique_relation_queries_emit_conflict_safe_single_row_inserts() {
         let queries = insert_unique_relation_queries(
             "CALLS",
             &[
@@ -2044,10 +2687,27 @@ mod tests {
             ],
         );
 
-        assert_eq!(queries.len(), 1);
-        assert!(queries[0].contains("LEFT JOIN CALLS existing"));
-        assert!(queries[0].contains("WHERE existing.source_id IS NULL"));
-        assert!(!queries[0].contains("ON CONFLICT"));
+        assert_eq!(queries.len(), 2);
+        assert!(queries[0].contains("INSERT INTO CALLS"));
+        assert!(queries[0].contains("ON CONFLICT DO NOTHING"));
+        assert!(!queries[0].contains("LEFT JOIN"));
+    }
+
+    #[test]
+    fn replace_relation_queries_delete_then_reinsert_exact_rows() {
+        let queries = replace_relation_queries(
+            "CALLS",
+            &[
+                "('a', 'b', 'proj')".to_string(),
+                "('c', 'd', 'proj')".to_string(),
+            ],
+            200,
+        );
+
+        assert_eq!(queries.len(), 2);
+        assert!(queries[0].contains("DELETE FROM CALLS USING (VALUES"));
+        assert!(queries[1].contains("INSERT INTO CALLS"));
+        assert!(!queries[1].contains("ON CONFLICT"));
     }
 
     #[test]
@@ -2091,6 +2751,121 @@ mod tests {
     }
 
     #[test]
+    fn upsert_file_queries_use_conflict_safe_insert_for_new_rows() {
+        let queries = crate::graph::GraphStore::upsert_file_queries(
+            "/tmp/demo.rs",
+            "proj",
+            42,
+            7,
+            100,
+            FileUpsertSource::Scan,
+        );
+
+        let insert_query = queries
+            .iter()
+            .find(|query| query.contains("INSERT INTO File"))
+            .expect("expected INSERT INTO File query");
+
+        assert!(insert_query.contains("ON CONFLICT(path) DO NOTHING"));
+        assert!(!insert_query.contains("WHERE NOT EXISTS"));
+    }
+
+    #[test]
+    fn canonical_timestamp_columns_exist_on_file_and_chunk_embedding() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let raw = store
+            .query_json(
+                "SELECT table_name, column_name \
+                 FROM information_schema.columns \
+                 WHERE table_name IN ('File', 'ChunkEmbedding') \
+                   AND column_name IN ('first_seen_at_ms', 'indexing_started_at_ms', 'graph_ready_at_ms', 'vectorization_started_at_ms', 'vector_ready_at_ms', 'last_state_change_at_ms', 'last_error_at_ms', 'embedded_at_ms')",
+            )
+            .unwrap();
+        assert!(raw.contains("first_seen_at_ms"));
+        assert!(raw.contains("embedded_at_ms"));
+        assert!(raw.contains("vector_ready_at_ms"));
+    }
+
+    #[test]
+    fn update_chunk_embeddings_persists_embedded_at_ms_and_refreshes_rollup() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
+                 VALUES ('chunk-1', 'symbol', 'sym-1', 'proj', '/tmp/demo.rs', 'function', 'fn demo() {}', 'hash-1', 1, 1)",
+            )
+            .unwrap();
+
+        store
+            .update_chunk_embeddings(CHUNK_MODEL_ID, &[(
+                "chunk-1".to_string(),
+                "hash-1".to_string(),
+                vec![0.1_f32; crate::embedding_contract::DIMENSION],
+            )])
+            .unwrap();
+
+        let embedded_at_ms = store
+            .query_count(
+                "SELECT count(*) FROM ChunkEmbedding WHERE chunk_id = 'chunk-1' AND embedded_at_ms IS NOT NULL",
+            )
+            .unwrap();
+        assert_eq!(embedded_at_ms, 1);
+
+        let rollup_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM HourlyVectorizationRollup WHERE model_id = '{}'",
+                CHUNK_MODEL_ID
+            ))
+            .unwrap();
+        assert!(rollup_count >= 1);
+    }
+
+    #[test]
+    fn finalize_file_vectorization_success_batch_records_vectorization_event() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) \
+                 VALUES ('/tmp/vectorized.rs', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, 1, 1, 1)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms) \
+                 VALUES ('/tmp/vectorized.rs', 'inflight', 1, 'claim-1', 1)",
+            )
+            .unwrap();
+
+        store
+            .finalize_file_vectorization_success_batch(
+                &[FileVectorizationWork {
+                    file_path: "/tmp/vectorized.rs".to_string(),
+                    resumed_after_interactive_pause: false,
+                }],
+                CHUNK_MODEL_ID,
+                2,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileLifecycleEvent WHERE file_path = '/tmp/vectorized.rs' AND stage = 'vectorization' AND status = 'ready'",
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM File WHERE path = '/tmp/vectorized.rs' AND vector_ready = TRUE AND vector_ready_at_ms IS NOT NULL",
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn insert_file_data_batch_replay_does_not_duplicate_calls_edges() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/replay_calls.rs".to_string();
@@ -2100,7 +2875,7 @@ mod tests {
             .unwrap();
 
         let make_extraction = || ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![
                 Symbol {
                     name: "Proj.Source.call".to_string(),
@@ -2158,7 +2933,83 @@ mod tests {
 
         assert_eq!(
             store
-                .query_count("SELECT count(*) FROM CALLS WHERE project_slug = 'proj'")
+                .query_count("SELECT count(*) FROM CALLS WHERE project_code = 'proj'")
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn insert_file_data_batch_rewrites_shared_global_calls_edges_without_duplicates() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path_a = "/tmp/shared_calls_a.ex".to_string();
+        let path_b = "/tmp/shared_calls_b.ex".to_string();
+
+        store
+            .bulk_insert_files(&[
+                (path_a.clone(), "proj".to_string(), 42, 1),
+                (path_b.clone(), "proj".to_string(), 42, 1),
+            ])
+            .unwrap();
+
+        let make_task = |path: &str| DbWriteTask::FileExtraction {
+            reservation_id: format!("res-{path}"),
+            path: path.to_string(),
+            content: Some("def call, do: :ok".to_string()),
+            extraction: ExtractionResult {
+                project_code: Some("proj".to_string()),
+                symbols: vec![
+                    Symbol {
+                        name: "Proj.Source.call".to_string(),
+                        kind: "function".to_string(),
+                        start_line: 1,
+                        end_line: 1,
+                        docstring: None,
+                        is_entry_point: false,
+                        is_public: true,
+                        tested: false,
+                        is_nif: false,
+                        is_unsafe: false,
+                        properties: Default::default(),
+                        embedding: None,
+                    },
+                    Symbol {
+                        name: "Proj.Target.case".to_string(),
+                        kind: "function".to_string(),
+                        start_line: 2,
+                        end_line: 2,
+                        docstring: None,
+                        is_entry_point: false,
+                        is_public: true,
+                        tested: false,
+                        is_nif: false,
+                        is_unsafe: false,
+                        properties: Default::default(),
+                        embedding: None,
+                    },
+                ],
+                relations: vec![Relation {
+                    from: "Proj.Source.call".to_string(),
+                    to: "Proj.Target.case".to_string(),
+                    rel_type: "calls".to_string(),
+                    properties: Default::default(),
+                }],
+            },
+            processing_mode: ProcessingMode::Full,
+            trace_id: format!("trace-{path}"),
+            observed_cost_bytes: 1,
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            t3: 0,
+        };
+
+        store.insert_file_data_batch(&[make_task(&path_a)]).unwrap();
+        store.insert_file_data_batch(&[make_task(&path_b)]).unwrap();
+
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM CALLS WHERE project_code = 'proj'")
                 .unwrap(),
             1
         );
@@ -2186,6 +3037,255 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn fetch_pending_file_vectorization_work_sets_exact_claim_token_batch() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES \
+                 ('/tmp/claim_a.rs', 'queued', 1), \
+                 ('/tmp/claim_b.rs', 'queued', 2), \
+                 ('/tmp/claim_c.rs', 'queued', 3)",
+            )
+            .unwrap();
+
+        let claimed = store.fetch_pending_file_vectorization_work(2).unwrap();
+        assert_eq!(claimed.len(), 2);
+        assert_eq!(claimed[0].file_path, "/tmp/claim_a.rs");
+        assert_eq!(claimed[1].file_path, "/tmp/claim_b.rs");
+
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'"
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(DISTINCT claim_token) FROM FileVectorizationQueue WHERE claim_token IS NOT NULL"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue WHERE claim_token IS NOT NULL AND claimed_at_ms IS NOT NULL"
+                )
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn recover_stale_inflight_file_vectorization_work_only_requeues_expired_claims() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms) VALUES \
+                 ('/tmp/stale.rs', 'inflight', 1, 'claim-stale', 1_000), \
+                 ('/tmp/fresh.rs', 'inflight', 2, 'claim-fresh', 9_500), \
+                 ('/tmp/queued.rs', 'queued', 3, NULL, NULL)",
+            )
+            .unwrap();
+
+        let recovered = store
+            .recover_stale_inflight_file_vectorization_work(10_000, 1_000)
+            .unwrap();
+
+        assert_eq!(recovered, 1);
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue \
+                     WHERE file_path = '/tmp/stale.rs' \
+                       AND status = 'queued' \
+                       AND status_reason = 'recovered_after_stale_inflight' \
+                       AND claim_token IS NULL \
+                       AND claimed_at_ms IS NULL"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue \
+                     WHERE file_path = '/tmp/fresh.rs' \
+                       AND status = 'inflight' \
+                       AND claim_token = 'claim-fresh' \
+                       AND claimed_at_ms = 9500"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue \
+                     WHERE file_path = '/tmp/queued.rs' \
+                       AND status = 'queued'"
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn fetch_segments_for_file_reads_writer_when_reader_snapshot_is_stale() {
+        use std::sync::atomic::Ordering;
+
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store.refresh_reader_snapshot().unwrap();
+        store
+            .execute(
+                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
+                 ('chunk-stale', 'symbol', 'sym-stale', 'proj', '/tmp/stale.rs', 'function', 'fresh', 'hash-stale', 1, 2)",
+            )
+            .unwrap();
+
+        store.recent_write_epoch_ms.store(0, Ordering::Relaxed);
+
+        let chunks = store.fetch_segments_for_file("/tmp/stale.rs").unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].0, "chunk-stale");
+    }
+
+    #[test]
+    fn enqueue_file_vectorization_refresh_skips_already_vector_ready_files() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
+                 VALUES ('/tmp/ready.rs', 'proj', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, TRUE)",
+            )
+            .unwrap();
+
+        store
+            .enqueue_file_vectorization_refresh("/tmp/ready.rs")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/ready.rs'")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn enqueue_file_vectorization_refresh_adds_files_needing_vectorization() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
+                 VALUES ('/tmp/not_ready.rs', 'proj', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
+            )
+            .unwrap();
+
+        store
+            .enqueue_file_vectorization_refresh("/tmp/not_ready.rs")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/not_ready.rs'")
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn insert_file_data_batch_does_not_queue_files_without_vectorizable_chunks() {
+        use crate::parser::ExtractionResult;
+        use crate::worker::DbWriteTask;
+
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path = "/tmp/no_chunks.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES ('/tmp/no_chunks.rs', 'queued', 1)",
+            )
+            .unwrap();
+
+        let task = DbWriteTask::FileExtraction {
+            reservation_id: "res-no-chunks".to_string(),
+            path: path.clone(),
+            content: Some("".to_string()),
+            extraction: ExtractionResult {
+                project_code: Some("proj".to_string()),
+                symbols: vec![],
+                relations: vec![],
+            },
+            processing_mode: ProcessingMode::Full,
+            trace_id: "trace-no-chunks".to_string(),
+            observed_cost_bytes: 1,
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            t3: 0,
+        };
+
+        store.insert_file_data_batch(&[task]).unwrap();
+
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/no_chunks.rs'")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn backfill_file_vectorization_queue_skips_files_already_present_in_queue() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
+                 VALUES ('/tmp/already_queued.rs', 'proj', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
+                 VALUES ('chunk-already-queued', 'symbol', 'sym-already-queued', 'proj', '/tmp/already_queued.rs', 'function', 'body', 'hash-already-queued', 1, 1)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO CONTAINS (source_id, target_id, project_code) \
+                 VALUES ('/tmp/already_queued.rs', 'sym-already-queued', 'proj')",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) \
+                 VALUES ('/tmp/already_queued.rs', 'queued', 1)",
+            )
+            .unwrap();
+
+        let inserted = store.backfill_file_vectorization_queue().unwrap();
+
+        assert_eq!(
+            inserted, 0,
+            "Le backfill ne doit pas retraiter un fichier deja present dans la queue"
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/already_queued.rs'"
+                )
+                .unwrap(),
+            1
+        );
+    }
 }
 
 impl GraphStore {
@@ -2201,6 +3301,7 @@ impl GraphStore {
             FileUpsertSource::Scan => "metadata_changed_scan",
             FileUpsertSource::HotDelta => "metadata_changed_hot_delta",
         };
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let safe_path = Self::escape_sql(path);
         let safe_project = Self::escape_sql(project);
         let safe_reason = Self::escape_sql(metadata_changed_reason);
@@ -2212,13 +3313,13 @@ impl GraphStore {
             ),
             format!(
                 "UPDATE File SET \
-                    project_slug='{safe_project}', \
+                    project_code='{safe_project}', \
                     size={size}, \
                     mtime={mtime}, \
                     status = CASE \
                         WHEN File.status = 'indexing' THEN File.status \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'pending' \
-                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN 'pending' \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_code IS DISTINCT FROM '{safe_project}' THEN 'pending' \
                         ELSE File.status \
                     END, \
                     priority = {priority}, \
@@ -2234,39 +3335,48 @@ impl GraphStore {
                         WHEN File.status = 'indexing' THEN File.status_reason \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'manual_or_system_requeue' \
                         WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} THEN '{safe_reason}' \
-                        WHEN File.project_slug IS DISTINCT FROM '{safe_project}' THEN 'manual_or_system_requeue' \
+                        WHEN File.project_code IS DISTINCT FROM '{safe_project}' THEN 'manual_or_system_requeue' \
                         WHEN File.priority IS DISTINCT FROM {priority} THEN 'priority_adjusted_no_requeue' \
                         ELSE COALESCE(File.status_reason, 'stable_metadata_no_requeue') \
                     END, \
                     file_stage = CASE \
                         WHEN File.status = 'indexing' THEN File.file_stage \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'promoted' \
-                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN 'promoted' \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_code IS DISTINCT FROM '{safe_project}' THEN 'promoted' \
                         ELSE File.file_stage \
                     END, \
                     graph_ready = CASE \
                         WHEN File.status = 'indexing' THEN File.graph_ready \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
-                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN FALSE \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_code IS DISTINCT FROM '{safe_project}' THEN FALSE \
                         ELSE File.graph_ready \
                     END, \
                     vector_ready = CASE \
                         WHEN File.status = 'indexing' THEN File.vector_ready \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
-                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN FALSE \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_code IS DISTINCT FROM '{safe_project}' THEN FALSE \
                         ELSE File.vector_ready \
                     END, \
                     defer_count = CASE \
                         WHEN File.status = 'indexing' THEN File.defer_count \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 0 \
-                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN 0 \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_code IS DISTINCT FROM '{safe_project}' THEN 0 \
                         ELSE File.defer_count \
                     END, \
                     last_deferred_at_ms = CASE \
                         WHEN File.status = 'indexing' THEN File.last_deferred_at_ms \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN NULL \
-                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN NULL \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_code IS DISTINCT FROM '{safe_project}' THEN NULL \
                         ELSE File.last_deferred_at_ms \
+                    END, \
+                    last_state_change_at_ms = CASE \
+                        WHEN File.project_code IS DISTINCT FROM '{safe_project}' \
+                             OR File.mtime IS DISTINCT FROM {mtime} \
+                             OR File.size IS DISTINCT FROM {size} \
+                             OR File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+                             OR File.priority IS DISTINCT FROM {priority} \
+                        THEN {now_ms} \
+                        ELSE File.last_state_change_at_ms \
                     END, \
                     needs_reindex = CASE \
                         WHEN File.status = 'indexing' \
@@ -2274,11 +3384,11 @@ impl GraphStore {
                         THEN TRUE \
                         WHEN File.status = 'indexing' THEN File.needs_reindex \
                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
-                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_slug IS DISTINCT FROM '{safe_project}' THEN FALSE \
+                        WHEN File.mtime IS DISTINCT FROM {mtime} OR File.size IS DISTINCT FROM {size} OR File.project_code IS DISTINCT FROM '{safe_project}' THEN FALSE \
                         ELSE File.needs_reindex \
                     END \
                  WHERE path = '{safe_path}' AND ( \
-                    File.project_slug IS DISTINCT FROM '{safe_project}' \
+                    File.project_code IS DISTINCT FROM '{safe_project}' \
                     OR File.mtime IS DISTINCT FROM {mtime} \
                     OR File.size IS DISTINCT FROM {size} \
                     OR File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') \
@@ -2286,15 +3396,16 @@ impl GraphStore {
                  );"
             ),
             format!(
-                "INSERT INTO File (path, project_slug, size, mtime, status, priority, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms) \
-                 SELECT '{}', '{}', {}, {}, 'pending', {}, FALSE, NULL, 'discovered_new', 0, NULL \
-                 WHERE NOT EXISTS (SELECT 1 FROM File WHERE path = '{}');",
+                "INSERT INTO File (path, project_code, size, mtime, status, priority, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms, first_seen_at_ms, last_state_change_at_ms) \
+                 VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE, NULL, 'discovered_new', 0, NULL, {}, {}) \
+                 ON CONFLICT(path) DO NOTHING;",
                 safe_path,
                 safe_project,
                 size,
                 mtime,
                 priority,
-                safe_path
+                now_ms,
+                now_ms
             ),
         ]
     }

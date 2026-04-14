@@ -2,6 +2,7 @@
 
 pub mod bridge;
 pub mod config;
+pub mod embedding_contract;
 pub mod embedder;
 pub mod file_ingress_guard;
 pub mod fs_watcher;
@@ -14,6 +15,7 @@ pub mod ingress_buffer;
 pub mod indexing_policy;
 pub mod mcp;
 pub mod mcp_http;
+pub mod optimizer;
 pub mod parser;
 pub mod project_meta;
 pub mod queue;

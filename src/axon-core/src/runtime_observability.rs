@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::graph::GraphStore;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessMemorySnapshot {
     pub rss_bytes: u64,
     pub rss_anon_bytes: u64,
@@ -10,14 +10,14 @@ pub struct ProcessMemorySnapshot {
     pub rss_shmem_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DuckDbStorageSnapshot {
     pub db_file_bytes: u64,
     pub db_wal_bytes: u64,
     pub db_total_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DuckDbMemorySnapshot {
     pub memory_usage_bytes: u64,
     pub temporary_storage_bytes: u64,

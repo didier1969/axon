@@ -13,13 +13,18 @@ use axon_core::graph::PendingFile;
 use axon_core::ingress_buffer::{
     record_ingress_flush, IngressMetricsSnapshot, SharedIngressBuffer,
 };
+use axon_core::optimizer::{
+    build_admissible_action_profiles, collect_host_snapshot, collect_operator_policy_snapshot,
+    collect_recent_analytics_window, collect_runtime_signals_window, observe_reward,
+    HeuristicPolicyEngine, PolicyEngine,
+};
 use axon_core::queue::{ProcessingMode, QueueStore};
 use axon_core::runtime_observability::{
     duckdb_memory_snapshot, duckdb_storage_snapshot, process_memory_snapshot,
 };
 use axon_core::scanner::Scanner;
 use axon_core::service_guard;
-use axon_core::service_guard::ServicePressure;
+use axon_core::service_guard::{InteractivePriority, ServicePressure};
 use axon_core::watcher_probe;
 use notify_debouncer_full::notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
@@ -76,8 +81,17 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub queue_depth: usize,
     pub claim_mode: String,
     pub service_pressure: String,
+    pub interactive_priority_active: bool,
+    pub interactive_priority_level: String,
+    pub interactive_requests_in_flight: u64,
     pub oversized_refusals_total: u64,
     pub degraded_mode_entries_total: u64,
+    pub background_launches_suppressed_total: u64,
+    pub vectorization_suppressed_due_to_interactive: u64,
+    pub vectorization_interrupted_due_to_interactive: u64,
+    pub vectorization_requeued_for_interactive: u64,
+    pub vectorization_resumed_after_interactive: u64,
+    pub projection_suppressed_due_to_interactive: u64,
     pub guard_hits: u64,
     pub guard_misses: u64,
     pub guard_bypassed_total: u64,
@@ -90,10 +104,15 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub ingress_subtree_hint_accepted_total: u64,
     pub ingress_subtree_hint_blocked_total: u64,
     pub ingress_subtree_hint_suppressed_total: u64,
+    pub ingress_subtree_hint_productive_total: u64,
+    pub ingress_subtree_hint_unproductive_total: u64,
+    pub ingress_subtree_hint_dropped_total: u64,
     pub ingress_collapsed_total: u64,
     pub ingress_flush_count: u64,
     pub ingress_last_flush_duration_ms: u64,
     pub ingress_last_promoted_count: u64,
+    pub memory_trim_attempts_total: u64,
+    pub memory_trim_successes_total: u64,
     pub cpu_load: f64,
     pub ram_load: f64,
     pub io_wait: f64,
@@ -174,22 +193,33 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>, ingress_buffer: Sha
             continue;
         }
 
-        if queue.common_len() > 0 {
-            continue;
-        }
-
         let ingress_metrics = ingress_buffer
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .metrics_snapshot();
-        if ingress_metrics.buffered_entries > 0 || ingress_metrics.subtree_hints > 0 {
+        let process_memory = process_memory_snapshot();
+        let min_anon_bytes = memory_reclaimer_min_anon_bytes();
+
+        if !should_attempt_memory_reclaim(
+            queue.common_len(),
+            &ingress_metrics,
+            process_memory,
+            min_anon_bytes,
+        ) {
             continue;
         }
 
-        let process_memory = process_memory_snapshot();
-        let min_anon_bytes = memory_reclaimer_min_anon_bytes();
-        if process_memory.rss_anon_bytes < min_anon_bytes {
-            continue;
+        if ingress_metrics.subtree_hints > 0 {
+            let dropped = ingress_buffer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .shed_subtree_hints_for_memory_pressure();
+            if dropped > 0 {
+                warn!(
+                    "Memory reclaimer shed {} subtree hint(s) under memory pressure before trim.",
+                    dropped
+                );
+            }
         }
 
         MEMORY_TRIM_ATTEMPTS_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -203,12 +233,166 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>, ingress_buffer: Sha
     });
 }
 
+pub(crate) fn spawn_shadow_optimizer(store: Arc<GraphStore>) {
+    std::thread::spawn(move || {
+        let engine = HeuristicPolicyEngine;
+        let mut previous: Option<(
+            String,
+            axon_core::optimizer::RuntimeSignalsWindow,
+            axon_core::optimizer::OperatorPolicySnapshot,
+        )> = None;
+
+        loop {
+            let host = collect_host_snapshot();
+            let policy = collect_operator_policy_snapshot(&host);
+            let signals = collect_runtime_signals_window(&store);
+            let analytics = collect_recent_analytics_window(&store);
+            let action_profiles = build_admissible_action_profiles(&host, &signals, &policy);
+
+            if let Some(decision) =
+                engine.choose(&host, &signals, &policy, &analytics, &action_profiles)
+            {
+                let constraints = optimizer_constraint_flags(&signals, &policy);
+                let host_json = serde_json::to_string(&host).unwrap_or_else(|_| "{}".to_string());
+                let policy_json =
+                    serde_json::to_string(&policy).unwrap_or_else(|_| "{}".to_string());
+                let signals_json =
+                    serde_json::to_string(&signals).unwrap_or_else(|_| "{}".to_string());
+                let analytics_json =
+                    serde_json::to_string(&analytics).unwrap_or_else(|_| "{}".to_string());
+                let decision_json =
+                    serde_json::to_string(&decision).unwrap_or_else(|_| "{}".to_string());
+                let constraints_json =
+                    serde_json::to_string(&constraints).unwrap_or_else(|_| "[]".to_string());
+                let would_apply = decision.action_profile_id != "hold";
+                if let Err(err) = store.log_optimizer_decision(
+                    &decision.decision_id,
+                    decision.proposed_at_ms,
+                    if policy.shadow_mode_enabled {
+                        "shadow"
+                    } else {
+                        "disabled"
+                    },
+                    &host_json,
+                    &policy_json,
+                    &signals_json,
+                    &analytics_json,
+                    &decision.action_profile_id,
+                    &decision_json,
+                    &constraints_json,
+                    would_apply,
+                    false,
+                    decision.evaluation_window_start_ms,
+                    decision.evaluation_window_end_ms,
+                ) {
+                    warn!("Shadow optimizer: failed to persist decision log: {:?}", err);
+                }
+
+                if let Some((previous_decision_id, previous_signals, previous_policy)) =
+                    previous.as_ref()
+                {
+                    let churn_penalty =
+                        if previous_decision_id != &decision.action_profile_id { 5.0 } else { 0.0 };
+                    let reward =
+                        observe_reward(previous_decision_id, previous_signals, &signals, previous_policy, churn_penalty);
+                    let reward_json =
+                        serde_json::to_string(&reward).unwrap_or_else(|_| "{}".to_string());
+                    let pressure_json = serde_json::json!({
+                        "cpu_usage_ratio": signals.cpu_usage_ratio,
+                        "ram_available_ratio": signals.ram_available_ratio,
+                        "io_wait_ratio": signals.io_wait_ratio,
+                        "vram_used_mb": signals.vram_used_mb,
+                        "interactive_requests_in_flight": signals.interactive_requests_in_flight,
+                        "vector_workers_active_current": signals.vector_workers_active_current
+                    })
+                    .to_string();
+                    let violations_json = serde_json::json!({
+                        "cpu": reward.penalty_cpu,
+                        "ram": reward.penalty_ram,
+                        "vram": reward.penalty_vram,
+                        "mcp": reward.penalty_mcp,
+                        "io": reward.penalty_io,
+                        "liveness": reward.penalty_liveness,
+                        "churn": reward.penalty_churn
+                    })
+                    .to_string();
+                    if let Err(err) = store.log_reward_observation(
+                        &reward.decision_id,
+                        reward.observed_at_ms,
+                        reward.window_start_ms,
+                        reward.window_end_ms,
+                        &reward_json,
+                        reward.throughput_chunks_per_hour,
+                        reward.throughput_files_per_hour,
+                        &violations_json,
+                        &pressure_json,
+                    ) {
+                        warn!("Shadow optimizer: failed to persist reward log: {:?}", err);
+                    }
+                }
+
+                previous = Some((decision.action_profile_id.clone(), signals, policy));
+            }
+
+            std::thread::sleep(Duration::from_millis(
+                optimizer_loop_interval_ms().max(10_000),
+            ));
+        }
+    });
+}
+
 fn reader_refresh_interval_ms() -> u64 {
     std::env::var("AXON_READER_REFRESH_INTERVAL_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|v| *v >= 250)
         .unwrap_or(5_000)
+}
+
+fn optimizer_loop_interval_ms() -> u64 {
+    std::env::var("AXON_OPT_LOOP_INTERVAL_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(15_000)
+}
+
+fn optimizer_constraint_flags(
+    signals: &axon_core::optimizer::RuntimeSignalsWindow,
+    policy: &axon_core::optimizer::OperatorPolicySnapshot,
+) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if signals.cpu_usage_ratio > policy.max_cpu_ratio {
+        flags.push("cpu");
+    }
+    if signals.ram_available_ratio < policy.min_ram_available_ratio {
+        flags.push("ram");
+    }
+    if signals.vram_used_mb > policy.max_vram_used_mb {
+        flags.push("vram");
+    }
+    if signals.io_wait_ratio > policy.max_io_wait_ratio {
+        flags.push("io");
+    }
+    if signals.mcp_latency_recent_ms > policy.max_mcp_p95_ms {
+        flags.push("mcp");
+    }
+    if signals.vector_workers_active_current == 0 {
+        flags.push("liveness");
+    }
+    flags
+}
+
+fn should_attempt_memory_reclaim(
+    queue_len: usize,
+    ingress_metrics: &IngressMetricsSnapshot,
+    process_memory: axon_core::runtime_observability::ProcessMemorySnapshot,
+    min_anon_bytes: u64,
+) -> bool {
+    if queue_len > 0 || ingress_metrics.buffered_entries > 0 {
+        return false;
+    }
+
+    process_memory.rss_anon_bytes >= min_anon_bytes
 }
 
 pub(crate) fn spawn_reader_snapshot_refresher(store: Arc<GraphStore>) {
@@ -349,6 +533,8 @@ pub(crate) fn runtime_telemetry_snapshot(
     let file_vectorization_queue_depth =
         file_vectorization_queue_queued + file_vectorization_queue_inflight;
 
+    let interactive_priority = service_guard::current_interactive_priority();
+
     RuntimeTelemetrySnapshot {
         budget_bytes: budget.budget_bytes,
         reserved_bytes: budget.reserved_bytes,
@@ -360,8 +546,17 @@ pub(crate) fn runtime_telemetry_snapshot(
         queue_depth,
         claim_mode: policy.mode.label().to_string(),
         service_pressure: service_pressure_label(service_pressure).to_string(),
+        interactive_priority_active: interactive_priority != InteractivePriority::BackgroundNormal,
+        interactive_priority_level: interactive_priority.as_str().to_string(),
+        interactive_requests_in_flight: service_guard::interactive_requests_in_flight(),
         oversized_refusals_total: OVERSIZED_REFUSALS_TOTAL.load(Ordering::Relaxed),
         degraded_mode_entries_total: DEGRADED_MODE_ENTRIES_TOTAL.load(Ordering::Relaxed),
+        background_launches_suppressed_total: service_guard::background_launches_suppressed_total(),
+        vectorization_suppressed_due_to_interactive: service_guard::vectorization_suppressed_total(),
+        vectorization_interrupted_due_to_interactive: service_guard::vectorization_interrupted_total(),
+        vectorization_requeued_for_interactive: service_guard::vectorization_requeued_for_interactive_total(),
+        vectorization_resumed_after_interactive: service_guard::vectorization_resumed_after_interactive_total(),
+        projection_suppressed_due_to_interactive: service_guard::projection_suppressed_total(),
         guard_hits: guard_metrics.hits,
         guard_misses: guard_metrics.misses,
         guard_bypassed_total: guard_metrics.bypassed_total,
@@ -374,10 +569,15 @@ pub(crate) fn runtime_telemetry_snapshot(
         ingress_subtree_hint_accepted_total: ingress_metrics.subtree_hint_accepted_total,
         ingress_subtree_hint_blocked_total: ingress_metrics.subtree_hint_blocked_total,
         ingress_subtree_hint_suppressed_total: ingress_metrics.subtree_hint_suppressed_total,
+        ingress_subtree_hint_productive_total: ingress_metrics.subtree_hint_productive_total,
+        ingress_subtree_hint_unproductive_total: ingress_metrics.subtree_hint_unproductive_total,
+        ingress_subtree_hint_dropped_total: ingress_metrics.subtree_hint_dropped_total,
         ingress_collapsed_total: ingress_metrics.collapsed_total,
         ingress_flush_count: ingress_metrics.flush_count,
         ingress_last_flush_duration_ms: ingress_metrics.last_flush_duration_ms,
         ingress_last_promoted_count: ingress_metrics.last_promoted_count,
+        memory_trim_attempts_total: MEMORY_TRIM_ATTEMPTS_TOTAL.load(Ordering::Relaxed),
+        memory_trim_successes_total: MEMORY_TRIM_SUCCESSES_TOTAL.load(Ordering::Relaxed),
         cpu_load: host_pressure.cpu_load,
         ram_load: host_pressure.ram_load,
         io_wait: host_pressure.io_wait,
@@ -480,7 +680,7 @@ fn flush_ingress_buffer_once(
     if !batch.subtree_hints.is_empty() {
         let scanner = Scanner::new(projects_root, "GLOBAL");
         for hint in &batch.subtree_hints {
-            scanner.scan_subtree_with_guard_and_ingress(
+            let promoted_hint_files = scanner.scan_subtree_with_guard_and_ingress(
                 store.clone(),
                 Path::new(&hint.path),
                 Some(file_ingress_guard),
@@ -489,7 +689,7 @@ fn flush_ingress_buffer_once(
             ingress_buffer
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .complete_subtree_hint(&hint.path);
+                .complete_subtree_hint_with_stats(&hint.path, promoted_hint_files);
         }
     }
 
@@ -814,13 +1014,13 @@ fn enqueue_claimed_files(
 pub(crate) fn spawn_initial_scan(
     store: Arc<GraphStore>,
     project_root: String,
-    project_slug: String,
+    project_code: String,
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
 ) {
     std::thread::spawn(move || {
         info!("🚀 Auto-Ignition: Beginning initial workspace mapping for {}...", project_root);
-        let scanner = axon_core::scanner::Scanner::new(&project_root, &project_slug);
+        let scanner = axon_core::scanner::Scanner::new(&project_root, &project_code);
         scanner.scan_with_guard_and_ingress(
             store,
             Some(&file_ingress_guard),
@@ -833,13 +1033,13 @@ pub(crate) fn spawn_initial_scan(
 pub(crate) fn spawn_hot_delta_watcher(
     store: Arc<GraphStore>,
     project_root: String,
-    project_slug: String,
+    project_code: String,
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
 ) {
     std::thread::spawn(move || {
         let watch_root = PathBuf::from(project_root);
-        let watcher_project_slug = project_slug.clone();
+        let watcher_project_code = project_code.clone();
         let preferred_project_root = Some(watch_root.clone());
         let watcher_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             info!(
@@ -848,7 +1048,7 @@ pub(crate) fn spawn_hot_delta_watcher(
             );
 
             let callback_root = watch_root.clone();
-            let callback_project_slug = watcher_project_slug.clone();
+            let callback_project_code = watcher_project_code.clone();
             let callback_store = store.clone();
             let callback_guard = file_ingress_guard.clone();
             let callback_ingress = ingress_buffer.clone();
@@ -866,7 +1066,7 @@ pub(crate) fn spawn_hot_delta_watcher(
                     handle_watcher_events(
                         callback_store.clone(),
                         callback_root.clone(),
-                        callback_project_slug.clone(),
+                        callback_project_code.clone(),
                         callback_guard.clone(),
                         callback_ingress.clone(),
                         callback_active_project_root.clone(),
@@ -1070,6 +1270,13 @@ fn memory_reclaimer_enabled() -> bool {
         .unwrap_or(true)
 }
 
+fn federation_orchestrator_enabled() -> bool {
+    std::env::var("AXON_ENABLE_FEDERATION_ORCHESTRATOR")
+        .ok()
+        .map(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+        .unwrap_or(true)
+}
+
 fn memory_reclaimer_min_anon_bytes() -> u64 {
     std::env::var("AXON_MEMORY_RECLAIMER_MIN_ANON_MB")
         .ok()
@@ -1182,6 +1389,26 @@ fn claim_policy(
     memory_limit: u64,
     service_pressure: ServicePressure,
 ) -> ClaimPolicy {
+    match service_guard::current_interactive_priority() {
+        InteractivePriority::InteractiveCritical => {
+            service_guard::record_background_launch_suppressed();
+            return ClaimPolicy {
+                mode: ClaimMode::Paused,
+                claim_count: 0,
+                sleep: std::time::Duration::from_millis(1_000),
+            };
+        }
+        InteractivePriority::InteractivePriority => {
+            service_guard::record_background_launch_suppressed();
+            return ClaimPolicy {
+                mode: ClaimMode::Guarded,
+                claim_count: 50,
+                sleep: std::time::Duration::from_millis(750),
+            };
+        }
+        InteractivePriority::BackgroundNormal => {}
+    }
+
     let rss_ratio = rss_bytes
         .map(|rss| rss as f64 / memory_limit.max(1) as f64)
         .unwrap_or(0.0);
@@ -1339,7 +1566,7 @@ fn dynamic_claim_sleep(pressure: f64, mode: ClaimMode) -> std::time::Duration {
 fn handle_watcher_events(
     store: Arc<GraphStore>,
     watch_root: std::path::PathBuf,
-    project_slug: String,
+    project_code: String,
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
     active_project_root: Option<PathBuf>,
@@ -1381,7 +1608,7 @@ fn handle_watcher_events(
                 if !salvaged.is_empty() {
                     match fs_watcher::enqueue_hot_deltas_with_guard(
                         &watch_root,
-                        &project_slug,
+                        &project_code,
                         salvaged.clone(),
                         HOT_PRIORITY,
                         &file_ingress_guard,
@@ -1436,7 +1663,7 @@ fn handle_watcher_events(
                     );
                     let rescan_store = store.clone();
                     let rescan_root = watch_root.clone();
-                    let rescan_project_slug = project_slug.clone();
+                    let rescan_project_code = project_code.clone();
                     let rescan_guard_state = file_ingress_guard.clone();
                     let rescan_ingress = ingress_buffer.clone();
                     let rescan_guard_release = rescan_guard.clone();
@@ -1451,7 +1678,7 @@ fn handle_watcher_events(
                             Some(&rescan_root),
                             "reason=notify_rescan",
                         );
-                        Scanner::new(rescan_root.to_string_lossy().as_ref(), &rescan_project_slug)
+                        Scanner::new(rescan_root.to_string_lossy().as_ref(), &rescan_project_code)
                             .scan_with_guard_and_ingress(
                                 rescan_store,
                                 Some(&rescan_guard_state),
@@ -1470,7 +1697,7 @@ fn handle_watcher_events(
 
             match fs_watcher::enqueue_hot_deltas_with_guard(
                 &watch_root,
-                &project_slug,
+                &project_code,
                 paths,
                 HOT_PRIORITY,
                 &file_ingress_guard,
@@ -1561,31 +1788,38 @@ pub(crate) fn spawn_federation_orchestrator(
     file_ingress_guard: SharedFileIngressGuard,
     ingress_buffer: SharedIngressBuffer,
 ) {
+    if !federation_orchestrator_enabled() {
+        info!("Fédération : orchestrateur désactivé via AXON_ENABLE_FEDERATION_ORCHESTRATOR.");
+        return;
+    }
     std::thread::spawn(move || {
         let mut known_projects = std::collections::HashSet::new();
         info!("Fédération : Démarrage de l'orchestrateur de projets SOLL.");
         loop {
             std::thread::sleep(Duration::from_millis(1000));
-            if let Ok(json_str) = store.query_json("SELECT project_slug, project_path FROM soll.ProjectCodeRegistry WHERE project_slug NOT IN ('GLOBAL')") {
+            if let Ok(json_str) = store.query_json("SELECT project_code, project_path FROM soll.ProjectCodeRegistry WHERE project_code NOT IN ('PRO')") {
                 if let Ok(rows) = serde_json::from_str::<Vec<Vec<String>>>(&json_str) {
                     for row in rows {
                         if row.len() == 2 {
-                            let slug = &row[0];
+                            let project_code = &row[0];
                             let path = &row[1];
-                            if !path.is_empty() && !known_projects.contains(slug) {
-                                known_projects.insert(slug.clone());
-                                info!("Fédération : Nouveau projet détecté et orchestré: {} ({})", slug, path);
+                            if !path.is_empty() && !known_projects.contains(project_code) {
+                                known_projects.insert(project_code.clone());
+                                info!(
+                                    "Fédération : Nouveau projet détecté et orchestré: {} ({})",
+                                    project_code, path
+                                );
                                 spawn_hot_delta_watcher(
                                     store.clone(),
                                     path.clone(),
-                                    slug.clone(),
+                                    project_code.clone(),
                                     file_ingress_guard.clone(),
                                     ingress_buffer.clone(),
                                 );
                                 spawn_initial_scan(
                                     store.clone(),
                                     path.clone(),
-                                    slug.clone(),
+                                    project_code.clone(),
                                     file_ingress_guard.clone(),
                                     ingress_buffer.clone(),
                                 );
@@ -1602,14 +1836,14 @@ pub(crate) fn spawn_federation_orchestrator(
 mod tests {
     use super::{
         active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files,
-        flush_ingress_buffer_once, handle_watcher_events, memory_limit_bytes,
-        memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, plan_admissions,
-        should_suppress_bootstrap_event_storm,
+        federation_orchestrator_enabled, flush_ingress_buffer_once, handle_watcher_events, memory_limit_bytes,
+        memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, optimizer_loop_interval_ms, plan_admissions,
+        should_attempt_memory_reclaim, should_suppress_bootstrap_event_storm, ClaimMode,
         RescanGuardReset, OVERSIZED_PROBATION_DEFER_THRESHOLD,
     };
     use axon_core::file_ingress_guard::FileIngressGuard;
     use axon_core::graph::{GraphStore, PendingFile};
-    use axon_core::ingress_buffer::{IngressBuffer, SharedIngressBuffer};
+    use axon_core::ingress_buffer::{IngressBuffer, IngressSource, SharedIngressBuffer};
     use axon_core::queue::QueueStore;
     use axon_core::service_guard::ServicePressure;
     use axon_core::watcher_probe;
@@ -1660,6 +1894,44 @@ mod tests {
     }
 
     #[test]
+    fn test_federation_orchestrator_enabled_defaults_to_true() {
+        unsafe {
+            std::env::remove_var("AXON_ENABLE_FEDERATION_ORCHESTRATOR");
+        }
+        assert!(federation_orchestrator_enabled());
+    }
+
+    #[test]
+    fn test_federation_orchestrator_enabled_respects_false_env() {
+        unsafe {
+            std::env::set_var("AXON_ENABLE_FEDERATION_ORCHESTRATOR", "false");
+        }
+        assert!(!federation_orchestrator_enabled());
+        unsafe {
+            std::env::remove_var("AXON_ENABLE_FEDERATION_ORCHESTRATOR");
+        }
+    }
+
+    #[test]
+    fn test_optimizer_loop_interval_defaults_to_15_seconds() {
+        unsafe {
+            std::env::remove_var("AXON_OPT_LOOP_INTERVAL_MS");
+        }
+        assert_eq!(optimizer_loop_interval_ms(), 15_000);
+    }
+
+    #[test]
+    fn test_optimizer_loop_interval_respects_env_override() {
+        unsafe {
+            std::env::set_var("AXON_OPT_LOOP_INTERVAL_MS", "30000");
+        }
+        assert_eq!(optimizer_loop_interval_ms(), 30_000);
+        unsafe {
+            std::env::remove_var("AXON_OPT_LOOP_INTERVAL_MS");
+        }
+    }
+
+    #[test]
     fn test_memory_reclaimer_can_be_disabled_with_env() {
         unsafe {
             std::env::set_var("AXON_ENABLE_MEMORY_RECLAIMER", "false");
@@ -1679,6 +1951,35 @@ mod tests {
         unsafe {
             std::env::remove_var("AXON_MEMORY_RECLAIMER_MIN_ANON_MB");
         }
+    }
+
+    #[test]
+    fn test_memory_reclaimer_can_run_when_only_stalled_subtree_hints_remain() {
+        let ingress = test_ingress_buffer();
+        {
+            let mut locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
+            locked.record_subtree_hint(
+                "/tmp/project/_build_truth_dashboard_ui".to_string(),
+                900,
+                IngressSource::Watcher,
+            );
+        }
+
+        let metrics = ingress
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .metrics_snapshot();
+        let process_memory = axon_core::runtime_observability::ProcessMemorySnapshot {
+            rss_bytes: 24 * 1024 * 1024 * 1024,
+            rss_anon_bytes: 23 * 1024 * 1024 * 1024,
+            rss_file_bytes: 64 * 1024 * 1024,
+            rss_shmem_bytes: 0,
+        };
+
+        assert!(
+            should_attempt_memory_reclaim(0, &metrics, process_memory, 4 * 1024 * 1024 * 1024),
+            "Le reclaim memoire doit rester possible quand seuls des subtree hints stagnants bloquent l'idle parfait"
+        );
     }
 
     #[test]
@@ -1883,6 +2184,21 @@ mod tests {
         );
         assert_eq!(policy.mode.label(), "paused");
         assert_eq!(policy.claim_count, 0);
+    }
+
+    #[test]
+    fn test_claim_policy_enters_guarded_mode_during_interactive_priority() {
+        axon_core::service_guard::reset_for_tests();
+        axon_core::service_guard::mcp_request_started();
+        let policy = claim_policy(
+            200,
+            0.10,
+            Some(2 * 1024 * 1024 * 1024),
+            10 * 1024 * 1024 * 1024,
+            ServicePressure::Healthy,
+        );
+        axon_core::service_guard::mcp_request_finished();
+        assert!(matches!(policy.mode, ClaimMode::Guarded | ClaimMode::Paused));
     }
 
     #[test]
