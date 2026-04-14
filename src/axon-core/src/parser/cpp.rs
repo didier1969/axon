@@ -24,7 +24,9 @@ impl CppParser {
         for child in node.named_children(&mut cursor) {
             match child.kind() {
                 "function_definition" => Self::extract_function(child, source_bytes, result),
-                "class_specifier" | "struct_specifier" | "enum_specifier" => Self::extract_class(child, source_bytes, result),
+                "class_specifier" | "struct_specifier" | "enum_specifier" => {
+                    Self::extract_class(child, source_bytes, result)
+                }
                 "call_expression" => Self::extract_call(child, source_bytes, result),
                 _ => Self::walk(child, source_bytes, result),
             }
@@ -34,7 +36,9 @@ impl CppParser {
     fn extract_function<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
         let mut name = String::new();
         if let Some(decl) = Self::find_child_by_type(node, "function_declarator") {
-            if let Some(id) = Self::find_child_by_type(decl, "identifier").or_else(|| Self::find_child_by_type(decl, "field_identifier")) {
+            if let Some(id) = Self::find_child_by_type(decl, "identifier")
+                .or_else(|| Self::find_child_by_type(decl, "field_identifier"))
+            {
                 name = id.utf8_text(source_bytes).unwrap_or("").to_string();
             }
         }
@@ -45,11 +49,17 @@ impl CppParser {
 
             let mut is_nif = false;
             let node_content = node.utf8_text(source_bytes).unwrap_or("");
-            if node_content.contains("JNIEXPORT") || node_content.contains("JNICALL") ||
-               node_content.contains("__declspec(dllexport)") || node_content.contains("extern \"C\"") ||
-               node_content.contains("PHP_FUNCTION") || node_content.contains("PHP_METHOD") ||
-               node_content.contains("rb_define_method") || node_content.contains("Init_") ||
-               node_content.contains("PyMODINIT_FUNC") || node_content.contains("ERL_NIF_INIT") {
+            if node_content.contains("JNIEXPORT")
+                || node_content.contains("JNICALL")
+                || node_content.contains("__declspec(dllexport)")
+                || node_content.contains("extern \"C\"")
+                || node_content.contains("PHP_FUNCTION")
+                || node_content.contains("PHP_METHOD")
+                || node_content.contains("rb_define_method")
+                || node_content.contains("Init_")
+                || node_content.contains("PyMODINIT_FUNC")
+                || node_content.contains("ERL_NIF_INIT")
+            {
                 is_nif = true;
             }
 
@@ -141,7 +151,7 @@ impl CppParser {
 impl Parser for CppParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut result = ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };

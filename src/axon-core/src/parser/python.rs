@@ -248,7 +248,7 @@ impl PythonParser {
 impl Parser for PythonParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut result = ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };

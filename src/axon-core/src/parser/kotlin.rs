@@ -24,7 +24,9 @@ impl KotlinParser {
         for child in node.named_children(&mut cursor) {
             match child.kind() {
                 "function_declaration" => Self::extract_function(child, source_bytes, result),
-                "class_declaration" | "object_declaration" | "interface_declaration" => Self::extract_class(child, source_bytes, result),
+                "class_declaration" | "object_declaration" | "interface_declaration" => {
+                    Self::extract_class(child, source_bytes, result)
+                }
                 "call_expression" => Self::extract_call(child, source_bytes, result),
                 _ => Self::walk(child, source_bytes, result),
             }
@@ -136,7 +138,7 @@ impl KotlinParser {
 impl Parser for KotlinParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut result = ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };

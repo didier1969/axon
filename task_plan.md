@@ -83,26 +83,75 @@ Reprendre le projet sur la base de sa réalité actuelle, valider l'environnemen
 - [x] Valider `axon_validate_soll`.
 - [x] Corriger la lecture stale de `soll.db` sur `reader_ctx`.
 
+### Phase 13: Phase 3 retrieval + staged vector pipeline
+- [x] Formaliser l'architecture `retrieve_context` et la tranche pipeline vectoriel stagee.
+- [x] Introduire le contrat d'embedding canonique (`embedding_contract.rs`).
+- [x] Extraire les frontieres `prepare -> embed -> persist` du worker vectoriel sans changer la concurrence runtime.
+- [x] Ajouter la surface MCP `retrieve_context` avec planner, degradation honnete et evidence packet.
+- [x] Ajouter le harness de qualification `scripts/qualify_retrieval_context.py` et ses tests Python.
+- [x] Revalider au moins les tests cibles Rust de la tranche (`test_prepared_vector_embed_batch_`, `test_retrieve_context_`).
+- [ ] Decider si la reprise doit continuer sur:
+  - la qualification runtime reelle de `retrieve_context`
+  - ou la fermeture hygiene/warnings de la tranche avant commit
+
+### Phase 14A: Operator Truth Unification
+- [x] Unifier la surface opérateur publique autour de `status`, `why`, `path`, `anomalies`.
+- [x] Réaligner la documentation et le skill canonique unique sur les vrais outils MCP exposés.
+- [x] Remplacer le report imprimé par `project_status`, une surface MCP live de situation projet.
+- [x] Verrouiller par tests la découvrabilité publique et les contrats JSON minimaux.
+
+### Phase 14B: Structural Diagnostics Completion
+- [x] Exposer les diagnostics structurels à plus fort ROI: `wrappers`, `orphan code`, `orphan intent`.
+- [x] Ajouter `feature envy`, `detours` et `abstraction detours` à la surface `anomalies`.
+- [x] Inclure sévérité, confiance, provenance et action recommandée dans la surface `anomalies`.
+- [x] Ajouter un score minimal de validation/sûreté aux recommandations structurelles.
+- [ ] Différer historique graphe complet, couche conception explicite et propagation avancée d'incertitude.
+
+### Phase 15: Persistent Structural Memory
+- [x] Persister des snapshots structurels dérivés hors `SOLL` sous un stockage non canonique.
+- [x] Exposer `snapshot_history` et `snapshot_diff` comme surfaces MCP publiques de lecture.
+- [x] Brancher `project_status` sur `snapshot_id`, `generated_at` et `delta_vs_previous` basés sur ce stockage dérivé.
+- [x] Requalifier ces surfaces contre le runtime live une fois le serveur revenu.
+
+### Phase 16: Confidence And Provenance
+- [x] Standardiser `provenance`, `confidence`, `evidence_sources`, `safe_to_act` et `needs_human_confirmation` sur les sorties structurales publiques.
+- [x] Marquer explicitement les findings heuristiques comme heuristiques/inférés.
+- [ ] Raffiner la propagation de confiance au-delà des règles discrètes v1.
+
+### Phase 17: Derived Conception Layer
+- [x] Exposer une vue `conception_view` dérivée en lecture seule (`modules`, `interfaces`, `contracts`, `flows`, frontières suspectes).
+- [x] Garder cette couche hors `SOLL` et non canonique.
+- [ ] Décider plus tard si une persistance dédiée de conception apporte assez de valeur pour justifier une nouvelle tranche.
+
+### Phase 18: Validation And Change Safety
+- [x] Exposer `change_safety` comme synthèse dérivée de couverture, traceability et signaux de validation.
+- [x] Intégrer des guardrails de mutation lisibles par agent.
+- [ ] Enrichir ultérieurement la couverture validation par cible/fichier/module sans modifier `SOLL` tant que non demandé.
+
 ## Working Assumptions
 - Les modifications Git actuellement visibles sont principalement des artefacts de runtime/devenv et non un signal suffisant de travail produit.
 - Toute conclusion tirée hors `devenv shell` est non fiable pour ce dépôt.
 - Les documents `progress.md` et `STATE.md` peuvent surestimer le niveau réel de fermeture.
 
 ## Current Priority
-1. Geler maintenant la tranche cockpit par commit/push sans interrompre le runtime en cours.
-2. Garder `DuckDB` comme vérité de `pending/indexing/indexed` avec ingress amorti en mémoire.
-3. Préserver la causalité explicite pour toute future extension du scheduler ou du writer.
-4. Observer le reclaimer mémoire idle avant toute politique plus agressive.
-5. Conserver la frontière documentaire maintenant posée:
+1. Consolider la performance des surfaces analytiques live (`anomalies`, `project_status`, `soll_work_plan`) maintenant que la qualification runtime passe.
+2. Requalifier `retrieve_context` dans un mode/runtime qui l'expose effectivement, sans rouvrir la surface publique `graph_only`.
+3. Garder `SOLL` comme seule vérité canonique d'intention:
+   - `soll_export` = backup réimportable
+   - `project_status` = surface de pilotage live non canonique
+4. Conserver `DuckDB` comme vérité de `pending/indexing/indexed` avec ingress amorti en mémoire.
+5. Préserver la causalité explicite pour toute future extension du scheduler, du writer et du planneur de retrieval.
+6. Observer le reclaimer mémoire idle avant toute politique plus agressive.
+7. Conserver la frontière documentaire maintenant posée:
    - `docs/` = canonique
    - `docs/archive/` = historique
    - `docs/vision/` = exports live
    - `docs/archive/soll-exports/` = snapshots déplacés
-6. Remplacer la logique de seuil fixe par un scheduler mémoire plus intelligent:
+8. Remplacer la logique de seuil fixe par un scheduler mémoire plus intelligent:
    - démarrage prudent par type de parser et bucket de taille tant que la confiance est faible
    - refus explicite des fichiers trop gros même seuls pour le budget courant
    - admission par lot optimisé sous budget au lieu d'un ordre FIFO naïf
-7. Garder les documents de statut alignés sur la preuve runtime, pas sur des formulations aspiratoires.
+9. Garder les documents de statut alignés sur la preuve runtime, pas sur des formulations aspiratoires.
 
 ## Errors Encountered
 | Error | Attempt | Resolution |

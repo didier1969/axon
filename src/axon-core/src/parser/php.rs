@@ -23,9 +23,15 @@ impl PhpParser {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             match child.kind() {
-                "function_definition" | "method_declaration" => Self::extract_function(child, source_bytes, result),
-                "class_declaration" | "interface_declaration" | "trait_declaration" => Self::extract_class(child, source_bytes, result),
-                "function_call_expression" | "method_call_expression" => Self::extract_call(child, source_bytes, result),
+                "function_definition" | "method_declaration" => {
+                    Self::extract_function(child, source_bytes, result)
+                }
+                "class_declaration" | "interface_declaration" | "trait_declaration" => {
+                    Self::extract_class(child, source_bytes, result)
+                }
+                "function_call_expression" | "method_call_expression" => {
+                    Self::extract_call(child, source_bytes, result)
+                }
                 _ => Self::walk(child, source_bytes, result),
             }
         }
@@ -48,7 +54,11 @@ impl PhpParser {
 
             result.symbols.push(Symbol {
                 name,
-                kind: if node.kind() == "method_declaration" { "method".to_string() } else { "function".to_string() },
+                kind: if node.kind() == "method_declaration" {
+                    "method".to_string()
+                } else {
+                    "function".to_string()
+                },
                 start_line,
                 end_line,
                 docstring: None,
@@ -114,7 +124,9 @@ impl PhpParser {
     fn walk_for_calls<'a>(node: Node<'a>, source_bytes: &[u8], result: &mut ExtractionResult) {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            if child.kind() == "function_call_expression" || child.kind() == "method_call_expression" {
+            if child.kind() == "function_call_expression"
+                || child.kind() == "method_call_expression"
+            {
                 Self::extract_call(child, source_bytes, result);
             } else {
                 Self::walk_for_calls(child, source_bytes, result);
@@ -136,7 +148,7 @@ impl PhpParser {
 impl Parser for PhpParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut result = ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };

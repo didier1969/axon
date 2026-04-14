@@ -231,7 +231,7 @@ impl Parser for JavaParser {
         }
 
         ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols,
             relations,
         }

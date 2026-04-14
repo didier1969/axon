@@ -647,7 +647,7 @@ impl Parser for RustParser {
             Some(t) => t,
             None => {
                 return ExtractionResult {
-                    project_slug: None,
+                    project_code: None,
                     symbols: Vec::new(),
                     relations: Vec::new(),
                 }
@@ -655,7 +655,7 @@ impl Parser for RustParser {
         };
 
         let mut result = ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };

@@ -11,11 +11,11 @@ Provide deterministic skill resolution and Axon-first operational behavior for S
 ## Enforced Policy
 - Do not infer workflows by scanning repository root.
 - Resolve workflows from skills only.
-- If Axon MCP is available, use `axon-soll-operator` before SOLL operations.
+- If Axon MCP is available, use `axon-engineering-protocol` before SOLL operations.
 - Prefer MCP tools for SOLL operations; use shell only for bootstrap/verification.
 - SOLL identity is server-owned: `create` returns canonical IDs in the form `TYPE-CODE-NNN`.
 - `CODE` is resolved by Axon from the canonical project declaration in `.axon/meta.json`, not chosen by the client.
-- `project_slug` must match the canonical slug declared in `.axon/meta.json`; aliases are rejected.
+- `project_code` must match the canonical 3-character code declared in `.axon/meta.json`; aliases are rejected.
 - All later SOLL mutations must use canonical IDs exactly, like primary keys.
 - Batch workflow IDs are also canonical and server-owned:
   - `preview_id` -> `PRV-CODE-NNN`
@@ -25,14 +25,14 @@ Provide deterministic skill resolution and Axon-first operational behavior for S
 ## Verification Commands
 ```bash
 readlink -f /home/dstadel/.gemini/skills
-readlink -f /home/dstadel/.codex/skills/axon-soll-operator
-test -f /home/dstadel/.codex/skills/axon-soll-operator/SKILL.md && echo "codex-skill-ok"
+readlink -f /home/dstadel/.codex/skills/axon-engineering-protocol
+test -f /home/dstadel/.codex/skills/axon-engineering-protocol/SKILL.md && echo "codex-skill-ok"
 grep -n "Axon Skills Resolution Policy" /home/dstadel/.gemini/GEMINI.md
 ```
 
 Expected:
 - Gemini skills resolves to `/home/dstadel/.claude/skills`
-- Codex `axon-soll-operator` resolves to `/home/dstadel/.claude/skills/axon-soll-operator`
+- Codex `axon-engineering-protocol` resolves to `/home/dstadel/.claude/skills/axon-engineering-protocol`
 - Policy section exists in `GEMINI.md`
 
 ## Runtime Notes
@@ -43,23 +43,35 @@ Expected:
 
 ## Recommended SOLL Entry Path
 1. Check MCP availability (`health`, then `soll_validate` if SOLL scope matters).
-2. Load `axon-soll-operator` workflow.
+2. Load `axon-engineering-protocol` workflow.
 3. Execute SOLL workflow via MCP tools (unit or bulk path), not direct DB mutations.
 4. Verify with SOLL validation tools before reporting completion.
+
+## Canonical vs Live Steering Surfaces
+- `soll_export` is the canonical, reimportable projection of the SOLL database.
+- LLMs should study and complete SOLL through `soll_query_context`, `soll_work_plan`, `soll_validate`, and `soll_export`.
+- `project_status` is the live, non-canonical steering surface for project state, operator surface, degradation, derived diagnostics, and runtime health.
+- The `Vision Anchor` returned by `project_status` must come from live `SOLL` source through `soll_query_context`, never from `soll_export`.
+- `project_status` must never replace SOLL reading or become a second source of intention truth.
+- `snapshot_history` and `snapshot_diff` are non-canonical structural memory surfaces persisted outside `SOLL`.
+- `conception_view` and `change_safety` are derived read surfaces; they help an agent reason before editing but must not be treated as canonical intention data.
 
 ## Public MCP Surface
 - Public `tools/list` is intentionally reduced to the canonical operator surface.
 - Hidden-by-default expert/internal tools remain callable when explicitly named, but they are no longer part of the normal client/LLM discovery path.
 - Preferred public families:
-  - DX: `query`, `inspect`, `impact`, `health`, `audit`, `fs_read`
+  - Operator truth: `status`, `project_status`, `why`, `path`, `anomalies`
+  - Structural memory and guidance: `snapshot_history`, `snapshot_diff`, `conception_view`, `change_safety`
+  - DX/SOLL commit discipline: `axon_pre_flight_check`, `axon_commit_work`, `fs_read`
   - SOLL read: `soll_validate`, `soll_query_context`, `soll_verify_requirements`, `soll_work_plan`, `soll_export`, `restore_soll`
   - SOLL write: `soll_manager`, `soll_apply_plan`, `soll_commit_revision`, `soll_rollback_revision`, `soll_attach_evidence`
+  - DX expert/internal: `retrieve_context`, `impact`, `health`, `audit`, `query`, `inspect`
 
 ## SOLL Identity and Scope
 - Canonical examples: `VIS-AXO-001`, `DEC-BKS-001`, `STK-AXO-003`, `PRV-FSC-001`, `REV-FSC-002`.
 - Non-canonical example: `DEC-BookingSystem-001`.
-- Use `soll_validate --project_slug <slug>` when the goal is project-scoped invariants rather than workspace-global triage.
-- Use `soll_export --project_slug <slug>` when the goal is a project snapshot rather than a mixed workspace export.
+- Use `soll_validate --project_code <CODE>` when the goal is project-scoped invariants rather than workspace-global triage.
+- Use `soll_export --project_code <CODE>` when the goal is a project snapshot rather than a mixed workspace export.
 - `soll_validate` now also catches dangling relation endpoints and relation-policy violations.
 
 ## Read-Only Planning Path

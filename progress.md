@@ -227,7 +227,7 @@
     - backlog visible
     - repartition `pending` / `indexing`
     - causes backlog dominantes quand elles existent
-  - `axon_audit` et `axon_health` utilisent maintenant `project_slug` uniquement pour compter le scope, plus de fallback sur un `path LIKE` ambigu
+  - `axon_audit` et `axon_health` utilisent maintenant `project_code` uniquement pour compter le scope, plus de fallback sur un `path LIKE` ambigu
 - Validation fraiche:
   - `cargo test --manifest-path Cargo.toml` dans `src/axon-core` vert (`146` + `44`)
 
@@ -449,3 +449,30 @@
   - bug de lecture stale identifie puis corrige:
     - les lectures `soll.*` passent maintenant par `writer_ctx`
   - test de regression ajoute pour la creation `Stakeholder` sur store file-backed
+
+## 2026-04-12 - Session recovery sur la tranche active Phase 3
+- Reprise terrain:
+  - les fichiers de pilotage (`task_plan.md`, `progress.md`, `findings.md`) etaient restes bloques sur la reprise d'avril 1-3
+  - le `git diff --stat` courant montre une tranche beaucoup plus recente centree sur:
+    - `retrieve_context`
+    - pipeline vectoriel stage
+    - `embedding_contract`
+    - qualification runtime/MCP associee
+- Artefacts de tranche identifies:
+  - `docs/architecture/2026-04-11-phase-3-llm-knowledge-amplification.md`
+  - `docs/plans/2026-04-11-staged-vector-pipeline-slice.md`
+  - `src/axon-core/src/embedding_contract.rs`
+  - `src/axon-core/src/mcp/tools_context.rs`
+  - `scripts/qualify_retrieval_context.py`
+  - `tests/test_qualify_retrieval_context.py`
+- Verification cible de reprise:
+  - `cargo test --manifest-path src/axon-core/Cargo.toml test_prepared_vector_embed_batch_ -- --nocapture` vert (`3` tests)
+  - `cargo test --manifest-path src/axon-core/Cargo.toml test_retrieve_context_ -- --nocapture` vert (`16` tests)
+- Observation:
+  - la tranche ne semble pas etre en panne fonctionnelle
+  - la dette immediate visible est surtout une dette de synchronisation documentaire et quelques warnings Rust non traites
+
+## Next Immediate Action
+- choisir explicitement la suite de reprise:
+  - soit qualification runtime reelle de `retrieve_context` via le harness HTTP
+  - soit fermeture hygiene de la tranche (warnings, docs, preuves finales) avant commit

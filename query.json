@@ -1,0 +1,7 @@
+{
+  "name": "soll_query_context",
+  "arguments": {
+    "project_code": "AXO",
+    "query": "Langages OR Parsers OR Phase 3 OR C++ OR Ruby"
+  }
+}

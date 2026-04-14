@@ -94,7 +94,7 @@ impl Parser for YamlParser {
         }
 
         ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols,
             relations,
         }

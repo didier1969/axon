@@ -28,7 +28,7 @@ impl Parser for TypeQLParser {
             Err(e) => {
                 error!("Failed to create temp file for TypeQL parser: {}", e);
                 return ExtractionResult {
-                    project_slug: None,
+                    project_code: None,
                     symbols,
                     relations,
                 };
@@ -41,7 +41,7 @@ impl Parser for TypeQLParser {
                 e
             );
             return ExtractionResult {
-                project_slug: None,
+                project_code: None,
                 symbols,
                 relations,
             };
@@ -79,7 +79,7 @@ impl Parser for TypeQLParser {
         }
 
         ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols,
             relations,
         }

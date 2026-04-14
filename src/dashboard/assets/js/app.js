@@ -27,10 +27,10 @@ import {hooks as colocatedHooks} from "phoenix-colocated/axon_dashboard"
 import topbar from "../vendor/topbar"
 import LiveViewWitness from "../../../liveview_witness/priv/static/liveview_witness.js"
 
-const WorkspaceSunburst = {
+const WorkspacePipelineFlow = {
   mounted() {
     this.chart = echarts.init(this.el)
-    this.handleEvent("workspace_sunburst", (payload) => {
+    this.handleEvent("workspace_pipeline_flow", (payload) => {
       this.renderChart(payload)
     })
     this.renderChart()
@@ -44,71 +44,137 @@ const WorkspaceSunburst = {
   renderChart(payload = null) {
     const known = Number((payload && payload.known) ?? this.el.dataset.known ?? 0)
     const completed = Number((payload && payload.completed) ?? this.el.dataset.completed ?? 0)
-    const graphReady = Number((payload && payload.graph_ready) ?? this.el.dataset.graphReady ?? 0)
-    const vectorFile = Number((payload && payload.vector_ready_file) ?? this.el.dataset.vectorFile ?? 0)
-    const vectorGraph = Number((payload && payload.vector_ready_graph) ?? this.el.dataset.vectorGraph ?? 0)
+    const indexed = Number((payload && payload.completed_indexed) ?? this.el.dataset.indexed ?? 0)
+    const indexedDegraded = Number((payload && payload.completed_indexed_degraded) ?? this.el.dataset.indexedDegraded ?? 0)
+    const skipped = Number((payload && payload.completed_skipped) ?? this.el.dataset.skipped ?? 0)
+    const deleted = Number((payload && payload.completed_deleted) ?? this.el.dataset.deleted ?? 0)
+    const oversized = Number((payload && payload.completed_oversized) ?? this.el.dataset.oversized ?? 0)
+    const indexing = Number((payload && payload.indexing) ?? this.el.dataset.indexing ?? 0)
+    const pending = Number((payload && payload.pending) ?? this.el.dataset.pending ?? 0)
+    const indexedGraphReady = Number((payload && payload.indexed_graph_ready) ?? this.el.dataset.indexedGraphReady ?? 0)
+    const indexedGraphMissing = Number((payload && payload.indexed_graph_missing) ?? this.el.dataset.indexedGraphMissing ?? 0)
+    const indexedDegradedGraphReady = Number((payload && payload.indexed_degraded_graph_ready) ?? this.el.dataset.indexedDegradedGraphReady ?? 0)
+    const indexedDegradedGraphMissing = Number((payload && payload.indexed_degraded_graph_missing) ?? this.el.dataset.indexedDegradedGraphMissing ?? 0)
+    const indexedVectorReady = Number((payload && payload.indexed_vector_ready) ?? this.el.dataset.indexedVectorReady ?? 0)
+    const indexedVectorMissing = Number((payload && payload.indexed_vector_missing) ?? this.el.dataset.indexedVectorMissing ?? 0)
+    const indexedDegradedVectorReady = Number((payload && payload.indexed_degraded_vector_ready) ?? this.el.dataset.indexedDegradedVectorReady ?? 0)
+    const indexedDegradedVectorMissing = Number((payload && payload.indexed_degraded_vector_missing) ?? this.el.dataset.indexedDegradedVectorMissing ?? 0)
 
-    const total = Math.max(known, 1)
-    const clamp = (value, max) => Math.max(0, Math.min(value, max))
+    const clamp = (value) => Math.max(0, Number.isFinite(value) ? value : 0)
+    const activeIndexing = clamp(indexing)
+    const activePending = clamp(pending)
+    const edgeExplanations = {
+      "Known Files|Indexing": "Files currently claimed and being processed.",
+      "Known Files|Pending": "Files known by Axon but not yet started.",
+      "Known Files|Indexed": "Files fully indexed with the primary path completed.",
+      "Known Files|Indexed Degraded": "Files completed with degraded or partial indexing.",
+      "Known Files|Skipped": "Files intentionally skipped by current policy.",
+      "Known Files|Deleted": "Files removed from source and marked as deleted.",
+      "Known Files|Oversized": "Files refused under the current budget envelope.",
+      "Indexed|Indexed · AST Ready": "Indexed files whose AST-derived graph is available.",
+      "Indexed|Indexed · AST Missing": "Indexed files still missing AST/graph truth.",
+      "Indexed Degraded|Degraded · AST Ready": "Degraded indexed files whose AST-derived graph is available.",
+      "Indexed Degraded|Degraded · AST Missing": "Degraded indexed files still missing AST/graph truth.",
+      "Indexed · AST Ready|Indexed · Vectorized": "Indexed files whose vectorization is complete.",
+      "Indexed · AST Ready|Indexed · Not Yet Vectorized": "Indexed files still awaiting vectorization.",
+      "Degraded · AST Ready|Degraded · Vectorized": "Degraded indexed files whose vectorization is complete.",
+      "Degraded · AST Ready|Degraded · Not Yet Vectorized": "Degraded indexed files still awaiting vectorization."
+    }
 
-    const cCompleted = clamp(completed, total)
-    const cGraph = clamp(graphReady, cCompleted)
-    const cVectorFile = clamp(vectorFile, cGraph)
-    const cVectorGraph = clamp(vectorGraph, cVectorFile)
+    const link = (source, target, value, meta = {}) => ({
+      source,
+      target,
+      value: clamp(value),
+      description: edgeExplanations[`${source}|${target}`] ?? null,
+      ...meta
+    })
+    const linksData = [
+      link("Known Files", "Indexing", activeIndexing),
+      link("Known Files", "Pending", activePending),
+      link("Known Files", "Indexed", indexed),
+      link("Known Files", "Indexed Degraded", indexedDegraded),
+      link("Known Files", "Skipped", skipped),
+      link("Known Files", "Deleted", deleted),
+      link("Known Files", "Oversized", oversized),
+      link("Indexed", "Indexed · AST Ready", indexedGraphReady),
+      link("Indexed", "Indexed · AST Missing", indexedGraphMissing),
+      link("Indexed Degraded", "Degraded · AST Ready", indexedDegradedGraphReady),
+      link("Indexed Degraded", "Degraded · AST Missing", indexedDegradedGraphMissing),
+      link("Indexed · AST Ready", "Indexed · Vectorized", indexedVectorReady),
+      link("Indexed · AST Ready", "Indexed · Not Yet Vectorized", indexedVectorMissing),
+      link("Degraded · AST Ready", "Degraded · Vectorized", indexedDegradedVectorReady),
+      link("Degraded · AST Ready", "Degraded · Not Yet Vectorized", indexedDegradedVectorMissing)
+    ].filter(item => item.value > 0)
 
-    const data = [{
-      name: "Known Files",
-      value: total,
-      children: [
-        {
-          name: "Completed",
-          value: cCompleted,
-          children: [
-            {
-              name: "Graph Ready",
-              value: cGraph,
-              children: [
-                {
-                  name: "Vector File Ready",
-                  value: cVectorFile,
-                  children: [
-                    {name: "Vector Graph Ready", value: cVectorGraph},
-                    {name: "Vector Graph Pending", value: cVectorFile - cVectorGraph}
-                  ]
-                },
-                {name: "Vector File Pending", value: cGraph - cVectorFile}
-              ]
-            },
-            {name: "Graph Pending", value: cCompleted - cGraph}
-          ]
-        },
-        {name: "Not Completed", value: total - cCompleted}
-      ]
-    }]
+    const nodePalette = {
+      "Known Files": "#93c5fd",
+      "Indexing": "#38bdf8",
+      "Pending": "#fbbf24",
+      "Indexed": "#10b981",
+      "Indexed Degraded": "#fb923c",
+      "Skipped": "#94a3b8",
+      "Deleted": "#64748b",
+      "Oversized": "#ef4444",
+      "Indexed · AST Ready": "#22c55e",
+      "Indexed · AST Missing": "#f97316",
+      "Degraded · AST Ready": "#14b8a6",
+      "Degraded · AST Missing": "#f97316",
+      "Indexed · Vectorized": "#06b6d4",
+      "Indexed · Not Yet Vectorized": "#a78bfa",
+      "Degraded · Vectorized": "#0891b2",
+      "Degraded · Not Yet Vectorized": "#c084fc"
+    }
+
+    const nodesData = [...new Set(linksData.flatMap(item => [item.source, item.target]))].map(name => ({
+      name,
+      itemStyle: {color: nodePalette[name] ?? "#94a3b8"}
+    }))
 
     this.chart.setOption({
       animation: true,
-      animationDuration: 350,
-      animationDurationUpdate: 220,
+      animationDuration: 450,
+      animationDurationUpdate: 240,
       backgroundColor: "transparent",
-      tooltip: {trigger: "item"},
-      color: ["#5470C6", "#91CC75", "#FAC858", "#EE6666", "#73C0DE", "#3BA272", "#FC8452", "#9A60B4", "#EA7CCC"],
+      tooltip: {
+        trigger: "item",
+        formatter: (params) => {
+          if (params.dataType === "edge") {
+            const lines = [
+              `${params.data.source} → ${params.data.target}`,
+              `${params.data.value} files`
+            ]
+            if (params.data.description) lines.push(params.data.description)
+            return lines.join("<br/>")
+          }
+          return `${params.name}`
+        }
+      },
       series: [
         {
-          type: "sunburst",
-          data,
-          radius: ["10%", "92%"],
-          sort: null,
-          emphasis: {focus: "ancestor"},
-          itemStyle: {borderWidth: 2, borderColor: "#0b1220"},
-          label: {rotate: "radial", color: "#f8fafc", fontSize: 11, overflow: "truncate"},
-          levels: [
-            {},
-            {r0: "10%", r: "26%", itemStyle: {borderWidth: 2}, label: {fontSize: 12}},
-            {r0: "26%", r: "44%", itemStyle: {borderWidth: 2}},
-            {r0: "44%", r: "66%", itemStyle: {borderWidth: 2}},
-            {r0: "66%", r: "92%", itemStyle: {borderWidth: 2}, label: {fontSize: 10}}
-          ]
+          type: "sankey",
+          data: nodesData,
+          links: linksData,
+          top: 24,
+          bottom: 24,
+          left: 12,
+          right: 24,
+          nodeAlign: "left",
+          emphasis: {focus: "adjacency"},
+          draggable: false,
+          lineStyle: {
+            color: "source",
+            curveness: 0.45,
+            opacity: 0.44
+          },
+          itemStyle: {
+            borderWidth: 1,
+            borderColor: "rgba(15, 23, 42, 0.55)"
+          },
+          label: {
+            color: "#e2e8f0",
+            fontSize: 11,
+            fontWeight: 500
+          }
         }
       ]
     }, true)
@@ -119,7 +185,7 @@ const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: false,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, LiveViewWitness, WorkspaceSunburst},
+  hooks: {...colocatedHooks, LiveViewWitness, WorkspacePipelineFlow},
 })
 
 // Show progress bar on live navigation and form submits

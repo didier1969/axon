@@ -217,7 +217,8 @@ impl McpServer {
                 escaped_project
             ))
             .unwrap_or_else(|_| "[]".to_string());
-        let contract_rows: Vec<Vec<Value>> = serde_json::from_str(&contracts_raw).unwrap_or_default();
+        let contract_rows: Vec<Vec<Value>> =
+            serde_json::from_str(&contracts_raw).unwrap_or_default();
         let contracts = contract_rows
             .iter()
             .filter_map(|row| {
@@ -325,7 +326,10 @@ impl McpServer {
         conception
     }
 
-    fn build_project_status_delta(previous_summary: Option<&Value>, current_summary: &Value) -> Value {
+    fn build_project_status_delta(
+        previous_summary: Option<&Value>,
+        current_summary: &Value,
+    ) -> Value {
         let Some(previous) = previous_summary else {
             return json!({ "available": false });
         };
@@ -372,7 +376,10 @@ impl McpServer {
             reasoning.push("target lacks direct test coverage".to_string());
         }
         if traceability_links > 0 {
-            reasoning.push(format!("target has {} traceability link(s)", traceability_links));
+            reasoning.push(format!(
+                "target has {} traceability link(s)",
+                traceability_links
+            ));
         } else {
             reasoning.push("target has no traceability links".to_string());
         }
@@ -417,13 +424,13 @@ impl McpServer {
     }
 
     fn summarize_why_response(args: &Value, response: &mut Value) {
-        let Some(data) = response.get_mut("data").and_then(|value| value.as_object_mut()) else {
+        let Some(data) = response
+            .get_mut("data")
+            .and_then(|value| value.as_object_mut())
+        else {
             return;
         };
-        let planner = data
-            .get("planner")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let planner = data.get("planner").cloned().unwrap_or_else(|| json!({}));
         let packet = data.get("packet").cloned().unwrap_or_else(|| json!({}));
         let relevant_soll_entities = packet
             .get("relevant_soll_entities")
@@ -509,7 +516,10 @@ impl McpServer {
             self.resolve_scoped_symbol_id_canonical(symbol_name, Some(project))
         };
         let symbol_match_clause = if let Some(symbol_id) = resolved_symbol_id.as_deref() {
-            format!("(s.name = '{escaped_name}' OR s.id = '{}')", symbol_id.replace('\'', "''"))
+            format!(
+                "(s.name = '{escaped_name}' OR s.id = '{}')",
+                symbol_id.replace('\'', "''")
+            )
         } else {
             format!("s.name = '{escaped_name}'")
         };
@@ -602,8 +612,7 @@ impl McpServer {
         for row in rows {
             if let Some(name) = row.first().and_then(|value| value.as_str()) {
                 let tested = row.get(1).and_then(|value| value.as_i64()).unwrap_or(0) > 0;
-                let traceability_links =
-                    row.get(2).and_then(|value| value.as_u64()).unwrap_or(0);
+                let traceability_links = row.get(2).and_then(|value| value.as_u64()).unwrap_or(0);
                 result.insert(
                     name.to_string(),
                     json!({
@@ -721,8 +730,7 @@ impl McpServer {
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
         for row in rows {
             if let Some(id) = row.first().and_then(|value| value.as_str()) {
-                let traceability_links =
-                    row.get(1).and_then(|value| value.as_u64()).unwrap_or(0);
+                let traceability_links = row.get(1).and_then(|value| value.as_u64()).unwrap_or(0);
                 let verifies_edges = row.get(2).and_then(|value| value.as_u64()).unwrap_or(0);
                 let validation_nodes = row.get(3).and_then(|value| value.as_u64()).unwrap_or(0);
                 result.insert(
@@ -747,7 +755,10 @@ impl McpServer {
         result
     }
 
-    fn recommend_effort_and_risk(kind: &str, validation_signals: &Value) -> (&'static str, &'static str) {
+    fn recommend_effort_and_risk(
+        kind: &str,
+        validation_signals: &Value,
+    ) -> (&'static str, &'static str) {
         match kind {
             "wrapper" => {
                 let tested = validation_signals
@@ -799,7 +810,9 @@ impl McpServer {
         let runtime_mode = AxonRuntimeMode::from_env();
         let runtime_profile = AxonRuntimeOperationalProfile::from_mode_and_strings(
             runtime_mode.as_str(),
-            std::env::var("AXON_ENABLE_AUTONOMOUS_INGESTOR").ok().as_deref(),
+            std::env::var("AXON_ENABLE_AUTONOMOUS_INGESTOR")
+                .ok()
+                .as_deref(),
         );
         let public_tools = tools_catalog(false)
             .get("tools")
@@ -882,7 +895,11 @@ impl McpServer {
             format_standard_contract(
                 "ok",
                 "operator truth snapshot assembled",
-                &format!("runtime:{} / profile:{}", runtime_mode.as_str(), runtime_profile.as_str()),
+                &format!(
+                    "runtime:{} / profile:{}",
+                    runtime_mode.as_str(),
+                    runtime_profile.as_str()
+                ),
                 &evidence_by_mode(&evidence, mode),
                 &[
                     "run `anomalies` for structural risks",
@@ -942,7 +959,10 @@ impl McpServer {
             "project_code": project_code,
             "limit": 5
         }))?;
-        let soll_data = soll_context.get("data").cloned().unwrap_or_else(|| json!({}));
+        let soll_data = soll_context
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         let conception = self.cached_conception_view(project_code);
         let vision = soll_data
             .get("visions")
@@ -972,7 +992,8 @@ impl McpServer {
             .and_then(|snapshot| snapshot.get("anomaly_summary"));
         let snapshot_id = format!("project-status-{}-{}", project_code, Self::now_unix_ms());
         let generated_at = Self::now_unix_ms();
-        let delta_vs_previous = Self::build_project_status_delta(previous_summary, &anomaly_summary);
+        let delta_vs_previous =
+            Self::build_project_status_delta(previous_summary, &anomaly_summary);
         let degraded_notes = status_data
             .pointer("/availability/degraded_notes")
             .and_then(|value| value.as_array())
@@ -995,7 +1016,10 @@ impl McpServer {
             "provenance": "aggregated",
             "confidence": "medium"
         });
-        let snapshot_storage = match Self::persist_structural_snapshot(project_code, &snapshot_record) {
+        let snapshot_storage = match Self::persist_structural_snapshot(
+            project_code,
+            &snapshot_record,
+        ) {
             Ok(()) => json!({
                 "scope": "derived_non_canonical",
                 "path": Self::structural_history_path(project_code).to_string_lossy().to_string(),
@@ -1031,20 +1055,47 @@ impl McpServer {
 **Wrappers / Orphan code / Orphan intent:** {} / {} / {}\n\
 **Validation coverage:** {}\n\
 **Degradation notes:** {}\n",
-            vision.get("id").and_then(|value| value.as_str()).unwrap_or("unavailable"),
-            vision.get("title").and_then(|value| value.as_str()).unwrap_or("unavailable"),
-            vision.get("status").and_then(|value| value.as_str()).unwrap_or("unknown"),
-            status_data.get("runtime_mode").and_then(|value| value.as_str()).unwrap_or("unknown"),
-            status_data.get("runtime_profile").and_then(|value| value.as_str()).unwrap_or("unknown"),
-            status_data.get("drain_state").and_then(|value| value.as_str()).unwrap_or("unknown"),
+            vision
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unavailable"),
+            vision
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unavailable"),
+            vision
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown"),
+            status_data
+                .get("runtime_mode")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown"),
+            status_data
+                .get("runtime_profile")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown"),
+            status_data
+                .get("drain_state")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown"),
             if public_tools.is_empty() {
                 "unknown".to_string()
             } else {
                 public_tools.join(", ")
             },
-            anomaly_summary.get("wrapper_count").and_then(|value| value.as_i64()).unwrap_or(0),
-            anomaly_summary.get("orphan_code_count").and_then(|value| value.as_i64()).unwrap_or(0),
-            anomaly_summary.get("orphan_intent_count").and_then(|value| value.as_i64()).unwrap_or(0),
+            anomaly_summary
+                .get("wrapper_count")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
+            anomaly_summary
+                .get("orphan_code_count")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
+            anomaly_summary
+                .get("orphan_intent_count")
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0),
             anomaly_summary
                 .get("validation_coverage_score")
                 .map(|value| value.to_string())
@@ -1099,7 +1150,10 @@ impl McpServer {
     }
 
     pub(crate) fn axon_why(&self, args: &Value) -> Option<Value> {
-        let mode = args.get("mode").and_then(|value| value.as_str()).unwrap_or("brief");
+        let mode = args
+            .get("mode")
+            .and_then(|value| value.as_str())
+            .unwrap_or("brief");
         let include_graph = args
             .get("include_graph")
             .and_then(|value| value.as_bool())
@@ -1123,7 +1177,10 @@ impl McpServer {
             "include_soll": true,
             "include_graph": include_graph
         }))?;
-        if let Some(data) = response.get_mut("data").and_then(|value| value.as_object_mut()) {
+        if let Some(data) = response
+            .get_mut("data")
+            .and_then(|value| value.as_object_mut())
+        {
             data.insert("framework_alias".to_string(), json!("why"));
         }
         Self::summarize_why_response(args, &mut response);
@@ -1138,7 +1195,10 @@ impl McpServer {
                 "isError": true
             }));
         }
-        let sink = args.get("sink").and_then(|value| value.as_str()).map(str::trim);
+        let sink = args
+            .get("sink")
+            .and_then(|value| value.as_str())
+            .map(str::trim);
         let project = args.get("project").and_then(|value| value.as_str());
         let depth = args
             .get("depth")
@@ -1229,7 +1289,8 @@ impl McpServer {
         ));
 
         let mut resolved_path: Option<(Vec<String>, Vec<String>)> = None;
-        while let Some((node_id, path_ids, path_names, edge_kinds, current_depth)) = queue.pop_front()
+        while let Some((node_id, path_ids, path_names, edge_kinds, current_depth)) =
+            queue.pop_front()
         {
             if node_id == sink_id {
                 resolved_path = Some((path_names, edge_kinds));
@@ -1297,7 +1358,10 @@ impl McpServer {
                     .map(|value| format!("project:{}", value))
                     .unwrap_or_else(|| "workspace:*".to_string()),
                 &evidence_by_mode(&evidence, mode),
-                &["run `impact` to expand blast radius", "run `why` to join rationale"],
+                &[
+                    "run `impact` to expand blast radius",
+                    "run `why` to join rationale"
+                ],
                 "medium",
             )
         );
@@ -1430,7 +1494,11 @@ impl McpServer {
             .collect::<Vec<_>>();
         let abstraction_detour_entities = abstraction_detours
             .iter()
-            .take(if brief_mode { 5 } else { abstraction_detours.len() })
+            .take(if brief_mode {
+                5
+            } else {
+                abstraction_detours.len()
+            })
             .cloned()
             .collect::<Vec<_>>();
         let orphan_code_entities = orphan_code
@@ -1593,16 +1661,17 @@ impl McpServer {
         }
         for node in &orphan_intent_entities {
             let node_id = node.split(' ').next().unwrap_or(node);
-            let validation_signals = intent_validation_map
-                .get(node_id)
-                .cloned()
-                .unwrap_or_else(|| {
-                    json!({
-                        "traceability_links": 0,
-                        "verifies_edges": 0,
-                        "validation_nodes": 0
-                    })
-                });
+            let validation_signals =
+                intent_validation_map
+                    .get(node_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "traceability_links": 0,
+                            "verifies_edges": 0,
+                            "validation_nodes": 0
+                        })
+                    });
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("orphan_intent", &validation_signals);
             findings.push(json!({
@@ -1646,7 +1715,10 @@ impl McpServer {
             }));
         }
         for name in &god_object_entities {
-            let count = god_objects.get(name).and_then(|value| value.as_i64()).unwrap_or(0);
+            let count = god_objects
+                .get(name)
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0);
             let validation_signals = symbol_validation_map
                 .get(name)
                 .cloned()
@@ -1675,7 +1747,8 @@ impl McpServer {
             0.0
         };
         let alignment_proxy_score = if total_symbols > 0 {
-            (((total_symbols.saturating_sub(orphan_code.len() as i64)) as f64 / total_symbols as f64)
+            (((total_symbols.saturating_sub(orphan_code.len() as i64)) as f64
+                / total_symbols as f64)
                 * 100.0
                 * 10.0)
                 .round()
@@ -1703,8 +1776,7 @@ impl McpServer {
             100.0
         };
         let orphan_intent_rate = if total_intent_nodes > 0 {
-            ((orphan_intent.len() as f64 / total_intent_nodes as f64) * 100.0 * 10.0).round()
-                / 10.0
+            ((orphan_intent.len() as f64 / total_intent_nodes as f64) * 100.0 * 10.0).round() / 10.0
         } else {
             0.0
         };
@@ -1766,15 +1838,17 @@ impl McpServer {
                 })
             })
             .collect::<Vec<_>>();
-        recommendations.sort_by_key(|item| match item
-            .get("severity")
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown")
-        {
-            "high" => 0,
-            "medium" => 1,
-            "low" => 2,
-            _ => 3,
+        recommendations.sort_by_key(|item| {
+            match item
+                .get("severity")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown")
+            {
+                "high" => 0,
+                "medium" => 1,
+                "low" => 2,
+                _ => 3,
+            }
         });
         if brief_mode {
             recommendations.truncate(12);
@@ -1893,7 +1967,9 @@ impl McpServer {
                 "isError": true
             }));
         }
-        let from_snapshot_id = args.get("from_snapshot_id").and_then(|value| value.as_str());
+        let from_snapshot_id = args
+            .get("from_snapshot_id")
+            .and_then(|value| value.as_str());
         let to_snapshot_id = args.get("to_snapshot_id").and_then(|value| value.as_str());
 
         let resolve = |snapshot_id: Option<&str>, prefer_last: bool| -> Option<Value> {
@@ -1901,7 +1977,9 @@ impl McpServer {
                 .and_then(|id| {
                     snapshots
                         .iter()
-                        .find(|item| item.get("snapshot_id").and_then(|value| value.as_str()) == Some(id))
+                        .find(|item| {
+                            item.get("snapshot_id").and_then(|value| value.as_str()) == Some(id)
+                        })
                         .cloned()
                 })
                 .or_else(|| {
@@ -1954,7 +2032,10 @@ impl McpServer {
             .get("project_code")
             .and_then(|value| value.as_str())
             .unwrap_or("AXO");
-        let mode = args.get("mode").and_then(|value| value.as_str()).unwrap_or("brief");
+        let mode = args
+            .get("mode")
+            .and_then(|value| value.as_str())
+            .unwrap_or("brief");
         let conception = self.cached_conception_view(project_code);
         let boundary_violations = if mode == "brief" {
             Vec::new()
@@ -1978,10 +2059,22 @@ impl McpServer {
 **Modules / Interfaces / Contracts / Flows:** {} / {} / {} / {}\n\
 **Boundary violations:** {}\n",
             project_code,
-            conception.get("module_count").and_then(|value| value.as_u64()).unwrap_or(0),
-            conception.get("interface_count").and_then(|value| value.as_u64()).unwrap_or(0),
-            conception.get("contract_count").and_then(|value| value.as_u64()).unwrap_or(0),
-            conception.get("flow_count").and_then(|value| value.as_u64()).unwrap_or(0),
+            conception
+                .get("module_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            conception
+                .get("interface_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            conception
+                .get("contract_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            conception
+                .get("flow_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
             boundary_violations.len()
         );
         let report = format!(
@@ -1991,7 +2084,10 @@ impl McpServer {
                 "derived conception view assembled",
                 &format!("project:{}", project_code),
                 &evidence_by_mode(&evidence, Some(mode)),
-                &["use `why` for rationale", "use `path` to inspect a flow in detail"],
+                &[
+                    "use `why` for rationale",
+                    "use `path` to inspect a flow in detail"
+                ],
                 "medium",
             )
         );
@@ -2094,7 +2190,11 @@ impl McpServer {
                 .unwrap_or_else(|| json!(0))
         });
         let (change_safety, reasoning, recommended_guardrails, confidence) =
-            Self::summarize_change_safety(&coverage_signals, &traceability_signals, &validation_signals);
+            Self::summarize_change_safety(
+                &coverage_signals,
+                &traceability_signals,
+                &validation_signals,
+            );
         let (safe_to_act, needs_human_confirmation) =
             (change_safety == "safe", change_safety != "safe");
 
@@ -2106,8 +2206,14 @@ impl McpServer {
             target,
             target_type,
             change_safety,
-            traceability_signals.get("traceability_links").and_then(|value| value.as_u64()).unwrap_or(0),
-            coverage_signals.get("tested").and_then(|value| value.as_bool()).unwrap_or(false)
+            traceability_signals
+                .get("traceability_links")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            coverage_signals
+                .get("tested")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
         );
         let report = format!(
             "## 🛡️ Change Safety\n\n{}",
@@ -2116,7 +2222,10 @@ impl McpServer {
                 "derived change-safety summary assembled",
                 &format!("project:{}", project_code),
                 &evidence_by_mode(&evidence, args.get("mode").and_then(|value| value.as_str())),
-                &["run `impact` before mutation", "use `why` to confirm intent remains valid"],
+                &[
+                    "run `impact` before mutation",
+                    "use `why` to confirm intent remains valid"
+                ],
                 confidence,
             )
         );

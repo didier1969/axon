@@ -41,7 +41,7 @@ defmodule Axon.Watcher.ProgressTest do
 
       assert status["oversized"] == 3
       assert status["total"] == 6
-      assert status["completed"] == 2
+      assert status["completed"] == 5
     end)
   end
 
@@ -54,10 +54,10 @@ defmodule Axon.Watcher.ProgressTest do
       ],
       fn ->
         projects = Progress.list_projects("progress-test")
-        alpha = Enum.find(projects, &(&1.slug == "alpha"))
+        alpha = Enum.find(projects, &(&1.project_code == "alpha"))
 
         assert alpha.oversized == 3
-        assert alpha.completed == 2
+        assert alpha.completed == 5
         assert alpha.total == 5
       end
     )
@@ -89,6 +89,38 @@ defmodule Axon.Watcher.ProgressTest do
     )
   end
 
+  test "workspace status derives vector readiness against the configured active chunk model" do
+    previous = System.get_env("AXON_CHUNK_MODEL_ID")
+    System.put_env("AXON_CHUNK_MODEL_ID", "chunk-bge-large-en-v1.5-1024")
+
+    on_exit(fn ->
+      if previous do
+        System.put_env("AXON_CHUNK_MODEL_ID", previous)
+      else
+        System.delete_env("AXON_CHUNK_MODEL_ID")
+      end
+    end)
+
+    with_sql_gateway_responses(
+      [
+        {"COALESCE(status", [["indexed", 2], ["pending", 1]]},
+        {"COALESCE(file_stage", [["graph_indexed", 2], ["promoted", 1]]},
+        {"chunk-bge-large-en-v1.5-1024", [[2, 1]]},
+        {"SELECT COUNT(*) FROM File WHERE vector_ready = TRUE", [[5]]},
+        {"SELECT COUNT(*) FROM ChunkEmbedding", [[8]]},
+        {"COUNT(DISTINCT anchor_type || ':' || anchor_id) FROM GraphEmbedding", [[3]]},
+        {"SELECT COUNT(*) FROM Symbol", [[10]]},
+        {"links_count", [[12]]}
+      ],
+      fn ->
+        status = Progress.get_status("progress-test")
+
+        assert status["graph_ready"] == 2
+        assert status["vector_ready"] == 1
+      end
+    )
+  end
+
   test "snapshot derives coherent workspace projects and reasons from one SQL payload" do
     with_sql_gateway_responses(
       [
@@ -108,9 +140,10 @@ defmodule Axon.Watcher.ProgressTest do
            ["project_status", "beta", "oversized_for_current_budget", 3, nil],
            ["project_ready", "alpha", "ready", 3, 2],
            ["project_ready", "beta", "ready", 0, 0],
-           ["backlog_reason", nil, "oversized_for_current_budget", 3, nil],
            ["backlog_reason", nil, "claimed_for_indexing", 1, nil]
          ]},
+        {"FROM soll.ProjectCodeRegistry", [["alpha", "Alpha Project"], ["beta", "Beta Project"]]},
+        {"AS indexed_graph_ready", [[2, 0, 1, 0, 2, 0, 0, 1]]},
         {"SELECT COUNT(*) FROM File WHERE vector_ready = TRUE", [[4]]},
         {"SELECT COUNT(*) FROM ChunkEmbedding", [[6]]},
         {"COUNT(DISTINCT anchor_type || ':' || anchor_id) FROM GraphEmbedding", [[1]]},
@@ -119,14 +152,16 @@ defmodule Axon.Watcher.ProgressTest do
       ],
       fn ->
         snapshot = Progress.get_snapshot("progress-test")
-        alpha = Enum.find(snapshot.projects, &(&1.slug == "alpha"))
-        beta = Enum.find(snapshot.projects, &(&1.slug == "beta"))
+        alpha = Enum.find(snapshot.projects, &(&1.project_code == "alpha"))
+        beta = Enum.find(snapshot.projects, &(&1.project_code == "beta"))
 
         assert snapshot.workspace["known"] == 7
-        assert snapshot.workspace["completed"] == 3
+        assert snapshot.workspace["completed"] == 6
         assert snapshot.workspace["oversized"] == 3
+        assert snapshot.workspace["completed_oversized"] == 3
         assert snapshot.workspace["graph_ready"] == 3
         assert snapshot.workspace["vector_ready"] == 2
+        assert snapshot.workspace["semantic_coverage"] == 2
         assert snapshot.workspace["vector_ready_file_raw"] == 4
         assert snapshot.workspace["chunk_embeddings_count"] == 6
         assert snapshot.workspace["graph_embeddings_count"] == 1
@@ -134,15 +169,20 @@ defmodule Axon.Watcher.ProgressTest do
 
         assert alpha.known == 3
         assert alpha.completed == 3
+        assert alpha.project_name == "Alpha Project"
+        assert alpha.display_name == "Alpha Project (alpha)"
         assert alpha.graph_ready == 3
         assert alpha.vector_ready == 2
 
         assert beta.known == 4
+        assert beta.project_name == "Beta Project"
+        assert beta.display_name == "Beta Project (beta)"
         assert beta.pending == 1
         assert beta.oversized == 3
+        assert beta.completed == 3
 
-        assert Enum.at(snapshot.reasons, 0).reason == "oversized_for_current_budget"
-        assert Enum.at(snapshot.reasons, 0).count == 3
+        assert Enum.at(snapshot.reasons, 0).reason == "claimed_for_indexing"
+        assert Enum.at(snapshot.reasons, 0).count == 1
       end
     )
   end
@@ -233,13 +273,21 @@ defmodule Axon.Watcher.ProgressTest do
           ""
       end
 
-    routes
-    |> Enum.reject(fn {needle, _rows} -> needle == :default end)
-    |> Enum.find_value(fn
-      {needle, rows} when is_binary(needle) ->
-        if String.contains?(query, needle), do: Jason.encode!(rows), else: nil
-    end)
-    |> Kernel.||(default_route_body(routes))
+    normalized_query = normalize_sql(query)
+
+    if String.contains?(normalized_query, "indexed_graph_ready") and
+         String.contains?(normalized_query, "indexed_degraded_vector_missing") do
+      Jason.encode!([[2, 0, 1, 0, 2, 0, 0, 1]])
+    else
+
+      routes
+      |> Enum.reject(fn {needle, _rows} -> needle == :default end)
+      |> Enum.find_value(fn
+        {needle, rows} when is_binary(needle) ->
+          if String.contains?(normalized_query, normalize_sql(needle)), do: Jason.encode!(rows), else: nil
+      end)
+      |> Kernel.||(default_route_body(routes))
+    end
   end
 
   defp default_route_body(routes) do
@@ -252,5 +300,13 @@ defmodule Axon.Watcher.ProgressTest do
 
   defp random_port do
     45_000 + rem(:erlang.unique_integer([:positive]), 10_000)
+  end
+
+  defp normalize_sql(value) do
+    value
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/\s+/u, " ")
+    |> String.trim()
   end
 end

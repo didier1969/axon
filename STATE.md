@@ -67,7 +67,7 @@ Les outils MCP et le cockpit Phoenix rendent maintenant cette dégradation expli
 - `Progress` ne garde plus d'overlay mutable local; la progression affichée reste dérivée de SQL
 - `GraphProjection` inclut maintenant `CALLS_NIF`
 - les tombstones et réindexations invalident désormais les projections, états de projection et embeddings graphe dépendants
-- `axon_query` scope désormais les recherches projet sur `project_slug`, pas sur une sous-chaîne de chemin
+- `axon_query` scope désormais les recherches projet sur `project_code`, pas sur une sous-chaîne de chemin
 - `axon_query` réutilise maintenant le worker sémantique isolé pour les embeddings de requête quand la pression service reste `healthy` ou `recovering`
 - sous pression `degraded` ou `critical`, `axon_query` retombe explicitement en mode structurel au lieu de bloquer ou d’inventer une similarité sémantique
 - la télémétrie cockpit en tests est maintenant remise à zéro explicitement entre cas pour éviter les faux négatifs liés à l’état ETS partagé

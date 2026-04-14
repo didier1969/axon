@@ -13,6 +13,34 @@ SPEC.loader.exec_module(MODULE)
 
 
 class McpValidateTests(unittest.TestCase):
+    def test_build_args_covers_public_operator_surface(self) -> None:
+        self.assertEqual(
+            MODULE.build_args("status", {}, "AXO", "axon", "checkout", {})["mode"],
+            "brief",
+        )
+        project_status_args = MODULE.build_args("project_status", {}, "AXO", "axon", "checkout", {})
+        self.assertEqual(project_status_args["project_code"], "AXO")
+        self.assertEqual(project_status_args["mode"], "brief")
+        snapshot_history_args = MODULE.build_args("snapshot_history", {}, "AXO", "axon", "checkout", {})
+        self.assertEqual(snapshot_history_args["project_code"], "AXO")
+        self.assertEqual(snapshot_history_args["limit"], 5)
+        snapshot_diff_args = MODULE.build_args("snapshot_diff", {}, "AXO", "axon", "checkout", {})
+        self.assertEqual(snapshot_diff_args["project_code"], "AXO")
+        conception_view_args = MODULE.build_args("conception_view", {}, "AXO", "axon", "checkout", {})
+        self.assertEqual(conception_view_args["project_code"], "AXO")
+        change_safety_args = MODULE.build_args("change_safety", {}, "AXO", "axon", "checkout", {})
+        self.assertEqual(change_safety_args["target"], "checkout")
+        self.assertEqual(change_safety_args["target_type"], "symbol")
+        why_args = MODULE.build_args("why", {}, "AXO", "axon", "checkout", {})
+        self.assertEqual(why_args["symbol"], "checkout")
+        self.assertEqual(why_args["project"], "AXO")
+        path_args = MODULE.build_args("path", {}, "AXO", "axon", "checkout", {})
+        self.assertEqual(path_args["source"], "checkout")
+        self.assertEqual(path_args["project"], "AXO")
+        anomalies_args = MODULE.build_args("anomalies", {}, "AXO", "axon", "checkout", {})
+        self.assertEqual(anomalies_args["project"], "AXO")
+        self.assertEqual(anomalies_args["mode"], "brief")
+
     def test_build_args_reuses_preview_id_from_validation_state(self) -> None:
         args = MODULE.build_args(
             "soll_commit_revision",
@@ -40,6 +68,168 @@ class McpValidateTests(unittest.TestCase):
         resp = {"result": {"content": [{"type": "text", "text": "ok"}]}}
 
         status, note = MODULE.evaluate_tool_result("query", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(note, "ok")
+
+    def test_evaluate_tool_result_checks_public_status_contract(self) -> None:
+        resp = {
+            "result": {
+                "content": [{"type": "text", "text": "ok"}],
+                "data": {
+                    "runtime_mode": "mcp_http",
+                    "runtime_profile": "advanced",
+                    "truth_status": "canonical",
+                    "canonical_sources": {
+                        "soll_export": {"reimportable": True},
+                    },
+                },
+            }
+        }
+
+        status, note = MODULE.evaluate_tool_result("status", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(note, "ok")
+
+    def test_evaluate_tool_result_checks_project_status_contract(self) -> None:
+        resp = {
+            "result": {
+                "content": [{"type": "text", "text": "ok"}],
+                "data": {
+                    "project_code": "AXO",
+                    "snapshot_id": "project-status-1",
+                    "generated_at": 123456789,
+                    "delta_vs_previous": {"available": False},
+                    "vision": {"id": "VIS-AXO-001"},
+                    "runtime": {"runtime_mode": "mcp_http"},
+                    "anomalies": {"summary": {}},
+                    "conception": {"module_count": 1},
+                    "soll_context": {"visions": []},
+                },
+            }
+        }
+
+        status, note = MODULE.evaluate_tool_result("project_status", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(note, "ok")
+
+    def test_evaluate_tool_result_checks_snapshot_history_contract(self) -> None:
+        resp = {
+            "result": {
+                "content": [{"type": "text", "text": "ok"}],
+                "data": {
+                    "snapshots": [],
+                    "storage": {"scope": "derived_non_canonical"},
+                },
+            }
+        }
+
+        status, note = MODULE.evaluate_tool_result("snapshot_history", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(note, "ok")
+
+    def test_evaluate_tool_result_checks_snapshot_diff_contract(self) -> None:
+        resp = {
+            "result": {
+                "content": [{"type": "text", "text": "ok"}],
+                "data": {
+                    "from_snapshot_id": "snap-1",
+                    "to_snapshot_id": "snap-2",
+                    "metric_delta": {"orphan_code_count_delta": 1},
+                },
+            }
+        }
+
+        status, note = MODULE.evaluate_tool_result("snapshot_diff", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(note, "ok")
+
+    def test_evaluate_tool_result_checks_conception_view_contract(self) -> None:
+        resp = {
+            "result": {
+                "content": [{"type": "text", "text": "ok"}],
+                "data": {
+                    "modules": [],
+                    "interfaces": [],
+                    "contracts": [],
+                    "flows": [],
+                },
+            }
+        }
+
+        status, note = MODULE.evaluate_tool_result("conception_view", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(note, "ok")
+
+    def test_evaluate_tool_result_checks_change_safety_contract(self) -> None:
+        resp = {
+            "result": {
+                "content": [{"type": "text", "text": "ok"}],
+                "data": {
+                    "target": "checkout",
+                    "change_safety": "caution",
+                    "coverage_signals": {},
+                    "traceability_signals": {},
+                    "validation_signals": {},
+                },
+            }
+        }
+
+        status, note = MODULE.evaluate_tool_result("change_safety", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(note, "ok")
+
+    def test_evaluate_tool_result_rejects_incomplete_public_why_contract(self) -> None:
+        resp = {
+            "result": {
+                "content": [{"type": "text", "text": "ok"}],
+                "data": {"framework_alias": "why"},
+            }
+        }
+
+        status, note = MODULE.evaluate_tool_result("why", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "fail")
+        self.assertIn("structured why payload", note)
+
+    def test_evaluate_tool_result_checks_public_anomalies_contract(self) -> None:
+        resp = {
+            "result": {
+                "content": [{"type": "text", "text": "ok"}],
+                "data": {
+                    "summary": {"wrapper_count": 1},
+                    "findings": [],
+                    "recommendations": [],
+                },
+            }
+        }
+
+        status, note = MODULE.evaluate_tool_result("anomalies", resp, "http://example.test", 1)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(note, "ok")
+
+    def test_evaluate_tool_result_checks_soll_query_context_includes_visions(self) -> None:
+        resp = {
+            "result": {
+                "content": [{"type": "text", "text": "ok"}],
+                "data": {
+                    "project_code": "AXO",
+                    "visions": ["VIS-AXO-001|Axon Vision|accepted|Vision first"],
+                    "requirements": [],
+                    "decisions": [],
+                    "revisions": [],
+                },
+            }
+        }
+
+        status, note = MODULE.evaluate_tool_result("soll_query_context", resp, "http://example.test", 1)
 
         self.assertEqual(status, "ok")
         self.assertEqual(note, "ok")

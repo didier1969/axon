@@ -52,8 +52,8 @@ impl McpServer {
     }
 
     pub(crate) fn indexing_diagnosis_markdown(&self, project: &str) -> String {
-        let file_filter = Self::project_filter(project, "project_slug");
-        let symbol_filter = Self::project_filter(project, "project_slug");
+        let file_filter = Self::project_filter(project, "project_code");
+        let symbol_filter = Self::project_filter(project, "project_code");
         let known = self.sql_scalar(&format!("SELECT count(*) FROM File WHERE {}", file_filter));
         let global_known = self.sql_scalar("SELECT count(*) FROM File");
         let pending = self.sql_scalar(&format!(
@@ -74,11 +74,11 @@ impl McpServer {
         ));
         let calls_direct = self.sql_scalar(&format!(
             "SELECT count(*) FROM CALLS c JOIN Symbol s ON c.source_id = s.id WHERE {}",
-            Self::project_filter(project, "s.project_slug")
+            Self::project_filter(project, "s.project_code")
         ));
         let calls_nif = self.sql_scalar(&format!(
             "SELECT count(*) FROM CALLS_NIF c JOIN Symbol s ON c.source_id = s.id WHERE {}",
-            Self::project_filter(project, "s.project_slug")
+            Self::project_filter(project, "s.project_code")
         ));
         let top_reasons = self.sql_rows(&format!(
             "SELECT COALESCE(status_reason, 'unknown'), count(*) \
@@ -99,7 +99,7 @@ impl McpServer {
         if known == 0 {
             if project != "*" && global_known > 0 {
                 causes.push(
-                    "scope_mismatch_or_wrong_project_slug: le workspace contient des fichiers, mais pas ce projet"
+                    "scope_mismatch_or_wrong_project_code: le workspace contient des fichiers, mais pas ce projet"
                         .to_string(),
                 );
             } else {
@@ -123,11 +123,14 @@ impl McpServer {
         }
         if symbols > 0 && (calls_direct + calls_nif) == 0 {
             causes.push(
-                "call_graph_gap: symboles présents mais graphe d'appels vide pour ce scope".to_string(),
+                "call_graph_gap: symboles présents mais graphe d'appels vide pour ce scope"
+                    .to_string(),
             );
         }
         if causes.is_empty() {
-            causes.push("no_blocker_detected: aucun blocage majeur détecté par ce diagnostic".to_string());
+            causes.push(
+                "no_blocker_detected: aucun blocage majeur détecté par ce diagnostic".to_string(),
+            );
         }
 
         let reason_lines = if top_reasons.is_empty() {
@@ -137,7 +140,10 @@ impl McpServer {
                 .iter()
                 .filter_map(|row| {
                     let reason = row.first()?.as_str()?;
-                    let count = row.get(1)?.as_i64().or_else(|| row.get(1)?.as_u64().map(|v| v as i64))?;
+                    let count = row
+                        .get(1)?
+                        .as_i64()
+                        .or_else(|| row.get(1)?.as_u64().map(|v| v as i64))?;
                     Some(format!("* `{}`: {}", reason, count))
                 })
                 .collect::<Vec<_>>()
@@ -151,7 +157,10 @@ impl McpServer {
                 .iter()
                 .filter_map(|row| {
                     let reason = row.first()?.as_str()?;
-                    let count = row.get(1)?.as_i64().or_else(|| row.get(1)?.as_u64().map(|v| v as i64))?;
+                    let count = row
+                        .get(1)?
+                        .as_i64()
+                        .or_else(|| row.get(1)?.as_u64().map(|v| v as i64))?;
                     Some(format!("* `{}`: {}", reason, count))
                 })
                 .collect::<Vec<_>>()
@@ -178,11 +187,21 @@ impl McpServer {
              **Top status reasons**\n{}\n\n\
              **Top parser/runtime errors**\n{}\n\n\
              **Remediation hints**\n\
-             * validate project slug and scope (`project_slug`) used in calls\n\
+             * validate project code and scope (`project_code`) used in calls\n\
              * check watch root and ignored paths\n\
              * inspect parser support and `last_error_reason`\n\
              * if symbols > 0 but calls = 0, run bridge refinement and inspect FFI boundaries",
-            project, known, completed, pending, indexing, symbols, calls_direct, calls_nif, cause_lines, reason_lines, error_lines
+            project,
+            known,
+            completed,
+            pending,
+            indexing,
+            symbols,
+            calls_direct,
+            calls_nif,
+            cause_lines,
+            reason_lines,
+            error_lines
         )
     }
 
@@ -197,7 +216,7 @@ impl McpServer {
             "SELECT count(*) FROM File".to_string()
         } else {
             format!(
-                "SELECT count(*) FROM File WHERE project_slug = '{}'",
+                "SELECT count(*) FROM File WHERE project_code = '{}'",
                 project.replace('\'', "''")
             )
         };
@@ -222,7 +241,8 @@ impl McpServer {
             .ok()?;
         let anchor_rows: Vec<Vec<Value>> = serde_json::from_str(&anchor_res).unwrap_or_default();
         let anchor_id = anchor_rows.first()?.first()?.as_str()?;
-        let query = "
+        let query = format!(
+            "
             SELECT other.name, other.kind, array_cosine_distance(anchor.embedding, peer.embedding) AS score
             FROM GraphEmbedding anchor
             JOIN GraphProjectionState anchor_state
@@ -246,13 +266,14 @@ impl McpServer {
               ON other.id = peer.anchor_id
             WHERE anchor.anchor_type = 'symbol'
               AND anchor.anchor_id = $anchor
-              AND anchor.model_id = 'graph-bge-small-en-v1.5-384'
+              AND anchor.model_id = '{GRAPH_MODEL_ID}'
               AND array_cosine_distance(anchor.embedding, peer.embedding) < 0.05
             ORDER BY score ASC
-            LIMIT 5";
+            LIMIT 5"
+        );
         let res = self
             .graph_store
-            .query_json_param(query, &json!({"anchor": anchor_id}))
+            .query_json_param(&query, &json!({"anchor": anchor_id}))
             .ok()?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
         if rows.is_empty() {
@@ -286,7 +307,10 @@ impl McpServer {
                     "project appears unindexed for audit scope",
                     &format!("project:{}", project),
                     &format!("{}\n\n{}", warning, diagnostic),
-                    &["run indexing and retry", "check project slug and ignore filters"],
+                    &[
+                        "run indexing and retry",
+                        "check project code and ignore filters"
+                    ],
                     "low",
                 )
             );
@@ -345,86 +369,135 @@ impl McpServer {
         }
 
         evidence.push_str(&format!("\n### 🧪 Qualité & Tests : {}%\n", cov_score));
-        
-        evidence.push_str(&format!("\n### 🧹 Hygiène du Code (Clean-As-You-Go) : {}/100\n", hygiene_score));
+
+        evidence.push_str(&format!(
+            "\n### 🧹 Hygiène du Code (Clean-As-You-Go) : {}/100\n",
+            hygiene_score
+        ));
         if god_objects.is_empty() && dead_code == 0 {
             evidence.push_str("✅ Codebase saine : Zéro God Object et zéro code mort détecté.\n");
         } else {
             if !god_objects.is_empty() {
-                evidence.push_str(&format!("* 🚨 {} God Objects (fichiers/fonctions monolithiques) détectés.\n", god_objects.len()));
+                evidence.push_str(&format!(
+                    "* 🚨 {} God Objects (fichiers/fonctions monolithiques) détectés.\n",
+                    god_objects.len()
+                ));
             }
             if dead_code > 0 {
                 evidence.push_str(&format!("* 🗑️ {} fonctions mortes (non publiques et sans appelant) détectées. Veuillez les supprimer.\n", dead_code));
             }
         }
 
-        evidence.push_str(&format!("\n### 📡 Télémétrie & Observabilité : {}/100\n", telemetry_score));
+        evidence.push_str(&format!(
+            "\n### 📡 Télémétrie & Observabilité : {}/100\n",
+            telemetry_score
+        ));
         if telemetry_score < 100 {
             evidence.push_str("🚨 Appels à des fonctions de log textuelles brutes (`println!`, `console.log`, etc.) détectés. Utilisez la télémétrie structurée.\n");
         } else {
             evidence.push_str("✅ Observabilité conforme (zéro appel de log brut détecté).\n");
         }
 
-        let circular_deps = self.graph_store.get_circular_dependencies(project).unwrap_or_default();
-        let domain_leaks = self.graph_store.get_domain_leakage(project, "domain", "infrastructure").unwrap_or_default();
-        let unsafe_exposure = self.graph_store.get_unsafe_exposure(project).unwrap_or_default();
-        let nif_blocking_risks = self.graph_store.get_nif_blocking_risks(project).unwrap_or_default();
-        
+        let circular_deps = self
+            .graph_store
+            .get_circular_dependencies(project)
+            .unwrap_or_default();
+        let domain_leaks = self
+            .graph_store
+            .get_domain_leakage(project, "domain", "infrastructure")
+            .unwrap_or_default();
+        let unsafe_exposure = self
+            .graph_store
+            .get_unsafe_exposure(project)
+            .unwrap_or_default();
+        let nif_blocking_risks = self
+            .graph_store
+            .get_nif_blocking_risks(project)
+            .unwrap_or_default();
+
         evidence.push_str("\n### 🌪️ Anti-Patterns Architecturaux\n");
         if circular_deps.is_empty() {
             evidence.push_str("✅ Aucune dépendance circulaire détectée.\n");
         } else {
-            evidence.push_str(&format!("🚨 [{}] Dépendances circulaires détectées :\n", circular_deps.len()));
+            evidence.push_str(&format!(
+                "🚨 [{}] Dépendances circulaires détectées :\n",
+                circular_deps.len()
+            ));
             for path in circular_deps.iter().take(5) {
                 evidence.push_str(&format!("*   `{}`\n", path));
             }
             if circular_deps.len() > 5 {
-                evidence.push_str(&format!("*   ... et {} autres boucles.\n", circular_deps.len() - 5));
+                evidence.push_str(&format!(
+                    "*   ... et {} autres boucles.\n",
+                    circular_deps.len() - 5
+                ));
             }
         }
 
         if domain_leaks.is_empty() {
             evidence.push_str("✅ Aucune fuite de domaine détectée.\n");
         } else {
-            evidence.push_str(&format!("🚨 [{}] Fuites de Domaine détectées :\n", domain_leaks.len()));
+            evidence.push_str(&format!(
+                "🚨 [{}] Fuites de Domaine détectées :\n",
+                domain_leaks.len()
+            ));
             for leak in domain_leaks.iter().take(5) {
                 evidence.push_str(&format!("*   `{}`\n", leak));
             }
             if domain_leaks.len() > 5 {
-                evidence.push_str(&format!("*   ... et {} autres fuites.\n", domain_leaks.len() - 5));
+                evidence.push_str(&format!(
+                    "*   ... et {} autres fuites.\n",
+                    domain_leaks.len() - 5
+                ));
             }
         }
 
         if unsafe_exposure.is_empty() {
             evidence.push_str("✅ Aucune exposition unsafe détectée.\n");
         } else {
-            evidence.push_str(&format!("🚨 [{}] Expositions Unsafe détectées :\n", unsafe_exposure.len()));
+            evidence.push_str(&format!(
+                "🚨 [{}] Expositions Unsafe détectées :\n",
+                unsafe_exposure.len()
+            ));
             for exp in unsafe_exposure.iter().take(5) {
                 evidence.push_str(&format!("*   `{}`\n", exp));
             }
             if unsafe_exposure.len() > 5 {
-                evidence.push_str(&format!("*   ... et {} autres expositions.\n", unsafe_exposure.len() - 5));
+                evidence.push_str(&format!(
+                    "*   ... et {} autres expositions.\n",
+                    unsafe_exposure.len() - 5
+                ));
             }
         }
 
         if nif_blocking_risks.is_empty() {
             evidence.push_str("✅ Aucun risque de blocage NIF (Scheduler Starvation) détecté.\n");
         } else {
-            evidence.push_str(&format!("🚨 [{}] Risques de Blocage NIF détectés (Profondeur d'appel critique) :\n", nif_blocking_risks.len()));
+            evidence.push_str(&format!(
+                "🚨 [{}] Risques de Blocage NIF détectés (Profondeur d'appel critique) :\n",
+                nif_blocking_risks.len()
+            ));
             for risk in nif_blocking_risks.iter().take(5) {
                 evidence.push_str(&format!("*   `{}`\n", risk));
             }
             if nif_blocking_risks.len() > 5 {
-                evidence.push_str(&format!("*   ... et {} autres risques.\n", nif_blocking_risks.len() - 5));
+                evidence.push_str(&format!(
+                    "*   ... et {} autres risques.\n",
+                    nif_blocking_risks.len() - 5
+                ));
             }
         }
 
-        let overall_score = if !circular_deps.is_empty() || !domain_leaks.is_empty() || !unsafe_exposure.is_empty() || !nif_blocking_risks.is_empty() {
+        let overall_score = if !circular_deps.is_empty()
+            || !domain_leaks.is_empty()
+            || !unsafe_exposure.is_empty()
+            || !nif_blocking_risks.is_empty()
+        {
             0
         } else {
             (sec_score + cov_score + hygiene_score + telemetry_score) / 4
         };
-        
+
         let report = format!(
             "## 🛡️ Audit de Conformité : {}\n\n{}",
             project,
@@ -433,8 +506,16 @@ impl McpServer {
                 "governance audit computed",
                 &format!("project:{}", project),
                 &evidence_by_mode(&evidence, mode),
-                &["review critical security paths first", "delete dead code", "triage top technical debt items"],
-                if overall_score >= 90 { "high" } else { "medium" },
+                &[
+                    "review critical security paths first",
+                    "delete dead code",
+                    "triage top technical debt items"
+                ],
+                if overall_score >= 90 {
+                    "high"
+                } else {
+                    "medium"
+                },
             )
         );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
@@ -461,7 +542,10 @@ impl McpServer {
                     "project appears unindexed for health scope",
                     &format!("project:{}", project),
                     &format!("{}\n\n{}", warning, diagnostic),
-                    &["run indexing and retry", "validate parser coverage for project languages"],
+                    &[
+                        "run indexing and retry",
+                        "validate parser coverage for project languages"
+                    ],
                     "low",
                 )
             );
@@ -474,10 +558,7 @@ impl McpServer {
             .get_god_objects(project)
             .unwrap_or_default();
 
-        let mut evidence = format!(
-            "Coverage {}%. Stability high.",
-            coverage
-        );
+        let mut evidence = format!("Coverage {}%. Stability high.", coverage);
         if let Some(note) = self.project_scope_truth_note((project != "*").then_some(project)) {
             evidence.push_str(&format!("\n{}", note));
         }
@@ -502,7 +583,10 @@ impl McpServer {
                 "health metrics computed",
                 &format!("project:{}", project),
                 &evidence_by_mode(&evidence, mode),
-                &["inspect god objects first", "run audit for governance details"],
+                &[
+                    "inspect god objects first",
+                    "run audit for governance details"
+                ],
                 "medium",
             )
         );
@@ -585,7 +669,11 @@ impl McpServer {
                 let report = if !rows.is_empty() {
                     let paths_str = rows
                         .into_iter()
-                        .filter_map(|r| r.into_iter().next().and_then(|v| v.as_str().map(|s| s.to_string())))
+                        .filter_map(|r| {
+                            r.into_iter()
+                                .next()
+                                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        })
                         .map(|s| format!("* {}", s))
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -609,3 +697,4 @@ impl McpServer {
         }
     }
 }
+use crate::embedding_contract::GRAPH_MODEL_ID;

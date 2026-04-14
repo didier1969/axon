@@ -35,7 +35,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Unified Axon qualification orchestrator.")
     parser.add_argument(
         "--profile",
-        choices=["smoke", "demo", "full", "ingestion"],
+        choices=["smoke", "demo", "full", "ingestion", "retrieval"],
         default="demo",
         help="Qualification profile to run. Default: demo",
     )
@@ -53,7 +53,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--project", default="BookingSystem", help="Project scope for project-aware MCP tools")
     parser.add_argument("--query", default="booking", help="Default semantic query probe")
     parser.add_argument("--symbol", default="", help="Optional symbol probe for symbol-aware tools")
-    parser.add_argument("--soll-project", default="AXO", help="SOLL project slug for soll_work_plan probes")
+    parser.add_argument("--soll-project", default="AXO", help="SOLL project code for soll_work_plan probes")
     parser.add_argument("--duration", type=int, default=60, help="Duration in seconds for robustness/ingestion runs")
     parser.add_argument("--warmup", type=int, default=2, help="Warmup in seconds before robustness load")
     parser.add_argument("--concurrency", type=int, default=2, help="Parallel workers for robustness profile")
@@ -68,9 +68,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--reset-ist", action="store_true", help="Reset IST before robustness/ingestion sub-runs")
     parser.add_argument("--keep-running", action="store_true", help="Leave the last runtime running after completion")
     parser.add_argument(
+        "--allow-mutations",
+        action="store_true",
+        help="Allow mutation-capable MCP validation probes. Default: disabled for SOLL safety.",
+    )
+    parser.add_argument(
         "--enforce-gate",
         action="store_true",
         help="Propagate ingestion truth drift gate when the profile includes ingestion qualification",
+    )
+    parser.add_argument(
+        "--retrieval-corpus",
+        default=str(PROJECT_ROOT / "scripts" / "retrieval_context_cases.json"),
+        help="Deterministic retrieve_context corpus JSON path",
     )
     return parser.parse_args(argv)
 
@@ -81,9 +91,11 @@ def profile_steps(profile: str) -> list[str]:
     if profile == "demo":
         return ["runtime_smoke", "mcp_validate", "mcp_robustness"]
     if profile == "full":
-        return ["runtime_smoke", "mcp_validate", "mcp_robustness", "ingestion_qualify"]
+        return ["runtime_smoke", "mcp_validate", "retrieval_qualify", "mcp_robustness", "ingestion_qualify"]
     if profile == "ingestion":
         return ["ingestion_qualify"]
+    if profile == "retrieval":
+        return ["runtime_smoke", "mcp_validate", "retrieval_qualify"]
     raise ValueError(f"Unsupported profile: {profile}")
 
 
@@ -166,7 +178,11 @@ def command_env(mode: str) -> dict[str, str]:
 
 
 def shell(
-    args: list[str], *, check: bool = False, env: dict[str, str] | None = None
+    args: list[str],
+    *,
+    check: bool = False,
+    env: dict[str, str] | None = None,
+    timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
@@ -175,7 +191,16 @@ def shell(
         capture_output=True,
         check=check,
         env=env,
+        timeout=timeout,
     )
+
+
+def completed_output(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def rpc_call(url: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
@@ -258,17 +283,36 @@ def step_result(name: str, status: str, duration_ms: int, note: str, summary: An
 def run_runtime_smoke(mode: str, run_dir: Path, url: str) -> dict[str, Any]:
     t0 = time.time()
     env = command_env(mode)
-    stop_proc = shell(["bash", "scripts/stop.sh"])
-    start_proc = shell(
-        ["bash", "scripts/start.sh", mode_flag(mode), "--skip-mcp-tests"],
-        env=env,
-    )
-    (run_dir / "runtime-stop.log").write_text((stop_proc.stdout or "") + (stop_proc.stderr or ""), encoding="utf-8")
-    (run_dir / "runtime-start.log").write_text((start_proc.stdout or "") + (start_proc.stderr or ""), encoding="utf-8")
+    smoke_budget_s = 180
+
+    try:
+        stop_proc = shell(["bash", "scripts/stop.sh"], timeout=30)
+        stop_log = completed_output(stop_proc.stdout) + completed_output(stop_proc.stderr)
+    except subprocess.TimeoutExpired as exc:
+        stop_log = completed_output(exc.stdout) + completed_output(exc.stderr)
+        stop_log += f"\n[qualify] stop.sh timeout after {exc.timeout}s\n"
+    (run_dir / "runtime-stop.log").write_text(stop_log, encoding="utf-8")
+
+    start_timed_out = False
+    try:
+        start_proc = shell(
+            ["bash", "scripts/start.sh", mode_flag(mode), "--skip-mcp-tests"],
+            env=env,
+            timeout=smoke_budget_s,
+        )
+        start_log = completed_output(start_proc.stdout) + completed_output(start_proc.stderr)
+    except subprocess.TimeoutExpired as exc:
+        start_timed_out = True
+        start_log = completed_output(exc.stdout) + completed_output(exc.stderr)
+        start_log += f"\n[qualify] start.sh timeout after {exc.timeout}s; checking runtime readiness anyway\n"
+    (run_dir / "runtime-start.log").write_text(start_log, encoding="utf-8")
 
     try:
         wait_for_mcp_ready(url, 120)
-        return step_result("runtime_smoke", "pass", int((time.time() - t0) * 1000), "runtime ready")
+        note = "runtime ready"
+        if start_timed_out:
+            note = f"{note}; start.sh exceeded {smoke_budget_s}s budget"
+        return step_result("runtime_smoke", "pass", int((time.time() - t0) * 1000), note)
     except Exception as exc:
         return step_result("runtime_smoke", "fail", int((time.time() - t0) * 1000), f"{type(exc).__name__}: {exc}")
 
@@ -288,7 +332,7 @@ def run_mcp_validate(args: argparse.Namespace, mode: str, run_dir: Path) -> dict
         "--json-out",
         str(json_out),
     ]
-    if mode == "full":
+    if args.allow_mutations:
         cmd.append("--allow-mutations")
     if args.symbol:
         cmd.extend(["--symbol", args.symbol])
@@ -365,6 +409,44 @@ def run_mcp_robustness(args: argparse.Namespace, mode: str, run_dir: Path) -> di
     return step_result("mcp_robustness", step_status, int((time.time() - t0) * 1000), note, summary)
 
 
+def run_retrieval_qualify(args: argparse.Namespace, mode: str, run_dir: Path) -> dict[str, Any]:
+    if mode != "full":
+        return step_result(
+            "retrieval_qualify",
+            "warn",
+            0,
+            f"skipped because retrieve_context is only available in full mode (mode={mode})",
+        )
+    t0 = time.time()
+    json_out = run_dir / "retrieval_qualify.json"
+    cmd = [
+        sys.executable,
+        "scripts/qualify_retrieval_context.py",
+        "--project",
+        args.project,
+        "--corpus",
+        args.retrieval_corpus,
+        "--timeout",
+        str(args.timeout),
+        "--json-out",
+        str(json_out),
+    ]
+    proc = shell(cmd, env=command_env(mode))
+    (run_dir / "retrieval_qualify.stdout.log").write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
+    summary = {}
+    if json_out.exists():
+        summary = json.loads(json_out.read_text(encoding="utf-8"))
+    summary_block = summary.get("summary", {}) if isinstance(summary, dict) else {}
+    verdict = summary_block.get("verdict")
+    step_status = "pass"
+    if verdict == "fail":
+        step_status = "fail"
+    elif verdict == "warn":
+        step_status = "warn"
+    note = f"verdict={verdict or 'unknown'} exit={proc.returncode}"
+    return step_result("retrieval_qualify", step_status, int((time.time() - t0) * 1000), note, summary)
+
+
 def run_ingestion_qualify(args: argparse.Namespace, mode: str, run_dir: Path) -> dict[str, Any]:
     t0 = time.time()
     output_root = run_dir / "ingestion"
@@ -422,6 +504,11 @@ def run_mode_profile(args: argparse.Namespace, mode: str, suite_run_dir: Path) -
                 result = step_result("mcp_robustness", "fail", 0, "skipped because runtime_smoke failed")
             else:
                 result = run_mcp_robustness(args, mode, mode_run_dir)
+        elif step_name == "retrieval_qualify":
+            if steps.get("runtime_smoke", {}).get("status") == "fail":
+                result = step_result("retrieval_qualify", "fail", 0, "skipped because runtime_smoke failed")
+            else:
+                result = run_retrieval_qualify(args, mode, mode_run_dir)
         elif step_name == "ingestion_qualify":
             result = run_ingestion_qualify(args, mode, mode_run_dir)
         else:

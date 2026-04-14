@@ -11,7 +11,9 @@ mod protocol;
 mod soll;
 #[cfg(test)]
 mod tests;
+mod tools_context;
 mod tools_dx;
+mod tools_framework;
 mod tools_governance;
 mod tools_risk;
 mod tools_soll;
@@ -85,7 +87,12 @@ impl McpServer {
     pub(crate) fn mcp_mutation_jobs_enabled() -> bool {
         std::env::var("AXON_MCP_MUTATION_JOBS")
             .ok()
-            .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     }
 
@@ -105,7 +112,11 @@ impl McpServer {
         )
     }
 
-    pub(crate) fn execute_tool_direct(&self, normalized_name: &str, arguments: &Value) -> Option<Value> {
+    pub(crate) fn execute_tool_direct(
+        &self,
+        normalized_name: &str,
+        arguments: &Value,
+    ) -> Option<Value> {
         match normalized_name {
             "refine_lattice" => self.axon_refine_lattice(arguments),
             "fs_read" => self.axon_fs_read(arguments),
@@ -118,17 +129,28 @@ impl McpServer {
             "soll_attach_evidence" => self.axon_soll_attach_evidence(arguments),
             "soll_verify_requirements" => self.axon_soll_verify_requirements(arguments),
             "soll_rollback_revision" => self.axon_soll_rollback_revision(arguments),
+            "retrieve_context" => self.axon_retrieve_context(arguments),
             "query" => self.axon_query(arguments),
             "soll_manager" => self.axon_soll_manager(arguments),
             "init_project" => self.axon_init_project(arguments),
             "apply_guidelines" => self.axon_apply_guidelines(arguments),
             "commit_work" => self.axon_commit_work(arguments),
+            "pre_flight_check" => self.axon_pre_flight_check(arguments),
             "soll_export" => self.axon_export_soll(arguments),
             "diagnose_indexing" => self.axon_diagnose_indexing(arguments),
             "inspect" => self.axon_inspect(arguments),
             "audit" => self.axon_audit(arguments),
             "impact" => self.axon_impact(arguments),
             "health" => self.axon_health(arguments),
+            "status" => self.axon_status(arguments),
+            "project_status" => self.axon_project_status(arguments),
+            "snapshot_history" => self.axon_snapshot_history(arguments),
+            "snapshot_diff" => self.axon_snapshot_diff(arguments),
+            "conception_view" => self.axon_conception_view(arguments),
+            "change_safety" => self.axon_change_safety(arguments),
+            "why" => self.axon_why(arguments),
+            "path" => self.axon_path(arguments),
+            "anomalies" => self.axon_anomalies(arguments),
             "diff" => self.axon_diff(arguments),
             "batch" => self.axon_batch(arguments),
             "cypher" => self.axon_cypher(arguments),
@@ -150,7 +172,7 @@ impl McpServer {
         }
     }
 
-    fn now_unix_ms() -> i64 {
+    pub(crate) fn now_unix_ms() -> i64 {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         SystemTime::now()
@@ -168,40 +190,40 @@ impl McpServer {
                 let Some(entity) = arguments.get("entity").and_then(|value| value.as_str()) else {
                     return json!({});
                 };
-                let project_slug = arguments
+                let project_code = arguments
                     .get("data")
-                    .and_then(|value| value.get("project_slug"))
+                    .and_then(|value| value.get("project_code"))
                     .and_then(|value| value.as_str())
                     .unwrap_or("AXO");
-                match self.next_soll_numeric_id(project_slug, entity) {
-                    Ok((canonical_slug, project_code, prefix, next_num)) => json!({
-                        "project_slug": canonical_slug,
+                match self.next_soll_numeric_id(project_code, entity) {
+                    Ok((canonical_project_code, project_code, prefix, next_num)) => json!({
+                        "project_code": canonical_project_code,
                         "entity_id": format!("{prefix}-{project_code}-{next_num:03}")
                     }),
                     Err(error) => json!({ "reservation_error": error.to_string() }),
                 }
             }
             "soll_apply_plan" => {
-                let project_slug = arguments
-                    .get("project_slug")
+                let project_code = arguments
+                    .get("project_code")
                     .and_then(|value| value.as_str())
                     .unwrap_or("AXO");
-                match self.next_server_numeric_id(project_slug, "preview") {
-                    Ok((canonical_slug, project_code, _, next_num)) => json!({
-                        "project_slug": canonical_slug,
+                match self.next_server_numeric_id(project_code, "preview") {
+                    Ok((canonical_project_code, project_code, _, next_num)) => json!({
+                        "project_code": canonical_project_code,
                         "preview_id": format!("PRV-{project_code}-{next_num:03}")
                     }),
                     Err(error) => json!({ "reservation_error": error.to_string() }),
                 }
             }
             "soll_commit_revision" => {
-                let project_slug = arguments
-                    .get("project_slug")
+                let project_code = arguments
+                    .get("project_code")
                     .and_then(|value| value.as_str())
                     .unwrap_or("AXO");
-                match self.next_server_numeric_id(project_slug, "revision") {
-                    Ok((canonical_slug, project_code, _, next_num)) => json!({
-                        "project_slug": canonical_slug,
+                match self.next_server_numeric_id(project_code, "revision") {
+                    Ok((canonical_project_code, project_code, _, next_num)) => json!({
+                        "project_code": canonical_project_code,
                         "revision_id": format!("REV-{project_code}-{next_num:03}")
                     }),
                     Err(error) => json!({ "reservation_error": error.to_string() }),
@@ -211,32 +233,57 @@ impl McpServer {
         }
     }
 
-    fn inject_reserved_ids(&self, normalized_name: &str, arguments: &Value, reserved_ids: &Value) -> Value {
+    fn inject_reserved_ids(
+        &self,
+        normalized_name: &str,
+        arguments: &Value,
+        reserved_ids: &Value,
+    ) -> Value {
         let mut patched = arguments.clone();
         match normalized_name {
             "soll_manager" => {
-                if let Some(entity_id) = reserved_ids.get("entity_id").and_then(|value| value.as_str()) {
+                if let Some(entity_id) = reserved_ids
+                    .get("entity_id")
+                    .and_then(|value| value.as_str())
+                {
                     patched["reserved_id"] = json!(entity_id);
                 }
-                if let Some(project_slug) = reserved_ids.get("project_slug").and_then(|value| value.as_str()) {
-                    patched["project_slug"] = json!(project_slug);
+                if let Some(project_code) = reserved_ids
+                    .get("project_code")
+                    .and_then(|value| value.as_str())
+                {
+                    patched["project_code"] = json!(project_code);
                 }
             }
             "soll_apply_plan" => {
-                if let Some(preview_id) = reserved_ids.get("preview_id").and_then(|value| value.as_str()) {
+                if let Some(preview_id) = reserved_ids
+                    .get("preview_id")
+                    .and_then(|value| value.as_str())
+                {
                     patched["reserved_preview_id"] = json!(preview_id);
                 }
-                if let Some(project_slug) = reserved_ids.get("project_slug").and_then(|value| value.as_str()) {
-                    patched["project_slug"] = json!(project_slug);
+                if let Some(project_code) = reserved_ids
+                    .get("project_code")
+                    .and_then(|value| value.as_str())
+                {
+                    patched["project_code"] = json!(project_code);
                 }
             }
             "soll_commit_revision" => {
-                if let Some(revision_id) = reserved_ids.get("revision_id").and_then(|value| value.as_str()) {
+                if let Some(revision_id) = reserved_ids
+                    .get("revision_id")
+                    .and_then(|value| value.as_str())
+                {
                     patched["reserved_revision_id"] = json!(revision_id);
                 }
-                if reserved_ids.get("project_slug").is_some() && patched.get("project_slug").is_none() {
-                    if let Some(project_slug) = reserved_ids.get("project_slug").and_then(|value| value.as_str()) {
-                        patched["project_slug"] = json!(project_slug);
+                if reserved_ids.get("project_code").is_some()
+                    && patched.get("project_code").is_none()
+                {
+                    if let Some(project_code) = reserved_ids
+                        .get("project_code")
+                        .and_then(|value| value.as_str())
+                    {
+                        patched["project_code"] = json!(project_code);
                     }
                 }
             }
@@ -269,7 +316,10 @@ impl McpServer {
 
     fn launch_mutation_job(&self, normalized_name: &str, arguments: &Value) -> Option<Value> {
         let reserved_ids = self.reserve_mutation_ids(normalized_name, arguments);
-        if let Some(error) = reserved_ids.get("reservation_error").and_then(|value| value.as_str()) {
+        if let Some(error) = reserved_ids
+            .get("reservation_error")
+            .and_then(|value| value.as_str())
+        {
             return Some(json!({
                 "content": [{ "type": "text", "text": format!("Mutation job reservation failed: {error}") }],
                 "isError": true

@@ -7,14 +7,14 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalProjectIdentity {
-    pub slug: String,
+    pub name: Option<String>,
     pub code: String,
+    pub project_path: PathBuf,
     pub meta_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct RawProjectMeta {
-    slug: Option<String>,
     code: Option<String>,
     name: Option<String>,
 }
@@ -96,53 +96,51 @@ pub fn discover_project_identities() -> Vec<CanonicalProjectIdentity> {
         let Some(raw) = load_raw_project_meta(&meta_path) else {
             continue;
         };
-        let Some(slug) = raw.slug.map(|value| value.trim().to_string()) else {
-            continue;
-        };
         let Some(code) = raw.code.map(|value| value.trim().to_ascii_uppercase()) else {
             continue;
         };
-        if slug.is_empty() || !is_valid_project_code(&code) {
+        if !is_valid_project_code(&code) {
             continue;
         }
-        if seen.insert(slug.clone()) {
+        if seen.insert(code.clone()) {
+            let project_path = dir.clone();
             identities.push(CanonicalProjectIdentity {
-                slug,
+                name: raw
+                    .name
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        dir.file_name()
+                            .map(|value| value.to_string_lossy().trim().to_string())
+                            .filter(|value| !value.is_empty())
+                    }),
                 code,
+                project_path,
                 meta_path,
             });
         }
     }
 
-    identities.sort_by(|left, right| left.slug.cmp(&right.slug));
+    identities.sort_by(|left, right| left.code.cmp(&right.code));
     identities
 }
 
-pub fn resolve_canonical_project_identity(project_slug: &str) -> Result<CanonicalProjectIdentity> {
-    let requested = project_slug.trim();
+pub fn resolve_canonical_project_identity(project_code: &str) -> Result<CanonicalProjectIdentity> {
+    let requested = project_code.trim();
     if requested.is_empty() {
-        return Err(anyhow!("Projet canonique vide"));
+        return Err(anyhow!("Code projet canonique vide"));
     }
-
-    let mut canonical_alias_hint: Option<String> = None;
 
     for dir in candidate_directories() {
         let meta_path = meta_path_for_directory(&dir);
         let Some(raw) = load_raw_project_meta(&meta_path) else {
             continue;
         };
-        let Some(slug) = raw.slug.as_deref().map(str::trim) else {
+        let Some(code_raw) = raw.code.as_deref().map(str::trim) else {
             continue;
         };
-        if slug == requested {
-            let Some(code_raw) = raw.code.as_deref().map(str::trim) else {
-                return Err(anyhow!(
-                    "Projet canonique `{}` trouvé dans `{}` mais `code` manque dans `.axon/meta.json`",
-                    requested,
-                    meta_path.display()
-                ));
-            };
-            let code = code_raw.to_ascii_uppercase();
+        let code = code_raw.to_ascii_uppercase();
+        if code == requested {
             if !is_valid_project_code(&code) {
                 return Err(anyhow!(
                     "Projet canonique `{}` trouvé dans `{}` mais `code` doit être alphanumérique sur 3 caractères",
@@ -151,25 +149,20 @@ pub fn resolve_canonical_project_identity(project_slug: &str) -> Result<Canonica
                 ));
             }
             return Ok(CanonicalProjectIdentity {
-                slug: requested.to_string(),
+                name: raw
+                    .name
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        dir.file_name()
+                            .map(|value| value.to_string_lossy().trim().to_string())
+                            .filter(|value| !value.is_empty())
+                    }),
                 code,
+                project_path: dir.clone(),
                 meta_path,
             });
         }
-
-        if raw.code.as_deref().is_some_and(|code| code.trim().eq_ignore_ascii_case(requested))
-            || raw.name.as_deref().is_some_and(|name| name.trim() == requested)
-        {
-            canonical_alias_hint = Some(slug.to_string());
-        }
-    }
-
-    if let Some(canonical_slug) = canonical_alias_hint {
-        return Err(anyhow!(
-            "Projet canonique attendu `{}`, pas `{}`. Utiliser le slug déclaré dans `.axon/meta.json`",
-            canonical_slug,
-            requested
-        ));
     }
 
     Err(anyhow!(

@@ -68,29 +68,29 @@ def esc(s: str) -> str:
 def metrics(sql_url: str, project: str) -> dict[str, int]:
     p = esc(project)
     return {
-        "known": scalar(sql_url, f"SELECT count(*) FROM File WHERE project_slug = '{p}'"),
+        "known": scalar(sql_url, f"SELECT count(*) FROM File WHERE project_code = '{p}'"),
         "completed": scalar(
             sql_url,
-            f"SELECT count(*) FROM File WHERE project_slug = '{p}' "
+            f"SELECT count(*) FROM File WHERE project_code = '{p}' "
             "AND status IN ('indexed','indexed_degraded','skipped','deleted')",
         ),
         "pending": scalar(
-            sql_url, f"SELECT count(*) FROM File WHERE project_slug = '{p}' AND status = 'pending'"
+            sql_url, f"SELECT count(*) FROM File WHERE project_code = '{p}' AND status = 'pending'"
         ),
         "indexing": scalar(
-            sql_url, f"SELECT count(*) FROM File WHERE project_slug = '{p}' AND status = 'indexing'"
+            sql_url, f"SELECT count(*) FROM File WHERE project_code = '{p}' AND status = 'indexing'"
         ),
-        "symbols": scalar(sql_url, f"SELECT count(*) FROM Symbol WHERE project_slug = '{p}'"),
+        "symbols": scalar(sql_url, f"SELECT count(*) FROM Symbol WHERE project_code = '{p}'"),
         "noise_files": scalar(
             sql_url,
-            f"SELECT count(*) FROM File WHERE project_slug = '{p}' AND ({NOISE_PREDICATE}) "
+            f"SELECT count(*) FROM File WHERE project_code = '{p}' AND ({NOISE_PREDICATE}) "
             "AND status <> 'deleted'",
         ),
         "noise_symbols": scalar(
             sql_url,
             f"SELECT count(DISTINCT c.target_id) "
             "FROM CONTAINS c JOIN File f ON f.path = c.source_id "
-            f"WHERE f.project_slug = '{p}' AND ({NOISE_PREDICATE}) AND f.status <> 'deleted'",
+            f"WHERE f.project_code = '{p}' AND ({NOISE_PREDICATE}) AND f.status <> 'deleted'",
         ),
     }
 
@@ -131,28 +131,28 @@ def clean_rebuild(sql_url: str, project: str, respect_ignore: bool, project_root
     # 1) Remove all derived graph/vector artifacts tied to this project.
     execute(
         sql_url,
-        f"DELETE FROM CALLS WHERE source_id IN (SELECT id FROM Symbol WHERE project_slug = '{p}') "
-        f"OR target_id IN (SELECT id FROM Symbol WHERE project_slug = '{p}');",
+        f"DELETE FROM CALLS WHERE source_id IN (SELECT id FROM Symbol WHERE project_code = '{p}') "
+        f"OR target_id IN (SELECT id FROM Symbol WHERE project_code = '{p}');",
     )
     execute(
         sql_url,
-        f"DELETE FROM CALLS_NIF WHERE source_id IN (SELECT id FROM Symbol WHERE project_slug = '{p}') "
-        f"OR target_id IN (SELECT id FROM Symbol WHERE project_slug = '{p}');",
+        f"DELETE FROM CALLS_NIF WHERE source_id IN (SELECT id FROM Symbol WHERE project_code = '{p}') "
+        f"OR target_id IN (SELECT id FROM Symbol WHERE project_code = '{p}');",
     )
     execute(
         sql_url,
-        f"DELETE FROM ChunkEmbedding WHERE chunk_id IN (SELECT id FROM Chunk WHERE project_slug = '{p}');",
+        f"DELETE FROM ChunkEmbedding WHERE chunk_id IN (SELECT id FROM Chunk WHERE project_code = '{p}');",
     )
-    execute(sql_url, f"DELETE FROM Chunk WHERE project_slug = '{p}';")
+    execute(sql_url, f"DELETE FROM Chunk WHERE project_code = '{p}';")
     execute(
         sql_url,
-        f"DELETE FROM CONTAINS WHERE source_id IN (SELECT path FROM File WHERE project_slug = '{p}') "
-        f"OR target_id IN (SELECT id FROM Symbol WHERE project_slug = '{p}');",
+        f"DELETE FROM CONTAINS WHERE source_id IN (SELECT path FROM File WHERE project_code = '{p}') "
+        f"OR target_id IN (SELECT id FROM Symbol WHERE project_code = '{p}');",
     )
-    execute(sql_url, f"DELETE FROM Symbol WHERE project_slug = '{p}';")
+    execute(sql_url, f"DELETE FROM Symbol WHERE project_code = '{p}';")
     execute(
         sql_url,
-        f"DELETE FROM FileVectorizationQueue WHERE file_path IN (SELECT path FROM File WHERE project_slug = '{p}');",
+        f"DELETE FROM FileVectorizationQueue WHERE file_path IN (SELECT path FROM File WHERE project_code = '{p}');",
     )
     # 2) Base cleanup of known generated/minified assets.
     execute(
@@ -166,14 +166,14 @@ SET status = 'deleted',
     graph_ready = FALSE,
     vector_ready = FALSE,
     status_reason = 'ignored_generated_asset'
-WHERE project_slug = '{p}' AND ({NOISE_PREDICATE});
+WHERE project_code = '{p}' AND ({NOISE_PREDICATE});
 """.strip(),
     )
     # 3) Optionally enforce current gitignore as source of truth.
     if respect_ignore:
         rows = q(
             sql_url,
-            f"SELECT path FROM File WHERE project_slug = '{p}' AND status <> 'deleted' ORDER BY path;",
+            f"SELECT path FROM File WHERE project_code = '{p}' AND status <> 'deleted' ORDER BY path;",
         )
         ignored_paths: list[str] = []
         for row in rows:
@@ -205,7 +205,7 @@ WHERE path IN ({selector});
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Clean rebuild of a single project with noise evaluation")
-    ap.add_argument("--project", default="BookingSystem", help="Project slug")
+    ap.add_argument("--project", default="BookingSystem", help="Project code")
     ap.add_argument("--sql-url", default=DEFAULT_SQL_URL, help="SQL gateway URL")
     ap.add_argument("--wait-seconds", type=int, default=120, help="Wait window for indexing progress")
     args = ap.parse_args(argv)
@@ -232,7 +232,7 @@ SET status = 'pending',
     file_stage = 'promoted',
     graph_ready = FALSE,
     vector_ready = FALSE
-WHERE project_slug = '{p}' AND status <> 'deleted';
+WHERE project_code = '{p}' AND status <> 'deleted';
 """.strip(),
     )
 

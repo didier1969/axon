@@ -1,5 +1,5 @@
-use std::ffi::{c_void, CString};
 use std::collections::HashMap;
+use std::ffi::{c_void, CString};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -236,7 +236,10 @@ impl GraphStore {
                 .ok_or_else(|| anyhow!("DB parent path unavailable for reader refresh"))?
                 .to_path_buf();
             soll_path.push("soll.db");
-            let attach_q = format!("ATTACH '{}' AS soll;", soll_path.to_string_lossy().replace('\'', "''"));
+            let attach_q = format!(
+                "ATTACH '{}' AS soll;",
+                soll_path.to_string_lossy().replace('\'', "''")
+            );
             self.setup_session(new_reader, &attach_q)?;
 
             let writer_ctx = *self
@@ -340,7 +343,9 @@ impl GraphStore {
             "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_code))",
         )?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_code VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_gui BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
-        let _ = self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0");
+        let _ = self.execute(
+            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0",
+        );
         self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_code VARCHAR PRIMARY KEY, project_name VARCHAR, project_path VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
@@ -358,7 +363,7 @@ impl GraphStore {
     fn ensure_embedding_runtime_tables(&self) -> Result<()> {
         self.execute("CREATE TABLE IF NOT EXISTS EmbeddingModel (id VARCHAR PRIMARY KEY, kind VARCHAR, model_name VARCHAR, dimension BIGINT, version VARCHAR, created_at BIGINT)")?;
         self.execute(&format!("CREATE TABLE IF NOT EXISTS ChunkEmbedding (chunk_id VARCHAR, model_id VARCHAR, embedding FLOAT[{DIMENSION}], source_hash VARCHAR, embedded_at_ms BIGINT, PRIMARY KEY (chunk_id, model_id))"))?;
-        self.execute("CREATE TABLE IF NOT EXISTS FileVectorizationQueue (file_path VARCHAR PRIMARY KEY, status VARCHAR DEFAULT 'queued', status_reason VARCHAR, attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT, next_eligible_at_ms BIGINT, interactive_pause_count BIGINT DEFAULT 0, claim_token VARCHAR, claimed_at_ms BIGINT)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS FileVectorizationQueue (file_path VARCHAR PRIMARY KEY, status VARCHAR DEFAULT 'queued', status_reason VARCHAR, attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT, next_eligible_at_ms BIGINT, interactive_pause_count BIGINT DEFAULT 0, claim_token VARCHAR, claimed_at_ms BIGINT, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0)")?;
         self.execute(&format!("CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding FLOAT[{DIMENSION}], updated_at BIGINT)"))?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_embedding_anchor_model_idx ON GraphEmbedding(anchor_type, anchor_id, radius, model_id)")?;
         Ok(())
@@ -413,7 +418,9 @@ impl GraphStore {
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS first_seen_at_ms BIGINT")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS indexing_started_at_ms BIGINT")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS graph_ready_at_ms BIGINT")?;
-        self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS vectorization_started_at_ms BIGINT")?;
+        self.execute(
+            "ALTER TABLE File ADD COLUMN IF NOT EXISTS vectorization_started_at_ms BIGINT",
+        )?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS vector_ready_at_ms BIGINT")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_state_change_at_ms BIGINT")?;
         self.execute("ALTER TABLE File ADD COLUMN IF NOT EXISTS last_error_at_ms BIGINT")?;
@@ -423,6 +430,15 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS HourlyVectorizationRollup (bucket_start_ms BIGINT, project_code VARCHAR, model_id VARCHAR, chunks_embedded BIGINT DEFAULT 0, files_vector_ready BIGINT DEFAULT 0, batches BIGINT DEFAULT 0, fetch_ms_total BIGINT DEFAULT 0, embed_ms_total BIGINT DEFAULT 0, db_write_ms_total BIGINT DEFAULT 0, mark_done_ms_total BIGINT DEFAULT 0, PRIMARY KEY (bucket_start_ms, project_code, model_id))")?;
         self.execute("CREATE TABLE IF NOT EXISTS OptimizerDecisionLog (decision_id VARCHAR PRIMARY KEY, at_ms BIGINT, mode VARCHAR, host_snapshot_json VARCHAR, policy_snapshot_json VARCHAR, signal_snapshot_json VARCHAR, analytics_snapshot_json VARCHAR, action_profile_id VARCHAR, decision_json VARCHAR, constraints_triggered_json VARCHAR, would_apply BOOLEAN, applied BOOLEAN, evaluation_window_start_ms BIGINT, evaluation_window_end_ms BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS RewardObservationLog (decision_id VARCHAR, observed_at_ms BIGINT, window_start_ms BIGINT, window_end_ms BIGINT, reward_json VARCHAR, throughput_chunks_per_hour DOUBLE, throughput_files_per_hour DOUBLE, constraint_violations_json VARCHAR, pressure_summary_json VARCHAR)")?;
+        self.execute(
+            "ALTER TABLE FileVectorizationQueue ADD COLUMN IF NOT EXISTS lease_heartbeat_at_ms BIGINT",
+        )?;
+        self.execute(
+            "ALTER TABLE FileVectorizationQueue ADD COLUMN IF NOT EXISTS lease_owner VARCHAR",
+        )?;
+        self.execute(
+            "ALTER TABLE FileVectorizationQueue ADD COLUMN IF NOT EXISTS lease_epoch BIGINT DEFAULT 0",
+        )?;
 
         let columns = self.list_file_table_columns()?;
         let has_status = columns.contains("status");
@@ -481,7 +497,7 @@ impl GraphStore {
             "UPDATE ChunkEmbedding SET embedded_at_ms = COALESCE(embedded_at_ms, {}) WHERE embedded_at_ms IS NULL",
             embedded_now_ms
         ))?;
-        
+
         self.execute("ALTER TABLE Chunk ADD COLUMN IF NOT EXISTS file_path VARCHAR")?;
         self.execute(
             "UPDATE Chunk \
@@ -492,10 +508,18 @@ impl GraphStore {
              WHERE file_path IS NULL OR file_path = ''",
         )?;
 
-        self.execute("ALTER TABLE CALLS ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'")?;
-        self.execute("ALTER TABLE CALLS_NIF ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'")?;
-        self.execute("ALTER TABLE CONTAINS ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'")?;
-        self.execute("ALTER TABLE IMPACTS ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'")?;
+        self.execute(
+            "ALTER TABLE CALLS ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'",
+        )?;
+        self.execute(
+            "ALTER TABLE CALLS_NIF ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'",
+        )?;
+        self.execute(
+            "ALTER TABLE CONTAINS ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'",
+        )?;
+        self.execute(
+            "ALTER TABLE IMPACTS ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'",
+        )?;
         self.execute("ALTER TABLE SUBSTANTIATES ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'")?;
 
         // Performance Indexes for Advanced Graph Heuristics
@@ -504,11 +528,17 @@ impl GraphStore {
         self.execute("CREATE INDEX IF NOT EXISTS calls_project_code_idx ON CALLS(project_code)")?;
         self.execute("CREATE INDEX IF NOT EXISTS calls_nif_source_idx ON CALLS_NIF(source_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS calls_nif_target_idx ON CALLS_NIF(target_id)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS calls_nif_project_code_idx ON CALLS_NIF(project_code)")?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS calls_nif_project_code_idx ON CALLS_NIF(project_code)",
+        )?;
         self.execute("CREATE INDEX IF NOT EXISTS contains_source_idx ON CONTAINS(source_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS contains_target_idx ON CONTAINS(target_id)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS contains_project_code_idx ON CONTAINS(project_code)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS impacts_project_code_idx ON IMPACTS(project_code)")?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS contains_project_code_idx ON CONTAINS(project_code)",
+        )?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS impacts_project_code_idx ON IMPACTS(project_code)",
+        )?;
         self.execute("CREATE INDEX IF NOT EXISTS substantiates_project_code_idx ON SUBSTANTIATES(project_code)")?;
         self.execute("CREATE INDEX IF NOT EXISTS symbol_project_code_idx ON Symbol(project_code)")?;
         self.execute("CREATE INDEX IF NOT EXISTS file_project_code_idx ON File(project_code)")?;
@@ -524,36 +554,56 @@ impl GraphStore {
         if has_status {
             self.execute("CREATE INDEX IF NOT EXISTS file_status_idx ON File(status)")?;
         }
-        
+
         Ok(())
     }
 
     fn ensure_additive_soll_schema(&self) -> Result<()> {
-        let _ = self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0");
+        let _ = self.execute(
+            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0",
+        );
         self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_code VARCHAR PRIMARY KEY, project_name VARCHAR, project_path VARCHAR)")?;
-        self.execute("ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS project_name VARCHAR")?;
-        self.execute("ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS project_path VARCHAR")?;
+        self.execute(
+            "ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS project_name VARCHAR",
+        )?;
+        self.execute(
+            "ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS project_path VARCHAR",
+        )?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx ON soll.ProjectCodeRegistry(project_code)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Edge (source_id VARCHAR, target_id VARCHAR, relation_type VARCHAR, metadata VARCHAR, PRIMARY KEY (source_id, target_id, relation_type))")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.McpJob (job_id VARCHAR PRIMARY KEY, tool_name VARCHAR, status VARCHAR, submitted_at BIGINT, started_at BIGINT, finished_at BIGINT, request_json VARCHAR, reserved_ids_json VARCHAR, result_json VARCHAR, error_text VARCHAR)")?;
-        
+
         // Performance Indexes
         self.execute("CREATE INDEX IF NOT EXISTS soll_node_type_idx ON soll.Node(type)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_node_project_code_idx ON soll.Node(project_code)")?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS soll_node_project_code_idx ON soll.Node(project_code)",
+        )?;
         self.execute("CREATE INDEX IF NOT EXISTS soll_edge_source_idx ON soll.Edge(source_id)")?;
         self.execute("CREATE INDEX IF NOT EXISTS soll_edge_target_idx ON soll.Edge(target_id)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_edge_relation_idx ON soll.Edge(relation_type)")?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS soll_edge_relation_idx ON soll.Edge(relation_type)",
+        )?;
         self.execute("CREATE INDEX IF NOT EXISTS soll_mcp_job_status_idx ON soll.McpJob(status)")?;
-        self.execute("CREATE INDEX IF NOT EXISTS soll_mcp_job_submitted_idx ON soll.McpJob(submitted_at)")?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS soll_mcp_job_submitted_idx ON soll.McpJob(submitted_at)",
+        )?;
 
         self.execute(
             "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_pil BIGINT DEFAULT 0",
         )?;
-        self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_vis BIGINT DEFAULT 0")?;
-        self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_stk BIGINT DEFAULT 0")?;
-        self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_prv BIGINT DEFAULT 0")?;
-        self.execute("ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_rev BIGINT DEFAULT 0")?;
+        self.execute(
+            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_vis BIGINT DEFAULT 0",
+        )?;
+        self.execute(
+            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_stk BIGINT DEFAULT 0",
+        )?;
+        self.execute(
+            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_prv BIGINT DEFAULT 0",
+        )?;
+        self.execute(
+            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_rev BIGINT DEFAULT 0",
+        )?;
 
         self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
@@ -588,7 +638,9 @@ impl GraphStore {
                 .file_name()
                 .map(|value| value.to_string_lossy().trim().to_string())
                 .filter(|value| !value.is_empty())
-                .or_else(|| (!existing_project_name.is_empty()).then_some(existing_project_name.clone()))
+                .or_else(|| {
+                    (!existing_project_name.is_empty()).then_some(existing_project_name.clone())
+                })
                 .unwrap_or_else(|| existing_project_code.clone());
 
             if existing_project_name != normalized_name {
@@ -607,7 +659,6 @@ impl GraphStore {
         }
         Ok(())
     }
-
 
     fn seed_global_guidelines(&self) -> Result<()> {
         let guidelines = [
@@ -805,7 +856,8 @@ impl GraphStore {
             if old_id.is_empty() || project_code.is_empty() {
                 continue;
             }
-            let (_, project_code) = self.resolve_or_seed_existing_project_identity(&project_code)?;
+            let (_, project_code) =
+                self.resolve_or_seed_existing_project_identity(&project_code)?;
             let next = next_by_code.get(&project_code).copied().unwrap_or(0) + 1;
             next_by_code.insert(project_code.clone(), next);
             let new_id = format!("PRV-{}-{:03}", project_code, next);
@@ -923,7 +975,8 @@ impl GraphStore {
 
             let source_id = if !existing_id.trim().is_empty() {
                 existing_id.clone()
-            } else if let Some((parsed_id, parsed_name)) = split_prefixed_display_name(&stored_name) {
+            } else if let Some((parsed_id, parsed_name)) = split_prefixed_display_name(&stored_name)
+            {
                 let _ = parsed_name;
                 parsed_id
             } else {
@@ -963,12 +1016,7 @@ impl GraphStore {
                     "UPDATE soll.Concept
                      SET id = ?, project_code = ?
                      WHERE COALESCE(id,'') = ? AND name = ?",
-                    &serde_json::json!([
-                        new_id,
-                        project_code,
-                        existing_id,
-                        stored_name
-                    ]),
+                    &serde_json::json!([new_id, project_code, existing_id, stored_name]),
                 )?;
 
                 if new_id != source_id {
@@ -1002,9 +1050,14 @@ impl GraphStore {
                 let code = if !existing_project_code.trim().is_empty() {
                     existing_project_code.clone()
                 } else {
-                    self.resolve_or_seed_existing_project_identity(project_part)?.1
+                    self.resolve_or_seed_existing_project_identity(project_part)?
+                        .1
                 };
-                (code.clone(), existing_id.clone(), format!("{}-{}-{:03}", prefix, code, number))
+                (
+                    code.clone(),
+                    existing_id.clone(),
+                    format!("{}-{}-{:03}", prefix, code, number),
+                )
             } else {
                 let initial_code = if existing_project_code.trim().is_empty() {
                     "AXO".to_string()
@@ -1394,7 +1447,8 @@ impl GraphStore {
 
     fn list_project_code_registry_columns(&self) -> Result<std::collections::HashSet<String>> {
         for target in ["soll.ProjectCodeRegistry", "ProjectCodeRegistry"] {
-            let raw = self.query_json(&format!("SELECT name FROM pragma_table_info('{target}')"))?;
+            let raw =
+                self.query_json(&format!("SELECT name FROM pragma_table_info('{target}')"))?;
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
             let columns: std::collections::HashSet<String> = rows
                 .into_iter()
@@ -1409,7 +1463,8 @@ impl GraphStore {
 
     fn list_soll_node_columns(&self) -> Result<std::collections::HashSet<String>> {
         for target in ["soll.Node", "Node"] {
-            let raw = self.query_json(&format!("SELECT name FROM pragma_table_info('{target}')"))?;
+            let raw =
+                self.query_json(&format!("SELECT name FROM pragma_table_info('{target}')"))?;
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
             let columns: std::collections::HashSet<String> = rows
                 .into_iter()
@@ -1475,9 +1530,7 @@ impl GraphStore {
     }
 
     fn soft_invalidate_embedding_state(&self) -> Result<()> {
-        let cleanup_queries = [
-            "UPDATE File SET vector_ready = FALSE WHERE graph_ready = TRUE",
-        ];
+        let cleanup_queries = ["UPDATE File SET vector_ready = FALSE WHERE graph_ready = TRUE"];
 
         for query in cleanup_queries {
             self.execute(query)?;
@@ -1512,7 +1565,9 @@ impl GraphStore {
 
 #[cfg(test)]
 mod graph_bootstrap_tests {
-    use crate::embedding_contract::{CHUNK_MODEL_ID, DIMENSION, GRAPH_MODEL_ID, MODEL_NAME, MODEL_VERSION};
+    use crate::embedding_contract::{
+        CHUNK_MODEL_ID, DIMENSION, GRAPH_MODEL_ID, MODEL_NAME, MODEL_VERSION,
+    };
     use crate::tests::test_helpers::create_test_db;
 
     #[test]
@@ -1523,7 +1578,12 @@ mod graph_bootstrap_tests {
                 "UPDATE soll.ProjectCodeRegistry
                  SET project_code = ?, project_name = ?, project_path = ?
                  WHERE project_code = ?",
-                &serde_json::json!(["BKS", "Legacy Human Name", "/home/dstadel/projects/BookingSystem", "BKS"]),
+                &serde_json::json!([
+                    "BKS",
+                    "Legacy Human Name",
+                    "/home/dstadel/projects/BookingSystem",
+                    "BKS"
+                ]),
             )
             .unwrap();
 
@@ -1555,11 +1615,36 @@ mod graph_bootstrap_tests {
 
         store.soft_invalidate_embedding_state().unwrap();
 
-        assert_eq!(store.query_count("SELECT count(*) FROM EmbeddingModel").unwrap(), 0);
-        assert_eq!(store.query_count("SELECT count(*) FROM ChunkEmbedding").unwrap(), 0);
-        assert_eq!(store.query_count("SELECT count(*) FROM GraphEmbedding").unwrap(), 0);
-        assert_eq!(store.query_count("SELECT count(*) FROM FileVectorizationQueue").unwrap(), 0);
-        assert_eq!(store.query_count("SELECT count(*) FROM File WHERE vector_ready = TRUE").unwrap(), 0);
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM EmbeddingModel")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM ChunkEmbedding")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM GraphEmbedding")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM FileVectorizationQueue")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM File WHERE vector_ready = TRUE")
+                .unwrap(),
+            0
+        );
     }
 }
 

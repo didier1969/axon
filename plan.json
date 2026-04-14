@@ -1,7 +1,7 @@
 {
   "name": "soll_apply_plan",
   "arguments": {
-    "project_slug": "AXO",
+    "project_code": "AXO",
     "author": "gemini_cli",
     "dry_run": false,
     "plan": {

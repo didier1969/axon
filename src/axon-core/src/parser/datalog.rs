@@ -28,7 +28,7 @@ impl Parser for DatalogParser {
             Err(e) => {
                 error!("Failed to create temp file for Datalog parser: {}", e);
                 return ExtractionResult {
-                    project_slug: None,
+                    project_code: None,
                     symbols,
                     relations,
                 };
@@ -41,7 +41,7 @@ impl Parser for DatalogParser {
                 e
             );
             return ExtractionResult {
-                project_slug: None,
+                project_code: None,
                 symbols,
                 relations,
             };
@@ -79,7 +79,7 @@ impl Parser for DatalogParser {
         }
 
         ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols,
             relations,
         }

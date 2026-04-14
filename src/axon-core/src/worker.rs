@@ -1,6 +1,7 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
 use crossbeam_channel::{Receiver, Sender};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -11,6 +12,7 @@ use crate::parser;
 use crate::queue::{estimate_observed_cost_bytes, ProcessingMode, QueueStore};
 
 // Payload for the Writer Actor
+#[derive(Debug, Clone)]
 pub enum DbWriteTask {
     FileExtraction {
         reservation_id: String,
@@ -51,18 +53,43 @@ pub enum TaskDispatchOutcome {
 }
 
 impl WorkerPool {
-    fn infer_project_slug(path: &str) -> Option<String> {
-        let projects_root = std::env::var("AXON_PROJECTS_ROOT")
-            .unwrap_or_else(|_| "/home/dstadel/projects".to_string());
-        let path = std::path::Path::new(path);
-        let relative = path.strip_prefix(&projects_root).ok()?;
-        let first = relative.components().next()?;
-        let slug = first.as_os_str().to_string_lossy().trim().to_string();
+    fn infer_project_code(path: &str) -> Option<String> {
+        let candidate = std::path::Path::new(path)
+            .canonicalize()
+            .unwrap_or_else(|_| std::path::PathBuf::from(path));
 
-        if slug.is_empty() || slug == "." {
-            None
-        } else {
-            Some(slug)
+        crate::project_meta::discover_project_identities()
+            .into_iter()
+            .find(|identity| candidate.starts_with(&identity.project_path))
+            .map(|identity| identity.code)
+    }
+
+    fn normalize_project_code(project_code: Option<String>, path: &str) -> Option<String> {
+        let normalized = project_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|value| {
+                if crate::project_meta::is_valid_project_code(value) {
+                    crate::project_meta::resolve_canonical_project_identity(value)
+                        .ok()
+                        .map(|identity| identity.code)
+                } else {
+                    None
+                }
+            });
+
+        normalized.or_else(|| Self::infer_project_code(path))
+    }
+
+    fn normalize_extraction_project_code(
+        extraction: &mut crate::parser::ExtractionResult,
+        path: &str,
+    ) {
+        extraction.project_code =
+            Self::normalize_project_code(extraction.project_code.clone(), path);
+        if extraction.project_code.is_none() {
+            extraction.project_code = Some("global".to_string());
         }
     }
 
@@ -144,9 +171,7 @@ impl WorkerPool {
                 if let Some(parser) = parser::get_parser_for_file(std::path::Path::new(&task.path))
                 {
                     let mut extraction = parser.parse(&content);
-                    if extraction.project_slug.is_none() {
-                        extraction.project_slug = Self::infer_project_slug(&task.path);
-                    }
+                    Self::normalize_extraction_project_code(&mut extraction, &task.path);
                     let t3 = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -317,7 +342,8 @@ impl WorkerPool {
 
                 // 3. COMMIT BATCH
                 if !batch.is_empty() {
-                    if let Err(e) = graph_store.insert_file_data_batch(&batch) {
+                    let commit_batch = consolidate_writer_batch(&batch);
+                    if let Err(e) = graph_store.insert_file_data_batch(&commit_batch) {
                         error!("Writer Actor: Batch commit failed: {:?}", e);
                         let claimed_paths = claimed_paths_from_batch(&batch);
                         if let Err(requeue_err) = graph_store.requeue_claimed_paths_with_reason(
@@ -332,7 +358,7 @@ impl WorkerPool {
                         }
                         release_writer_batch_reservations(&queue, &batch);
                     } else {
-                        for feedback in build_feedback_messages(&batch) {
+                        for feedback in build_feedback_messages(&commit_batch) {
                             let _ = result_sender.send(feedback);
                         }
                         release_writer_batch_reservations(&queue, &batch);
@@ -416,6 +442,93 @@ fn build_feedback_messages(batch: &[DbWriteTask]) -> Vec<String> {
     feedback_messages
 }
 
+fn consolidate_writer_batch(batch: &[DbWriteTask]) -> Vec<DbWriteTask> {
+    let mut latest_by_path = HashMap::new();
+    let mut passthrough = Vec::new();
+
+    for (idx, task) in batch.iter().enumerate() {
+        match task {
+            DbWriteTask::FileExtraction { path, .. } | DbWriteTask::FileSkipped { path, .. } => {
+                latest_by_path.insert(path.clone(), idx);
+            }
+            DbWriteTask::ExecuteCypher { .. } => passthrough.push((idx, task)),
+        }
+    }
+
+    let mut consolidated = Vec::new();
+    for (idx, task) in batch.iter().enumerate() {
+        match task {
+            DbWriteTask::FileExtraction { path, .. } | DbWriteTask::FileSkipped { path, .. } => {
+                if latest_by_path.get(path).copied() == Some(idx) {
+                    consolidated.push(clone_db_write_task(task));
+                }
+            }
+            DbWriteTask::ExecuteCypher { .. } => {
+                if passthrough
+                    .iter()
+                    .any(|(passthrough_idx, _)| *passthrough_idx == idx)
+                {
+                    consolidated.push(clone_db_write_task(task));
+                }
+            }
+        }
+    }
+
+    consolidated
+}
+
+fn clone_db_write_task(task: &DbWriteTask) -> DbWriteTask {
+    match task {
+        DbWriteTask::FileExtraction {
+            reservation_id,
+            path,
+            content,
+            extraction,
+            processing_mode,
+            trace_id,
+            observed_cost_bytes,
+            t0,
+            t1,
+            t2,
+            t3,
+        } => DbWriteTask::FileExtraction {
+            reservation_id: reservation_id.clone(),
+            path: path.clone(),
+            content: content.clone(),
+            extraction: extraction.clone(),
+            processing_mode: *processing_mode,
+            trace_id: trace_id.clone(),
+            observed_cost_bytes: *observed_cost_bytes,
+            t0: *t0,
+            t1: *t1,
+            t2: *t2,
+            t3: *t3,
+        },
+        DbWriteTask::FileSkipped {
+            reservation_id,
+            path,
+            reason,
+            trace_id,
+            observed_cost_bytes,
+            t0,
+            t1,
+            t2,
+        } => DbWriteTask::FileSkipped {
+            reservation_id: reservation_id.clone(),
+            path: path.clone(),
+            reason: reason.clone(),
+            trace_id: trace_id.clone(),
+            observed_cost_bytes: *observed_cost_bytes,
+            t0: *t0,
+            t1: *t1,
+            t2: *t2,
+        },
+        DbWriteTask::ExecuteCypher { query } => DbWriteTask::ExecuteCypher {
+            query: query.clone(),
+        },
+    }
+}
+
 fn release_writer_batch_reservations(queue: &Arc<QueueStore>, batch: &[DbWriteTask]) {
     for task in batch {
         match task {
@@ -455,7 +568,8 @@ fn claimed_paths_from_batch(batch: &[DbWriteTask]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DbWriteTask, TaskDispatchOutcome, WorkerPool};
+    use super::{consolidate_writer_batch, DbWriteTask, TaskDispatchOutcome, WorkerPool};
+    use crate::parser::ExtractionResult;
     use crate::queue::TaskLane;
     use crate::queue::{ProcessingMode, QueueStore, Task};
     use std::sync::Arc;
@@ -609,6 +723,72 @@ mod tests {
     }
 
     #[test]
+    fn consolidate_writer_batch_keeps_only_latest_task_per_path() {
+        let batch = vec![
+            DbWriteTask::FileSkipped {
+                reservation_id: "res-a-old".to_string(),
+                path: "/tmp/a.ex".to_string(),
+                reason: "old".to_string(),
+                trace_id: "trace-a-old".to_string(),
+                observed_cost_bytes: None,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+            },
+            DbWriteTask::FileExtraction {
+                reservation_id: "res-a-new".to_string(),
+                path: "/tmp/a.ex".to_string(),
+                content: Some("new".to_string()),
+                extraction: ExtractionResult::default(),
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace-a-new".to_string(),
+                observed_cost_bytes: 7,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            },
+            DbWriteTask::FileSkipped {
+                reservation_id: "res-b".to_string(),
+                path: "/tmp/b.ex".to_string(),
+                reason: "skip".to_string(),
+                trace_id: "trace-b".to_string(),
+                observed_cost_bytes: None,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+            },
+        ];
+
+        let consolidated = consolidate_writer_batch(&batch);
+        assert_eq!(consolidated.len(), 2);
+
+        match &consolidated[0] {
+            DbWriteTask::FileExtraction {
+                reservation_id,
+                path,
+                ..
+            } => {
+                assert_eq!(reservation_id, "res-a-new");
+                assert_eq!(path, "/tmp/a.ex");
+            }
+            other => panic!("expected latest extraction for /tmp/a.ex, got {other:?}"),
+        }
+
+        match &consolidated[1] {
+            DbWriteTask::FileSkipped {
+                reservation_id,
+                path,
+                ..
+            } => {
+                assert_eq!(reservation_id, "res-b");
+                assert_eq!(path, "/tmp/b.ex");
+            }
+            other => panic!("expected skipped task for /tmp/b.ex, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn build_feedback_messages_emits_one_line_per_task() {
         let batch = vec![
             DbWriteTask::FileExtraction {
@@ -736,5 +916,21 @@ mod tests {
             .unwrap();
         assert!(row.contains("indexing"), "{row}");
         assert!(row.contains("writer_pending_commit"), "{row}");
+    }
+
+    #[test]
+    fn normalize_project_code_prefers_canonical_code_for_repo_path() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("repo root");
+        let worker_path = repo_root.join("src/axon-core/src/worker.rs");
+
+        let normalized = WorkerPool::normalize_project_code(
+            Some("axon".to_string()),
+            worker_path.to_string_lossy().as_ref(),
+        );
+
+        assert_eq!(normalized.as_deref(), Some("AXO"));
     }
 }

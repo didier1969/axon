@@ -9,7 +9,7 @@ impl GraphStore {
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {
-            format!(" AND s1.project_slug = '{}' ", escaped)
+            format!(" AND s1.project_code = '{}' ", escaped)
         } else {
             String::new()
         };
@@ -67,7 +67,7 @@ impl GraphStore {
         let escaped = project.replace('\'', "''");
         let total = if scoped {
             self.query_count(&format!(
-                "SELECT count(*) FROM Symbol WHERE project_slug = '{}'",
+                "SELECT count(*) FROM Symbol WHERE project_code = '{}'",
                 escaped
             ))?
         } else {
@@ -78,7 +78,7 @@ impl GraphStore {
         }
         let tested = if scoped {
             self.query_count(&format!(
-                "SELECT count(*) FROM Symbol WHERE project_slug = '{}' AND tested = true",
+                "SELECT count(*) FROM Symbol WHERE project_code = '{}' AND tested = true",
                 escaped
             ))?
         } else {
@@ -113,7 +113,7 @@ impl GraphStore {
         ",
             if scoped {
                 format!(
-                    " AND (f.project_slug = '{}' OR s.project_slug = '{}')",
+                    " AND (f.project_code = '{}' OR s.project_code = '{}')",
                     escaped, escaped
                 )
             } else {
@@ -162,7 +162,7 @@ impl GraphStore {
             HAVING count(*) >= 20
         ",
             if scoped {
-                format!("WHERE s.project_slug = '{}'", escaped)
+                format!("WHERE s.project_code = '{}'", escaped)
             } else {
                 "WHERE 1=1".to_string()
             }
@@ -191,7 +191,7 @@ impl GraphStore {
             {}
             ",
             if scoped {
-                format!(" AND call.source_id IN (SELECT id FROM Symbol WHERE project_slug = '{}')", escaped)
+                format!(" AND call.source_id IN (SELECT id FROM Symbol WHERE project_code = '{}')", escaped)
             } else {
                 String::new()
             }
@@ -217,12 +217,338 @@ impl GraphStore {
             {}
             ",
             if scoped {
-                format!(" AND s.project_slug = '{}'", escaped)
+                format!(" AND s.project_code = '{}'", escaped)
             } else {
                 String::new()
             }
         );
         Ok(self.query_count(&query).unwrap_or(0))
+    }
+
+    pub fn get_wrapper_candidates(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let query = format!(
+            "
+            WITH outbound AS (
+                SELECT source_id, count(*) AS total_calls
+                FROM CALLS
+                GROUP BY 1
+            ),
+            inbound AS (
+                SELECT target_id, count(*) AS total_callers
+                FROM CALLS
+                GROUP BY 1
+            )
+            SELECT s.name, target.name, COALESCE(inbound.total_callers, 0)
+            FROM outbound o
+            JOIN CALLS c ON c.source_id = o.source_id
+            JOIN Symbol s ON s.id = o.source_id
+            JOIN Symbol target ON target.id = c.target_id
+            LEFT JOIN inbound ON inbound.target_id = target.id
+            LEFT JOIN CONTAINS rel ON rel.target_id = s.id
+            LEFT JOIN File f ON f.path = rel.source_id
+            WHERE o.total_calls = 1
+              AND COALESCE(s.is_public, false) = false
+              AND s.kind IN ('function', 'method')
+              AND (
+                f.path IS NULL
+                OR (
+                    lower(f.path) NOT LIKE '%/tests/%'
+                    AND lower(f.path) NOT LIKE '%_test.rs'
+                    AND lower(f.path) NOT LIKE '%_test.exs'
+                )
+              )
+              {}
+            ORDER BY COALESCE(inbound.total_callers, 0) DESC, s.name ASC
+            LIMIT 20
+            ",
+            if scoped {
+                format!(" AND s.project_code = '{}'", escaped)
+            } else {
+                String::new()
+            }
+        );
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter(|row| row.len() >= 2)
+            .map(|row| format!("{} -> {}", row[0], row[1]))
+            .collect())
+    }
+
+    pub fn get_feature_envy_candidates(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let query = format!(
+            "
+            WITH symbol_files AS (
+                SELECT s.id, s.name, f.path
+                FROM Symbol s
+                JOIN CONTAINS rel ON rel.target_id = s.id
+                JOIN File f ON f.path = rel.source_id
+                WHERE s.kind IN ('function', 'method')
+                  AND (
+                    lower(f.path) NOT LIKE '%/tests/%'
+                    AND lower(f.path) NOT LIKE '%_test.rs'
+                    AND lower(f.path) NOT LIKE '%_test.exs'
+                  )
+                  {}
+            ),
+            outbound AS (
+                SELECT
+                    src.name AS source_name,
+                    src.path AS source_path,
+                    dst.path AS target_path,
+                    count(*) AS call_count
+                FROM CALLS c
+                JOIN symbol_files src ON src.id = c.source_id
+                JOIN symbol_files dst ON dst.id = c.target_id
+                GROUP BY 1, 2, 3
+            ),
+            scored AS (
+                SELECT
+                    source_name,
+                    source_path,
+                    sum(call_count) AS total_calls,
+                    sum(CASE WHEN source_path != target_path THEN call_count ELSE 0 END) AS foreign_calls,
+                    max_by(target_path, CASE WHEN source_path != target_path THEN call_count ELSE 0 END) AS dominant_foreign_path
+                FROM outbound
+                GROUP BY 1, 2
+            )
+            SELECT
+                source_name,
+                dominant_foreign_path,
+                total_calls,
+                foreign_calls
+            FROM scored
+            WHERE total_calls >= 3
+              AND foreign_calls >= 2
+              AND foreign_calls > (total_calls - foreign_calls)
+              AND dominant_foreign_path IS NOT NULL
+            ORDER BY foreign_calls DESC, total_calls DESC, source_name ASC
+            LIMIT 20
+            ",
+            if scoped {
+                format!(" AND s.project_code = '{}'", escaped)
+            } else {
+                String::new()
+            }
+        );
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter(|row| row.len() >= 4)
+            .map(|row| format!("{} -> {} ({}/{})", row[0], row[1], row[3], row[2]))
+            .collect())
+    }
+
+    pub fn get_detour_candidates(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let query = format!(
+            "
+            WITH symbol_files AS (
+                SELECT s.id, s.name, f.path, COALESCE(s.is_public, false) AS is_public
+                FROM Symbol s
+                JOIN CONTAINS rel ON rel.target_id = s.id
+                JOIN File f ON f.path = rel.source_id
+                WHERE s.kind IN ('function', 'method')
+                  AND (
+                    lower(f.path) NOT LIKE '%/tests/%'
+                    AND lower(f.path) NOT LIKE '%_test.rs'
+                    AND lower(f.path) NOT LIKE '%_test.exs'
+                  )
+                  {}
+            ),
+            inbound AS (
+                SELECT target_id, count(*) AS inbound_calls
+                FROM CALLS
+                GROUP BY 1
+            ),
+            outbound AS (
+                SELECT source_id, count(*) AS outbound_calls
+                FROM CALLS
+                GROUP BY 1
+            )
+            SELECT
+                src.name,
+                mid.name,
+                dst.name
+            FROM CALLS c1
+            JOIN CALLS c2 ON c1.target_id = c2.source_id
+            JOIN symbol_files src ON src.id = c1.source_id
+            JOIN symbol_files mid ON mid.id = c1.target_id
+            JOIN symbol_files dst ON dst.id = c2.target_id
+            JOIN inbound mid_in ON mid_in.target_id = mid.id
+            JOIN outbound mid_out ON mid_out.source_id = mid.id
+            WHERE src.path = mid.path
+              AND mid.path = dst.path
+              AND src.id != dst.id
+              AND mid_in.inbound_calls = 1
+              AND mid_out.outbound_calls = 1
+              AND mid.is_public = false
+            ORDER BY src.name ASC, mid.name ASC, dst.name ASC
+            LIMIT 20
+            ",
+            if scoped {
+                format!(" AND s.project_code = '{}'", escaped)
+            } else {
+                String::new()
+            }
+        );
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter(|row| row.len() >= 3)
+            .map(|row| format!("{} -> {} -> {}", row[0], row[1], row[2]))
+            .collect())
+    }
+
+    pub fn get_abstraction_detour_candidates(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let query = format!(
+            "
+            WITH symbol_files AS (
+                SELECT s.id, s.name, lower(s.name) AS lowered_name, s.kind, f.path
+                FROM Symbol s
+                JOIN CONTAINS rel ON rel.target_id = s.id
+                JOIN File f ON f.path = rel.source_id
+                WHERE (
+                    lower(f.path) NOT LIKE '%/tests/%'
+                    AND lower(f.path) NOT LIKE '%_test.rs'
+                    AND lower(f.path) NOT LIKE '%_test.exs'
+                )
+                {}
+            )
+            SELECT
+                iface.name,
+                impl.name
+            FROM symbol_files iface
+            JOIN symbol_files impl ON impl.path = iface.path
+            WHERE iface.kind = 'interface'
+              AND impl.kind IN ('class', 'struct', 'module')
+              AND impl.id != iface.id
+              AND (
+                    impl.lowered_name = iface.lowered_name || 'impl'
+                    OR impl.lowered_name = iface.lowered_name || '_impl'
+                    OR impl.lowered_name LIKE iface.lowered_name || '%adapter%'
+              )
+              AND 1 = (
+                    SELECT count(*)
+                    FROM symbol_files impl2
+                    WHERE impl2.path = iface.path
+                      AND impl2.kind IN ('class', 'struct', 'module')
+                      AND (
+                        impl2.lowered_name = iface.lowered_name || 'impl'
+                        OR impl2.lowered_name = iface.lowered_name || '_impl'
+                        OR impl2.lowered_name LIKE iface.lowered_name || '%adapter%'
+                      )
+                )
+            ORDER BY iface.name ASC, impl.name ASC
+            LIMIT 20
+            ",
+            if scoped {
+                format!(" AND s.project_code = '{}'", escaped)
+            } else {
+                String::new()
+            }
+        );
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter(|row| row.len() >= 2)
+            .map(|row| format!("{} -> {}", row[0], row[1]))
+            .collect())
+    }
+
+    pub fn get_orphan_code_symbols(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let query = format!(
+            "
+            SELECT DISTINCT s.name
+            FROM Symbol s
+            LEFT JOIN SUBSTANTIATES subst
+              ON subst.source_id = s.id OR subst.target_id = s.id
+            LEFT JOIN IMPACTS imp
+              ON imp.source_id = s.id OR imp.target_id = s.id
+            LEFT JOIN soll.Traceability t
+              ON (t.artifact_type = 'Symbol' AND (t.artifact_ref = s.id OR t.artifact_ref = s.name))
+            LEFT JOIN CONTAINS rel ON rel.target_id = s.id
+            LEFT JOIN File f ON f.path = rel.source_id
+            WHERE s.kind IN ('function', 'method')
+              AND COALESCE(s.is_public, false) = false
+              AND subst.source_id IS NULL
+              AND imp.source_id IS NULL
+              AND t.id IS NULL
+              AND (
+                f.path IS NULL
+                OR (
+                    lower(f.path) NOT LIKE '%/tests/%'
+                    AND lower(f.path) NOT LIKE '%_test.rs'
+                    AND lower(f.path) NOT LIKE '%_test.exs'
+                )
+              )
+              {}
+            ORDER BY s.name ASC
+            LIMIT 20
+            ",
+            if scoped {
+                format!(" AND s.project_code = '{}'", escaped)
+            } else {
+                String::new()
+            }
+        );
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.first().cloned())
+            .collect())
+    }
+
+    pub fn get_orphan_intent_nodes(&self, project: &str) -> Result<Vec<String>> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let query = format!(
+            "
+            SELECT n.id, n.type, COALESCE(n.title, '')
+            FROM soll.Node n
+            LEFT JOIN soll.Traceability t
+              ON lower(t.soll_entity_type) = lower(n.type)
+             AND t.soll_entity_id = n.id
+            WHERE n.type IN ('Requirement', 'Decision', 'Concept', 'Validation')
+              AND t.id IS NULL
+              {}
+            ORDER BY n.id ASC
+            LIMIT 20
+            ",
+            if scoped {
+                format!(" AND n.project_code = '{}'", escaped)
+            } else {
+                String::new()
+            }
+        );
+        let res = self.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter(|row| row.len() >= 2)
+            .map(|row| {
+                let title = row.get(2).cloned().unwrap_or_default();
+                if title.is_empty() {
+                    format!("{} ({})", row[0], row[1])
+                } else {
+                    format!("{} ({}) - {}", row[0], row[1], title)
+                }
+            })
+            .collect())
     }
 
     pub fn get_circular_dependencies(&self, project: &str) -> Result<Vec<String>> {
@@ -233,7 +559,7 @@ impl GraphStore {
                 "SELECT c.source_id, c.target_id
                  FROM CALLS c
                  JOIN Symbol s ON s.id = c.source_id
-                 WHERE s.project_slug = '{}'",
+                 WHERE s.project_code = '{}'",
                 escaped
             )
         } else {
@@ -284,6 +610,39 @@ impl GraphStore {
         Ok(findings)
     }
 
+    pub fn get_circular_dependency_count_fast(&self, project: &str) -> Result<i64> {
+        let scoped = project != "*";
+        let escaped = project.replace('\'', "''");
+        let query = format!(
+            "
+            SELECT count(*)
+            FROM (
+                SELECT
+                    least(c1.source_id, c1.target_id) AS left_id,
+                    greatest(c1.source_id, c1.target_id) AS right_id
+                FROM CALLS c1
+                JOIN CALLS c2
+                  ON c1.source_id = c2.target_id
+                 AND c1.target_id = c2.source_id
+                JOIN Symbol s1 ON s1.id = c1.source_id
+                JOIN Symbol s2 ON s2.id = c1.target_id
+                WHERE c1.source_id != c1.target_id
+                  {}
+                GROUP BY 1, 2
+            ) reciprocal_cycles
+            ",
+            if scoped {
+                format!(
+                    "AND s1.project_code = '{}' AND s2.project_code = '{}'",
+                    escaped, escaped
+                )
+            } else {
+                String::new()
+            }
+        );
+        Ok(self.query_count(&query).unwrap_or(0))
+    }
+
     pub fn get_domain_leakage(
         &self,
         project: &str,
@@ -314,7 +673,7 @@ impl GraphStore {
             escaped_domain,
             escaped_infra,
             if scoped {
-                format!(" AND s_domain.project_slug = '{}'", escaped_project)
+                format!(" AND s_domain.project_code = '{}'", escaped_project)
             } else {
                 String::new()
             }
@@ -335,7 +694,7 @@ impl GraphStore {
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {
-            format!(" AND s_src.project_slug = '{}'", escaped)
+            format!(" AND s_src.project_code = '{}'", escaped)
         } else {
             String::new()
         };
@@ -376,14 +735,17 @@ impl GraphStore {
 
         let res = self.query_json(&query)?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-        Ok(rows.into_iter().filter_map(|row| row.first().cloned()).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.first().cloned())
+            .collect())
     }
 
     pub fn get_nif_blocking_risks(&self, project: &str) -> Result<Vec<String>> {
         let scoped = project != "*";
         let escaped = project.replace('\'', "''");
         let scope = if scoped {
-            format!(" AND s_nif.project_slug = '{}'", escaped)
+            format!(" AND s_nif.project_code = '{}'", escaped)
         } else {
             String::new()
         };
@@ -425,6 +787,9 @@ impl GraphStore {
 
         let res = self.query_json(&query)?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
-        Ok(rows.into_iter().filter_map(|row| row.first().cloned()).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.first().cloned())
+            .collect())
     }
 }

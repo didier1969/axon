@@ -145,7 +145,7 @@ def run_structured_import(
     *,
     url: str,
     payload: dict[str, Any],
-    project_slug: str,
+    project_code: str,
     author: str,
     dry_run: bool,
     strict: bool,
@@ -178,7 +178,7 @@ def run_structured_import(
             url,
             "soll_apply_plan",
             {
-                "project_slug": project_slug,
+                "project_code": project_code,
                 "author": author,
                 "dry_run": dry_run,
                 "plan": payload["plan"],
@@ -204,7 +204,7 @@ def run_structured_import(
             action = "update" if "id" in item and str(item.get("id", "")).strip() else "create"
             data = dict(item)
             if action == "create":
-                data.setdefault("project_slug", project_slug)
+                data.setdefault("project_code", project_code)
             if dry_run:
                 steps.append(
                     StepResult(
@@ -307,7 +307,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_MCP_URL,
         help=f"MCP URL (default: {DEFAULT_MCP_URL})",
     )
-    parser.add_argument("--project", default="AXO", help="Project slug for generated IDs.")
+    parser.add_argument("--project", default="AXO", help="Project code for generated IDs.")
     parser.add_argument("--author", default=os.getenv("USER", "codex"), help="Author for revision commits.")
     parser.add_argument("--dry-run", action="store_true", help="No write operations.")
     parser.add_argument("--strict", action="store_true", help="Stop on first tool error.")
@@ -335,7 +335,7 @@ def main() -> int:
     steps = run_structured_import(
         url=args.url,
         payload=payload,
-        project_slug=args.project,
+        project_code=args.project,
         author=args.author,
         dry_run=args.dry_run,
         strict=args.strict,

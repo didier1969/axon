@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "description": "Deterministic retrieve_context qualification corpus for Axon Phase 3.1",
+  "cases": [
+    {
+      "id": "exact_symbol_lookup",
+      "project": "AXO",
+      "question": "axon_retrieve_context",
+      "expected_route": "exact_lookup",
+      "expected_anchor_terms": ["axon_retrieve_context"],
+      "expected_file_paths": ["/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs"],
+      "require_supporting_chunks": false
+    },
+    {
+      "id": "exact_file_lookup",
+      "project": "AXO",
+      "question": "/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs",
+      "expected_route": "exact_lookup",
+      "expected_file_paths": ["/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs"],
+      "require_supporting_chunks": false
+    },
+    {
+      "id": "wiring_context",
+      "project": "AXO",
+      "question": "Where is trigger_scan wired?",
+      "expected_route": "wiring",
+      "expected_anchor_terms": ["trigger_scan"],
+      "require_supporting_chunks": true
+    },
+    {
+      "id": "impact_context",
+      "project": "AXO",
+      "question": "What breaks if parse_batch changes?",
+      "expected_route": "impact",
+      "expected_anchor_terms": ["parse_batch"],
+      "require_supporting_chunks": false
+    },
+    {
+      "id": "rationale_context",
+      "project": "BKS",
+      "question": "Why does checkout use the Stripe SDK?",
+      "expected_route": "soll_hybrid",
+      "expected_anchor_terms": ["checkout"],
+      "expected_soll_ids": ["DEC-BKS-010"],
+      "allow_missing": true
+    }
+  ]
+}

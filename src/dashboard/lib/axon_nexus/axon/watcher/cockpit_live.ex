@@ -13,7 +13,7 @@ defmodule Axon.Watcher.CockpitLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    repo_slug = System.get_env("AXON_REPO_SLUG") || Path.expand(".") |> Path.basename()
+    repo_code = System.get_env("AXON_PROJECT_CODE") || Path.expand(".") |> Path.basename()
 
     if connected?(socket) do
       :timer.send_interval(@reconcile_ms, self(), :reconcile_tick)
@@ -23,10 +23,10 @@ defmodule Axon.Watcher.CockpitLive do
 
     socket =
       socket
-      |> stream_configure(:projects, dom_id: &"project-#{slug_dom_id(&1.slug)}")
-      |> stream_configure(:reasons, dom_id: &"reason-#{slug_dom_id(&1.reason)}")
+      |> stream_configure(:projects, dom_id: &"project-#{stable_dom_id(&1.project_code)}")
+      |> stream_configure(:reasons, dom_id: &"reason-#{stable_dom_id(&1.reason)}")
       |> assign(
-        repo_slug: repo_slug,
+        repo_code: repo_code,
         monitoring_active: true,
         expanded_projects: MapSet.new(),
         last_mcp_probe_ms: 0,
@@ -44,7 +44,7 @@ defmodule Axon.Watcher.CockpitLive do
         snapshot_refresh_in_flight: false,
         snapshot_refresh_pending: false
       )
-      |> assign_snapshot(build_snapshot(repo_slug))
+      |> assign_snapshot(build_snapshot(repo_code))
 
     {:ok, socket}
   end
@@ -95,7 +95,7 @@ defmodule Axon.Watcher.CockpitLive do
       socket
       |> assign(:snapshot_refresh_in_flight, false)
       |> apply_snapshot(snapshot)
-      |> push_event("workspace_sunburst", sunburst_payload(snapshot.workspace))
+      |> push_event("workspace_pipeline_flow", pipeline_flow_payload(snapshot.workspace))
 
     Telemetry.mark_dashboard_render(System.monotonic_time(:millisecond) - started_at)
 
@@ -113,12 +113,12 @@ defmodule Axon.Watcher.CockpitLive do
   end
 
   @impl true
-  def handle_event("toggle_project", %{"slug" => slug}, socket) do
+  def handle_event("toggle_project", %{"project_code" => project_code}, socket) do
     expanded_projects =
-      if MapSet.member?(socket.assigns.expanded_projects, slug) do
-        MapSet.delete(socket.assigns.expanded_projects, slug)
+      if MapSet.member?(socket.assigns.expanded_projects, project_code) do
+        MapSet.delete(socket.assigns.expanded_projects, project_code)
       else
-        MapSet.put(socket.assigns.expanded_projects, slug)
+        MapSet.put(socket.assigns.expanded_projects, project_code)
       end
 
     {:noreply, assign(socket, :expanded_projects, expanded_projects)}
@@ -153,87 +153,87 @@ defmodule Axon.Watcher.CockpitLive do
         <div class="band-title-row">
           <div>
             <p class="eyebrow">Workspace</p>
-            <h2>Indexation globale</h2>
+            <h2>Pipeline overview</h2>
           </div>
           <div class="band-meta">
-            <span>Repo slug: {@repo_slug}</span>
-            <span>Completion: {@workspace["progress"]}%</span>
-            <span>Global Indexation: {@workspace["global_indexation_pct"] || 0}%</span>
+            <span>Project code: {@repo_code}</span>
+            <span>Terminal completion: {@workspace["progress"]}%</span>
+            <span>Primary pipeline readiness: {@workspace["global_indexation_pct"] || 0}%</span>
           </div>
         </div>
 
         <div class="workspace-metric-groups">
           <section class="metric-group">
             <div class="metric-group-head">
-              <p class="eyebrow">Flux 1</p>
-              <h3>Couverture fichiers</h3>
+              <p class="eyebrow">Lane 1</p>
+              <h3>File lifecycle</h3>
             </div>
             <div class="hero-grid">
-              <.metric_card label="Known Files" value={@workspace["known"]} tone={:neutral} hint="Total fichiers détectés dans le workspace." />
-              <.metric_card label="Files Completed" value={@workspace["completed"]} tone={:ok} hint="Fichiers en statut terminal: indexed + indexed_degraded + skipped + deleted." />
-              <.metric_card label="Indexing" value={@workspace["indexing"]} tone={:info} hint="Fichiers en traitement actif." />
-              <.metric_card label="Pending" value={@workspace["pending"]} tone={:warn} hint="Fichiers encore en attente de traitement." />
-              <.metric_card label="Degraded" value={@workspace["indexed_degraded"]} tone={:warn} hint="Indexation partielle (fallback/dégradé)." />
-              <.metric_card label="Oversized" value={@workspace["oversized"]} tone={:danger} hint="Fichiers refusés pour contrainte de taille/budget." />
-              <.metric_card label="Skipped" value={@workspace["skipped"]} tone={:neutral} hint="Fichiers ignorés intentionnellement." />
-              <.metric_card label="Deleted" value={@workspace["deleted"]} tone={:neutral} hint="Fichiers supprimés côté source." />
+              <.metric_card label="Known Files" value={@workspace["known"]} tone={:neutral} hint="All files currently known to the canonical file table." />
+              <.metric_card label="Terminal Files" value={@workspace["completed"]} tone={:ok} hint="Terminal lifecycle states: indexed, indexed degraded, skipped, deleted, and oversized." />
+              <.metric_card label="Indexing" value={@workspace["indexing"]} tone={:info} hint="Files currently claimed and actively processing." />
+              <.metric_card label="Pending" value={@workspace["pending"]} tone={:warn} hint="Files waiting to enter the fast lane." />
+              <.metric_card label="Indexed Degraded" value={@workspace["indexed_degraded"]} tone={:warn} hint="Structure-only success. Graph truth exists, but semantic materialization may be partial." />
+              <.metric_card label="Oversized" value={@workspace["oversized"]} tone={:danger} hint="Terminal refusal for the current budget envelope. A later scan or budget change can reopen it." />
+              <.metric_card label="Skipped" value={@workspace["skipped"]} tone={:neutral} hint="Files intentionally skipped by parser/runtime policy." />
+              <.metric_card label="Deleted" value={@workspace["deleted"]} tone={:neutral} hint="Files removed from source and tombstoned in the canonical table." />
             </div>
           </section>
 
           <section class="metric-group">
             <div class="metric-group-head">
-              <p class="eyebrow">Flux 2</p>
-              <h3>Structure graphe</h3>
+              <p class="eyebrow">Lane 2</p>
+              <h3>AST / graph readiness</h3>
             </div>
             <div class="hero-grid">
               <.metric_card
-                label="Files Graph Ready"
+                label="Files AST Ready"
                 value={"#{@workspace["graph_ready"]} (#{@workspace["graph_ready_pct"] || 0}%)"}
                 tone={:ok}
-                hint="Fichiers avec projection graphe validée."
+                hint="Files whose AST-derived structural graph is available and queryable."
               />
-              <.metric_card label="Nodes" value={@workspace["nodes_count"]} tone={:neutral} hint="Nombre de nœuds (Symbol)." />
-              <.metric_card label="Links" value={@workspace["links_count"]} tone={:neutral} hint="Nombre de liens structurels (CALLS/CONTAINS/IMPACTS/SUBSTANTIATES)." />
+              <.metric_card label="Nodes" value={@workspace["nodes_count"]} tone={:neutral} hint="Structural node count from Symbol." />
+              <.metric_card label="Links" value={@workspace["links_count"]} tone={:neutral} hint="Structural edge count from CALLS, CONTAINS, IMPACTS, and SUBSTANTIATES." />
             </div>
           </section>
 
           <section class="metric-group">
             <div class="metric-group-head">
-              <p class="eyebrow">Flux 3</p>
-              <h3>Enrichissement sémantique</h3>
+              <p class="eyebrow">Lane 3</p>
+              <h3>Vectorization readiness</h3>
             </div>
             <div class="hero-grid">
               <.metric_card
-                label="Files With Semantic Coverage (Derived)"
-                value={"#{@workspace["vector_ready_file"]} (#{@workspace["vector_ready_file_pct"] || 0}%)"}
+                label="Files Vectorized (Derived)"
+                value={"#{@workspace["semantic_coverage"]} (#{@workspace["semantic_coverage_pct"] || 0}%)"}
                 tone={:info}
-                hint="Fichiers graph_ready sans chunk embedding manquant pour le modèle chunk actif."
+                hint="Derived metric: AST-ready files with no missing chunk embeddings for the active chunk model."
               />
               <.metric_card
                 label="Chunk Embeddings"
                 value={@workspace["chunk_embeddings_count"]}
                 tone={:info}
-                hint="Nombre total de lignes persistées dans ChunkEmbedding."
+                hint="Persisted rows in ChunkEmbedding."
               />
               <.metric_card
-                label="Vector Ready File Flag"
+                label="File.vector_ready Raw Flag"
                 value={@workspace["vector_ready_file_raw"]}
                 tone={:neutral}
-                hint="Compteur brut de File.vector_ready = TRUE. Signal avancé seulement."
+                hint="Raw File.vector_ready = TRUE count. Advanced signal only."
               />
               <.metric_card
-                label="Graph Embeddings"
+                label="Graph Embeddings (Advanced)"
                 value={"#{@workspace["vector_ready_graph"]} (#{@workspace["vector_ready_graph_pct"] || 0}%)"}
                 tone={:neutral}
-                hint="Signal avancé expérimental, hors chemin critique principal."
+                hint="Secondary graph-level embedding signal. Not a primary product KPI."
               />
             </div>
           </section>
 
           <section class="metric-group">
             <div class="metric-group-head">
-              <p class="eyebrow">Flux 4</p>
-              <h3>Alignement SOLL</h3>
+              <p class="eyebrow">Lane 4</p>
+              <h3>SOLL alignment</h3>
             </div>
             <div class="hero-grid">
               <.metric_card label="SOLL Done" value={@workspace["soll_done"]} tone={:ok} />
@@ -257,20 +257,32 @@ defmodule Axon.Watcher.CockpitLive do
         <div class="band-title-row">
           <div>
             <p class="eyebrow">Workspace</p>
-            <h2>Sunburst progression</h2>
+            <h2>Pipeline flow</h2>
           </div>
-          <span class="band-kicker">Push live (ECharts)</span>
+          <span class="band-kicker">Read-only ECharts flow</span>
         </div>
         <div
-          id="workspace-sunburst"
-          phx-hook="WorkspaceSunburst"
+          id="workspace-pipeline-flow"
+          phx-hook="WorkspacePipelineFlow"
           phx-update="ignore"
           class="workspace-sunburst"
           data-known={@workspace["known"] || 0}
           data-completed={@workspace["completed"] || 0}
-          data-graph-ready={@workspace["graph_ready"] || 0}
-          data-vector-file={@workspace["vector_ready_file"] || 0}
-          data-vector-graph={@workspace["vector_ready_graph"] || 0}
+          data-indexed={@workspace["completed_indexed"] || 0}
+          data-indexed-degraded={@workspace["completed_indexed_degraded"] || 0}
+          data-skipped={@workspace["completed_skipped"] || 0}
+          data-deleted={@workspace["completed_deleted"] || 0}
+          data-oversized={@workspace["completed_oversized"] || 0}
+          data-indexing={@workspace["indexing"] || 0}
+          data-pending={@workspace["pending"] || 0}
+          data-indexed-graph-ready={@workspace["indexed_graph_ready"] || 0}
+          data-indexed-graph-missing={@workspace["indexed_graph_missing"] || 0}
+          data-indexed-degraded-graph-ready={@workspace["indexed_degraded_graph_ready"] || 0}
+          data-indexed-degraded-graph-missing={@workspace["indexed_degraded_graph_missing"] || 0}
+          data-indexed-vector-ready={@workspace["indexed_vector_ready"] || 0}
+          data-indexed-vector-missing={@workspace["indexed_vector_missing"] || 0}
+          data-indexed-degraded-vector-ready={@workspace["indexed_degraded_vector_ready"] || 0}
+          data-indexed-degraded-vector-missing={@workspace["indexed_degraded_vector_missing"] || 0}
           style="width:100%;height:360px;"
         >
         </div>
@@ -282,7 +294,7 @@ defmodule Axon.Watcher.CockpitLive do
             <div class="band-title-row">
               <div>
                 <p class="eyebrow">Backlog</p>
-                <h2>Causes dominantes</h2>
+                <h2>Active backlog reasons</h2>
               </div>
               <span class="band-kicker">{backlog_summary(@workspace)}</span>
             </div>
@@ -501,7 +513,7 @@ defmodule Axon.Watcher.CockpitLive do
           <div class="band-title-row">
             <div>
               <p class="eyebrow">Projects</p>
-              <h2>Readiness par projet</h2>
+              <h2>Project readiness</h2>
             </div>
             <span class="band-kicker">{@readiness.project_summary}</span>
           </div>
@@ -516,18 +528,18 @@ defmodule Axon.Watcher.CockpitLive do
             phx-update="stream"
             class="stack-list"
           >
-            <div :for={{dom_id, project} <- @streams.projects} id={dom_id} class={["project-card", if(expanded_project?(@expanded_projects, project.slug), do: "open", else: "closed")]}>
+            <div :for={{dom_id, project} <- @streams.projects} id={dom_id} class={["project-card", if(expanded_project?(@expanded_projects, project.project_code), do: "open", else: "closed")]}>
               <div class="project-head">
                 <div>
-                  <p class="stack-title">{project.slug}</p>
+                  <p class="stack-title">{project.display_name}</p>
                   <p class="stack-caption">{project.readiness |> String.upcase()} readiness</p>
                 </div>
                 <div class="project-head-actions">
                   <span class={["readiness-pill", readiness_class(project.readiness)]}>
                     {project.progress}%
                   </span>
-                  <button type="button" class="project-toggle" phx-click="toggle_project" phx-value-slug={project.slug}>
-                    {if expanded_project?(@expanded_projects, project.slug), do: "Hide", else: "Details"}
+                  <button type="button" class="project-toggle" phx-click="toggle_project" phx-value-project_code={project.project_code}>
+                    {if expanded_project?(@expanded_projects, project.project_code), do: "Hide", else: "Details"}
                   </button>
                 </div>
               </div>
@@ -543,16 +555,16 @@ defmodule Axon.Watcher.CockpitLive do
                 />
               </div>
 
-              <div :if={expanded_project?(@expanded_projects, project.slug)} class="project-grid expanded">
+              <div :if={expanded_project?(@expanded_projects, project.project_code)} class="project-grid expanded">
                 <.signal_stat label="Degraded" value={Integer.to_string(project.degraded)} />
                 <.signal_stat label="Oversized" value={Integer.to_string(project.oversized)} />
                 <.signal_stat label="Skipped" value={Integer.to_string(project.skipped)} />
                 <.signal_stat
-                  label="Vector File (Derived)"
+                  label="Semantic Coverage (Derived)"
                   value={"#{project.vector_ready_file} (#{project.vector_ready_file_pct || 0}%)"}
                 />
                 <.signal_stat
-                  label="Graph Embeddings"
+                  label="Graph Embeddings (Advanced)"
                   value={"#{project.vector_ready_graph} (#{project.vector_ready_graph_pct || 0}%)"}
                 />
                 <.signal_stat label="Nodes" value={Integer.to_string(project.nodes_count)} />
@@ -714,12 +726,12 @@ defmodule Axon.Watcher.CockpitLive do
       assign(socket, :snapshot_refresh_pending, true)
     else
       parent = self()
-      repo_slug = socket.assigns.repo_slug
+      repo_code = socket.assigns.repo_code
       started_at = System.monotonic_time(:millisecond)
 
       Task.start(fn ->
         try do
-          send(parent, {:snapshot_ready, started_at, build_snapshot(repo_slug)})
+          send(parent, {:snapshot_ready, started_at, build_snapshot(repo_code)})
         rescue
           error -> send(parent, {:snapshot_failed, started_at, error})
         end
@@ -731,8 +743,8 @@ defmodule Axon.Watcher.CockpitLive do
     end
   end
 
-  defp build_snapshot(repo_slug) do
-    progress_snapshot = Progress.get_snapshot(repo_slug)
+  defp build_snapshot(repo_code) do
+    progress_snapshot = Progress.get_snapshot(repo_code)
     workspace = progress_snapshot.workspace
     projects = progress_snapshot.projects
     reasons = progress_snapshot.reasons
@@ -849,10 +861,17 @@ defmodule Axon.Watcher.CockpitLive do
       "oversized" => 0,
       "skipped" => 0,
       "deleted" => 0,
+      "completed_indexed" => 0,
+      "completed_indexed_degraded" => 0,
+      "completed_skipped" => 0,
+      "completed_deleted" => 0,
+      "completed_oversized" => 0,
       "graph_ready" => 0,
       "graph_ready_pct" => 0,
       "vector_ready" => 0,
       "vector_ready_file" => 0,
+      "semantic_coverage" => 0,
+      "semantic_coverage_pct" => 0,
       "vector_ready_file_pct" => 0,
       "vector_ready_file_raw" => 0,
       "vector_ready_graph" => 0,
@@ -1097,8 +1116,8 @@ defmodule Axon.Watcher.CockpitLive do
   defp blank_to_none(""), do: "(none)"
   defp blank_to_none(value), do: value
 
-  defp expanded_project?(expanded_projects, slug) do
-    MapSet.member?(expanded_projects, slug)
+  defp expanded_project?(expanded_projects, project_code) do
+    MapSet.member?(expanded_projects, project_code)
   end
 
   defp spark_height(value, max_value) when is_integer(value) and is_integer(max_value) and max_value > 0 do
@@ -1139,17 +1158,29 @@ defmodule Axon.Watcher.CockpitLive do
   defp should_refresh_from_bridge_event?(%{"ScanComplete" => _payload}), do: true
   defp should_refresh_from_bridge_event?(_event), do: false
 
-  defp sunburst_payload(workspace) do
+  defp pipeline_flow_payload(workspace) do
     %{
       "known" => Map.get(workspace, "known", 0) || 0,
       "completed" => Map.get(workspace, "completed", 0) || 0,
-      "graph_ready" => Map.get(workspace, "graph_ready", 0) || 0,
-      "vector_ready_file" => Map.get(workspace, "vector_ready_file", 0) || 0,
-      "vector_ready_graph" => Map.get(workspace, "vector_ready_graph", 0) || 0
+      "completed_indexed" => Map.get(workspace, "completed_indexed", 0) || 0,
+      "completed_indexed_degraded" => Map.get(workspace, "completed_indexed_degraded", 0) || 0,
+      "completed_skipped" => Map.get(workspace, "completed_skipped", 0) || 0,
+      "completed_deleted" => Map.get(workspace, "completed_deleted", 0) || 0,
+      "completed_oversized" => Map.get(workspace, "completed_oversized", 0) || 0,
+      "indexing" => Map.get(workspace, "indexing", 0) || 0,
+      "pending" => Map.get(workspace, "pending", 0) || 0,
+      "indexed_graph_ready" => Map.get(workspace, "indexed_graph_ready", 0) || 0,
+      "indexed_graph_missing" => Map.get(workspace, "indexed_graph_missing", 0) || 0,
+      "indexed_degraded_graph_ready" => Map.get(workspace, "indexed_degraded_graph_ready", 0) || 0,
+      "indexed_degraded_graph_missing" => Map.get(workspace, "indexed_degraded_graph_missing", 0) || 0,
+      "indexed_vector_ready" => Map.get(workspace, "indexed_vector_ready", 0) || 0,
+      "indexed_vector_missing" => Map.get(workspace, "indexed_vector_missing", 0) || 0,
+      "indexed_degraded_vector_ready" => Map.get(workspace, "indexed_degraded_vector_ready", 0) || 0,
+      "indexed_degraded_vector_missing" => Map.get(workspace, "indexed_degraded_vector_missing", 0) || 0
     }
   end
 
-  defp slug_dom_id(value) do
+  defp stable_dom_id(value) do
     value
     |> to_string()
     |> String.downcase()

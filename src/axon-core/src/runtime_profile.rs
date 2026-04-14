@@ -12,6 +12,16 @@ pub struct RuntimeProfile {
     pub queue_capacity: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingLaneSizing {
+    pub query_workers: usize,
+    pub vector_workers: usize,
+    pub graph_workers: usize,
+    pub chunk_batch_size: usize,
+    pub file_vectorization_batch_size: usize,
+    pub graph_batch_size: usize,
+}
+
 impl RuntimeProfile {
     pub fn detect() -> Self {
         let cpu_cores = std::thread::available_parallelism()
@@ -80,10 +90,18 @@ fn detect_ingestion_memory_budget_gb(ram_budget_gb: u64) -> u64 {
         .max(2)
 }
 
+fn wsl_cuda_runtime_available(osrelease: &str, libcuda_present: bool) -> bool {
+    libcuda_present && osrelease.to_ascii_lowercase().contains("microsoft")
+}
+
 fn detect_gpu_presence() -> bool {
     Path::new("/dev/dri/renderD128").exists()
         || Path::new("/dev/nvidia0").exists()
         || Path::new("/proc/driver/nvidia/version").exists()
+        || wsl_cuda_runtime_available(
+            &std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default(),
+            Path::new("/usr/lib/wsl/lib/libcuda.so.1").exists(),
+        )
 }
 
 fn recommend_sizing(cpu_cores: usize, ram_total_gb: u64, gpu_present: bool) -> RecommendedSizing {
@@ -116,11 +134,53 @@ fn recommend_sizing(cpu_cores: usize, ram_total_gb: u64, gpu_present: bool) -> R
     }
 }
 
+pub fn recommend_embedding_lane_sizing(profile: &RuntimeProfile) -> EmbeddingLaneSizing {
+    let query_workers = 1usize;
+    let available_background_workers = profile.recommended_workers.saturating_sub(query_workers);
+
+    let (mut vector_workers, mut graph_workers) = if profile.gpu_present {
+        (1usize, 0usize)
+    } else {
+        (1usize, 0usize)
+    };
+
+    if available_background_workers <= 2 {
+        vector_workers = 1;
+        graph_workers = 0;
+    } else if vector_workers + graph_workers > available_background_workers {
+        vector_workers = available_background_workers.max(1);
+        graph_workers = 0;
+    }
+
+    let (chunk_batch_size, file_vectorization_batch_size, graph_batch_size) = if profile.gpu_present
+    {
+        // Keep a single GPU vector worker to avoid duplicate model residency,
+        // but feed that worker more aggressively now that query embeddings live on CPU
+        // and the CUDA controller can clamp under live memory pressure.
+        (48, 12, 8)
+    } else {
+        // CPU-only hosts should stay conservative by default.
+        // Runtime evidence showed that widening the background pool here
+        // increases contention and hurts MCP latency more than it helps drain.
+        (16, 8, 4)
+    };
+
+    EmbeddingLaneSizing {
+        query_workers,
+        vector_workers: vector_workers.max(1),
+        graph_workers,
+        chunk_batch_size,
+        file_vectorization_batch_size,
+        graph_batch_size,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         configured_max_worker_cap, detect_ingestion_memory_budget_gb, detect_ram_budget_gb,
-        recommend_sizing,
+        recommend_embedding_lane_sizing, recommend_sizing, wsl_cuda_runtime_available,
+        RuntimeProfile,
     };
 
     #[test]
@@ -164,9 +224,102 @@ mod tests {
     }
 
     #[test]
+    fn test_wsl_cuda_runtime_available_detects_wsl_gpu_shape() {
+        assert!(wsl_cuda_runtime_available(
+            "6.6.87.2-microsoft-standard-WSL2",
+            true
+        ));
+        assert!(!wsl_cuda_runtime_available("6.6.87.2-linux", true));
+        assert!(!wsl_cuda_runtime_available(
+            "6.6.87.2-microsoft-standard-WSL2",
+            false
+        ));
+    }
+
+    #[test]
     fn test_max_worker_cap_reads_positive_integer() {
         std::env::set_var("MAX_AXON_WORKERS", "1");
         assert_eq!(configured_max_worker_cap(), Some(1));
         std::env::remove_var("MAX_AXON_WORKERS");
+    }
+
+    #[test]
+    fn test_embedding_lane_sizing_disables_graph_lane_on_large_cpu_hosts_by_default() {
+        let profile = RuntimeProfile {
+            cpu_cores: 16,
+            ram_total_gb: 31,
+            ram_budget_gb: 23,
+            ingestion_memory_budget_gb: 9,
+            gpu_present: false,
+            recommended_workers: 14,
+            max_blocking_threads: 11,
+            queue_capacity: 200_000,
+        };
+        let sizing = recommend_embedding_lane_sizing(&profile);
+        assert_eq!(sizing.query_workers, 1);
+        assert_eq!(sizing.vector_workers, 1);
+        assert_eq!(sizing.graph_workers, 0);
+        assert_eq!(sizing.chunk_batch_size, 16);
+        assert_eq!(sizing.file_vectorization_batch_size, 8);
+    }
+
+    #[test]
+    fn test_embedding_lane_sizing_expands_when_gpu_is_available() {
+        let profile = RuntimeProfile {
+            cpu_cores: 16,
+            ram_total_gb: 31,
+            ram_budget_gb: 23,
+            ingestion_memory_budget_gb: 9,
+            gpu_present: true,
+            recommended_workers: 14,
+            max_blocking_threads: 11,
+            queue_capacity: 200_000,
+        };
+        let sizing = recommend_embedding_lane_sizing(&profile);
+        assert_eq!(sizing.query_workers, 1);
+        assert_eq!(sizing.vector_workers, 1);
+        assert_eq!(sizing.graph_workers, 0);
+        assert_eq!(sizing.chunk_batch_size, 48);
+        assert_eq!(sizing.file_vectorization_batch_size, 12);
+        assert_eq!(sizing.graph_batch_size, 8);
+    }
+
+    #[test]
+    fn test_embedding_lane_sizing_prefers_batch_depth_over_gpu_worker_fanout() {
+        let profile = RuntimeProfile {
+            cpu_cores: 24,
+            ram_total_gb: 64,
+            ram_budget_gb: 48,
+            ingestion_memory_budget_gb: 17,
+            gpu_present: true,
+            recommended_workers: 20,
+            max_blocking_threads: 15,
+            queue_capacity: 200_000,
+        };
+        let sizing = recommend_embedding_lane_sizing(&profile);
+        assert_eq!(sizing.query_workers, 1);
+        assert_eq!(sizing.vector_workers, 1);
+        assert_eq!(sizing.graph_workers, 0);
+        assert_eq!(sizing.chunk_batch_size, 48);
+        assert_eq!(sizing.file_vectorization_batch_size, 12);
+    }
+
+    #[test]
+    fn test_embedding_lane_sizing_stays_small_on_constrained_hosts() {
+        let profile = RuntimeProfile {
+            cpu_cores: 4,
+            ram_total_gb: 8,
+            ram_budget_gb: 6,
+            ingestion_memory_budget_gb: 3,
+            gpu_present: false,
+            recommended_workers: 2,
+            max_blocking_threads: 4,
+            queue_capacity: 20_000,
+        };
+        let sizing = recommend_embedding_lane_sizing(&profile);
+        assert_eq!(sizing.query_workers, 1);
+        assert_eq!(sizing.vector_workers, 1);
+        assert_eq!(sizing.graph_workers, 0);
+        assert_eq!(sizing.chunk_batch_size, 16);
     }
 }

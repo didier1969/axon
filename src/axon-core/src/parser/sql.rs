@@ -42,7 +42,7 @@ impl Parser for SqlParser {
 
         if content.is_empty() {
             return ExtractionResult {
-                project_slug: None,
+                project_code: None,
                 symbols,
                 relations,
             };
@@ -152,7 +152,7 @@ impl Parser for SqlParser {
         }
 
         ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols,
             relations,
         }

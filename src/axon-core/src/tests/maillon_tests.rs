@@ -11,6 +11,7 @@ use crate::worker::DbWriteTask;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedding_contract::{CHUNK_MODEL_ID, DIMENSION, GRAPH_MODEL_ID, MODEL_NAME};
     use crate::file_ingress_guard::{FileIngressGuard, GuardDecision};
     use crate::ingress_buffer::{
         IngressBuffer, IngressCause, IngressDrainBatch, IngressFileEvent, IngressSource,
@@ -850,12 +851,12 @@ mod tests {
         store.execute("DROP TABLE File;").unwrap();
         store
             .execute(
-                "CREATE TABLE File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR)"
+                "CREATE TABLE File (path VARCHAR PRIMARY KEY, project_code VARCHAR, status VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR)"
             )
             .unwrap();
         store
             .execute(
-                "INSERT INTO File (path, project_slug, status, size, priority, mtime, worker_id, trace_id) VALUES ('/tmp/legacy_reopen.ex', 'proj', 'indexed', 100, 1, 1, NULL, 'trace-legacy')"
+                "INSERT INTO File (path, project_code, status, size, priority, mtime, worker_id, trace_id) VALUES ('/tmp/legacy_reopen.ex', 'proj', 'indexed', 100, 1, 1, NULL, 'trace-legacy')"
             )
             .unwrap();
         store.execute("DELETE FROM RuntimeMetadata;").unwrap();
@@ -886,12 +887,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&db_root);
     }
 
-
-
-
-
-
-
     #[test]
     fn test_maillon_2c_embedding_version_drift_resets_only_embedding_layers() {
         let db_root = std::env::temp_dir().join(format!(
@@ -914,13 +909,13 @@ mod tests {
             )])
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES ('sym-embed-reset', 'embed_reset', 'function', 'proj')")
+            .execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('sym-embed-reset', 'embed_reset', 'function', 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('chunk-embed-reset', 'symbol', 'sym-embed-reset', 'proj', 'function', 'content', 'hash-1', 1, 1)")
+            .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-embed-reset', 'symbol', 'sym-embed-reset', 'proj', 'function', 'content', 'hash-1', 1, 1)")
             .unwrap();
         store
-            .execute("INSERT INTO EmbeddingModel (id, kind, model_name, dimension, version, created_at) VALUES ('model-embed-reset', 'chunk', 'bge-small-en-v1.5', 384, '0', 1)")
+            .execute(&format!("INSERT INTO EmbeddingModel (id, kind, model_name, dimension, version, created_at) VALUES ('model-embed-reset', 'chunk', '{MODEL_NAME}', {DIMENSION}, '0', 1)"))
             .unwrap();
         store
             .execute("INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash) VALUES ('chunk-embed-reset', 'model-embed-reset', 'hash-1')")
@@ -996,7 +991,7 @@ mod tests {
             .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/ingestion_reset.ex'")
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES ('sym-ingestion-reset', 'ingestion_reset', 'function', 'proj')")
+            .execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('sym-ingestion-reset', 'ingestion_reset', 'function', 'proj')")
             .unwrap();
         store
             .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/ingestion_reset.ex', 'sym-ingestion-reset')")
@@ -1063,12 +1058,12 @@ mod tests {
         store.execute("DROP TABLE File;").unwrap();
         store
             .execute(
-                "CREATE TABLE File (path VARCHAR PRIMARY KEY, project_slug VARCHAR, priority BIGINT)"
+                "CREATE TABLE File (path VARCHAR PRIMARY KEY, project_code VARCHAR, priority BIGINT)"
             )
             .unwrap();
         store
             .execute(
-                "INSERT INTO File (path, project_slug, priority) VALUES ('/tmp/hard_reset.ex', 'proj', 1)"
+                "INSERT INTO File (path, project_code, priority) VALUES ('/tmp/hard_reset.ex', 'proj', 1)"
             )
             .unwrap();
         store.execute("DELETE FROM RuntimeMetadata;").unwrap();
@@ -1141,7 +1136,7 @@ mod tests {
 
         let row = store
             .query_json(&format!(
-                "SELECT status, priority, project_slug FROM File WHERE path = '{}'",
+                "SELECT status, priority, project_code FROM File WHERE path = '{}'",
                 file_path.to_string_lossy().replace('\'', "''")
             ))
             .unwrap();
@@ -1154,7 +1149,7 @@ mod tests {
             row.contains("900"),
             "Le delta chaud doit imposer une priorité élevée"
         );
-        assert!(row.contains("proj"), "Le slug projet doit être conservé");
+        assert!(row.contains("proj"), "Le code projet doit être conservé");
     }
 
     #[test]
@@ -1396,6 +1391,110 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_2h4b_watcher_blocks_subtree_hint_for_bmad_generated_tree() {
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let blocked = root
+            .join("proj")
+            .join("_bmad-output")
+            .join("planning-artifacts");
+        std::fs::create_dir_all(&blocked).unwrap();
+
+        let ingress = shared_ingress_buffer();
+        let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
+
+        let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            root,
+            "proj",
+            &root.join("proj").join("_bmad-output"),
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+            &ingress,
+        )
+        .unwrap();
+
+        assert!(
+            !staged,
+            "Une arborescence _bmad-output ne doit pas produire de subtree_hint"
+        );
+
+        let locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(locked.subtree_hint_entries(), 0);
+        assert_eq!(locked.buffered_entries(), 0);
+    }
+
+    #[test]
+    fn test_maillon_2h5_watcher_control_file_enqueues_local_scope_hint_not_project_root() {
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        let nested = project.join("apps").join("billing");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(".gitignore"), "node_modules/\n").unwrap();
+
+        let ingress = shared_ingress_buffer();
+        let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
+
+        let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            root,
+            "proj",
+            &nested.join(".gitignore"),
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+            &ingress,
+        )
+        .unwrap();
+
+        assert!(
+            staged,
+            "Un fichier de controle doit produire un subtree_hint"
+        );
+
+        let mut locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
+        let batch = locked.drain_batch(10);
+        assert_eq!(batch.subtree_hints.len(), 1);
+        assert_eq!(
+            batch.subtree_hints[0].path,
+            nested.to_string_lossy().to_string(),
+            "Le subtree_hint doit rester borne au repertoire du fichier de controle"
+        );
+    }
+
+    #[test]
+    fn test_maillon_2h6_watcher_control_file_in_blocked_scope_does_not_enqueue_hint() {
+        let _guard = lock_file_ingress_guard_env();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let blocked = root.join("proj").join("_build").join("dev");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(blocked.join(".gitignore"), "*.beam\n").unwrap();
+
+        let ingress = shared_ingress_buffer();
+        let guard = Arc::new(Mutex::new(FileIngressGuard::default()));
+
+        let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
+            root,
+            "proj",
+            &blocked.join(".gitignore"),
+            crate::fs_watcher::HOT_PRIORITY,
+            &guard,
+            &ingress,
+        )
+        .unwrap();
+
+        assert!(
+            !staged,
+            "Un fichier de controle dans un scope bloque ne doit pas produire de subtree_hint"
+        );
+
+        let locked = ingress.lock().unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(locked.subtree_hint_entries(), 0);
+        assert_eq!(locked.buffered_entries(), 0);
+    }
+
+    #[test]
     fn test_maillon_2i_hot_delta_does_not_reopen_file_already_indexing() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1497,7 +1596,7 @@ mod tests {
         );
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "live_changed".to_string(),
                 kind: "func".to_string(),
@@ -1568,7 +1667,7 @@ mod tests {
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "deleted_live".to_string(),
                 kind: "func".to_string(),
@@ -1669,7 +1768,7 @@ mod tests {
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "rename_old".to_string(),
                 kind: "func".to_string(),
@@ -1865,7 +1964,7 @@ mod tests {
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "degraded_file".to_string(),
                 kind: "func".to_string(),
@@ -1914,7 +2013,7 @@ mod tests {
         assert!(row.contains("true"), "{row}");
 
         let symbol_count = store
-            .query_count("SELECT count(*) FROM Symbol WHERE project_slug = 'proj'")
+            .query_count("SELECT count(*) FROM Symbol WHERE project_code = 'proj'")
             .unwrap();
         assert_eq!(
             symbol_count, 1,
@@ -1937,7 +2036,7 @@ mod tests {
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "full_success".to_string(),
                 kind: "func".to_string(),
@@ -1983,6 +2082,66 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_2r1_full_commit_tolerates_nul_bytes_in_chunk_content() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path = "/tmp/nul_text_payload.txt".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .unwrap();
+
+        let extraction = parser::ExtractionResult {
+            project_code: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "document_body".to_string(),
+                kind: "markdown_content".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: Some("hello\0world".to_string()),
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-nul-chunk".to_string(),
+                path: path.clone(),
+                content: Some("hello\0world".to_string()),
+                extraction,
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        let row = store
+            .query_json(
+                "SELECT status, status_reason, file_stage FROM File WHERE path = '/tmp/nul_text_payload.txt'",
+            )
+            .unwrap();
+        assert!(row.contains("indexed"), "{row}");
+        assert!(row.contains("indexed_success_full"), "{row}");
+
+        let chunk_count = store
+            .query_count("SELECT count(*) FROM Chunk WHERE project_code = 'proj'")
+            .unwrap();
+        assert_eq!(
+            chunk_count, 1,
+            "text content with NUL bytes should remain indexable"
+        );
+    }
+
+    #[test]
     fn test_maillon_2r2_skipped_commit_marks_terminal_file_stage_without_graph_ready() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/skipped_file.rs".to_string();
@@ -2025,7 +2184,7 @@ mod tests {
     }
 
     #[test]
-    fn test_maillon_2r4_vector_ready_flips_true_after_chunk_embeddings_land() {
+    fn test_maillon_2r4_vector_ready_flips_true_only_after_file_completion_mark() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/vector_ready.rs".to_string();
         store
@@ -2033,7 +2192,7 @@ mod tests {
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "vector_ready".to_string(),
                 kind: "func".to_string(),
@@ -2075,14 +2234,37 @@ mod tests {
         assert!(before.contains("true"), "{before}");
 
         let chunk_rows = store
-            .query_json("SELECT id, content_hash FROM Chunk WHERE project_slug = 'proj'")
+            .query_json("SELECT id, content_hash FROM Chunk WHERE project_code = 'proj'")
             .unwrap();
         let rows: Vec<Vec<String>> = serde_json::from_str(&chunk_rows).unwrap();
         let chunk_id = rows[0][0].clone();
         let content_hash = rows[0][1].clone();
 
         store
-            .update_chunk_embeddings("test-model", &[(chunk_id, content_hash, vec![0.0; 384])])
+            .execute("UPDATE File SET vector_ready = FALSE WHERE path = '/tmp/vector_ready.rs'")
+            .unwrap();
+
+        store
+            .update_chunk_embeddings(
+                "test-model",
+                &[(chunk_id, content_hash, vec![0.0; DIMENSION])],
+            )
+            .unwrap();
+
+        let intermediate = store
+            .query_json(
+                "SELECT graph_ready, vector_ready FROM File WHERE path = '/tmp/vector_ready.rs'",
+            )
+            .unwrap();
+        let intermediate_rows: Vec<Vec<serde_json::Value>> =
+            serde_json::from_str(&intermediate).unwrap();
+        assert_eq!(intermediate_rows.len(), 1);
+        assert_eq!(intermediate_rows[0].len(), 2);
+        assert_eq!(intermediate_rows[0][0].as_str(), Some("true"));
+        assert_eq!(intermediate_rows[0][1].as_str(), Some("false"));
+
+        store
+            .mark_file_vectorization_done(std::slice::from_ref(&path), "test-model")
             .unwrap();
 
         let after = store
@@ -2098,6 +2280,107 @@ mod tests {
     }
 
     #[test]
+    fn test_mark_file_vectorization_done_handles_mixed_paths_in_single_pass() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path_ready = "/tmp/vector_ready_a.rs".to_string();
+        let path_pending = "/tmp/vector_ready_b.rs".to_string();
+        store
+            .bulk_insert_files(&[
+                (path_ready.clone(), "proj".to_string(), 128, 1),
+                (path_pending.clone(), "proj".to_string(), 128, 1),
+            ])
+            .unwrap();
+
+        let mk_extraction = |name: &str| parser::ExtractionResult {
+            project_code: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: name.to_string(),
+                kind: "function".to_string(),
+                start_line: 1,
+                end_line: 3,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[
+                DbWriteTask::FileExtraction {
+                    reservation_id: "res-a".to_string(),
+                    path: path_ready.clone(),
+                    content: Some("fn ready() {}".to_string()),
+                    extraction: mk_extraction("ready"),
+                    processing_mode: ProcessingMode::Full,
+                    trace_id: "trace-a".to_string(),
+                    observed_cost_bytes: 0,
+                    t0: 0,
+                    t1: 0,
+                    t2: 0,
+                    t3: 0,
+                },
+                DbWriteTask::FileExtraction {
+                    reservation_id: "res-b".to_string(),
+                    path: path_pending.clone(),
+                    content: Some("fn pending() {}".to_string()),
+                    extraction: mk_extraction("pending"),
+                    processing_mode: ProcessingMode::Full,
+                    trace_id: "trace-b".to_string(),
+                    observed_cost_bytes: 0,
+                    t0: 0,
+                    t1: 0,
+                    t2: 0,
+                    t3: 0,
+                },
+            ])
+            .unwrap();
+
+        let raw = store
+            .query_json(
+                "SELECT file_path, id, content_hash FROM Chunk WHERE project_code = 'proj' ORDER BY file_path",
+            )
+            .unwrap();
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(rows.len(), 2);
+        let ready_chunk_id = rows[0][1].as_str().unwrap().to_string();
+        let ready_hash = rows[0][2].as_str().unwrap().to_string();
+
+        store
+            .execute(
+                "UPDATE File SET vector_ready = FALSE WHERE path IN ('/tmp/vector_ready_a.rs', '/tmp/vector_ready_b.rs')",
+            )
+            .unwrap();
+        store
+            .update_chunk_embeddings(
+                "test-model",
+                &[(ready_chunk_id, ready_hash, vec![0.0; DIMENSION])],
+            )
+            .unwrap();
+
+        store
+            .mark_file_vectorization_done(&[path_ready.clone(), path_pending.clone()], "test-model")
+            .unwrap();
+
+        let status = store
+            .query_json(
+                "SELECT path, vector_ready FROM File WHERE path IN ('/tmp/vector_ready_a.rs', '/tmp/vector_ready_b.rs') ORDER BY path",
+            )
+            .unwrap();
+        let status_rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&status).unwrap();
+        assert_eq!(status_rows.len(), 2);
+        assert_eq!(status_rows[0][0].as_str(), Some("/tmp/vector_ready_a.rs"));
+        assert_eq!(status_rows[0][1].as_str(), Some("true"));
+        assert_eq!(status_rows[1][0].as_str(), Some("/tmp/vector_ready_b.rs"));
+        assert_eq!(status_rows[1][1].as_str(), Some("false"));
+    }
+
+    #[test]
     fn test_graph_only_policy_keeps_graph_ready_without_vector_queue_backlog() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/graph_only_ready.rs".to_string();
@@ -2106,7 +2389,7 @@ mod tests {
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "graph_only_ready".to_string(),
                 kind: "func".to_string(),
@@ -2156,6 +2439,139 @@ mod tests {
             .query_count("SELECT count(*) FROM FileVectorizationQueue")
             .unwrap();
         assert_eq!(queued, 0, "graph-only should not enqueue vectorization");
+    }
+
+    #[test]
+    fn test_chunk_materializes_file_path_for_hot_lookup() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path = "/tmp/chunk_file_path.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .unwrap();
+
+        let extraction = parser::ExtractionResult {
+            project_code: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "chunk_file_path".to_string(),
+                kind: "function".to_string(),
+                start_line: 1,
+                end_line: 3,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-chunk-file-path".to_string(),
+                path: path.clone(),
+                content: Some("fn chunk_file_path() {}".to_string()),
+                extraction,
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        let raw = store
+            .query_json("SELECT file_path FROM Chunk WHERE project_code = 'proj' LIMIT 1")
+            .unwrap();
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].as_str(), Some("/tmp/chunk_file_path.rs"));
+    }
+
+    #[test]
+    fn test_file_vectorization_work_can_pause_for_interactive_priority_and_resume() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES ('/tmp/interactive_pause.rs', 'queued', 1)",
+            )
+            .unwrap();
+
+        let work = store.fetch_pending_file_vectorization_work(1).unwrap();
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].file_path, "/tmp/interactive_pause.rs");
+
+        let paused = store
+            .pause_file_vectorization_work_for_interactive_priority(&work, 0, 2)
+            .unwrap();
+        assert_eq!(paused, 1, "interactive priority should pause inflight work");
+
+        let paused_row = store
+            .query_json(
+                "SELECT status, status_reason, interactive_pause_count FROM FileVectorizationQueue WHERE file_path = '/tmp/interactive_pause.rs'",
+            )
+            .unwrap();
+        assert!(
+            paused_row.contains("paused_for_interactive_priority"),
+            "{paused_row}"
+        );
+        assert!(
+            paused_row.contains("requeued_for_interactive_priority"),
+            "{paused_row}"
+        );
+        assert!(paused_row.contains("1"), "{paused_row}");
+
+        let resumed = store.fetch_pending_file_vectorization_work(1).unwrap();
+        assert_eq!(
+            resumed.len(),
+            1,
+            "paused work should become claimable again"
+        );
+        assert!(
+            resumed[0].resumed_after_interactive_pause,
+            "resumed work should record that it came from an interactive pause"
+        );
+    }
+
+    #[test]
+    fn test_file_vectorization_interactive_pause_cap_prevents_infinite_requeue() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES ('/tmp/interactive_cap.rs', 'queued', 1)",
+            )
+            .unwrap();
+
+        let first = store.fetch_pending_file_vectorization_work(1).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            store
+                .pause_file_vectorization_work_for_interactive_priority(&first, 0, 1)
+                .unwrap(),
+            1
+        );
+
+        let second = store.fetch_pending_file_vectorization_work(1).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            store
+                .pause_file_vectorization_work_for_interactive_priority(&second, 0, 1)
+                .unwrap(),
+            0,
+            "once the cap is reached the worker should keep the claimed task instead of requeueing forever"
+        );
+
+        let row = store
+            .query_json(
+                "SELECT status, interactive_pause_count FROM FileVectorizationQueue WHERE file_path = '/tmp/interactive_cap.rs'",
+            )
+            .unwrap();
+        assert!(row.contains("inflight"), "{row}");
+        assert!(row.contains("1"), "{row}");
     }
 
     #[test]
@@ -2309,7 +2725,7 @@ mod tests {
         );
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "late_deleted".to_string(),
                 kind: "func".to_string(),
@@ -2495,7 +2911,7 @@ mod tests {
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "test".to_string(),
                 kind: "func".to_string(),
@@ -2553,7 +2969,7 @@ mod tests {
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "test".to_string(),
                 kind: "func".to_string(),
@@ -2589,28 +3005,20 @@ mod tests {
             .insert_file_data_batch(&[task])
             .expect("Chunk setup failed");
         store
-            .ensure_embedding_model(
-                "chunk-bge-small-en-v1.5-384",
-                "chunk",
-                "BAAI/bge-small-en-v1.5",
-                384,
-                "1",
-            )
+            .ensure_embedding_model(CHUNK_MODEL_ID, "chunk", MODEL_NAME, DIMENSION as i64, "1")
             .unwrap();
 
-        let pending = store
-            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
-            .unwrap();
+        let pending = store.fetch_unembedded_chunks(CHUNK_MODEL_ID, 10).unwrap();
         assert_eq!(
             pending.len(),
             1,
             "Le store doit détecter le chunk non vectorisé"
         );
 
-        let vector = vec![0.0_f32; 384];
+        let vector = vec![0.0_f32; DIMENSION];
         store
             .update_chunk_embeddings(
-                "chunk-bge-small-en-v1.5-384",
+                CHUNK_MODEL_ID,
                 &[(pending[0].0.clone(), pending[0].2.clone(), vector)],
             )
             .unwrap();
@@ -2622,6 +3030,84 @@ mod tests {
             stored, 1,
             "Le vector store dérivé doit persister l'embedding du chunk"
         );
+    }
+
+    #[test]
+    fn test_maillon_7b_chunk_embedding_storage_upserts_without_duplicates() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path = "/tmp/chunk/upsert.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .unwrap();
+
+        let extraction = parser::ExtractionResult {
+            project_code: Some("proj".to_string()),
+            symbols: vec![parser::Symbol {
+                name: "upsert_chunk".to_string(),
+                kind: "func".to_string(),
+                start_line: 1,
+                end_line: 1,
+                docstring: None,
+                is_entry_point: false,
+                is_public: true,
+                tested: false,
+                is_nif: false,
+                is_unsafe: false,
+                properties: std::collections::HashMap::new(),
+                embedding: None,
+            }],
+            relations: vec![],
+        };
+
+        let task = DbWriteTask::FileExtraction {
+            reservation_id: "res-maillon-7b-upsert".to_string(),
+            path: path.clone(),
+            content: Some("fn upsert_chunk() {}".to_string()),
+            extraction,
+            processing_mode: ProcessingMode::Full,
+            trace_id: "t".to_string(),
+            observed_cost_bytes: 0,
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            t3: 0,
+        };
+
+        store
+            .insert_file_data_batch(&[task])
+            .expect("Chunk setup failed");
+        store
+            .ensure_embedding_model(CHUNK_MODEL_ID, "chunk", MODEL_NAME, DIMENSION as i64, "1")
+            .unwrap();
+
+        let pending = store.fetch_unembedded_chunks(CHUNK_MODEL_ID, 10).unwrap();
+        assert_eq!(pending.len(), 1);
+
+        let chunk_id = pending[0].0.clone();
+        let content_hash = pending[0].2.clone();
+        store
+            .update_chunk_embeddings(
+                CHUNK_MODEL_ID,
+                &[(
+                    chunk_id.clone(),
+                    content_hash.clone(),
+                    vec![0.0_f32; DIMENSION],
+                )],
+            )
+            .unwrap();
+        store
+            .update_chunk_embeddings(
+                CHUNK_MODEL_ID,
+                &[(chunk_id, content_hash, vec![1.0_f32; DIMENSION])],
+            )
+            .unwrap();
+
+        let stored = store
+            .query_count(&format!(
+                "SELECT count(*) FROM ChunkEmbedding WHERE model_id = '{CHUNK_MODEL_ID}'"
+            ))
+            .unwrap();
+        assert_eq!(stored, 1, "L'upsert ne doit pas créer de doublons");
     }
 
     #[test]
@@ -2640,7 +3126,7 @@ mod tests {
 
         let extraction_for = |project: &str, name: &str, _body: &str, docstring: Option<&str>| {
             parser::ExtractionResult {
-                project_slug: Some(project.to_string()),
+                project_code: Some(project.to_string()),
                 symbols: vec![parser::Symbol {
                     name: name.to_string(),
                     kind: "function".to_string(),
@@ -2704,18 +3190,10 @@ mod tests {
             .unwrap();
 
         store
-            .ensure_embedding_model(
-                "chunk-bge-small-en-v1.5-384",
-                "chunk",
-                "BAAI/bge-small-en-v1.5",
-                384,
-                "1",
-            )
+            .ensure_embedding_model(CHUNK_MODEL_ID, "chunk", MODEL_NAME, DIMENSION as i64, "1")
             .unwrap();
 
-        let initial_pending = store
-            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
-            .unwrap();
+        let initial_pending = store.fetch_unembedded_chunks(CHUNK_MODEL_ID, 10).unwrap();
         assert_eq!(
             initial_pending.len(),
             3,
@@ -2730,10 +3208,10 @@ mod tests {
             .clone();
         let updates: Vec<(String, String, Vec<f32>)> = initial_pending
             .iter()
-            .map(|(id, _, hash)| (id.clone(), hash.clone(), vec![0.0_f32; 384]))
+            .map(|(id, _, hash)| (id.clone(), hash.clone(), vec![0.0_f32; DIMENSION]))
             .collect();
         store
-            .update_chunk_embeddings("chunk-bge-small-en-v1.5-384", &updates)
+            .update_chunk_embeddings(CHUNK_MODEL_ID, &updates)
             .unwrap();
         assert_eq!(
             store
@@ -2771,9 +3249,7 @@ mod tests {
             "Le store conserve les embeddings existants; la derive est detectee via le source_hash"
         );
 
-        let pending = store
-            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
-            .unwrap();
+        let pending = store.fetch_unembedded_chunks(CHUNK_MODEL_ID, 10).unwrap();
         assert_eq!(
             pending.len(),
             1,
@@ -2787,24 +3263,16 @@ mod tests {
     fn test_maillon_7f_fetch_unembedded_chunks_detects_source_hash_drift() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO Chunk (id, source_type, source_id, project_slug, kind, content, content_hash, start_line, end_line) VALUES ('chunk-drift', 'symbol', 'sym-drift', 'proj', 'function', 'fresh content', 'hash-fresh', 1, 1)")
+            .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-drift', 'symbol', 'sym-drift', 'proj', 'function', 'fresh content', 'hash-fresh', 1, 1)")
             .unwrap();
         store
-            .ensure_embedding_model(
-                "chunk-bge-small-en-v1.5-384",
-                "chunk",
-                "BAAI/bge-small-en-v1.5",
-                384,
-                "1",
-            )
+            .ensure_embedding_model(CHUNK_MODEL_ID, "chunk", MODEL_NAME, DIMENSION as i64, "1")
             .unwrap();
         store
-            .execute("INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash) VALUES ('chunk-drift', 'chunk-bge-small-en-v1.5-384', 'hash-stale')")
+            .execute(&format!("INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash) VALUES ('chunk-drift', '{CHUNK_MODEL_ID}', 'hash-stale')"))
             .unwrap();
 
-        let pending = store
-            .fetch_unembedded_chunks("chunk-bge-small-en-v1.5-384", 10)
-            .unwrap();
+        let pending = store.fetch_unembedded_chunks(CHUNK_MODEL_ID, 10).unwrap();
         assert_eq!(
             pending.len(),
             1,
@@ -2827,7 +3295,7 @@ mod tests {
             .unwrap();
 
         let extraction_a = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "send_cypher".to_string(),
                 kind: "function".to_string(),
@@ -2846,7 +3314,7 @@ mod tests {
         };
 
         let extraction_b = parser::ExtractionResult {
-            project_slug: Some("proj".to_string()),
+            project_code: Some("proj".to_string()),
             symbols: vec![parser::Symbol {
                 name: "send_cypher".to_string(),
                 kind: "function".to_string(),
@@ -2917,7 +3385,7 @@ mod tests {
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_slug: Some("axon".to_string()),
+            project_code: Some("axon".to_string()),
             symbols: vec![
                 parser::Symbol {
                     name: "AxonDashboardWeb.StatusLive.handle_info".to_string(),
@@ -2982,10 +3450,10 @@ mod tests {
     fn test_graph_projection_symbol_radius_1_returns_useful_neighborhood() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/other.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/other.rs', 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
                 ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
                 ('proj::B', 'B', 'function', true, true, false, false, 'proj'), \
                 ('proj::C', 'C', 'function', true, true, false, false, 'proj'), \
@@ -3023,10 +3491,10 @@ mod tests {
     fn test_graph_projection_symbol_radius_2_expands_but_stays_bounded() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/other.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/other.rs', 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
                 ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
                 ('proj::B', 'B', 'function', true, true, false, false, 'proj'), \
                 ('proj::C', 'C', 'function', true, true, false, false, 'proj'), \
@@ -3064,10 +3532,10 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let file_path = "/tmp/graph/file_anchor.rs";
         store
-            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/file_anchor.rs', 'proj'), ('/tmp/graph/helper.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/file_anchor.rs', 'proj'), ('/tmp/graph/helper.rs', 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
                 ('proj::FileAlpha', 'FileAlpha', 'function', true, true, false, false, 'proj'), \
                 ('proj::FileBeta', 'FileBeta', 'function', true, true, false, false, 'proj'), \
                 ('proj::Helper', 'Helper', 'function', true, true, false, false, 'proj')")
@@ -3113,10 +3581,10 @@ mod tests {
     fn test_graph_projection_refresh_reuses_unchanged_anchor_without_rebuild() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
                 ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
                 ('proj::B', 'B', 'function', true, true, false, false, 'proj')")
             .unwrap();
@@ -3170,10 +3638,10 @@ mod tests {
     fn test_graph_projection_refresh_rebuilds_only_changed_anchor() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/d.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/d.rs', 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
                 ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
                 ('proj::B', 'B', 'function', true, true, false, false, 'proj'), \
                 ('proj::C', 'C', 'function', true, true, false, false, 'proj'), \
@@ -3232,10 +3700,10 @@ mod tests {
     fn test_graph_projection_symbol_includes_calls_nif_edges() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/b.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/b.rs', 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
                 ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
                 ('proj::B', 'B', 'function', true, true, true, false, 'proj')")
             .unwrap();
@@ -3266,10 +3734,10 @@ mod tests {
     fn test_tombstone_missing_path_invalidates_dependent_graph_derivations() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/graph/deleted.rs', 'proj'), ('/tmp/graph/keeper.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/deleted.rs', 'proj'), ('/tmp/graph/keeper.rs', 'proj')")
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_slug) VALUES \
+            .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
                 ('proj::Deleted', 'Deleted', 'function', true, true, false, false, 'proj'), \
                 ('proj::Keeper', 'Keeper', 'function', true, true, false, false, 'proj')")
             .unwrap();
@@ -3293,8 +3761,11 @@ mod tests {
         store
             .execute(&format!(
                 "INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) \
-                 VALUES ('symbol', '{}', 1, 'graph-bge-small-en-v1.5-384', 'sig-keeper', '1', CAST([1.0] || repeat([0.0], 383) AS FLOAT[384]), 1000)",
-                keeper_anchor
+                 VALUES ('symbol', '{}', 1, '{}', 'sig-keeper', '1', CAST([1.0] || repeat([0.0], {}) AS FLOAT[{}]), 1000)",
+                keeper_anchor,
+                GRAPH_MODEL_ID,
+                DIMENSION - 1,
+                DIMENSION
             ))
             .unwrap();
 
@@ -3335,35 +3806,44 @@ mod tests {
     #[test]
     fn test_graph_analytics_detects_circular_dependencies() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
-        
+
         store
-            .execute("INSERT INTO File (path, project_slug) VALUES ('/tmp/a.rs', 'proj')")
-            .unwrap();
-            
-        store
-            .execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES \
-                ('proj::A', 'A', 'function', 'proj'), \
-                ('proj::B', 'B', 'function', 'proj'), \
-                ('proj::C', 'C', 'function', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/a.rs', 'proj')")
             .unwrap();
 
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES \
+            .execute(
+                "INSERT INTO Symbol (id, name, kind, project_code) VALUES \
+                ('proj::A', 'A', 'function', 'proj'), \
+                ('proj::B', 'B', 'function', 'proj'), \
+                ('proj::C', 'C', 'function', 'proj')",
+            )
+            .unwrap();
+
+        store
+            .execute(
+                "INSERT INTO CALLS (source_id, target_id) VALUES \
                 ('proj::A', 'proj::B'), \
                 ('proj::B', 'proj::C'), \
-                ('proj::C', 'proj::A')")
+                ('proj::C', 'proj::A')",
+            )
             .unwrap();
 
         let deps = store.get_circular_dependencies("proj").unwrap();
         println!("CIRCULAR DEPS: {:?}", deps);
-        
-        assert!(!deps.is_empty(), "Il devrait y avoir des dépendances circulaires");
-        
+
+        assert!(
+            !deps.is_empty(),
+            "Il devrait y avoir des dépendances circulaires"
+        );
+
         let expected_a = "A -> B -> C -> A".to_string();
         let expected_b = "B -> C -> A -> B".to_string();
         let expected_c = "C -> A -> B -> C".to_string();
-        
-        assert!(deps.contains(&expected_a) || deps.contains(&expected_b) || deps.contains(&expected_c));
+
+        assert!(
+            deps.contains(&expected_a) || deps.contains(&expected_b) || deps.contains(&expected_c)
+        );
     }
 
     #[test]
@@ -3372,60 +3852,77 @@ mod tests {
 
         // 1. Insert Files
         store
-            .execute("INSERT INTO File (path, project_slug) VALUES \
+            .execute(
+                "INSERT INTO File (path, project_code) VALUES \
                 ('src/domain/user.rs', 'proj'), \
-                ('src/infrastructure/db.rs', 'proj')")
+                ('src/infrastructure/db.rs', 'proj')",
+            )
             .unwrap();
 
         // 2. Insert Symbols
         store
-            .execute("INSERT INTO Symbol (id, name, kind, project_slug) VALUES \
+            .execute(
+                "INSERT INTO Symbol (id, name, kind, project_code) VALUES \
                 ('proj::domain::User', 'User', 'class', 'proj'), \
-                ('proj::infra::Db', 'Db', 'class', 'proj')")
+                ('proj::infra::Db', 'Db', 'class', 'proj')",
+            )
             .unwrap();
 
         // 3. Insert CONTAINS
         store
-            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES \
+            .execute(
+                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
                 ('src/domain/user.rs', 'proj::domain::User'), \
-                ('src/infrastructure/db.rs', 'proj::infra::Db')")
+                ('src/infrastructure/db.rs', 'proj::infra::Db')",
+            )
             .unwrap();
 
         // 4. Insert CALLS (Domain calling Infra = Leakage)
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES \
-                ('proj::domain::User', 'proj::infra::Db')")
+            .execute(
+                "INSERT INTO CALLS (source_id, target_id) VALUES \
+                ('proj::domain::User', 'proj::infra::Db')",
+            )
             .unwrap();
 
-        let leaks = store.get_domain_leakage("proj", "src/domain", "src/infrastructure").unwrap();
-        
+        let leaks = store
+            .get_domain_leakage("proj", "src/domain", "src/infrastructure")
+            .unwrap();
+
         assert_eq!(leaks.len(), 1, "There should be exactly one domain leakage");
-        assert_eq!(leaks[0], "User (src/domain/user.rs) -> Db (src/infrastructure/db.rs)");
+        assert_eq!(
+            leaks[0],
+            "User (src/domain/user.rs) -> Db (src/infrastructure/db.rs)"
+        );
     }
 
     #[test]
     fn test_graph_analytics_detects_unsafe_exposure() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
-        
+
         // 1. Setup Symbol table
         store
-            .execute("INSERT INTO Symbol (id, name, kind, project_slug, is_public, is_unsafe) VALUES \
+            .execute(
+                "INSERT INTO Symbol (id, name, kind, project_code, is_public, is_unsafe) VALUES \
                 ('PublicA', 'PublicFunc', 'function', 'test_proj', true, false), \
                 ('InterB', 'InterFunc', 'function', 'test_proj', false, false), \
                 ('UnwrapC', 'unwrap', 'method', 'test_proj', false, false), \
-                ('UnsafeD', 'UnsafeFunc', 'function', 'test_proj', false, true)")
+                ('UnsafeD', 'UnsafeFunc', 'function', 'test_proj', false, true)",
+            )
             .unwrap();
 
         // 2. Setup CALLS
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES \
+            .execute(
+                "INSERT INTO CALLS (source_id, target_id) VALUES \
                 ('PublicA', 'InterB'), \
                 ('InterB', 'UnwrapC'), \
-                ('PublicA', 'UnsafeD')")
+                ('PublicA', 'UnsafeD')",
+            )
             .unwrap();
 
         let exposures = store.get_unsafe_exposure("test_proj").unwrap();
-        
+
         assert_eq!(exposures.len(), 2, "There should be two unsafe exposures");
         assert!(exposures.contains(&"PublicFunc -> ... -> unwrap".to_string()));
         assert!(exposures.contains(&"PublicFunc -> ... -> UnsafeFunc".to_string()));
@@ -3434,35 +3931,41 @@ mod tests {
     #[test]
     fn test_graph_analytics_detects_nif_blocking_risks() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
-        
+
         // 1. Setup Symbol table
         store
-            .execute("INSERT INTO Symbol (id, name, kind, project_slug, is_public, is_nif) VALUES \
+            .execute(
+                "INSERT INTO Symbol (id, name, kind, project_code, is_public, is_nif) VALUES \
                 ('ElixirFunc', 'elixir_func', 'function', 'test_proj', true, false), \
                 ('RustNif', 'rust::nif_func', 'function', 'test_proj', false, true), \
                 ('Node1', 'node1', 'function', 'test_proj', false, false), \
                 ('Node2', 'node2', 'function', 'test_proj', false, false), \
                 ('Node3', 'node3', 'function', 'test_proj', false, false), \
                 ('Node4', 'node4', 'function', 'test_proj', false, false), \
-                ('Node5', 'node5', 'function', 'test_proj', false, false)")
+                ('Node5', 'node5', 'function', 'test_proj', false, false)",
+            )
             .unwrap();
 
         // 2. Setup CALLS_NIF and CALLS
         store
-            .execute("INSERT INTO CALLS_NIF (source_id, target_id) VALUES ('ElixirFunc', 'RustNif')")
+            .execute(
+                "INSERT INTO CALLS_NIF (source_id, target_id) VALUES ('ElixirFunc', 'RustNif')",
+            )
             .unwrap();
 
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES \
+            .execute(
+                "INSERT INTO CALLS (source_id, target_id) VALUES \
                 ('RustNif', 'Node1'), \
                 ('Node1', 'Node2'), \
                 ('Node2', 'Node3'), \
                 ('Node3', 'Node4'), \
-                ('Node4', 'Node5')")
+                ('Node4', 'Node5')",
+            )
             .unwrap();
 
         let risks = store.get_nif_blocking_risks("test_proj").unwrap();
-        
+
         assert_eq!(risks.len(), 1, "There should be one NIF blocking risk");
         assert_eq!(risks[0], "rust::nif_func (profondeur: 6)");
     }

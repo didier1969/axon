@@ -99,7 +99,7 @@ in
     mkdir -p $ELIXIR_HOME
 
     # Auto Pre-warming (Necessary for Systemd or first setup)
-    if [ ! -f "$MIX_HOME/archives/hex-"* ]; then
+    if [ "''${AXON_SKIP_ELIXIR_PREWARM:-0}" != "1" ] && [ ! -f "$MIX_HOME/archives/hex-"* ]; then
       echo "📦 Pre-warming Elixir environment (Hex/Rebar)..." >&2
       mix local.hex --force > /dev/null 2>&1
       mix local.rebar --force > /dev/null 2>&1

@@ -125,7 +125,7 @@ impl Parser for TypeScriptParser {
             Some(t) => t,
             None => {
                 return ExtractionResult {
-                    project_slug: None,
+                    project_code: None,
                     symbols: Vec::new(),
                     relations: Vec::new(),
                 }
@@ -184,7 +184,7 @@ impl Parser for TypeScriptParser {
             Err(e) => {
                 log::warn!("Failed to create TSX query: {}", e);
                 return ExtractionResult {
-                    project_slug: None,
+                    project_code: None,
                     symbols: Vec::new(),
                     relations: Vec::new(),
                 };
@@ -386,7 +386,7 @@ impl Parser for TypeScriptParser {
         }
 
         ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols,
             relations,
         }

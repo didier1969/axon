@@ -21,6 +21,7 @@ fn is_public_tool(name: &str) -> bool {
             | "api_break_check"
             | "simulate_mutation"
             | "resume_vectorization"
+            | "retrieve_context"
     )
 }
 
@@ -40,6 +41,7 @@ pub(crate) fn requires_indexed_runtime(name: &str) -> bool {
             | "api_break_check"
             | "simulate_mutation"
             | "truth_check"
+            | "retrieve_context"
     )
 }
 
@@ -47,11 +49,16 @@ fn tool_available_in_runtime(name: &str) -> bool {
     let runtime_mode = AxonRuntimeMode::from_env();
     let runtime_profile = AxonRuntimeOperationalProfile::from_mode_and_strings(
         runtime_mode.as_str(),
-        std::env::var("AXON_ENABLE_AUTONOMOUS_INGESTOR").ok().as_deref(),
+        std::env::var("AXON_ENABLE_AUTONOMOUS_INGESTOR")
+            .ok()
+            .as_deref(),
     );
 
     if requires_indexed_runtime(name) {
-        return matches!(runtime_profile, AxonRuntimeOperationalProfile::FullAutonomous);
+        return matches!(
+            runtime_profile,
+            AxonRuntimeOperationalProfile::FullAutonomous
+        );
     }
 
     match runtime_mode {
@@ -89,7 +96,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_manager",
-                "description": "[SOLL] Centre de commande pour le graphe intentionnel. Gère la création (avec IDs auto), la mise à jour et les liaisons hiérarchiques. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "description": "[SOLL] Centre de commande pour le graphe intentionnel. Gère la création (avec IDs auto), la mise à jour et les liaisons hiérarchiques. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -97,7 +104,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation", "guideline"], "description": "Le type d'objet concerné." },
                         "data": {
                             "type": "object",
-                            "description": "Données JSON. \n- create (vision/pillar/requirement/concept/decision/milestone/stakeholder/validation/guideline) avec `project_slug`; le serveur retourne l'ID canonique `TYPE-CODE-NNN`.\n- update (id canonique requis, status/desc/etc).\n- link (source_id, target_id canoniques)."
+                            "description": "Données JSON. \n- create (vision/pillar/requirement/concept/decision/milestone/stakeholder/validation/guideline) avec `project_code`; le serveur retourne l'ID canonique `TYPE-CODE-NNN`.\n- update (id canonique requis, status/desc/etc).\n- link (source_id, target_id canoniques)."
                         }
                     },
                     "required": ["action", "entity", "data"]
@@ -110,10 +117,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "project_name": { "type": "string", "description": "Le nom du projet (ex: BookingSystem)." },
-                        "project_slug": { "type": "string", "description": "Le slug en 3 lettres (ex: BKS)." },
+                        "project_code": { "type": "string", "description": "Le code canonique en 3 caractères (ex: BKS)." },
+                        "project_path": { "type": "string", "description": "Le chemin absolu canonique du projet (ex: /home/dstadel/projects/BookingSystem)." },
                         "concept_document_url_or_text": { "type": "string", "description": "Optionnel: le texte ou lien vers la vision du projet." }
                     },
-                    "required": ["project_name", "project_slug"]
+                    "required": ["project_name", "project_code", "project_path"]
                 }
             },
             {
@@ -122,14 +130,14 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_slug": { "type": "string", "description": "Le slug en 3 lettres du projet cible." },
+                        "project_code": { "type": "string", "description": "Le code canonique en 3 caractères du projet cible." },
                         "accepted_global_rule_ids": {
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Liste des IDs canoniques des règles globales à appliquer (ex: GUI-PRO-001)."
                         }
                     },
-                    "required": ["project_slug", "accepted_global_rule_ids"]
+                    "required": ["project_code", "accepted_global_rule_ids"]
                 }
             },
             {
@@ -150,12 +158,28 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
-                "name": "soll_apply_plan",
-                "description": "[SOLL] Wrapper haut niveau idempotent pour appliquer un plan SOLL (pillars, requirements, decisions, milestones) avec dry-run et rapport created/updated/skipped/errors. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "name": "axon_pre_flight_check",
+                "description": "[DX/SOLL] Validation dry-run obligatoire avant commit. Vérifie les fichiers modifiés contre les Guidelines SOLL sans créer de commit.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_slug": { "type": "string", "description": "Slug projet (ex: AXO)." },
+                        "diff_paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Liste des chemins de fichiers modifiés."
+                        },
+                        "message": { "type": "string", "description": "Message optionnel pour journaliser la validation. Par défaut: 'pre-flight-check'." }
+                    },
+                    "required": ["diff_paths"]
+                }
+            },
+            {
+                "name": "soll_apply_plan",
+                "description": "[SOLL] Wrapper haut niveau idempotent pour appliquer un plan SOLL (pillars, requirements, decisions, milestones) avec dry-run et rapport created/updated/skipped/errors. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet (ex: AXO)." },
                         "dry_run": { "type": "boolean", "description": "Si true, ne modifie rien et produit seulement le plan d'action." },
                         "plan": {
                             "type": "object",
@@ -172,7 +196,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_commit_revision",
-                "description": "[SOLL] Commit atomique d'un preview SOLL vers une revision journalisée. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "description": "[SOLL] Commit atomique d'un preview SOLL vers une revision journalisée. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -184,11 +208,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_query_context",
-                "description": "[SOLL] Retourne le contexte projet (requirements, decisions, revisions) compact et prêt pour consommation LLM. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "description": "[SOLL] Retourne le contexte projet (requirements, decisions, revisions) compact et prêt pour consommation LLM. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_slug": { "type": "string" },
+                        "project_code": { "type": "string" },
                         "limit": { "type": "integer" }
                     },
                     "required": []
@@ -196,22 +220,22 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_work_plan",
-                "description": "[SOLL] Produit un plan de travail ideal read-only a partir du graphe intentionnel, avec waves paralleles, blockers, cycles et gates de validation. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "description": "[SOLL] Produit un plan de travail ideal read-only a partir du graphe intentionnel, avec waves paralleles, blockers, cycles et gates de validation. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_slug": { "type": "string" },
+                        "project_code": { "type": "string" },
                         "limit": { "type": "integer" },
                         "top": { "type": "integer" },
                         "include_ist": { "type": "boolean" },
                         "format": { "type": "string", "enum": ["brief", "verbose", "json"] }
                     },
-                    "required": ["project_slug"]
+                    "required": ["project_code"]
                 }
             },
             {
                 "name": "soll_attach_evidence",
-                "description": "[SOLL] Attache des preuves (fichier/test/metric/dashboard) à une entité SOLL. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "description": "[SOLL] Attache des preuves (fichier/test/metric/dashboard) à une entité SOLL. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -224,18 +248,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_verify_requirements",
-                "description": "[SOLL] Vérifie la couverture requirements (done/partial/missing) selon critères et preuves rattachées. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "description": "[SOLL] Vérifie la couverture requirements (done/partial/missing) selon critères et preuves rattachées. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_slug": { "type": "string" }
+                        "project_code": { "type": "string" }
                     },
                     "required": []
                 }
             },
             {
                 "name": "soll_rollback_revision",
-                "description": "[SOLL] Rollback best-effort d'une révision SOLL via le journal RevisionChange. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "description": "[SOLL] Rollback best-effort d'une révision SOLL via le journal RevisionChange. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -246,18 +270,18 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_export",
-                "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Milestones, Requirements, Decisions, Concepts) dans un document Markdown horodaté. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "description": "[SOLL] Exporte l'intégralité du graphe intentionnel (Vision, Pillars, Milestones, Requirements, Decisions, Concepts) dans un document Markdown horodaté. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_slug": { "type": "string", "description": "Filtre l'export au projet demandé." }
+                        "project_code": { "type": "string", "description": "Filtre l'export au projet demandé." }
                     },
                     "required": []
                 }
             },
             {
                 "name": "restore_soll",
-                "description": "[SOLL] Restaure les entites conceptuelles depuis un export Markdown officiel SOLL. Fonctionne en mode merge, sans purge destructive implicite. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "description": "[SOLL] Restaure les entites conceptuelles depuis un export Markdown officiel SOLL. Fonctionne en mode merge, sans purge destructive implicite. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -268,11 +292,11 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_validate",
-                "description": "[SOLL] Exécute des garde-fous minimaux de cohérence sur le graphe intentionnel. Validation en lecture seule: détecte les états orphelins évidents sans modifier SOLL. Guide opérateur: docs/skills/axon-soll-operator/SKILL.md",
+                "description": "[SOLL] Exécute des garde-fous minimaux de cohérence sur le graphe intentionnel. Validation en lecture seule: détecte les états orphelins évidents sans modifier SOLL. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_slug": { "type": "string", "description": "Filtre la validation au projet demandé." }
+                        "project_code": { "type": "string", "description": "Filtre la validation au projet demandé." }
                     },
                     "required": []
                 }
@@ -286,6 +310,138 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "job_id": { "type": "string", "description": "Identifiant du job (ex: JOB-1712851200000)." }
                     },
                     "required": ["job_id"]
+                }
+            },
+            {
+                "name": "status",
+                "description": "[SYSTEM] Vue opérateur unifiée: état runtime, profil actif, disponibilité des surfaces avancées et signaux de vérité/dégradation.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "project_status",
+                "description": "[SYSTEM/SOLL] Etat de situation vivant du projet: vision source SOLL, état runtime, surface opérateur, diagnostics structuraux et contexte SOLL récent.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "snapshot_history",
+                "description": "[SYSTEM] Historique dérivé non canonique des snapshots structurels exportés par `project_status` pour un projet.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
+                        "limit": { "type": "integer", "description": "Nombre maximum de snapshots retournés (défaut 10)." }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "snapshot_diff",
+                "description": "[SYSTEM] Diff dérivé entre deux snapshots structurels non canoniques d'un projet.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
+                        "from_snapshot_id": { "type": "string", "description": "Snapshot source optionnel; défaut: précédent." },
+                        "to_snapshot_id": { "type": "string", "description": "Snapshot cible optionnel; défaut: dernier." }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "conception_view",
+                "description": "[SYSTEM/DX] Vue de conception dérivée et lecture seule: modules, interfaces, contrats, flux et violations de frontières suspectées.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
+                        "mode": { "type": "string", "enum": ["brief", "full"] }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "change_safety",
+                "description": "[SYSTEM/DX/SOLL] Résume la sûreté de changement d'une cible via tests, traceability et validation dérivée.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
+                        "target": { "type": "string", "description": "Symbole, fichier ou entité cible." },
+                        "target_type": { "type": "string", "enum": ["symbol", "file", "intent"] },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                    },
+                    "required": ["target"]
+                }
+            },
+            {
+                "name": "why",
+                "description": "[DX/SOLL] Explique pourquoi un symbole, fichier ou sujet existe via liaisons code, traceability et rationale SOLL.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": { "type": "string", "description": "Symbole ou entité cible." },
+                        "question": { "type": "string", "description": "Question libre si le symbole seul ne suffit pas." },
+                        "project": { "type": "string" },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "path",
+                "description": "[DX] Explique un chemin d'exécution ou de dépendance entre deux points, ou bascule en trace topologique si seul un point d'ancrage est fourni.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": { "type": "string", "description": "Symbole source ou ancre de départ." },
+                        "sink": { "type": "string", "description": "Symbole cible optionnel." },
+                        "project": { "type": "string" },
+                        "depth": { "type": "integer", "description": "Profondeur maximale (défaut 6)." },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                    },
+                    "required": ["source"]
+                }
+            },
+            {
+                "name": "anomalies",
+                "description": "[GOVERNANCE] Agrège les anomalies structurelles prioritaires: cycles, god objects, wrappers et orphelins, avec sévérité, confiance et action recommandée.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": { "type": "string" },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "retrieve_context",
+                "description": "[DX] Planner-driven retrieval that assembles an evidence packet for LLM answerability from canonical truth, chunks, bounded graph context, and relevant SOLL rationale.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string" },
+                        "project": { "type": "string" },
+                        "mode": { "type": "string", "enum": ["brief", "verbose"] },
+                        "token_budget": { "type": "integer" },
+                        "top_k": { "type": "integer" },
+                        "include_soll": { "type": "boolean" },
+                        "include_graph": { "type": "boolean" }
+                    },
+                    "required": ["question"]
                 }
             },
             {
@@ -534,8 +690,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             tool.get("name")
                 .and_then(|value| value.as_str())
                 .is_some_and(|name| {
-                    tool_available_in_runtime(name)
-                        && (include_internal || is_public_tool(name))
+                    tool_available_in_runtime(name) && (include_internal || is_public_tool(name))
                 })
         });
     }

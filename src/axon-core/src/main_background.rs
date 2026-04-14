@@ -1,11 +1,18 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
+use axon_core::embedder::{
+    apply_runtime_embedding_lane_adjustment, current_embedding_provider_diagnostics,
+    current_gpu_memory_snapshot, current_gpu_utilization_snapshot,
+    current_vector_batch_controller_diagnostics, current_vector_drain_state,
+    embedding_lane_config_from_env,
+};
 use axon_core::file_ingress_guard::{guard_metrics_snapshot, SharedFileIngressGuard};
 use axon_core::fs_watcher::{self, HOT_PRIORITY};
 use axon_core::graph::GraphStore;
@@ -28,7 +35,43 @@ use axon_core::service_guard::{InteractivePriority, ServicePressure};
 use axon_core::watcher_probe;
 use notify_debouncer_full::notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+use serde_json::json;
 use tracing::{debug, error, info, warn};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GovernorMode {
+    Off,
+    Shadow,
+    Assist,
+    Live,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GovernorState {
+    Shadow,
+    Assist,
+    Live,
+    Freeze,
+    Rollback,
+    Disabled,
+}
+
+#[derive(Debug, Clone)]
+struct GovernorLoopState {
+    last_safe_profile_id: Option<String>,
+    freeze_until_ms: i64,
+    consecutive_zero_progress_windows: u64,
+}
+
+impl GovernorLoopState {
+    fn new() -> Self {
+        Self {
+            last_safe_profile_id: None,
+            freeze_until_ms: 0,
+            consecutive_zero_progress_windows: 0,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct WatchTarget {
@@ -236,6 +279,7 @@ pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>, ingress_buffer: Sha
 pub(crate) fn spawn_shadow_optimizer(store: Arc<GraphStore>) {
     std::thread::spawn(move || {
         let engine = HeuristicPolicyEngine;
+        let mut governor = GovernorLoopState::new();
         let mut previous: Option<(
             String,
             axon_core::optimizer::RuntimeSignalsWindow,
@@ -248,11 +292,91 @@ pub(crate) fn spawn_shadow_optimizer(store: Arc<GraphStore>) {
             let signals = collect_runtime_signals_window(&store);
             let analytics = collect_recent_analytics_window(&store);
             let action_profiles = build_admissible_action_profiles(&host, &signals, &policy);
+            let reward = previous.as_ref().map(
+                |(previous_decision_id, previous_signals, previous_policy)| {
+                    observe_reward(
+                        previous_decision_id,
+                        previous_signals,
+                        &signals,
+                        previous_policy,
+                        5.0,
+                    )
+                },
+            );
+            governor.consecutive_zero_progress_windows = reward
+                .as_ref()
+                .map(|value| {
+                    let qualifies = signals.file_vectorization_queue_depth >= 32
+                        && signals.ready_queue_depth_current == 0
+                        && value.throughput_chunks_per_hour <= 0.0
+                        && value.throughput_files_per_hour <= 0.0
+                        && value.penalty_liveness == 0.0;
+                    if qualifies {
+                        governor.consecutive_zero_progress_windows.saturating_add(1)
+                    } else {
+                        0
+                    }
+                })
+                .unwrap_or(0);
 
             if let Some(decision) =
                 engine.choose(&host, &signals, &policy, &analytics, &action_profiles)
             {
+                let current_profile_id = current_runtime_profile_id();
                 let constraints = optimizer_constraint_flags(&signals, &policy);
+                let governor_state = resolve_governor_state(
+                    configured_governor_mode(),
+                    &signals,
+                    &policy,
+                    reward.as_ref(),
+                    governor.freeze_until_ms,
+                    governor.consecutive_zero_progress_windows,
+                    &current_profile_id,
+                    &action_profiles,
+                );
+                let selected_profile = action_profiles
+                    .iter()
+                    .find(|profile| profile.id == decision.action_profile_id)
+                    .cloned();
+                let effective_profile = select_governor_profile(
+                    governor_state,
+                    &action_profiles,
+                    selected_profile.as_ref(),
+                    &current_profile_id,
+                    governor.last_safe_profile_id.as_deref(),
+                );
+
+                let mut applied = false;
+                if matches!(
+                    governor_state,
+                    GovernorState::Assist | GovernorState::Live | GovernorState::Rollback
+                ) {
+                    if let Some(profile) = effective_profile.as_ref() {
+                        if profile.id != current_profile_id {
+                            apply_live_optimizer_profile(profile, &policy);
+                            applied = true;
+                        }
+                    }
+                }
+                if matches!(
+                    governor_state,
+                    GovernorState::Freeze | GovernorState::Rollback
+                ) {
+                    governor.freeze_until_ms = chrono::Utc::now()
+                        .timestamp_millis()
+                        .saturating_add(governor_freeze_cooldown_ms() as i64);
+                }
+
+                let mut effective_decision = decision.clone();
+                if let Some(profile) = effective_profile.as_ref() {
+                    effective_decision.action_profile_id = profile.id.clone();
+                }
+                effective_decision.decision_reason = format!(
+                    "{}|governor:{}",
+                    effective_decision.decision_reason,
+                    governor_state_label(governor_state)
+                );
+
                 let host_json = serde_json::to_string(&host).unwrap_or_else(|_| "{}".to_string());
                 let policy_json =
                     serde_json::to_string(&policy).unwrap_or_else(|_| "{}".to_string());
@@ -261,40 +385,33 @@ pub(crate) fn spawn_shadow_optimizer(store: Arc<GraphStore>) {
                 let analytics_json =
                     serde_json::to_string(&analytics).unwrap_or_else(|_| "{}".to_string());
                 let decision_json =
-                    serde_json::to_string(&decision).unwrap_or_else(|_| "{}".to_string());
+                    serde_json::to_string(&effective_decision).unwrap_or_else(|_| "{}".to_string());
                 let constraints_json =
                     serde_json::to_string(&constraints).unwrap_or_else(|_| "[]".to_string());
-                let would_apply = decision.action_profile_id != "hold";
+                let would_apply = effective_profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.id != current_profile_id);
+
                 if let Err(err) = store.log_optimizer_decision(
-                    &decision.decision_id,
-                    decision.proposed_at_ms,
-                    if policy.shadow_mode_enabled {
-                        "shadow"
-                    } else {
-                        "disabled"
-                    },
+                    &effective_decision.decision_id,
+                    effective_decision.proposed_at_ms,
+                    governor_state_label(governor_state),
                     &host_json,
                     &policy_json,
                     &signals_json,
                     &analytics_json,
-                    &decision.action_profile_id,
+                    &effective_decision.action_profile_id,
                     &decision_json,
                     &constraints_json,
                     would_apply,
-                    false,
-                    decision.evaluation_window_start_ms,
-                    decision.evaluation_window_end_ms,
+                    applied,
+                    effective_decision.evaluation_window_start_ms,
+                    effective_decision.evaluation_window_end_ms,
                 ) {
-                    warn!("Shadow optimizer: failed to persist decision log: {:?}", err);
+                    warn!("Governor: failed to persist decision log: {:?}", err);
                 }
 
-                if let Some((previous_decision_id, previous_signals, previous_policy)) =
-                    previous.as_ref()
-                {
-                    let churn_penalty =
-                        if previous_decision_id != &decision.action_profile_id { 5.0 } else { 0.0 };
-                    let reward =
-                        observe_reward(previous_decision_id, previous_signals, &signals, previous_policy, churn_penalty);
+                if let Some(reward) = reward.as_ref() {
                     let reward_json =
                         serde_json::to_string(&reward).unwrap_or_else(|_| "{}".to_string());
                     let pressure_json = serde_json::json!({
@@ -327,11 +444,20 @@ pub(crate) fn spawn_shadow_optimizer(store: Arc<GraphStore>) {
                         &violations_json,
                         &pressure_json,
                     ) {
-                        warn!("Shadow optimizer: failed to persist reward log: {:?}", err);
+                        warn!("Governor: failed to persist reward log: {:?}", err);
                     }
                 }
 
-                previous = Some((decision.action_profile_id.clone(), signals, policy));
+                if let Some(profile) = effective_profile.as_ref() {
+                    if reward
+                        .as_ref()
+                        .is_none_or(|value| value.reward > 0.0 && value.penalty_liveness == 0.0)
+                    {
+                        governor.last_safe_profile_id = Some(profile.id.clone());
+                    }
+                }
+
+                previous = Some((effective_decision.decision_id.clone(), signals, policy));
             }
 
             std::thread::sleep(Duration::from_millis(
@@ -339,6 +465,438 @@ pub(crate) fn spawn_shadow_optimizer(store: Arc<GraphStore>) {
             ));
         }
     });
+}
+
+pub(crate) fn spawn_runtime_trace_logger(
+    store: Arc<GraphStore>,
+    queue: Arc<QueueStore>,
+    ingress_buffer: SharedIngressBuffer,
+) {
+    if !runtime_trace_enabled() {
+        return;
+    }
+
+    let trace_path = runtime_trace_path();
+    let interval = Duration::from_millis(runtime_trace_interval_ms());
+    std::thread::spawn(move || {
+        if let Some(parent) = trace_path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                warn!(
+                    "Runtime trace: failed to create parent directory {}: {:?}",
+                    parent.display(),
+                    err
+                );
+                return;
+            }
+        }
+
+        loop {
+            let telemetry = runtime_telemetry_snapshot(&store, &queue, &ingress_buffer);
+            let signals = collect_runtime_signals_window(&store);
+            let gpu_memory = current_gpu_memory_snapshot();
+            let gpu_utilization = current_gpu_utilization_snapshot();
+            let lane_config = embedding_lane_config_from_env();
+            let provider = current_embedding_provider_diagnostics();
+            let controller = current_vector_batch_controller_diagnostics(&lane_config);
+            let line = json!({
+                "captured_at_ms": chrono::Utc::now().timestamp_millis(),
+                "runtime_telemetry": {
+                    "queue_depth": telemetry.queue_depth,
+                    "claim_mode": telemetry.claim_mode,
+                    "service_pressure": telemetry.service_pressure,
+                    "interactive_priority_level": telemetry.interactive_priority_level,
+                    "interactive_requests_in_flight": telemetry.interactive_requests_in_flight,
+                    "file_vectorization_queue_depth": telemetry.file_vectorization_queue_depth,
+                    "graph_projection_queue_depth": telemetry.graph_projection_queue_depth,
+                },
+                "signals": {
+                    "cpu_usage_ratio": signals.cpu_usage_ratio,
+                    "ram_available_ratio": signals.ram_available_ratio,
+                    "io_wait_ratio": signals.io_wait_ratio,
+                    "vram_used_mb": signals.vram_used_mb,
+                    "vram_free_mb": signals.vram_free_mb,
+                    "gpu_utilization_ratio": signals.gpu_utilization_ratio,
+                    "gpu_memory_utilization_ratio": signals.gpu_memory_utilization_ratio,
+                    "file_vectorization_queue_depth": signals.file_vectorization_queue_depth,
+                    "ready_queue_depth_current": signals.ready_queue_depth_current,
+                    "ready_queue_depth_max": signals.ready_queue_depth_max,
+                    "persist_queue_depth_current": signals.persist_queue_depth_current,
+                    "persist_queue_depth_max": signals.persist_queue_depth_max,
+                    "gpu_idle_wait_ms_total": signals.gpu_idle_wait_ms_total,
+                    "prepare_queue_wait_ms_total": signals.prepare_queue_wait_ms_total,
+                    "persist_queue_wait_ms_total": signals.persist_queue_wait_ms_total,
+                    "latency_recent_fetch_p95_ms": signals.latency_recent_fetch_p95_ms,
+                    "latency_recent_embed_p95_ms": signals.latency_recent_embed_p95_ms,
+                    "latency_recent_db_write_p95_ms": signals.latency_recent_db_write_p95_ms,
+                    "latency_recent_mark_done_p95_ms": signals.latency_recent_mark_done_p95_ms,
+                    "mcp_latency_recent_ms": signals.mcp_latency_recent_ms,
+                    "vector_workers_active_current": signals.vector_workers_active_current,
+                    "vector_worker_heartbeat_at_ms": signals.vector_worker_heartbeat_at_ms,
+                    "chunks_embedded_total": signals.chunks_embedded_total,
+                    "files_completed_total": signals.files_completed_total,
+                },
+                "gpu_memory": gpu_memory.as_ref().map(|snapshot| json!({
+                    "used_mb": snapshot.used_mb,
+                    "total_mb": snapshot.total_mb,
+                    "free_mb": snapshot.free_mb
+                })),
+                "gpu_utilization": gpu_utilization.as_ref().map(|snapshot| json!({
+                    "gpu_utilization_ratio": snapshot.gpu_utilization_ratio,
+                    "memory_utilization_ratio": snapshot.memory_utilization_ratio
+                })),
+                "drain_state": current_vector_drain_state(
+                    telemetry.file_vectorization_queue_depth,
+                    service_guard::current_pressure(),
+                    telemetry.interactive_priority_active,
+                    &provider.provider_requested,
+                    &provider.provider_effective,
+                ).as_str(),
+                "vector_batch_controller": {
+                    "state": controller.state.as_str(),
+                    "reason": controller.reason,
+                    "target_embed_batch_chunks": controller.target_embed_batch_chunks,
+                    "target_files_per_cycle": controller.target_files_per_cycle,
+                    "avg_chunks_per_embed_call": controller.avg_chunks_per_embed_call,
+                    "avg_files_per_embed_call": controller.avg_files_per_embed_call,
+                    "embed_ms_per_chunk": controller.embed_ms_per_chunk,
+                    "window_embed_calls": controller.window_embed_calls,
+                    "window_chunks": controller.window_chunks,
+                    "window_files_touched": controller.window_files_touched,
+                    "adjustments_total": controller.adjustments_total,
+                }
+            });
+
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&trace_path)
+            {
+                Ok(mut file) => {
+                    if let Err(err) = writeln!(file, "{line}") {
+                        warn!(
+                            "Runtime trace: failed to append to {}: {:?}",
+                            trace_path.display(),
+                            err
+                        );
+                    }
+                }
+                Err(err) => warn!(
+                    "Runtime trace: failed to open {}: {:?}",
+                    trace_path.display(),
+                    err
+                ),
+            }
+
+            std::thread::sleep(interval);
+        }
+    });
+}
+
+fn apply_live_optimizer_profile(
+    profile: &axon_core::optimizer::ActionProfile,
+    policy: &axon_core::optimizer::OperatorPolicySnapshot,
+) {
+    let allow_vector_workers = policy
+        .allowed_actuators
+        .iter()
+        .any(|actuator| actuator == "vector_workers");
+    let allow_chunk_batch_size = policy
+        .allowed_actuators
+        .iter()
+        .any(|actuator| actuator == "chunk_batch_size");
+    let allow_file_vectorization_batch_size = policy
+        .allowed_actuators
+        .iter()
+        .any(|actuator| actuator == "file_vectorization_batch_size");
+    apply_runtime_embedding_lane_adjustment(
+        if allow_vector_workers {
+            Some(profile.target_vector_workers)
+        } else {
+            None
+        },
+        if allow_chunk_batch_size {
+            Some(profile.target_chunk_batch_size)
+        } else {
+            None
+        },
+        if allow_file_vectorization_batch_size {
+            Some(profile.target_file_vectorization_batch_size)
+        } else {
+            None
+        },
+    );
+}
+
+fn configured_governor_mode() -> GovernorMode {
+    match std::env::var("AXON_GOVERNOR_MODE")
+        .ok()
+        .unwrap_or_else(|| "shadow".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "off" => GovernorMode::Off,
+        "assist" => GovernorMode::Assist,
+        "live" => GovernorMode::Live,
+        _ => GovernorMode::Shadow,
+    }
+}
+
+fn governor_state_label(state: GovernorState) -> &'static str {
+    match state {
+        GovernorState::Shadow => "shadow",
+        GovernorState::Assist => "assist",
+        GovernorState::Live => "live",
+        GovernorState::Freeze => "freeze",
+        GovernorState::Rollback => "rollback",
+        GovernorState::Disabled => "disabled",
+    }
+}
+
+fn governor_freeze_cooldown_ms() -> u64 {
+    std::env::var("AXON_GOVERNOR_FREEZE_COOLDOWN_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(60_000)
+}
+
+fn current_runtime_profile_id() -> String {
+    let current = axon_core::embedder::embedding_lane_config_from_env();
+    format!(
+        "vw{}-cb{}-fb{}",
+        current.vector_workers, current.chunk_batch_size, current.file_vectorization_batch_size
+    )
+}
+
+fn resolve_governor_state(
+    mode: GovernorMode,
+    signals: &axon_core::optimizer::RuntimeSignalsWindow,
+    policy: &axon_core::optimizer::OperatorPolicySnapshot,
+    reward: Option<&axon_core::optimizer::RewardObservation>,
+    freeze_until_ms: i64,
+    consecutive_zero_progress_windows: u64,
+    current_profile_id: &str,
+    action_profiles: &[axon_core::optimizer::ActionProfile],
+) -> GovernorState {
+    if matches!(mode, GovernorMode::Off) {
+        return GovernorState::Disabled;
+    }
+    if matches!(mode, GovernorMode::Shadow) {
+        return GovernorState::Shadow;
+    }
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let worker_heartbeat_stale_ms =
+        env_u64("AXON_GOVERNOR_VECTOR_HEARTBEAT_STALE_MS", 30_000) as i64;
+    let embed_stall_ms = env_u64("AXON_GOVERNOR_EMBED_STALL_MS", 45_000) as i64;
+    let worker_heartbeat_age_ms =
+        now_ms.saturating_sub(signals.vector_worker_heartbeat_at_ms as i64);
+    let embed_inflight_age_ms = if signals.embed_inflight_started_at_ms > 0 {
+        now_ms.saturating_sub(signals.embed_inflight_started_at_ms as i64)
+    } else {
+        0
+    };
+    if freeze_until_ms > now_ms {
+        return GovernorState::Freeze;
+    }
+    if !action_profiles
+        .iter()
+        .any(|profile| profile.id == current_profile_id)
+    {
+        return GovernorState::Rollback;
+    }
+    let embed_inflight = signals.embed_inflight_started_at_ms > 0;
+    let heartbeat_stalled_without_inflight =
+        !embed_inflight && worker_heartbeat_age_ms > worker_heartbeat_stale_ms;
+    let embed_stalled = embed_inflight && embed_inflight_age_ms > embed_stall_ms;
+    if signals.vector_workers_active_current == 0
+        || heartbeat_stalled_without_inflight
+        || embed_stalled
+        || signals.mcp_latency_recent_ms > policy.max_mcp_p95_ms
+        || signals.vram_used_mb > policy.max_vram_used_mb
+        || signals.cpu_usage_ratio > policy.max_cpu_ratio
+        || signals.ram_available_ratio < policy.min_ram_available_ratio
+    {
+        return GovernorState::Freeze;
+    }
+    if reward.is_some_and(|value| value.penalty_liveness > 0.0) {
+        return GovernorState::Freeze;
+    }
+    if consecutive_zero_progress_windows >= 3
+        && signals.file_vectorization_queue_depth >= 32
+        && signals.ready_queue_depth_current == 0
+    {
+        return GovernorState::Freeze;
+    }
+    match mode {
+        GovernorMode::Assist => GovernorState::Assist,
+        GovernorMode::Live => GovernorState::Live,
+        GovernorMode::Off | GovernorMode::Shadow => GovernorState::Shadow,
+    }
+}
+
+fn select_governor_profile(
+    state: GovernorState,
+    action_profiles: &[axon_core::optimizer::ActionProfile],
+    selected_profile: Option<&axon_core::optimizer::ActionProfile>,
+    current_profile_id: &str,
+    last_safe_profile_id: Option<&str>,
+) -> Option<axon_core::optimizer::ActionProfile> {
+    let current_index = action_profiles
+        .iter()
+        .position(|profile| profile.id == current_profile_id);
+    let target_index = selected_profile.and_then(|selected| {
+        action_profiles
+            .iter()
+            .position(|profile| profile.id == selected.id)
+    });
+    match state {
+        GovernorState::Shadow | GovernorState::Disabled => None,
+        GovernorState::Freeze | GovernorState::Rollback => last_safe_profile_id
+            .and_then(|safe_id| action_profiles.iter().find(|profile| profile.id == safe_id))
+            .cloned()
+            .or_else(|| {
+                action_profiles
+                    .iter()
+                    .find(|profile| profile.label == "hold")
+                    .cloned()
+            })
+            .or_else(|| action_profiles.first().cloned()),
+        GovernorState::Assist => match (current_index, target_index) {
+            (Some(current), Some(target)) if target > current => {
+                action_profiles.get(current + 1).cloned()
+            }
+            (Some(current), Some(target)) if target < current && current > 0 => {
+                action_profiles.get(current - 1).cloned()
+            }
+            _ => selected_profile.cloned(),
+        },
+        GovernorState::Live => selected_profile.cloned(),
+    }
+}
+
+#[cfg(test)]
+mod governor_tests {
+    use super::{resolve_governor_state, select_governor_profile, GovernorMode, GovernorState};
+    use axon_core::optimizer::{ActionProfile, OperatorPolicySnapshot, RuntimeSignalsWindow};
+
+    fn profile(id: &str, label: &str) -> ActionProfile {
+        ActionProfile {
+            id: id.to_string(),
+            label: label.to_string(),
+            target_vector_workers: 1,
+            target_chunk_batch_size: 48,
+            target_file_vectorization_batch_size: 12,
+        }
+    }
+
+    #[test]
+    fn freeze_prefers_hold_when_no_last_safe_profile_exists() {
+        let profiles = vec![profile("hold", "hold"), profile("vw1-cb64-fb16", "step-up")];
+        let selected = select_governor_profile(
+            GovernorState::Freeze,
+            &profiles,
+            profiles.get(1),
+            "vw1-cb64-fb16",
+            None,
+        )
+        .expect("freeze profile");
+
+        assert_eq!(selected.id, "hold");
+    }
+
+    fn signals() -> RuntimeSignalsWindow {
+        RuntimeSignalsWindow {
+            window_start_ms: 0,
+            window_end_ms: 1_000,
+            captured_at_ms: 1_000,
+            source: "test".to_string(),
+            cpu_usage_ratio: 0.1,
+            ram_available_ratio: 0.8,
+            io_wait_ratio: 0.0,
+            process_memory: Default::default(),
+            duckdb_memory: Default::default(),
+            vram_used_mb: 512,
+            vram_free_mb: 1_024,
+            gpu_utilization_ratio: 0.5,
+            gpu_memory_utilization_ratio: 0.2,
+            file_vectorization_queue_depth: 32,
+            graph_projection_queue_depth: 0,
+            ready_queue_depth_current: 1,
+            ready_queue_depth_max: 1,
+            persist_queue_depth_current: 0,
+            persist_queue_depth_max: 0,
+            gpu_idle_wait_ms_total: 0,
+            prepare_queue_wait_ms_total: 0,
+            persist_queue_wait_ms_total: 0,
+            latency_recent_fetch_p95_ms: 0,
+            latency_recent_embed_p95_ms: 0,
+            latency_recent_db_write_p95_ms: 0,
+            latency_recent_mark_done_p95_ms: 0,
+            mcp_latency_recent_ms: 0,
+            vector_workers_active_current: 1,
+            vector_worker_heartbeat_at_ms: 1_000,
+            embed_inflight_started_at_ms: 0,
+            interactive_requests_in_flight: 0,
+            interactive_priority: "background_normal".to_string(),
+            chunks_embedded_total: 10,
+            files_completed_total: 1,
+        }
+    }
+
+    fn policy() -> OperatorPolicySnapshot {
+        OperatorPolicySnapshot {
+            captured_at_ms: 1_000,
+            max_cpu_ratio: 0.8,
+            min_ram_available_ratio: 0.2,
+            max_mcp_p95_ms: 300,
+            max_vram_used_ratio: 0.75,
+            max_vram_used_mb: 6_144,
+            max_io_wait_ratio: 0.2,
+            backlog_priority_weight: 1.0,
+            interactive_priority_weight: 1.0,
+            shadow_mode_enabled: false,
+            allowed_actuators: vec![],
+            evaluation_window_ms: 60_000,
+        }
+    }
+
+    #[test]
+    fn freeze_triggers_when_vector_worker_heartbeat_is_stale() {
+        std::env::set_var("AXON_GOVERNOR_VECTOR_HEARTBEAT_STALE_MS", "1");
+        let mut stalled = signals();
+        stalled.vector_worker_heartbeat_at_ms = 0;
+        let state = resolve_governor_state(
+            GovernorMode::Assist,
+            &stalled,
+            &policy(),
+            None,
+            0,
+            0,
+            "hold",
+            &[profile("hold", "hold")],
+        );
+        assert_eq!(state, GovernorState::Freeze);
+        std::env::remove_var("AXON_GOVERNOR_VECTOR_HEARTBEAT_STALE_MS");
+    }
+
+    #[test]
+    fn freeze_triggers_when_embed_inflight_stalls() {
+        std::env::set_var("AXON_GOVERNOR_EMBED_STALL_MS", "1");
+        let mut stalled = signals();
+        stalled.embed_inflight_started_at_ms = 1;
+        let state = resolve_governor_state(
+            GovernorMode::Live,
+            &stalled,
+            &policy(),
+            None,
+            0,
+            0,
+            "hold",
+            &[profile("hold", "hold")],
+        );
+        assert_eq!(state, GovernorState::Freeze);
+        std::env::remove_var("AXON_GOVERNOR_EMBED_STALL_MS");
+    }
 }
 
 fn reader_refresh_interval_ms() -> u64 {
@@ -354,6 +912,43 @@ fn optimizer_loop_interval_ms() -> u64 {
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .unwrap_or(15_000)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn runtime_trace_enabled() -> bool {
+    matches!(
+        std::env::var("AXON_RUNTIME_TRACE_ENABLED")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn runtime_trace_interval_ms() -> u64 {
+    std::env::var("AXON_RUNTIME_TRACE_INTERVAL_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 1_000)
+        .unwrap_or(5_000)
+}
+
+fn runtime_trace_path() -> PathBuf {
+    std::env::var("AXON_RUNTIME_TRACE_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+            PathBuf::from(format!(".axon/runtime-trace-{ts}.jsonl"))
+        })
 }
 
 fn optimizer_constraint_flags(
@@ -552,10 +1147,14 @@ pub(crate) fn runtime_telemetry_snapshot(
         oversized_refusals_total: OVERSIZED_REFUSALS_TOTAL.load(Ordering::Relaxed),
         degraded_mode_entries_total: DEGRADED_MODE_ENTRIES_TOTAL.load(Ordering::Relaxed),
         background_launches_suppressed_total: service_guard::background_launches_suppressed_total(),
-        vectorization_suppressed_due_to_interactive: service_guard::vectorization_suppressed_total(),
-        vectorization_interrupted_due_to_interactive: service_guard::vectorization_interrupted_total(),
-        vectorization_requeued_for_interactive: service_guard::vectorization_requeued_for_interactive_total(),
-        vectorization_resumed_after_interactive: service_guard::vectorization_resumed_after_interactive_total(),
+        vectorization_suppressed_due_to_interactive: service_guard::vectorization_suppressed_total(
+        ),
+        vectorization_interrupted_due_to_interactive:
+            service_guard::vectorization_interrupted_total(),
+        vectorization_requeued_for_interactive:
+            service_guard::vectorization_requeued_for_interactive_total(),
+        vectorization_resumed_after_interactive:
+            service_guard::vectorization_resumed_after_interactive_total(),
         projection_suppressed_due_to_interactive: service_guard::projection_suppressed_total(),
         guard_hits: guard_metrics.hits,
         guard_misses: guard_metrics.misses,
@@ -924,11 +1523,13 @@ fn fill_admission_plan(
                     file: candidate,
                     mode: ProcessingMode::StructureOnly,
                 });
-            } else if candidate.defer_count < OVERSIZED_PROBATION_DEFER_THRESHOLD || queue.can_fit_alone_in_mode(
-                &candidate.path,
-                candidate.size_bytes,
-                ProcessingMode::StructureOnly,
-            ) {
+            } else if candidate.defer_count < OVERSIZED_PROBATION_DEFER_THRESHOLD
+                || queue.can_fit_alone_in_mode(
+                    &candidate.path,
+                    candidate.size_bytes,
+                    ProcessingMode::StructureOnly,
+                )
+            {
                 plan.deferred.push(candidate);
             } else {
                 plan.oversized.push(candidate);
@@ -1019,14 +1620,20 @@ pub(crate) fn spawn_initial_scan(
     ingress_buffer: SharedIngressBuffer,
 ) {
     std::thread::spawn(move || {
-        info!("🚀 Auto-Ignition: Beginning initial workspace mapping for {}...", project_root);
+        info!(
+            "🚀 Auto-Ignition: Beginning initial workspace mapping for {}...",
+            project_root
+        );
         let scanner = axon_core::scanner::Scanner::new(&project_root, &project_code);
         scanner.scan_with_guard_and_ingress(
             store,
             Some(&file_ingress_guard),
             Some(&ingress_buffer),
         );
-        info!("✅ Auto-Ignition: Initial mapping sequence complete for {}.", project_root);
+        info!(
+            "✅ Auto-Ignition: Initial mapping sequence complete for {}.",
+            project_root
+        );
     });
 }
 
@@ -1273,7 +1880,12 @@ fn memory_reclaimer_enabled() -> bool {
 fn federation_orchestrator_enabled() -> bool {
     std::env::var("AXON_ENABLE_FEDERATION_ORCHESTRATOR")
         .ok()
-        .map(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no"
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -1293,7 +1905,6 @@ fn memory_limit_bytes() -> u64 {
         .unwrap_or(14);
     gb * 1024 * 1024 * 1024
 }
-
 
 fn active_project_hot_targets(preferred_root: Option<&Path>) -> Vec<WatchTarget> {
     let Some(preferred_root) = preferred_root else {
@@ -1354,7 +1965,6 @@ fn project_hot_target_rank(path: &Path) -> (u8, String) {
 
     (rank, name)
 }
-
 
 #[derive(Debug, Clone, Copy)]
 struct ClaimPolicy {
@@ -1836,10 +2446,11 @@ pub(crate) fn spawn_federation_orchestrator(
 mod tests {
     use super::{
         active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files,
-        federation_orchestrator_enabled, flush_ingress_buffer_once, handle_watcher_events, memory_limit_bytes,
-        memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes, optimizer_loop_interval_ms, plan_admissions,
-        should_attempt_memory_reclaim, should_suppress_bootstrap_event_storm, ClaimMode,
-        RescanGuardReset, OVERSIZED_PROBATION_DEFER_THRESHOLD,
+        federation_orchestrator_enabled, flush_ingress_buffer_once, handle_watcher_events,
+        memory_limit_bytes, memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes,
+        optimizer_loop_interval_ms, plan_admissions, should_attempt_memory_reclaim,
+        should_suppress_bootstrap_event_storm, ClaimMode, RescanGuardReset,
+        OVERSIZED_PROBATION_DEFER_THRESHOLD,
     };
     use axon_core::file_ingress_guard::FileIngressGuard;
     use axon_core::graph::{GraphStore, PendingFile};
@@ -2198,7 +2809,10 @@ mod tests {
             ServicePressure::Healthy,
         );
         axon_core::service_guard::mcp_request_finished();
-        assert!(matches!(policy.mode, ClaimMode::Guarded | ClaimMode::Paused));
+        assert!(matches!(
+            policy.mode,
+            ClaimMode::Guarded | ClaimMode::Paused
+        ));
     }
 
     #[test]
@@ -2881,16 +3495,6 @@ mod tests {
         }
         assert!(!guard.load(Ordering::SeqCst));
     }
-
-
-
-
-
-
-
-
-
-
 
     #[test]
     fn test_active_project_hot_targets_expand_visible_child_subtrees() {

@@ -3,7 +3,7 @@
 This directory contains project-local operator skills.
 
 Canonical project-local skill:
-- `docs/skills/axon-soll-operator/SKILL.md`
+- `docs/skills/axon-engineering-protocol/SKILL.md`
 
 ## Runtime linking model
 

@@ -7,11 +7,10 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-duckdb = { version = "1.10501.0" }
+duckdb = { version = "1.10501.0", features = ["bundled"] }
 serde_json = "1.0"
 
 
 [[bin]]
 name = "bin_test_pgq"
 path = "src/bin_test_pgq.rs"
-

@@ -24,7 +24,9 @@ impl CParser {
         for child in node.named_children(&mut cursor) {
             match child.kind() {
                 "function_definition" => Self::extract_function(child, source_bytes, result),
-                "struct_specifier" | "union_specifier" | "enum_specifier" => Self::extract_struct(child, source_bytes, result),
+                "struct_specifier" | "union_specifier" | "enum_specifier" => {
+                    Self::extract_struct(child, source_bytes, result)
+                }
                 "call_expression" => Self::extract_call(child, source_bytes, result),
                 _ => Self::walk(child, source_bytes, result),
             }
@@ -45,11 +47,17 @@ impl CParser {
 
             let mut is_nif = false;
             let node_content = node.utf8_text(source_bytes).unwrap_or("");
-            if node_content.contains("JNIEXPORT") || node_content.contains("JNICALL") ||
-               node_content.contains("__declspec(dllexport)") || node_content.contains("extern \"C\"") ||
-               node_content.contains("PHP_FUNCTION") || node_content.contains("PHP_METHOD") ||
-               node_content.contains("rb_define_method") || node_content.contains("Init_") ||
-               node_content.contains("PyMODINIT_FUNC") || node_content.contains("ERL_NIF_INIT") {
+            if node_content.contains("JNIEXPORT")
+                || node_content.contains("JNICALL")
+                || node_content.contains("__declspec(dllexport)")
+                || node_content.contains("extern \"C\"")
+                || node_content.contains("PHP_FUNCTION")
+                || node_content.contains("PHP_METHOD")
+                || node_content.contains("rb_define_method")
+                || node_content.contains("Init_")
+                || node_content.contains("PyMODINIT_FUNC")
+                || node_content.contains("ERL_NIF_INIT")
+            {
                 is_nif = true;
             }
 
@@ -139,7 +147,7 @@ impl CParser {
 impl Parser for CParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut result = ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };

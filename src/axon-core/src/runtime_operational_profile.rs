@@ -56,17 +56,14 @@ mod tests {
 
     #[test]
     fn test_full_mode_with_autonomous_flag_promotes_to_full_autonomous() {
-        let profile =
-            AxonRuntimeOperationalProfile::from_mode_and_strings("full", Some("true"));
+        let profile = AxonRuntimeOperationalProfile::from_mode_and_strings("full", Some("true"));
         assert_eq!(profile, AxonRuntimeOperationalProfile::FullAutonomous);
     }
 
     #[test]
     fn test_graph_only_ignores_autonomous_flag() {
-        let profile = AxonRuntimeOperationalProfile::from_mode_and_strings(
-            "graph_only",
-            Some("true"),
-        );
+        let profile =
+            AxonRuntimeOperationalProfile::from_mode_and_strings("graph_only", Some("true"));
         assert_eq!(profile, AxonRuntimeOperationalProfile::GraphOnly);
     }
 }

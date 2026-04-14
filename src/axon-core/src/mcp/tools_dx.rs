@@ -1,3 +1,4 @@
+use crate::embedding_contract::DIMENSION;
 use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
@@ -51,21 +52,21 @@ impl McpServer {
         let total_files = self
             .graph_store
             .query_count_param(
-                "SELECT count(*) FROM File WHERE project_slug = $project",
+                "SELECT count(*) FROM File WHERE project_code = $project",
                 &params,
             )
             .unwrap_or(0);
         let pending_files = self
             .graph_store
             .query_count_param(
-                "SELECT count(*) FROM File WHERE project_slug = $project AND status = 'pending'",
+                "SELECT count(*) FROM File WHERE project_code = $project AND status = 'pending'",
                 &params,
             )
             .unwrap_or(0);
         let indexing_files = self
             .graph_store
             .query_count_param(
-                "SELECT count(*) FROM File WHERE project_slug = $project AND status = 'indexing'",
+                "SELECT count(*) FROM File WHERE project_code = $project AND status = 'indexing'",
                 &params,
             )
             .unwrap_or(0);
@@ -77,7 +78,7 @@ impl McpServer {
             .query_json_param(
                 "SELECT COALESCE(status_reason, 'unknown'), count(*) \
                  FROM File \
-                 WHERE project_slug = $project AND status IN ('pending', 'indexing') \
+                 WHERE project_code = $project AND status IN ('pending', 'indexing') \
                  GROUP BY 1 \
                  ORDER BY count(*) DESC, 1 ASC \
                  LIMIT 3",
@@ -140,7 +141,7 @@ impl McpServer {
         let (query, params) = if let Some(project) = project {
             (
                 "SELECT count(*) FROM File \
-                 WHERE project_slug = $project AND status = 'indexed_degraded'",
+                 WHERE project_code = $project AND status = 'indexed_degraded'",
                 json!({ "project": project }),
             )
         } else {
@@ -162,7 +163,7 @@ impl McpServer {
                  JOIN CONTAINS c ON c.source_id = f.path \
                  JOIN Symbol s ON s.id = c.target_id \
                  WHERE (s.name = $sym OR s.id = $sym) \
-                   AND s.project_slug = $project \
+                   AND s.project_code = $project \
                    AND f.status = 'indexed_degraded'",
                 json!({ "sym": symbol, "project": project }),
             )
@@ -194,25 +195,7 @@ impl McpServer {
     }
 
     fn resolve_scoped_symbol_id_dx(&self, symbol: &str, project: Option<&str>) -> Option<String> {
-        let (query, params) = if let Some(project) = project {
-            (
-                "SELECT id FROM Symbol \
-                 WHERE (name = $sym OR id = $sym) AND project_slug = $project \
-                 LIMIT 1",
-                json!({ "sym": symbol, "project": project }),
-            )
-        } else {
-            (
-                "SELECT id FROM Symbol WHERE name = $sym OR id = $sym LIMIT 1",
-                json!({ "sym": symbol }),
-            )
-        };
-        let res = self.graph_store.query_json_param(query, &params).ok()?;
-        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-        rows.first()?
-            .first()?
-            .as_str()
-            .map(|value| value.to_string())
+        self.resolve_scoped_symbol_id_canonical(symbol, project)
     }
 
     fn build_symbol_search_params(query_text: &str, project: &str) -> Value {
@@ -493,10 +476,10 @@ impl McpServer {
             if project == "*" {
                 (
                     format!(
-                        "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[384]) as score \
+                        "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) as score \
                          FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
                          WHERE {} \
-                            OR array_cosine_distance(s.embedding, {}::FLOAT[384]) < 0.5 \
+                            OR array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) < 0.5 \
                          ORDER BY score ASC LIMIT {}",
                         vec_str, base_predicate, vec_str, query_limit
                     ),
@@ -505,10 +488,10 @@ impl McpServer {
             } else {
                 (
                     format!(
-                        "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[384]) as score \
+                        "SELECT s.name, s.kind, f.path AS uri, array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) as score \
                          FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                         WHERE f.project_slug = $proj AND ( {} \
-                            OR array_cosine_distance(s.embedding, {}::FLOAT[384]) < 0.5 \
+                         WHERE f.project_code = $proj AND ( {} \
+                            OR array_cosine_distance(s.embedding, {}::FLOAT[{DIMENSION}]) < 0.5 \
                          ) \
                          ORDER BY score ASC LIMIT {}",
                         vec_str, base_predicate, vec_str, query_limit
@@ -532,7 +515,7 @@ impl McpServer {
                 format!(
                     "SELECT s.name, s.kind, f.path AS uri \
                      FROM Symbol s JOIN CONTAINS c ON s.id = c.target_id JOIN File f ON f.path = c.source_id \
-                     WHERE f.project_slug = $proj AND ( {} ) LIMIT {}",
+                     WHERE f.project_code = $proj AND ( {} ) LIMIT {}",
                     base_predicate, query_limit
                 ),
                 Self::build_symbol_search_params(query_text, project),
@@ -547,8 +530,11 @@ impl McpServer {
 
         match self.graph_store.query_json_param(&sql, &params) {
             Ok(res) => {
-                let rows: Vec<Vec<Value>> =
-                    Self::rerank_symbol_rows(serde_json::from_str(&res).unwrap_or_default(), query_text, query_intent);
+                let rows: Vec<Vec<Value>> = Self::rerank_symbol_rows(
+                    serde_json::from_str(&res).unwrap_or_default(),
+                    query_text,
+                    query_intent,
+                );
                 if rows.is_empty() {
                     return self.axon_query_from_chunks(
                         query_text,
@@ -603,7 +589,10 @@ impl McpServer {
                         "semantic query resolved",
                         &scope,
                         &evidence,
-                        &["use `inspect` on a returned symbol", "use `impact` for blast radius"],
+                        &[
+                            "use `inspect` on a returned symbol",
+                            "use `impact` for blast radius"
+                        ],
                         "high",
                     )
                 );
@@ -698,7 +687,7 @@ impl McpServer {
                     JOIN Symbol s ON s.id = c.source_id \
                     JOIN CONTAINS rel ON rel.target_id = s.id \
                     JOIN File f ON f.path = rel.source_id \
-                    WHERE c.project_slug = $proj AND ({predicate}) \
+                    WHERE c.project_code = $proj AND ({predicate}) \
                  ) \
                  SELECT name, kind, uri, match_reason, evidence \
                  FROM chunk_matches \
@@ -718,8 +707,11 @@ impl McpServer {
 
         match self.graph_store.query_json_param(&sql, params) {
             Ok(res) => {
-                let rows: Vec<Vec<Value>> =
-                    Self::rerank_chunk_rows(serde_json::from_str(&res).unwrap_or_default(), query_text, query_intent);
+                let rows: Vec<Vec<Value>> = Self::rerank_chunk_rows(
+                    serde_json::from_str(&res).unwrap_or_default(),
+                    query_text,
+                    query_intent,
+                );
                 if rows.is_empty() {
                     return self.axon_query_without_contains(
                         query_text,
@@ -781,10 +773,17 @@ impl McpServer {
             .graph_store
             .query_count("SELECT count(*) FROM CONTAINS")
             .unwrap_or(0);
-        println!("axon_query_without_contains: contains_count={} in DB {:?}", contains_count, self.graph_store.db_path);
+        println!(
+            "axon_query_without_contains: contains_count={} in DB {:?}",
+            contains_count, self.graph_store.db_path
+        );
         if contains_count > 0 {
-            let diagnostic =
-                Self::query_diagnostic_block(query_intent, "structure_only_empty", "aucun", semantic_fallback_reason);
+            let diagnostic = Self::query_diagnostic_block(
+                query_intent,
+                "structure_only_empty",
+                "aucun",
+                semantic_fallback_reason,
+            );
             return Some(json!({
                 "content": [{
                     "type": "text",
@@ -801,7 +800,7 @@ impl McpServer {
         }
 
         let fallback_query = format!(
-            "SELECT s.name, s.kind, COALESCE(s.project_slug, 'unknown') \
+            "SELECT s.name, s.kind, COALESCE(s.project_code, 'unknown') \
              FROM Symbol s \
              WHERE {} \
              LIMIT 10",
@@ -815,8 +814,12 @@ impl McpServer {
             serde_json::from_str(&fallback_res).unwrap_or_default();
 
         if fallback_rows.is_empty() {
-            let diagnostic =
-                Self::query_diagnostic_block(query_intent, "structure_only_empty", "aucun", semantic_fallback_reason);
+            let diagnostic = Self::query_diagnostic_block(
+                query_intent,
+                "structure_only_empty",
+                "aucun",
+                semantic_fallback_reason,
+            );
             Some(json!({
                 "content": [{
                     "type": "text",
@@ -872,28 +875,27 @@ impl McpServer {
         let symbol = args.get("symbol")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
-        let (query, params) = if let Some(project) = project {
-            (
+        let query = if project.is_some() {
+            format!(
                 "SELECT s.name, s.kind, s.tested, \
                  (SELECT count(*) FROM CALLS c1 WHERE c1.target_id = s.id) AS callers, \
                  (SELECT count(*) FROM CALLS c2 WHERE c2.source_id = s.id) AS callees \
                  FROM Symbol s \
-                 WHERE s.name = $sym AND s.project_slug = $project",
-                json!({"sym": symbol, "project": project}),
+                 WHERE s.name = $sym{}",
+                Self::sql_project_filter_for_fields(project, &["s.project_code"])
             )
         } else {
-            (
-                "SELECT s.name, s.kind, s.tested, \
-                 (SELECT count(*) FROM CALLS c1 WHERE c1.target_id = s.id) AS callers, \
-                 (SELECT count(*) FROM CALLS c2 WHERE c2.source_id = s.id) AS callees \
-                 FROM Symbol s WHERE s.name = $sym",
-                json!({"sym": symbol}),
-            )
+            "SELECT s.name, s.kind, s.tested, \
+             (SELECT count(*) FROM CALLS c1 WHERE c1.target_id = s.id) AS callers, \
+             (SELECT count(*) FROM CALLS c2 WHERE c2.source_id = s.id) AS callees \
+             FROM Symbol s WHERE s.name = $sym"
+                .to_string()
         };
+        let params = json!({"sym": symbol});
         let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
         let project_note = self.project_scope_truth_note(project);
 
-        match self.graph_store.query_json_param(query, &params) {
+        match self.graph_store.query_json_param(&query, &params) {
             Ok(res) => {
                 let table =
                     format_table_from_json(&res, &["Nom", "Type", "Testé", "Appelants", "Appelés"]);
@@ -915,7 +917,10 @@ impl McpServer {
                         "symbol inspection computed",
                         &scope,
                         &evidence,
-                        &["run `impact` for dependency blast radius", "run `bidi_trace` for topology"],
+                        &[
+                            "run `impact` for dependency blast radius",
+                            "run `bidi_trace` for topology"
+                        ],
                         "high",
                     )
                 );
@@ -936,16 +941,16 @@ impl McpServer {
         let Some(target_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
             let (sugg_query, sugg_params) = if let Some(project) = project {
                 (
-                    "SELECT name, kind, project_slug \
+                    "SELECT name, kind, project_code \
                      FROM Symbol \
-                     WHERE project_slug = $project AND lower(name) LIKE lower($pat) \
+                     WHERE project_code = $project AND lower(name) LIKE lower($pat) \
                      ORDER BY name \
                      LIMIT 8",
                     json!({ "project": project, "pat": format!("%{}%", symbol) }),
                 )
             } else {
                 (
-                    "SELECT name, kind, COALESCE(project_slug, 'unknown') \
+                    "SELECT name, kind, COALESCE(project_code, 'unknown') \
                      FROM Symbol \
                      WHERE lower(name) LIKE lower($pat) \
                      ORDER BY name \
@@ -986,11 +991,11 @@ impl McpServer {
                 JOIN callers ON c.target_id = callers.sym
                 WHERE callers.depth < {}
             )
-            SELECT DISTINCT s.name, s.kind, COALESCE(s.project_slug, 'unknown') FROM callers
+            SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callers
             JOIN Symbol s ON s.id = callers.sym{}",
             depth,
             if project.is_some() {
-                " WHERE s.project_slug = $project"
+                " WHERE s.project_code = $project"
             } else {
                 ""
             }
@@ -1005,11 +1010,11 @@ impl McpServer {
                 JOIN callees ON c.source_id = callees.sym
                 WHERE callees.depth < {}
             )
-            SELECT DISTINCT s.name, s.kind, COALESCE(s.project_slug, 'unknown') FROM callees
+            SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callees
             JOIN Symbol s ON s.id = callees.sym{}",
             depth,
             if project.is_some() {
-                " WHERE s.project_slug = $project"
+                " WHERE s.project_code = $project"
             } else {
                 ""
             }
@@ -1055,7 +1060,10 @@ impl McpServer {
         evidence.push_str("### ↑ Appelants / Entry Points\n");
         evidence.push_str(&format_table_from_json(&up_res, &["Nom", "Type", "Projet"]));
         evidence.push_str("\n\n### ↓ Appels Profonds\n");
-        evidence.push_str(&format_table_from_json(&down_res, &["Nom", "Type", "Projet"]));
+        evidence.push_str(&format_table_from_json(
+            &down_res,
+            &["Nom", "Type", "Projet"],
+        ));
 
         let report = format!(
             "## ↕️ Trace Bidirectionnelle : {}\n\n{}",
@@ -1065,7 +1073,10 @@ impl McpServer {
                 "bidirectional call trace computed",
                 &scope,
                 &evidence_by_mode(&evidence, mode),
-                &["run `impact` for blast-radius summary", "run `inspect` on one critical neighbor"],
+                &[
+                    "run `impact` for blast-radius summary",
+                    "run `inspect` on one critical neighbor"
+                ],
                 confidence,
             )
         );
@@ -1089,7 +1100,10 @@ impl McpServer {
                     "symbol not found in current scope",
                     &scope,
                     "",
-                    &["run `query` to discover the exact symbol id/name", "retry with `project` when relevant"],
+                    &[
+                        "run `query` to discover the exact symbol id/name",
+                        "retry with `project` when relevant"
+                    ],
                     "low",
                 )
             );
@@ -1098,17 +1112,17 @@ impl McpServer {
 
         let query = if project.is_some() {
             "
-            SELECT DISTINCT f.path AS consumer, s.name, s.kind, COALESCE(s.project_slug, 'unknown')
+            SELECT DISTINCT f.path AS consumer, s.name, s.kind, COALESCE(s.project_code, 'unknown')
             FROM CALLS c
             JOIN Symbol s ON s.id = c.source_id
             LEFT JOIN CONTAINS con ON s.id = con.target_id
             LEFT JOIN File f ON f.path = con.source_id
             JOIN Symbol target ON target.id = c.target_id
-            WHERE target.id = $target_id AND target.is_public = true AND s.project_slug = $project
+            WHERE target.id = $target_id AND target.is_public = true AND s.project_code = $project
         "
         } else {
             "
-            SELECT DISTINCT f.path AS consumer, s.name, s.kind, COALESCE(s.project_slug, 'unknown')
+            SELECT DISTINCT f.path AS consumer, s.name, s.kind, COALESCE(s.project_code, 'unknown')
             FROM CALLS c
             JOIN Symbol s ON s.id = c.source_id
             LEFT JOIN CONTAINS con ON s.id = con.target_id
@@ -1167,7 +1181,10 @@ impl McpServer {
                             "public api consumer impact detected",
                             &scope,
                             &evidence_by_mode(&evidence, mode),
-                            &["inspect top consumers", "run `simulate_mutation` before changing signature"],
+                            &[
+                                "inspect top consumers",
+                                "run `simulate_mutation` before changing signature"
+                            ],
                             "high",
                         )
                     );

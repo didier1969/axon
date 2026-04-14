@@ -10,13 +10,15 @@ defmodule Axon.Watcher.Progress do
 
   require Logger
 
-  @terminal_statuses ["indexed", "indexed_degraded", "skipped", "deleted"]
+  @terminal_statuses ["indexed", "indexed_degraded", "skipped", "deleted", "oversized_for_current_budget"]
   @oversized_status "oversized_for_current_budget"
+  @default_chunk_model_id "chunk-bge-large-en-v1.5-1024"
 
-  def get_snapshot(_repo_slug) do
+  def get_snapshot(_repo_code) do
     rows = query_rows(snapshot_query())
     soll_coverage = query_rows(soll_coverage_query())
     soll_revision = query_rows(soll_revision_query())
+    flow_breakdown = query_rows(workspace_pipeline_breakdown_query()) |> decode_flow_breakdown()
     global_graph_vectors = query_rows(global_graph_vector_query())
     global_chunk_embeddings = query_rows(global_chunk_embedding_query())
     global_file_vector_flags = query_rows(global_file_vector_flag_query())
@@ -25,6 +27,7 @@ defmodule Axon.Watcher.Progress do
     project_nodes = query_rows(project_nodes_query()) |> decode_scope_counts()
     project_links = query_rows(project_links_query()) |> decode_scope_counts()
     project_graph_vectors = query_rows(project_graph_vector_query()) |> decode_scope_counts()
+    project_names = query_rows(project_names_query()) |> decode_scope_names()
 
     workspace_counts = rows |> section_rows("workspace_status") |> normalize_counts()
     stage_counts = rows |> section_rows("workspace_stage") |> normalize_counts()
@@ -34,8 +37,8 @@ defmodule Axon.Watcher.Progress do
       rows
       |> section_rows("project_ready")
       |> Enum.reduce(%{}, fn
-        [_section, slug, _key, graph_ready, vector_ready], acc ->
-          Map.put(acc, slug, %{graph_ready: decode_integer(graph_ready), vector_ready: decode_integer(vector_ready)})
+        [_section, project_code, _key, graph_ready, vector_ready], acc ->
+          Map.put(acc, project_code, %{graph_ready: decode_integer(graph_ready), vector_ready: decode_integer(vector_ready)})
 
         _row, acc ->
           acc
@@ -45,20 +48,22 @@ defmodule Axon.Watcher.Progress do
       rows
       |> section_rows("project_status")
       |> Enum.group_by(&Enum.at(&1, 1))
-      |> Enum.map(fn {slug, project_rows} ->
+      |> Enum.map(fn {project_code, project_rows} ->
         counts =
-          Enum.into(project_rows, %{}, fn [_section, _slug, status, count, _secondary_count] ->
+          Enum.into(project_rows, %{}, fn [_section, _project_code, status, count, _secondary_count] ->
             {status, decode_integer(count)}
           end)
 
         total = Enum.sum(Map.values(counts))
         completed = completed_total(counts)
-        readiness = Map.get(readiness_by_project, slug, %{graph_ready: 0, vector_ready: 0})
-        project_nodes_count = Map.get(project_nodes, slug, 0)
-        project_graph_vectors_count = Map.get(project_graph_vectors, slug, 0)
+        readiness = Map.get(readiness_by_project, project_code, %{graph_ready: 0, vector_ready: 0})
+        project_nodes_count = Map.get(project_nodes, project_code, 0)
+        project_graph_vectors_count = Map.get(project_graph_vectors, project_code, 0)
 
         %{
-          slug: slug,
+          project_code: project_code,
+          project_name: Map.get(project_names, project_code, project_code),
+          display_name: display_project_name(Map.get(project_names, project_code, project_code), project_code),
           known: total,
           total: total,
           completed: completed,
@@ -75,12 +80,12 @@ defmodule Axon.Watcher.Progress do
           vector_ready_graph: project_graph_vectors_count,
           vector_ready_graph_pct: percentage(project_graph_vectors_count, project_nodes_count),
           nodes_count: project_nodes_count,
-          links_count: Map.get(project_links, slug, 0),
+          links_count: Map.get(project_links, project_code, 0),
           progress: percentage(completed, total),
           readiness: readiness_label(counts, total)
         }
       end)
-      |> Enum.sort_by(fn project -> {-project.known, project.slug} end, :asc)
+      |> Enum.sort_by(fn project -> {-project.known, project.project_code} end, :asc)
 
     reasons =
       rows
@@ -95,7 +100,8 @@ defmodule Axon.Watcher.Progress do
     indexed = Map.get(workspace_counts, "indexed", 0)
     degraded = Map.get(workspace_counts, "indexed_degraded", 0)
     skipped = Map.get(workspace_counts, "skipped", 0)
-    terminal = indexed + degraded + skipped + Map.get(workspace_counts, "deleted", 0)
+    oversized = oversized_total(workspace_counts)
+    terminal = completed_total(workspace_counts)
     progress = percentage(terminal, total)
 
     workspace = %{
@@ -108,13 +114,20 @@ defmodule Axon.Watcher.Progress do
       "indexed_degraded" => degraded,
       "pending" => Map.get(workspace_counts, "pending", 0),
       "indexing" => Map.get(workspace_counts, "indexing", 0),
-      "oversized" => oversized_total(workspace_counts),
+      "oversized" => oversized,
       "skipped" => skipped,
       "deleted" => Map.get(workspace_counts, "deleted", 0),
+      "completed_indexed" => indexed,
+      "completed_indexed_degraded" => degraded,
+      "completed_skipped" => skipped,
+      "completed_deleted" => Map.get(workspace_counts, "deleted", 0),
+      "completed_oversized" => oversized,
       "graph_ready" => graph_ready,
       "graph_ready_pct" => percentage(graph_ready, total),
       "vector_ready" => vector_ready,
       "vector_ready_file" => vector_ready,
+      "semantic_coverage" => vector_ready,
+      "semantic_coverage_pct" => percentage(vector_ready, total),
       "vector_ready_file_pct" => percentage(vector_ready, total),
       "vector_ready_file_raw" => decode_single_count(global_file_vector_flags),
       "vector_ready_graph" => decode_single_count(global_graph_vectors),
@@ -130,6 +143,14 @@ defmodule Axon.Watcher.Progress do
       "stage_graph_indexed" => Map.get(stage_counts, "graph_indexed", 0),
       "known" => total,
       "completed" => terminal,
+      "indexed_graph_ready" => Map.get(flow_breakdown, "indexed_graph_ready", 0),
+      "indexed_graph_missing" => Map.get(flow_breakdown, "indexed_graph_missing", 0),
+      "indexed_degraded_graph_ready" => Map.get(flow_breakdown, "indexed_degraded_graph_ready", 0),
+      "indexed_degraded_graph_missing" => Map.get(flow_breakdown, "indexed_degraded_graph_missing", 0),
+      "indexed_vector_ready" => Map.get(flow_breakdown, "indexed_vector_ready", 0),
+      "indexed_vector_missing" => Map.get(flow_breakdown, "indexed_vector_missing", 0),
+      "indexed_degraded_vector_ready" => Map.get(flow_breakdown, "indexed_degraded_vector_ready", 0),
+      "indexed_degraded_vector_missing" => Map.get(flow_breakdown, "indexed_degraded_vector_missing", 0),
       "soll_done" => decode_soll_metric(soll_coverage, 1),
       "soll_partial" => decode_soll_metric(soll_coverage, 2),
       "soll_missing" => decode_soll_metric(soll_coverage, 3),
@@ -140,7 +161,9 @@ defmodule Axon.Watcher.Progress do
     %{workspace: workspace, projects: projects, reasons: reasons}
   end
 
-  def get_status(_repo_slug) do
+  def get_status(_repo_code) do
+    flow_breakdown = query_rows(workspace_pipeline_breakdown_query()) |> decode_flow_breakdown()
+
     counts =
       "SELECT COALESCE(status, 'unknown'), count(*) FROM File GROUP BY 1;"
       |> query_rows()
@@ -160,7 +183,8 @@ defmodule Axon.Watcher.Progress do
     indexed = Map.get(counts, "indexed", 0)
     degraded = Map.get(counts, "indexed_degraded", 0)
     skipped = Map.get(counts, "skipped", 0)
-    terminal = indexed + degraded + skipped + Map.get(counts, "deleted", 0)
+    oversized = oversized_total(counts)
+    terminal = completed_total(counts)
     progress = percentage(terminal, total)
 
     %{
@@ -173,13 +197,20 @@ defmodule Axon.Watcher.Progress do
       "indexed_degraded" => degraded,
       "pending" => Map.get(counts, "pending", 0),
       "indexing" => Map.get(counts, "indexing", 0),
-      "oversized" => oversized_total(counts),
+      "oversized" => oversized,
       "skipped" => skipped,
       "deleted" => Map.get(counts, "deleted", 0),
+      "completed_indexed" => indexed,
+      "completed_indexed_degraded" => degraded,
+      "completed_skipped" => skipped,
+      "completed_deleted" => Map.get(counts, "deleted", 0),
+      "completed_oversized" => oversized,
       "graph_ready" => graph_ready,
       "graph_ready_pct" => percentage(graph_ready, total),
       "vector_ready" => vector_ready,
       "vector_ready_file" => vector_ready,
+      "semantic_coverage" => vector_ready,
+      "semantic_coverage_pct" => percentage(vector_ready, total),
       "vector_ready_file_pct" => percentage(vector_ready, total),
       "vector_ready_file_raw" => decode_single_count(query_rows(global_file_vector_flag_query())),
       "vector_ready_graph" => decode_single_count(query_rows(global_graph_vector_query())),
@@ -198,6 +229,14 @@ defmodule Axon.Watcher.Progress do
       "stage_graph_indexed" => Map.get(stage_counts, "graph_indexed", 0),
       "known" => total,
       "completed" => terminal,
+      "indexed_graph_ready" => Map.get(flow_breakdown, "indexed_graph_ready", 0),
+      "indexed_graph_missing" => Map.get(flow_breakdown, "indexed_graph_missing", 0),
+      "indexed_degraded_graph_ready" => Map.get(flow_breakdown, "indexed_degraded_graph_ready", 0),
+      "indexed_degraded_graph_missing" => Map.get(flow_breakdown, "indexed_degraded_graph_missing", 0),
+      "indexed_vector_ready" => Map.get(flow_breakdown, "indexed_vector_ready", 0),
+      "indexed_vector_missing" => Map.get(flow_breakdown, "indexed_vector_missing", 0),
+      "indexed_degraded_vector_ready" => Map.get(flow_breakdown, "indexed_degraded_vector_ready", 0),
+      "indexed_degraded_vector_missing" => Map.get(flow_breakdown, "indexed_degraded_vector_missing", 0),
       "soll_done" => 0,
       "soll_partial" => 0,
       "soll_missing" => 0,
@@ -206,11 +245,11 @@ defmodule Axon.Watcher.Progress do
     }
   end
 
-  def get_directory_stats(repo_slug) do
-    repo_slug
+  def get_directory_stats(repo_code) do
+    repo_code
     |> list_projects()
     |> Enum.into(%{}, fn project ->
-      {project.slug,
+      {project.project_code,
        %{
          total: project.total,
          completed: project.completed,
@@ -220,38 +259,41 @@ defmodule Axon.Watcher.Progress do
     end)
   end
 
-  def list_projects(_repo_slug) do
+  def list_projects(_repo_code) do
     project_nodes = query_rows(project_nodes_query()) |> decode_scope_counts()
     project_graph_vectors = query_rows(project_graph_vector_query()) |> decode_scope_counts()
+    project_names = query_rows(project_names_query()) |> decode_scope_names()
 
     readiness_by_project =
       project_ready_query()
       |> query_rows()
       |> Enum.reduce(%{}, fn
-        [slug, graph_ready, vector_ready], acc ->
-          Map.put(acc, slug, %{graph_ready: decode_integer(graph_ready), vector_ready: decode_integer(vector_ready)})
+        [project_code, graph_ready, vector_ready], acc ->
+          Map.put(acc, project_code, %{graph_ready: decode_integer(graph_ready), vector_ready: decode_integer(vector_ready)})
 
         _row, acc ->
           acc
       end)
 
-    "SELECT COALESCE(project_slug, '(unscoped)'), COALESCE(status, 'unknown'), count(*) FROM File GROUP BY 1, 2;"
+    "SELECT COALESCE(project_code, '(unscoped)'), COALESCE(status, 'unknown'), count(*) FROM File GROUP BY 1, 2;"
     |> query_rows()
     |> Enum.group_by(&Enum.at(&1, 0))
-    |> Enum.map(fn {slug, rows} ->
+    |> Enum.map(fn {project_code, rows} ->
       counts =
-        Enum.into(rows, %{}, fn [_slug, status, count] ->
+        Enum.into(rows, %{}, fn [_project_code, status, count] ->
           {status, decode_integer(count)}
         end)
 
       total = Enum.sum(Map.values(counts))
       completed = completed_total(counts)
-      readiness = Map.get(readiness_by_project, slug, %{graph_ready: 0, vector_ready: 0})
-      project_nodes_count = Map.get(project_nodes, slug, 0)
-      project_graph_vectors_count = Map.get(project_graph_vectors, slug, 0)
+      readiness = Map.get(readiness_by_project, project_code, %{graph_ready: 0, vector_ready: 0})
+      project_nodes_count = Map.get(project_nodes, project_code, 0)
+      project_graph_vectors_count = Map.get(project_graph_vectors, project_code, 0)
 
       %{
-        slug: slug,
+        project_code: project_code,
+        project_name: Map.get(project_names, project_code, project_code),
+        display_name: display_project_name(Map.get(project_names, project_code, project_code), project_code),
         known: total,
         total: total,
         completed: completed,
@@ -275,14 +317,14 @@ defmodule Axon.Watcher.Progress do
     end)
     |> Enum.sort_by(
       fn project ->
-        {-project.known, project.slug}
+        {-project.known, project.project_code}
       end,
       :asc
     )
   end
 
-  def list_backlog_reasons(_repo_slug) do
-    "SELECT COALESCE(status_reason, 'unknown'), count(*) FROM File WHERE status IN ('pending', 'indexing', 'indexed_degraded', '#{@oversized_status}') GROUP BY 1 ORDER BY 2 DESC LIMIT 8;"
+  def list_backlog_reasons(_repo_code) do
+    "SELECT COALESCE(status_reason, 'unknown'), count(*) FROM File WHERE status IN ('pending', 'indexing') GROUP BY 1 ORDER BY 2 DESC LIMIT 8;"
     |> query_rows()
     |> Enum.map(fn [reason, count] ->
       %{reason: reason, count: decode_integer(count), label: humanize_reason(reason)}
@@ -380,19 +422,18 @@ defmodule Axon.Watcher.Progress do
     """
     WITH pending_vector_chunks AS (
       SELECT
-        co.source_id AS file_path
+        c.file_path AS file_path
       FROM Chunk c
-      JOIN CONTAINS co ON co.target_id = c.source_id
       LEFT JOIN ChunkEmbedding ce
         ON ce.chunk_id = c.id
-       AND ce.model_id = 'chunk-bge-small-en-v1.5-384'
+       AND ce.model_id = '#{active_chunk_model_id()}'
        AND ce.source_hash = c.content_hash
       WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash
       GROUP BY 1
     ),
     normalized_file AS (
       SELECT
-        COALESCE(f.project_slug, '(unscoped)') AS project_slug,
+        COALESCE(f.project_code, '(unscoped)') AS project_code,
         COALESCE(f.status, 'unknown') AS status,
         COALESCE(f.file_stage, 'unknown') AS file_stage,
         COALESCE(f.status_reason, 'unknown') AS status_reason,
@@ -438,7 +479,7 @@ defmodule Axon.Watcher.Progress do
 
     SELECT
       'project_status' AS section,
-      project_slug AS scope,
+      project_code AS scope,
       status AS key,
       count(*) AS primary_count,
       NULL AS secondary_count
@@ -449,7 +490,7 @@ defmodule Axon.Watcher.Progress do
 
     SELECT
       'project_ready' AS section,
-      project_slug AS scope,
+      project_code AS scope,
       'ready' AS key,
       SUM(CASE WHEN graph_ready THEN 1 ELSE 0 END) AS primary_count,
       SUM(CASE WHEN vector_ready THEN 1 ELSE 0 END) AS secondary_count
@@ -465,7 +506,7 @@ defmodule Axon.Watcher.Progress do
       count(*) AS primary_count,
       NULL AS secondary_count
     FROM normalized_file
-    WHERE status IN ('pending', 'indexing', 'indexed_degraded', '#{@oversized_status}')
+    WHERE status IN ('pending', 'indexing')
     GROUP BY 1, 2, 3
     """
   end
@@ -622,12 +663,11 @@ defmodule Axon.Watcher.Progress do
     """
     WITH pending_vector_chunks AS (
       SELECT
-        co.source_id AS file_path
+        c.file_path AS file_path
       FROM Chunk c
-      JOIN CONTAINS co ON co.target_id = c.source_id
       LEFT JOIN ChunkEmbedding ce
         ON ce.chunk_id = c.id
-       AND ce.model_id = 'chunk-bge-small-en-v1.5-384'
+       AND ce.model_id = '#{active_chunk_model_id()}'
        AND ce.source_hash = c.content_hash
       WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash
       GROUP BY 1
@@ -645,22 +685,58 @@ defmodule Axon.Watcher.Progress do
     """
   end
 
+  defp workspace_pipeline_breakdown_query do
+    """
+    WITH pending_vector_chunks AS (
+      SELECT
+        c.file_path AS file_path
+      FROM Chunk c
+      LEFT JOIN ChunkEmbedding ce
+        ON ce.chunk_id = c.id
+       AND ce.model_id = '#{active_chunk_model_id()}'
+       AND ce.source_hash = c.content_hash
+      WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash
+      GROUP BY 1
+    ),
+    normalized_file AS (
+      SELECT
+        COALESCE(f.status, 'unknown') AS status,
+        CASE WHEN f.graph_ready = TRUE THEN TRUE ELSE FALSE END AS graph_ready,
+        CASE
+          WHEN f.graph_ready = TRUE AND pvc.file_path IS NULL THEN TRUE
+          ELSE FALSE
+        END AS vector_ready
+      FROM File f
+      LEFT JOIN pending_vector_chunks pvc ON pvc.file_path = f.path
+    )
+    SELECT
+      SUM(CASE WHEN status = 'indexed' AND graph_ready THEN 1 ELSE 0 END) AS indexed_graph_ready,
+      SUM(CASE WHEN status = 'indexed' AND NOT graph_ready THEN 1 ELSE 0 END) AS indexed_graph_missing,
+      SUM(CASE WHEN status = 'indexed_degraded' AND graph_ready THEN 1 ELSE 0 END) AS indexed_degraded_graph_ready,
+      SUM(CASE WHEN status = 'indexed_degraded' AND NOT graph_ready THEN 1 ELSE 0 END) AS indexed_degraded_graph_missing,
+      SUM(CASE WHEN status = 'indexed' AND vector_ready THEN 1 ELSE 0 END) AS indexed_vector_ready,
+      SUM(CASE WHEN status = 'indexed' AND graph_ready AND NOT vector_ready THEN 1 ELSE 0 END) AS indexed_vector_missing,
+      SUM(CASE WHEN status = 'indexed_degraded' AND vector_ready THEN 1 ELSE 0 END) AS indexed_degraded_vector_ready,
+      SUM(CASE WHEN status = 'indexed_degraded' AND graph_ready AND NOT vector_ready THEN 1 ELSE 0 END) AS indexed_degraded_vector_missing
+    FROM normalized_file
+    """
+  end
+
   defp project_ready_query do
     """
     WITH pending_vector_chunks AS (
       SELECT
-        co.source_id AS file_path
+        c.file_path AS file_path
       FROM Chunk c
-      JOIN CONTAINS co ON co.target_id = c.source_id
       LEFT JOIN ChunkEmbedding ce
         ON ce.chunk_id = c.id
-       AND ce.model_id = 'chunk-bge-small-en-v1.5-384'
+       AND ce.model_id = '#{active_chunk_model_id()}'
        AND ce.source_hash = c.content_hash
       WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash
       GROUP BY 1
     )
     SELECT
-      COALESCE(f.project_slug, '(unscoped)') AS project_slug,
+      COALESCE(f.project_code, '(unscoped)') AS project_code,
       SUM(CASE WHEN f.graph_ready THEN 1 ELSE 0 END) AS graph_ready,
       SUM(
         CASE
@@ -679,11 +755,21 @@ defmodule Axon.Watcher.Progress do
   end
 
   defp global_chunk_embedding_query do
-    "SELECT COUNT(*) FROM ChunkEmbedding"
+    "SELECT COUNT(*) FROM ChunkEmbedding WHERE model_id = '#{active_chunk_model_id()}'"
   end
 
   defp global_file_vector_flag_query do
     "SELECT COUNT(*) FROM File WHERE vector_ready = TRUE"
+  end
+
+  defp active_chunk_model_id do
+    System.get_env("AXON_CHUNK_MODEL_ID")
+    |> case do
+      nil -> @default_chunk_model_id
+      value ->
+        normalized = String.trim(value)
+        if normalized == "", do: @default_chunk_model_id, else: normalized
+    end
   end
 
   defp global_nodes_query do
@@ -702,7 +788,7 @@ defmodule Axon.Watcher.Progress do
   end
 
   defp project_nodes_query do
-    "SELECT COALESCE(project_slug, '(unscoped)'), COUNT(*) FROM Symbol GROUP BY 1"
+    "SELECT COALESCE(project_code, '(unscoped)'), COUNT(*) FROM Symbol GROUP BY 1"
   end
 
   defp project_links_query do
@@ -716,7 +802,7 @@ defmodule Axon.Watcher.Progress do
       UNION ALL
       SELECT source_id FROM SUBSTANTIATES
     )
-    SELECT COALESCE(s.project_slug, '(unscoped)'), COUNT(*)
+    SELECT COALESCE(s.project_code, '(unscoped)'), COUNT(*)
     FROM edge_sources e
     LEFT JOIN Symbol s ON s.id = e.source_id
     GROUP BY 1
@@ -725,10 +811,19 @@ defmodule Axon.Watcher.Progress do
 
   defp project_graph_vector_query do
     """
-    SELECT COALESCE(s.project_slug, '(unscoped)'), COUNT(DISTINCT g.anchor_type || ':' || g.anchor_id)
+    SELECT COALESCE(s.project_code, '(unscoped)'), COUNT(DISTINCT g.anchor_type || ':' || g.anchor_id)
     FROM GraphEmbedding g
     LEFT JOIN Symbol s ON g.anchor_type = 'Symbol' AND s.id = g.anchor_id
     GROUP BY 1
+    """
+  end
+
+  defp project_names_query do
+    """
+    SELECT
+      COALESCE(project_code, '(unscoped)'),
+      COALESCE(NULLIF(project_name, ''), project_code)
+    FROM soll.ProjectCodeRegistry
     """
   end
 
@@ -744,6 +839,88 @@ defmodule Axon.Watcher.Progress do
       _row, acc ->
         acc
     end)
+  end
+
+  defp decode_scope_names(rows) do
+    Enum.reduce(rows, %{}, fn
+      [scope, value | _], acc when is_binary(scope) ->
+        Map.put(acc, scope, normalize_project_name(value, scope))
+
+      _row, acc ->
+        acc
+    end)
+  end
+
+  defp decode_flow_breakdown([[a, b, c, d, e, f, g, h | _rest]]) do
+    %{
+      "indexed_graph_ready" => decode_integer(a),
+      "indexed_graph_missing" => decode_integer(b),
+      "indexed_degraded_graph_ready" => decode_integer(c),
+      "indexed_degraded_graph_missing" => decode_integer(d),
+      "indexed_vector_ready" => decode_integer(e),
+      "indexed_vector_missing" => decode_integer(f),
+      "indexed_degraded_vector_ready" => decode_integer(g),
+      "indexed_degraded_vector_missing" => decode_integer(h)
+    }
+  end
+
+  defp decode_flow_breakdown(
+         [
+           %{
+             "indexed_graph_ready" => a,
+             "indexed_graph_missing" => b,
+             "indexed_degraded_graph_ready" => c,
+             "indexed_degraded_graph_missing" => d,
+             "indexed_vector_ready" => e,
+             "indexed_vector_missing" => f,
+             "indexed_degraded_vector_ready" => g,
+             "indexed_degraded_vector_missing" => h
+           }
+           | _rest
+         ]
+       ) do
+    %{
+      "indexed_graph_ready" => decode_integer(a),
+      "indexed_graph_missing" => decode_integer(b),
+      "indexed_degraded_graph_ready" => decode_integer(c),
+      "indexed_degraded_graph_missing" => decode_integer(d),
+      "indexed_vector_ready" => decode_integer(e),
+      "indexed_vector_missing" => decode_integer(f),
+      "indexed_degraded_vector_ready" => decode_integer(g),
+      "indexed_degraded_vector_missing" => decode_integer(h)
+    }
+  end
+
+  defp decode_flow_breakdown(_rows) do
+    %{
+      "indexed_graph_ready" => 0,
+      "indexed_graph_missing" => 0,
+      "indexed_degraded_graph_ready" => 0,
+      "indexed_degraded_graph_missing" => 0,
+      "indexed_vector_ready" => 0,
+      "indexed_vector_missing" => 0,
+      "indexed_degraded_vector_ready" => 0,
+      "indexed_degraded_vector_missing" => 0
+    }
+  end
+
+  defp normalize_project_name(value, fallback) when is_binary(value) do
+    case String.trim(value) do
+      "" -> fallback
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_project_name(_value, fallback), do: fallback
+
+  defp display_project_name(project_name, project_code) do
+    normalized_name = normalize_project_name(project_name, project_code)
+
+    if normalized_name == project_code do
+      project_code
+    else
+      "#{normalized_name} (#{project_code})"
+    end
   end
 
   defp soll_coverage_query do

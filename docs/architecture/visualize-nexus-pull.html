@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Axon Blueprint v3.0 : Spécification Intégrale Nexus Pull</title>
+    <title>Axon Blueprint v0.1 : Runtime MCP Publie</title>
     <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -168,14 +168,33 @@
 </head>
 <body>
     <header>
-        <span class="version-badge">Nexus Blueprint v3.5 • Rust Canonique + Vue Operateur</span>
+        <span class="version-badge">Blueprint v0.1 • Runtime MCP publiable</span>
         <h1 class="hero-title">Axon Intelligence Engine</h1>
         <p style="font-size: 1.25rem; color: var(--text-dim); max-width: 800px; margin: 20px auto;">
-            Vue d'architecture <strong>Nexus Pull & Couche SOLL</strong> : séparation de l'intention (SOLL) et de la réalité technique (IST), avec distinction explicite entre la cible et l'état réellement branché.
+            Vue d'architecture <strong>publiante et exécutable</strong> : séparation SOLL / IST, runtime Rust canonique, contrat MCP explicite, et pipeline utile à deux vitesses pour servir vite puis enrichir ensuite.
         </p>
     </header>
 
     <div class="container">
+        <section id="release-0-1">
+            <h2>Objectif de la Publication 0.1</h2>
+            <p>La priorité n'est plus la grande transformation interne d'Axon, mais la publication d'un système <strong>stable, lisible et exécutable</strong> par d'autres LLM via MCP. La version <strong>0.1</strong> doit rendre visible la vérité runtime, rendre les modes explicites et fournir une base opératoire propre avant la suite des refontes.</p>
+            <div class="grid">
+                <div class="info-card">
+                    <h3>Surface à publier</h3>
+                    <p>Un runtime Rust canonique, un manifest de vérité, une surface SQL/MCP claire, un contrat embeddings visible et une qualification smoke réaliste.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Règle de base</h3>
+                    <p><strong>Manifest-first</strong> : le runtime publie son mode, son profil, son boot et ses endpoints. Les wrappers et les autres LLM lisent cette vérité au lieu de la recalculer.</p>
+                </div>
+                <div class="info-card">
+                    <h3>Ce qui vient après</h3>
+                    <p>La transformation plus profonde d'Axon : simplification radicale du pipeline, incrémentalité de révision, et réduction supplémentaire de la dette structurelle.</p>
+                </div>
+            </div>
+        </section>
+
         <!-- 0. GOUVERNANCE INTENTIONNELLE & REGISTRE DES DÉCISIONS (MBSE) -->
         <section id="soll-governance">
             <h2>Gouvernance Intentionnelle & Registre des Décisions (MBSE)</h2>
@@ -271,63 +290,59 @@
 
         <!-- 1.5. LES TROIS SYSTÈMES (DUAL-TRACK & OMNISCIENCE) -->
         <section id="c4-systems">
-            <h2>Topologie d'Exécution : Les Trois Systèmes</h2>
-            <p>L'architecture opérationnelle repose sur une tripartition stricte garantissant à la fois l'omniscience globale et l'isolation totale (Zero Blast Radius) : un système Démon, un système de Production, et un système de Développement.</p>
+            <h2>Topologie d'Exécution : Production, Runtime Isolé, Publication MCP</h2>
+            <p>La version 0.1 cherche la <strong>clarté opératoire</strong>. On garde la séparation entre production durable et worktrees isolés, mais on remplace la logique implicite par un contrat simple : <code>runtime_mode</code>, <code>runtime_profile</code>, <code>boot_phase</code>, <code>boot_status</code>.</p>
             <div class="grid">
                 <div class="info-card">
-                    <h3>1. Le Système Démon (Omniscience)</h3>
-                    <p><strong>Rôle :</strong> Moteur de base (Data Plane) opérant en tant que service global en arrière-plan.<br/>
-                    <strong>Responsabilité :</strong> Traiter de manière concurrente les graphes de N projets (partitionnés par <code>project_slug</code>). Il exécute le scanner, le parsing AST, gère la mémoire, et interagit avec DuckDB. C'est l'autorité absolue sur le runtime.</p>
+                    <h3>1. Production</h3>
+                    <p><strong>Rôle :</strong> surface MCP/SQL de référence pour les autres LLM.<br/>
+                    <strong>Exigence :</strong> mode visible, endpoints stables, état de boot explicite, comportement prévisible.</p>
                 </div>
                 <div class="info-card">
-                    <h3>2. La Production (La Forteresse)</h3>
-                    <p><strong>Rôle :</strong> Environnement Live de référence.<br/>
-                    <strong>Emplacement :</strong> Racine du projet (branche <code>main</code>).<br/>
-                    <strong>Ports :</strong> <code>44129</code> (MCP/SQL), <code>44127</code> (Phoenix).<br/>
-                    <strong>Règle pour l'IA :</strong> Strictement <strong>Read-Only</strong>. C'est le "Juge Officiel" qui sert de source de vérité pour le système.</p>
+                    <h3>2. Runtime Isolé</h3>
+                    <p><strong>Rôle :</strong> laboratoire de développement et de qualification.<br/>
+                    <strong>Exigence :</strong> sockets courts, ports réservés, manifest local, et refus explicite de recycler une session vivante dans un mode incompatible.</p>
                 </div>
                 <div class="info-card">
-                    <h3>3. Le Développement (Le Laboratoire)</h3>
-                    <p><strong>Rôle :</strong> Environnement d'isolation asymétrique pour TDD et agents IA.<br/>
-                    <strong>Emplacement :</strong> Confiné dans des Git Worktrees (ex: <code>.worktrees/dev/feat-x</code>).<br/>
-                    <strong>Ports décalés :</strong> <code>44139</code> (MCP/SQL), <code>44137</code> (Phoenix) pour éviter les collisions.<br/>
-                    <strong>Workflow :</strong> Clone local de <code>ist.db</code> via script pour expérimenter sans impacter la Prod. Validation via l'outil <code>axon_pre_flight_check</code> sur le serveur MCP local avant commit et promotion en Prod (Hot Swap).</p>
+                    <h3>3. Profils Runtime</h3>
+                    <p><strong>Profils publiés :</strong> <code>graph_only</code>, <code>full_isolated</code>, <code>full_autonomous</code>, <code>read_only</code>, <code>mcp_only</code>.<br/>
+                    <strong>Exigence :</strong> les opérateurs et les autres LLM ne doivent plus deviner ce que fait le runtime.</p>
                 </div>
             </div>
             <div class="mermaid">
             graph TD
-                subgraph "Machine Hôte (Localhost)"
-                    Daemon[Démon Central Rust<br/>Autorité de Runtime & Stockage Multi-Projets]
+                subgraph "Machine Hôte"
+                    Runtime[Rust Runtime Canonique<br/>Manifest + SQL + MCP]
                     
-                    subgraph "Système Production (Racine)"
-                        Prod[Serveur MCP Prod : 44129<br/>Dashboard : 44127<br/>Base : .axon/graph_v2/ist.db]
+                    subgraph "Production"
+                        Prod[Serveur MCP / SQL<br/>Surface de référence]
                     end
                     
-                    subgraph "Système Développement (Git Worktree)"
-                        Dev[Serveur MCP Dev : 44139<br/>Dashboard : 44137<br/>Base isolée : .axon-dev/graph_v2/ist.db]
+                    subgraph "Worktree Isolé"
+                        Dev[Runtime Dev<br/>Manifest local + endpoints réservés]
                     end
                     
-                    Daemon -- "Partitionnement (project_slug)" --> Prod
-                    Daemon -- "Partitionnement (project_slug)" --> Dev
+                    Runtime -- "même contrat publié" --> Prod
+                    Runtime -- "même contrat publié" --> Dev
                     
-                    Agent((Agent IA)) -- "Query (Read-Only)" --> Prod
-                    Agent -- "Code & Validate (TDD)" --> Dev
-                    Dev -- "Promotion (axon_pre_flight_check)" --> Prod
+                    Agent((Autres LLM / Agents)) -- "Lecture / opération MCP" --> Prod
+                    DevAgent((Codex / Dev)) -- "TDD / qualif / refactor" --> Dev
+                    Dev -- "promotion après qualification" --> Prod
                 end
                 
-                style Daemon fill:#0ea5e9,color:#fff,stroke:#0284c7,stroke-width:3px
+                style Runtime fill:#0ea5e9,color:#fff,stroke:#0284c7,stroke-width:3px
                 style Prod fill:#dcfce7,stroke:#16a34a,stroke-width:2px
                 style Dev fill:#fef3c7,stroke:#d97706,stroke-width:2px
             </div>
             <div class="llm-bubble">
-                "En tant qu'agent, je me connecte au MCP de Prod pour lire la vérité, mais j'opère exclusivement mes mutations (code, tests) via le MCP de Dev dans mon Worktree isolé pour garantir un Blast Radius de zéro."
+                "En tant qu'agent, je dois voir immédiatement si le runtime en face de moi est `graph_only`, `full_isolated` ou `full_autonomous`, et s'il est encore en boot, prêt, dégradé ou cassé."
             </div>
         </section>
 
         <!-- 2. ARCHITECTURE DES CONTENEURS (C4 LEVEL 2) -->
         <section id="c4-level-2">
             <h2>Architecture des Conteneurs (C4 Level 2)</h2>
-            <p>L'architecture Couche SOLL sépare la couche intentionnelle (SOLL) de la couche technique (IST). Le binaire Rust ouvre <code>ist.db</code> et attache <code>soll.db</code> via <code>ATTACH</code>. Désormais, <strong>Rust</strong> est le runtime canonique pour le scan, le staging, le claiming, le parsing et l'indexation. Elixir/Phoenix reste la couche de visualisation et de plan opérateur.</p>
+            <p>L'architecture 0.1 garde la séparation SOLL / IST, mais simplifie l'opérationnel : <strong>Rust</strong> est le runtime canonique, publie son manifest très tôt, exécute le bootstrap par phases explicites, puis démarre les services selon un profil opérationnel lisible.</p>
             <div class="mermaid">
             graph LR
                 subgraph Elixir_Plane [Visualization Plane : Elixir/Phoenix]
@@ -336,7 +351,14 @@
                 end
 
                 subgraph Rust_Plane [Canonical Runtime : Rust/Tokio]
-                    subgraph Arena [CPU Arena]
+                    subgraph Bootstrap [BootstrapCoordinator]
+                        Open[Open]
+                        Inspect[Inspect]
+                        Repair[Repair]
+                        Recover[Recover]
+                        Ready[Ready]
+                    end
+                    subgraph Arena [Runtime CPU Arena]
                         Worker1[Worker 1]
                         WorkerN[Worker N]
                     end
@@ -349,6 +371,7 @@
                     MCP[Serveur MCP / SQL]
                     Channel(((QueueStore + Memory Budget)))
                     Writer[DB Writer Actor]
+                    Manifest[Runtime Manifest]
                 end
 
                 subgraph Unified_Storage [Architecture SOLL]
@@ -357,31 +380,35 @@
                     IST -- "ATTACH" --> SOLL
                 end
 
-                Scanner -- "1. Discovery events" --> Guard
-                Watcher -- "2. Hot deltas / subtree hints" --> Guard
-                Guard -- "3. Only useful changes" --> Buffer
-                Buffer -- "4. Batch flush" --> Promoter
+                Open --> Inspect --> Repair --> Recover --> Ready
+                Ready --> Manifest
+                Ready --> Scanner
+                Ready --> Watcher
+                Scanner -- "1. useful events" --> Guard
+                Watcher -- "2. useful deltas" --> Guard
+                Guard -- "3. dedupe / scope" --> Buffer
+                Buffer -- "4. batch flush" --> Promoter
                 Promoter -- "5. UPSERT File -> pending" --> IST
-                IST -- "6. Backlog durable" --> Planner
-                Planner -- "7. Claim atomique / throttle adaptatif" --> Channel
-                Channel -- "8. Dispatch lanes" --> Worker1
+                IST -- "6. durable backlog" --> Planner
+                Planner -- "7. claim / priority" --> Channel
+                Channel -- "8. dispatch" --> Worker1
                 Worker1 -- "9. Results" --> Writer
                 Writer -- "10. Commit IST" --> IST
-                Writer -- "10b. Commit SOLL" --> SOLL
+                Writer -- "11. Intent links" --> SOLL
                 MCP -- "Read-only queries" --> IST
                 MCP -- "SOLL Commands / Links / Restore" --> SOLL
                 Cockpit -- "Read only / telemetry" --> MCP
                 Telemetry -- "Projections operateur" --> MCP
                 
-                User((Agent IA)) -- "11. axon_query / inspect / audit" --> MCP
-                MCP -- "12. MVCC / reader_ctx truth" --> IST
-                User -. "13. create / link / refine / restore SOLL" .-> MCP
+                User((Agent IA)) -- "Query / inspect / operate" --> MCP
+                MCP -- "Reader_ctx + manifest truth" --> IST
 
                 style IST fill:#eff6ff,stroke:#0284c7,stroke-width:3px
                 style SOLL fill:#fef3c7,stroke:#d97706,stroke-width:3px
                 style MCP fill:#ecfdf5,stroke:#059669,stroke-width:2px
                 style Writer fill:#dbeafe,stroke:#2563eb,stroke-width:2px
                 style Channel fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,stroke-dasharray: 5 5
+                style Manifest fill:#ecfeff,stroke:#0891b2,stroke-width:2px
             </div>
         </section>
 
@@ -414,8 +441,8 @@
 
         <!-- 4. DÉTAIL DES ÉCHANGES & SYNCHRONISATION -->
         <section id="sync-details">
-            <h2>Dynamique des Échanges (Séquence Détaillée)</h2>
-            <p>Le cycle de vie réel d'un fichier, de sa découverte à sa validation de traitement. Le point de vérité d'ingestion est désormais Rust; Elixir se contente de refléter l'état opérateur. Depuis avril 2026, la découverte ne pousse plus directement chaque événement brut dans <code>DuckDB</code> : elle passe d'abord par un garde d'ingress, un buffer mémoire, puis un promoteur batché.</p>
+            <h2>Dynamique des Échanges (Chaîne Réelle Simplifiée)</h2>
+            <p>La chaîne utile doit servir vite. Le graphe et les chunks deviennent rapidement disponibles; les embeddings arrivent ensuite en fond. Le point de vérité reste Rust + DuckDB, avec publication d'état via le manifest runtime.</p>
             <div class="mermaid">
             sequenceDiagram
                 autonumber
@@ -426,11 +453,16 @@
                 participant PL as Planner / Claimer (Rust)
                 participant Q as QueueStore
                 participant W as Worker Core X (Rust)
+                participant E as Slow Lane Embeddings
                 participant WR as Writer Actor (Rust)
                 participant K as DuckDB
                 participant UI as Cockpit (Elixir)
+                participant M as Runtime Manifest
 
-                Note over F, K: PHASE 1 : DISCOVERY / DELTA
+                Note over M, K: PHASE 0 : BOOTSTRAP PUBLIE
+                M->>UI: boot_phase / boot_status / runtime_profile
+
+                Note over F, K: PHASE 1 : FAST LANE
                 F->>G: event {path, mtime, size, source}
                 G->>B: keep only useful delta
                 B->>PM: batch ready
@@ -443,22 +475,26 @@
                 PL->>Q: reserve memory per task
                 Q->>W: dispatch files
 
-                W->>W: AST Parsing + AI Embeddings
+                W->>W: parse + graph + chunks
                 W->>WR: PUSH_DATA {path, extraction_results}
                 WR->>K: COMMIT Transaction
                 K-->>WR: OK
                 WR-->>Q: release reservation
-                WR-->>W: DB_SYNC_COMPLETE / query truth ready
+                WR-->>W: DB_SYNC_COMPLETE / useful truth ready
+
+                Note over E, K: PHASE 3 : SLOW LANE
+                K->>E: enqueue chunks needing embeddings
+                E->>K: publish embeddings progressively
 
                 Note over UI, K: LE RETOUR D'INFORMATION
                 UI->>K: lecture operateur via surfaces Rust
-                K-->>UI: progression / sante / backlog
+                K-->>UI: boot / sante / backlog / enrichissement
             </div>
         </section>
 
         <section id="ingestion-reality">
-            <h2>Pipeline d'Ingestion Reel (Avril 2026)</h2>
-            <p>Le comportement reel d'Axon repose sur une separation stricte entre <strong>signaux bruts</strong>, <strong>decisions d'indexation</strong> et <strong>travail effectivement execute</strong>. La file canonique reste dans <code>DuckDB.File</code>, mais la detection passe d'abord par des amortisseurs memoire pour eviter de marteler la base a chaque evenement de watcher ou de scan.</p>
+            <h2>Pipeline d'Ingestion Reel (Version 0.1)</h2>
+            <p>Le pipeline utile suit maintenant trois principes simples : <strong>éviter le travail inutile</strong>, <strong>rendre le travail incrémental</strong>, puis <strong>paralleliser proprement ce qui reste</strong>. Le graphe est déjà un produit utile; les embeddings sont un enrichissement asynchrone.</p>
             <div class="mermaid">
             flowchart LR
                 FS[Filesystem] --> SC[Scanner]
@@ -475,9 +511,11 @@
 
                 FILE -->|status = pending| CP[Claim Scheduler]
                 CP -->|claim_count / claim_mode| QS[QueueStore]
-                QS -->|reservation_id| WK[Workers]
+                QS -->|reservation_id| WK[Fast Lane Workers]
                 WK --> WR[Writer Actor]
                 WR -->|commit graph / chunks / status| IST[(DuckDB IST)]
+                IST -->|embeddings_pending| SEM[Slow Lane Embeddings]
+                SEM -->|publish enrichment| IST
 
                 IST --> RC[reader_ctx]
                 WR --> WC[writer_ctx]
@@ -493,31 +531,32 @@
                 style FILE fill:#eff6ff,stroke:#2563eb,stroke-width:3px
                 style QS fill:#fee2e2,stroke:#b91c1c,stroke-width:2px
                 style WAL fill:#fef3c7,stroke:#d97706,stroke-width:2px
+                style SEM fill:#ede9fe,stroke:#7c3aed,stroke-width:2px
             </div>
             <div class="grid">
                 <div class="info-card">
-                    <h3>1. FileIngressGuard</h3>
-                    <p>Hydrate depuis <code>DuckDB.File</code> au boot. Il compare <code>path + mtime + size</code> et rejette les evenements triviaux. Il n'est <strong>pas</strong> une seconde base de verite, seulement un filtre amont fail-open.</p>
+                    <h3>1. Éviter le Travail Inutile</h3>
+                    <p>Le garde d'ingress, le buffer et le scoping par projet servent d'abord à empêcher le retraitement d'un fichier inchangé ou hors périmètre actif.</p>
                 </div>
                 <div class="info-card">
-                    <h3>2. IngressBuffer</h3>
-                    <p>Table tampon <strong>memoire seulement</strong>. Elle absorbe les tempetes du watcher/scanner, deduplique par path, fusionne les deltas, garde les hints de sous-arbre et retarde l'ecriture canonique en base.</p>
+                    <h3>2. Incrémentalité</h3>
+                    <p>Le but n'est plus de tout refaire plus vite, mais de recalculer seulement le sous-graphe et les chunks réellement affectés par une révision utile.</p>
                 </div>
                 <div class="info-card">
-                    <h3>3. IngressPromoter</h3>
-                    <p>Vide le buffer par <strong>batchs</strong> au lieu d'ecrire toutes les millisecondes. C'est lui qui transforme les signaux bruts en decisions <code>File.status = 'pending'</code> avec un <code>status_reason</code> explicite.</p>
+                    <h3>3. Fast Lane</h3>
+                    <p>Le service minimal utile au LLM est : fichier détecté, parsing, graphe prêt, chunks prêts, publication immédiate. Cette voie ne doit pas attendre les embeddings.</p>
                 </div>
                 <div class="info-card">
-                    <h3>4. Claim Scheduler + QueueStore</h3>
-                    <p>Le scheduler lit le backlog durable et passe les fichiers de <code>pending</code> a <code>indexing</code>. <code>QueueStore</code> reserve le budget memoire par <code>reservation_id</code> unique, pas par <code>trace_id</code> partage.</p>
+                    <h3>4. Slow Lane</h3>
+                    <p>Les embeddings arrivent ensuite en fond, par priorité. Ils enrichissent la recherche sémantique sans bloquer la disponibilité structurelle du système.</p>
                 </div>
                 <div class="info-card">
-                    <h3>5. Writer Actor</h3>
-                    <p>Toutes les ecritures critiques IST passent par le writer. Les lectures MCP/SQL read-only passent par <code>reader_ctx</code>. Les petites ecritures conceptuelles SOLL restent separees du bulk d'ingestion technique.</p>
+                    <h3>5. Parallélisme CPU Borné</h3>
+                    <p>Le vrai levier n'est pas le GPU pour le graphe. Le bon levier est un parallélisme CPU propre sur la fast lane, avec publication contrôlée et sans amplifier du travail déjà inutile.</p>
                 </div>
                 <div class="info-card">
-                    <h3>6. WAL DuckDB</h3>
-                    <p>Le <code>WAL</code> est une partie normale de la verite durable tant qu'un checkpoint n'a pas fusionne les ecritures. Au restart, DuckDB le rejoue automatiquement. Le supprimer avant redemarrage detruit des progres reels.</p>
+                    <h3>6. Writer + WAL</h3>
+                    <p>Toutes les écritures critiques passent par le writer et DuckDB reste la vérité durable. Le <code>WAL</code> fait partie du système normal ; il ne faut pas l'effacer pour "nettoyer" un runtime vivant.</p>
                 </div>
             </div>
             <table style="width:100%; border-collapse: collapse; margin-top: 18px;">

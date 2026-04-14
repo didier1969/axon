@@ -11,7 +11,9 @@ use axon_core::graph::GraphStore;
 use axon_core::ingress_buffer::{IngressBuffer, SharedIngressBuffer};
 use axon_core::queue::QueueStore;
 use axon_core::runtime_mode::AxonRuntimeMode;
-use axon_core::runtime_profile::{recommend_embedding_lane_sizing, EmbeddingLaneSizing, RuntimeProfile};
+use axon_core::runtime_profile::{
+    recommend_embedding_lane_sizing, EmbeddingLaneSizing, RuntimeProfile,
+};
 use std::fs;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
@@ -59,7 +61,10 @@ fn canonical_effective_embedding_lane_config() -> EmbeddingLaneConfig {
             "AXON_FILE_VECTORIZATION_BATCH_SIZE",
             effective.file_vectorization_batch_size.to_string(),
         );
-        std::env::set_var("AXON_GRAPH_BATCH_SIZE", effective.graph_batch_size.to_string());
+        std::env::set_var(
+            "AXON_GRAPH_BATCH_SIZE",
+            effective.graph_batch_size.to_string(),
+        );
     }
     effective
 }
@@ -368,6 +373,11 @@ fn main() -> anyhow::Result<()> {
             }
             main_background::spawn_reader_snapshot_refresher(graph_store.clone());
             main_background::spawn_shadow_optimizer(graph_store.clone());
+            main_background::spawn_runtime_trace_logger(
+                graph_store.clone(),
+                queue_store.clone(),
+                ingress_buffer.clone(),
+            );
 
             // --- Telemetry Listener Loop (Elixir/Dashboard) ---
             loop {
@@ -503,7 +513,10 @@ mod tests {
             std::env::var("AXON_FILE_VECTORIZATION_BATCH_SIZE_AUTOCONFIGURED").unwrap(),
             "true"
         );
-        assert_eq!(std::env::var("AXON_GRAPH_BATCH_SIZE_AUTOCONFIGURED").unwrap(), "true");
+        assert_eq!(
+            std::env::var("AXON_GRAPH_BATCH_SIZE_AUTOCONFIGURED").unwrap(),
+            "true"
+        );
 
         unsafe {
             std::env::remove_var("AXON_QUERY_EMBED_WORKERS");
@@ -547,12 +560,10 @@ mod tests {
             "true"
         );
         if std::path::Path::new("/usr/lib/wsl/lib").exists() {
-            assert!(
-                std::env::var("LD_LIBRARY_PATH")
-                    .unwrap_or_default()
-                    .split(':')
-                    .any(|segment| segment == "/usr/lib/wsl/lib")
-            );
+            assert!(std::env::var("LD_LIBRARY_PATH")
+                .unwrap_or_default()
+                .split(':')
+                .any(|segment| segment == "/usr/lib/wsl/lib"));
         }
 
         unsafe {
@@ -587,11 +598,9 @@ mod tests {
         let ld_library_path = std::env::var("LD_LIBRARY_PATH").unwrap();
         assert!(ld_library_path.contains("/tmp/custom-lib"));
         if std::path::Path::new("/usr/lib/wsl/lib").exists() {
-            assert!(
-                ld_library_path
-                    .split(':')
-                    .any(|segment| segment == "/usr/lib/wsl/lib")
-            );
+            assert!(ld_library_path
+                .split(':')
+                .any(|segment| segment == "/usr/lib/wsl/lib"));
         }
 
         unsafe {

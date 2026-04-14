@@ -7,60 +7,11 @@ use super::McpServer;
 
 impl McpServer {
     fn resolve_scoped_symbol_id(&self, symbol: &str, project: Option<&str>) -> Option<String> {
-        let (query, params) = if let Some(project) = project {
-            (
-                "SELECT id FROM Symbol \
-                 WHERE (name = $sym OR id = $sym) AND project_slug = $project \
-                 LIMIT 1",
-                json!({ "sym": symbol, "project": project }),
-            )
-        } else {
-            (
-                "SELECT id FROM Symbol WHERE name = $sym OR id = $sym LIMIT 1",
-                json!({ "sym": symbol }),
-            )
-        };
-        let res = self.graph_store.query_json_param(query, &params).ok()?;
-        let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-        rows.first()?
-            .first()?
-            .as_str()
-            .map(|value| value.to_string())
+        self.resolve_scoped_symbol_id_canonical(symbol, project)
     }
 
-    fn suggest_scoped_symbols(
-        &self,
-        symbol: &str,
-        project: Option<&str>,
-        limit: usize,
-    ) -> String {
-        let needle = symbol.trim();
-        if needle.is_empty() {
-            return "[]".to_string();
-        }
-        let (query, params) = if let Some(project) = project {
-            (
-                "SELECT name, kind, COALESCE(project_slug, 'unknown') \
-                 FROM Symbol \
-                 WHERE project_slug = $project \
-                   AND lower(name) LIKE lower($pat) \
-                 ORDER BY name \
-                 LIMIT $limit",
-                json!({ "project": project, "pat": format!("%{}%", needle), "limit": limit as u64 }),
-            )
-        } else {
-            (
-                "SELECT name, kind, COALESCE(project_slug, 'unknown') \
-                 FROM Symbol \
-                 WHERE lower(name) LIKE lower($pat) \
-                 ORDER BY name \
-                 LIMIT $limit",
-                json!({ "pat": format!("%{}%", needle), "limit": limit as u64 }),
-            )
-        };
-        self.graph_store
-            .query_json_param(query, &params)
-            .unwrap_or_else(|_| "[]".to_string())
+    fn suggest_scoped_symbols(&self, symbol: &str, project: Option<&str>, limit: usize) -> String {
+        self.suggest_scoped_symbols_canonical(symbol, project, limit)
     }
 
     fn build_local_projection_section(
@@ -195,7 +146,7 @@ impl McpServer {
                     .unwrap_or_else(|_| "[]".to_string());
                 let soll_rows: Vec<Vec<Value>> =
                     serde_json::from_str(&soll_raw).unwrap_or_default();
-                    
+
                 if !soll_rows.is_empty() {
                     table.push_str("\n### 🏛️ SOLL Impact (Architecture Compromise)\n\n| Entité | Type | Titre |\n| --- | --- | --- |\n");
                     for row in soll_rows {
@@ -206,7 +157,7 @@ impl McpServer {
                     }
                     table.push('\n');
                 }
-                
+
                 let count_query = format!(
                     "WITH RECURSIVE bridge_edges AS (
                         SELECT s1.id AS source_id, s2.id AS target_id
@@ -269,10 +220,7 @@ impl McpServer {
                 let mut nif_edges = 0_i64;
                 let mut inferred_edges = 0_i64;
                 for row in confidence_rows {
-                    let edge_type = row
-                        .first()
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
+                    let edge_type = row.first().and_then(|v| v.as_str()).unwrap_or("unknown");
                     let count = row
                         .get(1)
                         .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|x| x as i64)))
@@ -332,7 +280,10 @@ impl McpServer {
                         "impact analysis computed",
                         &scope,
                         &evidence_by_mode(&evidence, mode),
-                        &["review top impacted symbols", "run simulate_mutation before editing"],
+                        &[
+                            "review top impacted symbols",
+                            "run simulate_mutation before editing"
+                        ],
                         confidence_label,
                     )
                 );
@@ -353,15 +304,15 @@ impl McpServer {
     ) -> Option<Value> {
         let (query, params) = if let Some(project) = project {
             (
-                "SELECT name, kind, COALESCE(project_slug, 'unknown') \
+                "SELECT name, kind, COALESCE(project_code, 'unknown') \
                  FROM Symbol \
-                 WHERE (name = $sym OR id = $sym) AND project_slug = $project \
+                 WHERE (name = $sym OR id = $sym) AND project_code = $project \
                  LIMIT 5",
                 json!({ "sym": symbol, "project": project }),
             )
         } else {
             (
-                "SELECT name, kind, COALESCE(project_slug, 'unknown') \
+                "SELECT name, kind, COALESCE(project_code, 'unknown') \
                  FROM Symbol \
                  WHERE name = $sym OR id = $sym \
                  LIMIT 5",
@@ -375,10 +326,8 @@ impl McpServer {
         let symbol_rows: Vec<Vec<Value>> = serde_json::from_str(&symbol_res).unwrap_or_default();
         if symbol_rows.is_empty() {
             let suggestions = self.suggest_scoped_symbols(symbol, project, 8);
-            let suggestions_table = format_table_from_json(
-                &suggestions,
-                &["Symbole suggéré", "Type", "Projet"],
-            );
+            let suggestions_table =
+                format_table_from_json(&suggestions, &["Symbole suggéré", "Type", "Projet"]);
             return Some(json!({
                 "content": [{
                     "type": "text",
@@ -404,8 +353,11 @@ impl McpServer {
             .graph_store
             .query_count("SELECT (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)")
             .unwrap_or(0);
-            
-        println!("axon_impact_without_calls: calls_count={} in DB {:?}", calls_count, self.graph_store.db_path);
+
+        println!(
+            "axon_impact_without_calls: calls_count={} in DB {:?}",
+            calls_count, self.graph_store.db_path
+        );
         if calls_count > 0 {
             return Some(json!({
                 "content": [{
@@ -484,7 +436,10 @@ impl McpServer {
                 "diff symbol extraction completed",
                 "workspace:*",
                 &evidence_by_mode(&evidence, mode),
-                &["increase `limit` if needed", "run impact on selected symbols for blast radius"],
+                &[
+                    "increase `limit` if needed",
+                    "run impact on selected symbols for blast radius"
+                ],
                 if truncated { "medium" } else { "high" },
             )
         );

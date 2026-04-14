@@ -2,16 +2,16 @@ use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
-use crate::embedding_contract::{
-    CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION, STORAGE_TYPE,
-};
 use crate::embedder::{
     allowed_gpu_vector_workers, current_embedding_provider_diagnostics,
     current_gpu_memory_pressure_active, current_gpu_memory_snapshot,
-    current_vector_batch_controller_diagnostics, gpu_memory_soft_limit_mb,
-    gpu_pressure_embed_batch_chunks, gpu_pressure_files_per_cycle,
-    gpu_telemetry_backend_name, gpu_telemetry_cache_ttl_ms, gpu_telemetry_device_index,
-    current_vector_drain_state, embedding_lane_config_from_env,
+    current_vector_batch_controller_diagnostics, current_vector_drain_state,
+    embedding_lane_config_from_env, gpu_memory_soft_limit_mb, gpu_pressure_embed_batch_chunks,
+    gpu_pressure_files_per_cycle, gpu_telemetry_backend_name, gpu_telemetry_cache_ttl_ms,
+    gpu_telemetry_device_index,
+};
+use crate::embedding_contract::{
+    CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION, STORAGE_TYPE,
 };
 use crate::ingress_buffer::ingress_metrics_snapshot;
 use crate::optimizer::{
@@ -227,20 +227,22 @@ impl McpServer {
         let indexing_count = canonical_count("SELECT count(*) FROM File WHERE status = 'indexing'");
         let degraded_count =
             canonical_count("SELECT count(*) FROM File WHERE status = 'indexed_degraded'");
-        let oversized_count =
-            canonical_count("SELECT count(*) FROM File WHERE status = 'oversized_for_current_budget'");
+        let oversized_count = canonical_count(
+            "SELECT count(*) FROM File WHERE status = 'oversized_for_current_budget'",
+        );
         let skipped_count = canonical_count("SELECT count(*) FROM File WHERE status = 'skipped'");
-        let graph_ready_count = canonical_count("SELECT count(*) FROM File WHERE graph_ready = TRUE");
+        let graph_ready_count =
+            canonical_count("SELECT count(*) FROM File WHERE graph_ready = TRUE");
         let vector_ready_query = format!(
             "WITH pending_vector_chunks AS ( \
-               SELECT co.source_id AS file_path \
+               SELECT c.file_path AS file_path \
                FROM Chunk c \
-               JOIN CONTAINS co ON co.target_id = c.source_id \
                LEFT JOIN ChunkEmbedding ce \
                  ON ce.chunk_id = c.id \
                 AND ce.model_id = '{CHUNK_MODEL_ID}' \
                 AND ce.source_hash = c.content_hash \
-               WHERE ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash \
+               WHERE c.file_path IS NOT NULL \
+                 AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
                GROUP BY 1 \
              ) \
              SELECT COUNT(*) \
@@ -318,7 +320,8 @@ impl McpServer {
             &provider.provider_requested,
             &provider.provider_effective,
         );
-        let gpu_background_worker_cap = if provider.provider_effective.eq_ignore_ascii_case("cuda") {
+        let gpu_background_worker_cap = if provider.provider_effective.eq_ignore_ascii_case("cuda")
+        {
             allowed_gpu_vector_workers(
                 file_vectorization_queue_depth,
                 service_guard::current_pressure(),
@@ -829,7 +832,10 @@ impl McpServer {
                 "runtime diagnostics collected",
                 "workspace:*",
                 &evidence_by_mode(&evidence, mode),
-                &["run `truth_check` to inspect canonical vs reader drift", "run `health` for project-level view"],
+                &[
+                    "run `truth_check` to inspect canonical vs reader drift",
+                    "run `health` for project-level view"
+                ],
                 "high",
             )
         );
@@ -897,6 +903,8 @@ impl McpServer {
                         "prepare_queue_wait_ms_total": vector_runtime.prepare_queue_wait_ms_total,
                         "prepare_queue_depth_current": vector_runtime.prepare_queue_depth_current,
                         "prepare_queue_depth_max": vector_runtime.prepare_queue_depth_max,
+                        "ready_queue_depth_current": vector_runtime.ready_queue_depth_current,
+                        "ready_queue_depth_max": vector_runtime.ready_queue_depth_max,
                         "embed_input_texts_total": vector_runtime.embed_input_texts_total,
                         "embed_input_text_bytes_total": vector_runtime.embed_input_text_bytes_total,
                         "embed_clone_ms_total": vector_runtime.embed_clone_ms_total,
@@ -916,6 +924,11 @@ impl McpServer {
                         "finalize_queue_wait_ms_total": vector_runtime.finalize_queue_wait_ms_total,
                         "finalize_queue_depth_current": vector_runtime.finalize_queue_depth_current,
                         "finalize_queue_depth_max": vector_runtime.finalize_queue_depth_max,
+                        "persist_queue_depth_current": vector_runtime.persist_queue_depth_current,
+                        "persist_queue_depth_max": vector_runtime.persist_queue_depth_max,
+                        "persist_send_wait_ms_total": vector_runtime.persist_send_wait_ms_total,
+                        "persist_queue_wait_ms_total": vector_runtime.persist_queue_wait_ms_total,
+                        "gpu_idle_wait_ms_total": vector_runtime.gpu_idle_wait_ms_total,
                         "batches_total": vector_runtime.batches_total,
                         "chunks_embedded_total": vector_runtime.chunks_embedded_total,
                         "files_completed_total": vector_runtime.files_completed_total,
@@ -1106,7 +1119,8 @@ impl McpServer {
                 .and_then(parse_scalar_count_row)
                 .unwrap_or(0)
         };
-        let reader_count = |query: &str| -> i64 { self.graph_store.query_count(query).unwrap_or(0) };
+        let reader_count =
+            |query: &str| -> i64 { self.graph_store.query_count(query).unwrap_or(0) };
 
         let checks = vec![
             ("File", "SELECT count(*) FROM File"),
@@ -1128,7 +1142,11 @@ impl McpServer {
             rows.push(json!([name, canonical, reader, delta]));
         }
         let table = serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string());
-        let status = if drift_count == 0 { "aligned" } else { "drift_detected" };
+        let status = if drift_count == 0 {
+            "aligned"
+        } else {
+            "drift_detected"
+        };
         let report = format!(
             "## 🧪 Truth Contract Check\n\n\
              **Status:** {}\n\
@@ -1136,7 +1154,10 @@ impl McpServer {
              {}\n",
             status,
             drift_count,
-            format_table_from_json(&table, &["Counter", "Canonical(writer)", "Reader-path", "Delta"])
+            format_table_from_json(
+                &table,
+                &["Counter", "Canonical(writer)", "Reader-path", "Delta"]
+            )
         );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))
     }
@@ -1147,10 +1168,7 @@ impl McpServer {
         let ql = q.to_ascii_lowercase();
 
         // Minimal robust support for common multi-hop CALLS checks.
-        if ql.contains("match")
-            && ql.contains("[:calls")
-            && ql.contains("return count(*)")
-        {
+        if ql.contains("match") && ql.contains("[:calls") && ql.contains("return count(*)") {
             if ql.contains("[:calls*1..3]") {
                 let sql = "WITH RECURSIVE hops(source_id, target_id, depth) AS (
                              SELECT source_id, target_id, 1 FROM CALLS

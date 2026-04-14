@@ -11,7 +11,8 @@ fn test_full_pipeline_loop() {
 
     // 1. Setup GraphStore in memory
     println!("[TEST] Step 1: Init GraphStore...");
-    let graph = Arc::new(crate::tests::test_helpers::create_test_db().expect("Failed to init GraphStore"));
+    let graph =
+        Arc::new(crate::tests::test_helpers::create_test_db().expect("Failed to init GraphStore"));
 
     // 2. Setup QueueStore
     println!("[TEST] Step 2: Init QueueStore...");
@@ -121,7 +122,7 @@ fn test_full_pipeline_loop() {
     );
 
     let chunk_json = graph
-        .query_json("SELECT source_type, kind, project_slug, content_hash FROM Chunk")
+        .query_json("SELECT source_type, kind, project_code, content_hash FROM Chunk")
         .expect("Query failed");
     assert!(
         chunk_json.contains("symbol"),
@@ -129,13 +130,13 @@ fn test_full_pipeline_loop() {
     );
     assert!(
         chunk_json.contains("test_proj"),
-        "Chunk rows should inherit project slug"
+        "Chunk rows should inherit project code"
     );
 
     // Verify 9 columns integrity
     let symbols_json = graph
         .query_json(
-            "SELECT name, kind, project_slug, is_public, tested, is_nif, is_unsafe FROM Symbol",
+            "SELECT name, kind, project_code, is_public, tested, is_nif, is_unsafe FROM Symbol",
         )
         .expect("Query failed");
     println!("[TEST] Extracted Symbols: {}", symbols_json);
@@ -145,7 +146,7 @@ fn test_full_pipeline_loop() {
     );
     assert!(
         symbols_json.contains("test_proj"),
-        "Project slug should be inferred from the indexed path"
+        "Project code should be inferred from the indexed path"
     );
 
     // Clean up

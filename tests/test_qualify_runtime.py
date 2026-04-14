@@ -39,7 +39,7 @@ class QualifyRuntimeTests(unittest.TestCase):
     def test_plan_profile_steps_for_full(self) -> None:
         self.assertEqual(
             MODULE.profile_steps("full"),
-            ["runtime_smoke", "mcp_validate", "mcp_robustness", "ingestion_qualify"],
+            ["runtime_smoke", "mcp_validate", "retrieval_qualify", "mcp_robustness", "ingestion_qualify"],
         )
 
     def test_normalize_modes_prefers_compare_list(self) -> None:
@@ -122,12 +122,13 @@ class QualifyRuntimeTests(unittest.TestCase):
         self.assertEqual(delta["timeout_delta"], 1)
         self.assertEqual(delta["backend_unavailable_delta"], 0)
 
-    def test_run_mcp_validate_enables_mutations_for_full_mode(self) -> None:
+    def test_run_mcp_validate_keeps_mutations_disabled_by_default(self) -> None:
         captured: dict[str, object] = {}
 
-        def fake_shell(cmd, *, check=False, env=None):
+        def fake_shell(cmd, *, check=False, env=None, timeout=None):
             captured["cmd"] = cmd
             captured["env"] = env
+            captured["timeout"] = timeout
             return MODULE.subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
         original_shell = MODULE.shell
@@ -146,7 +147,7 @@ class QualifyRuntimeTests(unittest.TestCase):
             MODULE.shell = original_shell
 
         self.assertEqual(result["status"], "pass")
-        self.assertIn("--allow-mutations", captured["cmd"])
+        self.assertNotIn("--allow-mutations", captured["cmd"])
         self.assertEqual(captured["env"]["AXON_RUNTIME_PROFILE"], "full_autonomous")
         self.assertEqual(
             captured["env"]["AXON_ENABLE_AUTONOMOUS_INGESTOR"], "true"
@@ -155,7 +156,7 @@ class QualifyRuntimeTests(unittest.TestCase):
     def test_run_runtime_smoke_skips_embedded_mcp_gate(self) -> None:
         calls: list[list[str]] = []
 
-        def fake_shell(cmd, *, check=False, env=None):
+        def fake_shell(cmd, *, check=False, env=None, timeout=None):
             calls.append(cmd)
             return MODULE.subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -179,6 +180,32 @@ class QualifyRuntimeTests(unittest.TestCase):
             calls[1],
             ["bash", "scripts/start.sh", "--full", "--skip-mcp-tests"],
         )
+
+    def test_run_runtime_smoke_tolerates_start_timeout_when_runtime_becomes_ready(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_shell(cmd, *, check=False, env=None, timeout=None):
+            calls.append(cmd)
+            if cmd[:2] == ["bash", "scripts/start.sh"]:
+                raise MODULE.subprocess.TimeoutExpired(cmd, timeout or 0, output="booting", stderr="")
+            return MODULE.subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        def fake_wait_for_mcp_ready(url, timeout_s):
+            return None
+
+        original_shell = MODULE.shell
+        original_wait = MODULE.wait_for_mcp_ready
+        try:
+            MODULE.shell = fake_shell
+            MODULE.wait_for_mcp_ready = fake_wait_for_mcp_ready
+            with tempfile.TemporaryDirectory() as tmpdir:
+                result = MODULE.run_runtime_smoke("graph_only", Path(tmpdir), MODULE.MCP_URL)
+        finally:
+            MODULE.shell = original_shell
+            MODULE.wait_for_mcp_ready = original_wait
+
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("exceeded", result["note"])
 
 
 if __name__ == "__main__":

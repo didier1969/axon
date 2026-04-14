@@ -180,7 +180,7 @@ impl Parser for CssParser {
         }
 
         ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols,
             relations,
         }

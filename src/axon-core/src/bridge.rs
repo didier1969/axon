@@ -45,8 +45,17 @@ pub enum BridgeEvent {
         queue_depth: usize,
         claim_mode: String,
         service_pressure: String,
+        interactive_priority_active: bool,
+        interactive_priority_level: String,
+        interactive_requests_in_flight: u64,
         oversized_refusals_total: u64,
         degraded_mode_entries_total: u64,
+        background_launches_suppressed_total: u64,
+        vectorization_suppressed_due_to_interactive: u64,
+        vectorization_interrupted_due_to_interactive: u64,
+        vectorization_requeued_for_interactive: u64,
+        vectorization_resumed_after_interactive: u64,
+        projection_suppressed_due_to_interactive: u64,
         guard_hits: u64,
         guard_misses: u64,
         guard_bypassed_total: u64,
@@ -59,10 +68,15 @@ pub enum BridgeEvent {
         ingress_subtree_hint_accepted_total: u64,
         ingress_subtree_hint_blocked_total: u64,
         ingress_subtree_hint_suppressed_total: u64,
+        ingress_subtree_hint_productive_total: u64,
+        ingress_subtree_hint_unproductive_total: u64,
+        ingress_subtree_hint_dropped_total: u64,
         ingress_collapsed_total: u64,
         ingress_flush_count: u64,
         ingress_last_flush_duration_ms: u64,
         ingress_last_promoted_count: u64,
+        memory_trim_attempts_total: u64,
+        memory_trim_successes_total: u64,
         cpu_load: f64,
         ram_load: f64,
         io_wait: f64,
@@ -108,8 +122,17 @@ mod tests {
             queue_depth: 3,
             claim_mode: "guarded".to_string(),
             service_pressure: "degraded".to_string(),
+            interactive_priority_active: true,
+            interactive_priority_level: "interactive_priority".to_string(),
+            interactive_requests_in_flight: 2,
             oversized_refusals_total: 7,
             degraded_mode_entries_total: 3,
+            background_launches_suppressed_total: 4,
+            vectorization_suppressed_due_to_interactive: 5,
+            vectorization_interrupted_due_to_interactive: 7,
+            vectorization_requeued_for_interactive: 7,
+            vectorization_resumed_after_interactive: 3,
+            projection_suppressed_due_to_interactive: 6,
             guard_hits: 9,
             guard_misses: 4,
             guard_bypassed_total: 2,
@@ -122,10 +145,15 @@ mod tests {
             ingress_subtree_hint_accepted_total: 15,
             ingress_subtree_hint_blocked_total: 4,
             ingress_subtree_hint_suppressed_total: 2,
+            ingress_subtree_hint_productive_total: 9,
+            ingress_subtree_hint_unproductive_total: 6,
+            ingress_subtree_hint_dropped_total: 3,
             ingress_collapsed_total: 19,
             ingress_flush_count: 5,
             ingress_last_flush_duration_ms: 44,
             ingress_last_promoted_count: 8,
+            memory_trim_attempts_total: 11,
+            memory_trim_successes_total: 5,
             cpu_load: 61.5,
             ram_load: 47.0,
             io_wait: 12.2,
@@ -161,8 +189,17 @@ mod tests {
         assert!(json.contains("\"queue_depth\":3"));
         assert!(json.contains("\"claim_mode\":\"guarded\""));
         assert!(json.contains("\"service_pressure\":\"degraded\""));
+        assert!(json.contains("\"interactive_priority_active\":true"));
+        assert!(json.contains("\"interactive_priority_level\":\"interactive_priority\""));
+        assert!(json.contains("\"interactive_requests_in_flight\":2"));
         assert!(json.contains("\"oversized_refusals_total\":7"));
         assert!(json.contains("\"degraded_mode_entries_total\":3"));
+        assert!(json.contains("\"background_launches_suppressed_total\":4"));
+        assert!(json.contains("\"vectorization_suppressed_due_to_interactive\":5"));
+        assert!(json.contains("\"vectorization_interrupted_due_to_interactive\":7"));
+        assert!(json.contains("\"vectorization_requeued_for_interactive\":7"));
+        assert!(json.contains("\"vectorization_resumed_after_interactive\":3"));
+        assert!(json.contains("\"projection_suppressed_due_to_interactive\":6"));
         assert!(json.contains("\"guard_hits\":9"));
         assert!(json.contains("\"guard_misses\":4"));
         assert!(json.contains("\"guard_bypassed_total\":2"));
@@ -175,10 +212,15 @@ mod tests {
         assert!(json.contains("\"ingress_subtree_hint_accepted_total\":15"));
         assert!(json.contains("\"ingress_subtree_hint_blocked_total\":4"));
         assert!(json.contains("\"ingress_subtree_hint_suppressed_total\":2"));
+        assert!(json.contains("\"ingress_subtree_hint_productive_total\":9"));
+        assert!(json.contains("\"ingress_subtree_hint_unproductive_total\":6"));
+        assert!(json.contains("\"ingress_subtree_hint_dropped_total\":3"));
         assert!(json.contains("\"ingress_collapsed_total\":19"));
         assert!(json.contains("\"ingress_flush_count\":5"));
         assert!(json.contains("\"ingress_last_flush_duration_ms\":44"));
         assert!(json.contains("\"ingress_last_promoted_count\":8"));
+        assert!(json.contains("\"memory_trim_attempts_total\":11"));
+        assert!(json.contains("\"memory_trim_successes_total\":5"));
         assert!(json.contains("\"cpu_load\":61.5"));
         assert!(json.contains("\"ram_load\":47.0"));
         assert!(json.contains("\"io_wait\":12.2"));

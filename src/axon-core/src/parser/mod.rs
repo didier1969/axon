@@ -1,3 +1,4 @@
+use crate::indexing_policy::EcosystemId;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -76,7 +77,7 @@ pub fn parse_with_wasm_safe(
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub kind: String,
@@ -98,7 +99,7 @@ pub struct Symbol {
     pub embedding: Option<Vec<f32>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Relation {
     pub from: String,
     pub to: String,
@@ -107,10 +108,10 @@ pub struct Relation {
     pub properties: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExtractionResult {
     #[serde(default)]
-    pub project_slug: Option<String>,
+    pub project_code: Option<String>,
     pub symbols: Vec<Symbol>,
     pub relations: Vec<Relation>,
 }
@@ -178,6 +179,28 @@ pub mod text;
 pub mod typeql;
 pub mod typescript;
 pub mod yaml;
+
+const SUPPORTED_PARSER_ECOSYSTEMS: &[EcosystemId] = &[
+    EcosystemId::JavaScript,
+    EcosystemId::TypeScript,
+    EcosystemId::Python,
+    EcosystemId::Elixir,
+    EcosystemId::Erlang,
+    EcosystemId::Rust,
+    EcosystemId::Go,
+    EcosystemId::Jvm,
+    EcosystemId::C,
+    EcosystemId::Cpp,
+    EcosystemId::CSharp,
+    EcosystemId::Ruby,
+    EcosystemId::Php,
+    EcosystemId::WebAssets,
+    EcosystemId::DataLogic,
+];
+
+pub fn supported_parser_ecosystems() -> &'static [EcosystemId] {
+    SUPPORTED_PARSER_ECOSYSTEMS
+}
 
 pub fn get_parser_for_file(path: &Path) -> Option<Box<dyn Parser>> {
     let ext = path.extension()?.to_str()?.to_lowercase();

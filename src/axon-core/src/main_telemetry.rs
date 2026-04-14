@@ -39,8 +39,22 @@ pub(crate) fn spawn_runtime_telemetry(
                 queue_depth: snapshot.queue_depth,
                 claim_mode: snapshot.claim_mode,
                 service_pressure: snapshot.service_pressure,
+                interactive_priority_active: snapshot.interactive_priority_active,
+                interactive_priority_level: snapshot.interactive_priority_level,
+                interactive_requests_in_flight: snapshot.interactive_requests_in_flight,
                 oversized_refusals_total: snapshot.oversized_refusals_total,
                 degraded_mode_entries_total: snapshot.degraded_mode_entries_total,
+                background_launches_suppressed_total: snapshot.background_launches_suppressed_total,
+                vectorization_suppressed_due_to_interactive: snapshot
+                    .vectorization_suppressed_due_to_interactive,
+                vectorization_interrupted_due_to_interactive: snapshot
+                    .vectorization_interrupted_due_to_interactive,
+                vectorization_requeued_for_interactive: snapshot
+                    .vectorization_requeued_for_interactive,
+                vectorization_resumed_after_interactive: snapshot
+                    .vectorization_resumed_after_interactive,
+                projection_suppressed_due_to_interactive: snapshot
+                    .projection_suppressed_due_to_interactive,
                 guard_hits: snapshot.guard_hits,
                 guard_misses: snapshot.guard_misses,
                 guard_bypassed_total: snapshot.guard_bypassed_total,
@@ -54,10 +68,17 @@ pub(crate) fn spawn_runtime_telemetry(
                 ingress_subtree_hint_blocked_total: snapshot.ingress_subtree_hint_blocked_total,
                 ingress_subtree_hint_suppressed_total: snapshot
                     .ingress_subtree_hint_suppressed_total,
+                ingress_subtree_hint_productive_total: snapshot
+                    .ingress_subtree_hint_productive_total,
+                ingress_subtree_hint_unproductive_total: snapshot
+                    .ingress_subtree_hint_unproductive_total,
+                ingress_subtree_hint_dropped_total: snapshot.ingress_subtree_hint_dropped_total,
                 ingress_collapsed_total: snapshot.ingress_collapsed_total,
                 ingress_flush_count: snapshot.ingress_flush_count,
                 ingress_last_flush_duration_ms: snapshot.ingress_last_flush_duration_ms,
                 ingress_last_promoted_count: snapshot.ingress_last_promoted_count,
+                memory_trim_attempts_total: snapshot.memory_trim_attempts_total,
+                memory_trim_successes_total: snapshot.memory_trim_successes_total,
                 cpu_load: snapshot.cpu_load,
                 ram_load: snapshot.ram_load,
                 io_wait: snapshot.io_wait,

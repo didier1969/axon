@@ -18,10 +18,25 @@ TMUX_SESSION="${TMUX_SESSION:-axon}"
 
 WATCH_ROOT="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
 PROJECTS_ROOT="${AXON_PROJECTS_ROOT:-$WATCH_ROOT}"
-REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
+PROJECT_CODE="${AXON_PROJECT_CODE:-}"
+if [[ -z "$PROJECT_CODE" && -f "$PROJECT_ROOT/.axon/meta.json" ]]; then
+    PROJECT_CODE="$(python3 -c 'import json; print(json.load(open("'"$PROJECT_ROOT"'/.axon/meta.json")).get("code",""))' 2>/dev/null || true)"
+fi
+PROJECT_CODE="${PROJECT_CODE:-$(basename "$PROJECT_ROOT")}"
 RUNTIME_MODE="${AXON_RUNTIME_MODE:-full}"
 START_DASHBOARD=1
 RUN_MCP_TESTS=1
+SKIP_ELIXIR_PREWARM="${AXON_SKIP_ELIXIR_PREWARM:-0}"
+
+detect_accessible_gpu() {
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ -x /usr/lib/wsl/lib/nvidia-smi ] && /usr/lib/wsl/lib/nvidia-smi -L >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -44,9 +59,12 @@ while [[ $# -gt 0 ]]; do
         --skip-mcp-tests)
             RUN_MCP_TESTS=0
             ;;
+        --skip-elixir-prewarm)
+            SKIP_ELIXIR_PREWARM=1
+            ;;
         --help|-h)
             cat <<'EOF'
-Usage: ./scripts/start.sh [--full|--read-only|--mcp-only] [--no-dashboard] [--skip-mcp-tests]
+Usage: ./scripts/start.sh [--full|--read-only|--mcp-only] [--no-dashboard] [--skip-mcp-tests] [--skip-elixir-prewarm]
 
 Modes:
   --full           Full runtime: scan + watcher + ingestion + SQL/MCP + dashboard
@@ -57,6 +75,7 @@ Modes:
 Options:
   --no-dashboard   Disable Elixir LiveView dashboard
   --skip-mcp-tests Skip automatic MCP quality gate validation after startup
+  --skip-elixir-prewarm Skip non-interactive `mix local.hex`/`mix local.rebar` bootstrap
 EOF
             exit 0
             ;;
@@ -68,6 +87,35 @@ EOF
     esac
     shift
 done
+
+export AXON_SKIP_ELIXIR_PREWARM="$SKIP_ELIXIR_PREWARM"
+
+if [[ -n "${AXON_EMBEDDING_PROVIDER:-}" ]]; then
+    EMBEDDING_PROVIDER_REQUEST="$AXON_EMBEDDING_PROVIDER"
+elif detect_accessible_gpu; then
+    EMBEDDING_PROVIDER_REQUEST="cuda"
+else
+    EMBEDDING_PROVIDER_REQUEST="cpu"
+fi
+export AXON_EMBEDDING_PROVIDER="$EMBEDDING_PROVIDER_REQUEST"
+
+if [[ "$EMBEDDING_PROVIDER_REQUEST" == "cpu" ]]; then
+    if [[ -z "${AXON_VECTOR_WORKERS:-}" ]]; then
+        export AXON_VECTOR_WORKERS=1
+    fi
+    if [[ -z "${AXON_CHUNK_BATCH_SIZE:-}" ]]; then
+        export AXON_CHUNK_BATCH_SIZE=24
+    fi
+    if [[ -z "${AXON_FILE_VECTORIZATION_BATCH_SIZE:-}" ]]; then
+        export AXON_FILE_VECTORIZATION_BATCH_SIZE=8
+    fi
+    if [[ -z "${OMP_NUM_THREADS:-}" ]]; then
+        export OMP_NUM_THREADS=4
+    fi
+    if [[ -z "${OMP_WAIT_POLICY:-}" ]]; then
+        export OMP_WAIT_POLICY=PASSIVE
+    fi
+fi
 
 STARTUP_TIMEOUT_S="${AXON_STARTUP_TIMEOUT_S:-}"
 if [[ -z "$STARTUP_TIMEOUT_S" ]]; then
@@ -86,8 +134,12 @@ fi
 echo "📦 Validating Devenv environment..."
 devenv shell -- bash -lc './scripts/validate-devenv.sh'
 
-echo "📦 Pre-warming Elixir environment (Hex/Rebar)..."
-devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null"
+if [[ "$SKIP_ELIXIR_PREWARM" == "1" ]]; then
+    echo "⏭️ Skipping Elixir pre-warm (AXON_SKIP_ELIXIR_PREWARM=1)."
+else
+    echo "📦 Pre-warming Elixir environment (Hex/Rebar)..."
+    devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null"
+fi
 
 if [ ! -x "bin/axon-core" ]; then
     echo "❌ Missing bin/axon-core"
@@ -295,16 +347,119 @@ WORKER_CAP_EXPORT=""
 if [[ -n "${MAX_AXON_WORKERS:-}" ]]; then
     WORKER_CAP_EXPORT="export MAX_AXON_WORKERS=\"$MAX_AXON_WORKERS\"; "
 fi
+EMBEDDING_PROVIDER_EXPORT=""
+if [[ -n "${EMBEDDING_PROVIDER_REQUEST:-}" ]]; then
+    EMBEDDING_PROVIDER_EXPORT="export AXON_EMBEDDING_PROVIDER=\"$EMBEDDING_PROVIDER_REQUEST\"; "
+fi
+PASS_THROUGH_EXPORTS=""
+append_pass_through_export() {
+    local var_name="$1"
+    local value="${!var_name-}"
+    if [[ -n "${value:-}" ]]; then
+        local escaped=""
+        printf -v escaped '%q' "$value"
+        PASS_THROUGH_EXPORTS+="export ${var_name}=${escaped}; "
+    fi
+}
+for pass_through_var in \
+    AXON_ENABLE_FEDERATION_ORCHESTRATOR \
+    AXON_VECTOR_WORKERS \
+    AXON_GRAPH_WORKERS \
+    AXON_CHUNK_BATCH_SIZE \
+    AXON_FILE_VECTORIZATION_BATCH_SIZE \
+    AXON_MAX_EMBED_BATCH_BYTES \
+    OMP_NUM_THREADS \
+    OMP_WAIT_POLICY
+do
+    append_pass_through_export "$pass_through_var"
+done
 PROFILE_EXPORT=""
 if [[ "$RUNTIME_MODE" == "full" ]]; then
     PROFILE_EXPORT="export AXON_ENABLE_AUTONOMOUS_INGESTOR=true; export AXON_RUNTIME_PROFILE=full_autonomous; "
 fi
-tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_MCP_MUTATION_JOBS=1; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\$(nix eval --raw nixpkgs#onnxruntime.outPath 2>/dev/null)/lib/libonnxruntime.so; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
+PRELAUNCH_LD_LIBRARY_PATH_EXPORT=""
+ORT_BUILD_LOG="$(mktemp /tmp/axon-ort-build.XXXXXX.log)"
+ORT_BUILD_TARGET="nixpkgs#onnxruntime"
+ORT_ARTIFACT_MANIFEST="${AXON_ORT_ARTIFACT_MANIFEST:-$PROJECT_ROOT/.axon/ort-artifacts/onnxruntime-cuda/current.json}"
+ORT_OUT_PATH=""
+ORT_DYLIB_PATH=""
+if [[ "$EMBEDDING_PROVIDER_REQUEST" == "cuda" ]]; then
+    if [[ -f "$ORT_ARTIFACT_MANIFEST" ]]; then
+        ORT_DYLIB_PATH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("core_lib",""))' "$ORT_ARTIFACT_MANIFEST" 2>/dev/null || true)"
+        CUDA_PROVIDER_PATH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("cuda_provider_lib",""))' "$ORT_ARTIFACT_MANIFEST" 2>/dev/null || true)"
+        if [[ -n "${ORT_DYLIB_PATH:-}" && -f "$ORT_DYLIB_PATH" && -n "${CUDA_PROVIDER_PATH:-}" && -f "$CUDA_PROVIDER_PATH" ]]; then
+            ORT_OUT_PATH="$(dirname "$(dirname "$ORT_DYLIB_PATH")")"
+            echo "♻️ Using external CUDA ONNX Runtime artifact from manifest..."
+            echo "   Manifest: $ORT_ARTIFACT_MANIFEST"
+        else
+            echo "⚠️ Ignoring invalid external CUDA artifact manifest: $ORT_ARTIFACT_MANIFEST"
+            echo "   Falling back to nixpkgs materialization."
+            ORT_DYLIB_PATH=""
+        fi
+    fi
+    if [[ -z "${ORT_DYLIB_PATH:-}" ]]; then
+        ORT_BUILD_TARGET="(import (builtins.getFlake \"nixpkgs\").outPath {
+          system = builtins.currentSystem;
+          config = {
+            cudaSupport = true;
+            allowUnfreePredicate = _: true;
+          };
+        }).onnxruntime"
+        echo "🔧 Materializing CUDA-enabled ONNX Runtime from nixpkgs..."
+    fi
+fi
+if [[ -z "${ORT_DYLIB_PATH:-}" ]]; then
+    if [[ "$ORT_BUILD_TARGET" == "nixpkgs#onnxruntime" ]]; then
+        ORT_OUT_PATH="$(nix build --no-link --print-out-paths "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | tail -n 1)"
+    else
+        ORT_OUT_PATH="$(nix build --impure --no-link --print-out-paths --expr "$ORT_BUILD_TARGET" 2>&1 | tee "$ORT_BUILD_LOG" | tail -n 1)"
+    fi
+    if [[ -z "${ORT_OUT_PATH:-}" || ! -f "$ORT_OUT_PATH/lib/libonnxruntime.so" ]]; then
+        echo "❌ Unable to materialize a valid ONNX Runtime output path."
+        if [[ "$EMBEDDING_PROVIDER_REQUEST" == "cuda" ]]; then
+            echo "   Tried to build nixpkgs onnxruntime with cudaSupport=true."
+            if rg -q "unexpected eof while reading|cannot download .*cudnn|developer\\.download\\.nvidia\\.com" "$ORT_BUILD_LOG" 2>/dev/null; then
+                echo "   The failure came from downloading NVIDIA CUDA/cuDNN artifacts, not from Axon itself."
+                echo "   Retry the start once connectivity to developer.download.nvidia.com is stable."
+            fi
+        fi
+        echo "   Build log: $ORT_BUILD_LOG"
+        exit 1
+    fi
+    ORT_DYLIB_PATH="$ORT_OUT_PATH/lib/libonnxruntime.so"
+fi
+if [[ "$EMBEDDING_PROVIDER_REQUEST" == "cuda" ]]; then
+    ORT_LIB_DIR="$(dirname "$ORT_DYLIB_PATH")"
+    CUDA_LD_PATH_SEGMENTS=()
+    if [[ -d "$ORT_LIB_DIR" ]]; then
+        CUDA_LD_PATH_SEGMENTS+=("$ORT_LIB_DIR")
+    fi
+    if [[ -d "/usr/lib/wsl/lib" ]]; then
+        CUDA_LD_PATH_SEGMENTS+=("/usr/lib/wsl/lib")
+    fi
+    if [[ ${#CUDA_LD_PATH_SEGMENTS[@]} -gt 0 ]]; then
+        CUDA_LD_PREFIX="$(IFS=:; echo "${CUDA_LD_PATH_SEGMENTS[*]}")"
+        if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+            PRELAUNCH_LD_LIBRARY_PATH_EXPORT="export LD_LIBRARY_PATH=\"$CUDA_LD_PREFIX:$LD_LIBRARY_PATH\"; "
+        else
+            PRELAUNCH_LD_LIBRARY_PATH_EXPORT="export LD_LIBRARY_PATH=\"$CUDA_LD_PREFIX\"; "
+        fi
+    fi
+fi
+if [[ "$EMBEDDING_PROVIDER_REQUEST" == "cuda" && ! -f "$ORT_OUT_PATH/lib/libonnxruntime_providers_cuda.so" ]]; then
+    echo "⚠️ The selected ONNX Runtime package does not include libonnxruntime_providers_cuda.so."
+    echo "   CUDA embedding cannot activate with this system ORT package; Axon will fall back to CPU diagnostics."
+fi
+tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_WATCH_DIR=\"$WATCH_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_MCP_MUTATION_JOBS=1; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\"$ORT_DYLIB_PATH\"; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
 
 if [ "$START_DASHBOARD" = "1" ]; then
     # Start Visualization Plane
     tmux new-window -t "$TMUX_SESSION" -n "nexus"
-    tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_REPO_SLUG=$REPO_SLUG AXON_WATCH_DIR=$WATCH_ROOT elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+    if [[ "$SKIP_ELIXIR_PREWARM" == "1" ]]; then
+        tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_PROJECT_CODE=$PROJECT_CODE AXON_WATCH_DIR=$WATCH_ROOT elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+    else
+        tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_PROJECT_CODE=$PROJECT_CODE AXON_WATCH_DIR=$WATCH_ROOT elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+    fi
 fi
 
 echo "⏳ Waiting for Axon Infrastructure to rise (Timeout: ${STARTUP_TIMEOUT_S}s)..."

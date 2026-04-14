@@ -26,7 +26,6 @@ pub(crate) struct ParsedSollExport {
     pub guidelines: Vec<ParsedGuideline>,
 }
 
-
 pub(crate) struct ParsedGuideline {
     pub id: String,
     pub title: String,
@@ -150,9 +149,13 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
 
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
-        
+
         if trimmed.starts_with("## Entités : ") {
-            current_type = trimmed.strip_prefix("## Entités : ").unwrap_or("").trim().to_string();
+            current_type = trimmed
+                .strip_prefix("## Entités : ")
+                .unwrap_or("")
+                .trim()
+                .to_string();
             continue;
         }
 
@@ -199,27 +202,88 @@ pub(crate) fn parse_soll_export(markdown: &str) -> std::result::Result<ParsedSol
                 if next_trim.starts_with("### ") || next_trim.starts_with("## ") {
                     break;
                 }
-                
+
                 if next_trim.starts_with("**Description:**") {
-                    description = next_trim.strip_prefix("**Description:**").unwrap_or("").trim().to_string();
+                    description = next_trim
+                        .strip_prefix("**Description:**")
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                 } else if next_trim.starts_with("**Status:**") {
-                    status = next_trim.strip_prefix("**Status:**").unwrap_or("").trim().to_string();
+                    status = next_trim
+                        .strip_prefix("**Status:**")
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                 } else if next_trim.starts_with("**Meta:**") {
-                    let meta_str = next_trim.strip_prefix("**Meta:**").unwrap_or("").trim().trim_matches('`').to_string();
+                    let meta_str = next_trim
+                        .strip_prefix("**Meta:**")
+                        .unwrap_or("")
+                        .trim()
+                        .trim_matches('`')
+                        .to_string();
                     metadata = Some(meta_str);
                 }
                 lines.next();
             }
 
             match current_type.as_str() {
-                "Vision" => parsed.vision.push(ParsedVision { title, description, goal: "".to_string(), metadata }),
-                "Pillar" => parsed.pillars.push(ParsedPillar { id, title, description, metadata }),
-                "Requirement" => parsed.requirements.push(ParsedRequirement { id, title, priority: "".to_string(), description, status: Some(status), metadata }),
-                "Concept" => parsed.concepts.push(ParsedConcept { id, name: title, explanation: description, rationale: "".to_string(), metadata }),
-                "Decision" => parsed.decisions.push(ParsedDecision { id, title, status, description: Some(description), context: None, rationale: "".to_string(), metadata }),
-                "Milestone" => parsed.milestones.push(ParsedMilestone { id, title, status, metadata }),
-                "Validation" => parsed.validations.push(ParsedValidation { id, result: status, method: "".to_string(), timestamp: 0, metadata }),
-                "Guideline" => parsed.guidelines.push(ParsedGuideline { id, title, description, status, metadata }),
+                "Vision" => parsed.vision.push(ParsedVision {
+                    title,
+                    description,
+                    goal: "".to_string(),
+                    metadata,
+                }),
+                "Pillar" => parsed.pillars.push(ParsedPillar {
+                    id,
+                    title,
+                    description,
+                    metadata,
+                }),
+                "Requirement" => parsed.requirements.push(ParsedRequirement {
+                    id,
+                    title,
+                    priority: "".to_string(),
+                    description,
+                    status: Some(status),
+                    metadata,
+                }),
+                "Concept" => parsed.concepts.push(ParsedConcept {
+                    id,
+                    name: title,
+                    explanation: description,
+                    rationale: "".to_string(),
+                    metadata,
+                }),
+                "Decision" => parsed.decisions.push(ParsedDecision {
+                    id,
+                    title,
+                    status,
+                    description: Some(description),
+                    context: None,
+                    rationale: "".to_string(),
+                    metadata,
+                }),
+                "Milestone" => parsed.milestones.push(ParsedMilestone {
+                    id,
+                    title,
+                    status,
+                    metadata,
+                }),
+                "Validation" => parsed.validations.push(ParsedValidation {
+                    id,
+                    result: status,
+                    method: "".to_string(),
+                    timestamp: 0,
+                    metadata,
+                }),
+                "Guideline" => parsed.guidelines.push(ParsedGuideline {
+                    id,
+                    title,
+                    description,
+                    status,
+                    metadata,
+                }),
                 _ => {}
             }
         }

@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Axon Adaptive Orchestrator</title>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f6f3ea;
+      --surface: rgba(255,255,255,0.88);
+      --surface-strong: rgba(255,255,255,0.96);
+      --surface-dim: rgba(120,97,56,0.07);
+      --border: rgba(74,56,24,0.14);
+      --text: #24180d;
+      --text-dim: #6f5f49;
+      --accent-a: #b55c2f;
+      --accent-b: #1f7a6b;
+      --accent-c: #4a5fb5;
+      --accent-d: #8d3b6a;
+      --danger: #a02e2e;
+      --warn: #c47b15;
+      --ok: #217a45;
+      --shadow: 0 24px 60px rgba(68, 49, 18, 0.10);
+      --radius: 24px;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+      --display: "Space Grotesk", system-ui, sans-serif;
+      --grid: rgba(103, 81, 45, 0.05);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #11151a;
+        --surface: rgba(24, 29, 35, 0.88);
+        --surface-strong: rgba(32, 39, 47, 0.95);
+        --surface-dim: rgba(255,255,255,0.04);
+        --border: rgba(255,255,255,0.11);
+        --text: #f2f0eb;
+        --text-dim: #acb5be;
+        --accent-a: #ff8b5a;
+        --accent-b: #4ad0bc;
+        --accent-c: #86a1ff;
+        --accent-d: #f189c3;
+        --danger: #ff7c7c;
+        --warn: #f0b55a;
+        --ok: #7fe0a5;
+        --shadow: 0 24px 80px rgba(0,0,0,0.35);
+        --grid: rgba(255,255,255,0.04);
+      }
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: var(--display);
+      color: var(--text);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.1), transparent 30%),
+        radial-gradient(circle at 15% 20%, rgba(181,92,47,0.12), transparent 28%),
+        radial-gradient(circle at 85% 15%, rgba(31,122,107,0.12), transparent 26%),
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+        var(--bg);
+      background-size: auto, auto, auto, 22px 22px, 22px 22px, auto;
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+
+    .page {
+      width: min(1480px, calc(100vw - 32px));
+      margin: 28px auto 56px;
+    }
+
+    .hero {
+      background: var(--surface-strong);
+      border: 1px solid var(--border);
+      border-radius: 32px;
+      box-shadow: var(--shadow);
+      padding: 28px 30px 26px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -90px -90px auto;
+      width: 320px;
+      height: 320px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(74,95,181,0.20), transparent 64%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      font: 600 12px/1.2 var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--accent-b);
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2rem, 4vw, 4.1rem);
+      line-height: 0.96;
+      letter-spacing: -0.04em;
+      max-width: 12ch;
+    }
+
+    .hero-grid {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: 1.35fr 0.95fr;
+      gap: 20px;
+      align-items: start;
+    }
+
+    .lede {
+      font-size: 1.05rem;
+      color: var(--text-dim);
+      max-width: 72ch;
+      margin: 0;
+    }
+
+    .constraints {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .constraint {
+      padding: 14px 15px;
+      border-radius: 16px;
+      background: var(--surface-dim);
+      border: 1px solid var(--border);
+    }
+
+    .constraint strong {
+      display: block;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+    }
+
+    .constraint span {
+      font-size: 1.2rem;
+      font-weight: 700;
+    }
+
+    .diagram {
+      margin-top: 22px;
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1.2fr;
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .column {
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 16px 18px;
+      backdrop-filter: blur(10px);
+    }
+
+    .panel h2, .panel h3 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+      letter-spacing: -0.02em;
+    }
+
+    .panel h2 { font-size: 1.08rem; }
+
+    .tag {
+      display: inline-block;
+      font: 600 11px/1 var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-dim);
+      margin-bottom: 10px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: rgba(255,255,255,0.03);
+      padding: 13px 14px;
+    }
+
+    .card .name {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
+
+    .card .name code {
+      font: 500 12px/1.3 var(--mono);
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--text-dim);
+      font-size: 0.94rem;
+    }
+
+    .controller {
+      min-height: 100%;
+      display: grid;
+      gap: 16px;
+      align-content: start;
+      position: relative;
+    }
+
+    .controller-core {
+      padding: 20px;
+      border-radius: 28px;
+      background:
+        radial-gradient(circle at top left, rgba(181,92,47,0.18), transparent 40%),
+        radial-gradient(circle at bottom right, rgba(74,95,181,0.18), transparent 44%),
+        var(--surface-strong);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+    }
+
+    .controller-core h2 {
+      font-size: 1.35rem;
+      margin-bottom: 8px;
+    }
+
+    .controller-core p {
+      margin: 0;
+      color: var(--text-dim);
+      font-size: 0.98rem;
+    }
+
+    .formula {
+      margin-top: 14px;
+      border-radius: 18px;
+      padding: 14px 15px;
+      background: var(--surface-dim);
+      border: 1px dashed var(--border);
+      font: 500 13px/1.65 var(--mono);
+      color: var(--text);
+    }
+
+    .decision-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .decision {
+      border-radius: 18px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.03);
+    }
+
+    .decision strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 0.92rem;
+    }
+
+    .decision p {
+      margin: 0;
+      color: var(--text-dim);
+      font-size: 0.88rem;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .pill {
+      padding: 8px 10px;
+      border-radius: 999px;
+      font: 500 12px/1 var(--mono);
+      border: 1px solid var(--border);
+      background: var(--surface-dim);
+    }
+
+    .pill-a { color: var(--accent-a); }
+    .pill-b { color: var(--accent-b); }
+    .pill-c { color: var(--accent-c); }
+    .pill-d { color: var(--accent-d); }
+    .pill-ok { color: var(--ok); }
+    .pill-warn { color: var(--warn); }
+    .pill-danger { color: var(--danger); }
+
+    .footer-grid {
+      margin-top: 20px;
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 18px;
+    }
+
+    .tableish {
+      display: grid;
+      gap: 10px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1.25fr 1.1fr 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 12px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .row:first-child { border-top: 0; padding-top: 0; }
+
+    .row strong, .mini strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 0.9rem;
+    }
+
+    .row div, .mini div {
+      color: var(--text-dim);
+      font-size: 0.88rem;
+    }
+
+    .mini-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .mini {
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 13px 14px;
+      background: var(--surface-dim);
+    }
+
+    .wire {
+      position: relative;
+    }
+
+    .wire::before, .wire::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      width: 28px;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--border), transparent);
+      transform: translateY(-50%);
+    }
+
+    .wire-left::before { right: -23px; }
+    .wire-right::after { left: -23px; }
+
+    @media (max-width: 1180px) {
+      .hero-grid,
+      .diagram,
+      .footer-grid {
+        grid-template-columns: 1fr;
+      }
+      .decision-grid,
+      .constraints {
+        grid-template-columns: 1fr;
+      }
+      .wire::before, .wire::after { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div class="eyebrow">Axon Control Plane Proposal</div>
+      <h1>Adaptive Orchestrator</h1>
+      <div class="hero-grid">
+        <p class="lede">
+          L’orchestrateur adaptatif agit comme un coordinateur en boucle fermée. Il observe l’état réel du pipeline
+          d’ingestion, la santé du serveur MCP et la pression des ressources, puis ouvre ou ferme progressivement les
+          vannes du système pour maximiser la complétion du backlog sans casser l’usage interactif.
+        </p>
+        <div class="constraints">
+          <div class="constraint">
+            <strong>Objectif principal</strong>
+            <span>Max backlog drain</span>
+          </div>
+          <div class="constraint">
+            <strong>Contrainte mémoire</strong>
+            <span>&ge; 33% RAM libre</span>
+          </div>
+          <div class="constraint">
+            <strong>Contrainte interactive</strong>
+            <span>MCP &le; 300 ms</span>
+          </div>
+          <div class="constraint">
+            <strong>Contrainte CPU</strong>
+            <span>Axon &le; 50%</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="diagram">
+      <div class="column wire wire-left">
+        <div class="panel">
+          <div class="tag">Flux entrants</div>
+          <div class="stack">
+            <div class="card">
+              <div class="name"><span>Watcher / Scanner</span><code>main_background.rs</code></div>
+              <p>Produisent du travail fichier, indexation, vectorisation et projections graphe.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>Queue de vectorisation</span><code>fetch_file_vectorization_queue_counts()</code></div>
+              <p>Mesure le backlog vectoriel réellement à drainer, avec files <em>queued</em> et <em>inflight</em>.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>Demandes interactives</span><code>MCP / query embedding</code></div>
+              <p>Constituent la charge prioritaire. Elles doivent rester fluides pendant que l’ingestion tourne.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>Contraintes hôte</span><code>RAM / CPU / GPU</code></div>
+              <p>État machine observé en continu: mémoire, pression service, fallback CPU ou GPU actif.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="tag">Sondes</div>
+          <div class="stack">
+            <div class="card">
+              <div class="name"><span>Débit backlog</span><code>files_completed_total</code></div>
+              <p>Mesure la vitesse de résorption du backlog, pas juste l’activité interne.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>Latence MCP</span><code>service_pressure + MCP timings</code></div>
+              <p>Doit rester sous le budget interactif fixé. Toute dérive doit refermer les vannes.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>Coût embed</span><code>embed_transform_ms_per_chunk</code></div>
+              <p>Signal central pour savoir si le modèle ou le batching domine le temps de traitement.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>État provider</span><code>provider_effective</code></div>
+              <p>Distingue <em>gpu_active</em>, <em>cpu_fallback</em> ou blocage de scaling GPU.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="column controller">
+        <div class="controller-core">
+          <div class="tag">Coordinateur central</div>
+          <h2>Adaptive Orchestrator</h2>
+          <p>
+            Boucle fermée multi-objectifs. À chaque cycle, il observe le système, vérifie les contraintes dures,
+            estime la marge de manœuvre, puis ajuste les paramètres de débit.
+          </p>
+          <div class="formula">
+            Priorité 1: maximiser <strong>backlog_drain_rate</strong><br>
+            Sous contraintes:<br>
+            <strong>mem_available_ratio &ge; 0.33</strong><br>
+            <strong>mcp_latency_p95 &le; 300ms</strong><br>
+            <strong>cpu_usage_ratio &le; 0.50</strong>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="tag">Logique initiale</div>
+          <div class="decision-grid">
+            <div class="decision">
+              <strong>1. Observer</strong>
+              <p>Collecter backlog, pression service, coûts embed, disponibilité mémoire, budget CPU.</p>
+            </div>
+            <div class="decision">
+              <strong>2. Vérifier</strong>
+              <p>Si une contrainte dure casse, réduire rapidement le débit ou passer en mode gardé.</p>
+            </div>
+            <div class="decision">
+              <strong>3. Ouvrir lentement</strong>
+              <p>Si tout est stable, augmenter progressivement les vannes sur une seule dimension à la fois.</p>
+            </div>
+            <div class="decision">
+              <strong>4. Refermer vite</strong>
+              <p>En cas de dérive latence/RAM/CPU, réduire immédiatement les paramètres récemment ouverts.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="tag">États de décision</div>
+          <div class="legend">
+            <span class="pill pill-ok">Quiet Cruise</span>
+            <span class="pill pill-b">Aggressive Drain</span>
+            <span class="pill pill-warn">Recovery</span>
+            <span class="pill pill-danger">Interactive Guarded</span>
+            <span class="pill pill-d">Gpu Scaling Blocked</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="column wire wire-right">
+        <div class="panel">
+          <div class="tag">Actionneurs</div>
+          <div class="stack">
+            <div class="card">
+              <div class="name"><span>Vector workers</span><code>AXON_VECTOR_WORKERS</code></div>
+              <p>Augmenter ou réduire la parallélisation de la vectorisation.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>Chunk batch size</span><code>AXON_CHUNK_BATCH_SIZE</code></div>
+              <p>Jouer sur la granularité d’un appel d’embed pour améliorer le throughput.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>File batch size</span><code>AXON_FILE_VECTORIZATION_BATCH_SIZE</code></div>
+              <p>Ajuster le nombre de fichiers actifs par cycle de vectorisation.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>Graph workers</span><code>AXON_GRAPH_WORKERS</code></div>
+              <p>Réserver ou relâcher de la capacité sur les projections graphe.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>Claim policy</span><code>Fast / Slow / Guarded / Paused</code></div>
+              <p>Ouvrir ou fermer la vanne d’admission du travail en fond.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>Priorité interactive</span><code>interactive_priority_active()</code></div>
+              <p>Protéger le MCP en suspendant temporairement le travail de fond.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="tag">Sorties observables</div>
+          <div class="stack">
+            <div class="card">
+              <div class="name"><span>Drain plus rapide</span><code>files_completed_total ↑</code></div>
+              <p>Le backlog baisse plus vite sans pousser le système hors enveloppe.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>MCP protégé</span><code>latence stable</code></div>
+              <p>Les outils restent utilisables pendant l’ingestion.</p>
+            </div>
+            <div class="card">
+              <div class="name"><span>CPU/RAM bornés</span><code>headroom préservé</code></div>
+              <p>Le système évite l’emballement, la contention et les oscillations sévères.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="footer-grid">
+      <div class="panel">
+        <div class="tag">Métriques et fichiers clés</div>
+        <div class="tableish">
+          <div class="row">
+            <div><strong>Claim policy</strong><div>Admission du travail de fond selon pression, RSS, budget mémoire, queue length.</div></div>
+            <div><strong>Source</strong><div><code>main_background.rs</code></div></div>
+            <div><strong>Rôle</strong><div>Ouvre ou ferme la vanne d’entrée principale.</div></div>
+          </div>
+          <div class="row">
+            <div><strong>Vector runtime metrics</strong><div>Temps fetch/embed/db, chunks embedded, fichiers complétés, queue depths.</div></div>
+            <div><strong>Source</strong><div><code>service_guard.rs</code></div></div>
+            <div><strong>Rôle</strong><div>Sonde principale du coût réel d’ingestion.</div></div>
+          </div>
+          <div class="row">
+            <div><strong>Drain state</strong><div><em>AggressiveDrain</em>, <em>Recovery</em>, <em>InteractiveGuarded</em>, <em>GpuScalingBlocked</em>.</div></div>
+            <div><strong>Source</strong><div><code>embedder.rs</code></div></div>
+            <div><strong>Rôle</strong><div>État synthétique de l’orchestrateur côté vectorisation.</div></div>
+          </div>
+          <div class="row">
+            <div><strong>Project/system status</strong><div>Expose provider effectif, pression service, backlog queues, runtime metrics.</div></div>
+            <div><strong>Source</strong><div><code>tools_system.rs</code></div></div>
+            <div><strong>Rôle</strong><div>Surface de lecture opérateur et LLM.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="tag">Garde-fous de design</div>
+        <div class="mini-grid">
+          <div class="mini">
+            <strong>Simple d’abord</strong>
+            <div>Heuristiques explicables et monotones avant tout MPC ou optimisation opaque.</div>
+          </div>
+          <div class="mini">
+            <strong>Une vanne à la fois</strong>
+            <div>Éviter d’ajuster simultanément plusieurs paramètres tant que la causalité n’est pas claire.</div>
+          </div>
+          <div class="mini">
+            <strong>Fermer vite, ouvrir lentement</strong>
+            <div>Réduire rapidement le débit si MCP, RAM ou CPU sortent de l’enveloppe, puis rouvrir par petits pas.</div>
+          </div>
+          <div class="mini">
+            <strong>Historiser chaque décision</strong>
+            <div>Tracer les changements de vannes, les mesures observées et les effets pour apprendre sans dériver.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

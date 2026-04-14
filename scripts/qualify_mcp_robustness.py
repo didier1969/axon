@@ -243,7 +243,23 @@ def build_request_specs(project: str, soll_project: str, query: str, symbol: str
                 "method": "tools/call",
                 "params": {
                     "name": "soll_work_plan",
-                    "arguments": {"project_slug": soll_project, "format": "json", "top": 3, "limit": 10},
+                    "arguments": {"project_code": soll_project, "format": "json", "top": 3, "limit": 10},
+                },
+            },
+        ),
+        RequestSpec(
+            "retrieve_context",
+            {
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "retrieve_context",
+                    "arguments": {
+                        "question": f"Where is {symbol} wired?",
+                        "project": project,
+                        "token_budget": 900,
+                    },
                 },
             },
         ),
@@ -507,7 +523,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--project", default="BookingSystem", help="Project scope for project-aware MCP tools")
     parser.add_argument("--query", default="booking", help="Query probe used for search-oriented tools")
     parser.add_argument("--symbol", default="parse_batch", help="Symbol probe used for symbol-oriented tools")
-    parser.add_argument("--soll-project", default="AXO", help="SOLL project slug for soll_work_plan")
+    parser.add_argument("--soll-project", default="AXO", help="SOLL project code for soll_work_plan")
     parser.add_argument("--label", default="mcp-robustness", help="Run label")
     parser.add_argument("--output-root", default=str(RUNS_ROOT), help=f"Run artifacts root (default: {RUNS_ROOT})")
     parser.add_argument("--reset-ist", action="store_true", help="Delete ist.db and ist.db.wal before each mode")

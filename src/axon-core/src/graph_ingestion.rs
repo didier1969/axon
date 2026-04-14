@@ -41,6 +41,13 @@ pub struct FileVectorizationWork {
     pub resumed_after_interactive_pause: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileVectorizationLeaseSnapshot {
+    pub file_path: String,
+    pub claim_token: String,
+    pub lease_epoch: u64,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileLifecycleEvent {
     pub file_path: String,
@@ -155,12 +162,14 @@ fn graph_projection_queue_upsert(
 fn file_vectorization_queue_upsert_if_needed(file_path: &str, now_ms: i64) -> String {
     let safe_path = file_path.replace('\'', "''");
     format!(
-        "INSERT INTO FileVectorizationQueue (file_path, status, status_reason, attempts, queued_at, last_error_reason, last_attempt_at, claim_token, claimed_at_ms) \
-         SELECT path, 'queued', NULL, 0, {}, NULL, NULL, NULL, NULL \
+        "INSERT INTO FileVectorizationQueue (file_path, status, status_reason, attempts, queued_at, last_error_reason, last_attempt_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) \
+         SELECT path, 'queued', NULL, 0, {}, NULL, NULL, NULL, NULL, NULL, NULL, 0 \
          FROM File \
          WHERE path = '{}' \
            AND graph_ready = TRUE \
            AND vector_ready = FALSE \
+           AND status NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+           AND file_stage NOT IN ('deleted', 'skipped', 'oversized') \
          ON CONFLICT(file_path) DO UPDATE \
          SET status = 'queued', \
          status_reason = NULL, \
@@ -169,7 +178,10 @@ fn file_vectorization_queue_upsert_if_needed(file_path: &str, now_ms: i64) -> St
          last_error_reason = NULL, \
          last_attempt_at = NULL, \
          claim_token = NULL, \
-         claimed_at_ms = NULL",
+         claimed_at_ms = NULL, \
+         lease_heartbeat_at_ms = NULL, \
+         lease_owner = NULL, \
+         lease_epoch = 0",
         now_ms, safe_path, now_ms
     )
 }
@@ -319,11 +331,9 @@ impl GraphStore {
         let bucket_end_ms = bucket_start_ms.saturating_add(3_600_000);
         let model_id = Self::escape_sql(model_id);
         self.execute(&format!(
-            "DELETE FROM HourlyVectorizationRollup WHERE bucket_start_ms = {} AND model_id = '{}';",
-            bucket_start_ms, model_id
-        ))?;
-        self.execute(&format!(
-            "INSERT INTO HourlyVectorizationRollup (bucket_start_ms, project_code, model_id, chunks_embedded, files_vector_ready, batches, fetch_ms_total, embed_ms_total, db_write_ms_total, mark_done_ms_total) \
+            "BEGIN TRANSACTION; \
+             DELETE FROM HourlyVectorizationRollup WHERE bucket_start_ms = {} AND model_id = '{}'; \
+             INSERT INTO HourlyVectorizationRollup (bucket_start_ms, project_code, model_id, chunks_embedded, files_vector_ready, batches, fetch_ms_total, embed_ms_total, db_write_ms_total, mark_done_ms_total) \
              WITH chunk_rollup AS ( \
                  SELECT c.project_code AS project_code, COUNT(*) AS chunks_embedded \
                  FROM ChunkEmbedding ce \
@@ -347,6 +357,9 @@ impl GraphStore {
                  UNION \
                  SELECT project_code FROM file_rollup \
              ), \
+             project_counts AS ( \
+                 SELECT COUNT(*) AS project_count FROM project_keys \
+             ), \
              batch_rollup AS ( \
                  SELECT COUNT(*) AS batches, \
                         COALESCE(SUM(fetch_ms), 0) AS fetch_ms_total, \
@@ -364,34 +377,38 @@ impl GraphStore {
                     COALESCE(cr.chunks_embedded, 0), \
                     COALESCE(fr.files_vector_ready, 0), \
                     CASE \
-                        WHEN row_number() OVER (ORDER BY pk.project_code) = 1 \
+                        WHEN pc.project_count = 1 \
                         THEN COALESCE(br.batches, 0) \
                         ELSE 0 \
                     END AS batches, \
                     CASE \
-                        WHEN row_number() OVER (ORDER BY pk.project_code) = 1 \
+                        WHEN pc.project_count = 1 \
                         THEN COALESCE(br.fetch_ms_total, 0) \
                         ELSE 0 \
                     END AS fetch_ms_total, \
                     CASE \
-                        WHEN row_number() OVER (ORDER BY pk.project_code) = 1 \
+                        WHEN pc.project_count = 1 \
                         THEN COALESCE(br.embed_ms_total, 0) \
                         ELSE 0 \
                     END AS embed_ms_total, \
                     CASE \
-                        WHEN row_number() OVER (ORDER BY pk.project_code) = 1 \
+                        WHEN pc.project_count = 1 \
                         THEN COALESCE(br.db_write_ms_total, 0) \
                         ELSE 0 \
                     END AS db_write_ms_total, \
                     CASE \
-                        WHEN row_number() OVER (ORDER BY pk.project_code) = 1 \
+                        WHEN pc.project_count = 1 \
                         THEN COALESCE(br.mark_done_ms_total, 0) \
                         ELSE 0 \
                     END AS mark_done_ms_total \
              FROM project_keys pk \
              LEFT JOIN chunk_rollup cr ON cr.project_code = pk.project_code \
              LEFT JOIN file_rollup fr ON fr.project_code = pk.project_code \
-             CROSS JOIN batch_rollup br;",
+             CROSS JOIN batch_rollup br \
+             CROSS JOIN project_counts pc; \
+             COMMIT;",
+            bucket_start_ms,
+            model_id,
             model_id,
             bucket_start_ms,
             bucket_end_ms,
@@ -526,7 +543,12 @@ impl GraphStore {
         if Self::is_globally_qualified_symbol(name) {
             format!("{}::{}", project_code, name)
         } else {
-            format!("{}::{}::{}", project_code, Self::symbol_path_namespace(path), name)
+            format!(
+                "{}::{}::{}",
+                project_code,
+                Self::symbol_path_namespace(path),
+                name
+            )
         }
     }
 
@@ -641,12 +663,7 @@ impl GraphStore {
             .collect::<Vec<_>>();
         for (path, project, size, mtime, priority, source) in dedup_file_batch_rows(&batch) {
             queries.extend(Self::upsert_file_queries(
-                &path,
-                &project,
-                size,
-                mtime,
-                priority,
-                source,
+                &path, &project, size, mtime, priority, source,
             ));
         }
         self.execute_batch(&queries)
@@ -1007,10 +1024,7 @@ impl GraphStore {
         ))
     }
 
-    pub fn enqueue_graph_projection_refresh_batch(
-        &self,
-        work: &[(&str, &str, i64)],
-    ) -> Result<()> {
+    pub fn enqueue_graph_projection_refresh_batch(&self, work: &[(&str, &str, i64)]) -> Result<()> {
         if work.is_empty() {
             return Ok(());
         }
@@ -1231,7 +1245,9 @@ impl GraphStore {
 
     pub fn enqueue_file_vectorization_refresh(&self, file_path: &str) -> Result<()> {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        self.execute(&file_vectorization_queue_upsert_if_needed(file_path, now_ms))
+        self.execute(&file_vectorization_queue_upsert_if_needed(
+            file_path, now_ms,
+        ))
     }
 
     pub fn fetch_pending_file_vectorization_work(
@@ -1255,34 +1271,29 @@ impl GraphStore {
                  last_attempt_at = {}, \
                  attempts = attempts + 1, \
                  claim_token = '{}', \
-                 claimed_at_ms = {} \
+                 claimed_at_ms = {}, \
+                 lease_heartbeat_at_ms = {}, \
+                 lease_owner = 'vector', \
+                 lease_epoch = COALESCE(lease_epoch, 0) \
              WHERE status IN ('queued', 'paused_for_interactive_priority') \
                AND file_path IN ( \
                    SELECT file_path \
-                   FROM FileVectorizationQueue \
-                   WHERE status IN ('queued', 'paused_for_interactive_priority') \
-                     AND (next_eligible_at_ms IS NULL OR next_eligible_at_ms <= {}) \
-                   ORDER BY COALESCE(queued_at, 0), file_path \
+                   FROM FileVectorizationQueue fq \
+                   LEFT JOIN File f ON f.path = fq.file_path \
+                   WHERE fq.status IN ('queued', 'paused_for_interactive_priority') \
+                     AND COALESCE(f.vector_ready, FALSE) = FALSE \
+                     AND COALESCE(f.status, '') NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+                     AND COALESCE(f.file_stage, '') NOT IN ('deleted', 'skipped', 'oversized') \
+                     AND (fq.next_eligible_at_ms IS NULL OR fq.next_eligible_at_ms <= {}) \
+                   ORDER BY COALESCE(queued_at, 0), fq.file_path \
                    LIMIT {} \
                )",
             now_ms,
             Self::escape_sql(&claim_token),
             now_ms,
             now_ms,
+            now_ms,
             count
-        ))?;
-        self.execute(&format!(
-            "UPDATE File \
-             SET vectorization_started_at_ms = COALESCE(vectorization_started_at_ms, {}), \
-                 last_state_change_at_ms = {} \
-             WHERE path IN ( \
-                 SELECT file_path \
-                 FROM FileVectorizationQueue \
-                 WHERE claim_token = '{}' \
-             )",
-            now_ms,
-            now_ms,
-            Self::escape_sql(&claim_token)
         ))?;
 
         let raw = self.query_json(&format!(
@@ -1317,6 +1328,37 @@ impl GraphStore {
         }
 
         Ok(queue)
+    }
+
+    pub fn mark_file_vectorization_started(&self, work: &[FileVectorizationWork]) -> Result<usize> {
+        if work.is_empty() {
+            return Ok(0);
+        }
+
+        let predicates = work
+            .iter()
+            .map(|item| format!("(path = '{}')", Self::escape_sql(&item.file_path)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let started = usize::try_from(self.query_count(&format!(
+            "SELECT count(*) \
+             FROM File \
+             WHERE vectorization_started_at_ms IS NULL \
+               AND ({})",
+            predicates
+        ))?)
+        .unwrap_or(0);
+
+        self.execute(&format!(
+            "UPDATE File \
+             SET vectorization_started_at_ms = COALESCE(vectorization_started_at_ms, {}), \
+                 last_state_change_at_ms = {} \
+             WHERE ({})",
+            now_ms, now_ms, predicates
+        ))?;
+
+        Ok(started)
     }
 
     pub fn pause_file_vectorization_work_for_interactive_priority(
@@ -1360,7 +1402,10 @@ impl GraphStore {
                  next_eligible_at_ms = {}, \
                  interactive_pause_count = COALESCE(interactive_pause_count, 0) + 1, \
                  claim_token = NULL, \
-                 claimed_at_ms = NULL \
+                 claimed_at_ms = NULL, \
+                 lease_heartbeat_at_ms = NULL, \
+                 lease_owner = NULL, \
+                 lease_epoch = COALESCE(lease_epoch, 0) + 1 \
              WHERE status = 'inflight' \
                AND COALESCE(interactive_pause_count, 0) < {} \
                AND ({})",
@@ -1385,9 +1430,195 @@ impl GraphStore {
 
         self.execute(&format!(
             "DELETE FROM FileVectorizationQueue \
-             WHERE status = 'inflight' AND ({})",
+             WHERE ({})",
             predicates
         ))
+    }
+
+    pub fn refresh_inflight_file_vectorization_claims(
+        &self,
+        work: &[FileVectorizationWork],
+    ) -> Result<usize> {
+        self.refresh_file_vectorization_leases_for_owner(work, "vector")
+    }
+
+    pub fn refresh_file_vectorization_leases_for_owner(
+        &self,
+        work: &[FileVectorizationWork],
+        lease_owner: &str,
+    ) -> Result<usize> {
+        if work.is_empty() {
+            return Ok(0);
+        }
+
+        let predicates = work
+            .iter()
+            .map(|item| format!("(file_path = '{}')", Self::escape_sql(&item.file_path)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let refreshed = usize::try_from(self.query_count(&format!(
+            "SELECT count(*) FROM FileVectorizationQueue \
+             WHERE status = 'inflight' \
+               AND claim_token IS NOT NULL \
+               AND COALESCE(lease_owner, '') = '{}' \
+               AND ({})",
+            Self::escape_sql(lease_owner),
+            predicates
+        ))?)
+        .unwrap_or(0);
+
+        if refreshed == 0 {
+            return Ok(0);
+        }
+
+        self.execute(&format!(
+            "UPDATE FileVectorizationQueue \
+             SET claimed_at_ms = {}, \
+                 lease_heartbeat_at_ms = {}, \
+                 last_attempt_at = {} \
+             WHERE status = 'inflight' \
+               AND claim_token IS NOT NULL \
+               AND COALESCE(lease_owner, '') = '{}' \
+               AND ({})",
+            now_ms,
+            now_ms,
+            now_ms,
+            Self::escape_sql(lease_owner),
+            predicates
+        ))?;
+
+        Ok(refreshed)
+    }
+
+    pub fn transfer_file_vectorization_lease_owner(
+        &self,
+        snapshots: &[FileVectorizationLeaseSnapshot],
+        from_owner: &str,
+        to_owner: &str,
+    ) -> Result<Vec<FileVectorizationLeaseSnapshot>> {
+        if snapshots.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let predicates = snapshots
+            .iter()
+            .map(|item| {
+                format!(
+                    "(file_path = '{}' AND claim_token = '{}' AND COALESCE(lease_epoch, 0) = {})",
+                    Self::escape_sql(&item.file_path),
+                    Self::escape_sql(&item.claim_token),
+                    item.lease_epoch
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let transferred = usize::try_from(self.query_count(&format!(
+            "SELECT count(*) FROM FileVectorizationQueue \
+             WHERE status = 'inflight' \
+               AND claim_token IS NOT NULL \
+               AND COALESCE(lease_owner, '') = '{}' \
+               AND ({})",
+            Self::escape_sql(from_owner),
+            predicates
+        ))?)
+        .unwrap_or(0);
+
+        if transferred != snapshots.len() {
+            return Err(anyhow!(
+                "lease owner transfer refused: expected {} rows, matched {}",
+                snapshots.len(),
+                transferred
+            ));
+        }
+
+        self.execute(&format!(
+            "UPDATE FileVectorizationQueue \
+             SET lease_owner = '{}', \
+                 lease_epoch = COALESCE(lease_epoch, 0) + 1, \
+                 lease_heartbeat_at_ms = {}, \
+                 last_attempt_at = {} \
+             WHERE status = 'inflight' \
+               AND claim_token IS NOT NULL \
+               AND COALESCE(lease_owner, '') = '{}' \
+               AND ({})",
+            Self::escape_sql(to_owner),
+            now_ms,
+            now_ms,
+            Self::escape_sql(from_owner),
+            predicates
+        ))?;
+
+        Ok(snapshots
+            .iter()
+            .map(|item| FileVectorizationLeaseSnapshot {
+                file_path: item.file_path.clone(),
+                claim_token: item.claim_token.clone(),
+                lease_epoch: item.lease_epoch.saturating_add(1),
+            })
+            .collect())
+    }
+
+    pub fn capture_file_vectorization_lease_snapshots(
+        &self,
+        work: &[FileVectorizationWork],
+        lease_owner: &str,
+    ) -> Result<Vec<FileVectorizationLeaseSnapshot>> {
+        if work.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let predicates = work
+            .iter()
+            .map(|item| format!("(file_path = '{}')", Self::escape_sql(&item.file_path)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let raw = self.query_json(&format!(
+            "SELECT file_path, claim_token, COALESCE(lease_epoch, 0) \
+             FROM FileVectorizationQueue \
+             WHERE status = 'inflight' \
+               AND claim_token IS NOT NULL \
+               AND COALESCE(lease_owner, '') = '{}' \
+               AND ({}) \
+             ORDER BY file_path",
+            Self::escape_sql(lease_owner),
+            predicates
+        ))?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut snapshots = rows
+            .into_iter()
+            .filter_map(|row| {
+                let file_path = row.first()?.as_str()?.to_string();
+                let claim_token = row.get(1)?.as_str()?.to_string();
+                let lease_epoch = parse_u64_field(row.get(2)?).unwrap_or(0);
+                Some(FileVectorizationLeaseSnapshot {
+                    file_path,
+                    claim_token,
+                    lease_epoch,
+                })
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+
+        let mut expected_paths = work
+            .iter()
+            .map(|item| item.file_path.clone())
+            .collect::<Vec<_>>();
+        expected_paths.sort();
+        let actual_paths = snapshots
+            .iter()
+            .map(|item| item.file_path.clone())
+            .collect::<Vec<_>>();
+        if actual_paths != expected_paths {
+            return Err(anyhow!(
+                "lease snapshot capture mismatch: expected {:?}, got {:?}",
+                expected_paths,
+                actual_paths
+            ));
+        }
+
+        Ok(snapshots)
     }
 
     pub fn mark_file_vectorization_work_failed(
@@ -1413,7 +1644,10 @@ impl GraphStore {
                 last_attempt_at = {}, \
                 attempts = attempts + 1, \
                 claim_token = NULL, \
-                claimed_at_ms = NULL \
+                claimed_at_ms = NULL, \
+                lease_heartbeat_at_ms = NULL, \
+                lease_owner = NULL, \
+                lease_epoch = COALESCE(lease_epoch, 0) + 1 \
              WHERE status = 'inflight' AND ({})",
             Self::escape_sql(reason),
             chrono::Utc::now().timestamp_millis(),
@@ -1438,7 +1672,10 @@ impl GraphStore {
              SET status = 'queued', \
                  status_reason = 'recovered_after_stale_inflight', \
                  claim_token = NULL, \
-                 claimed_at_ms = NULL \
+                 claimed_at_ms = NULL, \
+                 lease_heartbeat_at_ms = NULL, \
+                 lease_owner = NULL, \
+                 lease_epoch = COALESCE(lease_epoch, 0) + 1 \
              WHERE status = 'inflight'",
         )
     }
@@ -1451,10 +1688,15 @@ impl GraphStore {
         let cutoff_ms = now_ms.saturating_sub(max_claim_age_ms.max(0));
         let recovered = usize::try_from(self.query_count(&format!(
             "SELECT count(*) \
-             FROM FileVectorizationQueue \
-             WHERE status = 'inflight' \
-               AND claimed_at_ms IS NOT NULL \
-               AND claimed_at_ms <= {}",
+             FROM FileVectorizationQueue fq \
+             LEFT JOIN File f ON f.path = fq.file_path \
+             WHERE fq.status = 'inflight' \
+               AND COALESCE(f.vector_ready, FALSE) = FALSE \
+               AND fq.claim_token IS NOT NULL \
+               AND COALESCE(f.status, '') NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+               AND COALESCE(f.file_stage, '') NOT IN ('deleted', 'skipped', 'oversized') \
+               AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) IS NOT NULL \
+               AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) <= {}",
             cutoff_ms
         ))?)
         .unwrap_or(0);
@@ -1468,11 +1710,26 @@ impl GraphStore {
              SET status = 'queued', \
                  status_reason = 'recovered_after_stale_inflight', \
                  claim_token = NULL, \
-                 claimed_at_ms = NULL \
+                 claimed_at_ms = NULL, \
+                 lease_heartbeat_at_ms = NULL, \
+                 lease_owner = NULL, \
+                 lease_epoch = COALESCE(lease_epoch, 0) + 1 \
              WHERE status = 'inflight' \
-               AND claimed_at_ms IS NOT NULL \
-               AND claimed_at_ms <= {}",
-            cutoff_ms
+               AND file_path IN ( \
+                   SELECT fq.file_path \
+                   FROM FileVectorizationQueue fq \
+                   LEFT JOIN File f ON f.path = fq.file_path \
+                   WHERE fq.status = 'inflight' \
+                     AND COALESCE(f.vector_ready, FALSE) = FALSE \
+                     AND fq.claim_token IS NOT NULL \
+                     AND COALESCE(f.status, '') NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+                     AND COALESCE(f.file_stage, '') NOT IN ('deleted', 'skipped', 'oversized') \
+                     AND COALESCE(fq.lease_heartbeat_at_ms, fq.claimed_at_ms) IS NOT NULL \
+                     AND COALESCE(fq.lease_heartbeat_at_ms, fq.claimed_at_ms) <= {} \
+               ) \
+               AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) IS NOT NULL \
+               AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) <= {}",
+            cutoff_ms, cutoff_ms
         ))?;
 
         Ok(recovered)
@@ -1485,6 +1742,9 @@ impl GraphStore {
              WHERE status IN ('indexed', 'indexed_degraded') \
                AND file_stage = 'graph_indexed' \
                AND graph_ready = TRUE \
+               AND vector_ready = FALSE \
+               AND status NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+               AND file_stage NOT IN ('deleted', 'skipped', 'oversized') \
                AND NOT EXISTS ( \
                    SELECT 1 \
                    FROM FileVectorizationQueue fvq \
@@ -1493,12 +1753,11 @@ impl GraphStore {
                AND EXISTS ( \
                    SELECT 1 \
                    FROM Chunk c \
-                   JOIN CONTAINS co ON co.target_id = c.source_id \
                    LEFT JOIN ChunkEmbedding ce \
                      ON ce.chunk_id = c.id \
                     AND ce.model_id = '{}' \
                     AND ce.source_hash = c.content_hash \
-                   WHERE co.source_id = File.path \
+                   WHERE c.file_path = File.path \
                      AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
                )",
             Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
@@ -1519,7 +1778,7 @@ impl GraphStore {
             let Some(file_path) = row.first().and_then(|value| value.as_str()) else {
                 continue;
             };
-                queries.push(file_vectorization_queue_upsert_if_needed(file_path, now_ms));
+            queries.push(file_vectorization_queue_upsert_if_needed(file_path, now_ms));
         }
 
         let inserted = queries.len();
@@ -1671,9 +1930,10 @@ impl GraphStore {
                     }
                     if enqueue_vectorization
                         && matches!(
-                        processing_mode,
-                        ProcessingMode::Full | ProcessingMode::StructureOnly
-                    ) {
+                            processing_mode,
+                            ProcessingMode::Full | ProcessingMode::StructureOnly
+                        )
+                    {
                         file_vectorization_paths.push(path.clone());
                     }
                     let project_code = extraction.project_code.as_deref().unwrap_or("global");
@@ -1933,7 +2193,11 @@ impl GraphStore {
         }
         queries.extend(insert_unique_relation_queries("CONTAINS", &contains_values));
         queries.extend(replace_relation_queries("CALLS", &calls_values, 200));
-        queries.extend(replace_relation_queries("CALLS_NIF", &calls_nif_values, 200));
+        queries.extend(replace_relation_queries(
+            "CALLS_NIF",
+            &calls_nif_values,
+            200,
+        ));
         if !file_vectorization_paths.is_empty() {
             file_vectorization_paths.sort();
             file_vectorization_paths.dedup();
@@ -1962,8 +2226,9 @@ impl GraphStore {
             let events = graph_ready_paths
                 .into_iter()
                 .filter_map(|path| {
-                    metadata.get(&path).map(|(project_code, worker_id, trace_id)| {
-                        FileLifecycleEvent {
+                    metadata
+                        .get(&path)
+                        .map(|(project_code, worker_id, trace_id)| FileLifecycleEvent {
                             file_path: path,
                             project_code: project_code.clone(),
                             stage: "graph".to_string(),
@@ -1973,8 +2238,7 @@ impl GraphStore {
                             worker_id: *worker_id,
                             trace_id: trace_id.clone(),
                             run_id: None,
-                        }
-                    })
+                        })
                 })
                 .collect::<Vec<_>>();
             if !events.is_empty() {
@@ -2023,7 +2287,7 @@ impl GraphStore {
                     return Err(anyhow!("Pending Fetch Error (CString): {:?}", e));
                 }
             };
-            
+
             if !exec_fn(*guard, c_query.as_ptr()) {
                 if let Ok(rb) = CString::new("ROLLBACK;") {
                     let _ = exec_fn(*guard, rb.as_ptr());
@@ -2043,7 +2307,11 @@ impl GraphStore {
             Ok(r) => r,
             Err(e) => {
                 unsafe {
-                    if let Ok(exec_fn) = self.pool.lib.get::<LibSymbol<ExecFunc>>(b"duckdb_execute\0") {
+                    if let Ok(exec_fn) = self
+                        .pool
+                        .lib
+                        .get::<LibSymbol<ExecFunc>>(b"duckdb_execute\0")
+                    {
                         if let Ok(rb_query) = CString::new("ROLLBACK;") {
                             let _ = exec_fn(*guard, rb_query.as_ptr());
                         }
@@ -2136,7 +2404,7 @@ impl GraphStore {
                     return Err(anyhow!("Claim Paths Error (CString): {:?}", e));
                 }
             };
-            
+
             if !exec_fn(*guard, c_query.as_ptr()) {
                 if let Ok(rb) = CString::new("ROLLBACK;") {
                     let _ = exec_fn(*guard, rb.as_ptr());
@@ -2156,7 +2424,11 @@ impl GraphStore {
             Ok(r) => r,
             Err(e) => {
                 unsafe {
-                    if let Ok(exec_fn) = self.pool.lib.get::<LibSymbol<ExecFunc>>(b"duckdb_execute\0") {
+                    if let Ok(exec_fn) = self
+                        .pool
+                        .lib
+                        .get::<LibSymbol<ExecFunc>>(b"duckdb_execute\0")
+                    {
                         if let Ok(rb_query) = CString::new("ROLLBACK;") {
                             let _ = exec_fn(*guard, rb_query.as_ptr());
                         }
@@ -2187,20 +2459,35 @@ impl GraphStore {
     }
 
     pub fn mark_file_oversized_for_current_budget(&self, path: &str) -> Result<()> {
-        self.execute(&format!(
-            "UPDATE File \
-             SET status = 'oversized_for_current_budget', \
-                 file_stage = 'oversized', \
-                 graph_ready = FALSE, \
-                 vector_ready = FALSE, \
-                 worker_id = NULL, \
-                 last_error_reason = 'estimated cost exceeds current budget envelope', \
-                 status_reason = 'oversized_for_current_budget', \
-                 defer_count = 0, \
-                 last_deferred_at_ms = NULL \
-             WHERE path = '{}';",
-            Self::escape_sql(path)
-        ))
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let queries = vec![
+            format!(
+                "UPDATE File \
+                 SET status = 'oversized_for_current_budget', \
+                     file_stage = 'oversized', \
+                     graph_ready = FALSE, \
+                     vector_ready = FALSE, \
+                     worker_id = NULL, \
+                     last_error_reason = 'estimated cost exceeds current budget envelope', \
+                     status_reason = 'oversized_for_current_budget', \
+                     defer_count = 0, \
+                     last_deferred_at_ms = NULL \
+                 WHERE path = '{}';",
+                Self::escape_sql(path)
+            ),
+            format!(
+                "DELETE FROM FileVectorizationQueue WHERE file_path = '{}';",
+                Self::escape_sql(path)
+            ),
+            format!(
+                "INSERT INTO FileLifecycleEvent (file_path, project_code, stage, status, reason, at_ms, worker_id, trace_id, run_id) \
+                 SELECT path, COALESCE(project_code, 'proj'), 'vectorization', 'oversized_for_current_budget', 'estimated cost exceeds current budget envelope', {}, NULL, NULL, NULL \
+                 FROM File WHERE path = '{}';",
+                now_ms,
+                Self::escape_sql(path)
+            ),
+        ];
+        self.execute_batch(&queries)
     }
 
     pub fn mark_pending_files_deferred(&self, paths: &[String]) -> Result<()> {
@@ -2349,7 +2636,10 @@ impl GraphStore {
         Ok(chunks)
     }
 
-    pub fn fetch_segments_for_file(&self, file_path: &str) -> Result<Vec<(String, String, String)>> {
+    pub fn fetch_segments_for_file(
+        &self,
+        file_path: &str,
+    ) -> Result<Vec<(String, String, String)>> {
         let query = format!(
             "SELECT c.id, c.content, c.content_hash \
              FROM Chunk c \
@@ -2397,8 +2687,7 @@ impl GraphStore {
                    AND ce.source_hash = c.content_hash \
              ) \
             )",
-            Self::escape_sql(file_path)
-            ,
+            Self::escape_sql(file_path),
             Self::escape_sql(model_id)
         );
 
@@ -2430,20 +2719,26 @@ impl GraphStore {
                  vector_ready_at_ms = COALESCE(vector_ready_at_ms, {}), \
                  last_state_change_at_ms = {} \
              WHERE graph_ready = TRUE AND path IN ({})",
-            now_ms,
-            now_ms,
-            filter
+            now_ms, now_ms, filter
         ))
     }
 
     pub fn finalize_file_vectorization_success_batch(
         &self,
         work: &[FileVectorizationWork],
+        lease_snapshots: &[FileVectorizationLeaseSnapshot],
         _model_id: &str,
         projection_radius: i64,
     ) -> Result<()> {
         if work.is_empty() {
             return Ok(());
+        }
+        if lease_snapshots.len() != work.len() {
+            return Err(anyhow!(
+                "finalize refused: expected {} lease snapshots, got {}",
+                work.len(),
+                lease_snapshots.len()
+            ));
         }
 
         let paths = work
@@ -2451,6 +2746,33 @@ impl GraphStore {
             .map(|item| format!("'{}'", Self::escape_sql(&item.file_path)))
             .collect::<Vec<_>>()
             .join(",");
+        let lease_predicates = lease_snapshots
+            .iter()
+            .map(|item| {
+                format!(
+                    "(file_path = '{}' AND claim_token = '{}' AND COALESCE(lease_epoch, 0) = {} AND COALESCE(lease_owner, '') = 'finalize')",
+                    Self::escape_sql(&item.file_path),
+                    Self::escape_sql(&item.claim_token),
+                    item.lease_epoch
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let matched = usize::try_from(self.query_count(&format!(
+            "SELECT count(*) FROM FileVectorizationQueue \
+             WHERE status = 'inflight' \
+               AND claim_token IS NOT NULL \
+               AND ({})",
+            lease_predicates
+        ))?)
+        .unwrap_or(0);
+        if matched != lease_snapshots.len() {
+            return Err(anyhow!(
+                "finalize refused: expected {} finalize-owned rows, matched {}",
+                lease_snapshots.len(),
+                matched
+            ));
+        }
 
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut queries = vec![
@@ -2459,15 +2781,21 @@ impl GraphStore {
                  SET vector_ready = TRUE, \
                      vector_ready_at_ms = COALESCE(vector_ready_at_ms, {}), \
                      last_state_change_at_ms = {} \
-                 WHERE graph_ready = TRUE AND path IN ({})",
-                now_ms,
-                now_ms,
-                paths
+                 WHERE graph_ready = TRUE \
+                   AND path IN ({}) \
+                   AND EXISTS ( \
+                       SELECT 1 FROM FileVectorizationQueue fvq \
+                       WHERE fvq.file_path = File.path \
+                         AND fvq.status = 'inflight' \
+                         AND ({}) \
+                   )",
+                now_ms, now_ms, paths, lease_predicates
             ),
             format!(
                 "DELETE FROM FileVectorizationQueue \
-                 WHERE status = 'inflight' AND file_path IN ({})",
-                paths
+                 WHERE status = 'inflight' \
+                   AND ({})",
+                lease_predicates
             ),
         ];
 
@@ -2481,13 +2809,18 @@ impl GraphStore {
         }
 
         self.execute_batch(&queries)?;
-        let metadata =
-            self.fetch_file_project_metadata(&work.iter().map(|item| item.file_path.clone()).collect::<Vec<_>>())?;
+        let metadata = self.fetch_file_project_metadata(
+            &work
+                .iter()
+                .map(|item| item.file_path.clone())
+                .collect::<Vec<_>>(),
+        )?;
         let events = work
             .iter()
             .filter_map(|item| {
-                metadata.get(&item.file_path).map(|(project_code, worker_id, trace_id)| {
-                    FileLifecycleEvent {
+                metadata
+                    .get(&item.file_path)
+                    .map(|(project_code, worker_id, trace_id)| FileLifecycleEvent {
                         file_path: item.file_path.clone(),
                         project_code: project_code.clone(),
                         stage: "vectorization".to_string(),
@@ -2497,14 +2830,16 @@ impl GraphStore {
                         worker_id: *worker_id,
                         trace_id: trace_id.clone(),
                         run_id: None,
-                    }
-                })
+                    })
             })
             .collect::<Vec<_>>();
         if !events.is_empty() {
             self.append_file_lifecycle_events(&events)?;
         }
-        self.refresh_hourly_vectorization_rollup(hourly_bucket_start_ms(now_ms), CHUNK_EMBEDDING_MODEL_ID)?;
+        self.refresh_hourly_vectorization_rollup(
+            hourly_bucket_start_ms(now_ms),
+            CHUNK_EMBEDDING_MODEL_ID,
+        )?;
         Ok(())
     }
 
@@ -2648,9 +2983,10 @@ impl GraphStore {
 mod tests {
     use super::{
         dedup_file_batch_rows, insert_unique_relation_queries, replace_relation_queries,
-        sort_and_dedup_sql_tuples, FileUpsertSource, FileVectorizationWork,
+        sort_and_dedup_sql_tuples, FileUpsertSource, FileVectorizationLeaseSnapshot,
+        FileVectorizationWork,
     };
-    use crate::embedding_contract::CHUNK_MODEL_ID;
+    use crate::embedding_contract::{CHUNK_MODEL_ID, DIMENSION};
     use crate::parser::{ExtractionResult, Relation, Symbol};
     use crate::queue::ProcessingMode;
     use crate::worker::DbWriteTask;
@@ -2797,11 +3133,14 @@ mod tests {
             .unwrap();
 
         store
-            .update_chunk_embeddings(CHUNK_MODEL_ID, &[(
-                "chunk-1".to_string(),
-                "hash-1".to_string(),
-                vec![0.1_f32; crate::embedding_contract::DIMENSION],
-            )])
+            .update_chunk_embeddings(
+                CHUNK_MODEL_ID,
+                &[(
+                    "chunk-1".to_string(),
+                    "hash-1".to_string(),
+                    vec![0.1_f32; crate::embedding_contract::DIMENSION],
+                )],
+            )
             .unwrap();
 
         let embedded_at_ms = store
@@ -2831,8 +3170,8 @@ mod tests {
             .unwrap();
         store
             .execute(
-                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms) \
-                 VALUES ('/tmp/vectorized.rs', 'inflight', 1, 'claim-1', 1)",
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) \
+                 VALUES ('/tmp/vectorized.rs', 'inflight', 1, 'claim-1', 1, 1, 'finalize', 1)",
             )
             .unwrap();
 
@@ -2841,6 +3180,11 @@ mod tests {
                 &[FileVectorizationWork {
                     file_path: "/tmp/vectorized.rs".to_string(),
                     resumed_after_interactive_pause: false,
+                }],
+                &[FileVectorizationLeaseSnapshot {
+                    file_path: "/tmp/vectorized.rs".to_string(),
+                    claim_token: "claim-1".to_string(),
+                    lease_epoch: 1,
                 }],
                 CHUNK_MODEL_ID,
                 2,
@@ -3086,10 +3430,10 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
             .execute(
-                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms) VALUES \
-                 ('/tmp/stale.rs', 'inflight', 1, 'claim-stale', 1_000), \
-                 ('/tmp/fresh.rs', 'inflight', 2, 'claim-fresh', 9_500), \
-                 ('/tmp/queued.rs', 'queued', 3, NULL, NULL)",
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms) VALUES \
+                 ('/tmp/stale.rs', 'inflight', 1, 'claim-stale', 1_000, 1_000), \
+                 ('/tmp/fresh.rs', 'inflight', 2, 'claim-fresh', 9_500, 9_500), \
+                 ('/tmp/queued.rs', 'queued', 3, NULL, NULL, NULL)",
             )
             .unwrap();
 
@@ -3136,6 +3480,160 @@ mod tests {
     }
 
     #[test]
+    fn refresh_inflight_file_vectorization_claims_updates_only_live_rows() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner) VALUES \
+                 ('/tmp/live.rs', 'inflight', 1, 'claim-live', 1_000, 1_000, 'vector'), \
+                 ('/tmp/queued.rs', 'queued', 2, NULL, NULL, NULL, NULL)",
+            )
+            .unwrap();
+
+        let refreshed = store
+            .refresh_inflight_file_vectorization_claims(&[FileVectorizationWork {
+                file_path: "/tmp/live.rs".to_string(),
+                resumed_after_interactive_pause: false,
+            }])
+            .unwrap();
+
+        assert_eq!(refreshed, 1);
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue \
+                     WHERE file_path = '/tmp/live.rs' \
+                       AND status = 'inflight' \
+                       AND claimed_at_ms > 1000 \
+                       AND lease_heartbeat_at_ms > 1000"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue \
+                     WHERE file_path = '/tmp/queued.rs' \
+                       AND status = 'queued' \
+                       AND claimed_at_ms IS NULL"
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn recover_stale_inflight_file_vectorization_work_respects_recent_lease_heartbeat() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms) VALUES \
+                 ('/tmp/live-tail.rs', 'inflight', 1, 'claim-live-tail', 1_000, 9_750)",
+            )
+            .unwrap();
+
+        let recovered = store
+            .recover_stale_inflight_file_vectorization_work(10_000, 1_000)
+            .unwrap();
+
+        assert_eq!(recovered, 0);
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue \
+                     WHERE file_path = '/tmp/live-tail.rs' \
+                       AND status = 'inflight' \
+                       AND claim_token = 'claim-live-tail' \
+                       AND lease_heartbeat_at_ms = 9750"
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn hourly_rollup_does_not_assign_batch_timings_to_multiple_projects() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store.execute(
+            "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
+             ('chunk-a', 'symbol', 'sym-a', 'proj-a', '/tmp/a.rs', 'function', 'fn a() {}', 'hash-a', 1, 1), \
+             ('chunk-b', 'symbol', 'sym-b', 'proj-b', '/tmp/b.rs', 'function', 'fn b() {}', 'hash-b', 1, 1)"
+        ).unwrap();
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, vector_ready, vector_ready_at_ms) VALUES \
+             ('/tmp/a.rs', 'proj-a', TRUE, 1000), \
+             ('/tmp/b.rs', 'proj-b', TRUE, 1000)",
+            )
+            .unwrap();
+        store
+            .update_chunk_embeddings(
+                "chunk-bge-large-en-v1.5",
+                &[
+                    (
+                        "chunk-a".to_string(),
+                        "hash-a".to_string(),
+                        vec![0.1; DIMENSION],
+                    ),
+                    (
+                        "chunk-b".to_string(),
+                        "hash-b".to_string(),
+                        vec![0.2; DIMENSION],
+                    ),
+                ],
+            )
+            .unwrap();
+        store
+            .record_vector_batch_run(&super::VectorBatchRun {
+                run_id: "run-1".to_string(),
+                started_at_ms: 900,
+                finished_at_ms: 1000,
+                provider: "cuda".to_string(),
+                model_id: "chunk-bge-large-en-v1.5".to_string(),
+                chunk_count: 2,
+                file_count: 2,
+                input_bytes: 100,
+                fetch_ms: 10,
+                embed_ms: 20,
+                db_write_ms: 30,
+                mark_done_ms: 40,
+                success: true,
+                error_reason: None,
+            })
+            .unwrap();
+
+        store
+            .refresh_hourly_vectorization_rollup(0, "chunk-bge-large-en-v1.5")
+            .unwrap();
+
+        let raw = store
+            .query_json(
+                "SELECT project_code, batches, fetch_ms_total, embed_ms_total, db_write_ms_total, mark_done_ms_total \
+                 FROM HourlyVectorizationRollup \
+                 WHERE bucket_start_ms = 0 AND model_id = 'chunk-bge-large-en-v1.5' \
+                 ORDER BY project_code",
+            )
+            .unwrap();
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(rows.len(), 2);
+        let as_u64 = |value: &serde_json::Value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().map(|raw| raw.max(0) as u64))
+                .or_else(|| value.as_f64().map(|raw| raw.max(0.0) as u64))
+                .unwrap_or(0)
+        };
+        for row in rows {
+            assert_eq!(as_u64(&row[1]), 0);
+            assert_eq!(as_u64(&row[2]), 0);
+            assert_eq!(as_u64(&row[3]), 0);
+            assert_eq!(as_u64(&row[4]), 0);
+            assert_eq!(as_u64(&row[5]), 0);
+        }
+    }
+
+    #[test]
     fn fetch_segments_for_file_reads_writer_when_reader_snapshot_is_stale() {
         use std::sync::atomic::Ordering;
 
@@ -3171,7 +3669,9 @@ mod tests {
 
         assert_eq!(
             store
-                .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/ready.rs'")
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/ready.rs'"
+                )
                 .unwrap(),
             0
         );
@@ -3284,6 +3784,35 @@ mod tests {
                 )
                 .unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn backfill_file_vectorization_queue_skips_oversized_files() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
+                 VALUES ('/tmp/oversized.rs', 'proj', 'oversized_for_current_budget', 1, 1, 100, 'oversized', TRUE, FALSE)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
+                 VALUES ('chunk-oversized', 'symbol', 'sym-oversized', 'proj', '/tmp/oversized.rs', 'function', 'body', 'hash-oversized', 1, 1)",
+            )
+            .unwrap();
+
+        let inserted = store.backfill_file_vectorization_queue().unwrap();
+
+        assert_eq!(inserted, 0);
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/oversized.rs'"
+                )
+                .unwrap(),
+            0
         );
     }
 }

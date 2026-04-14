@@ -1,5 +1,8 @@
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpServer};
-use crate::service_guard::{record_latency, ServiceKind};
+use crate::service_guard::{
+    mcp_request_finished_with_class, mcp_request_started_with_class, record_latency,
+    McpRequestClass, ServiceKind,
+};
 use axum::{
     extract::Extension,
     response::sse::{Event, Sse},
@@ -62,6 +65,8 @@ async fn handle_mcp_post(
 
     async move {
         let t0 = Instant::now();
+        let request_class = classify_mcp_request(&payload);
+        mcp_request_started_with_class(request_class);
         // Offload C-FFI / DB work to a blocking thread pool safely
         // No more mcp_active_flag: Zero-Sleep MVCC architecture handles concurrency.
         let response =
@@ -76,11 +81,55 @@ async fn handle_mcp_post(
                     None
                 }
             };
+        mcp_request_finished_with_class(request_class);
 
         Json(response)
     }
     .instrument(span)
     .await
+}
+
+fn classify_mcp_request(request: &JsonRpcRequest) -> McpRequestClass {
+    match request.method.as_str() {
+        "initialize" | "tools/list" => McpRequestClass::Observer,
+        "tools/call" => {
+            let tool_name = request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("name"))
+                .and_then(|value| value.as_str())
+                .map(|name| {
+                    name.strip_prefix("mcp_axon_")
+                        .or_else(|| name.strip_prefix("axon_"))
+                        .unwrap_or(name)
+                });
+            if tool_name.is_some_and(is_observer_tool_name) {
+                McpRequestClass::Observer
+            } else {
+                McpRequestClass::Control
+            }
+        }
+        _ => McpRequestClass::Control,
+    }
+}
+
+fn is_observer_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "status"
+            | "project_status"
+            | "snapshot_history"
+            | "snapshot_diff"
+            | "conception_view"
+            | "change_safety"
+            | "why"
+            | "path"
+            | "anomalies"
+            | "job_status"
+            | "debug"
+            | "health"
+            | "truth_check"
+    )
 }
 
 /// Compliant MCP SSE Endpoint
@@ -102,8 +151,12 @@ async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible>>> 
 #[cfg(test)]
 mod tests {
     use crate::graph::GraphStore;
-    use crate::mcp::McpServer;
-    use crate::mcp_http::app_router;
+    use crate::mcp::{JsonRpcRequest, McpServer};
+    use crate::mcp_http::{app_router, classify_mcp_request};
+    use crate::service_guard;
+    use crate::service_guard::{
+        mcp_request_finished_with_class, mcp_request_started_with_class, McpRequestClass,
+    };
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -149,5 +202,52 @@ mod tests {
 
         assert_eq!(body_json["jsonrpc"], "2.0");
         assert!(!body_json["result"]["tools"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_classify_mcp_request_marks_status_as_observer() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": {}
+            })),
+            id: Some(json!(1)),
+        };
+
+        assert!(matches!(
+            classify_mcp_request(&req),
+            McpRequestClass::Observer
+        ));
+    }
+
+    #[test]
+    fn test_classify_mcp_request_marks_health_and_truth_check_as_observer() {
+        for tool_name in ["health", "truth_check"] {
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": tool_name,
+                    "arguments": {}
+                })),
+                id: Some(json!(1)),
+            };
+
+            assert!(
+                matches!(classify_mcp_request(&req), McpRequestClass::Observer),
+                "tool {tool_name} should stay observer-classified"
+            );
+        }
+    }
+
+    #[test]
+    fn test_observer_requests_do_not_increment_interactive_inflight() {
+        service_guard::reset_for_tests();
+        mcp_request_started_with_class(McpRequestClass::Observer);
+        assert_eq!(service_guard::interactive_requests_in_flight(), 0);
+        mcp_request_finished_with_class(McpRequestClass::Observer);
+        assert_eq!(service_guard::interactive_requests_in_flight(), 0);
     }
 }

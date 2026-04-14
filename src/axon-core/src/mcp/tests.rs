@@ -1,10 +1,10 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
 use super::*;
+use crate::embedder::{embedding_lane_config_from_env, reset_vector_batch_controller_for_tests};
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION,
 };
-use crate::embedder::{embedding_lane_config_from_env, reset_vector_batch_controller_for_tests};
 use crate::graph::GraphStore;
 use crate::parser;
 use crate::queue::ProcessingMode;
@@ -182,7 +182,10 @@ fn test_mutating_soll_manager_returns_job_and_reserved_entity_id() {
         .and_then(|value| value.get("entity_id"))
         .and_then(|value| value.as_str())
         .expect("reserved entity_id");
-    assert!(data.get("accepted").and_then(|value| value.as_bool()).unwrap_or(false));
+    assert!(data
+        .get("accepted")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false));
     assert!(entity_id.starts_with("CPT-AXO-"), "{entity_id}");
 
     let final_status = wait_for_job_status(&server, job_id);
@@ -427,20 +430,21 @@ fn test_mcp_query_returns_profile_error_in_full_isolated() {
 #[test]
 fn test_pre_flight_check_alias_uses_dry_run_commit_work() {
     let server = create_test_server();
-    let response = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "axon_pre_flight_check",
-            "arguments": {
-                "diff_paths": ["docs/skills/axon-engineering-protocol/SKILL.md"]
-            }
-        })),
-        id: Some(json!(2201)),
-    })
-    .unwrap()
-    .result
-    .unwrap();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_pre_flight_check",
+                "arguments": {
+                    "diff_paths": ["docs/skills/axon-engineering-protocol/SKILL.md"]
+                }
+            })),
+            id: Some(json!(2201)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     let text = response["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Dry Run"), "{text}");
@@ -449,18 +453,19 @@ fn test_pre_flight_check_alias_uses_dry_run_commit_work() {
 #[test]
 fn test_status_reports_public_surface_and_runtime_truth() {
     let server = create_test_server();
-    let response = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "status",
-            "arguments": { "mode": "brief" }
-        })),
-        id: Some(json!(2202)),
-    })
-    .unwrap()
-    .result
-    .unwrap();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2202)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     let data = response.get("data").unwrap();
     let public_tools = data["public_tools"].as_array().unwrap();
@@ -473,9 +478,18 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     assert!(public_tool_names.contains(&"why"));
     assert!(public_tool_names.contains(&"path"));
     assert!(public_tool_names.contains(&"anomalies"));
-    assert!(data.get("runtime_mode").and_then(|value| value.as_str()).is_some());
-    assert!(data.get("runtime_profile").and_then(|value| value.as_str()).is_some());
-    assert!(data.get("truth_status").and_then(|value| value.as_str()).is_some());
+    assert!(data
+        .get("runtime_mode")
+        .and_then(|value| value.as_str())
+        .is_some());
+    assert!(data
+        .get("runtime_profile")
+        .and_then(|value| value.as_str())
+        .is_some());
+    assert!(data
+        .get("truth_status")
+        .and_then(|value| value.as_str())
+        .is_some());
     assert!(data["availability"]["degraded_notes"].as_array().is_some());
     assert_eq!(
         data["canonical_sources"]["soll_export"]["reimportable"].as_bool(),
@@ -493,18 +507,19 @@ fn test_why_wraps_retrieve_context_and_reports_framework_alias() {
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Operational payment choice', 'accepted', '{\"rationale\":\"Operational safety\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-BKS-WHY', 'Decision', 'DEC-BKS-010', 'Symbol', 'checkout', 1.0, 0)").unwrap();
 
-    let response = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "why",
-            "arguments": { "symbol": "checkout", "project": "BKS", "mode": "brief" }
-        })),
-        id: Some(json!(2203)),
-    })
-    .unwrap()
-    .result
-    .unwrap();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "why",
+                "arguments": { "symbol": "checkout", "project": "BKS", "mode": "brief" }
+            })),
+            id: Some(json!(2203)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     assert_eq!(response["data"]["framework_alias"].as_str(), Some("why"));
     assert_eq!(
@@ -519,22 +534,18 @@ fn test_why_wraps_retrieve_context_and_reports_framework_alias() {
         response["data"]["why"]["route"].as_str(),
         Some("soll_hybrid")
     );
-    assert!(
-        response["data"]["why"]["linked_intentions"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty())
-    );
+    assert!(response["data"]["why"]["linked_intentions"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
     assert!(
         response["data"]["why"]["supporting_artifacts"]["supporting_chunks"]
             .as_array()
             .is_some_and(|items| !items.is_empty())
     );
-    assert!(
-        response["data"]["why"]["missing_evidence"].as_array().is_some()
-    );
-    assert!(
-        response["data"]["why"]["confidence"].as_object().is_some()
-    );
+    assert!(response["data"]["why"]["missing_evidence"]
+        .as_array()
+        .is_some());
+    assert!(response["data"]["why"]["confidence"].as_object().is_some());
     assert_eq!(
         response["data"]["why"]["canonical_sources"]["soll_export"]["reimportable"].as_bool(),
         Some(true)
@@ -548,25 +559,39 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::wrapper', 'wrapper_fn', 'function', false, false, false, 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::target', 'target_fn', 'function', true, true, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')").unwrap();
-    server.graph_store.execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::wrapper', 'axo::target')").unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::wrapper', 'axo::target')")
+        .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'accepted', '{\"goal\":\"Vision first\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', 'Keep runtime truthful', 'draft', '{\"priority\":\"P1\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Rust authoritative', 'Use Rust as the authoritative runtime', 'accepted', '{\"context\":\"\",\"rationale\":\"\"}')").unwrap();
 
-    let response = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "project_status",
-            "arguments": { "project_code": "AXO", "mode": "brief" }
-        })),
-        id: Some(json!(22031)),
-    })
-    .unwrap()
-    .result
-    .unwrap();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_status",
+                "arguments": { "project_code": "AXO", "mode": "brief" }
+            })),
+            id: Some(json!(22031)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     let data = response.get("data").unwrap();
     assert_eq!(data["project_code"].as_str(), Some("AXO"));
@@ -580,13 +605,25 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     assert_eq!(data["conception"]["interface_count"].as_u64(), Some(0));
     assert_eq!(data["conception"]["contract_count"].as_u64(), Some(1));
     assert_eq!(data["conception"]["flow_count"].as_u64(), Some(0));
-    assert!(data["conception"]["modules"].as_array().is_some_and(|items| !items.is_empty()));
+    assert!(data["conception"]["modules"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
     assert!(data["conception"]["interfaces"].as_array().is_some());
-    assert!(data["conception"]["contracts"].as_array().is_some_and(|items| !items.is_empty()));
+    assert!(data["conception"]["contracts"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
     assert!(data["conception"]["flows"].as_array().is_some());
-    assert_eq!(data["anomalies"]["summary"]["wrapper_count"].as_i64(), Some(1));
-    assert_eq!(data["anomalies"]["summary"]["alignment_proxy_score"].as_f64(), Some(50.0));
-    assert!(data["soll_context"]["visions"].as_array().is_some_and(|items| !items.is_empty()));
+    assert_eq!(
+        data["anomalies"]["summary"]["wrapper_count"].as_i64(),
+        Some(1)
+    );
+    assert_eq!(
+        data["anomalies"]["summary"]["alignment_proxy_score"].as_f64(),
+        Some(50.0)
+    );
+    assert!(data["soll_context"]["visions"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
     let text = response["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Project Status"), "{text}");
     assert!(text.contains("Axon Vision"), "{text}");
@@ -597,7 +634,9 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')")
+        .execute(
+            "INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')",
+        )
         .unwrap();
     server
         .graph_store
@@ -609,7 +648,9 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')")
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')",
+        )
         .unwrap();
     server
         .graph_store
@@ -620,18 +661,19 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
         .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'accepted', '{}')")
         .unwrap();
 
-    let first = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "project_status",
-            "arguments": { "project_code": "AXO", "mode": "brief" }
-        })),
-        id: Some(json!(22032)),
-    })
-    .unwrap()
-    .result
-    .unwrap();
+    let first = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_status",
+                "arguments": { "project_code": "AXO", "mode": "brief" }
+            })),
+            id: Some(json!(22032)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
     assert_eq!(
         first["data"]["delta_vs_previous"]["available"].as_bool(),
         Some(false)
@@ -646,18 +688,19 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
         .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::orphan')")
         .unwrap();
 
-    let second = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "project_status",
-            "arguments": { "project_code": "AXO", "mode": "brief" }
-        })),
-        id: Some(json!(22033)),
-    })
-    .unwrap()
-    .result
-    .unwrap();
+    let second = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_status",
+                "arguments": { "project_code": "AXO", "mode": "brief" }
+            })),
+            id: Some(json!(22033)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
     let delta = &second["data"]["delta_vs_previous"];
     assert_eq!(delta["available"].as_bool(), Some(true));
     assert_eq!(delta["wrapper_count_delta"].as_i64(), Some(0));
@@ -675,7 +718,9 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')")
+        .execute(
+            "INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')",
+        )
         .unwrap();
     server
         .graph_store
@@ -687,7 +732,9 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')")
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')",
+        )
         .unwrap();
     server
         .graph_store
@@ -766,7 +813,10 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         history_items[1]["snapshot_id"].as_str(),
         Some(second_snapshot.as_str())
     );
-    assert_eq!(history["data"]["storage"]["scope"].as_str(), Some("derived_non_canonical"));
+    assert_eq!(
+        history["data"]["storage"]["scope"].as_str(),
+        Some("derived_non_canonical")
+    );
 
     let diff = server
         .handle_request(JsonRpcRequest {
@@ -785,8 +835,14 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         .unwrap()
         .result
         .unwrap();
-    assert_eq!(diff["data"]["from_snapshot_id"].as_str(), Some(first_snapshot.as_str()));
-    assert_eq!(diff["data"]["to_snapshot_id"].as_str(), Some(second_snapshot.as_str()));
+    assert_eq!(
+        diff["data"]["from_snapshot_id"].as_str(),
+        Some(first_snapshot.as_str())
+    );
+    assert_eq!(
+        diff["data"]["to_snapshot_id"].as_str(),
+        Some(second_snapshot.as_str())
+    );
     assert_eq!(
         diff["data"]["metric_delta"]["orphan_code_count_delta"].as_i64(),
         Some(1)
@@ -803,7 +859,9 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/api.rs', 'AXO', 'indexed')")
+        .execute(
+            "INSERT INTO File (path, project_code, status) VALUES ('src/api.rs', 'AXO', 'indexed')",
+        )
         .unwrap();
     server
         .graph_store
@@ -852,10 +910,19 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
         .result
         .unwrap();
     assert_eq!(conception["data"]["project_code"].as_str(), Some("AXO"));
-    assert_eq!(conception["data"]["provenance"].as_str(), Some("derived_read_only_view"));
-    assert!(conception["data"]["modules"].as_array().is_some_and(|items| !items.is_empty()));
-    assert!(conception["data"]["interfaces"].as_array().is_some_and(|items| !items.is_empty()));
-    assert!(conception["data"]["contracts"].as_array().is_some_and(|items| !items.is_empty()));
+    assert_eq!(
+        conception["data"]["provenance"].as_str(),
+        Some("derived_read_only_view")
+    );
+    assert!(conception["data"]["modules"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(conception["data"]["interfaces"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(conception["data"]["contracts"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
     assert!(conception["data"]["flows"].as_array().is_some());
 
     let change_safety = server
@@ -883,7 +950,9 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
     assert!(data["coverage_signals"].as_object().is_some());
     assert!(data["traceability_signals"].as_object().is_some());
     assert!(data["validation_signals"].as_object().is_some());
-    assert!(data["reasoning"].as_array().is_some_and(|items| !items.is_empty()));
+    assert!(data["reasoning"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
     assert!(data["recommended_guardrails"].as_array().is_some());
 }
 
@@ -893,26 +962,33 @@ fn test_path_returns_bounded_call_path_between_symbols() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::source', 'source_fn', 'function', true, true, false, 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::mid', 'mid_fn', 'function', true, false, false, 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::sink', 'sink_fn', 'function', true, true, false, 'BKS')").unwrap();
-    server.graph_store.execute("INSERT INTO CALLS (source_id, target_id) VALUES ('bks::source', 'bks::mid')").unwrap();
-    server.graph_store.execute("INSERT INTO CALLS (source_id, target_id) VALUES ('bks::mid', 'bks::sink')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('bks::source', 'bks::mid')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('bks::mid', 'bks::sink')")
+        .unwrap();
 
-    let response = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "path",
-            "arguments": {
-                "source": "source_fn",
-                "sink": "sink_fn",
-                "project": "BKS",
-                "depth": 4
-            }
-        })),
-        id: Some(json!(2204)),
-    })
-    .unwrap()
-    .result
-    .unwrap();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "path",
+                "arguments": {
+                    "source": "source_fn",
+                    "sink": "sink_fn",
+                    "project": "BKS",
+                    "depth": 4
+                }
+            })),
+            id: Some(json!(2204)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     let data = response.get("data").unwrap();
     assert_eq!(data["path_found"].as_bool(), Some(true));
@@ -924,7 +1000,10 @@ fn test_path_returns_bounded_call_path_between_symbols() {
         Some(true)
     );
     let path = data["path"].as_array().unwrap();
-    let rendered = path.iter().filter_map(|value| value.as_str()).collect::<Vec<_>>();
+    let rendered = path
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(rendered, vec!["source_fn", "mid_fn", "sink_fn"]);
 }
 
@@ -934,53 +1013,106 @@ fn test_anomalies_reports_wrappers_and_orphans_with_actions() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::wrapper', 'wrapper_fn', 'function', false, false, false, 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::target', 'target_fn', 'function', true, true, false, 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axo::orphan', 'orphan_fn', 'function', false, false, false, 'AXO')").unwrap();
-    server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::orphan')").unwrap();
-    server.graph_store.execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::wrapper', 'axo::target')").unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_code, status) VALUES ('src/lib.rs', 'AXO', 'indexed')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::orphan')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::wrapper', 'axo::target')")
+        .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-099', 'Requirement', 'AXO', 'Unimplemented requirement', 'No traceability yet', 'draft', '{\"priority\":\"P2\"}')").unwrap();
 
-    let response = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "anomalies",
-            "arguments": { "project": "AXO", "mode": "brief" }
-        })),
-        id: Some(json!(2205)),
-    })
-    .unwrap()
-    .result
-    .unwrap();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "anomalies",
+                "arguments": { "project": "AXO", "mode": "brief" }
+            })),
+            id: Some(json!(2205)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     let data = response.get("data").unwrap();
     let findings = data["findings"].as_array().unwrap();
-    assert!(findings.iter().any(|finding| finding["type"].as_str() == Some("wrapper")));
-    assert!(findings.iter().any(|finding| finding["type"].as_str() == Some("orphan_code")));
-    assert!(findings.iter().any(|finding| finding["type"].as_str() == Some("orphan_intent")));
-    assert!(findings.iter().all(|finding| finding.get("recommended_action").and_then(|value| value.as_str()).is_some()));
-    assert!(findings.iter().all(|finding| finding.get("estimated_effort").and_then(|value| value.as_str()).is_some()));
-    assert!(findings.iter().all(|finding| finding.get("estimated_risk").and_then(|value| value.as_str()).is_some()));
-    assert!(findings.iter().all(|finding| finding.get("validation_signals").and_then(|value| value.as_object()).is_some()));
-    assert_eq!(data["summary"]["validation_coverage_score"].as_i64(), Some(33));
+    assert!(findings
+        .iter()
+        .any(|finding| finding["type"].as_str() == Some("wrapper")));
+    assert!(findings
+        .iter()
+        .any(|finding| finding["type"].as_str() == Some("orphan_code")));
+    assert!(findings
+        .iter()
+        .any(|finding| finding["type"].as_str() == Some("orphan_intent")));
+    assert!(findings.iter().all(|finding| finding
+        .get("recommended_action")
+        .and_then(|value| value.as_str())
+        .is_some()));
+    assert!(findings.iter().all(|finding| finding
+        .get("estimated_effort")
+        .and_then(|value| value.as_str())
+        .is_some()));
+    assert!(findings.iter().all(|finding| finding
+        .get("estimated_risk")
+        .and_then(|value| value.as_str())
+        .is_some()));
+    assert!(findings.iter().all(|finding| finding
+        .get("validation_signals")
+        .and_then(|value| value.as_object())
+        .is_some()));
+    assert_eq!(
+        data["summary"]["validation_coverage_score"].as_i64(),
+        Some(33)
+    );
     assert_eq!(data["summary"]["total_symbols"].as_i64(), Some(3));
     assert_eq!(data["summary"]["total_intent_nodes"].as_i64(), Some(1));
-    assert_eq!(data["summary"]["alignment_proxy_score"].as_f64(), Some(33.3));
-    assert_eq!(data["summary"]["rectitude_proxy_score"].as_f64(), Some(66.7));
+    assert_eq!(
+        data["summary"]["alignment_proxy_score"].as_f64(),
+        Some(33.3)
+    );
+    assert_eq!(
+        data["summary"]["rectitude_proxy_score"].as_f64(),
+        Some(66.7)
+    );
     assert_eq!(data["summary"]["cycle_health_score"].as_f64(), Some(100.0));
     assert_eq!(data["summary"]["orphan_code_rate"].as_f64(), Some(66.7));
     assert_eq!(data["summary"]["orphan_intent_rate"].as_f64(), Some(100.0));
 
     let recommendations = data["recommendations"].as_array().expect("recommendations");
     assert!(!recommendations.is_empty());
-    assert!(recommendations.iter().all(|item| item.get("sequencing_dependencies").and_then(|value| value.as_array()).is_some()));
-    assert!(recommendations.iter().all(|item| item.get("validation_signals").and_then(|value| value.as_object()).is_some()));
+    assert!(recommendations.iter().all(|item| item
+        .get("sequencing_dependencies")
+        .and_then(|value| value.as_array())
+        .is_some()));
+    assert!(recommendations.iter().all(|item| item
+        .get("validation_signals")
+        .and_then(|value| value.as_object())
+        .is_some()));
 
     let wrapper = findings
         .iter()
         .find(|finding| finding["type"].as_str() == Some("wrapper"))
         .expect("wrapper finding");
-    assert_eq!(wrapper["validation_signals"]["tested"].as_bool(), Some(false));
+    assert_eq!(
+        wrapper["validation_signals"]["tested"].as_bool(),
+        Some(false)
+    );
     assert_eq!(
         wrapper["validation_signals"]["traceability_links"].as_u64(),
         Some(0)
@@ -1054,7 +1186,9 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
 
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::source')")
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::source')",
+        )
         .unwrap();
     server
         .graph_store
@@ -1062,15 +1196,21 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::entry')")
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::entry')",
+        )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::bridge')")
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::bridge')",
+        )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::sink')")
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::sink')",
+        )
         .unwrap();
     server
         .graph_store
@@ -1082,7 +1222,9 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/interface.rs', 'axo::iface')")
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/interface.rs', 'axo::iface')",
+        )
         .unwrap();
     server
         .graph_store
@@ -1091,15 +1233,21 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
 
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::source', 'axo::local_helper')")
+        .execute(
+            "INSERT INTO CALLS (source_id, target_id) VALUES ('axo::source', 'axo::local_helper')",
+        )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::source', 'axo::foreign_a')")
+        .execute(
+            "INSERT INTO CALLS (source_id, target_id) VALUES ('axo::source', 'axo::foreign_a')",
+        )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::source', 'axo::foreign_b')")
+        .execute(
+            "INSERT INTO CALLS (source_id, target_id) VALUES ('axo::source', 'axo::foreign_b')",
+        )
         .unwrap();
     server
         .graph_store
@@ -1110,29 +1258,42 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
         .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::bridge', 'axo::sink')")
         .unwrap();
 
-    let response = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "anomalies",
-            "arguments": { "project": "AXO", "mode": "brief" }
-        })),
-        id: Some(json!(2206)),
-    })
-    .unwrap()
-    .result
-    .unwrap();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "anomalies",
+                "arguments": { "project": "AXO", "mode": "brief" }
+            })),
+            id: Some(json!(2206)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
 
     let data = response.get("data").unwrap();
     let findings = data["findings"].as_array().unwrap();
-    assert!(findings.iter().any(|finding| finding["type"].as_str() == Some("feature_envy")));
-    assert!(findings.iter().any(|finding| finding["type"].as_str() == Some("detour")));
-    assert!(findings.iter().any(|finding| finding["type"].as_str() == Some("abstraction_detour")));
+    assert!(findings
+        .iter()
+        .any(|finding| finding["type"].as_str() == Some("feature_envy")));
+    assert!(findings
+        .iter()
+        .any(|finding| finding["type"].as_str() == Some("detour")));
+    assert!(findings
+        .iter()
+        .any(|finding| finding["type"].as_str() == Some("abstraction_detour")));
     assert_eq!(data["summary"]["feature_envy_count"].as_u64(), Some(1));
     assert_eq!(data["summary"]["detour_count"].as_u64(), Some(1));
-    assert_eq!(data["summary"]["abstraction_detour_count"].as_u64(), Some(1));
+    assert_eq!(
+        data["summary"]["abstraction_detour_count"].as_u64(),
+        Some(1)
+    );
     assert_eq!(data["summary"]["alignment_proxy_score"].as_f64(), Some(0.0));
-    assert_eq!(data["summary"]["rectitude_proxy_score"].as_f64(), Some(57.1));
+    assert_eq!(
+        data["summary"]["rectitude_proxy_score"].as_f64(),
+        Some(57.1)
+    );
     assert_eq!(data["summary"]["cycle_health_score"].as_f64(), Some(100.0));
 }
 
@@ -1475,12 +1636,27 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     assert!(content.contains("RSS Anon"), "{content}");
     assert!(content.contains("Mémoire DuckDB"), "{content}");
     assert!(content.contains("Ingress Buffer"), "{content}");
-    assert!(content.contains("Graph Projection Queue Queued : 1"), "{content}");
-    assert!(content.contains("Graph Projection Queue Inflight : 1"), "{content}");
-    assert!(content.contains("Graph Projection Queue Pending : 2"), "{content}");
+    assert!(
+        content.contains("Graph Projection Queue Queued : 1"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Graph Projection Queue Inflight : 1"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Graph Projection Queue Pending : 2"),
+        "{content}"
+    );
     assert!(content.contains("GPU Present Detected : no"), "{content}");
-    assert!(content.contains("Embedding Provider Requested : cuda"), "{content}");
-    assert!(content.contains("Embedding Provider Effective"), "{content}");
+    assert!(
+        content.contains("Embedding Provider Requested : cuda"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Embedding Provider Effective"),
+        "{content}"
+    );
     assert!(
         content.contains("Embedding Acceleration State : gpu_requested_but_unavailable"),
         "{content}"
@@ -1494,43 +1670,94 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     assert!(content.contains("DB write ms total : 33"), "{content}");
     assert!(content.contains("Prepare dispatch total : 1"), "{content}");
     assert!(content.contains("Prepare prefetch total : 1"), "{content}");
-    assert!(content.contains("Prepare fallback inline total : 1"), "{content}");
-    assert!(content.contains("Prepare reply wait ms total : 66"), "{content}");
-    assert!(content.contains("Prepare send wait ms total : 77"), "{content}");
-    assert!(content.contains("Prepare queue wait ms total : 78"), "{content}");
+    assert!(
+        content.contains("Prepare fallback inline total : 1"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Prepare reply wait ms total : 66"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Prepare send wait ms total : 77"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Prepare queue wait ms total : 78"),
+        "{content}"
+    );
     assert!(
         content.contains("Prepare queue depth current/max : 2/2"),
         "{content}"
     );
     assert!(content.contains("Embed input texts total : 7"), "{content}");
-    assert!(content.contains("Embed input text bytes total : 700"), "{content}");
+    assert!(
+        content.contains("Embed input text bytes total : 700"),
+        "{content}"
+    );
     assert!(content.contains("Embed clone ms total : 9"), "{content}");
     assert!(content.contains("Finalize enqueued total : 1"), "{content}");
     assert!(
         content.contains("Finalize fallback inline total : 1"),
         "{content}"
     );
-    assert!(content.contains("Finalize send wait ms total : 88"), "{content}");
-    assert!(content.contains("Finalize queue wait ms total : 89"), "{content}");
+    assert!(
+        content.contains("Finalize send wait ms total : 88"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Finalize queue wait ms total : 89"),
+        "{content}"
+    );
     assert!(
         content.contains("Finalize queue depth current/max : 3/3"),
         "{content}"
     );
     assert!(content.contains("Embed calls total : 1"), "{content}");
-    assert!(content.contains("Claimed work items total : 5"), "{content}");
-    assert!(content.contains("Partial file cycles total : 4"), "{content}");
+    assert!(
+        content.contains("Claimed work items total : 5"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Partial file cycles total : 4"),
+        "{content}"
+    );
     assert!(content.contains("Mark done calls total : 1"), "{content}");
     assert!(content.contains("Files touched total : 3"), "{content}");
-    assert!(content.contains("Avg chunks per embed call : 7.00"), "{content}");
-    assert!(content.contains("Avg files per embed call : 3.00"), "{content}");
-    assert!(content.contains("Avg embed input texts per call : 7.00"), "{content}");
-    assert!(content.contains("Avg embed input bytes per call : 700.00"), "{content}");
-    assert!(content.contains("Avg embed input bytes per chunk : 100.00"), "{content}");
-    assert!(content.contains("Embed clone ms per call : 9.00"), "{content}");
-    assert!(content.contains("File vectorization queue statuses"), "{content}");
+    assert!(
+        content.contains("Avg chunks per embed call : 7.00"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Avg files per embed call : 3.00"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Avg embed input texts per call : 7.00"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Avg embed input bytes per call : 700.00"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Avg embed input bytes per chunk : 100.00"),
+        "{content}"
+    );
+    assert!(
+        content.contains("Embed clone ms per call : 9.00"),
+        "{content}"
+    );
+    assert!(
+        content.contains("File vectorization queue statuses"),
+        "{content}"
+    );
     assert!(content.contains("`inflight` : 1"), "{content}");
     assert!(content.contains("`queued` : 1"), "{content}");
-    assert!(content.contains("Vector Stage Latencies (recent window)"), "{content}");
+    assert!(
+        content.contains("Vector Stage Latencies (recent window)"),
+        "{content}"
+    );
     assert!(
         content.contains("Fetch p50/p95/max ms : 11/11/11 (samples: 1)"),
         "{content}"
@@ -1540,11 +1767,11 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
         "{content}"
     );
     assert!(content.contains("Drain State : quiet_cruise"), "{content}");
-    assert!(content.contains("GPU Background Worker Cap : 0"), "{content}");
-    assert_eq!(
-        contract["model_name"].as_str(),
-        Some(MODEL_NAME)
+    assert!(
+        content.contains("GPU Background Worker Cap : 0"),
+        "{content}"
     );
+    assert_eq!(contract["model_name"].as_str(), Some(MODEL_NAME));
     assert_eq!(contract["dimension"].as_u64(), Some(DIMENSION as u64));
     assert_eq!(
         contract["native_dimension"].as_u64(),
@@ -1796,7 +2023,9 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
         Some(55)
     );
     assert_eq!(
-        contract["file_vectorization_queue_statuses"].as_array().map(|v| v.len()),
+        contract["file_vectorization_queue_statuses"]
+            .as_array()
+            .map(|v| v.len()),
         Some(2)
     );
     assert_eq!(
@@ -1827,10 +2056,7 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
         contract["vector_batch_controller"]["target_files_per_cycle"].as_u64(),
         Some(24)
     );
-    assert_eq!(
-        contract["chunk_model_id"].as_str(),
-        Some(CHUNK_MODEL_ID)
-    );
+    assert_eq!(contract["chunk_model_id"].as_str(), Some(CHUNK_MODEL_ID));
 
     unsafe {
         std::env::remove_var("AXON_EMBEDDING_GPU_PRESENT");
@@ -1844,7 +2070,6 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     }
     service_guard::reset_for_tests();
 }
-
 
 #[test]
 fn test_axon_list_labels_tables_reclassifies_graph_tables_as_derived_optional() {
@@ -2140,12 +2365,18 @@ fn test_retrieve_context_routes_breakage_question_to_impact_and_packages_neighbo
         .and_then(|value| value.as_array())
         .expect("expected structural neighbors");
     assert!(
-        structural_neighbors.iter().any(|row| row.to_string().contains("consumer_a")),
+        structural_neighbors
+            .iter()
+            .any(|row| row.to_string().contains("consumer_a")),
         "{:?}",
         structural_neighbors
     );
     assert!(
-        packet.get("answer_sketch").and_then(|value| value.as_str()).unwrap_or_default().contains("parse_batch"),
+        packet
+            .get("answer_sketch")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .contains("parse_batch"),
         "{packet:?}"
     );
 
@@ -2216,12 +2447,18 @@ fn test_retrieve_context_joins_soll_when_question_is_about_rationale() {
         .and_then(|value| value.as_array())
         .expect("expected soll entities");
     assert!(
-        soll_entities.iter().any(|row| row.to_string().contains("DEC-BKS-010")),
+        soll_entities
+            .iter()
+            .any(|row| row.to_string().contains("DEC-BKS-010")),
         "{:?}",
         soll_entities
     );
     assert!(
-        packet.get("why_these_items").and_then(|value| value.as_array()).map(|items| !items.is_empty()).unwrap_or(false),
+        packet
+            .get("why_these_items")
+            .and_then(|value| value.as_array())
+            .map(|items| !items.is_empty())
+            .unwrap_or(false),
         "{packet:?}"
     );
 
@@ -2364,11 +2601,15 @@ fn test_retrieve_context_uses_repo_literal_fallback_when_index_has_no_anchor() {
     let result = response.result.expect("Expected result");
     let packet = &result["data"]["packet"];
     assert!(
-        packet["direct_evidence"].to_string().contains("trigger_scan"),
+        packet["direct_evidence"]
+            .to_string()
+            .contains("trigger_scan"),
         "{packet:?}"
     );
     assert!(
-        packet["supporting_chunks"].to_string().contains("repo_literal"),
+        packet["supporting_chunks"]
+            .to_string()
+            .contains("repo_literal"),
         "{packet:?}"
     );
     assert!(
@@ -2626,9 +2867,14 @@ fn test_retrieve_context_uses_file_anchor_for_path_like_question() {
 
     let result = response.result.expect("Expected result");
     let data = result.get("data").expect("expected data payload");
-    assert_eq!(data["planner"]["route"].as_str().unwrap_or_default(), "exact_lookup");
+    assert_eq!(
+        data["planner"]["route"].as_str().unwrap_or_default(),
+        "exact_lookup"
+    );
     let packet = data.get("packet").expect("expected packet");
-    let direct_evidence = packet["direct_evidence"].as_array().expect("expected direct evidence");
+    let direct_evidence = packet["direct_evidence"]
+        .as_array()
+        .expect("expected direct evidence");
     assert!(
         direct_evidence.iter().any(|row| {
             row.get("evidence_class").and_then(|value| value.as_str()) == Some("canonical_file")
@@ -2703,11 +2949,21 @@ fn test_retrieve_context_prefers_anchored_chunks_over_generic_semantic_noise() {
 
     let result = response.result.expect("Expected result");
     let packet = result["data"]["packet"].clone();
-    let chunks = packet["supporting_chunks"].as_array().expect("expected supporting chunks");
+    let chunks = packet["supporting_chunks"]
+        .as_array()
+        .expect("expected supporting chunks");
     assert!(!chunks.is_empty(), "{packet:?}");
     let first = &chunks[0];
-    assert_eq!(first["chunk_id"].as_str().unwrap_or_default(), "chunk-anchor", "{packet:?}");
-    assert_eq!(first["anchored_to_entry"].as_bool(), Some(true), "{packet:?}");
+    assert_eq!(
+        first["chunk_id"].as_str().unwrap_or_default(),
+        "chunk-anchor",
+        "{packet:?}"
+    );
+    assert_eq!(
+        first["anchored_to_entry"].as_bool(),
+        Some(true),
+        "{packet:?}"
+    );
     assert!(
         result["data"]["packet"]["retrieval_diagnostics"]["anchored_chunks_selected"]
             .as_u64()
@@ -2776,7 +3032,11 @@ fn test_retrieve_context_skips_semantic_search_under_critical_pressure_and_repor
     let result = response.result.expect("Expected result");
     let planner = &result["data"]["planner"];
     let packet = &result["data"]["packet"];
-    assert_eq!(planner["semantic_search_used"].as_bool(), Some(false), "{planner:?}");
+    assert_eq!(
+        planner["semantic_search_used"].as_bool(),
+        Some(false),
+        "{planner:?}"
+    );
     assert!(
         planner["degraded_reason"]
             .as_str()
@@ -2791,7 +3051,9 @@ fn test_retrieve_context_skips_semantic_search_under_critical_pressure_and_repor
         "{packet:?}"
     );
     assert!(
-        packet["direct_evidence"].to_string().contains("parse_batch"),
+        packet["direct_evidence"]
+            .to_string()
+            .contains("parse_batch"),
         "{packet:?}"
     );
 
@@ -2862,12 +3124,22 @@ fn test_retrieve_context_prefers_same_file_impl_chunk_over_docs_chunk() {
 
     let result = response.result.expect("Expected result");
     let packet = &result["data"]["packet"];
-    let chunks = packet["supporting_chunks"].as_array().expect("expected supporting chunks");
+    let chunks = packet["supporting_chunks"]
+        .as_array()
+        .expect("expected supporting chunks");
     assert!(!chunks.is_empty(), "{packet:?}");
-    assert_eq!(chunks[0]["chunk_id"].as_str().unwrap_or_default(), "chunk-router-impl", "{packet:?}");
+    assert_eq!(
+        chunks[0]["chunk_id"].as_str().unwrap_or_default(),
+        "chunk-router-impl",
+        "{packet:?}"
+    );
     assert!(
-        packet["excluded_because"].to_string().contains("docs_file_penalty")
-            || packet["excluded_because"].to_string().contains("same_file_preferred")
+        packet["excluded_because"]
+            .to_string()
+            .contains("docs_file_penalty")
+            || packet["excluded_because"]
+                .to_string()
+                .contains("same_file_preferred")
             || packet["retrieval_diagnostics"]["chunk_candidates_considered"]
                 .as_u64()
                 .unwrap_or_default()
@@ -2939,15 +3211,22 @@ fn test_retrieve_context_caps_broad_semantic_fallbacks_to_one() {
 
     let result = response.result.expect("Expected result");
     let packet = &result["data"]["packet"];
-    let chunks = packet["supporting_chunks"].as_array().expect("expected supporting chunks");
+    let chunks = packet["supporting_chunks"]
+        .as_array()
+        .expect("expected supporting chunks");
     let broad_count = chunks
         .iter()
-        .filter(|chunk| chunk["anchored_to_entry"].as_bool() == Some(false) && chunk["same_file_as_entry"].as_bool() == Some(false))
+        .filter(|chunk| {
+            chunk["anchored_to_entry"].as_bool() == Some(false)
+                && chunk["same_file_as_entry"].as_bool() == Some(false)
+        })
         .count();
     assert!(broad_count <= 1, "{packet:?}");
     if broad_count == 1 {
         assert!(
-            packet["excluded_because"].to_string().contains("broader_semantic_dropped_due_to_anchor"),
+            packet["excluded_because"]
+                .to_string()
+                .contains("broader_semantic_dropped_due_to_anchor"),
             "{packet:?}"
         );
     }
@@ -3002,13 +3281,19 @@ fn test_retrieve_context_prefers_direct_file_traceability_for_rationale() {
 
     let result = response.result.expect("Expected result");
     let packet = &result["data"]["packet"];
-    let soll_entities = packet["relevant_soll_entities"].as_array().expect("expected soll entities");
+    let soll_entities = packet["relevant_soll_entities"]
+        .as_array()
+        .expect("expected soll entities");
     assert!(
-        soll_entities.iter().any(|row| row.to_string().contains("DEC-BKS-FILE")),
+        soll_entities
+            .iter()
+            .any(|row| row.to_string().contains("DEC-BKS-FILE")),
         "{packet:?}"
     );
     assert!(
-        soll_entities[0].to_string().contains("direct_file_traceability"),
+        soll_entities[0]
+            .to_string()
+            .contains("direct_file_traceability"),
         "{packet:?}"
     );
 
@@ -3157,12 +3442,16 @@ fn test_retrieve_context_under_critical_pressure_skips_graph_and_soll_even_with_
     let result = response.result.expect("Expected result");
     let packet = &result["data"]["packet"];
     assert_eq!(
-        packet["structural_neighbors"].as_array().map(|rows| rows.len()),
+        packet["structural_neighbors"]
+            .as_array()
+            .map(|rows| rows.len()),
         Some(0),
         "{packet:?}"
     );
     assert_eq!(
-        packet["relevant_soll_entities"].as_array().map(|rows| rows.len()),
+        packet["relevant_soll_entities"]
+            .as_array()
+            .map(|rows| rows.len()),
         Some(0),
         "{packet:?}"
     );
@@ -3232,11 +3521,15 @@ fn test_retrieve_context_falls_back_to_repo_local_global_symbol_when_project_cod
     let result = response.result.expect("Expected result");
     let packet = &result["data"]["packet"];
     assert!(
-        packet["direct_evidence"].to_string().contains("trigger_scan"),
+        packet["direct_evidence"]
+            .to_string()
+            .contains("trigger_scan"),
         "{packet:?}"
     );
     assert!(
-        packet["supporting_chunks"].to_string().contains("chunk-global-trigger"),
+        packet["supporting_chunks"]
+            .to_string()
+            .contains("chunk-global-trigger"),
         "{packet:?}"
     );
 
@@ -3288,7 +3581,9 @@ fn test_retrieve_context_reports_precise_missing_rationale_evidence() {
     let result = response.result.expect("Expected result");
     let packet = &result["data"]["packet"];
     assert!(
-        packet["missing_evidence"].to_string().contains("anchor_found_but_no_traceability"),
+        packet["missing_evidence"]
+            .to_string()
+            .contains("anchor_found_but_no_traceability"),
         "{packet:?}"
     );
 
@@ -3312,19 +3607,24 @@ fn test_axon_impact_accepts_canonical_project_code_for_repo_code_symbols() {
     server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs', 'axon::axon_retrieve_context')").unwrap();
     server.graph_store.execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axon::caller', 'axon::axon_retrieve_context')").unwrap();
 
-    let response = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "impact",
-            "arguments": { "symbol": "axon_retrieve_context", "project": "AXO", "depth": 2 }
-        })),
-        id: Some(json!(6208)),
-    }).unwrap();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "impact",
+                "arguments": { "symbol": "axon_retrieve_context", "project": "AXO", "depth": 2 }
+            })),
+            id: Some(json!(6208)),
+        })
+        .unwrap();
     let result = response.result.expect("Expected result");
     let text = result["content"][0]["text"].as_str().unwrap_or_default();
     assert!(text.contains("caller"), "{text}");
-    assert!(!text.contains("symbol not found in current scope"), "{text}");
+    assert!(
+        !text.contains("symbol not found in current scope"),
+        "{text}"
+    );
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -3342,15 +3642,17 @@ fn test_axon_inspect_accepts_canonical_project_code_for_repo_code_symbols() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'axon')").unwrap();
 
-    let response = server.handle_request(JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": "inspect",
-            "arguments": { "symbol": "axon_retrieve_context", "project": "AXO" }
-        })),
-        id: Some(json!(6209)),
-    }).unwrap();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "inspect",
+                "arguments": { "symbol": "axon_retrieve_context", "project": "AXO" }
+            })),
+            id: Some(json!(6209)),
+        })
+        .unwrap();
     let result = response.result.expect("Expected result");
     let text = result["content"][0]["text"].as_str().unwrap_or_default();
     assert!(text.contains("axon_retrieve_context"), "{text}");
@@ -6252,9 +6554,18 @@ fn test_soll_query_context_returns_project_visions_from_source() {
 
     let response = server.handle_request(req).unwrap().result.unwrap();
     let data = response.get("data").expect("data payload");
-    let visions = data.get("visions").and_then(|value| value.as_array()).expect("visions array");
-    assert!(!visions.is_empty(), "visions should be returned from SOLL source");
-    let first = visions.first().and_then(|value| value.as_str()).unwrap_or_default();
+    let visions = data
+        .get("visions")
+        .and_then(|value| value.as_array())
+        .expect("visions array");
+    assert!(
+        !visions.is_empty(),
+        "visions should be returned from SOLL source"
+    );
+    let first = visions
+        .first()
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
     assert!(first.contains("VIS-AXO-001"), "{first}");
     assert!(first.contains("Axon Vision"), "{first}");
     assert!(first.contains("accepted"), "{first}");

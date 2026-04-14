@@ -107,7 +107,7 @@ struct RelationPolicy {
     allow_multiple_types: bool,
 }
 
-fn relation_table_name(relation_type: &str) -> Option<&'static str> {
+fn relation_table_name(_relation_type: &str) -> Option<&'static str> {
     Some("soll.Edge")
 }
 
@@ -634,17 +634,20 @@ impl McpServer {
 
         match action {
             "create" => {
-                let project_slug = args
-                    .get("project_slug")
+                let project_code = args
+                    .get("project_code")
                     .and_then(|v| v.as_str())
-                    .or_else(|| data.get("project_slug").and_then(|v| v.as_str()))
+                    .or_else(|| args.get("project_code").and_then(|v| v.as_str()))
+                    .or_else(|| data.get("project_code").and_then(|v| v.as_str()))
+                    .or_else(|| data.get("project_code").and_then(|v| v.as_str()))
                     .unwrap_or("AXO");
                 let reserved_id = args.get("reserved_id").and_then(|value| value.as_str());
-                let (project_slug, project_code, formatted_id) = if let Some(reserved_id) = reserved_id
+                let (_requested_code, canonical_code, formatted_id) = if let Some(reserved_id) =
+                    reserved_id
                 {
-                    match self.resolve_canonical_project_identity_for_mutation(project_slug) {
-                        Ok((canonical_slug, project_code)) => {
-                            (canonical_slug, project_code, reserved_id.to_string())
+                    match self.resolve_canonical_project_identity_for_mutation(project_code) {
+                        Ok((canonical_code, project_code)) => {
+                            (canonical_code, project_code, reserved_id.to_string())
                         }
                         Err(e) => {
                             return Some(
@@ -653,9 +656,9 @@ impl McpServer {
                         }
                     }
                 } else {
-                    match self.next_soll_numeric_id(project_slug, entity) {
-                        Ok((canonical_slug, project_code, prefix, next_num)) => (
-                            canonical_slug,
+                    match self.next_soll_numeric_id(project_code, entity) {
+                        Ok((canonical_code, project_code, prefix, next_num)) => (
+                            canonical_code,
                             project_code.clone(),
                             format!("{}-{}-{:03}", prefix, project_code, next_num),
                         ),
@@ -742,15 +745,14 @@ impl McpServer {
                     }
                 };
 
-                let q = "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET project_slug = EXCLUDED.project_slug, project_code = EXCLUDED.project_code, title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata";
+                let q = "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET project_code = EXCLUDED.project_code, title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata";
 
                 let insert_res = self.graph_store.execute_param(
                     q,
                     &json!([
                         formatted_id,
                         entity_type_cap,
-                        project_slug,
-                        project_code,
+                        canonical_code,
                         title,
                         description,
                         status,
@@ -884,9 +886,9 @@ impl McpServer {
     }
 
     pub(crate) fn axon_export_soll(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
-        let project_slug = args.get("project_slug").and_then(|v| v.as_str());
-        let project_code = match project_slug
-            .map(|slug| self.resolve_project_code(slug))
+        let project_code = args.get("project_code").and_then(|v| v.as_str());
+        let project_code = match project_code
+            .map(|code| self.resolve_project_code(code))
             .transpose()
         {
             Ok(code) => code,
@@ -913,12 +915,12 @@ impl McpServer {
             timestamp_str
         ));
 
-        if let Some(slug) = project_slug {
+        if let Some(ref code) = project_code {
             markdown.push_str(&format!(
                 "*Portée : projet `{}`*
 
 ",
-                slug
+                code
             ));
         }
 
@@ -1022,9 +1024,9 @@ graph TD;
     }
 
     pub(crate) fn axon_validate_soll(&self, args: &Value) -> Option<Value> {
-        let project_slug = args.get("project_slug").and_then(|v| v.as_str());
-        let project_code = match project_slug
-            .map(|slug| self.resolve_project_code(slug))
+        let project_code = args.get("project_code").and_then(|v| v.as_str());
+        let project_code = match project_code
+            .map(|code| self.resolve_project_code(code))
             .transpose()
         {
             Ok(code) => code,
@@ -1128,8 +1130,8 @@ graph TD;
             format_standard_contract(
                 status,
                 summary,
-                &match project_slug {
-                    Some(slug) => format!("project:{}", slug),
+                &match project_code {
+                    Some(code) => format!("project:{}", code),
                     None => "workspace:*".to_string(),
                 },
                 &evidence,
@@ -1171,9 +1173,9 @@ graph TD;
         };
 
         if let Err(e) = self.graph_store.execute(
-            "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_prv, last_rev)
+            "INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_prv, last_rev)
              VALUES ('AXO', 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-             ON CONFLICT (project_slug) DO NOTHING"
+             ON CONFLICT (project_code) DO NOTHING"
         ) {
             return Some(json!({
                 "content": [{ "type": "text", "text": format!("SOLL restore registry error: {}", e) }],
@@ -1196,8 +1198,8 @@ graph TD;
                 }
             }
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata)
-                 VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'AXO', $title, $description, NULL, $metadata)
+                "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata)
+                 VALUES ('VIS-AXO-001', 'Vision', 'AXO', $title, $description, NULL, $metadata)
                  ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, metadata = EXCLUDED.metadata",
                 &serde_json::json!({
                     "title": vision.title,
@@ -1363,12 +1365,11 @@ graph TD;
                 }
             }
             if let Err(e) = self.graph_store.execute_param(
-                "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, metadata)
-                 VALUES ($id, 'Concept', $project_slug, $project_code, $name, $explanation, $metadata)
+                "INSERT INTO soll.Node (id, type, project_code, title, description, metadata)
+                 VALUES ($id, 'Concept', $project_code, $name, $explanation, $metadata)
                  ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, metadata = EXCLUDED.metadata",
                 &serde_json::json!({
                     "id": cpt.id,
-                    "project_slug": "AXO".to_string(),
                     "project_code": "AXO".to_string(),
                     "name": cpt.name,
                     "explanation": cpt.explanation,
@@ -1678,56 +1679,68 @@ graph TD;
 
     fn sync_project_code_registry_from_meta(&self) -> anyhow::Result<()> {
         for identity in discover_project_identities() {
-            self.graph_store
-                .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
+            let project_path = identity.project_path.to_string_lossy().to_string();
+            self.graph_store.sync_project_registry_entry(
+                &identity.code,
+                identity.name.as_deref(),
+                Some(&project_path),
+            )?;
         }
         Ok(())
     }
 
     fn resolve_canonical_project_identity_for_mutation(
         &self,
-        project_slug: &str,
+        project_code: &str,
     ) -> anyhow::Result<(String, String)> {
-        let identity = resolve_canonical_project_identity(project_slug)?;
-        self.graph_store
-            .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
-        Ok((identity.slug, identity.code))
+        let identity = resolve_canonical_project_identity(project_code)?;
+        let project_path = identity.project_path.to_string_lossy().to_string();
+        self.graph_store.sync_project_registry_entry(
+            &identity.code,
+            identity.name.as_deref(),
+            Some(&project_path),
+        )?;
+        Ok((identity.code.clone(), identity.code))
     }
 
-    fn resolve_project_code(&self, project_slug: &str) -> anyhow::Result<String> {
+    fn resolve_project_code(&self, project_code: &str) -> anyhow::Result<String> {
         let _ = self.sync_project_code_registry_from_meta();
-        let escaped = escape_sql(project_slug);
-        let by_slug = self.query_single_column(&format!(
-            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_slug = '{}'",
+        let escaped = escape_sql(project_code);
+        let by_code = self.query_single_column(&format!(
+            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
             escaped
         ))?;
-        if let Some(code) = by_slug.into_iter().next() {
+        if let Some(code) = by_code.into_iter().next() {
             return Ok(code);
         }
 
-        if let Ok(identity) = resolve_canonical_project_identity(project_slug) {
-            self.graph_store
-                .sync_project_code_registry_entry(&identity.slug, &identity.code, None)?;
+        if let Ok(identity) = resolve_canonical_project_identity(project_code) {
+            let project_path = identity.project_path.to_string_lossy().to_string();
+            self.graph_store.sync_project_registry_entry(
+                &identity.code,
+                identity.name.as_deref(),
+                Some(&project_path),
+            )?;
             return Ok(identity.code);
         }
 
-        if let Err(e) = resolve_canonical_project_identity(project_slug) {
+        if let Err(e) = resolve_canonical_project_identity(project_code) {
             return Err(e);
         }
 
         Err(anyhow!(
             "Projet canonique `{}` introuvable dans `.axon/meta.json` ou soll.ProjectCodeRegistry",
-            project_slug
+            project_code
         ))
     }
 
     pub(crate) fn next_server_numeric_id(
         &self,
-        project_slug: &str,
+        project_code: &str,
         kind: &str,
     ) -> anyhow::Result<(String, String, &'static str, u64)> {
-        let (project_slug, project_code) =
-            self.resolve_canonical_project_identity_for_mutation(project_slug)?;
+        let (canonical_code, project_code) =
+            self.resolve_canonical_project_identity_for_mutation(project_code)?;
         let (prefix, reg_col, table, id_expr) = match kind {
             "vision" => ("VIS", "last_vis", "soll.Node", "id"),
             "pillar" => ("PIL", "last_pil", "soll.Node", "id"),
@@ -1744,15 +1757,15 @@ graph TD;
         };
 
         self.graph_store.execute_param(
-            "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev) \
-             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_slug) DO NOTHING",
-            &json!([project_slug]),
+            "INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev) \
+             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) ON CONFLICT (project_code) DO NOTHING",
+            &json!([canonical_code]),
         )?;
 
         let current_query = format!(
-            "SELECT COALESCE({}, 0) FROM soll.Registry WHERE project_slug = '{}'",
+            "SELECT COALESCE({}, 0) FROM soll.Registry WHERE project_code = '{}'",
             reg_col,
-            escape_sql(&project_slug)
+            escape_sql(&canonical_code)
         );
         let current = self
             .query_single_column(&current_query)?
@@ -1778,21 +1791,21 @@ graph TD;
 
         let next = current.max(observed_max) + 1;
         self.graph_store.execute(&format!(
-            "UPDATE soll.Registry SET {} = {} WHERE project_slug = '{}'",
+            "UPDATE soll.Registry SET {} = {} WHERE project_code = '{}'",
             reg_col,
             next,
-            escape_sql(&project_slug)
+            escape_sql(&canonical_code)
         ))?;
 
-        Ok((project_slug, project_code, prefix, next))
+        Ok((canonical_code, project_code, prefix, next))
     }
 
     pub(crate) fn next_soll_numeric_id(
         &self,
-        project_slug: &str,
+        project_code: &str,
         entity: &str,
     ) -> anyhow::Result<(String, String, &'static str, u64)> {
-        self.next_server_numeric_id(project_slug, entity)
+        self.next_server_numeric_id(project_code, entity)
     }
 
     fn restore_soll_relation(
@@ -1811,8 +1824,8 @@ graph TD;
 
 impl McpServer {
     pub(crate) fn axon_soll_apply_plan(&self, args: &Value) -> Option<Value> {
-        let project_slug = args
-            .get("project_slug")
+        let project_code = args
+            .get("project_code")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
         let author = args
@@ -1823,10 +1836,10 @@ impl McpServer {
             .get("dry_run")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let plan = args.get("plan")?;
+        let _plan = args.get("plan")?;
 
-        let (canonical_slug, _) = match self
-            .resolve_canonical_project_identity_for_mutation(project_slug)
+        let (canonical_project_code, _) = match self
+            .resolve_canonical_project_identity_for_mutation(project_code)
         {
             Ok(identity) => identity,
             Err(e) => {
@@ -1837,36 +1850,37 @@ impl McpServer {
             }
         };
 
-        let operations = self.build_plan_operations(&canonical_slug, args);
+        let operations = self.build_plan_operations(&canonical_project_code, args);
         let preview_id = if let Some(reserved_preview_id) = args
             .get("reserved_preview_id")
             .and_then(|value| value.as_str())
         {
             reserved_preview_id.to_string()
         } else {
-            let (_, project_code, _, next_preview) =
-                match self.next_server_numeric_id(&canonical_slug, "preview") {
-                    Ok(parts) => parts,
-                    Err(e) => {
-                        return Some(json!({
-                            "content": [{"type":"text","text": format!("SOLL apply_plan preview id error: {}", e)}],
-                            "isError": true
-                        }))
-                    }
-                };
+            let (_, project_code, _, next_preview) = match self
+                .next_server_numeric_id(&canonical_project_code, "preview")
+            {
+                Ok(parts) => parts,
+                Err(e) => {
+                    return Some(json!({
+                        "content": [{"type":"text","text": format!("SOLL apply_plan preview id error: {}", e)}],
+                        "isError": true
+                    }))
+                }
+            };
             format!("PRV-{}-{:03}", project_code, next_preview)
         };
         let payload = json!({
-            "project_slug": canonical_slug,
+            "project_code": canonical_project_code,
             "author": author,
             "dry_run": dry_run,
             "operations": operations
         });
 
         if let Err(e) = self.graph_store.execute_param(
-            "INSERT INTO soll.RevisionPreview (preview_id, author, project_slug, payload, created_at) VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT (preview_id) DO UPDATE SET author = EXCLUDED.author, project_slug = EXCLUDED.project_slug, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at",
-            &json!([preview_id, author, canonical_slug, payload.to_string(), now_unix_ms()]),
+            "INSERT INTO soll.RevisionPreview (preview_id, author, project_code, payload, created_at) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (preview_id) DO UPDATE SET author = EXCLUDED.author, project_code = EXCLUDED.project_code, payload = EXCLUDED.payload, created_at = EXCLUDED.created_at",
+            &json!([preview_id, author, canonical_project_code, payload.to_string(), now_unix_ms()]),
         ) {
             return Some(json!({
                 "content": [{"type":"text","text": format!("SOLL apply_plan error: {}", e)}],
@@ -2024,8 +2038,8 @@ impl McpServer {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let project_slug = payload
-            .get("project_slug")
+        let project_code = payload
+            .get("project_code")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
 
@@ -2035,16 +2049,17 @@ impl McpServer {
         {
             reserved_revision_id.to_string()
         } else {
-            let (_, project_code, _, next_revision) =
-                match self.next_server_numeric_id(project_slug, "revision") {
-                    Ok(parts) => parts,
-                    Err(e) => {
-                        return Some(json!({
-                            "content": [{"type":"text","text": format!("SOLL commit error (revision id): {}", e)}],
-                            "isError": true
-                        }))
-                    }
-                };
+            let (_, project_code, _, next_revision) = match self
+                .next_server_numeric_id(project_code, "revision")
+            {
+                Ok(parts) => parts,
+                Err(e) => {
+                    return Some(json!({
+                        "content": [{"type":"text","text": format!("SOLL commit error (revision id): {}", e)}],
+                        "isError": true
+                    }))
+                }
+            };
             format!("REV-{}-{:03}", project_code, next_revision)
         };
         let now = now_unix_ms();
@@ -2094,11 +2109,11 @@ impl McpServer {
     }
 
     pub(crate) fn axon_soll_query_context(&self, args: &Value) -> Option<Value> {
-        let project_slug = args
-            .get("project_slug")
+        let project_code = args
+            .get("project_code")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
-        let project_code = self.resolve_project_code(project_slug).ok()?;
+        let project_code = self.resolve_project_code(project_code).ok()?;
         let limit = args
             .get("limit")
             .and_then(|v| v.as_i64())
@@ -2107,6 +2122,12 @@ impl McpServer {
 
         let reqs = self.query_single_column(&format!(
             "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Requirement' AND id LIKE 'REQ-{}-%' ORDER BY id DESC LIMIT {}",
+            escape_sql(&project_code),
+            limit
+        )).unwrap_or_default();
+        let visions = self.query_single_column(&format!(
+            "SELECT id || '|' || title || '|' || COALESCE(status,'') || '|' || COALESCE(description,'') \
+             FROM soll.Node WHERE type='Vision' AND id LIKE 'VIS-{}-%' ORDER BY id DESC LIMIT {}",
             escape_sql(&project_code),
             limit
         )).unwrap_or_default();
@@ -2121,9 +2142,10 @@ impl McpServer {
         )).unwrap_or_default();
 
         Some(json!({
-            "content": [{"type":"text","text": format!("SOLL context for {} loaded.", project_slug)}],
+            "content": [{"type":"text","text": format!("SOLL context for {} loaded.", project_code)}],
             "data": {
-                "project_slug": project_slug,
+                "project_code": project_code,
+                "visions": visions,
                 "requirements": reqs,
                 "decisions": decisions,
                 "revisions": revisions
@@ -2132,7 +2154,7 @@ impl McpServer {
     }
 
     pub(crate) fn axon_soll_work_plan(&self, args: &Value) -> Option<Value> {
-        let project_slug = args.get("project_slug")?.as_str()?;
+        let project_code = args.get("project_code")?.as_str()?;
         let limit = args
             .get("limit")
             .and_then(|v| v.as_u64())
@@ -2148,8 +2170,8 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("brief");
 
-        let mut nodes = self.load_work_plan_nodes(project_slug);
-        let edges = self.load_work_plan_edges(project_slug);
+        let mut nodes = self.load_work_plan_nodes(project_code);
+        let edges = self.load_work_plan_edges(project_code);
         let adjacency = build_adjacency_map(&edges);
         let cycle_sets = detect_cycle_sets(nodes.keys(), &adjacency);
         let cycle_node_ids = cycle_sets
@@ -2158,7 +2180,7 @@ impl McpServer {
             .collect::<HashSet<_>>();
         let blocked_by_cycles = collect_blocked_by_cycles(&adjacency, &cycle_node_ids);
         let backlog_visible = self
-            .project_scope_summary(Some(project_slug))
+            .project_scope_summary(Some(project_code))
             .map(|summary| summary.backlog_files > 0)
             .unwrap_or(false);
 
@@ -2225,8 +2247,8 @@ impl McpServer {
         let (limited_waves, returned_items, truncated) = apply_wave_limit(&waves, limit);
         let top_recommendations = build_top_recommendations(&limited_waves, top);
         let global_validation =
-            self.axon_soll_verify_requirements(&json!({ "project_slug": project_slug }));
-        let soll_validation = self.axon_validate_soll(&json!({ "project_slug": project_slug }));
+            self.axon_soll_verify_requirements(&json!({ "project_code": project_code }));
+        let soll_validation = self.axon_validate_soll(&json!({ "project_code": project_code }));
         let validation_gates = json!({
             "requirement_verification": global_validation
                 .as_ref()
@@ -2242,7 +2264,7 @@ impl McpServer {
         });
         let data = json!({
             "summary": {
-                "project_slug": project_slug,
+                "project_code": project_code,
                 "total_nodes": nodes.len(),
                 "schedulable_nodes": schedulable_ids.len(),
                 "blocked_nodes": blockers.len(),
@@ -2267,10 +2289,10 @@ impl McpServer {
         });
 
         let text = if format == "json" {
-            format!("SOLL work plan generated for {}.", project_slug)
+            format!("SOLL work plan generated for {}.", project_code)
         } else {
             self.render_work_plan_text(
-                project_slug,
+                project_code,
                 &limited_waves,
                 &blockers,
                 &cycles,
@@ -2330,8 +2352,8 @@ impl McpServer {
         }))
     }
 
-    fn load_work_plan_nodes(&self, project_slug: &str) -> HashMap<String, WorkPlanNode> {
-        let Ok(project_code) = self.resolve_project_code(project_slug) else {
+    fn load_work_plan_nodes(&self, project_code: &str) -> HashMap<String, WorkPlanNode> {
+        let Ok(project_code) = self.resolve_project_code(project_code) else {
             return HashMap::new();
         };
         let mut nodes = HashMap::new();
@@ -2458,8 +2480,8 @@ impl McpServer {
         nodes
     }
 
-    fn load_work_plan_edges(&self, project_slug: &str) -> Vec<(String, String)> {
-        let Ok(project_code) = self.resolve_project_code(project_slug) else {
+    fn load_work_plan_edges(&self, project_code: &str) -> Vec<(String, String)> {
+        let Ok(project_code) = self.resolve_project_code(project_code) else {
             return Vec::new();
         };
         let mut edges = Vec::new();
@@ -2544,7 +2566,7 @@ impl McpServer {
 
     fn render_work_plan_text(
         &self,
-        project_slug: &str,
+        project_code: &str,
         waves: &[WorkPlanWave],
         blockers: &[WorkPlanBlocker],
         cycles: &[WorkPlanCycle],
@@ -2600,11 +2622,11 @@ impl McpServer {
         }
         format!(
             "### 🗺️ SOLL Work Plan: {}\n\n{}",
-            project_slug,
+            project_code,
             format_standard_contract(
                 "ok",
                 "work plan computed from SOLL",
-                &format!("project:{}", project_slug),
+                &format!("project:{}", project_code),
                 &evidence,
                 &[
                     "review blockers before execution",
@@ -2616,11 +2638,11 @@ impl McpServer {
     }
 
     pub(crate) fn axon_soll_verify_requirements(&self, args: &Value) -> Option<Value> {
-        let project_slug = args
-            .get("project_slug")
+        let project_code = args
+            .get("project_code")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
-        let project_code = self.resolve_project_code(project_slug).ok()?;
+        let project_code = self.resolve_project_code(project_code).ok()?;
         let query = format!(
             "SELECT r.id, COALESCE(r.status,''), COALESCE(r.acceptance_criteria,''), COUNT(t.id)
              FROM soll.Node r WHERE r.type='Requirement' AND
@@ -2666,7 +2688,7 @@ impl McpServer {
 
         Some(json!({
             "content": [{"type":"text","text": format!("Requirement verification: done={}, partial={}, missing={}", done, partial, missing)}],
-            "data": {"project_slug": project_slug, "done": done, "partial": partial, "missing": missing, "details": details}
+            "data": {"project_code": project_code, "done": done, "partial": partial, "missing": missing, "details": details}
         }))
     }
 
@@ -2717,7 +2739,7 @@ impl McpServer {
         )
     }
 
-    fn build_plan_operations(&self, project_slug: &str, args: &Value) -> Vec<Value> {
+    fn build_plan_operations(&self, project_code: &str, args: &Value) -> Vec<Value> {
         let mut operations = Vec::new();
 
         // 1. Entities
@@ -2750,7 +2772,7 @@ impl McpServer {
                             operations.push(json!({
                                 "kind": kind,
                                 "entity": entity,
-                                "project_slug": project_slug,
+                                "project_code": project_code,
                                 "logical_key": logical_key,
                                 "entity_id": existing_id,
                                 "payload": Value::Object(obj.clone())
@@ -2768,7 +2790,7 @@ impl McpServer {
                     operations.push(json!({
                         "kind": "link",
                         "entity": "relation",
-                        "project_slug": project_slug,
+                        "project_code": project_code,
                         "payload": Value::Object(obj.clone())
                     }));
                 }
@@ -2790,8 +2812,8 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("requirement");
         let mut payload = op.get("payload").cloned().unwrap_or(serde_json::json!({}));
-        let project_slug = op
-            .get("project_slug")
+        let project_code = op
+            .get("project_code")
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
 
@@ -2841,7 +2863,7 @@ impl McpServer {
             )
         } else {
             let mut data = payload.clone();
-            data["project_slug"] = serde_json::json!(project_slug);
+            data["project_code"] = serde_json::json!(project_code);
             self.axon_soll_manager(
                 &serde_json::json!({"action":"create","entity":entity,"data":data}),
             )
@@ -3124,16 +3146,22 @@ impl McpServer {
 
     pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
         let project_name = args.get("project_name")?.as_str()?;
-        let project_slug = args.get("project_slug")?.as_str()?;
+        let project_code = args
+            .get("project_code")
+            .and_then(|value| value.as_str())
+            .or_else(|| args.get("project_code").and_then(|value| value.as_str()))?;
         let concept_text = args
             .get("concept_document_url_or_text")
             .and_then(|v| v.as_str());
 
         // 1. Register project
-        if let Err(e) = self
-            .graph_store
-            .sync_project_code_registry_entry(project_slug, project_slug, None)
-        {
+        let project_path = args.get("project_path").and_then(|value| value.as_str());
+
+        if let Err(e) = self.graph_store.sync_project_registry_entry(
+            project_code,
+            Some(project_name),
+            project_path,
+        ) {
             return Some(serde_json::json!({
                 "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],
                 "isError": true
@@ -3142,7 +3170,7 @@ impl McpServer {
 
         // 2. Fetch global guidelines
         let rows_raw = self.graph_store.query_json(
-            "SELECT id, title, description, metadata FROM soll.Node WHERE type='Guideline' AND project_slug='GLOBAL'"
+            "SELECT id, title, description, metadata FROM soll.Node WHERE type='Guideline' AND project_code='PRO'"
         ).unwrap_or_else(|_| "[]".to_string());
 
         let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
@@ -3157,13 +3185,13 @@ impl McpServer {
         // 3. Prepare response
         let mut response_text = format!(
             "Projet '{}' ({}) initialisé avec succès dans Axon.\n\n",
-            project_name, project_slug
+            project_name, project_code
         );
 
-        if let Some(concept) = concept_text {
+        if concept_text.is_some() {
             response_text.push_str(&format!(
                 "📄 Un document de concept a été détecté. Extrayez-en la Vision et les Piliers, et utilisez `soll_manager` pour les créer sous le projet {}.\n\n",
-                project_slug
+                project_code
             ));
         }
 
@@ -3181,7 +3209,7 @@ impl McpServer {
         &self,
         args: &serde_json::Value,
     ) -> Option<serde_json::Value> {
-        let project_slug = args.get("project_slug")?.as_str()?;
+        let project_code = args.get("project_code").and_then(|value| value.as_str())?;
         let accepted_ids = args.get("accepted_global_rule_ids")?.as_array()?;
 
         let mut applied = Vec::new();
@@ -3204,16 +3232,16 @@ impl McpServer {
                 let meta = &row[2];
 
                 // Create local rule
-                let (p_slug, p_code, prefix, num) = self
-                    .next_soll_numeric_id(project_slug, "guideline")
+                let (_scope_code, p_code, prefix, num) = self
+                    .next_soll_numeric_id(project_code, "guideline")
                     .unwrap();
                 let local_id = format!("{}-{}-{:03}", prefix, p_code, num);
 
                 // Insert local rule
                 let _ = self.graph_store.execute_param(
-                    "INSERT INTO soll.Node (id, type, project_slug, project_code, title, description, status, metadata) 
-                     VALUES (?, 'Guideline', ?, ?, ?, ?, 'active', ?)",
-                    &serde_json::json!([local_id, p_slug, p_code, title, desc, meta])
+                    "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) 
+                     VALUES (?, 'Guideline', ?, ?, ?, 'active', ?)",
+                    &serde_json::json!([local_id, p_code, title, desc, meta])
                 );
 
                 // Insert edge

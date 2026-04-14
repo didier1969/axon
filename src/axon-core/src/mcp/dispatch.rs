@@ -18,11 +18,16 @@ impl McpServer {
         let runtime_mode = AxonRuntimeMode::from_env();
         let runtime_profile = AxonRuntimeOperationalProfile::from_mode_and_strings(
             runtime_mode.as_str(),
-            std::env::var("AXON_ENABLE_AUTONOMOUS_INGESTOR").ok().as_deref(),
+            std::env::var("AXON_ENABLE_AUTONOMOUS_INGESTOR")
+                .ok()
+                .as_deref(),
         );
 
         if requires_indexed_runtime(normalized_name)
-            && !matches!(runtime_profile, AxonRuntimeOperationalProfile::FullAutonomous)
+            && !matches!(
+                runtime_profile,
+                AxonRuntimeOperationalProfile::FullAutonomous
+            )
         {
             return Some(json!({
                 "content": [{
@@ -38,12 +43,12 @@ impl McpServer {
             }));
         }
 
-        let response = if Self::mcp_mutation_jobs_enabled() && Self::is_mutating_tool(normalized_name)
-        {
-            self.launch_mutation_job(normalized_name, arguments)
-        } else {
-            self.execute_tool_direct(normalized_name, arguments)
-        };
+        let response =
+            if Self::mcp_mutation_jobs_enabled() && Self::is_mutating_tool(normalized_name) {
+                self.launch_mutation_job(normalized_name, arguments)
+            } else {
+                self.execute_tool_direct(normalized_name, arguments)
+            };
 
         Some(response.unwrap_or_else(|| {
             json!({

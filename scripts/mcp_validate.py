@@ -49,6 +49,31 @@ class ScenarioStep:
     fail_if_contains: list[str]
 
 
+HIDDEN_TOOL_SCENARIOS: list[ScenarioStep] = [
+    ScenarioStep(
+        name="hidden.retrieve_context.exact",
+        tool="retrieve_context",
+        args={},
+        expect_contains=["Context Retrieval"],
+        fail_if_contains=[],
+    ),
+    ScenarioStep(
+        name="hidden.retrieve_context.wiring",
+        tool="retrieve_context",
+        args={},
+        expect_contains=["Context Retrieval"],
+        fail_if_contains=[],
+    ),
+    ScenarioStep(
+        name="hidden.retrieve_context.rationale",
+        tool="retrieve_context",
+        args={},
+        expect_contains=["Context Retrieval"],
+        fail_if_contains=[],
+    ),
+]
+
+
 def extract_result_data(result_payload: dict[str, Any]) -> dict[str, Any]:
     result = result_payload.get("result")
     if isinstance(result, dict):
@@ -103,6 +128,15 @@ def build_args(
     state = state or {}
     # Safe, deterministic overrides for known tools.
     overrides: dict[str, dict[str, Any]] = {
+        "status": {"mode": "brief"},
+        "project_status": {"project_code": "AXO", "mode": "brief"},
+        "snapshot_history": {"project_code": "AXO", "limit": 5},
+        "snapshot_diff": {"project_code": "AXO"},
+        "conception_view": {"project_code": "AXO", "mode": "brief"},
+        "change_safety": {"project_code": "AXO", "target": symbol_probe, "target_type": "symbol", "mode": "brief"},
+        "why": {"symbol": symbol_probe, "project": project, "mode": "brief"},
+        "path": {"source": symbol_probe, "project": project, "depth": 2},
+        "anomalies": {"project": project, "mode": "brief"},
         "query": {"query": query, "project": project},
         "inspect": {"symbol": symbol_probe, "project": project},
         "health": {"project": project},
@@ -121,10 +155,10 @@ def build_args(
         "list_labels_tables": {},
         "query_examples": {},
         "debug": {"project": project},
-        "soll_query_context": {"project_slug": "AXO", "limit": 5},
-        "soll_work_plan": {"project_slug": "AXO", "limit": 10, "include_ist": True, "format": "json"},
-        "soll_verify_requirements": {"project_slug": "AXO"},
-        "soll_apply_plan": {"project_slug": "AXO", "author": "mcp-validate", "dry_run": True, "plan": {}},
+        "soll_query_context": {"project_code": "AXO", "limit": 5},
+        "soll_work_plan": {"project_code": "AXO", "limit": 10, "include_ist": True, "format": "json"},
+        "soll_verify_requirements": {"project_code": "AXO"},
+        "soll_apply_plan": {"project_code": "AXO", "author": "mcp-validate", "dry_run": True, "plan": {}},
         "soll_commit_revision": {
             "preview_id": str(state.get("preview_id") or "dry-run-preview"),
             "author": "mcp-validate",
@@ -139,7 +173,7 @@ def build_args(
             "action": "create",
             "entity": "requirement",
             "data": {
-                "project_slug": "AXO",
+                "project_code": "AXO",
                 "title": "MCP Validate Requirement",
                 "description": "Synthetic MCP validation requirement",
                 "priority": "P3",
@@ -236,6 +270,107 @@ def evaluate_response(tool_name: str, resp: dict[str, Any]) -> tuple[str, str]:
         return "fail", "query returned no result"
     if tool_name in {"health", "audit", "diagnose_indexing"} and "known files: 0" in text:
         return "fail", f"{tool_name} reports empty project scope"
+    if tool_name == "status":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("runtime_mode"), str):
+            return "fail", "status missing runtime_mode"
+        if not isinstance(data.get("runtime_profile"), str):
+            return "fail", "status missing runtime_profile"
+        if not isinstance(data.get("truth_status"), str):
+            return "fail", "status missing truth_status"
+        if not isinstance(data.get("canonical_sources"), dict):
+            return "fail", "status missing canonical_sources"
+    if tool_name == "project_status":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("project_code"), str):
+            return "fail", "project_status missing project_code"
+        if not isinstance(data.get("snapshot_id"), str):
+            return "fail", "project_status missing snapshot_id"
+        if not isinstance(data.get("generated_at"), int):
+            return "fail", "project_status missing generated_at"
+        if not isinstance(data.get("delta_vs_previous"), dict):
+            return "fail", "project_status missing delta_vs_previous"
+        if not isinstance(data.get("vision"), dict):
+            return "fail", "project_status missing vision"
+        if not isinstance(data.get("conception"), dict):
+            return "fail", "project_status missing conception"
+        if not isinstance(data.get("runtime"), dict):
+            return "fail", "project_status missing runtime"
+        if not isinstance(data.get("anomalies"), dict):
+            return "fail", "project_status missing anomalies"
+        if not isinstance(data.get("soll_context"), dict):
+            return "fail", "project_status missing soll_context"
+    if tool_name == "snapshot_history":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("snapshots"), list):
+            return "fail", "snapshot_history missing snapshots"
+        if not isinstance(data.get("storage"), dict):
+            return "fail", "snapshot_history missing storage"
+    if tool_name == "snapshot_diff":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("from_snapshot_id"), str):
+            return "fail", "snapshot_diff missing from_snapshot_id"
+        if not isinstance(data.get("to_snapshot_id"), str):
+            return "fail", "snapshot_diff missing to_snapshot_id"
+        if not isinstance(data.get("metric_delta"), dict):
+            return "fail", "snapshot_diff missing metric_delta"
+    if tool_name == "conception_view":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("modules"), list):
+            return "fail", "conception_view missing modules"
+        if not isinstance(data.get("interfaces"), list):
+            return "fail", "conception_view missing interfaces"
+        if not isinstance(data.get("contracts"), list):
+            return "fail", "conception_view missing contracts"
+        if not isinstance(data.get("flows"), list):
+            return "fail", "conception_view missing flows"
+    if tool_name == "change_safety":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("target"), str):
+            return "fail", "change_safety missing target"
+        if not isinstance(data.get("change_safety"), str):
+            return "fail", "change_safety missing change_safety"
+        if not isinstance(data.get("coverage_signals"), dict):
+            return "fail", "change_safety missing coverage_signals"
+        if not isinstance(data.get("traceability_signals"), dict):
+            return "fail", "change_safety missing traceability_signals"
+        if not isinstance(data.get("validation_signals"), dict):
+            return "fail", "change_safety missing validation_signals"
+    if tool_name == "why":
+        data = extract_result_data(resp)
+        why_data = data.get("why")
+        if not isinstance(why_data, dict):
+            return "fail", "why missing structured why payload"
+        target = why_data.get("target")
+        if not isinstance(target, dict):
+            return "fail", "why missing target"
+        if not isinstance(why_data.get("missing_evidence"), list):
+            return "fail", "why missing missing_evidence"
+        if not isinstance(why_data.get("confidence"), dict):
+            return "fail", "why missing confidence"
+    if tool_name == "path":
+        data = extract_result_data(resp)
+        if data.get("path_found") is True:
+            if not isinstance(data.get("path"), list):
+                return "fail", "path missing path array"
+            if not isinstance(data.get("path_type"), str):
+                return "fail", "path missing path_type"
+        if not isinstance(data.get("canonical_sources"), dict):
+            return "fail", "path missing canonical_sources"
+    if tool_name == "anomalies":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("summary"), dict):
+            return "fail", "anomalies missing summary"
+        if not isinstance(data.get("findings"), list):
+            return "fail", "anomalies missing findings"
+        if not isinstance(data.get("recommendations"), list):
+            return "fail", "anomalies missing recommendations"
+    if tool_name == "soll_query_context":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("project_code"), str):
+            return "fail", "soll_query_context missing project_code"
+        if not isinstance(data.get("visions"), list):
+            return "fail", "soll_query_context missing visions"
 
     return "ok", "ok"
 
@@ -494,6 +629,83 @@ def run_query_sequence_scenario(
     return results
 
 
+def run_hidden_tool_probes(
+    url: str,
+    timeout: int,
+    excerpt_limit: int,
+    project: str,
+    symbol_probe: str,
+) -> list[ToolResult]:
+    probes = [
+        ("hidden.retrieve_context.exact", {"question": symbol_probe, "project": project, "token_budget": 900}),
+        ("hidden.retrieve_context.wiring", {"question": f"Where is {symbol_probe} wired?", "project": project, "token_budget": 900}),
+        ("hidden.retrieve_context.rationale", {"question": f"Why does {symbol_probe} exist?", "project": project, "token_budget": 900}),
+    ]
+    results: list[ToolResult] = []
+    for offset, (name, request_args) in enumerate(probes, start=9800):
+        payload = {
+            "jsonrpc": "2.0",
+            "id": offset,
+            "method": "tools/call",
+            "params": {"name": "retrieve_context", "arguments": request_args},
+        }
+        t0 = time.time()
+        try:
+            resp = rpc_call(url, payload, timeout)
+            excerpt, response_size = summarize_response(resp, excerpt_limit)
+            text = extract_text(resp)
+            if "unavailable in runtime mode" in text.lower():
+                results.append(
+                    ToolResult(
+                        name=name,
+                        status="skip",
+                        duration_ms=int((time.time() - t0) * 1000),
+                        note="retrieve_context unavailable in this runtime mode",
+                        request_args=request_args,
+                        response_excerpt=excerpt,
+                        response_size=response_size,
+                    )
+                )
+                continue
+            status, note = evaluate_tool_result("retrieve_context", resp, url, timeout)
+            data = extract_result_data(resp)
+            planner = data.get("planner", {}) if isinstance(data, dict) else {}
+            packet = data.get("packet", {}) if isinstance(data, dict) else {}
+            if status == "ok":
+                if not isinstance(planner, dict) or not isinstance(packet, dict):
+                    status, note = "fail", "retrieve_context hidden probe missing planner/packet"
+                elif not planner.get("route"):
+                    status, note = "fail", "retrieve_context hidden probe missing planner route"
+                elif not isinstance(packet.get("direct_evidence"), list):
+                    status, note = "fail", "retrieve_context hidden probe missing direct_evidence array"
+                else:
+                    note = f"{note}; route={planner.get('route')}"
+            results.append(
+                ToolResult(
+                    name=name,
+                    status=status,
+                    duration_ms=int((time.time() - t0) * 1000),
+                    note=note,
+                    request_args=request_args,
+                    response_excerpt=excerpt,
+                    response_size=response_size,
+                )
+            )
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            results.append(
+                ToolResult(
+                    name=name,
+                    status="fail",
+                    duration_ms=int((time.time() - t0) * 1000),
+                    note=f"hidden retrieve_context probe failed: {type(exc).__name__}: {exc}",
+                    request_args=request_args,
+                    response_excerpt=f"{type(exc).__name__}: {exc}",
+                    response_size=0,
+                )
+            )
+    return results
+
+
 def run(args: argparse.Namespace) -> int:
     started = time.time()
     scenario_steps: list[ScenarioStep] = []
@@ -615,6 +827,9 @@ def run(args: argparse.Namespace) -> int:
         tool_results.extend(
             run_query_sequence_scenario(args.url, args.timeout, args.excerpt, scenario_steps)
         )
+    tool_results.extend(
+        run_hidden_tool_probes(args.url, args.timeout, args.excerpt, project, symbol_probe)
+    )
 
     ok = sum(1 for r in tool_results if r.status == "ok")
     warn = sum(1 for r in tool_results if r.status == "warn")

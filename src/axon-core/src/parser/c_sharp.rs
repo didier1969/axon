@@ -23,8 +23,13 @@ impl CSharpParser {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             match child.kind() {
-                "method_declaration" | "constructor_declaration" => Self::extract_method(child, source_bytes, result),
-                "class_declaration" | "struct_declaration" | "interface_declaration" | "enum_declaration" => Self::extract_class(child, source_bytes, result),
+                "method_declaration" | "constructor_declaration" => {
+                    Self::extract_method(child, source_bytes, result)
+                }
+                "class_declaration"
+                | "struct_declaration"
+                | "interface_declaration"
+                | "enum_declaration" => Self::extract_class(child, source_bytes, result),
                 "invocation_expression" => Self::extract_call(child, source_bytes, result),
                 _ => Self::walk(child, source_bytes, result),
             }
@@ -146,7 +151,7 @@ impl CSharpParser {
 impl Parser for CSharpParser {
     fn parse(&self, content: &str) -> ExtractionResult {
         let mut result = ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };

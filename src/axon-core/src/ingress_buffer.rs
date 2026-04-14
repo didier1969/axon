@@ -11,6 +11,9 @@ static INGRESS_SUBTREE_HINT_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_SUBTREE_HINT_BLOCKED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_SUBTREE_HINT_PRODUCTIVE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_SUBTREE_HINT_UNPRODUCTIVE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_SUBTREE_HINT_DROPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_COLLAPSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
 static INGRESS_LAST_FLUSH_DURATION_MS: AtomicU64 = AtomicU64::new(0);
@@ -33,7 +36,7 @@ pub enum IngressCause {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IngressFileEvent {
     pub path: String,
-    pub project_slug: String,
+    pub project_code: String,
     pub size: i64,
     pub mtime: i64,
     pub priority: i64,
@@ -44,7 +47,7 @@ pub struct IngressFileEvent {
 impl IngressFileEvent {
     pub fn new(
         path: impl Into<String>,
-        project_slug: impl Into<String>,
+        project_code: impl Into<String>,
         size: i64,
         mtime: i64,
         priority: i64,
@@ -53,7 +56,7 @@ impl IngressFileEvent {
     ) -> Self {
         Self {
             path: path.into(),
-            project_slug: project_slug.into(),
+            project_code: project_code.into(),
             size,
             mtime,
             priority,
@@ -76,6 +79,7 @@ struct BufferedSubtreeHint {
     first_seen_ms: u64,
     last_seen_ms: u64,
     execution_count: u64,
+    cooldown_ms: u64,
     cooldown_until_ms: u64,
     in_flight: bool,
 }
@@ -109,6 +113,9 @@ pub struct IngressMetricsSnapshot {
     pub subtree_hint_accepted_total: u64,
     pub subtree_hint_blocked_total: u64,
     pub subtree_hint_suppressed_total: u64,
+    pub subtree_hint_productive_total: u64,
+    pub subtree_hint_unproductive_total: u64,
+    pub subtree_hint_dropped_total: u64,
     pub hot_entries: usize,
     pub scan_entries: usize,
     pub collapsed_total: u64,
@@ -183,9 +190,20 @@ impl IngressBuffer {
         priority: i64,
         source: IngressSource,
     ) {
+        self.record_subtree_hint_with_cooldown(path, priority, source, subtree_hint_cooldown_ms());
+    }
+
+    pub fn record_subtree_hint_with_cooldown(
+        &mut self,
+        path: impl Into<String>,
+        priority: i64,
+        source: IngressSource,
+        cooldown_ms: u64,
+    ) {
         let now = current_time_ms();
         self.prune_idle_subtree_hints(now);
         let path = path.into();
+        let cooldown_ms = cooldown_ms.max(1);
         match self.subtree_hints.get_mut(&path) {
             Some(existing) => {
                 self.collapsed_events += 1;
@@ -199,6 +217,7 @@ impl IngressBuffer {
                 if priority >= existing.hint.priority {
                     existing.hint.source = source;
                 }
+                existing.cooldown_ms = existing.cooldown_ms.max(cooldown_ms);
                 if existing.in_flight || existing.cooldown_until_ms > now {
                     record_blocked_subtree_hint();
                     INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -214,6 +233,13 @@ impl IngressBuffer {
                 INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL.fetch_add(1, Ordering::Relaxed);
             }
             None => {
+                if source == IngressSource::Watcher
+                    && self.subtree_hints.len() >= watcher_subtree_hint_budget()
+                {
+                    INGRESS_SUBTREE_HINT_DROPPED_TOTAL.fetch_add(1, Ordering::Relaxed);
+                    self.sync_metrics();
+                    return;
+                }
                 INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL.fetch_add(1, Ordering::Relaxed);
                 self.subtree_hints.insert(
                     path.clone(),
@@ -226,6 +252,7 @@ impl IngressBuffer {
                         first_seen_ms: now,
                         last_seen_ms: now,
                         execution_count: 0,
+                        cooldown_ms,
                         cooldown_until_ms: 0,
                         in_flight: false,
                     },
@@ -275,6 +302,11 @@ impl IngressBuffer {
             subtree_hint_blocked_total: INGRESS_SUBTREE_HINT_BLOCKED_TOTAL.load(Ordering::Relaxed),
             subtree_hint_suppressed_total: INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL
                 .load(Ordering::Relaxed),
+            subtree_hint_productive_total: INGRESS_SUBTREE_HINT_PRODUCTIVE_TOTAL
+                .load(Ordering::Relaxed),
+            subtree_hint_unproductive_total: INGRESS_SUBTREE_HINT_UNPRODUCTIVE_TOTAL
+                .load(Ordering::Relaxed),
+            subtree_hint_dropped_total: INGRESS_SUBTREE_HINT_DROPPED_TOTAL.load(Ordering::Relaxed),
             hot_entries,
             scan_entries,
             collapsed_total: INGRESS_COLLAPSED_TOTAL.load(Ordering::Relaxed),
@@ -349,13 +381,50 @@ impl IngressBuffer {
             state.in_flight = false;
             state.last_seen_ms = now;
             state.execution_count = state.execution_count.saturating_add(1);
-            state.cooldown_until_ms = now.saturating_add(subtree_hint_cooldown_ms());
+            state.cooldown_until_ms = now.saturating_add(state.cooldown_ms.max(1));
             if state.execution_count >= subtree_hint_retry_budget() {
                 INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
             }
         }
         self.prune_idle_subtree_hints(now);
         self.sync_metrics();
+    }
+
+    pub fn complete_subtree_hint_with_stats(&mut self, path: &str, promoted_count: usize) {
+        let now = current_time_ms();
+        let mut drop_hint = false;
+        if let Some(state) = self.subtree_hints.get_mut(path) {
+            state.in_flight = false;
+            state.last_seen_ms = now;
+            if promoted_count > 0 {
+                state.execution_count = 0;
+                INGRESS_SUBTREE_HINT_PRODUCTIVE_TOTAL.fetch_add(1, Ordering::Relaxed);
+            } else {
+                state.execution_count = state.execution_count.saturating_add(1);
+                INGRESS_SUBTREE_HINT_UNPRODUCTIVE_TOTAL.fetch_add(1, Ordering::Relaxed);
+            }
+            state.cooldown_until_ms = now.saturating_add(state.cooldown_ms.max(1));
+            if promoted_count == 0 && state.execution_count >= subtree_hint_retry_budget() {
+                INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL.fetch_add(1, Ordering::Relaxed);
+                drop_hint = true;
+            }
+        }
+        if drop_hint && self.subtree_hints.remove(path).is_some() {
+            INGRESS_SUBTREE_HINT_DROPPED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        self.prune_idle_subtree_hints(now);
+        self.sync_metrics();
+    }
+
+    pub fn shed_subtree_hints_for_memory_pressure(&mut self) -> usize {
+        let dropped = self.subtree_hints.len();
+        if dropped == 0 {
+            return 0;
+        }
+        self.subtree_hints.clear();
+        INGRESS_SUBTREE_HINT_DROPPED_TOTAL.fetch_add(dropped as u64, Ordering::Relaxed);
+        self.sync_metrics();
+        dropped
     }
 
     fn prune_idle_subtree_hints(&mut self, now: u64) {
@@ -383,7 +452,7 @@ fn merge_file_event(existing: &mut IngressFileEvent, incoming: IngressFileEvent)
     if replace_metadata {
         existing.size = incoming.size;
         existing.mtime = incoming.mtime;
-        existing.project_slug = incoming.project_slug;
+        existing.project_code = incoming.project_code;
         existing.cause = incoming.cause;
     }
     if incoming.priority >= existing.priority {
@@ -432,6 +501,11 @@ pub fn ingress_metrics_snapshot() -> IngressMetricsSnapshot {
         subtree_hint_blocked_total: INGRESS_SUBTREE_HINT_BLOCKED_TOTAL.load(Ordering::Relaxed),
         subtree_hint_suppressed_total: INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL
             .load(Ordering::Relaxed),
+        subtree_hint_productive_total: INGRESS_SUBTREE_HINT_PRODUCTIVE_TOTAL
+            .load(Ordering::Relaxed),
+        subtree_hint_unproductive_total: INGRESS_SUBTREE_HINT_UNPRODUCTIVE_TOTAL
+            .load(Ordering::Relaxed),
+        subtree_hint_dropped_total: INGRESS_SUBTREE_HINT_DROPPED_TOTAL.load(Ordering::Relaxed),
         hot_entries: 0,
         scan_entries: 0,
         collapsed_total: INGRESS_COLLAPSED_TOTAL.load(Ordering::Relaxed),
@@ -472,8 +546,124 @@ fn subtree_hint_retry_budget() -> u64 {
         .max(1)
 }
 
+fn watcher_subtree_hint_budget() -> usize {
+    std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(512)
+}
+
 impl Default for IngressBuffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{current_time_ms, IngressBuffer, IngressSource};
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn test_subtree_hint_is_evicted_after_retry_budget_when_unproductive() {
+        let mut buffer = IngressBuffer::default();
+        let path = "/tmp/project/_build_truth";
+
+        buffer.record_subtree_hint(path, 900, IngressSource::Watcher);
+        assert_eq!(buffer.subtree_hint_entries(), 1);
+
+        let batch = buffer.drain_batch(10);
+        assert_eq!(batch.subtree_hints.len(), 1);
+
+        for _ in 0..3 {
+            buffer.complete_subtree_hint_with_stats(path, 0);
+        }
+
+        assert_eq!(
+            buffer.subtree_hint_entries(),
+            0,
+            "Un subtree hint non productif doit etre abandonne apres epuisement du budget"
+        );
+    }
+
+    #[test]
+    fn test_subtree_hint_is_preserved_when_it_produces_work() {
+        let mut buffer = IngressBuffer::default();
+        let path = "/tmp/project/src";
+
+        buffer.record_subtree_hint(path, 900, IngressSource::Watcher);
+        let batch = buffer.drain_batch(10);
+        assert_eq!(batch.subtree_hints.len(), 1);
+
+        buffer.complete_subtree_hint_with_stats(path, 4);
+
+        assert_eq!(
+            buffer.subtree_hint_entries(),
+            1,
+            "Un subtree hint productif doit rester eligible pour de futures rafales"
+        );
+    }
+
+    #[test]
+    fn test_subtree_hint_custom_cooldown_is_preserved_on_completion() {
+        let mut buffer = IngressBuffer::default();
+        let path = "/tmp/project/control-scope";
+        let custom_cooldown_ms = 60_000;
+
+        buffer.record_subtree_hint_with_cooldown(
+            path,
+            900,
+            IngressSource::Watcher,
+            custom_cooldown_ms,
+        );
+        let batch = buffer.drain_batch(10);
+        assert_eq!(batch.subtree_hints.len(), 1);
+
+        let before_complete = current_time_ms();
+        buffer.complete_subtree_hint(path);
+
+        let state = buffer
+            .subtree_hints
+            .get(path)
+            .expect("state must remain tracked");
+        assert_eq!(state.cooldown_ms, custom_cooldown_ms);
+        assert!(
+            state.cooldown_until_ms.saturating_sub(before_complete)
+                >= custom_cooldown_ms.saturating_sub(50),
+            "Le cooldown conserve doit refleter la valeur custom du subtree hint"
+        );
+    }
+
+    #[test]
+    fn test_watcher_subtree_hint_is_dropped_when_budget_is_exhausted() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("AXON_WATCHER_SUBTREE_HINT_BUDGET", "2");
+        }
+
+        let mut buffer = IngressBuffer::default();
+        buffer.record_subtree_hint("/tmp/project/a", 900, IngressSource::Watcher);
+        buffer.record_subtree_hint("/tmp/project/b", 900, IngressSource::Watcher);
+        buffer.record_subtree_hint("/tmp/project/c", 900, IngressSource::Watcher);
+
+        assert_eq!(
+            buffer.subtree_hint_entries(),
+            2,
+            "Le buffer watcher doit refuser les subtree hints supplémentaires quand le budget est plein"
+        );
+        assert!(
+            buffer.metrics_snapshot().subtree_hint_dropped_total >= 1,
+            "Le drop doit être comptabilisé explicitement"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
+        }
     }
 }

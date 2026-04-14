@@ -515,7 +515,7 @@ impl Parser for ElixirParser {
             Some(t) => t,
             None => {
                 return ExtractionResult {
-                    project_slug: None,
+                    project_code: None,
                     symbols: Vec::new(),
                     relations: Vec::new(),
                 }
@@ -523,7 +523,7 @@ impl Parser for ElixirParser {
         };
 
         let mut result = ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols: Vec::new(),
             relations: Vec::new(),
         };

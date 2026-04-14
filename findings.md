@@ -190,7 +190,7 @@
   - backlog visible
   - répartition `pending` / `indexing`
   - causes backlog dominantes
-- `axon_audit` et `axon_health` utilisent maintenant `project_slug` comme frontière de scope au lieu d’un `path LIKE` ambigu
+- `axon_audit` et `axon_health` utilisent maintenant `project_code` comme frontière de scope au lieu d’un `path LIKE` ambigu
 
 ### 13. Les transitions de scheduling critiques portent maintenant une cause explicite
 - `fetch_pending_batch` et `claim_pending_paths` posent maintenant `status_reason = 'claimed_for_indexing'`
@@ -386,3 +386,34 @@
   - toute requete `soll.` est maintenant routee vers `writer_ctx`
 - conclusion:
   - pour `SOLL`, la coherence immediate compte plus que l'isolation lecture seule
+
+### 29. Les fichiers de reprise locaux etaient devenus faux par omission
+- `task_plan.md`, `progress.md` et `findings.md` ne decrivaient plus la tranche active visible dans le worktree.
+- le depot porte maintenant une tranche plus recente et coherente autour de:
+  - `retrieve_context`
+  - la Phase 3 "LLM knowledge amplification"
+  - la refactorisation stagee du worker vectoriel
+- conclusion:
+  - le vrai premier travail de reprise n'etait pas du debug
+  - c'etait de resynchroniser la memoire projet sur l'etat courant du code
+
+### 30. La tranche Phase 3 n'est pas actuellement bloquee par un echec de tests cible
+- verifications locales executees a la reprise:
+  - `cargo test --manifest-path src/axon-core/Cargo.toml test_prepared_vector_embed_batch_ -- --nocapture`
+  - `cargo test --manifest-path src/axon-core/Cargo.toml test_retrieve_context_ -- --nocapture`
+- resultat:
+  - tests du pipeline vectoriel stage: `3/3` verts
+  - tests `retrieve_context`: `16/16` verts
+- conclusion:
+  - la reprise ne doit pas partir de l'hypothese "implementation cassee"
+  - la prochaine decision rationnelle est soit une qualification runtime reelle, soit une fermeture d'hygiene/warnings avant commit
+
+### 31. Le prochain point de decision n'est plus architectural mais operationnel
+- l'architecture Phase 3 existe deja en docs et en code:
+  - planner explicite
+  - degradation pressure-aware
+  - paquet de preuves LLM-friendly
+  - contrat vectoriel `prepare -> embed -> persist`
+- la question ouverte de reprise est maintenant:
+  - faut-il d'abord prouver cette tranche sur runtime HTTP reel
+  - ou la nettoyer/localiser completement avant de la figer

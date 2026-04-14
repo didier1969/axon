@@ -30,8 +30,12 @@ pub(crate) fn format_table_from_json(json_res: &str, headers: &[&str]) -> String
                 serde_json::Value::Bool(v) => v.to_string(),
                 serde_json::Value::Number(v) => v.to_string(),
                 serde_json::Value::String(v) => v,
-                serde_json::Value::Array(v) => serde_json::to_string(&v).unwrap_or_else(|_| "[]".to_string()),
-                serde_json::Value::Object(v) => serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string()),
+                serde_json::Value::Array(v) => {
+                    serde_json::to_string(&v).unwrap_or_else(|_| "[]".to_string())
+                }
+                serde_json::Value::Object(v) => {
+                    serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string())
+                }
             };
             output.push_str(&format!(" {} |", clean_val));
         }

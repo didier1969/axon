@@ -49,7 +49,7 @@ def extract_text(resp: dict[str, Any]) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate an ideal read-only work plan from SOLL.")
-    parser.add_argument("--project", required=True, help="Project slug, e.g. AXO")
+    parser.add_argument("--project", required=True, help="Project code, e.g. AXO")
     parser.add_argument("--limit", type=int, default=50, help="Maximum number of returned work items")
     parser.add_argument("--top", type=int, default=5, help="Number of immediate recommendations to highlight")
     parser.add_argument("--no-ist", action="store_true", help="Ignore IST signals during scoring")
@@ -59,7 +59,7 @@ def main() -> int:
     args = parser.parse_args()
 
     rpc_args = {
-        "project_slug": args.project,
+        "project_code": args.project,
         "limit": max(1, args.limit),
         "top": max(1, args.top),
         "include_ist": not args.no_ist,

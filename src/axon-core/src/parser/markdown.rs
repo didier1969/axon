@@ -269,7 +269,7 @@ impl Parser for MarkdownParser {
         self.extract_links_and_fences(&lines, &mut symbols, &mut relations);
 
         ExtractionResult {
-            project_slug: None,
+            project_code: None,
             symbols,
             relations,
         }
