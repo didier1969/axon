@@ -1874,9 +1874,8 @@ impl SemanticWorkerPool {
                         worker_idx, reason
                     );
                     if let Err(failure_err) = graph_store
-                        .mark_file_vectorization_work_failed_for_owner(
+                        .mark_file_vectorization_work_failed(
                             &finalize_owned_works,
-                            "finalize",
                             &reason,
                         )
                     {
@@ -2660,8 +2659,6 @@ fn work_with_lease_snapshots(
                 FileVectorizationWork {
                     file_path: item.file_path.clone(),
                     resumed_after_interactive_pause: item.resumed_after_interactive_pause,
-                    claim_token: snapshot.claim_token.clone(),
-                    lease_epoch: snapshot.lease_epoch,
                 }
             } else {
                 item.clone()
@@ -4975,14 +4972,10 @@ mod tests {
         let work_a = FileVectorizationWork {
             file_path: "src/a.rs".to_string(),
             resumed_after_interactive_pause: false,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         };
         let work_b = FileVectorizationWork {
             file_path: "src/b.rs".to_string(),
             resumed_after_interactive_pause: false,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         };
 
         let mut plan = VectorBatchPlan::default();
@@ -5051,14 +5044,10 @@ mod tests {
             FileVectorizationWork {
                 file_path: "/tmp/a.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/b.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
         ];
 
@@ -5097,20 +5086,14 @@ mod tests {
             FileVectorizationWork {
                 file_path: "/tmp/a.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/b.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/c.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
         ];
 
@@ -5143,8 +5126,6 @@ mod tests {
         let active_works = vec![FileVectorizationWork {
             file_path: "/tmp/limited.rs".to_string(),
             resumed_after_interactive_pause: false,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         }];
 
         let plan =
@@ -5168,8 +5149,6 @@ mod tests {
         let active_works = vec![FileVectorizationWork {
             file_path: "/tmp/complete.rs".to_string(),
             resumed_after_interactive_pause: false,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         }];
 
         let plan =
@@ -5194,14 +5173,10 @@ mod tests {
             FileVectorizationWork {
                 file_path: "/tmp/bytes-a.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/bytes-b.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
         ];
 
@@ -5236,8 +5211,6 @@ mod tests {
         let active_works = vec![FileVectorizationWork {
             file_path: "/tmp/vectorized.rs".to_string(),
             resumed_after_interactive_pause: false,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         }];
 
         let plan =
@@ -5252,27 +5225,19 @@ mod tests {
         let existing = vec![FileVectorizationWork {
             file_path: "src/a.rs".to_string(),
             resumed_after_interactive_pause: false,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         }];
         let additional = vec![
             FileVectorizationWork {
                 file_path: "src/a.rs".to_string(),
                 resumed_after_interactive_pause: true,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "src/b.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "src/c.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
         ];
 
@@ -5287,14 +5252,10 @@ mod tests {
         let work_a = FileVectorizationWork {
             file_path: "src/a.rs".to_string(),
             resumed_after_interactive_pause: false,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         };
         let work_b = FileVectorizationWork {
             file_path: "src/b.rs".to_string(),
             resumed_after_interactive_pause: true,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         };
         let mut plan = VectorBatchPlan::default();
         plan.work_items = vec![
@@ -5332,14 +5293,10 @@ mod tests {
         let work_a = FileVectorizationWork {
             file_path: "src/a.rs".to_string(),
             resumed_after_interactive_pause: false,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         };
         let work_b = FileVectorizationWork {
             file_path: "src/b.rs".to_string(),
             resumed_after_interactive_pause: false,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         };
         let mut plan = VectorBatchPlan::default();
         plan.work_items = vec![
@@ -5409,14 +5366,12 @@ mod tests {
             vec![FileVectorizationWork {
                 file_path: "/tmp/finalize_vector.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             }],
             vec![FileVectorizationLeaseSnapshot {
-                file_path: "/tmp/finalize_vector.rs".to_string(),
-                claim_token: "claim-finalize-vector".to_string(),
-                lease_epoch: 1,
-            }],
+                        file_path: "/tmp/finalize_vector.rs".to_string(),
+                        claim_token: String::new(),
+                        lease_epoch: 0,
+                    }],
             vec![],
         )
         .unwrap();
@@ -5465,14 +5420,12 @@ mod tests {
             vec![FileVectorizationWork {
                 file_path: "/tmp/file_level_ready.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             }],
             vec![FileVectorizationLeaseSnapshot {
-                file_path: "/tmp/file_level_ready.rs".to_string(),
-                claim_token: "claim-file-ready".to_string(),
-                lease_epoch: 1,
-            }],
+                        file_path: "/tmp/file_level_ready.rs".to_string(),
+                        claim_token: String::new(),
+                        lease_epoch: 0,
+                    }],
             vec![],
         )
         .unwrap();
@@ -5511,27 +5464,23 @@ mod tests {
                 FileVectorizationWork {
                     file_path: "/tmp/finalize_a.rs".to_string(),
                     resumed_after_interactive_pause: false,
-                    claim_token: "test-claim".to_string(),
-                    lease_epoch: 0,
                 },
                 FileVectorizationWork {
                     file_path: "/tmp/finalize_b.rs".to_string(),
                     resumed_after_interactive_pause: false,
-                    claim_token: "test-claim".to_string(),
-                    lease_epoch: 0,
                 },
             ],
             vec![
                 FileVectorizationLeaseSnapshot {
-                    file_path: "/tmp/finalize_a.rs".to_string(),
-                    claim_token: "claim-finalize-a".to_string(),
-                    lease_epoch: 1,
-                },
+                        file_path: "/tmp/finalize_a.rs".to_string(),
+                        claim_token: String::new(),
+                        lease_epoch: 0,
+                    },
                 FileVectorizationLeaseSnapshot {
-                    file_path: "/tmp/finalize_b.rs".to_string(),
-                    claim_token: "claim-finalize-b".to_string(),
-                    lease_epoch: 1,
-                },
+                        file_path: "/tmp/finalize_b.rs".to_string(),
+                        claim_token: String::new(),
+                        lease_epoch: 0,
+                    },
             ],
             vec![],
         )
@@ -5593,8 +5542,6 @@ mod tests {
             vec![FileVectorizationWork {
                 file_path: "/tmp/prepared.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             }],
             64,
             64,
@@ -5628,8 +5575,6 @@ mod tests {
         let mut completed_works = vec![FileVectorizationWork {
             file_path: "/tmp/flush_finalize.rs".to_string(),
             resumed_after_interactive_pause: false,
-            claim_token: "test-claim".to_string(),
-            lease_epoch: 0,
         }];
         let mut completed_batch_runs = vec![];
         let mut failed = HashMap::new();
@@ -5696,8 +5641,6 @@ mod tests {
             ClaimedLeaseSet::new(vec![FileVectorizationWork {
                 file_path: "/tmp/prefetched.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             }]),
             64,
             64,
@@ -5727,20 +5670,14 @@ mod tests {
             FileVectorizationWork {
                 file_path: "/tmp/a.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/b.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/c.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
         ];
 
@@ -5764,14 +5701,10 @@ mod tests {
             FileVectorizationWork {
                 file_path: "/tmp/a.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/b.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             },
         ];
 
@@ -5801,8 +5734,6 @@ mod tests {
             &[FileVectorizationWork {
                 file_path: "/tmp/oversized.rs".to_string(),
                 resumed_after_interactive_pause: false,
-                claim_token: "test-claim".to_string(),
-                lease_epoch: 0,
             }],
             8,
             1,

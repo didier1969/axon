@@ -10,8 +10,10 @@ use std::time::{Duration, Instant};
 use axon_core::embedder::{
     apply_runtime_embedding_lane_adjustment, current_embedding_provider_diagnostics,
     current_gpu_memory_snapshot, current_gpu_utilization_snapshot,
-    current_vector_batch_controller_diagnostics, current_vector_drain_state,
     embedding_lane_config_from_env,
+};
+use axon_core::vector_control::{
+    current_vector_batch_controller_diagnostics, current_vector_drain_state,
 };
 use axon_core::file_ingress_guard::{guard_metrics_snapshot, SharedFileIngressGuard};
 use axon_core::fs_watcher::{self, HOT_PRIORITY};
@@ -532,7 +534,7 @@ pub(crate) fn spawn_runtime_trace_logger(
                     "mcp_latency_recent_ms": signals.mcp_latency_recent_ms,
                     "vector_workers_active_current": signals.vector_workers_active_current,
                     "vector_worker_heartbeat_at_ms": signals.vector_worker_heartbeat_at_ms,
-                    "chunks_embedded_total": signals.chunks_embedded_total,
+                    "chunks_embedded_total": signals.canonical_chunk_embeddings_total,
                     "files_completed_total": signals.files_completed_total,
                 },
                 "gpu_memory": gpu_memory.as_ref().map(|snapshot| json!({
@@ -624,6 +626,11 @@ fn apply_live_optimizer_profile(
         } else {
             None
         },
+        None,
+        None,
+        None,
+        None,
+        None,
     );
 }
 
@@ -786,6 +793,11 @@ mod governor_tests {
             target_vector_workers: 1,
             target_chunk_batch_size: 48,
             target_file_vectorization_batch_size: 12,
+            target_ready_queue_depth: 8,
+            target_persist_queue_bound: 1,
+            target_max_inflight_persists: 2,
+            target_embed_micro_batch_max_items: 64,
+            target_embed_micro_batch_max_total_tokens: 8192,
         }
     }
 
@@ -838,7 +850,11 @@ mod governor_tests {
             embed_inflight_started_at_ms: 0,
             interactive_requests_in_flight: 0,
             interactive_priority: "background_normal".to_string(),
-            chunks_embedded_total: 10,
+            canonical_chunk_embeddings_total: 10,
+            canonical_chunks_embedded_last_minute: 0,
+            canonical_files_embedded_last_minute: 0,
+            canonical_files_embedded_total: 0,
+            chunk_embedding_writes_total: 0,
             files_completed_total: 1,
         }
     }

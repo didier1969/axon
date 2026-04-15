@@ -950,11 +950,14 @@ impl McpServer {
 
         let status = self.axon_status(&json!({ "mode": mode.unwrap_or("brief") }))?;
         let status_data = status.get("data").cloned().unwrap_or_else(|| json!({}));
-        let anomalies = self.axon_anomalies(&json!({
-            "project": project_code,
-            "mode": mode.unwrap_or("brief")
-        }))?;
-        let anomalies_data = anomalies.get("data").cloned().unwrap_or_else(|| json!({}));
+        
+        // Decoupled: We no longer compute anomalies inline to prevent MCP timeouts.
+        // The operator must call the `anomalies` tool explicitly.
+        let anomalies_data = json!({
+            "summary": { "note": "Anomalies calculation decoupled to prevent timeout. Use 'anomalies' tool directly." },
+            "findings": [],
+            "recommendations": []
+        });
         let soll_context = self.axon_soll_query_context(&json!({
             "project_code": project_code,
             "limit": 5
@@ -2037,22 +2040,12 @@ impl McpServer {
             .and_then(|value| value.as_str())
             .unwrap_or("brief");
         let conception = self.cached_conception_view(project_code);
-        let boundary_violations = if mode == "brief" {
+        let boundary_violations: Vec<Value> = if mode == "brief" {
             Vec::new()
         } else {
-            self.axon_anomalies(&json!({ "project": project_code, "mode": "brief" }))
-                .and_then(|value| value.get("data").cloned())
-                .and_then(|data| data.get("findings").cloned())
-                .and_then(|value| value.as_array().cloned())
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|finding| {
-                    matches!(
-                        finding.get("type").and_then(|value| value.as_str()),
-                        Some("feature_envy" | "detour" | "abstraction_detour")
-                    )
-                })
-                .collect::<Vec<_>>()
+            // Decoupled: We no longer fetch anomalies inline to avoid timeouts.
+            // The operator must call 'anomalies' directly if needed.
+            Vec::new()
         };
         let evidence = format!(
             "**Project:** `{}`\n\

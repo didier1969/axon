@@ -1,7 +1,8 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
 use super::*;
-use crate::embedder::{embedding_lane_config_from_env, reset_vector_batch_controller_for_tests};
+use crate::embedder::embedding_lane_config_from_env;
+use crate::vector_control::reset_vector_batch_controller_for_tests;
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION,
 };
@@ -614,12 +615,8 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
         .is_some_and(|items| !items.is_empty()));
     assert!(data["conception"]["flows"].as_array().is_some());
     assert_eq!(
-        data["anomalies"]["summary"]["wrapper_count"].as_i64(),
-        Some(1)
-    );
-    assert_eq!(
-        data["anomalies"]["summary"]["alignment_proxy_score"].as_f64(),
-        Some(50.0)
+        data["anomalies"]["summary"]["note"].as_str(),
+        Some("Anomalies calculation decoupled to prevent timeout. Use 'anomalies' tool directly.")
     );
     assert!(data["soll_context"]["visions"]
         .as_array()

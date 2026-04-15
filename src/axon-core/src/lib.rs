@@ -23,8 +23,11 @@ pub mod runtime_mode;
 pub mod runtime_observability;
 pub mod runtime_operational_profile;
 pub mod runtime_profile;
+pub mod runtime_tuning;
 pub mod scanner;
 pub mod service_guard;
+pub mod vector_control;
+pub mod vector_pipeline;
 pub mod watcher_probe;
 pub mod worker;
 
