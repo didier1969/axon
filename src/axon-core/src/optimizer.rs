@@ -1,6 +1,6 @@
 use crate::embedder::{
     current_embedding_provider_diagnostics, current_gpu_memory_snapshot,
-    current_gpu_utilization_snapshot, embedding_lane_config_from_env,
+    current_gpu_utilization_snapshot, current_runtime_tuning_state,
 };
 use crate::embedding_contract::CHUNK_MODEL_ID;
 use crate::graph::GraphStore;
@@ -8,9 +8,13 @@ use crate::runtime_observability::{
     duckdb_memory_snapshot, process_memory_snapshot, DuckDbMemorySnapshot, ProcessMemorySnapshot,
 };
 use crate::runtime_profile::RuntimeProfile;
+use crate::runtime_tuning::RuntimeTuningState;
 use crate::service_guard;
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, OnceLock},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HostSnapshot {
@@ -60,8 +64,12 @@ pub struct RuntimeSignalsWindow {
     pub embed_inflight_started_at_ms: u64,
     pub interactive_requests_in_flight: u64,
     pub interactive_priority: String,
-    pub chunks_embedded_total: u64,
+    pub chunk_embedding_writes_total: u64,
     pub files_completed_total: u64,
+    pub canonical_chunk_embeddings_total: u64,
+    pub canonical_files_embedded_total: u64,
+    pub canonical_chunks_embedded_last_minute: u64,
+    pub canonical_files_embedded_last_minute: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -99,6 +107,11 @@ pub struct ActionProfile {
     pub target_vector_workers: usize,
     pub target_chunk_batch_size: usize,
     pub target_file_vectorization_batch_size: usize,
+    pub target_ready_queue_depth: usize,
+    pub target_persist_queue_bound: usize,
+    pub target_max_inflight_persists: usize,
+    pub target_embed_micro_batch_max_items: usize,
+    pub target_embed_micro_batch_max_total_tokens: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -128,6 +141,7 @@ pub struct RewardObservation {
     pub penalty_mcp: f64,
     pub penalty_io: f64,
     pub penalty_liveness: f64,
+    pub penalty_stability: f64,
     pub penalty_churn: f64,
 }
 
@@ -140,6 +154,64 @@ pub trait PolicyEngine {
         analytics: &RecentAnalyticsWindow,
         action_profiles: &[ActionProfile],
     ) -> Option<OptimizerDecision>;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LiveProfileStats {
+    pub pulls: u64,
+    pub total_reward: f64,
+    pub mean_reward: f64,
+    pub last_reward: f64,
+    pub last_throughput_chunks_per_hour: f64,
+    pub last_observed_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LiveDecisionMemory {
+    by_profile: BTreeMap<String, LiveProfileStats>,
+    by_decision: BTreeMap<String, String>,
+    total_observations: u64,
+}
+
+static LIVE_DECISION_MEMORY: OnceLock<Mutex<LiveDecisionMemory>> = OnceLock::new();
+
+fn live_decision_memory() -> &'static Mutex<LiveDecisionMemory> {
+    LIVE_DECISION_MEMORY.get_or_init(|| Mutex::new(LiveDecisionMemory::default()))
+}
+
+pub fn remember_optimizer_decision(decision: &OptimizerDecision) {
+    let mut memory = live_decision_memory()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    memory.by_decision.insert(
+        decision.decision_id.clone(),
+        decision.action_profile_id.clone(),
+    );
+}
+
+pub fn record_optimizer_outcome(reward: &RewardObservation) {
+    let mut memory = live_decision_memory()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let Some(profile_id) = memory.by_decision.remove(&reward.decision_id) else {
+        return;
+    };
+    let stats = memory.by_profile.entry(profile_id).or_default();
+    stats.pulls = stats.pulls.saturating_add(1);
+    stats.total_reward += reward.reward;
+    stats.mean_reward = stats.total_reward / stats.pulls as f64;
+    stats.last_reward = reward.reward;
+    stats.last_throughput_chunks_per_hour = reward.throughput_chunks_per_hour;
+    stats.last_observed_at_ms = reward.observed_at_ms;
+    memory.total_observations = memory.total_observations.saturating_add(1);
+}
+
+#[cfg(test)]
+pub fn reset_live_decision_memory() {
+    let mut memory = live_decision_memory()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    *memory = LiveDecisionMemory::default();
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -159,10 +231,14 @@ impl PolicyEngine for HeuristicPolicyEngine {
         let eval_window_end_ms =
             now_ms.saturating_add(i64::try_from(policy.evaluation_window_ms).unwrap_or(i64::MAX));
         let mut best: Option<(ActionProfile, f64, String)> = None;
+        let current_state = current_runtime_tuning_state();
 
         for profile in action_profiles {
+            let score_embed_throughput_weight =
+                env_f64("AXON_OPT_SCORE_EMBED_THROUGHPUT_WEIGHT", 1.0).max(0.1);
             let mut score = analytics.chunks_embedded_current_hour as f64
-                * policy.backlog_priority_weight.max(0.1);
+                * policy.backlog_priority_weight.max(0.1)
+                * score_embed_throughput_weight;
             let mut reasons = Vec::new();
             let backlog_depth = signals.file_vectorization_queue_depth.max(1);
             let gpu_underutilized_ratio =
@@ -198,6 +274,23 @@ impl PolicyEngine for HeuristicPolicyEngine {
                 env_f64("AXON_OPT_SCORE_EMBED_INFLIGHT_PENALTY", 1.5);
             let score_overly_small_batch_penalty =
                 env_f64("AXON_OPT_SCORE_OVERLY_SMALL_BATCH_PENALTY", 1.0);
+            let score_ready_depth_starvation_bonus =
+                env_f64("AXON_OPT_SCORE_READY_DEPTH_STARVATION_BONUS", 3.0);
+            let score_persist_relief_bonus = env_f64("AXON_OPT_SCORE_PERSIST_RELIEF_BONUS", 1.5);
+            let score_overdeep_queue_penalty =
+                env_f64("AXON_OPT_SCORE_OVERDEEP_QUEUE_PENALTY", 1.0);
+            let score_bottleneck_backlog_open_batch_bonus =
+                env_f64("AXON_OPT_SCORE_BOTTLENECK_BACKLOG_OPEN_BATCH_BONUS", 3.0);
+            let score_bottleneck_backlog_open_file_batch_bonus = env_f64(
+                "AXON_OPT_SCORE_BOTTLENECK_BACKLOG_OPEN_FILE_BATCH_BONUS",
+                1.5,
+            );
+            let score_bottleneck_backlog_open_items_bonus =
+                env_f64("AXON_OPT_SCORE_BOTTLENECK_BACKLOG_OPEN_ITEMS_BONUS", 1.5);
+            let score_bottleneck_backlog_open_tokens_bonus =
+                env_f64("AXON_OPT_SCORE_BOTTLENECK_BACKLOG_OPEN_TOKENS_BONUS", 1.5);
+            let score_bottleneck_gpu_busy_bonus =
+                env_f64("AXON_OPT_SCORE_BOTTLENECK_GPU_BUSY_BONUS", 2.0);
             let gpu_underutilized = host.gpu_present
                 && backlog_depth >= profile.target_chunk_batch_size.max(16)
                 && signals.gpu_utilization_ratio < gpu_underutilized_ratio
@@ -207,8 +300,8 @@ impl PolicyEngine for HeuristicPolicyEngine {
                         .saturating_sub(gpu_headroom_margin_mb);
             let warmup_active = host.gpu_present
                 && backlog_depth >= warmup_backlog_threshold
-                && analytics.batches_current_hour == 0
-                && signals.chunks_embedded_total == 0;
+                && analytics.chunks_embedded_current_hour == 0
+                && signals.canonical_chunks_embedded_last_minute == 0;
 
             if profile.target_chunk_batch_size > backlog_depth {
                 score -= score_batch_gt_backlog_penalty;
@@ -219,7 +312,9 @@ impl PolicyEngine for HeuristicPolicyEngine {
                 reasons.push("cpu_parallelism_risk");
             }
             if signals.cpu_usage_ratio > policy.max_cpu_ratio {
-                score -= score_cpu_guard_penalty;
+                let cpu_excess = (signals.cpu_usage_ratio - policy.max_cpu_ratio)
+                    / (1.0 - policy.max_cpu_ratio).max(0.01);
+                score -= score_cpu_guard_penalty * cpu_excess.clamp(0.0, 1.0);
                 reasons.push("cpu_guard_active");
             } else if profile.target_vector_workers > 1 {
                 score += score_cpu_headroom_bonus;
@@ -287,6 +382,73 @@ impl PolicyEngine for HeuristicPolicyEngine {
                 score -= score_overly_small_batch_penalty;
                 reasons.push("overly_small_batch");
             }
+            if signals.ready_queue_depth_current == 0
+                && signals.file_vectorization_queue_depth >= 32
+            {
+                if profile.target_ready_queue_depth > current_state.vector_ready_queue_depth {
+                    score += score_ready_depth_starvation_bonus;
+                    reasons.push("ready_depth_relieves_starvation");
+                }
+                if profile.target_file_vectorization_batch_size
+                    > current_state.file_vectorization_batch_size
+                {
+                    score += score_ready_depth_starvation_bonus * 0.5;
+                    reasons.push("file_batch_relieves_starvation");
+                }
+            }
+            if signals.persist_queue_depth_current > 0
+                && profile.target_persist_queue_bound > current_state.vector_persist_queue_bound
+            {
+                score += score_persist_relief_bonus;
+                reasons.push("persist_relief");
+            }
+            if signals.cpu_usage_ratio > policy.max_cpu_ratio * 0.9
+                && profile.target_ready_queue_depth > current_state.vector_ready_queue_depth
+            {
+                score -= score_overdeep_queue_penalty;
+                reasons.push("avoid_overdeep_ready_under_cpu_pressure");
+            }
+            if signals.vram_used_mb > policy.max_vram_used_mb.saturating_mul(9) / 10
+                && profile.target_embed_micro_batch_max_total_tokens
+                    > current_state.embed_micro_batch_max_total_tokens
+            {
+                score -= score_vram_guard_penalty * 0.5;
+                reasons.push("avoid_token_budget_growth_near_vram_limit");
+            }
+            if backlog_depth >= 32
+                && signals.cpu_usage_ratio <= policy.max_cpu_ratio
+                && signals.ram_available_ratio >= policy.min_ram_available_ratio
+                && signals.io_wait_ratio <= policy.max_io_wait_ratio
+            {
+                if profile.target_chunk_batch_size > current_state.chunk_batch_size {
+                    score += score_bottleneck_backlog_open_batch_bonus;
+                    reasons.push("bottleneck_prefers_chunk_batch_growth");
+                }
+                if profile.target_file_vectorization_batch_size
+                    > current_state.file_vectorization_batch_size
+                {
+                    score += score_bottleneck_backlog_open_file_batch_bonus;
+                    reasons.push("bottleneck_prefers_file_batch_growth");
+                }
+                if profile.target_embed_micro_batch_max_items
+                    > current_state.embed_micro_batch_max_items
+                {
+                    score += score_bottleneck_backlog_open_items_bonus;
+                    reasons.push("bottleneck_prefers_micro_batch_items_growth");
+                }
+                if profile.target_embed_micro_batch_max_total_tokens
+                    > current_state.embed_micro_batch_max_total_tokens
+                {
+                    score += score_bottleneck_backlog_open_tokens_bonus;
+                    reasons.push("bottleneck_prefers_micro_batch_tokens_growth");
+                }
+                if signals.ready_queue_depth_current > 0
+                    && signals.gpu_utilization_ratio >= gpu_underutilized_ratio
+                {
+                    score += score_bottleneck_gpu_busy_bonus;
+                    reasons.push("bottleneck_rewards_busy_gpu");
+                }
+            }
 
             let reason = reasons.join(",");
             if best
@@ -306,6 +468,149 @@ impl PolicyEngine for HeuristicPolicyEngine {
             decision_reason: reason,
             score,
             confidence: if action_profiles.len() <= 1 { 1.0 } else { 0.6 },
+            evaluation_window_start_ms: eval_window_start_ms,
+            evaluation_window_end_ms: eval_window_end_ms,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LiveBanditPolicyEngine;
+
+impl PolicyEngine for LiveBanditPolicyEngine {
+    fn choose(
+        &self,
+        _host: &HostSnapshot,
+        signals: &RuntimeSignalsWindow,
+        policy: &OperatorPolicySnapshot,
+        _analytics: &RecentAnalyticsWindow,
+        action_profiles: &[ActionProfile],
+    ) -> Option<OptimizerDecision> {
+        let now_ms = now_ms();
+        let eval_window_start_ms = now_ms;
+        let eval_window_end_ms =
+            now_ms.saturating_add(i64::try_from(policy.evaluation_window_ms).unwrap_or(i64::MAX));
+        let current = current_runtime_tuning_state();
+        let memory = live_decision_memory()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        let total_observations = memory.total_observations.max(1) as f64;
+        let exploration_weight = env_f64("AXON_OPT_LIVE_UCB_EXPLORATION_WEIGHT", 8.0).max(0.1);
+        let backlog_weight = env_f64("AXON_OPT_LIVE_BACKLOG_WEIGHT", 6.0).max(0.0);
+        let gpu_idle_penalty_weight =
+            env_f64("AXON_OPT_LIVE_GPU_IDLE_PENALTY_WEIGHT", 4.0).max(0.0);
+        let no_progress_penalty_weight =
+            env_f64("AXON_OPT_LIVE_NO_PROGRESS_PENALTY_WEIGHT", 10.0).max(0.0);
+        let anchor_fill_bonus_weight =
+            env_f64("AXON_OPT_LIVE_ANCHOR_FILL_BONUS_WEIGHT", 14.0).max(0.0);
+        let mut best: Option<(ActionProfile, f64, String)> = None;
+
+        for profile in action_profiles {
+            let stats = memory
+                .by_profile
+                .get(&profile.id)
+                .cloned()
+                .unwrap_or_default();
+            let exploitation = stats.mean_reward;
+            let exploration = exploration_weight
+                * ((total_observations.ln() + 1.0) / (stats.pulls.max(1) as f64)).sqrt();
+
+            let larger_chunk_batch = profile.target_chunk_batch_size > current.chunk_batch_size;
+            let larger_file_batch = profile.target_file_vectorization_batch_size
+                > current.file_vectorization_batch_size;
+            let larger_ready_depth =
+                profile.target_ready_queue_depth > current.vector_ready_queue_depth;
+            let larger_micro_items =
+                profile.target_embed_micro_batch_max_items > current.embed_micro_batch_max_items;
+            let larger_micro_tokens = profile.target_embed_micro_batch_max_total_tokens
+                > current.embed_micro_batch_max_total_tokens;
+
+            let backlog_bonus = if signals.file_vectorization_queue_depth >= 32 {
+                let mut bonus = 0.0;
+                if larger_chunk_batch {
+                    bonus += backlog_weight;
+                }
+                if larger_file_batch {
+                    bonus += backlog_weight * 0.5;
+                }
+                if larger_ready_depth {
+                    bonus += backlog_weight * 0.75;
+                }
+                if larger_micro_items {
+                    bonus += backlog_weight * 0.5;
+                }
+                if larger_micro_tokens {
+                    bonus += backlog_weight * 0.5;
+                }
+                bonus
+            } else {
+                0.0
+            };
+
+            let anchor_fill_bonus = if signals.file_vectorization_queue_depth >= 256
+                && signals.ready_queue_depth_current == 0
+                && profile.label.starts_with("anchor_")
+            {
+                let mut bonus = anchor_fill_bonus_weight;
+                if profile.label == "anchor_gpu_fill" {
+                    bonus += anchor_fill_bonus_weight * 0.5;
+                } else if profile.label == "anchor_backlog_surge"
+                    && signals.file_vectorization_queue_depth >= 4_096
+                {
+                    bonus += anchor_fill_bonus_weight * 0.75;
+                }
+                bonus
+            } else {
+                0.0
+            };
+
+            let gpu_idle_penalty = if signals.file_vectorization_queue_depth >= 32
+                && signals.ready_queue_depth_current == 0
+                && !larger_ready_depth
+                && !larger_file_batch
+            {
+                gpu_idle_penalty_weight
+            } else {
+                0.0
+            };
+
+            let no_progress_penalty = if stats.pulls > 0
+                && stats.last_throughput_chunks_per_hour <= 0.0
+                && !larger_chunk_batch
+                && !larger_file_batch
+                && !larger_ready_depth
+            {
+                no_progress_penalty_weight
+            } else {
+                0.0
+            };
+
+            let score = exploitation + exploration + backlog_bonus + anchor_fill_bonus
+                - gpu_idle_penalty
+                - no_progress_penalty;
+            let reason = format!(
+                "live_bandit:mean={:.2},ucb={:.2},backlog={:.2},anchor={:.2},pulls={}",
+                exploitation, exploration, backlog_bonus, anchor_fill_bonus, stats.pulls
+            );
+
+            if best
+                .as_ref()
+                .map(|(_, best_score, _)| score > *best_score)
+                .unwrap_or(true)
+            {
+                best = Some((profile.clone(), score, reason));
+            }
+        }
+
+        let (profile, score, reason) = best?;
+        Some(OptimizerDecision {
+            decision_id: format!("opt-{}", now_ms),
+            proposed_at_ms: now_ms,
+            action_profile_id: profile.id,
+            decision_reason: reason,
+            score,
+            confidence: 0.8,
             evaluation_window_start_ms: eval_window_start_ms,
             evaluation_window_end_ms: eval_window_end_ms,
         })
@@ -349,7 +654,7 @@ pub fn collect_operator_policy_snapshot(host: &HostSnapshot) -> OperatorPolicySn
     };
     OperatorPolicySnapshot {
         captured_at_ms,
-        max_cpu_ratio: env_f64("AXON_OPT_MAX_CPU_RATIO", 0.50).clamp(0.0, 1.0),
+        max_cpu_ratio: env_f64("AXON_OPT_MAX_CPU_RATIO", 0.90).clamp(0.0, 1.0),
         min_ram_available_ratio: env_f64("AXON_OPT_MIN_RAM_AVAILABLE_RATIO", 0.33).clamp(0.0, 1.0),
         max_mcp_p95_ms: env_u64("AXON_OPT_MAX_MCP_P95_MS", 300),
         max_vram_used_ratio,
@@ -359,29 +664,31 @@ pub fn collect_operator_policy_snapshot(host: &HostSnapshot) -> OperatorPolicySn
         interactive_priority_weight: env_f64("AXON_OPT_INTERACTIVE_PRIORITY_WEIGHT", 1.0).max(0.0),
         shadow_mode_enabled: env_bool("AXON_OPT_SHADOW_MODE_ENABLED", true),
         allowed_actuators: optimizer_allowed_actuators(),
-        evaluation_window_ms: env_u64("AXON_OPT_EVALUATION_WINDOW_MS", 60_000).max(10_000),
+        evaluation_window_ms: env_u64("AXON_OPT_EVALUATION_WINDOW_MS", 15_000).max(10_000),
     }
 }
 
 fn optimizer_allowed_actuators() -> Vec<String> {
-    let configured = std::env::var("AXON_OPT_ALLOWED_ACTUATORS")
-        .ok()
-        .map(|raw| {
-            raw.split(',')
-                .map(|item| item.trim())
-                .filter(|item| !item.is_empty())
-                .filter(|item| *item != "vector_workers")
-                .map(|item| item.to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if configured.is_empty() {
+    let default = || {
         vec![
             "chunk_batch_size".to_string(),
             "file_vectorization_batch_size".to_string(),
+            "vector_ready_queue_depth".to_string(),
+            "vector_persist_queue_bound".to_string(),
+            "vector_max_inflight_persists".to_string(),
+            "embed_micro_batch_max_items".to_string(),
+            "embed_micro_batch_max_total_tokens".to_string(),
         ]
-    } else {
-        configured
+    };
+    match std::env::var("AXON_OPT_ALLOWED_ACTUATORS") {
+        Ok(raw) => raw
+            .split(',')
+            .map(|item| item.trim())
+            .filter(|item| !item.is_empty())
+            .filter(|item| *item != "vector_workers")
+            .map(|item| item.to_string())
+            .collect::<Vec<_>>(),
+        Err(_) => default(),
     }
 }
 
@@ -445,8 +752,47 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
         interactive_priority: service_guard::current_interactive_priority()
             .as_str()
             .to_string(),
-        chunks_embedded_total: vector_runtime.chunks_embedded_total,
+        chunk_embedding_writes_total: vector_runtime.chunks_embedded_total,
         files_completed_total: vector_runtime.files_completed_total,
+        canonical_chunk_embeddings_total: canonical_count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM ChunkEmbedding WHERE model_id = '{}'",
+                CHUNK_MODEL_ID.replace('\'', "''")
+            ),
+        ) as u64,
+        canonical_files_embedded_total: canonical_count(
+            store,
+            &format!(
+                "SELECT COUNT(DISTINCT c.file_path) \
+             FROM ChunkEmbedding ce \
+             JOIN Chunk c ON c.id = ce.chunk_id \
+             WHERE ce.model_id = '{}'",
+                CHUNK_MODEL_ID.replace('\'', "''")
+            ),
+        ) as u64,
+        canonical_chunks_embedded_last_minute: canonical_count(
+            store,
+            &format!(
+                "SELECT COUNT(*) FROM ChunkEmbedding \
+             WHERE model_id = '{}' \
+               AND COALESCE(embedded_at_ms, 0) >= {}",
+                CHUNK_MODEL_ID.replace('\'', "''"),
+                now_ms.saturating_sub(60_000)
+            ),
+        ) as u64,
+        canonical_files_embedded_last_minute: canonical_count(
+            store,
+            &format!(
+                "SELECT COUNT(DISTINCT c.file_path) \
+             FROM ChunkEmbedding ce \
+             JOIN Chunk c ON c.id = ce.chunk_id \
+             WHERE ce.model_id = '{}' \
+               AND COALESCE(ce.embedded_at_ms, 0) >= {}",
+                CHUNK_MODEL_ID.replace('\'', "''"),
+                now_ms.saturating_sub(60_000)
+            ),
+        ) as u64,
     }
 }
 
@@ -488,42 +834,49 @@ pub fn build_admissible_action_profiles(
     signals: &RuntimeSignalsWindow,
     policy: &OperatorPolicySnapshot,
 ) -> Vec<ActionProfile> {
-    let current = embedding_lane_config_from_env();
+    let current = current_runtime_tuning_state();
     let mut profiles = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    let mut push =
-        |label: &str, vector_workers: usize, chunk_batch_size: usize, file_batch: usize| {
-            let tuple = (
-                vector_workers.max(1),
-                chunk_batch_size.max(1),
-                file_batch.max(1),
-            );
-            if !seen.insert(tuple) {
-                return;
-            }
-            profiles.push(ActionProfile {
-                id: format!("vw{}-cb{}-fb{}", tuple.0, tuple.1, tuple.2),
-                label: label.to_string(),
-                target_vector_workers: tuple.0,
-                target_chunk_batch_size: tuple.1,
-                target_file_vectorization_batch_size: tuple.2,
-            });
-        };
+    let mut push = |label: &str, state: RuntimeTuningState| {
+        let state = normalize_runtime_tuning_state(state);
+        let key = (
+            state.vector_workers,
+            state.chunk_batch_size,
+            state.file_vectorization_batch_size,
+            state.vector_ready_queue_depth,
+            state.vector_persist_queue_bound,
+            state.vector_max_inflight_persists,
+            state.embed_micro_batch_max_items,
+            state.embed_micro_batch_max_total_tokens,
+        );
+        if !seen.insert(key) {
+            return;
+        }
+        profiles.push(ActionProfile {
+            id: runtime_tuning_profile_id(&state),
+            label: label.to_string(),
+            target_vector_workers: state.vector_workers,
+            target_chunk_batch_size: state.chunk_batch_size,
+            target_file_vectorization_batch_size: state.file_vectorization_batch_size,
+            target_ready_queue_depth: state.vector_ready_queue_depth,
+            target_persist_queue_bound: state.vector_persist_queue_bound,
+            target_max_inflight_persists: state.vector_max_inflight_persists,
+            target_embed_micro_batch_max_items: state.embed_micro_batch_max_items,
+            target_embed_micro_batch_max_total_tokens: state.embed_micro_batch_max_total_tokens,
+        });
+    };
 
-    push(
-        "hold",
-        current.vector_workers,
-        current.chunk_batch_size,
-        current.file_vectorization_batch_size,
-    );
+    push("hold", current);
 
-    let validated_profiles = validated_batch_profiles();
-    for (chunk_batch_size, file_batch_size) in validated_profiles {
-        if !host.gpu_present && chunk_batch_size > current.chunk_batch_size {
+    let system_under_pressure = signals.ram_available_ratio < policy.min_ram_available_ratio
+        || signals.vram_used_mb > policy.max_vram_used_mb;
+
+    for neighbor in runtime_tuning_neighbors(current, policy.allowed_actuators.as_slice()) {
+        if !host.gpu_present && neighbor.chunk_batch_size > current.chunk_batch_size {
             continue;
         }
         if signals.file_vectorization_queue_depth > 0
-            && chunk_batch_size
+            && neighbor.chunk_batch_size
                 > signals
                     .file_vectorization_queue_depth
                     .saturating_mul(4)
@@ -531,40 +884,118 @@ pub fn build_admissible_action_profiles(
         {
             continue;
         }
-        if chunk_batch_size > current.chunk_batch_size
-            && (signals.cpu_usage_ratio > policy.max_cpu_ratio
-                || signals.ram_available_ratio < policy.min_ram_available_ratio
-                || signals.vram_used_mb > policy.max_vram_used_mb)
-        {
+        if system_under_pressure && profile_increases_runtime_pressure(current, neighbor) {
             continue;
         }
-        push(
-            "validated_profile",
-            current.vector_workers,
-            chunk_batch_size,
-            file_batch_size,
+        push("neighbor", neighbor);
+    }
+
+    if !system_under_pressure && signals.file_vectorization_queue_depth >= 256 {
+        for (label, anchor) in aggressive_embedding_anchor_profiles(
+            current,
+            signals,
+            policy.allowed_actuators.as_slice(),
+        ) {
+            push(label, anchor);
+        }
+    }
+
+    profiles
+}
+
+fn aggressive_embedding_anchor_profiles(
+    current: RuntimeTuningState,
+    signals: &RuntimeSignalsWindow,
+    allowed_actuators: &[String],
+) -> Vec<(&'static str, RuntimeTuningState)> {
+    let allows = |name: &str| allowed_actuators.iter().any(|item| item == name);
+    let backlog_scale = signals.file_vectorization_queue_depth;
+    let mut profiles = Vec::new();
+
+    let mut push_anchor = |label: &'static str,
+                           chunk_batch_size: usize,
+                           file_batch_size: usize,
+                           ready_depth: usize,
+                           persist_bound: usize,
+                           inflight_persists: usize,
+                           micro_items: usize,
+                           micro_tokens: usize| {
+        let mut candidate = current;
+        if allows("chunk_batch_size") {
+            candidate.chunk_batch_size = chunk_batch_size;
+        }
+        if allows("file_vectorization_batch_size") {
+            candidate.file_vectorization_batch_size = file_batch_size;
+        }
+        if allows("vector_ready_queue_depth") {
+            candidate.vector_ready_queue_depth = ready_depth;
+        }
+        if allows("vector_persist_queue_bound") {
+            candidate.vector_persist_queue_bound = persist_bound;
+        }
+        if allows("vector_max_inflight_persists") {
+            candidate.vector_max_inflight_persists = inflight_persists;
+        }
+        if allows("embed_micro_batch_max_items") {
+            candidate.embed_micro_batch_max_items = micro_items;
+        }
+        if allows("embed_micro_batch_max_total_tokens") {
+            candidate.embed_micro_batch_max_total_tokens = micro_tokens;
+        }
+        profiles.push((label, normalize_runtime_tuning_state(candidate)));
+    };
+
+    push_anchor(
+        "anchor_backlog_open",
+        current.chunk_batch_size.max(96),
+        current.file_vectorization_batch_size.max(16),
+        current.vector_ready_queue_depth.max(8),
+        current.vector_persist_queue_bound.max(3),
+        current.vector_max_inflight_persists.max(3),
+        current.embed_micro_batch_max_items.max(96),
+        current.embed_micro_batch_max_total_tokens.max(16_384),
+    );
+
+    if backlog_scale >= 1_024 || signals.ready_queue_depth_current == 0 {
+        push_anchor(
+            "anchor_gpu_fill",
+            current.chunk_batch_size.max(128),
+            current.file_vectorization_batch_size.max(24),
+            current.vector_ready_queue_depth.max(10),
+            current.vector_persist_queue_bound.max(4),
+            current.vector_max_inflight_persists.max(4),
+            current.embed_micro_batch_max_items.max(128),
+            current.embed_micro_batch_max_total_tokens.max(24_576),
+        );
+    }
+
+    if backlog_scale >= 4_096 {
+        push_anchor(
+            "anchor_backlog_surge",
+            current.chunk_batch_size.max(160),
+            current.file_vectorization_batch_size.max(32),
+            current.vector_ready_queue_depth.max(12),
+            current.vector_persist_queue_bound.max(6),
+            current.vector_max_inflight_persists.max(6),
+            current.embed_micro_batch_max_items.max(160),
+            current.embed_micro_batch_max_total_tokens.max(32_768),
         );
     }
 
     profiles
 }
 
-fn validated_batch_profiles() -> Vec<(usize, usize)> {
-    let configured = std::env::var("AXON_GOVERNOR_VALIDATED_PROFILES")
-        .ok()
-        .unwrap_or_else(|| "64:16,72:18,80:20,88:22,96:24,104:26".to_string());
-    let mut profiles = configured
-        .split(',')
-        .filter_map(|item| {
-            let mut parts = item.trim().split(':');
-            let chunk = parts.next()?.trim().parse::<usize>().ok()?;
-            let files = parts.next()?.trim().parse::<usize>().ok()?;
-            Some((chunk.max(1), files.max(1)))
-        })
-        .collect::<Vec<_>>();
-    profiles.sort_unstable();
-    profiles.dedup();
-    profiles
+fn profile_increases_runtime_pressure(
+    current: RuntimeTuningState,
+    candidate: RuntimeTuningState,
+) -> bool {
+    candidate.chunk_batch_size > current.chunk_batch_size
+        || candidate.file_vectorization_batch_size > current.file_vectorization_batch_size
+        || candidate.vector_ready_queue_depth > current.vector_ready_queue_depth
+        || candidate.vector_persist_queue_bound > current.vector_persist_queue_bound
+        || candidate.vector_max_inflight_persists > current.vector_max_inflight_persists
+        || candidate.embed_micro_batch_max_items > current.embed_micro_batch_max_items
+        || candidate.embed_micro_batch_max_total_tokens > current.embed_micro_batch_max_total_tokens
 }
 
 pub fn observe_reward(
@@ -574,16 +1005,10 @@ pub fn observe_reward(
     policy: &OperatorPolicySnapshot,
     churn_penalty: f64,
 ) -> RewardObservation {
-    let elapsed_hours =
-        ((current.window_end_ms - previous.window_end_ms).max(1) as f64) / 3_600_000.0;
-    let chunk_delta = current
-        .chunks_embedded_total
-        .saturating_sub(previous.chunks_embedded_total) as f64;
-    let file_delta = current
-        .files_completed_total
-        .saturating_sub(previous.files_completed_total) as f64;
-    let throughput_chunks_per_hour = chunk_delta / elapsed_hours;
-    let throughput_files_per_hour = file_delta / elapsed_hours;
+    let throughput_chunks_per_hour = current.canonical_chunks_embedded_last_minute as f64 * 60.0;
+    let throughput_files_per_hour = current.canonical_files_embedded_last_minute as f64 * 60.0;
+    let previous_throughput_chunks_per_hour =
+        previous.canonical_chunks_embedded_last_minute as f64 * 60.0;
     let warmup_gpu_underutilized_ratio =
         env_f64("AXON_OPT_GPU_UNDERUTILIZED_RATIO", 0.35).clamp(0.0, 1.0);
     let reward_cpu_penalty_scale = env_f64("AXON_OPT_REWARD_CPU_PENALTY_SCALE", 100.0);
@@ -595,8 +1020,17 @@ pub fn observe_reward(
     let reward_io_penalty_scale = env_f64("AXON_OPT_REWARD_IO_PENALTY_SCALE", 100.0);
     let reward_liveness_penalty = env_f64("AXON_OPT_REWARD_LIVENESS_PENALTY", 25.0);
     let reward_gpu_headroom_bonus = env_f64("AXON_OPT_REWARD_GPU_HEADROOM_BONUS", 5.0);
+    let reward_chunks_throughput_weight =
+        env_f64("AXON_OPT_REWARD_CHUNKS_THROUGHPUT_WEIGHT", 1.5).max(0.1);
+    let reward_files_throughput_weight =
+        env_f64("AXON_OPT_REWARD_FILES_THROUGHPUT_WEIGHT", 0.05).max(0.0);
+    let reward_ready_queue_nonempty_bonus =
+        env_f64("AXON_OPT_REWARD_READY_QUEUE_NONEMPTY_BONUS", 10.0);
+    let reward_underfed_backlog_penalty = env_f64("AXON_OPT_REWARD_UNDERFED_BACKLOG_PENALTY", 15.0);
+    let reward_stability_penalty_scale =
+        env_f64("AXON_OPT_REWARD_STABILITY_PENALTY_SCALE", 20.0).max(0.0);
     let warmup_active = current.file_vectorization_queue_depth > 0
-        && current.chunks_embedded_total == 0
+        && current.canonical_chunks_embedded_last_minute == 0
         && current.gpu_utilization_ratio < warmup_gpu_underutilized_ratio;
 
     let penalty_cpu = if !warmup_active && current.cpu_usage_ratio > policy.max_cpu_ratio {
@@ -629,6 +1063,15 @@ pub fn observe_reward(
     } else {
         0.0
     };
+    let penalty_stability = if previous_throughput_chunks_per_hour > 0.0
+        && throughput_chunks_per_hour < previous_throughput_chunks_per_hour
+    {
+        ((previous_throughput_chunks_per_hour - throughput_chunks_per_hour)
+            / previous_throughput_chunks_per_hour)
+            * reward_stability_penalty_scale
+    } else {
+        0.0
+    };
     let gpu_starvation_bonus = if current.file_vectorization_queue_depth >= 32
         && current.gpu_utilization_ratio >= 0.45
         && current.vram_used_mb <= policy.max_vram_used_mb
@@ -637,13 +1080,32 @@ pub fn observe_reward(
     } else {
         0.0
     };
-    let reward = throughput_chunks_per_hour + gpu_starvation_bonus
+    let ready_queue_continuity_bonus =
+        if current.file_vectorization_queue_depth >= 32 && current.ready_queue_depth_current > 0 {
+            reward_ready_queue_nonempty_bonus
+        } else {
+            0.0
+        };
+    let underfed_backlog_penalty = if current.file_vectorization_queue_depth >= 32
+        && current.ready_queue_depth_current == 0
+        && current.gpu_utilization_ratio < warmup_gpu_underutilized_ratio
+    {
+        reward_underfed_backlog_penalty
+    } else {
+        0.0
+    };
+    let reward = throughput_chunks_per_hour * reward_chunks_throughput_weight
+        + throughput_files_per_hour * reward_files_throughput_weight
+        + gpu_starvation_bonus
+        + ready_queue_continuity_bonus
         - penalty_cpu
         - penalty_ram
         - penalty_vram
         - penalty_mcp
         - penalty_io
         - penalty_liveness
+        - penalty_stability
+        - underfed_backlog_penalty
         - churn_penalty;
 
     RewardObservation {
@@ -660,8 +1122,103 @@ pub fn observe_reward(
         penalty_mcp,
         penalty_io,
         penalty_liveness,
+        penalty_stability,
         penalty_churn: churn_penalty,
     }
+}
+
+fn runtime_tuning_profile_id(state: &RuntimeTuningState) -> String {
+    format!(
+        "vw{}-cb{}-fb{}-rq{}-pq{}-ip{}-mi{}-mt{}",
+        state.vector_workers,
+        state.chunk_batch_size,
+        state.file_vectorization_batch_size,
+        state.vector_ready_queue_depth,
+        state.vector_persist_queue_bound,
+        state.vector_max_inflight_persists,
+        state.embed_micro_batch_max_items,
+        state.embed_micro_batch_max_total_tokens
+    )
+}
+
+fn normalize_runtime_tuning_state(mut state: RuntimeTuningState) -> RuntimeTuningState {
+    state.vector_workers = state.vector_workers.max(1);
+    state.chunk_batch_size = state.chunk_batch_size.clamp(16, 256);
+    state.file_vectorization_batch_size = state.file_vectorization_batch_size.clamp(4, 64);
+    state.vector_ready_queue_depth = state.vector_ready_queue_depth.clamp(1, 16);
+    state.vector_persist_queue_bound = state.vector_persist_queue_bound.clamp(1, 12);
+    state.vector_max_inflight_persists = state
+        .vector_max_inflight_persists
+        .clamp(1, state.vector_persist_queue_bound);
+    state.embed_micro_batch_max_items = state.embed_micro_batch_max_items.clamp(8, 256);
+    state.embed_micro_batch_max_total_tokens =
+        state.embed_micro_batch_max_total_tokens.clamp(512, 65_536);
+    state
+}
+
+fn mutate_step(value: usize, increase: bool) -> usize {
+    let delta = ((value as f64) * 0.10).ceil() as usize;
+    if increase {
+        value.saturating_add(delta.max(1))
+    } else {
+        value.saturating_sub(delta.max(1))
+    }
+}
+
+fn runtime_tuning_neighbors(
+    current: RuntimeTuningState,
+    allowed_actuators: &[String],
+) -> Vec<RuntimeTuningState> {
+    let mut neighbors = Vec::new();
+    let mut emit =
+        |candidate: RuntimeTuningState| neighbors.push(normalize_runtime_tuning_state(candidate));
+    let allows = |name: &str| allowed_actuators.iter().any(|item| item == name);
+
+    for increase in [false, true] {
+        if allows("chunk_batch_size") {
+            let mut candidate = current;
+            candidate.chunk_batch_size = mutate_step(current.chunk_batch_size, increase);
+            emit(candidate);
+        }
+        if allows("file_vectorization_batch_size") {
+            let mut candidate = current;
+            candidate.file_vectorization_batch_size =
+                mutate_step(current.file_vectorization_batch_size, increase);
+            emit(candidate);
+        }
+        if allows("vector_ready_queue_depth") {
+            let mut candidate = current;
+            candidate.vector_ready_queue_depth =
+                mutate_step(current.vector_ready_queue_depth, increase);
+            emit(candidate);
+        }
+        if allows("vector_persist_queue_bound") {
+            let mut candidate = current;
+            candidate.vector_persist_queue_bound =
+                mutate_step(current.vector_persist_queue_bound, increase);
+            emit(candidate);
+        }
+        if allows("vector_max_inflight_persists") {
+            let mut candidate = current;
+            candidate.vector_max_inflight_persists =
+                mutate_step(current.vector_max_inflight_persists, increase);
+            emit(candidate);
+        }
+        if allows("embed_micro_batch_max_items") {
+            let mut candidate = current;
+            candidate.embed_micro_batch_max_items =
+                mutate_step(current.embed_micro_batch_max_items, increase);
+            emit(candidate);
+        }
+        if allows("embed_micro_batch_max_total_tokens") {
+            let mut candidate = current;
+            candidate.embed_micro_batch_max_total_tokens =
+                mutate_step(current.embed_micro_batch_max_total_tokens, increase);
+            emit(candidate);
+        }
+    }
+
+    neighbors
 }
 
 fn env_bool(key: &str, default: bool) -> bool {
@@ -714,6 +1271,46 @@ fn value_u64(value: Option<&serde_json::Value>) -> u64 {
                 .and_then(|v| v.parse::<u64>().ok())
         })
         .unwrap_or(0)
+}
+
+fn canonical_count(store: &GraphStore, query: &str) -> i64 {
+    let raw = match store.query_json(query) {
+        Ok(raw) => raw,
+        Err(_) => return 0,
+    };
+
+    if let Ok(rows) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&raw) {
+        if let Some(value) = rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|value| value.as_i64().or_else(|| value.as_u64().map(|v| v as i64)))
+        {
+            return value.max(0);
+        }
+    }
+
+    if let Ok(rows) = serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(&raw)
+    {
+        for row in rows {
+            if let Some(value) = row
+                .get("count(*)")
+                .or_else(|| row.get("count_star()"))
+                .or_else(|| row.get("count"))
+                .and_then(|value| value.as_i64().or_else(|| value.as_u64().map(|v| v as i64)))
+            {
+                return value.max(0);
+            }
+            if let Some(value) = row
+                .values()
+                .next()
+                .and_then(|value| value.as_i64().or_else(|| value.as_u64().map(|v| v as i64)))
+            {
+                return value.max(0);
+            }
+        }
+    }
+
+    0
 }
 
 fn read_host_pressure_ratios() -> (f64, f64, f64) {
@@ -834,9 +1431,10 @@ mod tests {
     use super::{
         build_admissible_action_profiles, collect_operator_policy_snapshot,
         compute_cpu_and_io_usage_ratios, observe_reward, ActionProfile, HeuristicPolicyEngine,
-        HostSnapshot, OperatorPolicySnapshot, PolicyEngine, ProcStatSample, RecentAnalyticsWindow,
-        RuntimeSignalsWindow,
+        HostSnapshot, LiveBanditPolicyEngine, OperatorPolicySnapshot, PolicyEngine, ProcStatSample,
+        RecentAnalyticsWindow, RuntimeSignalsWindow,
     };
+    use crate::runtime_tuning::RuntimeTuningState;
     use crate::service_guard::InteractivePriority;
 
     fn host() -> HostSnapshot {
@@ -888,8 +1486,12 @@ mod tests {
             persist_queue_wait_ms_total: 0,
             interactive_requests_in_flight: 0,
             interactive_priority: InteractivePriority::BackgroundNormal.as_str().to_string(),
-            chunks_embedded_total: 100,
+            chunk_embedding_writes_total: 100,
             files_completed_total: 10,
+            canonical_chunk_embeddings_total: 100,
+            canonical_files_embedded_total: 10,
+            canonical_chunks_embedded_last_minute: 100,
+            canonical_files_embedded_last_minute: 10,
         }
     }
 
@@ -900,7 +1502,7 @@ mod tests {
             min_ram_available_ratio: 0.33,
             max_mcp_p95_ms: 300,
             max_vram_used_ratio: 0.75,
-            max_vram_used_mb: 3072,
+            max_vram_used_mb: 6144,
             max_io_wait_ratio: 0.2,
             backlog_priority_weight: 1.0,
             interactive_priority_weight: 1.0,
@@ -933,8 +1535,20 @@ mod tests {
             vec![
                 "chunk_batch_size".to_string(),
                 "file_vectorization_batch_size".to_string(),
+                "vector_ready_queue_depth".to_string(),
+                "vector_persist_queue_bound".to_string(),
+                "vector_max_inflight_persists".to_string(),
+                "embed_micro_batch_max_items".to_string(),
+                "embed_micro_batch_max_total_tokens".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn collect_operator_policy_defaults_to_short_live_evaluation_window() {
+        std::env::remove_var("AXON_OPT_EVALUATION_WINDOW_MS");
+        let policy = collect_operator_policy_snapshot(&host());
+        assert_eq!(policy.evaluation_window_ms, 15_000);
     }
 
     #[test]
@@ -944,13 +1558,26 @@ mod tests {
             "chunk_batch_size,file_vectorization_batch_size,vector_workers",
         );
         let policy = collect_operator_policy_snapshot(&host());
-        assert_eq!(
-            policy.allowed_actuators,
-            vec![
-                "chunk_batch_size".to_string(),
-                "file_vectorization_batch_size".to_string(),
-            ]
-        );
+        assert!(policy
+            .allowed_actuators
+            .iter()
+            .any(|item| item == "chunk_batch_size"));
+        assert!(policy
+            .allowed_actuators
+            .iter()
+            .any(|item| item == "file_vectorization_batch_size"));
+        assert!(policy
+            .allowed_actuators
+            .iter()
+            .all(|item| item != "vector_workers"));
+        std::env::remove_var("AXON_OPT_ALLOWED_ACTUATORS");
+    }
+
+    #[test]
+    fn collect_operator_policy_fails_closed_when_allowlist_filters_to_empty() {
+        std::env::set_var("AXON_OPT_ALLOWED_ACTUATORS", "vector_workers");
+        let policy = collect_operator_policy_snapshot(&host());
+        assert!(policy.allowed_actuators.is_empty());
         std::env::remove_var("AXON_OPT_ALLOWED_ACTUATORS");
     }
 
@@ -963,6 +1590,11 @@ mod tests {
                 target_vector_workers: 1,
                 target_chunk_batch_size: 32,
                 target_file_vectorization_batch_size: 8,
+                target_ready_queue_depth: 6,
+                target_persist_queue_bound: 1,
+                target_max_inflight_persists: 1,
+                target_embed_micro_batch_max_items: 32,
+                target_embed_micro_batch_max_total_tokens: 8_192,
             },
             ActionProfile {
                 id: "deepen".to_string(),
@@ -970,6 +1602,11 @@ mod tests {
                 target_vector_workers: 1,
                 target_chunk_batch_size: 48,
                 target_file_vectorization_batch_size: 12,
+                target_ready_queue_depth: 7,
+                target_persist_queue_bound: 2,
+                target_max_inflight_persists: 2,
+                target_embed_micro_batch_max_items: 40,
+                target_embed_micro_batch_max_total_tokens: 9_216,
             },
         ];
         let decision = HeuristicPolicyEngine
@@ -1007,34 +1644,97 @@ mod tests {
     }
 
     #[test]
-    fn validated_batch_profiles_uses_sorted_unique_catalog() {
+    fn build_admissible_action_profiles_generates_local_neighbors() {
+        let mut signals = signals();
+        signals.file_vectorization_queue_depth = 256;
         std::env::set_var(
-            "AXON_GOVERNOR_VALIDATED_PROFILES",
-            "96:24,64:16,96:24,80:20",
+            "AXON_OPT_ALLOWED_ACTUATORS",
+            "chunk_batch_size,file_vectorization_batch_size,vector_ready_queue_depth",
         );
-        assert_eq!(
-            super::validated_batch_profiles(),
-            vec![(64, 16), (80, 20), (96, 24)]
-        );
-        std::env::remove_var("AXON_GOVERNOR_VALIDATED_PROFILES");
+        let profiles = build_admissible_action_profiles(&host(), &signals, &policy());
+        let hold = profiles
+            .iter()
+            .find(|profile| profile.label == "hold")
+            .expect("hold profile");
+        let neighbors = profiles
+            .iter()
+            .filter(|profile| profile.label == "neighbor")
+            .collect::<Vec<_>>();
+        assert!(!neighbors.is_empty());
+        assert!(neighbors
+            .iter()
+            .all(|profile| profile.target_vector_workers == 1));
+        assert!(neighbors.iter().all(|profile| {
+            let mut deltas = 0;
+            deltas += usize::from(profile.target_chunk_batch_size != hold.target_chunk_batch_size);
+            deltas += usize::from(
+                profile.target_file_vectorization_batch_size
+                    != hold.target_file_vectorization_batch_size,
+            );
+            deltas +=
+                usize::from(profile.target_ready_queue_depth != hold.target_ready_queue_depth);
+            deltas == 1
+        }));
+        std::env::remove_var("AXON_OPT_ALLOWED_ACTUATORS");
     }
 
     #[test]
-    fn build_admissible_action_profiles_draws_from_validated_catalog() {
-        std::env::set_var("AXON_GOVERNOR_VALIDATED_PROFILES", "64:16,80:20");
-        let mut signals = signals();
-        signals.file_vectorization_queue_depth = 256;
-        let profiles = build_admissible_action_profiles(&host(), &signals, &policy());
-        assert!(profiles.iter().any(|profile| profile.id == "vw1-cb64-fb16"));
-        assert!(profiles.iter().any(|profile| profile.id == "vw1-cb80-fb20"));
+    fn build_admissible_action_profiles_includes_aggressive_embedding_anchors_under_backlog() {
+        let mut current_signals = signals();
+        current_signals.file_vectorization_queue_depth = 8_192;
+        current_signals.ready_queue_depth_current = 0;
+        let mut current_policy = policy();
+        current_policy.allowed_actuators = vec![
+            "chunk_batch_size".to_string(),
+            "file_vectorization_batch_size".to_string(),
+            "vector_ready_queue_depth".to_string(),
+            "vector_persist_queue_bound".to_string(),
+            "vector_max_inflight_persists".to_string(),
+            "embed_micro_batch_max_items".to_string(),
+            "embed_micro_batch_max_total_tokens".to_string(),
+        ];
+        let profiles = build_admissible_action_profiles(&host(), &current_signals, &current_policy);
         assert!(profiles
             .iter()
-            .all(|profile| profile.target_vector_workers == 1));
+            .any(|profile| profile.label == "anchor_backlog_open"));
         assert!(profiles
             .iter()
-            .filter(|profile| profile.label != "hold")
-            .all(|profile| profile.id == "vw1-cb64-fb16" || profile.id == "vw1-cb80-fb20"));
-        std::env::remove_var("AXON_GOVERNOR_VALIDATED_PROFILES");
+            .any(|profile| profile.label == "anchor_gpu_fill"));
+        assert!(profiles
+            .iter()
+            .any(|profile| profile.label == "anchor_backlog_surge"));
+    }
+
+    #[test]
+    fn live_bandit_prefers_anchor_profiles_when_backlog_is_large_and_ready_queue_is_empty() {
+        let mut current_signals = signals();
+        current_signals.file_vectorization_queue_depth = 8_192;
+        current_signals.ready_queue_depth_current = 0;
+        let mut current_policy = policy();
+        current_policy.allowed_actuators = vec![
+            "chunk_batch_size".to_string(),
+            "file_vectorization_batch_size".to_string(),
+            "vector_ready_queue_depth".to_string(),
+            "vector_persist_queue_bound".to_string(),
+            "vector_max_inflight_persists".to_string(),
+            "embed_micro_batch_max_items".to_string(),
+            "embed_micro_batch_max_total_tokens".to_string(),
+        ];
+        let action_profiles =
+            build_admissible_action_profiles(&host(), &current_signals, &current_policy);
+        let decision = LiveBanditPolicyEngine
+            .choose(
+                &host(),
+                &current_signals,
+                &current_policy,
+                &RecentAnalyticsWindow::default(),
+                &action_profiles,
+            )
+            .expect("bandit decision");
+        assert!(
+            decision.action_profile_id.contains("cb128")
+                || decision.action_profile_id.contains("cb160")
+        );
     }
 
     #[test]
@@ -1043,7 +1743,7 @@ mod tests {
         let mut current = signals();
         current.cpu_usage_ratio = 0.90;
         current.file_vectorization_queue_depth = 512;
-        current.chunks_embedded_total = 0;
+        current.canonical_chunks_embedded_last_minute = 0;
         current.gpu_utilization_ratio = 0.10;
         let observation = observe_reward("test", &previous, &current, &policy(), 0.0);
         assert_eq!(observation.penalty_cpu, 0.0);
@@ -1054,11 +1754,96 @@ mod tests {
         let previous = signals();
         let mut current = signals();
         current.window_end_ms = 120_000;
-        current.chunks_embedded_total = 200;
+        current.canonical_chunks_embedded_last_minute = 200;
         current.cpu_usage_ratio = 0.9;
         let obs = observe_reward("d1", &previous, &current, &policy(), 0.0);
         assert!(obs.penalty_cpu > 0.0);
-        assert!(obs.reward < obs.throughput_chunks_per_hour);
+        assert!(obs.reward < obs.throughput_chunks_per_hour * 1.5);
+    }
+
+    #[test]
+    fn reward_observation_prefers_chunk_throughput_and_ready_queue_continuity() {
+        let previous = signals();
+        let mut current = signals();
+        current.window_end_ms = 120_000;
+        current.canonical_chunks_embedded_last_minute = 220;
+        current.canonical_files_embedded_last_minute = 12;
+        current.ready_queue_depth_current = 4;
+        current.gpu_utilization_ratio = 0.55;
+        let obs = observe_reward("d2", &previous, &current, &policy(), 0.0);
+        assert!(obs.reward > obs.throughput_chunks_per_hour);
+    }
+
+    #[test]
+    fn reward_observation_penalizes_underfed_gpu_when_backlog_exists() {
+        let previous = signals();
+        let mut underfed = signals();
+        underfed.window_end_ms = 120_000;
+        underfed.canonical_chunks_embedded_last_minute = 1;
+        underfed.ready_queue_depth_current = 0;
+        underfed.gpu_utilization_ratio = 0.10;
+        underfed.file_vectorization_queue_depth = 256;
+
+        let mut fed = underfed.clone();
+        fed.ready_queue_depth_current = 4;
+        fed.gpu_utilization_ratio = 0.55;
+
+        let underfed_obs = observe_reward("d3-underfed", &previous, &underfed, &policy(), 0.0);
+        let fed_obs = observe_reward("d3-fed", &previous, &fed, &policy(), 0.0);
+        assert!(underfed_obs.reward < fed_obs.reward);
+    }
+
+    #[test]
+    fn reward_observation_penalizes_throughput_regression_across_windows() {
+        let previous = signals();
+        let mut current = signals();
+        current.window_end_ms = 120_000;
+        current.canonical_chunks_embedded_last_minute = 40;
+        let obs = observe_reward("d4", &previous, &current, &policy(), 0.0);
+        assert!(obs.penalty_stability > 0.0);
+    }
+
+    #[test]
+    fn heuristic_policy_prefers_opening_embedding_throughput_under_backlog() {
+        let action_profiles = vec![
+            ActionProfile {
+                id: "hold".to_string(),
+                label: "hold".to_string(),
+                target_vector_workers: 1,
+                target_chunk_batch_size: 32,
+                target_file_vectorization_batch_size: 8,
+                target_ready_queue_depth: 6,
+                target_persist_queue_bound: 1,
+                target_max_inflight_persists: 1,
+                target_embed_micro_batch_max_items: 32,
+                target_embed_micro_batch_max_total_tokens: 8_192,
+            },
+            ActionProfile {
+                id: "open-embed".to_string(),
+                label: "neighbor".to_string(),
+                target_vector_workers: 1,
+                target_chunk_batch_size: 40,
+                target_file_vectorization_batch_size: 10,
+                target_ready_queue_depth: 6,
+                target_persist_queue_bound: 1,
+                target_max_inflight_persists: 1,
+                target_embed_micro_batch_max_items: 40,
+                target_embed_micro_batch_max_total_tokens: 9_216,
+            },
+        ];
+        let decision = HeuristicPolicyEngine
+            .choose(
+                &host(),
+                &signals(),
+                &policy(),
+                &RecentAnalyticsWindow {
+                    chunks_embedded_current_hour: 100,
+                    ..Default::default()
+                },
+                &action_profiles,
+            )
+            .unwrap();
+        assert_eq!(decision.action_profile_id, "open-embed");
     }
 
     #[test]
@@ -1080,5 +1865,95 @@ mod tests {
         assert!(profiles
             .iter()
             .all(|profile| profile.target_vector_workers == 1));
+    }
+
+    #[test]
+    fn admissible_action_profiles_hold_only_when_no_actuators_are_allowed() {
+        let mut current_signals = signals();
+        current_signals.file_vectorization_queue_depth = 256;
+        let mut current_policy = policy();
+        current_policy.allowed_actuators = vec![];
+        let profiles = build_admissible_action_profiles(&host(), &current_signals, &current_policy);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].label, "hold");
+    }
+
+    #[test]
+    fn admissible_action_profiles_do_not_block_more_aggressive_neighbors_on_cpu_pressure_alone() {
+        let mut pressured_signals = signals();
+        pressured_signals.file_vectorization_queue_depth = 256;
+        pressured_signals.cpu_usage_ratio = 0.95;
+        let profiles = build_admissible_action_profiles(&host(), &pressured_signals, &policy());
+        let hold = profiles
+            .iter()
+            .find(|profile| profile.label == "hold")
+            .expect("hold profile");
+        assert!(profiles.iter().any(|profile| {
+            profile.label != "hold"
+                && super::profile_increases_runtime_pressure(
+                    RuntimeTuningState {
+                        vector_workers: hold.target_vector_workers,
+                        chunk_batch_size: hold.target_chunk_batch_size,
+                        file_vectorization_batch_size: hold.target_file_vectorization_batch_size,
+                        vector_ready_queue_depth: hold.target_ready_queue_depth,
+                        vector_persist_queue_bound: hold.target_persist_queue_bound,
+                        vector_max_inflight_persists: hold.target_max_inflight_persists,
+                        embed_micro_batch_max_items: hold.target_embed_micro_batch_max_items,
+                        embed_micro_batch_max_total_tokens: hold
+                            .target_embed_micro_batch_max_total_tokens,
+                    },
+                    RuntimeTuningState {
+                        vector_workers: profile.target_vector_workers,
+                        chunk_batch_size: profile.target_chunk_batch_size,
+                        file_vectorization_batch_size: profile.target_file_vectorization_batch_size,
+                        vector_ready_queue_depth: profile.target_ready_queue_depth,
+                        vector_persist_queue_bound: profile.target_persist_queue_bound,
+                        vector_max_inflight_persists: profile.target_max_inflight_persists,
+                        embed_micro_batch_max_items: profile.target_embed_micro_batch_max_items,
+                        embed_micro_batch_max_total_tokens: profile
+                            .target_embed_micro_batch_max_total_tokens,
+                    },
+                )
+        }));
+    }
+
+    #[test]
+    fn runtime_tuning_neighbors_move_by_at_most_ten_percent_one_actuator_at_a_time() {
+        let current = RuntimeTuningState {
+            vector_workers: 1,
+            chunk_batch_size: 64,
+            file_vectorization_batch_size: 20,
+            vector_ready_queue_depth: 6,
+            vector_persist_queue_bound: 2,
+            vector_max_inflight_persists: 2,
+            embed_micro_batch_max_items: 80,
+            embed_micro_batch_max_total_tokens: 8_192,
+        };
+        let allowed = vec![
+            "chunk_batch_size".to_string(),
+            "vector_ready_queue_depth".to_string(),
+            "embed_micro_batch_max_total_tokens".to_string(),
+        ];
+        let neighbors = super::runtime_tuning_neighbors(current, &allowed);
+        assert!(neighbors.iter().all(|candidate| {
+            let mut deltas = 0;
+            deltas += usize::from(candidate.chunk_batch_size != current.chunk_batch_size);
+            deltas +=
+                usize::from(candidate.vector_ready_queue_depth != current.vector_ready_queue_depth);
+            deltas += usize::from(
+                candidate.embed_micro_batch_max_total_tokens
+                    != current.embed_micro_batch_max_total_tokens,
+            );
+            deltas == 1
+        }));
+        assert!(neighbors
+            .iter()
+            .any(|candidate| candidate.chunk_batch_size == 71));
+        assert!(neighbors
+            .iter()
+            .any(|candidate| candidate.vector_ready_queue_depth == 7));
+        assert!(neighbors
+            .iter()
+            .any(|candidate| candidate.embed_micro_batch_max_total_tokens == 9_012));
     }
 }

@@ -9,7 +9,23 @@ use crate::graph_ingestion::{
 };
 use crate::queue::QueueStore;
 use crate::runtime_profile::{recommend_embedding_lane_sizing, RuntimeProfile};
+use crate::runtime_tuning::{
+    current_runtime_tuning_snapshot as runtime_tuning_snapshot,
+    current_runtime_tuning_state as runtime_tuning_state,
+    update_runtime_tuning_state as update_shared_runtime_tuning_state, RuntimeTuningSnapshot,
+    RuntimeTuningState,
+};
 use crate::service_guard::{self, ServicePressure};
+use crate::vector_control::{
+    graph_projection_allowed, observe_vector_batch_controller,
+    reset_vector_batch_controller_for_tests, semantic_policy, symbol_embedding_allowed,
+    vector_claim_target, vector_ready_reserve_target, vector_worker_admitted,
+    VectorBatchControllerObservation,
+};
+use crate::vector_pipeline::{
+    ClaimedLeaseSet, FinalizeEnvelope, InflightPersistRequest, PersistEnvelope,
+    PreparedBatchEnvelope,
+};
 use anyhow::{anyhow, Result as AnyhowResult};
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use fastembed::{InitOptions, OutputKey, Pooling, SingleBatchOutput, TextEmbedding};
@@ -33,25 +49,12 @@ const SYMBOL_BATCH_SIZE: usize = 32;
 const FILE_VECTORIZATION_BATCH_SIZE: usize = 8;
 const GRAPH_BATCH_SIZE: usize = 6;
 const QUERY_EMBED_TIMEOUT: Duration = Duration::from_secs(15);
-const CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD: usize = 512;
-const GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD: usize = 2048;
-const MCP_IDLE_TARGET_EMBED_BATCH_MULTIPLIER: usize = 2;
-const VECTOR_BATCH_CONTROLLER_MIN_EMBED_CALLS: u64 = 4;
-const VECTOR_BATCH_CONTROLLER_COOLDOWN_MS: u64 = 10_000;
-const VECTOR_BATCH_CONTROLLER_EMBED_STEP: usize = 16;
-const VECTOR_BATCH_CONTROLLER_FILES_STEP: usize = 8;
-const VECTOR_BATCH_CONTROLLER_IDLE_BACKLOG_THRESHOLD: usize = 128;
 const VECTOR_FINALIZE_QUEUE_BOUND: usize = 8;
 const VECTOR_PERSIST_QUEUE_BOUND: usize = 1;
-const QUIET_CRUISE_FILE_BACKLOG_THRESHOLD: usize = 32;
-const AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD: usize = 128;
-const SYMBOL_BACKLOG_RESIDUAL_THRESHOLD: usize = 64;
 const MAX_CHUNKS_PER_FILE: usize = 64;
 const MAX_EMBED_BATCH_BYTES: usize = 512 * 1024;
 const DEFAULT_VECTOR_STALE_INFLIGHT_CLAIM_AGE_MS: u64 = 30_000;
 const DEFAULT_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS: u64 = 10_000;
-const DEFAULT_GPU_WARMUP_EMBED_BATCH_CHUNKS: usize = 8;
-const DEFAULT_GPU_WARMUP_FILES_PER_CYCLE: usize = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingProviderDiagnostics {
@@ -85,7 +88,7 @@ struct QueryEmbeddingRequest {
 }
 
 struct VectorPrepareRequest {
-    active_works: Vec<FileVectorizationWork>,
+    claimed: ClaimedLeaseSet,
     target_chunks: usize,
     per_file_fetch_limit: usize,
     batch_max_bytes: usize,
@@ -97,128 +100,22 @@ struct VectorPrepareRequest {
 type PreparedVectorEmbedSequenceReply = Receiver<PreparedVectorEmbedSequence>;
 
 struct VectorFinalizeRequest {
-    completed_works: Vec<FileVectorizationWork>,
-    lease_snapshots: Vec<FileVectorizationLeaseSnapshot>,
-    batch_runs: Vec<VectorBatchRun>,
+    envelope: FinalizeEnvelope,
     enqueued_at: Instant,
 }
 
 struct VectorPersistRequest {
-    persist_plan: VectorPersistPlan,
-    batch_run: VectorBatchRun,
+    envelope: PersistEnvelope,
     enqueued_at: Instant,
     reply: Sender<VectorPersistOutcome>,
 }
 
-type VectorPersistOutcomeReply = Receiver<VectorPersistOutcome>;
-
-struct InflightPersistRequest {
-    reply_rx: VectorPersistOutcomeReply,
-    owned_works: Vec<FileVectorizationWork>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VectorBatchControllerState {
-    Holding,
-    IdleDrain,
-    InteractiveGuarded,
-}
-
-impl VectorBatchControllerState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Holding => "holding",
-            Self::IdleDrain => "idle_drain",
-            Self::InteractiveGuarded => "interactive_guarded",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VectorDrainState {
-    AggressiveDrain,
-    InteractiveGuarded,
-    QuietCruise,
-    Recovery,
-    GpuScalingBlocked,
-}
-
-impl VectorDrainState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AggressiveDrain => "aggressive_drain",
-            Self::InteractiveGuarded => "interactive_guarded",
-            Self::QuietCruise => "quiet_cruise",
-            Self::Recovery => "recovery",
-            Self::GpuScalingBlocked => "gpu_scaling_blocked",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct VectorBatchControllerDiagnostics {
-    pub state: VectorBatchControllerState,
-    pub reason: String,
-    pub adjustments_total: u64,
-    pub last_adjustment_ms: u64,
-    pub target_embed_batch_chunks: usize,
-    pub target_files_per_cycle: usize,
-    pub window_embed_calls: u64,
-    pub window_chunks: u64,
-    pub window_files_touched: u64,
-    pub avg_chunks_per_embed_call: f64,
-    pub avg_files_per_embed_call: f64,
-    pub embed_ms_per_chunk: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct VectorBatchControllerObservation {
-    pub queue_pending: usize,
-    pub interactive_active: bool,
-    pub gpu_memory_pressure: bool,
-    pub metrics: service_guard::VectorRuntimeMetrics,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct VectorBatchControllerBounds {
-    min_embed_batch_chunks: usize,
-    default_embed_batch_chunks: usize,
-    max_embed_batch_chunks: usize,
-    gpu_pressure_embed_batch_chunks: usize,
-    min_files_per_cycle: usize,
-    default_files_per_cycle: usize,
-    max_files_per_cycle: usize,
-    gpu_pressure_files_per_cycle: usize,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct VectorBatchControllerWindow {
-    embed_calls: u64,
-    chunks: u64,
-    files_touched: u64,
-    embed_ms: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct VectorBatchController {
-    bounds: VectorBatchControllerBounds,
-    state: VectorBatchControllerState,
-    reason: String,
-    adjustments_total: u64,
-    last_adjustment_ms: u64,
-    target_embed_batch_chunks: usize,
-    target_files_per_cycle: usize,
-    baseline_metrics: service_guard::VectorRuntimeMetrics,
-    last_window_started_ms: u64,
-    last_best_embed_ms_per_chunk: Option<f64>,
-    last_window: VectorBatchControllerWindow,
-}
+pub(crate) type VectorPersistOutcomeReply = Receiver<VectorPersistOutcome>;
 
 static QUERY_EMBEDDING_SENDER: OnceLock<Mutex<Option<Sender<QueryEmbeddingRequest>>>> =
     OnceLock::new();
 static EMBEDDING_PROVIDER_DIAGNOSTICS: OnceLock<Mutex<EmbeddingProviderDiagnostics>> =
     OnceLock::new();
-static VECTOR_BATCH_CONTROLLER: OnceLock<Mutex<VectorBatchController>> = OnceLock::new();
 static GPU_MEMORY_SNAPSHOT_CACHE: OnceLock<Mutex<Option<CachedGpuMemorySnapshot>>> =
     OnceLock::new();
 
@@ -281,7 +178,7 @@ struct VectorBatchPlan {
 }
 
 #[derive(Debug)]
-struct PreparedVectorEmbedBatch {
+pub(crate) struct PreparedVectorEmbedBatch {
     work_items: Vec<VectorChunkWorkItem>,
     texts: Vec<String>,
     token_counts: Vec<usize>,
@@ -292,6 +189,7 @@ struct PreparedVectorEmbedBatch {
     oversized_works: Vec<FileVectorizationWork>,
     next_active_after_success: Vec<FileVectorizationWork>,
     next_active_after_failure: Vec<FileVectorizationWork>,
+    #[cfg_attr(not(test), allow(dead_code))]
     files_touched: usize,
     partial_file_cycles: usize,
     fetch_ms_total: u64,
@@ -300,8 +198,8 @@ struct PreparedVectorEmbedBatch {
 
 #[derive(Debug)]
 struct PreparedVectorEmbedSequence {
-    batches: Vec<PreparedVectorEmbedBatch>,
-    remaining_active_after_success: Vec<FileVectorizationWork>,
+    batches: Vec<PreparedBatchEnvelope>,
+    remaining_claimed_after_success: ClaimedLeaseSet,
 }
 
 #[derive(Debug, Clone)]
@@ -367,7 +265,7 @@ impl Drop for LeaseRefreshGuard {
 }
 
 #[derive(Debug)]
-struct VectorPersistPlan {
+pub(crate) struct VectorPersistPlan {
     updates: Vec<(String, String, Vec<f32>)>,
     completed_works: Vec<FileVectorizationWork>,
     next_active_after_failure: Vec<FileVectorizationWork>,
@@ -375,7 +273,7 @@ struct VectorPersistPlan {
 }
 
 #[derive(Debug)]
-struct VectorPersistOutcome {
+pub(crate) struct VectorPersistOutcome {
     completed_works: Vec<FileVectorizationWork>,
     batch_runs: Vec<VectorBatchRun>,
     next_active_after_failure: Vec<FileVectorizationWork>,
@@ -439,53 +337,125 @@ fn configured_embedding_token_bucket_size() -> usize {
         .min(configured_embedding_max_length().max(8))
 }
 
-fn configured_embedding_micro_batch_max_items(total_items: usize) -> usize {
-    let fallback = embedding_lane_config_from_env().chunk_batch_size.max(1);
-    std::env::var("AXON_EMBED_MICRO_BATCH_MAX_ITEMS")
+fn bootstrap_embedding_lane_config_from_env() -> EmbeddingLaneConfig {
+    let query_workers = env_usize("AXON_QUERY_EMBED_WORKERS", 1);
+    let requested_vector_workers = env_usize("AXON_VECTOR_WORKERS", 1);
+    let oversubscription_allowed = std::env::var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION")
+        .ok()
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let vector_workers = if embedding_provider_requested_is_gpu()
+        && requested_vector_workers > 1
+        && !oversubscription_allowed
+    {
+        1
+    } else {
+        requested_vector_workers
+    };
+
+    EmbeddingLaneConfig {
+        query_workers,
+        vector_workers,
+        graph_workers: env_usize_nonnegative("AXON_GRAPH_WORKERS", 1),
+        chunk_batch_size: env_usize("AXON_CHUNK_BATCH_SIZE", CHUNK_BATCH_SIZE),
+        file_vectorization_batch_size: env_usize(
+            "AXON_FILE_VECTORIZATION_BATCH_SIZE",
+            FILE_VECTORIZATION_BATCH_SIZE,
+        ),
+        graph_batch_size: env_usize("AXON_GRAPH_BATCH_SIZE", GRAPH_BATCH_SIZE),
+        max_chunks_per_file: env_usize("AXON_MAX_CHUNKS_PER_FILE", MAX_CHUNKS_PER_FILE),
+        max_embed_batch_bytes: env_usize("AXON_MAX_EMBED_BATCH_BYTES", MAX_EMBED_BATCH_BYTES),
+    }
+}
+
+fn bootstrap_runtime_tuning_state_from_env() -> RuntimeTuningState {
+    let lane_config = bootstrap_embedding_lane_config_from_env();
+    let embed_micro_batch_max_items = std::env::var("AXON_EMBED_MICRO_BATCH_MAX_ITEMS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(fallback)
+        .unwrap_or(lane_config.chunk_batch_size.max(1));
+    let max_length = configured_embedding_max_length();
+    let embed_micro_batch_max_total_tokens =
+        std::env::var("AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value >= max_length)
+            .unwrap_or(
+                embed_micro_batch_max_items
+                    .saturating_mul((max_length / 2).max(1))
+                    .max(max_length),
+            );
+    let vector_ready_queue_depth = std::env::var("AXON_VECTOR_READY_QUEUE_DEPTH")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(10);
+    let vector_persist_queue_bound = std::env::var("AXON_VECTOR_PERSIST_QUEUE_BOUND")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(VECTOR_PERSIST_QUEUE_BOUND.max(6));
+    let vector_max_inflight_persists = std::env::var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(vector_persist_queue_bound.max(1).min(4))
+        .max(1);
+    RuntimeTuningState {
+        vector_workers: lane_config.vector_workers,
+        chunk_batch_size: lane_config.chunk_batch_size,
+        file_vectorization_batch_size: lane_config.file_vectorization_batch_size,
+        vector_ready_queue_depth,
+        vector_persist_queue_bound,
+        vector_max_inflight_persists,
+        embed_micro_batch_max_items,
+        embed_micro_batch_max_total_tokens,
+    }
+}
+
+pub fn current_runtime_tuning_snapshot() -> RuntimeTuningSnapshot {
+    runtime_tuning_snapshot(bootstrap_runtime_tuning_state_from_env())
+}
+
+#[cfg(test)]
+fn refresh_runtime_tuning_snapshot_from_env() -> RuntimeTuningSnapshot {
+    crate::runtime_tuning::reset_runtime_tuning_snapshot(bootstrap_runtime_tuning_state_from_env())
+}
+
+fn configured_embedding_micro_batch_max_items(total_items: usize) -> usize {
+    current_runtime_tuning_snapshot()
+        .state
+        .embed_micro_batch_max_items
         .clamp(1, total_items.max(1))
 }
 
 fn configured_embedding_micro_batch_max_total_tokens(total_items: usize) -> usize {
     let max_length = configured_embedding_max_length();
-    let default_items = configured_embedding_micro_batch_max_items(total_items);
-    let fallback = default_items
-        .saturating_mul((max_length / 2).max(1))
-        .max(max_length);
-    std::env::var("AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value >= max_length)
-        .unwrap_or(fallback)
+    current_runtime_tuning_snapshot()
+        .state
+        .embed_micro_batch_max_total_tokens
         .clamp(max_length, max_length.saturating_mul(total_items.max(1)))
 }
 
 fn configured_vector_ready_queue_depth() -> usize {
-    std::env::var("AXON_VECTOR_READY_QUEUE_DEPTH")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(6)
+    current_runtime_tuning_snapshot()
+        .state
+        .vector_ready_queue_depth
+        .max(1)
 }
 
 fn configured_vector_persist_queue_bound() -> usize {
-    std::env::var("AXON_VECTOR_PERSIST_QUEUE_BOUND")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(VECTOR_PERSIST_QUEUE_BOUND)
+    current_runtime_tuning_snapshot()
+        .state
+        .vector_persist_queue_bound
+        .max(1)
 }
 
 fn configured_vector_max_inflight_persists() -> usize {
-    let fallback = configured_vector_persist_queue_bound().max(1).min(3);
-    std::env::var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(fallback)
+    current_runtime_tuning_snapshot()
+        .state
+        .vector_max_inflight_persists
         .max(1)
 }
 
@@ -748,7 +718,7 @@ fn build_prepared_vector_embed_sequence(
             || !prepared.finalize_after_success.is_empty()
             || !prepared.failed_fetches.is_empty();
         current_active = prepared.next_active_after_success.clone();
-        batches.push(prepared);
+        batches.push(PreparedBatchEnvelope::new(prepared));
         if !made_progress {
             break;
         }
@@ -756,7 +726,7 @@ fn build_prepared_vector_embed_sequence(
 
     PreparedVectorEmbedSequence {
         batches,
-        remaining_active_after_success: current_active,
+        remaining_claimed_after_success: ClaimedLeaseSet::new(current_active),
     }
 }
 
@@ -867,12 +837,13 @@ fn cuda_execution_provider_dispatch() -> ExecutionProviderDispatch {
 }
 
 fn cuda_memory_limit_bytes() -> usize {
-    const DEFAULT_LIMIT_MB: usize = 3072;
-    std::env::var("AXON_CUDA_MEMORY_LIMIT_MB")
+    (std::env::var("AXON_CUDA_MEMORY_LIMIT_MB")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value >= 512)
-        .unwrap_or(DEFAULT_LIMIT_MB)
+        .map(|value| value as u64)
+        .unwrap_or_else(gpu_memory_soft_limit_mb)
+        .max(512) as usize)
         .saturating_mul(1024 * 1024)
 }
 
@@ -938,6 +909,7 @@ fn effective_provider_request_for_lane(lane: &str) -> String {
 }
 
 impl VectorBatchPlan {
+    #[cfg_attr(not(test), allow(dead_code))]
     fn next_active_after_success(self) -> Vec<FileVectorizationWork> {
         let mut next = self.continuation_works;
         next.extend(self.untouched_works);
@@ -981,7 +953,10 @@ impl PreparedVectorEmbedBatch {
         }
     }
 
-    fn into_persist_plan(self, embeddings: Vec<Vec<f32>>) -> AnyhowResult<VectorPersistPlan> {
+    pub(crate) fn into_persist_plan(
+        self,
+        embeddings: Vec<Vec<f32>>,
+    ) -> AnyhowResult<VectorPersistPlan> {
         if self.work_items.len() != embeddings.len() {
             return Err(anyhow!(
                 "embedding count mismatch: work_items={} embeddings={}",
@@ -1003,353 +978,6 @@ impl PreparedVectorEmbedBatch {
             next_active_after_failure: self.next_active_after_failure,
             touched_works: self.touched_works,
         })
-    }
-}
-
-impl VectorBatchController {
-    pub fn new(lane_config: &EmbeddingLaneConfig) -> Self {
-        let default_embed_batch_chunks = lane_config.chunk_batch_size.max(1);
-        let min_embed_batch_chunks = (default_embed_batch_chunks / 2).max(8);
-        let max_embed_batch_chunks = default_embed_batch_chunks.saturating_mul(2).clamp(
-            default_embed_batch_chunks,
-            default_embed_batch_chunks.max(96),
-        );
-        let default_files_per_cycle = lane_config.file_vectorization_batch_size.max(1);
-        let max_files_per_cycle = default_files_per_cycle
-            .saturating_mul(2)
-            .clamp(default_files_per_cycle, default_files_per_cycle.max(16));
-        let gpu_pressure_embed_batch_chunks =
-            gpu_pressure_embed_batch_chunks(default_embed_batch_chunks, min_embed_batch_chunks);
-        let gpu_pressure_files_per_cycle = gpu_pressure_files_per_cycle(default_files_per_cycle);
-        Self {
-            bounds: VectorBatchControllerBounds {
-                min_embed_batch_chunks,
-                default_embed_batch_chunks,
-                max_embed_batch_chunks,
-                gpu_pressure_embed_batch_chunks,
-                min_files_per_cycle: 1,
-                default_files_per_cycle,
-                max_files_per_cycle,
-                gpu_pressure_files_per_cycle,
-            },
-            state: VectorBatchControllerState::Holding,
-            reason: "startup".to_string(),
-            adjustments_total: 0,
-            last_adjustment_ms: 0,
-            target_embed_batch_chunks: default_embed_batch_chunks,
-            target_files_per_cycle: default_files_per_cycle,
-            baseline_metrics: service_guard::VectorRuntimeMetrics {
-                fetch_ms_total: 0,
-                embed_ms_total: 0,
-                db_write_ms_total: 0,
-                completion_check_ms_total: 0,
-                mark_done_ms_total: 0,
-                batches_total: 0,
-                chunks_embedded_total: 0,
-                files_completed_total: 0,
-                embed_calls_total: 0,
-                claimed_work_items_total: 0,
-                partial_file_cycles_total: 0,
-                mark_done_calls_total: 0,
-                files_touched_total: 0,
-                prepare_dispatch_total: 0,
-                prepare_prefetch_total: 0,
-                prepare_fallback_inline_total: 0,
-                prepared_work_items_total: 0,
-                prepare_empty_batches_total: 0,
-                prepare_immediate_completed_total: 0,
-                prepare_failed_fetches_total: 0,
-                finalize_enqueued_total: 0,
-                finalize_fallback_inline_total: 0,
-                prepare_reply_wait_ms_total: 0,
-                prepare_send_wait_ms_total: 0,
-                finalize_send_wait_ms_total: 0,
-                prepare_queue_wait_ms_total: 0,
-                finalize_queue_wait_ms_total: 0,
-                prepare_queue_depth_current: 0,
-                prepare_queue_depth_max: 0,
-                ready_queue_depth_current: 0,
-                ready_queue_depth_max: 0,
-                finalize_queue_depth_current: 0,
-                finalize_queue_depth_max: 0,
-                persist_queue_depth_current: 0,
-                persist_queue_depth_max: 0,
-                persist_send_wait_ms_total: 0,
-                persist_queue_wait_ms_total: 0,
-                gpu_idle_wait_ms_total: 0,
-                embed_input_texts_total: 0,
-                embed_input_text_bytes_total: 0,
-                embed_clone_ms_total: 0,
-                embed_transform_ms_total: 0,
-                embed_export_ms_total: 0,
-                embed_attempts_total: 0,
-                embed_inflight_started_at_ms: 0,
-                embed_inflight_texts_current: 0,
-                embed_inflight_text_bytes_current: 0,
-                vector_workers_started_total: 0,
-                vector_workers_stopped_total: 0,
-                vector_workers_active_current: 0,
-                vector_worker_heartbeat_at_ms: 0,
-            },
-            last_window_started_ms: 0,
-            last_best_embed_ms_per_chunk: None,
-            last_window: VectorBatchControllerWindow::default(),
-        }
-    }
-
-    pub fn diagnostics(&self) -> VectorBatchControllerDiagnostics {
-        let avg_chunks_per_embed_call = if self.last_window.embed_calls > 0 {
-            self.last_window.chunks as f64 / self.last_window.embed_calls as f64
-        } else {
-            0.0
-        };
-        let avg_files_per_embed_call = if self.last_window.embed_calls > 0 {
-            self.last_window.files_touched as f64 / self.last_window.embed_calls as f64
-        } else {
-            0.0
-        };
-        let embed_ms_per_chunk = if self.last_window.chunks > 0 {
-            self.last_window.embed_ms as f64 / self.last_window.chunks as f64
-        } else {
-            0.0
-        };
-
-        VectorBatchControllerDiagnostics {
-            state: self.state,
-            reason: self.reason.clone(),
-            adjustments_total: self.adjustments_total,
-            last_adjustment_ms: self.last_adjustment_ms,
-            target_embed_batch_chunks: self.target_embed_batch_chunks,
-            target_files_per_cycle: self.target_files_per_cycle,
-            window_embed_calls: self.last_window.embed_calls,
-            window_chunks: self.last_window.chunks,
-            window_files_touched: self.last_window.files_touched,
-            avg_chunks_per_embed_call,
-            avg_files_per_embed_call,
-            embed_ms_per_chunk,
-        }
-    }
-
-    pub fn observe(
-        &mut self,
-        now_ms: u64,
-        observation: VectorBatchControllerObservation,
-    ) -> VectorBatchControllerDiagnostics {
-        let window = VectorBatchControllerWindow {
-            embed_calls: observation
-                .metrics
-                .embed_calls_total
-                .saturating_sub(self.baseline_metrics.embed_calls_total),
-            chunks: observation
-                .metrics
-                .chunks_embedded_total
-                .saturating_sub(self.baseline_metrics.chunks_embedded_total),
-            files_touched: observation
-                .metrics
-                .files_touched_total
-                .saturating_sub(self.baseline_metrics.files_touched_total),
-            embed_ms: observation
-                .metrics
-                .embed_ms_total
-                .saturating_sub(self.baseline_metrics.embed_ms_total),
-        };
-        let enough_calls = window.embed_calls >= VECTOR_BATCH_CONTROLLER_MIN_EMBED_CALLS;
-        let cooldown_elapsed = self.last_adjustment_ms == 0
-            || now_ms.saturating_sub(self.last_adjustment_ms)
-                >= VECTOR_BATCH_CONTROLLER_COOLDOWN_MS;
-        let backlog_meaningful =
-            observation.queue_pending >= VECTOR_BATCH_CONTROLLER_IDLE_BACKLOG_THRESHOLD;
-
-        if observation.gpu_memory_pressure {
-            self.state = VectorBatchControllerState::InteractiveGuarded;
-            self.reason = "gpu_memory_pressure".to_string();
-            let desired_embed_batch_chunks = self.bounds.gpu_pressure_embed_batch_chunks;
-            let desired_files_per_cycle = self.bounds.gpu_pressure_files_per_cycle;
-            if self.target_embed_batch_chunks != desired_embed_batch_chunks
-                || self.target_files_per_cycle != desired_files_per_cycle
-            {
-                self.target_embed_batch_chunks = desired_embed_batch_chunks;
-                self.target_files_per_cycle = desired_files_per_cycle;
-                self.adjustments_total += 1;
-                self.last_adjustment_ms = now_ms;
-            }
-            self.baseline_metrics = observation.metrics;
-            self.last_window_started_ms = now_ms;
-            self.last_window = window;
-            return self.diagnostics();
-        }
-
-        if observation.interactive_active
-            && (self.target_embed_batch_chunks > self.bounds.default_embed_batch_chunks
-                || self.target_files_per_cycle > self.bounds.default_files_per_cycle)
-        {
-            self.state = VectorBatchControllerState::InteractiveGuarded;
-            self.reason = "interactive_priority".to_string();
-            self.target_embed_batch_chunks = self.bounds.default_embed_batch_chunks;
-            self.target_files_per_cycle = self.bounds.default_files_per_cycle;
-            self.adjustments_total += 1;
-            self.last_adjustment_ms = now_ms;
-            self.baseline_metrics = observation.metrics;
-            self.last_window_started_ms = now_ms;
-            self.last_window = window;
-            return self.diagnostics();
-        }
-
-        if !enough_calls || !cooldown_elapsed {
-            self.state = if observation.interactive_active {
-                VectorBatchControllerState::InteractiveGuarded
-            } else if backlog_meaningful {
-                VectorBatchControllerState::IdleDrain
-            } else {
-                VectorBatchControllerState::Holding
-            };
-            self.reason = if !enough_calls {
-                "warming_window".to_string()
-            } else {
-                "cooldown".to_string()
-            };
-            if !observation.interactive_active && backlog_meaningful && !enough_calls {
-                if embedding_provider_requested_is_gpu() {
-                    self.target_embed_batch_chunks =
-                        gpu_warmup_embed_batch_chunks(self.bounds.default_embed_batch_chunks)
-                            .clamp(
-                                self.bounds.min_embed_batch_chunks,
-                                self.bounds.max_embed_batch_chunks,
-                            );
-                    self.target_files_per_cycle =
-                        gpu_warmup_files_per_cycle(self.bounds.default_files_per_cycle).clamp(
-                            self.bounds.min_files_per_cycle,
-                            self.bounds.max_files_per_cycle,
-                        );
-                } else {
-                    self.target_embed_batch_chunks = vector_embed_target_chunks(
-                        &EmbeddingLaneConfig {
-                            query_workers: 0,
-                            vector_workers: 0,
-                            graph_workers: 0,
-                            chunk_batch_size: self.bounds.default_embed_batch_chunks,
-                            file_vectorization_batch_size: self.bounds.default_files_per_cycle,
-                            graph_batch_size: 0,
-                            max_chunks_per_file: MAX_CHUNKS_PER_FILE,
-                            max_embed_batch_bytes: MAX_EMBED_BATCH_BYTES,
-                        },
-                        false,
-                    )
-                    .clamp(
-                        self.bounds.min_embed_batch_chunks,
-                        self.bounds.max_embed_batch_chunks,
-                    );
-                }
-            }
-            return self.diagnostics();
-        }
-
-        self.last_window = window;
-
-        let avg_chunks_per_embed_call = if window.embed_calls > 0 {
-            window.chunks as f64 / window.embed_calls as f64
-        } else {
-            0.0
-        };
-        let avg_files_per_embed_call = if window.embed_calls > 0 {
-            window.files_touched as f64 / window.embed_calls as f64
-        } else {
-            0.0
-        };
-        let embed_ms_per_chunk = if window.chunks > 0 {
-            window.embed_ms as f64 / window.chunks as f64
-        } else {
-            0.0
-        };
-        let ready_queue_starved = observation.metrics.ready_queue_depth_current == 0;
-        let persist_congested = observation.metrics.persist_queue_depth_current > 0;
-        let gpu_idle_wait_delta = observation
-            .metrics
-            .gpu_idle_wait_ms_total
-            .saturating_sub(self.baseline_metrics.gpu_idle_wait_ms_total);
-
-        let mut desired_embed_chunks = self.target_embed_batch_chunks;
-        let mut desired_files_per_cycle = self.target_files_per_cycle;
-        let mut reason = "holding_density".to_string();
-        let state = if observation.interactive_active {
-            VectorBatchControllerState::InteractiveGuarded
-        } else if backlog_meaningful {
-            VectorBatchControllerState::IdleDrain
-        } else {
-            VectorBatchControllerState::Holding
-        };
-
-        let embed_regressed = self
-            .last_best_embed_ms_per_chunk
-            .is_some_and(|best| embed_ms_per_chunk > best * 1.20);
-
-        if embed_regressed {
-            reason = "embed_efficiency_regressed".to_string();
-            if desired_embed_chunks > self.bounds.default_embed_batch_chunks {
-                desired_embed_chunks = desired_embed_chunks
-                    .saturating_sub(VECTOR_BATCH_CONTROLLER_EMBED_STEP)
-                    .max(self.bounds.default_embed_batch_chunks);
-            } else if desired_files_per_cycle > self.bounds.default_files_per_cycle {
-                desired_files_per_cycle = desired_files_per_cycle
-                    .saturating_sub(VECTOR_BATCH_CONTROLLER_FILES_STEP)
-                    .max(self.bounds.default_files_per_cycle);
-            }
-        } else if !observation.interactive_active && backlog_meaningful {
-            let underfed_chunks =
-                avg_chunks_per_embed_call < (self.target_embed_batch_chunks as f64 * 0.75);
-            let underfed_files = underfed_chunks && avg_files_per_embed_call < 1.5;
-            if ready_queue_starved || gpu_idle_wait_delta > 250 || underfed_chunks || underfed_files
-            {
-                reason = if ready_queue_starved || gpu_idle_wait_delta > 250 {
-                    "ready_queue_starved".to_string()
-                } else {
-                    "idle_underfed".to_string()
-                };
-                if underfed_chunks {
-                    desired_embed_chunks = desired_embed_chunks
-                        .saturating_add(VECTOR_BATCH_CONTROLLER_EMBED_STEP)
-                        .min(self.bounds.max_embed_batch_chunks);
-                }
-                if underfed_files || ready_queue_starved {
-                    desired_files_per_cycle = desired_files_per_cycle
-                        .saturating_add(VECTOR_BATCH_CONTROLLER_FILES_STEP)
-                        .min(self.bounds.max_files_per_cycle);
-                }
-            } else if persist_congested {
-                reason = "persist_congested".to_string();
-                desired_files_per_cycle = desired_files_per_cycle
-                    .saturating_sub(VECTOR_BATCH_CONTROLLER_FILES_STEP)
-                    .max(self.bounds.default_files_per_cycle);
-            }
-        }
-
-        self.state = state;
-        self.reason = reason;
-        if desired_embed_chunks != self.target_embed_batch_chunks
-            || desired_files_per_cycle != self.target_files_per_cycle
-        {
-            self.target_embed_batch_chunks = desired_embed_chunks.clamp(
-                self.bounds.min_embed_batch_chunks,
-                self.bounds.max_embed_batch_chunks,
-            );
-            self.target_files_per_cycle = desired_files_per_cycle.clamp(
-                self.bounds.min_files_per_cycle,
-                self.bounds.max_files_per_cycle,
-            );
-            self.adjustments_total += 1;
-            self.last_adjustment_ms = now_ms;
-        }
-
-        if window.chunks > 0 {
-            self.last_best_embed_ms_per_chunk = Some(
-                self.last_best_embed_ms_per_chunk
-                    .map(|best| best.min(embed_ms_per_chunk))
-                    .unwrap_or(embed_ms_per_chunk),
-            );
-        }
-        self.baseline_metrics = observation.metrics;
-        self.last_window_started_ms = now_ms;
-        self.diagnostics()
     }
 }
 
@@ -1561,9 +1189,21 @@ impl SemanticWorkerPool {
                     metrics: service_guard::vector_runtime_metrics(),
                 },
             );
+            let initial_ready_target = vector_ready_reserve_target(
+                configured_vector_ready_queue_depth(),
+                file_backlog_depth,
+                controller.target_files_per_cycle,
+                controller.target_embed_batch_chunks,
+                0,
+            );
             match graph_store.fetch_pending_file_vectorization_work(vector_claim_target(
                 controller.target_files_per_cycle,
                 controller.avg_files_per_embed_call,
+                controller.target_embed_batch_chunks,
+                controller.avg_chunks_per_embed_call,
+                initial_ready_target,
+                0,
+                file_backlog_depth,
             )) {
                 Ok(pending) if !pending.is_empty() => {
                     backlog_active = true;
@@ -1581,10 +1221,9 @@ impl SemanticWorkerPool {
                     let mut active_works = pending;
                     let mut estimated_queue_pending =
                         file_backlog_depth.saturating_sub(active_works.len());
-                    let mut ready_batches = VecDeque::new();
+                    let mut ready_batches: VecDeque<PreparedBatchEnvelope> = VecDeque::new();
                     let mut inflight_persists: VecDeque<InflightPersistRequest> = VecDeque::new();
                     let max_inflight_persists = configured_vector_max_inflight_persists();
-                    let target_ready_depth = configured_vector_ready_queue_depth();
                     while !active_works.is_empty()
                         || !ready_batches.is_empty()
                         || !inflight_persists.is_empty()
@@ -1618,7 +1257,7 @@ impl SemanticWorkerPool {
                             .collect::<Vec<_>>();
                         let owned_persist_works = inflight_persists
                             .iter()
-                            .flat_map(|request| request.owned_works.clone())
+                            .flat_map(|request| request.claimed.clone_works())
                             .collect::<Vec<_>>();
                         let current_vector_owned = merge_unique_vectorization_work_sets([
                             active_works.clone(),
@@ -1647,9 +1286,27 @@ impl SemanticWorkerPool {
                                 metrics: service_guard::vector_runtime_metrics(),
                             },
                         );
+                        let target_ready_depth = vector_ready_reserve_target(
+                            configured_vector_ready_queue_depth(),
+                            estimated_queue_pending
+                                + active_works.len()
+                                + ready_batches.len()
+                                + inflight_persists.len(),
+                            controller.target_files_per_cycle,
+                            controller.target_embed_batch_chunks,
+                            ready_batches.len(),
+                        );
                         let claim_target = vector_claim_target(
                             controller.target_files_per_cycle,
                             controller.avg_files_per_embed_call,
+                            controller.target_embed_batch_chunks,
+                            controller.avg_chunks_per_embed_call,
+                            target_ready_depth,
+                            ready_batches.len(),
+                            estimated_queue_pending
+                                + active_works.len()
+                                + ready_batches.len()
+                                + inflight_persists.len(),
                         );
                         if active_works.len() < claim_target {
                             if let Ok(top_up) = graph_store.fetch_pending_file_vectorization_work(
@@ -1678,6 +1335,8 @@ impl SemanticWorkerPool {
                                 .refresh_inflight_file_vectorization_claims(&active_works);
                             let gpu_idle_started = Instant::now();
                             let sequence = match request_prepared_vector_embed_sequence(
+                                &graph_store,
+                                worker_idx,
                                 &prepare_tx,
                                 active_works.clone(),
                                 target_chunks,
@@ -1701,10 +1360,10 @@ impl SemanticWorkerPool {
                                         &HashSet::new(),
                                     );
                                     PreparedVectorEmbedSequence {
-                                        remaining_active_after_success: prepared
-                                            .next_active_after_success
-                                            .clone(),
-                                        batches: vec![prepared],
+                                        remaining_claimed_after_success: ClaimedLeaseSet::new(
+                                            prepared.next_active_after_success.clone(),
+                                        ),
+                                        batches: vec![PreparedBatchEnvelope::new(prepared)],
                                     }
                                 }
                             };
@@ -1715,7 +1374,7 @@ impl SemanticWorkerPool {
                                 ready_batches.push_back(prefetched);
                                 service_guard::record_vector_prepare_prefetch();
                             }
-                            active_works = sequence.remaining_active_after_success;
+                            active_works = sequence.remaining_claimed_after_success.into_inner();
                             service_guard::record_vector_ready_queue_depth(
                                 ready_batches.len() as u64
                             );
@@ -1727,7 +1386,7 @@ impl SemanticWorkerPool {
                                     &graph_store,
                                     worker_idx,
                                     inflight.reply_rx,
-                                    &inflight.owned_works,
+                                    inflight.claimed.as_slice(),
                                 ) {
                                     apply_vector_persist_outcome(
                                         outcome,
@@ -1833,8 +1492,6 @@ impl SemanticWorkerPool {
                             embed_input_text_bytes,
                             embed_clone_ms,
                         );
-                        let _ =
-                            graph_store.mark_file_vectorization_started(&prepared.touched_works);
                         if let Err(err) = graph_store
                             .refresh_inflight_file_vectorization_claims(&prepared.touched_works)
                         {
@@ -1855,7 +1512,7 @@ impl SemanticWorkerPool {
                                 .collect::<Vec<_>>(),
                             inflight_persists
                                 .iter()
-                                .flat_map(|request| request.owned_works.clone())
+                                .flat_map(|request| request.claimed.clone_works())
                                 .collect::<Vec<_>>(),
                             prepared.touched_works.clone(),
                             completed_works.clone(),
@@ -1866,6 +1523,8 @@ impl SemanticWorkerPool {
                             "vector",
                         );
                         let embed_started = Instant::now();
+                        let _ =
+                            graph_store.mark_file_vectorization_started(&prepared.touched_works);
                         match embed_prepared_batch_with_breakdown(&mut model, &prepared) {
                             Ok((embeddings, transform_ms, export_ms)) => {
                                 service_guard::record_vector_embed_attempt_finished();
@@ -1881,8 +1540,35 @@ impl SemanticWorkerPool {
                                 let next_active_after_failure =
                                     prepared.next_active_after_failure.clone();
                                 let prepared_fetch_ms_total = prepared.fetch_ms_total;
-                                let persist_plan = match prepared.into_persist_plan(embeddings) {
-                                    Ok(persist_plan) => persist_plan,
+                                let persist_plan = match prepared.into_persist_envelope(
+                                    embeddings,
+                                    VectorBatchRun {
+                                        run_id: format!(
+                                            "vec-batch-{}-{}",
+                                            worker_idx,
+                                            chrono::Utc::now()
+                                                .timestamp_nanos_opt()
+                                                .unwrap_or_else(
+                                                    || chrono::Utc::now().timestamp_micros()
+                                                )
+                                        ),
+                                        started_at_ms: batch_started_at_ms,
+                                        finished_at_ms: chrono::Utc::now().timestamp_millis(),
+                                        provider: current_embedding_provider_diagnostics()
+                                            .provider_effective,
+                                        model_id: CHUNK_MODEL_ID.to_string(),
+                                        chunk_count: 0,
+                                        file_count: 0,
+                                        input_bytes: embed_input_text_bytes,
+                                        fetch_ms: prepared_fetch_ms_total,
+                                        embed_ms: embed_started.elapsed().as_millis() as u64,
+                                        db_write_ms: 0,
+                                        mark_done_ms: 0,
+                                        success: true,
+                                        error_reason: None,
+                                    },
+                                ) {
+                                    Ok(envelope) => envelope,
                                     Err(err) => {
                                         let reason = format!(
                                             "failed to build vector persist plan: {:?}",
@@ -1894,29 +1580,11 @@ impl SemanticWorkerPool {
                                         continue;
                                     }
                                 };
-                                let batch_run = VectorBatchRun {
-                                    run_id: format!(
-                                        "vec-batch-{}-{}",
-                                        worker_idx,
-                                        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_else(
-                                            || chrono::Utc::now().timestamp_micros()
-                                        )
-                                    ),
-                                    started_at_ms: batch_started_at_ms,
-                                    finished_at_ms: chrono::Utc::now().timestamp_millis(),
-                                    provider: current_embedding_provider_diagnostics()
-                                        .provider_effective,
-                                    model_id: CHUNK_MODEL_ID.to_string(),
-                                    chunk_count: persist_plan.updates.len() as u64,
-                                    file_count: persist_plan.touched_works.len() as u64,
-                                    input_bytes: embed_input_text_bytes,
-                                    fetch_ms: prepared_fetch_ms_total,
-                                    embed_ms: embed_started.elapsed().as_millis() as u64,
-                                    db_write_ms: 0,
-                                    mark_done_ms: 0,
-                                    success: true,
-                                    error_reason: None,
-                                };
+                                let mut persist_envelope = persist_plan;
+                                persist_envelope.batch_run.chunk_count =
+                                    persist_envelope.persist_plan.updates.len() as u64;
+                                persist_envelope.batch_run.file_count =
+                                    persist_envelope.persist_plan.touched_works.len() as u64;
                                 while inflight_persists.len() >= max_inflight_persists {
                                     let Some(inflight) = inflight_persists.pop_front() else {
                                         break;
@@ -1925,7 +1593,7 @@ impl SemanticWorkerPool {
                                         &graph_store,
                                         worker_idx,
                                         inflight.reply_rx,
-                                        &inflight.owned_works,
+                                        inflight.claimed.as_slice(),
                                     ) {
                                         apply_vector_persist_outcome(
                                             outcome,
@@ -1937,15 +1605,11 @@ impl SemanticWorkerPool {
                                         );
                                     }
                                 }
-                                match dispatch_vector_persist_plan(
-                                    &persist_tx,
-                                    persist_plan,
-                                    batch_run,
-                                ) {
+                                match dispatch_vector_persist_plan(&persist_tx, persist_envelope) {
                                     Ok(reply_rx) => {
                                         inflight_persists.push_back(InflightPersistRequest {
                                             reply_rx,
-                                            owned_works: touched_works,
+                                            claimed: ClaimedLeaseSet::new(touched_works),
                                         });
                                     }
                                     Err(err) => {
@@ -1986,7 +1650,7 @@ impl SemanticWorkerPool {
                                     .entry(reason)
                                     .or_default()
                                     .extend(prepared.touched_works.iter().cloned());
-                                active_works = prepared.next_active_after_failure;
+                                active_works = prepared.next_active_after_failure.clone();
                             }
                         }
                     }
@@ -1996,7 +1660,7 @@ impl SemanticWorkerPool {
                             &graph_store,
                             worker_idx,
                             inflight.reply_rx,
-                            &inflight.owned_works,
+                            inflight.claimed.as_slice(),
                         ) {
                             apply_vector_persist_outcome(
                                 outcome,
@@ -2114,9 +1778,11 @@ impl SemanticWorkerPool {
             service_guard::record_vector_finalize_queue_wait_ms(
                 request.enqueued_at.elapsed().as_millis() as u64,
             );
-            let completed_works = request.completed_works;
-            let vector_lease_snapshots = request.lease_snapshots;
-            let batch_runs = request.batch_runs;
+            let FinalizeEnvelope {
+                completed_works,
+                lease_snapshots: vector_lease_snapshots,
+                batch_runs,
+            } = request.envelope;
             let finalize_lease_snapshots = match graph_store
                 .transfer_file_vectorization_lease_owner(
                     &vector_lease_snapshots,
@@ -2147,18 +1813,20 @@ impl SemanticWorkerPool {
                     continue;
                 }
             };
+            let finalize_owned_works =
+                work_with_lease_snapshots(&completed_works, &finalize_lease_snapshots);
             let _ = graph_store
-                .refresh_file_vectorization_leases_for_owner(&completed_works, "finalize");
+                .refresh_file_vectorization_leases_for_owner(&finalize_owned_works, "finalize");
             let mark_done_started = Instant::now();
             service_guard::record_vector_mark_done_call();
             let _finalize_lease_guard = LeaseRefreshGuard::start(
                 Arc::clone(&graph_store),
-                completed_works.clone(),
+                finalize_owned_works.clone(),
                 "finalize",
             );
             match finalize_completed_vectorization_works(
                 &graph_store,
-                completed_works.clone(),
+                finalize_owned_works.clone(),
                 finalize_lease_snapshots,
                 batch_runs,
             ) {
@@ -2205,8 +1873,12 @@ impl SemanticWorkerPool {
                         "Semantic Vector Finalize Worker [{}]: {}",
                         worker_idx, reason
                     );
-                    if let Err(failure_err) =
-                        graph_store.mark_file_vectorization_work_failed(&completed_works, &reason)
+                    if let Err(failure_err) = graph_store
+                        .mark_file_vectorization_work_failed_for_owner(
+                            &finalize_owned_works,
+                            "finalize",
+                            &reason,
+                        )
                     {
                         error!(
                             "Semantic Vector Finalize Worker [{}]: failed to persist finalize failure state: {:?}",
@@ -2235,7 +1907,7 @@ impl SemanticWorkerPool {
             );
             let mut sequence = build_prepared_vector_embed_sequence(
                 &graph_store,
-                &request.active_works,
+                request.claimed.as_slice(),
                 request.target_chunks,
                 request.per_file_fetch_limit,
                 request.batch_max_bytes,
@@ -2287,13 +1959,16 @@ impl SemanticWorkerPool {
                 request.enqueued_at.elapsed().as_millis() as u64,
             );
             let db_write_started = Instant::now();
-            let mut batch_run = request.batch_run;
+            let PersistEnvelope {
+                persist_plan,
+                mut batch_run,
+            } = request.envelope;
             let _persist_lease_guard = LeaseRefreshGuard::start(
                 Arc::clone(&graph_store),
-                request.persist_plan.touched_works.clone(),
+                persist_plan.touched_works.clone(),
                 "vector",
             );
-            let outcome = match persist_vector_embed_batch(&graph_store, &request.persist_plan) {
+            let outcome = match persist_vector_embed_batch(&graph_store, &persist_plan) {
                 Ok(()) => {
                     let db_write_ms = db_write_started.elapsed().as_millis() as u64;
                     service_guard::record_vector_stage_ms(
@@ -2301,8 +1976,8 @@ impl SemanticWorkerPool {
                         db_write_ms,
                     );
                     service_guard::record_vector_embed_call(
-                        request.persist_plan.updates.len() as u64,
-                        request.persist_plan.touched_works.len() as u64,
+                        persist_plan.updates.len() as u64,
+                        persist_plan.touched_works.len() as u64,
                     );
                     batch_run.db_write_ms = db_write_ms;
                     batch_run.finished_at_ms = chrono::Utc::now().timestamp_millis();
@@ -2312,16 +1987,16 @@ impl SemanticWorkerPool {
                             worker_idx, err
                         );
                     }
-                    let batch_runs = if request.persist_plan.completed_works.is_empty() {
+                    let batch_runs = if persist_plan.completed_works.is_empty() {
                         Vec::new()
                     } else {
                         vec![batch_run]
                     };
                     VectorPersistOutcome {
-                        completed_works: request.persist_plan.completed_works,
+                        completed_works: persist_plan.completed_works,
                         batch_runs,
-                        next_active_after_failure: request.persist_plan.next_active_after_failure,
-                        touched_works: request.persist_plan.touched_works,
+                        next_active_after_failure: persist_plan.next_active_after_failure,
+                        touched_works: persist_plan.touched_works,
                         error_reason: None,
                     }
                 }
@@ -2345,8 +2020,8 @@ impl SemanticWorkerPool {
                     VectorPersistOutcome {
                         completed_works: Vec::new(),
                         batch_runs: Vec::new(),
-                        next_active_after_failure: request.persist_plan.next_active_after_failure,
-                        touched_works: request.persist_plan.touched_works,
+                        next_active_after_failure: persist_plan.next_active_after_failure,
+                        touched_works: persist_plan.touched_works,
                         error_reason: Some(format!(
                             "failed to persist chunk embeddings: {:?}",
                             err
@@ -2788,42 +2463,6 @@ impl SemanticWorkerPool {
     }
 }
 
-fn vector_embed_target_chunks(
-    lane_config: &EmbeddingLaneConfig,
-    interactive_active: bool,
-) -> usize {
-    if interactive_active {
-        lane_config.chunk_batch_size.max(1)
-    } else {
-        let idle_multiplier = if lane_config.chunk_batch_size >= 32 {
-            1
-        } else {
-            MCP_IDLE_TARGET_EMBED_BATCH_MULTIPLIER
-        };
-        lane_config
-            .chunk_batch_size
-            .saturating_mul(idle_multiplier)
-            .clamp(1, 256)
-    }
-}
-
-fn vector_claim_target(target_files_per_cycle: usize, avg_files_per_embed_call: f64) -> usize {
-    if target_files_per_cycle == 0 {
-        return 0;
-    }
-
-    let min_claim_target = target_files_per_cycle.clamp(1, 8);
-
-    if avg_files_per_embed_call.is_finite() && avg_files_per_embed_call > 0.0 {
-        let learned = avg_files_per_embed_call.ceil() as usize;
-        return learned
-            .saturating_add(2)
-            .clamp(min_claim_target, target_files_per_cycle.max(1));
-    }
-
-    min_claim_target
-}
-
 fn build_vector_batch_plan(
     graph_store: &GraphStore,
     active_works: &[FileVectorizationWork],
@@ -3007,9 +2646,33 @@ fn finalize_completed_vectorization_works(
     })
 }
 
+fn work_with_lease_snapshots(
+    work: &[FileVectorizationWork],
+    snapshots: &[FileVectorizationLeaseSnapshot],
+) -> Vec<FileVectorizationWork> {
+    let snapshot_by_path = snapshots
+        .iter()
+        .map(|snapshot| (snapshot.file_path.as_str(), snapshot))
+        .collect::<std::collections::HashMap<_, _>>();
+    work.iter()
+        .map(|item| {
+            if let Some(snapshot) = snapshot_by_path.get(item.file_path.as_str()) {
+                FileVectorizationWork {
+                    file_path: item.file_path.clone(),
+                    resumed_after_interactive_pause: item.resumed_after_interactive_pause,
+                    claim_token: snapshot.claim_token.clone(),
+                    lease_epoch: snapshot.lease_epoch,
+                }
+            } else {
+                item.clone()
+            }
+        })
+        .collect()
+}
+
 fn flush_completed_vectorization_works(
     worker_idx: usize,
-    graph_store: &GraphStore,
+    graph_store: &Arc<GraphStore>,
     finalize_tx: &Sender<VectorFinalizeRequest>,
     completed_works: &mut Vec<FileVectorizationWork>,
     completed_batch_runs: &mut Vec<VectorBatchRun>,
@@ -3037,9 +2700,11 @@ fn flush_completed_vectorization_works(
         }
     };
     let finalize_request = VectorFinalizeRequest {
-        completed_works: works_to_finalize.clone(),
-        lease_snapshots: vector_lease_snapshots.clone(),
-        batch_runs: batch_runs_to_finalize.clone(),
+        envelope: FinalizeEnvelope {
+            completed_works: works_to_finalize.clone(),
+            lease_snapshots: vector_lease_snapshots.clone(),
+            batch_runs: batch_runs_to_finalize.clone(),
+        },
         enqueued_at: Instant::now(),
     };
     let finalize_send_started = Instant::now();
@@ -3052,13 +2717,51 @@ fn flush_completed_vectorization_works(
             "Semantic Vector Worker [{}]: finalize queue unavailable, falling back to inline finalization",
             worker_idx
         );
+        let finalize_lease_snapshots = match graph_store.transfer_file_vectorization_lease_owner(
+            &err.0.envelope.lease_snapshots,
+            "vector",
+            "finalize",
+        ) {
+            Ok(snapshots) => snapshots,
+            Err(transfer_err) => {
+                let reason = format!(
+                    "failed to transfer finalize lease ownership for inline fallback: {:?}",
+                    transfer_err
+                );
+                failed
+                    .entry(reason.clone())
+                    .or_default()
+                    .extend(err.0.envelope.completed_works.iter().cloned());
+                for mut batch_run in err.0.envelope.batch_runs {
+                    batch_run.finished_at_ms = chrono::Utc::now().timestamp_millis();
+                    batch_run.success = false;
+                    batch_run.error_reason = Some(reason.clone());
+                    if let Err(record_err) = graph_store.record_vector_batch_run(&batch_run) {
+                        error!(
+                            "Semantic Vector Worker [{}]: failed to persist inline finalize ownership error batch run: {:?}",
+                            worker_idx, record_err
+                        );
+                    }
+                }
+                return;
+            }
+        };
+        let finalize_owned_works =
+            work_with_lease_snapshots(&err.0.envelope.completed_works, &finalize_lease_snapshots);
+        let _ = graph_store
+            .refresh_file_vectorization_leases_for_owner(&finalize_owned_works, "finalize");
         let mark_done_started = Instant::now();
         service_guard::record_vector_mark_done_call();
+        let _inline_finalize_lease_guard = LeaseRefreshGuard::start(
+            Arc::clone(graph_store),
+            finalize_owned_works.clone(),
+            "finalize",
+        );
         match finalize_completed_vectorization_works(
             graph_store,
-            err.0.completed_works,
-            err.0.lease_snapshots,
-            err.0.batch_runs,
+            finalize_owned_works,
+            finalize_lease_snapshots,
+            err.0.envelope.batch_runs,
         ) {
             Err((finalize_err, mut batch_runs)) => {
                 service_guard::record_vector_stage_ms(
@@ -3117,7 +2820,7 @@ fn flush_completed_vectorization_works(
 fn apply_vector_persist_outcome(
     outcome: VectorPersistOutcome,
     active_works: &mut Vec<FileVectorizationWork>,
-    ready_batches: &mut VecDeque<PreparedVectorEmbedBatch>,
+    ready_batches: &mut VecDeque<PreparedBatchEnvelope>,
     completed_works: &mut Vec<FileVectorizationWork>,
     completed_batch_runs: &mut Vec<VectorBatchRun>,
     failed: &mut HashMap<String, Vec<FileVectorizationWork>>,
@@ -3168,6 +2871,8 @@ fn wait_for_vector_persist_outcome(
 }
 
 fn request_prepared_vector_embed_sequence(
+    graph_store: &Arc<GraphStore>,
+    worker_idx: usize,
     prepare_tx: &Sender<VectorPrepareRequest>,
     active_works: Vec<FileVectorizationWork>,
     target_chunks: usize,
@@ -3175,18 +2880,31 @@ fn request_prepared_vector_embed_sequence(
     batch_max_bytes: usize,
     target_ready_depth: usize,
 ) -> AnyhowResult<PreparedVectorEmbedSequence> {
+    let claimed = ClaimedLeaseSet::new(active_works);
     let reply_rx = dispatch_prepared_vector_embed_sequence(
         prepare_tx,
-        active_works,
+        claimed.clone(),
         target_chunks,
         per_file_fetch_limit,
         batch_max_bytes,
         target_ready_depth,
     )?;
     let reply_wait_started = Instant::now();
-    let prepared = reply_rx
-        .recv()
-        .map_err(|err| anyhow!("prepare worker reply unavailable: {}", err))?;
+    let prepared = loop {
+        service_guard::record_vector_worker_heartbeat();
+        let _ =
+            graph_store.refresh_file_vectorization_leases_for_owner(claimed.as_slice(), "vector");
+        match reply_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(prepared) => break prepared,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!(
+                    "prepare worker reply unavailable for vector worker [{}]: disconnected",
+                    worker_idx
+                ));
+            }
+        }
+    };
     service_guard::record_vector_prepare_reply_wait_ms(
         reply_wait_started.elapsed().as_millis() as u64
     );
@@ -3195,7 +2913,7 @@ fn request_prepared_vector_embed_sequence(
 
 fn dispatch_prepared_vector_embed_sequence(
     prepare_tx: &Sender<VectorPrepareRequest>,
-    active_works: Vec<FileVectorizationWork>,
+    claimed: ClaimedLeaseSet,
     target_chunks: usize,
     per_file_fetch_limit: usize,
     batch_max_bytes: usize,
@@ -3206,7 +2924,7 @@ fn dispatch_prepared_vector_embed_sequence(
     let prepare_send_started = Instant::now();
     prepare_tx
         .send(VectorPrepareRequest {
-            active_works,
+            claimed,
             target_chunks,
             per_file_fetch_limit,
             batch_max_bytes,
@@ -3224,15 +2942,13 @@ fn dispatch_prepared_vector_embed_sequence(
 
 fn dispatch_vector_persist_plan(
     persist_tx: &Sender<VectorPersistRequest>,
-    persist_plan: VectorPersistPlan,
-    batch_run: VectorBatchRun,
+    envelope: PersistEnvelope,
 ) -> AnyhowResult<VectorPersistOutcomeReply> {
     let (reply_tx, reply_rx) = bounded(1);
     let persist_send_started = Instant::now();
     persist_tx
         .send(VectorPersistRequest {
-            persist_plan,
-            batch_run,
+            envelope,
             enqueued_at: Instant::now(),
             reply: reply_tx,
         })
@@ -3284,42 +3000,6 @@ where
 
 fn query_embedding_sender_slot() -> &'static Mutex<Option<Sender<QueryEmbeddingRequest>>> {
     QUERY_EMBEDDING_SENDER.get_or_init(|| Mutex::new(None))
-}
-
-fn vector_batch_controller_slot(
-    lane_config: &EmbeddingLaneConfig,
-) -> &'static Mutex<VectorBatchController> {
-    VECTOR_BATCH_CONTROLLER.get_or_init(|| Mutex::new(VectorBatchController::new(lane_config)))
-}
-
-pub fn current_vector_batch_controller_diagnostics(
-    lane_config: &EmbeddingLaneConfig,
-) -> VectorBatchControllerDiagnostics {
-    vector_batch_controller_slot(lane_config)
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .diagnostics()
-}
-
-pub fn observe_vector_batch_controller(
-    lane_config: &EmbeddingLaneConfig,
-    observation: VectorBatchControllerObservation,
-) -> VectorBatchControllerDiagnostics {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    vector_batch_controller_slot(lane_config)
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .observe(now_ms, observation)
-}
-
-#[cfg(test)]
-pub fn reset_vector_batch_controller_for_tests(lane_config: &EmbeddingLaneConfig) {
-    let slot = vector_batch_controller_slot(lane_config);
-    *slot.lock().unwrap_or_else(|poison| poison.into_inner()) =
-        VectorBatchController::new(lane_config);
 }
 
 fn embedding_provider_slot() -> &'static Mutex<EmbeddingProviderDiagnostics> {
@@ -3383,15 +3063,26 @@ fn env_usize_nonnegative(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn recommended_ort_auto_threads() -> usize {
+    std::env::var("AXON_ORT_AUTO_THREADS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            thread::available_parallelism()
+                .ok()
+                .map(|parallelism| parallelism.get())
+        })
+        .unwrap_or(1)
+}
+
 fn apply_cpu_fallback_ort_runtime_env() {
     let auto_configured = std::env::var("AXON_ORT_OMP_AUTOCONFIGURED")
         .ok()
         .map(|value| value.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if auto_configured {
-        let cpu_threads = thread::available_parallelism()
-            .map(|parallelism| parallelism.get().min(8).max(2))
-            .unwrap_or(4);
+        let cpu_threads = recommended_ort_auto_threads();
         unsafe {
             std::env::set_var("OMP_NUM_THREADS", cpu_threads.to_string());
             std::env::set_var("OMP_WAIT_POLICY", "PASSIVE");
@@ -3403,9 +3094,7 @@ fn apply_cpu_fallback_ort_runtime_env() {
         .map(|value| value.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if ort_threads_autoconfigured {
-        let cpu_threads = thread::available_parallelism()
-            .map(|parallelism| parallelism.get().min(8).max(2))
-            .unwrap_or(4);
+        let cpu_threads = recommended_ort_auto_threads();
         unsafe {
             std::env::set_var("AXON_ORT_INTRA_THREADS", cpu_threads.to_string());
         }
@@ -3683,16 +3372,26 @@ fn current_gpu_utilization_snapshot_via_nvml() -> Option<GpuUtilizationSnapshot>
 }
 
 pub fn gpu_memory_soft_limit_mb() -> u64 {
-    std::env::var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB")
+    if let Some(configured) = std::env::var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .or_else(|| {
-            std::env::var("AXON_OPT_MAX_VRAM_USED_MB")
-                .ok()
-                .and_then(|value| value.trim().parse::<u64>().ok())
-        })
         .filter(|value| *value >= 512)
-        .unwrap_or(3_072)
+    {
+        return configured;
+    }
+    if let Some(operator_budget) = std::env::var("AXON_OPT_MAX_VRAM_USED_MB")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 512)
+    {
+        return operator_budget;
+    }
+    current_gpu_memory_snapshot()
+        .map(|snapshot| {
+            let derived = ((snapshot.total_mb as f64) * 0.80).round() as u64;
+            derived.clamp(4_096, snapshot.total_mb.saturating_sub(256).max(4_096))
+        })
+        .unwrap_or(6_144)
 }
 
 pub fn vector_stale_inflight_claim_age_ms() -> u64 {
@@ -3711,24 +3410,6 @@ pub fn vector_stale_inflight_recovery_interval_ms() -> u64 {
         .unwrap_or(DEFAULT_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS)
 }
 
-fn gpu_warmup_embed_batch_chunks(default_embed_batch_chunks: usize) -> usize {
-    std::env::var("AXON_GPU_WARMUP_EMBED_BATCH_CHUNKS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value >= 1)
-        .unwrap_or(DEFAULT_GPU_WARMUP_EMBED_BATCH_CHUNKS)
-        .clamp(1, default_embed_batch_chunks.max(1))
-}
-
-fn gpu_warmup_files_per_cycle(default_files_per_cycle: usize) -> usize {
-    std::env::var("AXON_GPU_WARMUP_FILES_PER_CYCLE")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value >= 1)
-        .unwrap_or(DEFAULT_GPU_WARMUP_FILES_PER_CYCLE)
-        .clamp(1, default_files_per_cycle.max(1))
-}
-
 fn recover_stale_vector_inflight_now(
     graph_store: &GraphStore,
     now_ms: i64,
@@ -3741,27 +3422,6 @@ fn recover_stale_vector_inflight_now(
 
 fn gpu_memory_pressure_active(snapshot: GpuMemorySnapshot) -> bool {
     snapshot.used_mb >= gpu_memory_soft_limit_mb()
-}
-
-pub fn gpu_pressure_embed_batch_chunks(
-    default_embed_batch_chunks: usize,
-    min_embed_batch_chunks: usize,
-) -> usize {
-    std::env::var("AXON_GPU_PRESSURE_EMBED_BATCH_CHUNKS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value >= 1)
-        .unwrap_or_else(|| (default_embed_batch_chunks / 4).max(8))
-        .clamp(1, min_embed_batch_chunks)
-}
-
-pub fn gpu_pressure_files_per_cycle(default_files_per_cycle: usize) -> usize {
-    std::env::var("AXON_GPU_PRESSURE_FILES_PER_CYCLE")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value >= 1)
-        .unwrap_or(1)
-        .clamp(1, default_files_per_cycle.max(1))
 }
 
 pub fn current_gpu_memory_snapshot() -> Option<GpuMemorySnapshot> {
@@ -3843,33 +3503,17 @@ fn embedding_provider_requested_is_gpu() -> bool {
 }
 
 pub fn embedding_lane_config_from_env() -> EmbeddingLaneConfig {
-    let query_workers = env_usize("AXON_QUERY_EMBED_WORKERS", 1);
-    let requested_vector_workers = env_usize("AXON_VECTOR_WORKERS", 1);
-    let oversubscription_allowed = std::env::var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION")
-        .ok()
-        .map(|value| value.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let vector_workers = if embedding_provider_requested_is_gpu()
-        && requested_vector_workers > 1
-        && !oversubscription_allowed
-    {
-        1
-    } else {
-        requested_vector_workers
-    };
-
+    let bootstrap = bootstrap_embedding_lane_config_from_env();
+    let tuning = current_runtime_tuning_snapshot().state;
     EmbeddingLaneConfig {
-        query_workers,
-        vector_workers,
-        graph_workers: env_usize_nonnegative("AXON_GRAPH_WORKERS", 1),
-        chunk_batch_size: env_usize("AXON_CHUNK_BATCH_SIZE", CHUNK_BATCH_SIZE),
-        file_vectorization_batch_size: env_usize(
-            "AXON_FILE_VECTORIZATION_BATCH_SIZE",
-            FILE_VECTORIZATION_BATCH_SIZE,
-        ),
-        graph_batch_size: env_usize("AXON_GRAPH_BATCH_SIZE", GRAPH_BATCH_SIZE),
-        max_chunks_per_file: env_usize("AXON_MAX_CHUNKS_PER_FILE", MAX_CHUNKS_PER_FILE),
-        max_embed_batch_bytes: env_usize("AXON_MAX_EMBED_BATCH_BYTES", MAX_EMBED_BATCH_BYTES),
+        query_workers: bootstrap.query_workers,
+        vector_workers: tuning.vector_workers.max(1),
+        graph_workers: bootstrap.graph_workers,
+        chunk_batch_size: tuning.chunk_batch_size.max(1),
+        file_vectorization_batch_size: tuning.file_vectorization_batch_size.max(1),
+        graph_batch_size: bootstrap.graph_batch_size,
+        max_chunks_per_file: bootstrap.max_chunks_per_file,
+        max_embed_batch_bytes: bootstrap.max_embed_batch_bytes,
     }
 }
 
@@ -3877,7 +3521,23 @@ pub fn apply_runtime_embedding_lane_adjustment(
     vector_workers: Option<usize>,
     chunk_batch_size: Option<usize>,
     file_vectorization_batch_size: Option<usize>,
+    vector_ready_queue_depth: Option<usize>,
+    vector_persist_queue_bound: Option<usize>,
+    vector_max_inflight_persists: Option<usize>,
+    embed_micro_batch_max_items: Option<usize>,
+    embed_micro_batch_max_total_tokens: Option<usize>,
 ) {
+    let _snapshot = update_shared_runtime_tuning_state(
+        bootstrap_runtime_tuning_state_from_env(),
+        vector_workers,
+        chunk_batch_size,
+        file_vectorization_batch_size,
+        vector_ready_queue_depth,
+        vector_persist_queue_bound,
+        vector_max_inflight_persists,
+        embed_micro_batch_max_items,
+        embed_micro_batch_max_total_tokens,
+    );
     if let Some(vector_workers) = vector_workers {
         std::env::set_var("AXON_VECTOR_WORKERS", vector_workers.max(1).to_string());
         std::env::set_var("AXON_VECTOR_WORKERS_AUTOCONFIGURED", "false");
@@ -3893,14 +3553,54 @@ pub fn apply_runtime_embedding_lane_adjustment(
         );
         std::env::set_var("AXON_FILE_VECTORIZATION_BATCH_SIZE_AUTOCONFIGURED", "false");
     }
+    if let Some(vector_ready_queue_depth) = vector_ready_queue_depth {
+        std::env::set_var(
+            "AXON_VECTOR_READY_QUEUE_DEPTH",
+            vector_ready_queue_depth.max(1).to_string(),
+        );
+        std::env::set_var("AXON_VECTOR_READY_QUEUE_DEPTH_AUTOCONFIGURED", "false");
+    }
+    if let Some(vector_persist_queue_bound) = vector_persist_queue_bound {
+        std::env::set_var(
+            "AXON_VECTOR_PERSIST_QUEUE_BOUND",
+            vector_persist_queue_bound.max(1).to_string(),
+        );
+        std::env::set_var("AXON_VECTOR_PERSIST_QUEUE_BOUND_AUTOCONFIGURED", "false");
+    }
+    if let Some(vector_max_inflight_persists) = vector_max_inflight_persists {
+        std::env::set_var(
+            "AXON_VECTOR_MAX_INFLIGHT_PERSISTS",
+            vector_max_inflight_persists.max(1).to_string(),
+        );
+        std::env::set_var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS_AUTOCONFIGURED", "false");
+    }
+    if let Some(embed_micro_batch_max_items) = embed_micro_batch_max_items {
+        std::env::set_var(
+            "AXON_EMBED_MICRO_BATCH_MAX_ITEMS",
+            embed_micro_batch_max_items.max(1).to_string(),
+        );
+        std::env::set_var("AXON_EMBED_MICRO_BATCH_MAX_ITEMS_AUTOCONFIGURED", "false");
+    }
+    if let Some(embed_micro_batch_max_total_tokens) = embed_micro_batch_max_total_tokens {
+        std::env::set_var(
+            "AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS",
+            embed_micro_batch_max_total_tokens.max(1).to_string(),
+        );
+        std::env::set_var(
+            "AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS_AUTOCONFIGURED",
+            "false",
+        );
+    }
     refresh_vector_batch_controller_from_env();
+}
+
+pub fn current_runtime_tuning_state() -> RuntimeTuningState {
+    runtime_tuning_state(bootstrap_runtime_tuning_state_from_env())
 }
 
 pub fn refresh_vector_batch_controller_from_env() {
     let lane_config = embedding_lane_config_from_env();
-    let slot = vector_batch_controller_slot(&lane_config);
-    *slot.lock().unwrap_or_else(|poison| poison.into_inner()) =
-        VectorBatchController::new(&lane_config);
+    reset_vector_batch_controller_for_tests(&lane_config);
 }
 
 fn current_query_embedding_sender() -> Option<Sender<QueryEmbeddingRequest>> {
@@ -4039,13 +3739,6 @@ impl GraphStore {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SemanticPolicy {
-    pause: bool,
-    sleep: Duration,
-    idle_sleep: Duration,
-}
-
 fn query_embedding_allowed(service_pressure: ServicePressure) -> bool {
     matches!(
         service_pressure,
@@ -4058,191 +3751,6 @@ fn effective_embedding_provider_is_gpu() -> bool {
         .ok()
         .map(|value| value.trim().eq_ignore_ascii_case("cuda"))
         .unwrap_or(false)
-}
-
-pub fn current_vector_drain_state(
-    file_backlog_depth: usize,
-    service_pressure: ServicePressure,
-    interactive_active: bool,
-    provider_requested: &str,
-    provider_effective: &str,
-) -> VectorDrainState {
-    if interactive_active {
-        return VectorDrainState::InteractiveGuarded;
-    }
-    if matches!(
-        service_pressure,
-        ServicePressure::Degraded | ServicePressure::Critical
-    ) {
-        return VectorDrainState::Recovery;
-    }
-    if file_backlog_depth >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
-        if provider_requested.eq_ignore_ascii_case("cuda")
-            && !provider_effective.eq_ignore_ascii_case("cuda")
-        {
-            return VectorDrainState::GpuScalingBlocked;
-        }
-        return VectorDrainState::AggressiveDrain;
-    }
-
-    VectorDrainState::QuietCruise
-}
-
-fn symbol_embedding_allowed(file_backlog_depth: usize, service_pressure: ServicePressure) -> bool {
-    if service_guard::interactive_priority_active() {
-        return false;
-    }
-    if service_guard::interactive_requests_in_flight() > 0 {
-        return false;
-    }
-    if file_backlog_depth >= SYMBOL_BACKLOG_RESIDUAL_THRESHOLD {
-        return false;
-    }
-
-    matches!(
-        service_pressure,
-        ServicePressure::Healthy | ServicePressure::Recovering
-    )
-}
-
-fn graph_projection_allowed(
-    _queue_len: usize,
-    service_pressure: ServicePressure,
-    vector_backlog_depth: usize,
-    gpu_available: bool,
-) -> bool {
-    if service_guard::interactive_priority_active() {
-        service_guard::record_projection_suppressed();
-        return false;
-    }
-    if service_guard::interactive_requests_in_flight() > 0 {
-        service_guard::record_projection_suppressed();
-        return false;
-    }
-    if service_pressure != ServicePressure::Healthy {
-        service_guard::record_projection_suppressed();
-        return false;
-    }
-    if !gpu_available && vector_backlog_depth >= CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD {
-        service_guard::record_projection_suppressed();
-        return false;
-    }
-    if gpu_available && vector_backlog_depth >= GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD {
-        service_guard::record_projection_suppressed();
-        return false;
-    }
-
-    true
-}
-
-pub fn allowed_gpu_vector_workers(
-    file_backlog_depth: usize,
-    service_pressure: ServicePressure,
-) -> usize {
-    match service_pressure {
-        ServicePressure::Critical | ServicePressure::Degraded => 1,
-        ServicePressure::Recovering | ServicePressure::Healthy => {
-            if file_backlog_depth >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
-                2
-            } else {
-                1
-            }
-        }
-    }
-}
-
-fn vector_worker_admitted(
-    worker_idx: usize,
-    service_pressure: ServicePressure,
-    gpu_available: bool,
-    file_backlog_depth: usize,
-) -> bool {
-    if service_guard::interactive_priority_active() {
-        service_guard::record_vectorization_suppressed();
-        return false;
-    }
-
-    let interactive_in_flight = service_guard::interactive_requests_in_flight();
-    if interactive_in_flight > 0 {
-        let allowed_interactive_workers = if gpu_available { 1 } else { 0 };
-        if worker_idx >= allowed_interactive_workers {
-            service_guard::record_vectorization_suppressed();
-            return false;
-        }
-    }
-
-    if !gpu_available {
-        return true;
-    }
-
-    let allowed_gpu_workers = allowed_gpu_vector_workers(file_backlog_depth, service_pressure);
-
-    if worker_idx >= allowed_gpu_workers {
-        service_guard::record_vectorization_suppressed();
-        return false;
-    }
-
-    true
-}
-
-fn semantic_policy(queue_len: usize, service_pressure: ServicePressure) -> SemanticPolicy {
-    if service_guard::interactive_priority_active() {
-        service_guard::record_vectorization_suppressed();
-        return SemanticPolicy {
-            pause: true,
-            sleep: Duration::from_secs(2),
-            idle_sleep: Duration::from_secs(2),
-        };
-    }
-    if service_guard::interactive_requests_in_flight() == 0
-        && !service_guard::interactive_priority_active()
-        && queue_len >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD
-    {
-        return SemanticPolicy {
-            pause: false,
-            sleep: Duration::from_millis(250),
-            idle_sleep: Duration::from_millis(250),
-        };
-    }
-    if service_guard::interactive_requests_in_flight() == 0
-        && !service_guard::interactive_priority_active()
-        && queue_len <= QUIET_CRUISE_FILE_BACKLOG_THRESHOLD
-    {
-        return SemanticPolicy {
-            pause: false,
-            sleep: Duration::from_secs(1),
-            idle_sleep: Duration::from_secs(3),
-        };
-    }
-    if service_pressure == ServicePressure::Critical || queue_len >= 3_000 {
-        return SemanticPolicy {
-            pause: true,
-            sleep: Duration::from_secs(10),
-            idle_sleep: Duration::from_secs(10),
-        };
-    }
-
-    if service_pressure == ServicePressure::Degraded || queue_len >= 1_500 {
-        return SemanticPolicy {
-            pause: true,
-            sleep: Duration::from_secs(3),
-            idle_sleep: Duration::from_secs(5),
-        };
-    }
-
-    if service_pressure == ServicePressure::Recovering {
-        return SemanticPolicy {
-            pause: true,
-            sleep: Duration::from_secs(2),
-            idle_sleep: Duration::from_secs(3),
-        };
-    }
-
-    SemanticPolicy {
-        pause: false,
-        sleep: Duration::from_secs(1),
-        idle_sleep: Duration::from_secs(5),
-    }
 }
 
 fn pause_vectorization_work_if_interactive(
@@ -4305,28 +3813,34 @@ pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{
-        allowed_gpu_vector_workers, build_prepared_vector_embed_sequence,
-        build_token_aware_micro_batches, build_vector_batch_plan, configured_embedding_max_length,
-        cuda_execution_provider_dispatch, current_vector_batch_controller_diagnostics,
-        current_vector_drain_state, dispatch_prepared_vector_embed_sequence,
-        effective_embedding_provider_is_gpu, embedding_download_progress_enabled,
-        embedding_lane_config_from_env, embedding_model_cache_dir, embedding_provider_diagnostics,
+        build_prepared_vector_embed_sequence, build_token_aware_micro_batches,
+        build_vector_batch_plan, configured_embedding_max_length, cuda_execution_provider_dispatch,
+        current_runtime_tuning_snapshot, current_runtime_tuning_state,
+        dispatch_prepared_vector_embed_sequence, effective_embedding_provider_is_gpu,
+        embedding_download_progress_enabled, embedding_lane_config_from_env,
+        embedding_model_cache_dir, embedding_provider_diagnostics,
         finalize_completed_vectorization_works, flush_completed_vectorization_works,
-        gpu_memory_soft_limit_mb, graph_projection_allowed, is_fatal_embedding_error,
-        merge_vectorization_work, query_embedding_allowed, request_prepared_vector_embed_sequence,
-        request_query_embedding, semantic_policy, symbol_embedding_allowed, vector_claim_target,
-        vector_embed_target_chunks, vector_worker_admitted, EmbeddingLaneConfig,
-        PreparedVectorEmbedBatch, PreparedVectorEmbedSequence, QueryEmbeddingRequest,
-        VectorBatchController, VectorBatchControllerObservation, VectorBatchControllerState,
-        VectorBatchPlan, VectorChunkWorkItem, VectorDrainState, VectorFinalizeRequest,
-        VectorPrepareRequest, AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
-        CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD, GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD,
-        QUIET_CRUISE_FILE_BACKLOG_THRESHOLD, SYMBOL_BACKLOG_RESIDUAL_THRESHOLD,
+        gpu_memory_soft_limit_mb, is_fatal_embedding_error, merge_vectorization_work,
+        query_embedding_allowed, request_prepared_vector_embed_sequence, request_query_embedding,
+        ClaimedLeaseSet, EmbeddingLaneConfig, PreparedBatchEnvelope, PreparedVectorEmbedBatch,
+        PreparedVectorEmbedSequence, QueryEmbeddingRequest, VectorBatchPlan, VectorChunkWorkItem,
+        VectorFinalizeRequest, VectorPrepareRequest,
     };
     use crate::embedding_contract::{fastembed_model, CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH};
     use crate::graph_ingestion::{FileVectorizationLeaseSnapshot, FileVectorizationWork};
     use crate::service_guard::{ServicePressure, VectorRuntimeMetrics};
+    use crate::vector_control::{
+        allowed_gpu_vector_workers, current_vector_batch_controller_diagnostics,
+        current_vector_drain_state, graph_projection_allowed, semantic_policy,
+        symbol_embedding_allowed, vector_claim_target, vector_embed_target_chunks,
+        vector_worker_admitted, VectorBatchController, VectorBatchControllerObservation,
+        VectorBatchControllerState, VectorDrainState, AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
+        CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD, GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD,
+        QUIET_CRUISE_FILE_BACKLOG_THRESHOLD, SYMBOL_BACKLOG_RESIDUAL_THRESHOLD,
+    };
     use crossbeam_channel::{bounded, unbounded};
     use fastembed::{InitOptions, TextEmbedding};
     use std::collections::{HashMap, HashSet};
@@ -4501,8 +4015,7 @@ mod tests {
             .unwrap()
             .parse::<usize>()
             .unwrap();
-        assert!(cpu_threads >= 2);
-        assert!(cpu_threads <= 8);
+        assert!(cpu_threads >= 1);
         assert_eq!(std::env::var("OMP_WAIT_POLICY").unwrap(), "PASSIVE");
         assert_eq!(
             std::env::var("AXON_ORT_INTRA_THREADS").unwrap(),
@@ -4678,7 +4191,7 @@ mod tests {
                 AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
                 ServicePressure::Healthy
             ),
-            2
+            4
         );
         assert_eq!(
             allowed_gpu_vector_workers(4_096, ServicePressure::Degraded),
@@ -4691,7 +4204,7 @@ mod tests {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         crate::service_guard::reset_for_tests();
         crate::service_guard::mcp_request_started();
-        assert!(!vector_worker_admitted(
+        assert!(vector_worker_admitted(
             0,
             ServicePressure::Healthy,
             true,
@@ -4708,6 +4221,7 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_config_from_env_supports_split_worker_counts() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
         unsafe {
             std::env::set_var("AXON_QUERY_EMBED_WORKERS", "2");
             std::env::set_var("AXON_VECTOR_WORKERS", "5");
@@ -4719,6 +4233,7 @@ mod tests {
             std::env::set_var("AXON_MAX_CHUNKS_PER_FILE", "12");
             std::env::set_var("AXON_MAX_EMBED_BATCH_BYTES", "65536");
         }
+        super::refresh_runtime_tuning_snapshot_from_env();
         let config = embedding_lane_config_from_env();
         unsafe {
             std::env::remove_var("AXON_QUERY_EMBED_WORKERS");
@@ -4744,11 +4259,13 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_config_caps_gpu_vector_workers_without_unsafe_opt_in() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::set_var("AXON_VECTOR_WORKERS", "5");
             std::env::remove_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
         }
+        super::refresh_runtime_tuning_snapshot_from_env();
         let config = embedding_lane_config_from_env();
         unsafe {
             std::env::remove_var("AXON_EMBEDDING_PROVIDER");
@@ -4769,12 +4286,29 @@ mod tests {
         }
         super::refresh_vector_batch_controller_from_env();
 
-        super::apply_runtime_embedding_lane_adjustment(None, Some(64), Some(16));
+        super::apply_runtime_embedding_lane_adjustment(
+            None,
+            Some(64),
+            Some(16),
+            Some(7),
+            Some(3),
+            Some(2),
+            Some(72),
+            Some(8_192),
+        );
 
         let config = embedding_lane_config_from_env();
         let diagnostics = current_vector_batch_controller_diagnostics(&config);
         assert_eq!(config.chunk_batch_size, 64);
         assert_eq!(config.file_vectorization_batch_size, 16);
+        let runtime_tuning = current_runtime_tuning_state();
+        let runtime_snapshot = current_runtime_tuning_snapshot();
+        assert_eq!(runtime_tuning.vector_ready_queue_depth, 7);
+        assert_eq!(runtime_tuning.vector_persist_queue_bound, 3);
+        assert_eq!(runtime_tuning.vector_max_inflight_persists, 2);
+        assert_eq!(runtime_tuning.embed_micro_batch_max_items, 72);
+        assert_eq!(runtime_tuning.embed_micro_batch_max_total_tokens, 8_192);
+        assert!(runtime_snapshot.version >= 2);
         assert_eq!(diagnostics.target_embed_batch_chunks, 64);
         assert_eq!(diagnostics.target_files_per_cycle, 16);
         assert_eq!(
@@ -4785,22 +4319,54 @@ mod tests {
             std::env::var("AXON_FILE_VECTORIZATION_BATCH_SIZE_AUTOCONFIGURED").unwrap(),
             "false"
         );
+        assert_eq!(
+            std::env::var("AXON_VECTOR_READY_QUEUE_DEPTH_AUTOCONFIGURED").unwrap(),
+            "false"
+        );
+        assert_eq!(
+            std::env::var("AXON_VECTOR_PERSIST_QUEUE_BOUND_AUTOCONFIGURED").unwrap(),
+            "false"
+        );
+        assert_eq!(
+            std::env::var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS_AUTOCONFIGURED").unwrap(),
+            "false"
+        );
+
+        unsafe {
+            std::env::set_var("AXON_CHUNK_BATCH_SIZE", "96");
+        }
+        let config_after_env_override = embedding_lane_config_from_env();
+        let runtime_tuning_after_env_override = current_runtime_tuning_state();
+        assert_eq!(config_after_env_override.chunk_batch_size, 64);
+        assert_eq!(runtime_tuning_after_env_override.chunk_batch_size, 64);
 
         unsafe {
             std::env::remove_var("AXON_CHUNK_BATCH_SIZE");
             std::env::remove_var("AXON_FILE_VECTORIZATION_BATCH_SIZE");
+            std::env::remove_var("AXON_VECTOR_READY_QUEUE_DEPTH");
+            std::env::remove_var("AXON_VECTOR_PERSIST_QUEUE_BOUND");
+            std::env::remove_var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS");
+            std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_ITEMS");
+            std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS");
             std::env::remove_var("AXON_CHUNK_BATCH_SIZE_AUTOCONFIGURED");
             std::env::remove_var("AXON_FILE_VECTORIZATION_BATCH_SIZE_AUTOCONFIGURED");
+            std::env::remove_var("AXON_VECTOR_READY_QUEUE_DEPTH_AUTOCONFIGURED");
+            std::env::remove_var("AXON_VECTOR_PERSIST_QUEUE_BOUND_AUTOCONFIGURED");
+            std::env::remove_var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS_AUTOCONFIGURED");
+            std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_ITEMS_AUTOCONFIGURED");
+            std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS_AUTOCONFIGURED");
         }
     }
 
     #[test]
     fn test_embedding_lane_config_allows_gpu_vector_worker_oversubscription_with_opt_in() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::set_var("AXON_VECTOR_WORKERS", "5");
             std::env::set_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION", "true");
         }
+        super::refresh_runtime_tuning_snapshot_from_env();
         let config = embedding_lane_config_from_env();
         unsafe {
             std::env::remove_var("AXON_EMBEDDING_PROVIDER");
@@ -4906,12 +4472,17 @@ mod tests {
     }
 
     #[test]
-    fn test_cuda_memory_limit_bytes_defaults_to_3072_mb() {
+    fn test_cuda_memory_limit_bytes_defaults_to_soft_limit_policy() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         unsafe {
             std::env::remove_var("AXON_CUDA_MEMORY_LIMIT_MB");
+            std::env::remove_var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB");
+            std::env::set_var("AXON_OPT_MAX_VRAM_USED_MB", "6144");
         }
-        assert_eq!(super::cuda_memory_limit_bytes(), 3_072 * 1024 * 1024);
+        assert_eq!(super::cuda_memory_limit_bytes(), 6_144 * 1024 * 1024);
+        unsafe {
+            std::env::remove_var("AXON_OPT_MAX_VRAM_USED_MB");
+        }
     }
 
     #[test]
@@ -4931,10 +4502,13 @@ mod tests {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         unsafe {
             std::env::set_var("AXON_CUDA_MEMORY_LIMIT_MB", "128");
+            std::env::remove_var("AXON_CUDA_MEMORY_SOFT_LIMIT_MB");
+            std::env::set_var("AXON_OPT_MAX_VRAM_USED_MB", "6144");
         }
-        assert_eq!(super::cuda_memory_limit_bytes(), 3_072 * 1024 * 1024);
+        assert_eq!(super::cuda_memory_limit_bytes(), 6_144 * 1024 * 1024);
         unsafe {
             std::env::remove_var("AXON_CUDA_MEMORY_LIMIT_MB");
+            std::env::remove_var("AXON_OPT_MAX_VRAM_USED_MB");
         }
     }
 
@@ -5393,7 +4967,7 @@ mod tests {
         };
 
         assert_eq!(vector_embed_target_chunks(&lane_config, true), 64);
-        assert_eq!(vector_embed_target_chunks(&lane_config, false), 128);
+        assert_eq!(vector_embed_target_chunks(&lane_config, false), 64);
     }
 
     #[test]
@@ -5401,10 +4975,14 @@ mod tests {
         let work_a = FileVectorizationWork {
             file_path: "src/a.rs".to_string(),
             resumed_after_interactive_pause: false,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         };
         let work_b = FileVectorizationWork {
             file_path: "src/b.rs".to_string(),
             resumed_after_interactive_pause: false,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         };
 
         let mut plan = VectorBatchPlan::default();
@@ -5473,10 +5051,14 @@ mod tests {
             FileVectorizationWork {
                 file_path: "/tmp/a.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/b.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
         ];
 
@@ -5515,14 +5097,20 @@ mod tests {
             FileVectorizationWork {
                 file_path: "/tmp/a.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/b.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/c.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
         ];
 
@@ -5555,6 +5143,8 @@ mod tests {
         let active_works = vec![FileVectorizationWork {
             file_path: "/tmp/limited.rs".to_string(),
             resumed_after_interactive_pause: false,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         }];
 
         let plan =
@@ -5578,6 +5168,8 @@ mod tests {
         let active_works = vec![FileVectorizationWork {
             file_path: "/tmp/complete.rs".to_string(),
             resumed_after_interactive_pause: false,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         }];
 
         let plan =
@@ -5602,10 +5194,14 @@ mod tests {
             FileVectorizationWork {
                 file_path: "/tmp/bytes-a.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/bytes-b.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
         ];
 
@@ -5640,6 +5236,8 @@ mod tests {
         let active_works = vec![FileVectorizationWork {
             file_path: "/tmp/vectorized.rs".to_string(),
             resumed_after_interactive_pause: false,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         }];
 
         let plan =
@@ -5654,19 +5252,27 @@ mod tests {
         let existing = vec![FileVectorizationWork {
             file_path: "src/a.rs".to_string(),
             resumed_after_interactive_pause: false,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         }];
         let additional = vec![
             FileVectorizationWork {
                 file_path: "src/a.rs".to_string(),
                 resumed_after_interactive_pause: true,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "src/b.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "src/c.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
         ];
 
@@ -5681,10 +5287,14 @@ mod tests {
         let work_a = FileVectorizationWork {
             file_path: "src/a.rs".to_string(),
             resumed_after_interactive_pause: false,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         };
         let work_b = FileVectorizationWork {
             file_path: "src/b.rs".to_string(),
             resumed_after_interactive_pause: true,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         };
         let mut plan = VectorBatchPlan::default();
         plan.work_items = vec![
@@ -5722,10 +5332,14 @@ mod tests {
         let work_a = FileVectorizationWork {
             file_path: "src/a.rs".to_string(),
             resumed_after_interactive_pause: false,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         };
         let work_b = FileVectorizationWork {
             file_path: "src/b.rs".to_string(),
             resumed_after_interactive_pause: false,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         };
         let mut plan = VectorBatchPlan::default();
         plan.work_items = vec![
@@ -5795,6 +5409,8 @@ mod tests {
             vec![FileVectorizationWork {
                 file_path: "/tmp/finalize_vector.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             }],
             vec![FileVectorizationLeaseSnapshot {
                 file_path: "/tmp/finalize_vector.rs".to_string(),
@@ -5849,6 +5465,8 @@ mod tests {
             vec![FileVectorizationWork {
                 file_path: "/tmp/file_level_ready.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             }],
             vec![FileVectorizationLeaseSnapshot {
                 file_path: "/tmp/file_level_ready.rs".to_string(),
@@ -5893,10 +5511,14 @@ mod tests {
                 FileVectorizationWork {
                     file_path: "/tmp/finalize_a.rs".to_string(),
                     resumed_after_interactive_pause: false,
+                    claim_token: "test-claim".to_string(),
+                    lease_epoch: 0,
                 },
                 FileVectorizationWork {
                     file_path: "/tmp/finalize_b.rs".to_string(),
                     resumed_after_interactive_pause: false,
+                    claim_token: "test-claim".to_string(),
+                    lease_epoch: 0,
                 },
             ],
             vec![
@@ -5936,18 +5558,19 @@ mod tests {
 
     #[test]
     fn test_request_prepared_vector_embed_sequence_round_trips_over_prepare_channel() {
+        let store = std::sync::Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let (prepare_tx, prepare_rx) = bounded::<VectorPrepareRequest>(1);
         std::thread::spawn(move || {
             let request = prepare_rx.recv().unwrap();
             request
                 .reply
                 .send(PreparedVectorEmbedSequence {
-                    batches: vec![PreparedVectorEmbedBatch {
+                    batches: vec![PreparedBatchEnvelope::new(PreparedVectorEmbedBatch {
                         work_items: vec![],
                         texts: vec!["prepared".to_string()],
                         token_counts: vec![],
                         encoded_micro_batches: vec![],
-                        touched_works: request.active_works,
+                        touched_works: request.claimed.into_inner(),
                         finalize_after_success: vec![],
                         immediate_completed: vec![],
                         oversized_works: vec![],
@@ -5957,17 +5580,21 @@ mod tests {
                         partial_file_cycles: 0,
                         fetch_ms_total: 0,
                         failed_fetches: vec![],
-                    }],
-                    remaining_active_after_success: vec![],
+                    })],
+                    remaining_claimed_after_success: ClaimedLeaseSet::new(vec![]),
                 })
                 .unwrap();
         });
 
         let prepared = request_prepared_vector_embed_sequence(
+            &store,
+            0,
             &prepare_tx,
             vec![FileVectorizationWork {
                 file_path: "/tmp/prepared.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             }],
             64,
             64,
@@ -5984,11 +5611,25 @@ mod tests {
 
     #[test]
     fn test_flush_completed_vectorization_works_enqueues_finalize_request() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES \
+                 ('/tmp/flush_finalize.rs', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) VALUES \
+                 ('/tmp/flush_finalize.rs', 'inflight', 1, 'test-claim', 1, 1, 'vector', 0)",
+            )
+            .unwrap();
         let (finalize_tx, finalize_rx) = bounded::<VectorFinalizeRequest>(1);
         let mut completed_works = vec![FileVectorizationWork {
             file_path: "/tmp/flush_finalize.rs".to_string(),
             resumed_after_interactive_pause: false,
+            claim_token: "test-claim".to_string(),
+            lease_epoch: 0,
         }];
         let mut completed_batch_runs = vec![];
         let mut failed = HashMap::new();
@@ -6005,20 +5646,20 @@ mod tests {
         assert!(completed_works.is_empty());
         assert!(failed.is_empty());
         let request = finalize_rx.try_recv().expect("finalize request");
-        assert_eq!(request.completed_works.len(), 1);
-        assert!(request.batch_runs.is_empty());
+        assert_eq!(request.envelope.completed_works.len(), 1);
+        assert!(request.envelope.batch_runs.is_empty());
         assert_eq!(
-            request.completed_works[0].file_path,
+            request.envelope.completed_works[0].file_path,
             "/tmp/flush_finalize.rs"
         );
     }
 
     #[test]
-    fn test_vector_claim_target_prefers_small_inflight_window_when_batches_are_file_sparse() {
-        assert_eq!(vector_claim_target(24, 0.0), 8);
-        assert_eq!(vector_claim_target(24, 1.0), 8);
-        assert_eq!(vector_claim_target(24, 2.2), 8);
-        assert_eq!(vector_claim_target(3, 10.0), 3);
+    fn test_vector_claim_target_expands_when_ready_reserve_is_missing() {
+        assert_eq!(vector_claim_target(24, 0.0, 24, 0.0, 10, 0, 4_096), 146);
+        assert_eq!(vector_claim_target(24, 1.0, 24, 3.0, 10, 0, 4_096), 146);
+        assert_eq!(vector_claim_target(24, 2.2, 24, 6.6, 10, 0, 4_096), 146);
+        assert_eq!(vector_claim_target(3, 10.0, 12, 30.0, 8, 6, 128), 10);
     }
 
     #[test]
@@ -6029,12 +5670,12 @@ mod tests {
             request
                 .reply
                 .send(PreparedVectorEmbedSequence {
-                    batches: vec![PreparedVectorEmbedBatch {
+                    batches: vec![PreparedBatchEnvelope::new(PreparedVectorEmbedBatch {
                         work_items: vec![],
                         texts: vec!["prefetched".to_string()],
                         token_counts: vec![],
                         encoded_micro_batches: vec![],
-                        touched_works: request.active_works,
+                        touched_works: request.claimed.into_inner(),
                         finalize_after_success: vec![],
                         immediate_completed: vec![],
                         oversized_works: vec![],
@@ -6044,18 +5685,20 @@ mod tests {
                         partial_file_cycles: 0,
                         fetch_ms_total: 0,
                         failed_fetches: vec![],
-                    }],
-                    remaining_active_after_success: vec![],
+                    })],
+                    remaining_claimed_after_success: ClaimedLeaseSet::new(vec![]),
                 })
                 .unwrap();
         });
 
         let reply_rx = dispatch_prepared_vector_embed_sequence(
             &prepare_tx,
-            vec![FileVectorizationWork {
+            ClaimedLeaseSet::new(vec![FileVectorizationWork {
                 file_path: "/tmp/prefetched.rs".to_string(),
                 resumed_after_interactive_pause: false,
-            }],
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
+            }]),
             64,
             64,
             512 * 1024,
@@ -6084,21 +5727,27 @@ mod tests {
             FileVectorizationWork {
                 file_path: "/tmp/a.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/b.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/c.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
         ];
 
         let sequence = build_prepared_vector_embed_sequence(&store, &active, 1, 1, 512 * 1024, 2);
 
         assert_eq!(sequence.batches.len(), 2);
-        assert_eq!(sequence.remaining_active_after_success.len(), 1);
+        assert_eq!(sequence.remaining_claimed_after_success.as_slice().len(), 1);
     }
 
     #[test]
@@ -6115,10 +5764,14 @@ mod tests {
             FileVectorizationWork {
                 file_path: "/tmp/a.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
             FileVectorizationWork {
                 file_path: "/tmp/b.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             },
         ];
 
@@ -6148,6 +5801,8 @@ mod tests {
             &[FileVectorizationWork {
                 file_path: "/tmp/oversized.rs".to_string(),
                 resumed_after_interactive_pause: false,
+                claim_token: "test-claim".to_string(),
+                lease_epoch: 0,
             }],
             8,
             1,
@@ -6191,6 +5846,30 @@ mod tests {
         files_touched_total: u64,
         embed_ms_total: u64,
     ) -> VectorBatchControllerObservation {
+        controller_observation_with_runtime(
+            queue_pending,
+            interactive_active,
+            gpu_memory_pressure,
+            embed_calls_total,
+            chunks_embedded_total,
+            files_touched_total,
+            embed_ms_total,
+            0,
+            0,
+        )
+    }
+
+    fn controller_observation_with_runtime(
+        queue_pending: usize,
+        interactive_active: bool,
+        gpu_memory_pressure: bool,
+        embed_calls_total: u64,
+        chunks_embedded_total: u64,
+        files_touched_total: u64,
+        embed_ms_total: u64,
+        ready_queue_depth_current: u64,
+        gpu_idle_wait_ms_total: u64,
+    ) -> VectorBatchControllerObservation {
         VectorBatchControllerObservation {
             queue_pending,
             interactive_active,
@@ -6225,7 +5904,7 @@ mod tests {
                 finalize_queue_wait_ms_total: 0,
                 prepare_queue_depth_current: 0,
                 prepare_queue_depth_max: 0,
-                ready_queue_depth_current: 0,
+                ready_queue_depth_current,
                 ready_queue_depth_max: 0,
                 finalize_queue_depth_current: 0,
                 finalize_queue_depth_max: 0,
@@ -6233,7 +5912,7 @@ mod tests {
                 persist_queue_depth_max: 0,
                 persist_send_wait_ms_total: 0,
                 persist_queue_wait_ms_total: 0,
-                gpu_idle_wait_ms_total: 0,
+                gpu_idle_wait_ms_total,
                 embed_input_texts_total: 0,
                 embed_input_text_bytes_total: 0,
                 embed_clone_ms_total: 0,
@@ -6260,8 +5939,8 @@ mod tests {
         );
 
         assert_eq!(diagnostics.state, VectorBatchControllerState::IdleDrain);
-        assert_eq!(diagnostics.target_embed_batch_chunks, 48);
-        assert_eq!(diagnostics.target_files_per_cycle, 16);
+        assert_eq!(diagnostics.target_embed_batch_chunks, 80);
+        assert_eq!(diagnostics.target_files_per_cycle, 24);
         assert_eq!(diagnostics.adjustments_total, 1);
     }
 
@@ -6307,8 +5986,8 @@ mod tests {
             );
         }
 
-        assert_eq!(diagnostics.target_embed_batch_chunks, 64);
-        assert_eq!(diagnostics.target_files_per_cycle, 16);
+        assert_eq!(diagnostics.target_embed_batch_chunks, 128);
+        assert_eq!(diagnostics.target_files_per_cycle, 32);
     }
 
     #[test]
@@ -6319,7 +5998,7 @@ mod tests {
             controller_observation(4_096, false, false, 4, 128, 4, 20_480),
         );
         let second = controller.observe(
-            12_000,
+            11_000,
             controller_observation(4_096, false, false, 8, 256, 8, 40_960),
         );
 
@@ -6340,7 +6019,7 @@ mod tests {
         );
         let warmup = controller.observe(
             12_000,
-            controller_observation(4_096, false, false, 5, 160, 5, 25_600),
+            controller_observation(4_096, false, false, 4, 128, 4, 20_480),
         );
 
         assert_eq!(matured.window_embed_calls, 4);
@@ -6355,7 +6034,7 @@ mod tests {
 
         let diagnostics = controller.observe(
             10_000,
-            controller_observation(4_096, false, false, 1, 30, 4, 20_480),
+            controller_observation(4_096, false, false, 0, 0, 0, 0),
         );
 
         assert_eq!(diagnostics.state, VectorBatchControllerState::IdleDrain);
@@ -6376,13 +6055,13 @@ mod tests {
 
         let diagnostics = controller.observe(
             10_000,
-            controller_observation(4_096, false, false, 1, 30, 4, 20_480),
+            controller_observation(4_096, false, false, 0, 0, 0, 0),
         );
 
         assert_eq!(diagnostics.state, VectorBatchControllerState::IdleDrain);
         assert_eq!(diagnostics.reason, "warming_window");
         assert_eq!(diagnostics.target_embed_batch_chunks, 16);
-        assert_eq!(diagnostics.target_files_per_cycle, 1);
+        assert_eq!(diagnostics.target_files_per_cycle, 4);
         assert_eq!(diagnostics.adjustments_total, 0);
 
         std::env::remove_var("AXON_GPU_WARMUP_EMBED_BATCH_CHUNKS");
@@ -6408,9 +6087,9 @@ mod tests {
         );
 
         assert_eq!(diagnostics.state, VectorBatchControllerState::IdleDrain);
-        assert_eq!(diagnostics.target_embed_batch_chunks, 32);
-        assert_eq!(diagnostics.target_files_per_cycle, 16);
-        assert_eq!(diagnostics.adjustments_total, 2);
+        assert_eq!(diagnostics.target_embed_batch_chunks, 104);
+        assert_eq!(diagnostics.target_files_per_cycle, 32);
+        assert_eq!(diagnostics.adjustments_total, 3);
     }
 
     #[test]
@@ -6430,7 +6109,7 @@ mod tests {
 
         let diagnostics = controller.observe(
             10_000,
-            controller_observation(4_096, false, false, 4, 116, 4, 88_000),
+            controller_observation_with_runtime(4_096, false, false, 4, 116, 4, 88_000, 12, 0),
         );
 
         assert_eq!(diagnostics.state, VectorBatchControllerState::IdleDrain);
@@ -6454,8 +6133,12 @@ mod tests {
         );
 
         assert_eq!(diagnostics.reason, "gpu_memory_pressure");
-        assert_eq!(diagnostics.target_embed_batch_chunks, 8);
-        assert_eq!(diagnostics.target_files_per_cycle, 1);
+        assert_eq!(
+            diagnostics.state,
+            VectorBatchControllerState::GpuMemoryGuarded
+        );
+        assert_eq!(diagnostics.target_embed_batch_chunks, 16);
+        assert_eq!(diagnostics.target_files_per_cycle, 4);
         assert_eq!(diagnostics.adjustments_total, 2);
     }
 
@@ -6470,11 +6153,11 @@ mod tests {
 
         assert_eq!(
             diagnostics.state,
-            VectorBatchControllerState::InteractiveGuarded
+            VectorBatchControllerState::GpuMemoryGuarded
         );
         assert_eq!(diagnostics.reason, "gpu_memory_pressure");
-        assert_eq!(diagnostics.target_embed_batch_chunks, 8);
-        assert_eq!(diagnostics.target_files_per_cycle, 1);
+        assert_eq!(diagnostics.target_embed_batch_chunks, 16);
+        assert_eq!(diagnostics.target_files_per_cycle, 4);
     }
 
     #[test]
