@@ -30,7 +30,7 @@ pub struct HostSnapshot {
     pub io_characteristics: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RuntimeSignalsWindow {
     pub window_start_ms: i64,
     pub window_end_ms: i64,
@@ -47,13 +47,23 @@ pub struct RuntimeSignalsWindow {
     pub gpu_memory_utilization_ratio: f64,
     pub file_vectorization_queue_depth: usize,
     pub graph_projection_queue_depth: usize,
+    pub canonical_vector_backlog_depth: usize,
     pub ready_queue_depth_current: u64,
     pub ready_queue_depth_max: u64,
+    pub active_claimed_current: u64,
+    pub prepare_claimed_current: u64,
+    pub ready_claimed_current: u64,
     pub persist_queue_depth_current: u64,
     pub persist_queue_depth_max: u64,
+    pub persist_claimed_current: u64,
+    pub prepare_inflight_current: u64,
+    pub prepare_inflight_max: u64,
     pub gpu_idle_wait_ms_total: u64,
     pub prepare_queue_wait_ms_total: u64,
+    pub prepare_reply_wait_ms_total: u64,
     pub persist_queue_wait_ms_total: u64,
+    pub oldest_ready_batch_age_ms_current: u64,
+    pub oldest_ready_batch_age_ms_max: u64,
     pub latency_recent_fetch_p95_ms: u64,
     pub latency_recent_embed_p95_ms: u64,
     pub latency_recent_db_write_p95_ms: u64,
@@ -708,13 +718,22 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
         });
     let vector_latency = service_guard::vector_runtime_latency_summaries();
     let vector_runtime = service_guard::vector_runtime_metrics();
-    let (file_vectorization_queue_queued, file_vectorization_queue_inflight) = store
+    let (file_vectorization_queue_queued, _file_vectorization_queue_inflight) = store
         .fetch_file_vectorization_queue_counts()
         .unwrap_or((0, 0));
+    let (vector_outbox_queued, vector_outbox_inflight) =
+        store.fetch_vector_persist_outbox_counts().unwrap_or((0, 0));
     let (graph_projection_queue_queued, graph_projection_queue_inflight) = store
         .fetch_graph_projection_queue_counts()
         .unwrap_or((0, 0));
     let (cpu_usage_ratio, ram_available_ratio, io_wait_ratio) = read_host_pressure_ratios();
+    let canonical_backlog_depth = file_vectorization_queue_queued
+        .saturating_add(vector_runtime.active_claimed_current as usize)
+        .saturating_add(vector_runtime.prepare_claimed_current as usize)
+        .saturating_add(vector_runtime.ready_claimed_current as usize)
+        .saturating_add(vector_runtime.persist_claimed_current as usize)
+        .saturating_add(vector_outbox_queued)
+        .saturating_add(vector_outbox_inflight);
     RuntimeSignalsWindow {
         window_start_ms: now_ms.saturating_sub(60_000),
         window_end_ms: now_ms,
@@ -729,17 +748,26 @@ pub fn collect_runtime_signals_window(store: &GraphStore) -> RuntimeSignalsWindo
         vram_free_mb: gpu.free_mb,
         gpu_utilization_ratio: gpu_utilization.gpu_utilization_ratio,
         gpu_memory_utilization_ratio: gpu_utilization.memory_utilization_ratio,
-        file_vectorization_queue_depth: file_vectorization_queue_queued
-            + file_vectorization_queue_inflight,
+        file_vectorization_queue_depth: canonical_backlog_depth,
         graph_projection_queue_depth: graph_projection_queue_queued
             + graph_projection_queue_inflight,
+        canonical_vector_backlog_depth: canonical_backlog_depth,
         ready_queue_depth_current: vector_runtime.ready_queue_depth_current,
         ready_queue_depth_max: vector_runtime.ready_queue_depth_max,
+        active_claimed_current: vector_runtime.active_claimed_current,
+        prepare_claimed_current: vector_runtime.prepare_claimed_current,
+        ready_claimed_current: vector_runtime.ready_claimed_current,
         persist_queue_depth_current: vector_runtime.persist_queue_depth_current,
         persist_queue_depth_max: vector_runtime.persist_queue_depth_max,
+        persist_claimed_current: vector_runtime.persist_claimed_current,
+        prepare_inflight_current: vector_runtime.prepare_inflight_current,
+        prepare_inflight_max: vector_runtime.prepare_inflight_max,
         gpu_idle_wait_ms_total: vector_runtime.gpu_idle_wait_ms_total,
         prepare_queue_wait_ms_total: vector_runtime.prepare_queue_wait_ms_total,
+        prepare_reply_wait_ms_total: vector_runtime.prepare_reply_wait_ms_total,
         persist_queue_wait_ms_total: vector_runtime.persist_queue_wait_ms_total,
+        oldest_ready_batch_age_ms_current: vector_runtime.oldest_ready_batch_age_ms_current,
+        oldest_ready_batch_age_ms_max: vector_runtime.oldest_ready_batch_age_ms_max,
         latency_recent_fetch_p95_ms: vector_latency.fetch.p95_ms,
         latency_recent_embed_p95_ms: vector_latency.embed.p95_ms,
         latency_recent_db_write_p95_ms: vector_latency.db_write.p95_ms,
@@ -1145,7 +1173,7 @@ fn normalize_runtime_tuning_state(mut state: RuntimeTuningState) -> RuntimeTunin
     state.vector_workers = state.vector_workers.max(1);
     state.chunk_batch_size = state.chunk_batch_size.clamp(16, 256);
     state.file_vectorization_batch_size = state.file_vectorization_batch_size.clamp(4, 64);
-    state.vector_ready_queue_depth = state.vector_ready_queue_depth.clamp(1, 16);
+    state.vector_ready_queue_depth = state.vector_ready_queue_depth.clamp(1, 32);
     state.vector_persist_queue_bound = state.vector_persist_queue_bound.clamp(1, 12);
     state.vector_max_inflight_persists = state
         .vector_max_inflight_persists
@@ -1469,6 +1497,10 @@ mod tests {
             gpu_memory_utilization_ratio: 0.1,
             file_vectorization_queue_depth: 128,
             graph_projection_queue_depth: 4,
+            canonical_vector_backlog_depth: 128,
+            active_claimed_current: 0,
+            prepare_claimed_current: 0,
+            ready_claimed_current: 0,
             latency_recent_fetch_p95_ms: 10,
             latency_recent_embed_p95_ms: 25,
             latency_recent_db_write_p95_ms: 5,
@@ -1479,11 +1511,17 @@ mod tests {
             embed_inflight_started_at_ms: 0,
             ready_queue_depth_current: 0,
             ready_queue_depth_max: 0,
+            prepare_inflight_current: 0,
+            prepare_inflight_max: 0,
             persist_queue_depth_current: 0,
             persist_queue_depth_max: 0,
+            persist_claimed_current: 0,
             gpu_idle_wait_ms_total: 0,
             prepare_queue_wait_ms_total: 0,
+            prepare_reply_wait_ms_total: 0,
             persist_queue_wait_ms_total: 0,
+            oldest_ready_batch_age_ms_current: 0,
+            oldest_ready_batch_age_ms_max: 0,
             interactive_requests_in_flight: 0,
             interactive_priority: InteractivePriority::BackgroundNormal.as_str().to_string(),
             chunk_embedding_writes_total: 100,

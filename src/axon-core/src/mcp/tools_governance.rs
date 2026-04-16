@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
+use crate::embedding_contract::GRAPH_MODEL_ID;
+use crate::runtime_mode::graph_embeddings_enabled;
 
 impl McpServer {
     fn json_to_i64(value: &Value) -> Option<i64> {
@@ -232,6 +234,12 @@ impl McpServer {
     }
 
     fn build_graph_clone_section(&self, symbol: &str) -> Option<String> {
+        if !graph_embeddings_enabled() {
+            return Some(
+                "\n\n### Voisinages similaires derives du graphe\n\n**Etat:** temporairement desactive; Axon retourne uniquement le signal clone symbol/chunk tant que `GraphEmbedding` reste coupe."
+                    .to_string(),
+            );
+        }
         let anchor_res = self
             .graph_store
             .query_json_param(
@@ -697,4 +705,3 @@ impl McpServer {
         }
     }
 }
-use crate::embedding_contract::GRAPH_MODEL_ID;

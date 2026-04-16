@@ -3,12 +3,9 @@ use serde_json::{json, Value};
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
 use crate::embedder::{
-    allowed_gpu_vector_workers, current_embedding_provider_diagnostics,
-    current_gpu_memory_pressure_active, current_gpu_memory_snapshot,
-    current_vector_batch_controller_diagnostics, current_vector_drain_state,
-    embedding_lane_config_from_env, gpu_memory_soft_limit_mb, gpu_pressure_embed_batch_chunks,
-    gpu_pressure_files_per_cycle, gpu_telemetry_backend_name, gpu_telemetry_cache_ttl_ms,
-    gpu_telemetry_device_index,
+    current_embedding_provider_diagnostics, current_gpu_memory_pressure_active,
+    current_gpu_memory_snapshot, embedding_lane_config_from_env, gpu_memory_soft_limit_mb,
+    gpu_telemetry_backend_name, gpu_telemetry_cache_ttl_ms, gpu_telemetry_device_index,
 };
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION, STORAGE_TYPE,
@@ -23,6 +20,10 @@ use crate::runtime_observability::{
     duckdb_memory_snapshot, duckdb_storage_snapshot, process_memory_snapshot,
 };
 use crate::service_guard;
+use crate::vector_control::{
+    allowed_gpu_vector_workers, current_vector_batch_controller_diagnostics,
+    current_vector_drain_state, gpu_pressure_embed_batch_chunks, gpu_pressure_files_per_cycle,
+};
 
 fn format_bytes_human(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
@@ -314,7 +315,7 @@ impl McpServer {
             "cpu_only"
         };
         let drain_state = current_vector_drain_state(
-            file_vectorization_queue_depth,
+            optimizer_runtime_signals.file_vectorization_queue_depth,
             service_guard::current_pressure(),
             interactive_active,
             &provider.provider_requested,
@@ -323,7 +324,7 @@ impl McpServer {
         let gpu_background_worker_cap = if provider.provider_effective.eq_ignore_ascii_case("cuda")
         {
             allowed_gpu_vector_workers(
-                file_vectorization_queue_depth,
+                optimizer_runtime_signals.file_vectorization_queue_depth,
                 service_guard::current_pressure(),
             )
         } else {
@@ -903,8 +904,13 @@ impl McpServer {
                         "prepare_queue_wait_ms_total": vector_runtime.prepare_queue_wait_ms_total,
                         "prepare_queue_depth_current": vector_runtime.prepare_queue_depth_current,
                         "prepare_queue_depth_max": vector_runtime.prepare_queue_depth_max,
+                        "prepare_inflight_current": vector_runtime.prepare_inflight_current,
+                        "prepare_inflight_max": vector_runtime.prepare_inflight_max,
                         "ready_queue_depth_current": vector_runtime.ready_queue_depth_current,
                         "ready_queue_depth_max": vector_runtime.ready_queue_depth_max,
+                        "active_claimed_current": vector_runtime.active_claimed_current,
+                        "prepare_claimed_current": vector_runtime.prepare_claimed_current,
+                        "ready_claimed_current": vector_runtime.ready_claimed_current,
                         "embed_input_texts_total": vector_runtime.embed_input_texts_total,
                         "embed_input_text_bytes_total": vector_runtime.embed_input_text_bytes_total,
                         "embed_clone_ms_total": vector_runtime.embed_clone_ms_total,
@@ -926,9 +932,14 @@ impl McpServer {
                         "finalize_queue_depth_max": vector_runtime.finalize_queue_depth_max,
                         "persist_queue_depth_current": vector_runtime.persist_queue_depth_current,
                         "persist_queue_depth_max": vector_runtime.persist_queue_depth_max,
+                        "persist_claimed_current": vector_runtime.persist_claimed_current,
                         "persist_send_wait_ms_total": vector_runtime.persist_send_wait_ms_total,
                         "persist_queue_wait_ms_total": vector_runtime.persist_queue_wait_ms_total,
                         "gpu_idle_wait_ms_total": vector_runtime.gpu_idle_wait_ms_total,
+                        "canonical_backlog_depth_current": vector_runtime.canonical_backlog_depth_current,
+                        "canonical_backlog_depth_max": vector_runtime.canonical_backlog_depth_max,
+                        "oldest_ready_batch_age_ms_current": vector_runtime.oldest_ready_batch_age_ms_current,
+                        "oldest_ready_batch_age_ms_max": vector_runtime.oldest_ready_batch_age_ms_max,
                         "batches_total": vector_runtime.batches_total,
                         "chunks_embedded_total": vector_runtime.chunks_embedded_total,
                         "files_completed_total": vector_runtime.files_completed_total,

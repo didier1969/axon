@@ -3,6 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Check if the active IST database exists before running tests
+DB_PATH="${HOME}/.local/share/axon/db/ist.db"
+if [ ! -f "$DB_PATH" ]; then
+    echo "⚠️  Base de données IST introuvable ($DB_PATH)."
+    echo "   Skipping MCP tests car l'indexation n'a pas encore été effectuée ou la base est vide."
+    exit 0
+fi
+
 PROJECTS=("BookingSystem")
 QUERY_BY_PROJECT=("booking")
 

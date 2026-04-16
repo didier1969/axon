@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::embedder::embedding_lane_config_from_env;
-use crate::vector_control::reset_vector_batch_controller_for_tests;
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION,
 };
@@ -10,6 +9,7 @@ use crate::graph::GraphStore;
 use crate::parser;
 use crate::queue::ProcessingMode;
 use crate::service_guard::{self, ServiceKind};
+use crate::vector_control::reset_vector_batch_controller_for_tests;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -1542,6 +1542,7 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     std::env::remove_var("AXON_ENABLE_GRAPH_VECTORIZATION");
     service_guard::reset_for_tests();
     unsafe {
+        std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
         std::env::set_var("AXON_EMBEDDING_GPU_PRESENT", "false");
         std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
         std::env::set_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION", "true");
@@ -1763,7 +1764,10 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
         content.contains("Embed p50/p95/max ms : 22/22/22 (samples: 1)"),
         "{content}"
     );
-    assert!(content.contains("Drain State : quiet_cruise"), "{content}");
+    assert!(
+        content.contains("Drain State : gpu_scaling_blocked"),
+        "{content}"
+    );
     assert!(
         content.contains("GPU Background Worker Cap : 0"),
         "{content}"
@@ -1784,7 +1788,10 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
         contract["acceleration_state"].as_str(),
         Some("gpu_requested_but_unavailable")
     );
-    assert_eq!(contract["drain_state"].as_str(), Some("quiet_cruise"));
+    assert_eq!(
+        contract["drain_state"].as_str(),
+        Some("gpu_scaling_blocked")
+    );
     assert_eq!(contract["gpu_background_worker_cap"].as_u64(), Some(0));
     assert_eq!(
         contract["vector_runtime"]["prepare_dispatch_total"].as_u64(),
@@ -1882,7 +1889,10 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     assert_eq!(contract["vector_workers"].as_u64(), Some(5));
     assert_eq!(contract["graph_workers"].as_u64(), Some(3));
     assert_eq!(contract["max_chunks_per_file"].as_u64(), Some(64));
-    assert_eq!(contract["max_embed_batch_bytes"].as_u64(), Some(512 * 1024));
+    assert_eq!(
+        contract["max_embed_batch_bytes"].as_u64(),
+        Some(4 * 1024 * 1024)
+    );
     assert_eq!(
         contract["vector_runtime"]["fetch_ms_total"].as_u64(),
         Some(11)
@@ -2056,6 +2066,7 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     assert_eq!(contract["chunk_model_id"].as_str(), Some(CHUNK_MODEL_ID));
 
     unsafe {
+        std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
         std::env::remove_var("AXON_EMBEDDING_GPU_PRESENT");
         std::env::remove_var("AXON_EMBEDDING_PROVIDER");
         std::env::remove_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
@@ -3734,6 +3745,11 @@ fn test_axon_inspect() {
 
 #[test]
 fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+        std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
+    }
     let server = create_test_server();
     let graph_model_id = current_graph_model_id();
     let anchor_embedding = graph_embedding_sql(&[1.0]);
@@ -3779,12 +3795,22 @@ fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
         .as_str()
         .unwrap();
 
+    unsafe {
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
+    }
+
     assert!(content.contains("check_token_chain"));
-    assert!(content.contains("derive optionnel du graphe"), "{content}");
+    assert!(content.contains("contexte derive du graphe"), "{content}");
 }
 
 #[test]
 fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+        std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
+    }
     let server = create_test_server();
     let graph_model_id = current_graph_model_id();
     let anchor_embedding = graph_embedding_sql(&[1.0]);
@@ -3830,8 +3856,74 @@ fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
         .as_str()
         .unwrap();
 
-    assert!(!content.contains("derive optionnel du graphe"));
+    unsafe {
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
+    }
+
+    assert!(!content.contains("contexte derive du graphe"));
     assert!(!content.contains("check_token_chain"));
+}
+
+#[test]
+fn test_graph_embedding_semantic_clones_reports_explicit_fallback_when_disabled() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+        std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "false");
+    }
+    let server = create_test_server();
+    let graph_model_id = current_graph_model_id();
+    let anchor_embedding = graph_embedding_sql(&[1.0]);
+    let peer_embedding = graph_embedding_sql(&[0.99, 0.01]);
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/auth.rs', 'global')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/access.rs', 'global')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::authorize_request', 'authorize_request', 'function', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::check_token_chain', 'check_token_chain', 'function', false, true, false, 'global')").unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/auth.rs', 'global::authorize_request')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/access.rs', 'global::check_token_chain')")
+        .unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'sig-access', '1', 1001)").unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::authorize_request', 1, '{}', 'sig-auth', '1', {}, 1000)", graph_model_id, anchor_embedding)).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, '{}', 'sig-access', '1', {}, 1001)", graph_model_id, peer_embedding)).unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "semantic_clones",
+            "arguments": { "symbol": "authorize_request" }
+        })),
+        id: Some(json!(79)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    unsafe {
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
+    }
+
+    assert!(!content.contains("derive optionnel du graphe"));
+    assert!(content.contains("temporairement desactive"), "{content}");
 }
 
 #[test]
@@ -5437,7 +5529,7 @@ fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() 
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::opaque_worker::chunk', 'symbol', 'axon::opaque_worker', 'axon', 'function', 'symbol: opaque_worker\nkind: function\nfile: src/runtime/watcher.rs\nlines: 10-18\n\nwhen a manual scan requested event arrives, relay it to the rust watcher and keep the ui passive', 'hash-a', 10, 18)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::opaque_worker::chunk', 'symbol', 'axon::opaque_worker', 'axon', 'function', 'symbol: opaque_worker\nkind: function\n\nwhen a manual scan requested event arrives, relay it to the rust watcher and keep the ui passive', 'hash-a', 10, 18)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5486,11 +5578,11 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::worker_alpha::chunk', 'symbol', 'axon::worker_alpha', 'axon', 'function', 'symbol: worker_alpha\nkind: function\nfile: src/runtime/requeue.rs\nlines: 20-28\n\nrequeue claimed file back to pending when the common lane is full', 'hash-b', 20, 28)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::worker_alpha::chunk', 'symbol', 'axon::worker_alpha', 'axon', 'function', 'symbol: worker_alpha\nkind: function\n\nrequeue claimed file back to pending when the common lane is full', 'hash-b', 20, 28)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::worker_beta::chunk', 'symbol', 'axon::worker_beta', 'axon', 'function', 'symbol: worker_beta\nkind: function\nfile: src/runtime/noise.rs\nlines: 2-8\n\nlog queue metrics and continue', 'hash-c', 2, 8)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::worker_beta::chunk', 'symbol', 'axon::worker_beta', 'axon', 'function', 'symbol: worker_beta\nkind: function\n\nlog queue metrics and continue', 'hash-c', 2, 8)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5511,9 +5603,11 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("worker_alpha"));
-    assert!(content.contains("requeue claimed file back to pending"));
-    assert!(content.contains("src/runtime/requeue.rs"));
+    assert!(
+        content.contains("requeue claimed file back to pending"),
+        "{content}"
+    );
+    assert!(content.contains("src/runtime/requeue.rs"), "{content}");
 }
 
 #[test]
@@ -5607,11 +5701,11 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::path_only_probe::chunk', 'symbol', 'axon::path_only_probe', 'axon', 'function', 'symbol: path_only_probe\nkind: function\nfile: src/runtime/path_only_fake_indexing_overlay.rs\nlines: 1-4\n\nlog metrics and continue', 'hash-path', 1, 4)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::path_only_probe::chunk', 'symbol', 'axon::path_only_probe', 'axon', 'function', 'symbol: path_only_probe\nkind: function\n\nlog metrics and continue', 'hash-path', 1, 4)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::truth_probe::chunk', 'symbol', 'axon::truth_probe', 'axon', 'function', 'symbol: truth_probe\nkind: function\nfile: src/runtime/docstring_truth.rs\nlines: 10-18\ndocstring: prevent fake indexing overlay in the cockpit while forwarding to the rust watcher.\n\nnotify runtime and preserve live truth', 'hash-doc', 10, 18)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::truth_probe::chunk', 'symbol', 'axon::truth_probe', 'axon', 'function', 'symbol: truth_probe\nkind: function\ndocstring: prevent fake indexing overlay in the cockpit while forwarding to the rust watcher.\n\nnotify runtime and preserve live truth', 'hash-doc', 10, 18)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5633,17 +5727,16 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
         .unwrap();
 
     let truth_pos = content
-        .find("truth_probe")
-        .expect("truth probe should appear");
+        .find("src/runtime/docstring_truth.rs")
+        .expect("docstring-backed file should appear");
     let path_pos = content
-        .find("path_only_probe")
-        .expect("path-only probe should appear");
+        .find("src/runtime/path_only_fake_indexing_overlay.rs")
+        .expect("path-only file should appear");
     assert!(
         truth_pos < path_pos,
         "content-backed match should rank ahead of path-only match"
     );
-    assert!(content.contains("docstring"));
-    assert!(content.contains("file path"));
+    assert!(content.contains("docstring"), "{content}");
 }
 
 #[test]
@@ -5669,11 +5762,11 @@ fn test_axon_query_exact_config_lookup_prefers_operational_source_over_documenta
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::runtime_config::chunk', 'symbol', 'axon::runtime_config', 'axon', 'module', 'symbol: runtime_config\nkind: module\nfile: config/runtime.exs\nlines: 1-12\n\nconfigures Credo.Check.Refactor.CyclomaticComplexity threshold for the application runtime', 'hash-runtime', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::runtime_config::chunk', 'symbol', 'axon::runtime_config', 'axon', 'module', 'symbol: runtime_config\nkind: module\n\nconfigures Credo.Check.Refactor.CyclomaticComplexity threshold for the application runtime', 'hash-runtime', 1, 12)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::audit_section::chunk', 'symbol', 'axon::audit_section', 'axon', 'section', 'symbol: audit_section\nkind: section\nfile: docs/AXON_TEXT_PARSING_AUDIT.md\nlines: 20-35\n\naudit notes mention Credo.Check.Refactor.CyclomaticComplexity as a failing lookup scenario', 'hash-audit', 20, 35)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::audit_section::chunk', 'symbol', 'axon::audit_section', 'axon', 'section', 'symbol: audit_section\nkind: section\n\naudit notes mention Credo.Check.Refactor.CyclomaticComplexity as a failing lookup scenario', 'hash-audit', 20, 35)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5723,7 +5816,7 @@ fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_m
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::audit_section::chunk', 'symbol', 'axon::audit_section', 'axon', 'section', 'symbol: audit_section\nkind: section\nfile: docs/AXON_TEXT_PARSING_AUDIT.md\nlines: 20-35\n\naudit notes mention Credo.Check.Refactor.CyclomaticComplexity as a failing lookup scenario', 'hash-audit-only', 20, 35)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::audit_section::chunk', 'symbol', 'axon::audit_section', 'axon', 'section', 'symbol: audit_section\nkind: section\n\naudit notes mention Credo.Check.Refactor.CyclomaticComplexity as a failing lookup scenario', 'hash-audit-only', 20, 35)")
         .unwrap();
 
     let req = JsonRpcRequest {

@@ -15,12 +15,12 @@ pub const SYMBOL_BACKLOG_RESIDUAL_THRESHOLD: usize = 64;
 pub const CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD: usize = 512;
 pub const GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD: usize = 2048;
 const MAX_CHUNKS_PER_FILE: usize = 64;
-const MAX_EMBED_BATCH_BYTES: usize = 512 * 1024;
-const DEFAULT_GPU_WARMUP_EMBED_BATCH_CHUNKS: usize = 32;
-const DEFAULT_GPU_WARMUP_FILES_PER_CYCLE: usize = 8;
-const READY_RESERVE_FLOOR: usize = 8;
-const READY_RESERVE_HEAVY_BACKLOG: usize = 10;
-const READY_RESERVE_EXTREME_BACKLOG: usize = 12;
+const MAX_EMBED_BATCH_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_GPU_WARMUP_EMBED_BATCH_CHUNKS: usize = 64;
+const DEFAULT_GPU_WARMUP_FILES_PER_CYCLE: usize = 16;
+const READY_RESERVE_FLOOR: usize = 16;
+const READY_RESERVE_HEAVY_BACKLOG: usize = 24;
+const READY_RESERVE_EXTREME_BACKLOG: usize = 32;
 const GPU_IDLE_WAIT_ESCALATION_MS: u64 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,59 +164,7 @@ impl VectorBatchController {
             last_adjustment_ms: 0,
             target_embed_batch_chunks: default_embed_batch_chunks,
             target_files_per_cycle: default_files_per_cycle,
-            baseline_metrics: service_guard::VectorRuntimeMetrics {
-                fetch_ms_total: 0,
-                embed_ms_total: 0,
-                db_write_ms_total: 0,
-                completion_check_ms_total: 0,
-                mark_done_ms_total: 0,
-                batches_total: 0,
-                chunks_embedded_total: 0,
-                files_completed_total: 0,
-                embed_calls_total: 0,
-                claimed_work_items_total: 0,
-                partial_file_cycles_total: 0,
-                mark_done_calls_total: 0,
-                files_touched_total: 0,
-                prepare_dispatch_total: 0,
-                prepare_prefetch_total: 0,
-                prepare_fallback_inline_total: 0,
-                prepared_work_items_total: 0,
-                prepare_empty_batches_total: 0,
-                prepare_immediate_completed_total: 0,
-                prepare_failed_fetches_total: 0,
-                finalize_enqueued_total: 0,
-                finalize_fallback_inline_total: 0,
-                prepare_reply_wait_ms_total: 0,
-                prepare_send_wait_ms_total: 0,
-                finalize_send_wait_ms_total: 0,
-                prepare_queue_wait_ms_total: 0,
-                finalize_queue_wait_ms_total: 0,
-                prepare_queue_depth_current: 0,
-                prepare_queue_depth_max: 0,
-                ready_queue_depth_current: 0,
-                ready_queue_depth_max: 0,
-                finalize_queue_depth_current: 0,
-                finalize_queue_depth_max: 0,
-                persist_queue_depth_current: 0,
-                persist_queue_depth_max: 0,
-                persist_send_wait_ms_total: 0,
-                persist_queue_wait_ms_total: 0,
-                gpu_idle_wait_ms_total: 0,
-                embed_input_texts_total: 0,
-                embed_input_text_bytes_total: 0,
-                embed_clone_ms_total: 0,
-                embed_transform_ms_total: 0,
-                embed_export_ms_total: 0,
-                embed_attempts_total: 0,
-                embed_inflight_started_at_ms: 0,
-                embed_inflight_texts_current: 0,
-                embed_inflight_text_bytes_current: 0,
-                vector_workers_started_total: 0,
-                vector_workers_stopped_total: 0,
-                vector_workers_active_current: 0,
-                vector_worker_heartbeat_at_ms: 0,
-            },
+            baseline_metrics: service_guard::VectorRuntimeMetrics::default(),
             last_window_started_ms: 0,
             last_best_embed_ms_per_chunk: None,
             last_window: VectorBatchControllerWindow::default(),
@@ -648,7 +596,7 @@ pub fn vector_ready_reserve_target(
     if current_ready_depth == 0 && queue_pending >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
         reserve = reserve.max(READY_RESERVE_HEAVY_BACKLOG);
     }
-    reserve.clamp(1, 16)
+    reserve.clamp(1, READY_RESERVE_EXTREME_BACKLOG)
 }
 
 pub fn current_vector_drain_state(
@@ -658,24 +606,21 @@ pub fn current_vector_drain_state(
     provider_requested: &str,
     provider_effective: &str,
 ) -> VectorDrainState {
+    if file_backlog_depth == 0 {
+        return VectorDrainState::QuietCruise;
+    }
     if interactive_active {
         return VectorDrainState::InteractiveGuarded;
     }
-    if matches!(
-        service_pressure,
-        ServicePressure::Degraded | ServicePressure::Critical
-    ) {
+    if matches!(service_pressure, ServicePressure::Critical) {
         return VectorDrainState::Recovery;
     }
-    if file_backlog_depth >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
-        if provider_requested.eq_ignore_ascii_case("cuda")
-            && !provider_effective.eq_ignore_ascii_case("cuda")
-        {
-            return VectorDrainState::GpuScalingBlocked;
-        }
-        return VectorDrainState::AggressiveDrain;
+    if provider_requested.eq_ignore_ascii_case("cuda")
+        && !provider_effective.eq_ignore_ascii_case("cuda")
+    {
+        return VectorDrainState::GpuScalingBlocked;
     }
-    VectorDrainState::QuietCruise
+    VectorDrainState::AggressiveDrain
 }
 
 pub fn allowed_gpu_vector_workers(
@@ -683,12 +628,13 @@ pub fn allowed_gpu_vector_workers(
     service_pressure: ServicePressure,
 ) -> usize {
     match service_pressure {
-        ServicePressure::Critical | ServicePressure::Degraded => 1,
+        ServicePressure::Critical => 1,
+        ServicePressure::Degraded => 2,
         ServicePressure::Recovering | ServicePressure::Healthy => {
             if file_backlog_depth >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
-                4
+                6
             } else {
-                1
+                2
             }
         }
     }
@@ -726,56 +672,53 @@ pub fn semantic_policy(queue_len: usize, service_pressure: ServicePressure) -> S
     if service_guard::interactive_priority_active() {
         service_guard::record_vectorization_suppressed();
         return SemanticPolicy {
+            pause: false,
+            sleep: Duration::from_millis(750),
+            idle_sleep: Duration::from_millis(1500),
+        };
+    }
+    if queue_len == 0 {
+        return SemanticPolicy {
+            pause: false,
+            sleep: Duration::from_millis(250),
+            idle_sleep: Duration::from_secs(20),
+        };
+    }
+    if service_pressure == ServicePressure::Critical {
+        return SemanticPolicy {
             pause: true,
             sleep: Duration::from_secs(2),
             idle_sleep: Duration::from_secs(2),
         };
     }
-    if service_guard::interactive_requests_in_flight() == 0
-        && !service_guard::interactive_priority_active()
-        && queue_len >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD
-    {
+    if service_guard::interactive_requests_in_flight() > 0 {
         return SemanticPolicy {
             pause: false,
-            sleep: Duration::from_millis(250),
+            sleep: Duration::from_millis(500),
+            idle_sleep: Duration::from_secs(1),
+        };
+    }
+    if queue_len >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
+        return SemanticPolicy {
+            pause: false,
+            sleep: Duration::from_millis(100),
             idle_sleep: Duration::from_millis(250),
         };
     }
-    if service_guard::interactive_requests_in_flight() == 0
-        && !service_guard::interactive_priority_active()
-        && queue_len <= QUIET_CRUISE_FILE_BACKLOG_THRESHOLD
-    {
+    if matches!(
+        service_pressure,
+        ServicePressure::Degraded | ServicePressure::Recovering
+    ) {
         return SemanticPolicy {
             pause: false,
-            sleep: Duration::from_secs(1),
-            idle_sleep: Duration::from_secs(3),
-        };
-    }
-    if service_pressure == ServicePressure::Critical || queue_len >= 3_000 {
-        return SemanticPolicy {
-            pause: true,
-            sleep: Duration::from_secs(10),
-            idle_sleep: Duration::from_secs(10),
-        };
-    }
-    if service_pressure == ServicePressure::Degraded || queue_len >= 1_500 {
-        return SemanticPolicy {
-            pause: true,
-            sleep: Duration::from_secs(3),
-            idle_sleep: Duration::from_secs(5),
-        };
-    }
-    if service_pressure == ServicePressure::Recovering {
-        return SemanticPolicy {
-            pause: true,
-            sleep: Duration::from_secs(2),
-            idle_sleep: Duration::from_secs(3),
+            sleep: Duration::from_millis(350),
+            idle_sleep: Duration::from_millis(750),
         };
     }
     SemanticPolicy {
         pause: false,
-        sleep: Duration::from_secs(1),
-        idle_sleep: Duration::from_secs(5),
+        sleep: Duration::from_millis(250),
+        idle_sleep: Duration::from_millis(750),
     }
 }
 

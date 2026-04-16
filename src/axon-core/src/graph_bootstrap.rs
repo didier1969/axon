@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 use crate::embedding_contract::{DIMENSION, GRAPH_MODEL_ID};
 use crate::graph::{CloseDbFunc, ExecFunc, GraphStore, InitDbFunc, LatticePool};
+use crate::runtime_mode::graph_embeddings_enabled;
 use crate::runtime_mode::AxonRuntimeMode;
 
 const IST_SCHEMA_VERSION: &str = "3";
@@ -116,20 +117,26 @@ impl GraphStore {
             info!("GraphStore startup: stale graph projection inflight cleanup complete.");
             let _ = store.clear_stale_inflight_file_vectorization_work();
             info!("GraphStore startup: stale file vectorization inflight cleanup complete.");
-            match store.backfill_graph_projection_queue_for_model(GRAPH_MODEL_ID) {
-                Ok(count) if count > 0 => {
-                    info!(
-                        "Backfilled {} graph projection queue entries for graph embeddings",
-                        count
-                    );
+            if graph_embeddings_enabled() {
+                match store.backfill_graph_projection_queue_for_model(GRAPH_MODEL_ID) {
+                    Ok(count) if count > 0 => {
+                        info!(
+                            "Backfilled {} graph projection queue entries for graph embeddings",
+                            count
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!(
+                            "Unable to backfill graph projection queue at startup: {:?}",
+                            err
+                        );
+                    }
                 }
-                Ok(_) => {}
-                Err(err) => {
-                    warn!(
-                        "Unable to backfill graph projection queue at startup: {:?}",
-                        err
-                    );
-                }
+            } else {
+                info!(
+                    "Skipping graph embedding queue backfill at startup because graph embeddings are disabled."
+                );
             }
             info!("GraphStore startup: graph projection backfill complete.");
             if AxonRuntimeMode::from_env().background_vectorization_enabled() {
@@ -354,6 +361,8 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS FileLifecycleEvent (file_path VARCHAR, project_code VARCHAR, stage VARCHAR, status VARCHAR, reason VARCHAR, at_ms BIGINT, worker_id BIGINT, trace_id VARCHAR, run_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorBatchRun (run_id VARCHAR PRIMARY KEY, started_at_ms BIGINT, finished_at_ms BIGINT, provider VARCHAR, model_id VARCHAR, chunk_count BIGINT, file_count BIGINT, input_bytes BIGINT, fetch_ms BIGINT, embed_ms BIGINT, db_write_ms BIGINT, mark_done_ms BIGINT, success BOOLEAN, error_reason VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS VectorPersistOutbox (outbox_id VARCHAR PRIMARY KEY, run_id VARCHAR, model_id VARCHAR, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at_ms BIGINT, claimed_at_ms BIGINT, completed_at_ms BIGINT, last_error_reason VARCHAR, claim_token VARCHAR, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0, chunk_count BIGINT DEFAULT 0, file_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, fetch_ms BIGINT DEFAULT 0, embed_ms BIGINT DEFAULT 0, payload_json VARCHAR)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS vector_persist_outbox_status_idx ON VectorPersistOutbox(status, queued_at_ms)")?;
         self.execute("CREATE TABLE IF NOT EXISTS HourlyVectorizationRollup (bucket_start_ms BIGINT, project_code VARCHAR, model_id VARCHAR, chunks_embedded BIGINT DEFAULT 0, files_vector_ready BIGINT DEFAULT 0, batches BIGINT DEFAULT 0, fetch_ms_total BIGINT DEFAULT 0, embed_ms_total BIGINT DEFAULT 0, db_write_ms_total BIGINT DEFAULT 0, mark_done_ms_total BIGINT DEFAULT 0, PRIMARY KEY (bucket_start_ms, project_code, model_id))")?;
         self.execute("CREATE TABLE IF NOT EXISTS OptimizerDecisionLog (decision_id VARCHAR PRIMARY KEY, at_ms BIGINT, mode VARCHAR, host_snapshot_json VARCHAR, policy_snapshot_json VARCHAR, signal_snapshot_json VARCHAR, analytics_snapshot_json VARCHAR, action_profile_id VARCHAR, decision_json VARCHAR, constraints_triggered_json VARCHAR, would_apply BOOLEAN, applied BOOLEAN, evaluation_window_start_ms BIGINT, evaluation_window_end_ms BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS RewardObservationLog (decision_id VARCHAR, observed_at_ms BIGINT, window_start_ms BIGINT, window_end_ms BIGINT, reward_json VARCHAR, throughput_chunks_per_hour DOUBLE, throughput_files_per_hour DOUBLE, constraint_violations_json VARCHAR, pressure_summary_json VARCHAR)")?;
@@ -427,6 +436,8 @@ impl GraphStore {
         self.execute("ALTER TABLE ChunkEmbedding ADD COLUMN IF NOT EXISTS embedded_at_ms BIGINT")?;
         self.execute("CREATE TABLE IF NOT EXISTS FileLifecycleEvent (file_path VARCHAR, project_code VARCHAR, stage VARCHAR, status VARCHAR, reason VARCHAR, at_ms BIGINT, worker_id BIGINT, trace_id VARCHAR, run_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorBatchRun (run_id VARCHAR PRIMARY KEY, started_at_ms BIGINT, finished_at_ms BIGINT, provider VARCHAR, model_id VARCHAR, chunk_count BIGINT, file_count BIGINT, input_bytes BIGINT, fetch_ms BIGINT, embed_ms BIGINT, db_write_ms BIGINT, mark_done_ms BIGINT, success BOOLEAN, error_reason VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS VectorPersistOutbox (outbox_id VARCHAR PRIMARY KEY, run_id VARCHAR, model_id VARCHAR, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at_ms BIGINT, claimed_at_ms BIGINT, completed_at_ms BIGINT, last_error_reason VARCHAR, claim_token VARCHAR, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0, chunk_count BIGINT DEFAULT 0, file_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, fetch_ms BIGINT DEFAULT 0, embed_ms BIGINT DEFAULT 0, payload_json VARCHAR)")?;
+        self.execute("CREATE INDEX IF NOT EXISTS vector_persist_outbox_status_idx ON VectorPersistOutbox(status, queued_at_ms)")?;
         self.execute("CREATE TABLE IF NOT EXISTS HourlyVectorizationRollup (bucket_start_ms BIGINT, project_code VARCHAR, model_id VARCHAR, chunks_embedded BIGINT DEFAULT 0, files_vector_ready BIGINT DEFAULT 0, batches BIGINT DEFAULT 0, fetch_ms_total BIGINT DEFAULT 0, embed_ms_total BIGINT DEFAULT 0, db_write_ms_total BIGINT DEFAULT 0, mark_done_ms_total BIGINT DEFAULT 0, PRIMARY KEY (bucket_start_ms, project_code, model_id))")?;
         self.execute("CREATE TABLE IF NOT EXISTS OptimizerDecisionLog (decision_id VARCHAR PRIMARY KEY, at_ms BIGINT, mode VARCHAR, host_snapshot_json VARCHAR, policy_snapshot_json VARCHAR, signal_snapshot_json VARCHAR, analytics_snapshot_json VARCHAR, action_profile_id VARCHAR, decision_json VARCHAR, constraints_triggered_json VARCHAR, would_apply BOOLEAN, applied BOOLEAN, evaluation_window_start_ms BIGINT, evaluation_window_end_ms BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS RewardObservationLog (decision_id VARCHAR, observed_at_ms BIGINT, window_start_ms BIGINT, window_end_ms BIGINT, reward_json VARCHAR, throughput_chunks_per_hour DOUBLE, throughput_files_per_hour DOUBLE, constraint_violations_json VARCHAR, pressure_summary_json VARCHAR)")?;

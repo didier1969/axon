@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static LAST_SQL_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_MCP_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
@@ -45,15 +45,25 @@ static VECTOR_PREPARE_QUEUE_WAIT_MS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_FINALIZE_QUEUE_WAIT_MS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_PREPARE_QUEUE_DEPTH_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_PREPARE_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
+static VECTOR_PREPARE_INFLIGHT_CURRENT: AtomicU64 = AtomicU64::new(0);
+static VECTOR_PREPARE_INFLIGHT_MAX: AtomicU64 = AtomicU64::new(0);
 static VECTOR_READY_QUEUE_DEPTH_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_READY_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
+static VECTOR_ACTIVE_CLAIMED_CURRENT: AtomicU64 = AtomicU64::new(0);
+static VECTOR_PREPARE_CLAIMED_CURRENT: AtomicU64 = AtomicU64::new(0);
+static VECTOR_READY_CLAIMED_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_FINALIZE_QUEUE_DEPTH_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_FINALIZE_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
 static VECTOR_PERSIST_QUEUE_DEPTH_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_PERSIST_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
+static VECTOR_PERSIST_CLAIMED_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_PERSIST_SEND_WAIT_MS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_PERSIST_QUEUE_WAIT_MS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_GPU_IDLE_WAIT_MS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static VECTOR_CANONICAL_BACKLOG_DEPTH_CURRENT: AtomicU64 = AtomicU64::new(0);
+static VECTOR_CANONICAL_BACKLOG_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
+static VECTOR_OLDEST_READY_BATCH_AGE_MS_CURRENT: AtomicU64 = AtomicU64::new(0);
+static VECTOR_OLDEST_READY_BATCH_AGE_MS_MAX: AtomicU64 = AtomicU64::new(0);
 static VECTOR_EMBED_INPUT_TEXTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_EMBED_INPUT_TEXT_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_EMBED_CLONE_MS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -68,6 +78,7 @@ static VECTOR_WORKERS_STOPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKERS_ACTIVE_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKER_HEARTBEAT_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_STAGE_LATENCY_WINDOWS: OnceLock<Mutex<VectorStageLatencyWindows>> = OnceLock::new();
+static VECTOR_BACKLOG_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 
 const SERVICE_SAMPLE_TTL_MS: u64 = 5_000;
 const SERVICE_RECOVERY_WINDOW_MS: u64 = 15_000;
@@ -104,7 +115,7 @@ pub enum VectorStageKind {
     MarkDone,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct VectorRuntimeMetrics {
     pub fetch_ms_total: u64,
     pub embed_ms_total: u64,
@@ -135,15 +146,25 @@ pub struct VectorRuntimeMetrics {
     pub finalize_queue_wait_ms_total: u64,
     pub prepare_queue_depth_current: u64,
     pub prepare_queue_depth_max: u64,
+    pub prepare_inflight_current: u64,
+    pub prepare_inflight_max: u64,
     pub ready_queue_depth_current: u64,
     pub ready_queue_depth_max: u64,
+    pub active_claimed_current: u64,
+    pub prepare_claimed_current: u64,
+    pub ready_claimed_current: u64,
     pub finalize_queue_depth_current: u64,
     pub finalize_queue_depth_max: u64,
     pub persist_queue_depth_current: u64,
     pub persist_queue_depth_max: u64,
+    pub persist_claimed_current: u64,
     pub persist_send_wait_ms_total: u64,
     pub persist_queue_wait_ms_total: u64,
     pub gpu_idle_wait_ms_total: u64,
+    pub canonical_backlog_depth_current: u64,
+    pub canonical_backlog_depth_max: u64,
+    pub oldest_ready_batch_age_ms_current: u64,
+    pub oldest_ready_batch_age_ms_max: u64,
     pub embed_input_texts_total: u64,
     pub embed_input_text_bytes_total: u64,
     pub embed_clone_ms_total: u64,
@@ -368,6 +389,20 @@ pub fn record_vector_worker_heartbeat() {
     VECTOR_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
 }
 
+pub fn notify_vector_backlog_activity() {
+    let (lock, cvar) = VECTOR_BACKLOG_SIGNAL.get_or_init(|| (Mutex::new(0), Condvar::new()));
+    let mut generation = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    *generation = generation.saturating_add(1);
+    cvar.notify_all();
+}
+
+pub fn wait_for_vector_backlog_signal(timeout: Duration) {
+    let (lock, cvar) = VECTOR_BACKLOG_SIGNAL.get_or_init(|| (Mutex::new(0), Condvar::new()));
+    let generation = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    let observed = *generation;
+    let _ = cvar.wait_timeout_while(generation, timeout, |current| *current == observed);
+}
+
 pub fn record_vector_files_completed(count: u64) {
     VECTOR_FILES_COMPLETED_TOTAL.fetch_add(count, Ordering::Relaxed);
 }
@@ -442,6 +477,11 @@ pub fn record_vector_prepare_queue_depth(depth: u64) {
     update_atomic_max(&VECTOR_PREPARE_QUEUE_DEPTH_MAX, depth);
 }
 
+pub fn record_vector_prepare_inflight_depth(depth: u64) {
+    VECTOR_PREPARE_INFLIGHT_CURRENT.store(depth, Ordering::Relaxed);
+    update_atomic_max(&VECTOR_PREPARE_INFLIGHT_MAX, depth);
+}
+
 pub fn record_vector_finalize_queue_depth(depth: u64) {
     VECTOR_FINALIZE_QUEUE_DEPTH_CURRENT.store(depth, Ordering::Relaxed);
     update_atomic_max(&VECTOR_FINALIZE_QUEUE_DEPTH_MAX, depth);
@@ -452,9 +492,25 @@ pub fn record_vector_ready_queue_depth(depth: u64) {
     update_atomic_max(&VECTOR_READY_QUEUE_DEPTH_MAX, depth);
 }
 
+pub fn record_vector_active_claimed(depth: u64) {
+    VECTOR_ACTIVE_CLAIMED_CURRENT.store(depth, Ordering::Relaxed);
+}
+
+pub fn record_vector_prepare_claimed(depth: u64) {
+    VECTOR_PREPARE_CLAIMED_CURRENT.store(depth, Ordering::Relaxed);
+}
+
+pub fn record_vector_ready_claimed(depth: u64) {
+    VECTOR_READY_CLAIMED_CURRENT.store(depth, Ordering::Relaxed);
+}
+
 pub fn record_vector_persist_queue_depth(depth: u64) {
     VECTOR_PERSIST_QUEUE_DEPTH_CURRENT.store(depth, Ordering::Relaxed);
     update_atomic_max(&VECTOR_PERSIST_QUEUE_DEPTH_MAX, depth);
+}
+
+pub fn record_vector_persist_claimed(depth: u64) {
+    VECTOR_PERSIST_CLAIMED_CURRENT.store(depth, Ordering::Relaxed);
 }
 
 pub fn record_vector_persist_send_wait_ms(latency_ms: u64) {
@@ -467,6 +523,16 @@ pub fn record_vector_persist_queue_wait_ms(latency_ms: u64) {
 
 pub fn record_vector_gpu_idle_wait_ms(latency_ms: u64) {
     VECTOR_GPU_IDLE_WAIT_MS_TOTAL.fetch_add(latency_ms, Ordering::Relaxed);
+}
+
+pub fn record_vector_canonical_backlog_depth(depth: u64) {
+    VECTOR_CANONICAL_BACKLOG_DEPTH_CURRENT.store(depth, Ordering::Relaxed);
+    update_atomic_max(&VECTOR_CANONICAL_BACKLOG_DEPTH_MAX, depth);
+}
+
+pub fn record_vector_oldest_ready_batch_age_ms(latency_ms: u64) {
+    VECTOR_OLDEST_READY_BATCH_AGE_MS_CURRENT.store(latency_ms, Ordering::Relaxed);
+    update_atomic_max(&VECTOR_OLDEST_READY_BATCH_AGE_MS_MAX, latency_ms);
 }
 
 pub fn background_launches_suppressed_total() -> u64 {
@@ -526,15 +592,27 @@ pub fn vector_runtime_metrics() -> VectorRuntimeMetrics {
         finalize_queue_wait_ms_total: VECTOR_FINALIZE_QUEUE_WAIT_MS_TOTAL.load(Ordering::Relaxed),
         prepare_queue_depth_current: VECTOR_PREPARE_QUEUE_DEPTH_CURRENT.load(Ordering::Relaxed),
         prepare_queue_depth_max: VECTOR_PREPARE_QUEUE_DEPTH_MAX.load(Ordering::Relaxed),
+        prepare_inflight_current: VECTOR_PREPARE_INFLIGHT_CURRENT.load(Ordering::Relaxed),
+        prepare_inflight_max: VECTOR_PREPARE_INFLIGHT_MAX.load(Ordering::Relaxed),
         ready_queue_depth_current: VECTOR_READY_QUEUE_DEPTH_CURRENT.load(Ordering::Relaxed),
         ready_queue_depth_max: VECTOR_READY_QUEUE_DEPTH_MAX.load(Ordering::Relaxed),
+        active_claimed_current: VECTOR_ACTIVE_CLAIMED_CURRENT.load(Ordering::Relaxed),
+        prepare_claimed_current: VECTOR_PREPARE_CLAIMED_CURRENT.load(Ordering::Relaxed),
+        ready_claimed_current: VECTOR_READY_CLAIMED_CURRENT.load(Ordering::Relaxed),
         finalize_queue_depth_current: VECTOR_FINALIZE_QUEUE_DEPTH_CURRENT.load(Ordering::Relaxed),
         finalize_queue_depth_max: VECTOR_FINALIZE_QUEUE_DEPTH_MAX.load(Ordering::Relaxed),
         persist_queue_depth_current: VECTOR_PERSIST_QUEUE_DEPTH_CURRENT.load(Ordering::Relaxed),
         persist_queue_depth_max: VECTOR_PERSIST_QUEUE_DEPTH_MAX.load(Ordering::Relaxed),
+        persist_claimed_current: VECTOR_PERSIST_CLAIMED_CURRENT.load(Ordering::Relaxed),
         persist_send_wait_ms_total: VECTOR_PERSIST_SEND_WAIT_MS_TOTAL.load(Ordering::Relaxed),
         persist_queue_wait_ms_total: VECTOR_PERSIST_QUEUE_WAIT_MS_TOTAL.load(Ordering::Relaxed),
         gpu_idle_wait_ms_total: VECTOR_GPU_IDLE_WAIT_MS_TOTAL.load(Ordering::Relaxed),
+        canonical_backlog_depth_current: VECTOR_CANONICAL_BACKLOG_DEPTH_CURRENT
+            .load(Ordering::Relaxed),
+        canonical_backlog_depth_max: VECTOR_CANONICAL_BACKLOG_DEPTH_MAX.load(Ordering::Relaxed),
+        oldest_ready_batch_age_ms_current: VECTOR_OLDEST_READY_BATCH_AGE_MS_CURRENT
+            .load(Ordering::Relaxed),
+        oldest_ready_batch_age_ms_max: VECTOR_OLDEST_READY_BATCH_AGE_MS_MAX.load(Ordering::Relaxed),
         embed_input_texts_total: VECTOR_EMBED_INPUT_TEXTS_TOTAL.load(Ordering::Relaxed),
         embed_input_text_bytes_total: VECTOR_EMBED_INPUT_TEXT_BYTES_TOTAL.load(Ordering::Relaxed),
         embed_clone_ms_total: VECTOR_EMBED_CLONE_MS_TOTAL.load(Ordering::Relaxed),
@@ -607,15 +685,25 @@ pub fn reset_for_tests() {
     VECTOR_FINALIZE_QUEUE_WAIT_MS_TOTAL.store(0, Ordering::Relaxed);
     VECTOR_PREPARE_QUEUE_DEPTH_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_PREPARE_QUEUE_DEPTH_MAX.store(0, Ordering::Relaxed);
+    VECTOR_PREPARE_INFLIGHT_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_PREPARE_INFLIGHT_MAX.store(0, Ordering::Relaxed);
     VECTOR_READY_QUEUE_DEPTH_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_READY_QUEUE_DEPTH_MAX.store(0, Ordering::Relaxed);
+    VECTOR_ACTIVE_CLAIMED_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_PREPARE_CLAIMED_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_READY_CLAIMED_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_FINALIZE_QUEUE_DEPTH_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_FINALIZE_QUEUE_DEPTH_MAX.store(0, Ordering::Relaxed);
     VECTOR_PERSIST_QUEUE_DEPTH_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_PERSIST_QUEUE_DEPTH_MAX.store(0, Ordering::Relaxed);
+    VECTOR_PERSIST_CLAIMED_CURRENT.store(0, Ordering::Relaxed);
     VECTOR_PERSIST_SEND_WAIT_MS_TOTAL.store(0, Ordering::Relaxed);
     VECTOR_PERSIST_QUEUE_WAIT_MS_TOTAL.store(0, Ordering::Relaxed);
     VECTOR_GPU_IDLE_WAIT_MS_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_CANONICAL_BACKLOG_DEPTH_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_CANONICAL_BACKLOG_DEPTH_MAX.store(0, Ordering::Relaxed);
+    VECTOR_OLDEST_READY_BATCH_AGE_MS_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_OLDEST_READY_BATCH_AGE_MS_MAX.store(0, Ordering::Relaxed);
     VECTOR_EMBED_INPUT_TEXTS_TOTAL.store(0, Ordering::Relaxed);
     VECTOR_EMBED_INPUT_TEXT_BYTES_TOTAL.store(0, Ordering::Relaxed);
     VECTOR_EMBED_CLONE_MS_TOTAL.store(0, Ordering::Relaxed);

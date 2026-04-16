@@ -43,9 +43,19 @@ impl AxonRuntimeMode {
     }
 }
 
+pub fn graph_embeddings_enabled() -> bool {
+    matches!(
+        std::env::var("AXON_GRAPH_EMBEDDINGS_ENABLED")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AxonRuntimeMode;
+    use super::{graph_embeddings_enabled, AxonRuntimeMode};
 
     #[test]
     fn test_graph_only_mode_preserves_ingestion_without_semantic_workers() {
@@ -64,5 +74,22 @@ mod tests {
         assert!(mode.ingestion_enabled());
         assert!(mode.semantic_workers_enabled());
         assert!(mode.background_vectorization_enabled());
+    }
+
+    #[test]
+    fn test_graph_embeddings_enabled_defaults_off_and_honors_true_values() {
+        unsafe {
+            std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
+        }
+        assert!(!graph_embeddings_enabled());
+
+        unsafe {
+            std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
+        }
+        assert!(graph_embeddings_enabled());
+
+        unsafe {
+            std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
+        }
     }
 }

@@ -13,7 +13,9 @@ use crate::file_ingress_guard::FileIngressRow;
 use crate::graph::{ExecFunc, GraphStore, PendingFile};
 use crate::ingress_buffer::{IngressDrainBatch, IngressPromotionStats, IngressSource};
 use crate::queue::ProcessingMode;
+use crate::runtime_mode::graph_embeddings_enabled;
 use crate::runtime_mode::AxonRuntimeMode;
+use crate::service_guard;
 use crate::watcher_probe;
 
 const DEFAULT_GRAPH_EMBEDDING_RADIUS: i64 = 2;
@@ -35,13 +37,13 @@ pub struct GraphProjectionWork {
     pub radius: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileVectorizationWork {
     pub file_path: String,
     pub resumed_after_interactive_pause: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileVectorizationLeaseSnapshot {
     pub file_path: String,
     pub claim_token: String,
@@ -77,6 +79,27 @@ pub struct VectorBatchRun {
     pub mark_done_ms: u64,
     pub success: bool,
     pub error_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VectorPersistOutboxUpdate {
+    pub chunk_id: String,
+    pub source_hash: String,
+    pub vector: Vec<f32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VectorPersistOutboxPayload {
+    pub updates: Vec<VectorPersistOutboxUpdate>,
+    pub completed_works: Vec<FileVectorizationWork>,
+    pub completed_lease_snapshots: Vec<FileVectorizationLeaseSnapshot>,
+    pub batch_run: VectorBatchRun,
+}
+
+#[derive(Debug, Clone)]
+pub struct VectorPersistOutboxWork {
+    pub outbox_id: String,
+    pub payload: VectorPersistOutboxPayload,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -188,6 +211,11 @@ fn file_vectorization_queue_upsert_if_needed(file_path: &str, now_ms: i64) -> St
 
 fn hourly_bucket_start_ms(at_ms: i64) -> i64 {
     (at_ms / 3_600_000) * 3_600_000
+}
+
+fn next_vector_persist_outbox_claim_token(now_ms: i64) -> String {
+    let seq = FILE_VECTORIZATION_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("outbox-claim-{}-{}", now_ms, seq)
 }
 
 fn sort_and_dedup_sql_tuples(values: &mut Vec<String>) {
@@ -321,6 +349,266 @@ impl GraphStore {
                 .map(|reason| format!("'{}'", Self::escape_sql(reason)))
                 .unwrap_or_else(|| "NULL".to_string())
         ))
+    }
+
+    pub fn enqueue_vector_persist_outbox(
+        &self,
+        payload: &VectorPersistOutboxPayload,
+    ) -> Result<String> {
+        let outbox_id = format!("outbox-{}", payload.batch_run.run_id);
+        let payload_json = serde_json::to_string(payload)?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        self.execute(&format!(
+            "INSERT OR REPLACE INTO VectorPersistOutbox \
+             (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, completed_at_ms, last_error_reason, claim_token, lease_heartbeat_at_ms, lease_owner, lease_epoch, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, payload_json) \
+             VALUES ('{}', '{}', '{}', 'queued', 0, {}, NULL, NULL, NULL, NULL, NULL, NULL, 0, {}, {}, {}, {}, {}, '{}')",
+            Self::escape_sql(&outbox_id),
+            Self::escape_sql(&payload.batch_run.run_id),
+            Self::escape_sql(&payload.batch_run.model_id),
+            now_ms,
+            payload.batch_run.chunk_count,
+            payload.batch_run.file_count,
+            payload.batch_run.input_bytes,
+            payload.batch_run.fetch_ms,
+            payload.batch_run.embed_ms,
+            Self::escape_sql(&payload_json)
+        ))?;
+        service_guard::notify_vector_backlog_activity();
+        Ok(outbox_id)
+    }
+
+    pub fn enqueue_vector_persist_outbox_handoff(
+        &self,
+        payload: &VectorPersistOutboxPayload,
+        lease_snapshots: &[FileVectorizationLeaseSnapshot],
+    ) -> Result<String> {
+        let outbox_id = format!("outbox-{}", payload.batch_run.run_id);
+        let payload_json = serde_json::to_string(payload)?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let lease_predicates = if lease_snapshots.is_empty() {
+            None
+        } else {
+            Some(
+                lease_snapshots
+                    .iter()
+                    .map(|item| {
+                        format!(
+                            "(file_path = '{}' AND claim_token = '{}' AND COALESCE(lease_epoch, 0) = {} AND COALESCE(lease_owner, '') = 'vector')",
+                            Self::escape_sql(&item.file_path),
+                            Self::escape_sql(&item.claim_token),
+                            item.lease_epoch
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" OR "),
+            )
+        };
+
+        if let Some(predicates) = lease_predicates.as_ref() {
+            let matched = usize::try_from(self.query_count(&format!(
+                "SELECT count(*) FROM FileVectorizationQueue \
+                 WHERE status = 'inflight' \
+                   AND claim_token IS NOT NULL \
+                   AND ({})",
+                predicates
+            ))?)
+            .unwrap_or(0);
+            if matched != lease_snapshots.len() {
+                return Err(anyhow!(
+                    "outbox handoff refused: expected {} vector-owned rows, matched {}",
+                    lease_snapshots.len(),
+                    matched
+                ));
+            }
+        }
+
+        let mut queries = vec![format!(
+            "INSERT OR REPLACE INTO VectorPersistOutbox \
+             (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, completed_at_ms, last_error_reason, claim_token, lease_heartbeat_at_ms, lease_owner, lease_epoch, chunk_count, file_count, input_bytes, fetch_ms, embed_ms, payload_json) \
+             VALUES ('{}', '{}', '{}', 'queued', 0, {}, NULL, NULL, NULL, NULL, NULL, NULL, 0, {}, {}, {}, {}, {}, '{}')",
+            Self::escape_sql(&outbox_id),
+            Self::escape_sql(&payload.batch_run.run_id),
+            Self::escape_sql(&payload.batch_run.model_id),
+            now_ms,
+            payload.batch_run.chunk_count,
+            payload.batch_run.file_count,
+            payload.batch_run.input_bytes,
+            payload.batch_run.fetch_ms,
+            payload.batch_run.embed_ms,
+            Self::escape_sql(&payload_json)
+        )];
+
+        if let Some(predicates) = lease_predicates {
+            queries.push(format!(
+                "UPDATE FileVectorizationQueue \
+                 SET lease_owner = 'outbox', \
+                     lease_epoch = COALESCE(lease_epoch, 0) + 1, \
+                     lease_heartbeat_at_ms = {}, \
+                     last_attempt_at = {} \
+                 WHERE status = 'inflight' \
+                   AND claim_token IS NOT NULL \
+                   AND ({})",
+                now_ms, now_ms, predicates
+            ));
+        }
+
+        self.execute_batch(&queries)?;
+        service_guard::notify_vector_backlog_activity();
+        Ok(outbox_id)
+    }
+
+    pub fn fetch_pending_vector_persist_outbox_work(
+        &self,
+        count: usize,
+    ) -> Result<Vec<VectorPersistOutboxWork>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let claim_token = next_vector_persist_outbox_claim_token(now_ms);
+        self.execute(&format!(
+            "UPDATE VectorPersistOutbox \
+             SET status = 'inflight', \
+                 attempts = attempts + 1, \
+                 claimed_at_ms = {}, \
+                 lease_heartbeat_at_ms = {}, \
+                 lease_owner = 'outbox', \
+                 claim_token = '{}', \
+                 last_error_reason = NULL \
+             WHERE outbox_id IN ( \
+                 SELECT outbox_id FROM VectorPersistOutbox \
+                 WHERE status = 'queued' \
+                 ORDER BY queued_at_ms, outbox_id \
+                 LIMIT {} \
+             )",
+            now_ms,
+            now_ms,
+            Self::escape_sql(&claim_token),
+            count
+        ))?;
+
+        let raw = self.query_json(&format!(
+            "SELECT outbox_id, payload_json \
+             FROM VectorPersistOutbox \
+             WHERE claim_token = '{}' \
+             ORDER BY queued_at_ms, outbox_id",
+            Self::escape_sql(&claim_token)
+        ))?;
+        if raw == "[]" || raw.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let outbox_id = row.first()?.as_str()?.to_string();
+                let payload_json = row.get(1)?.as_str()?.to_string();
+                let payload =
+                    serde_json::from_str::<VectorPersistOutboxPayload>(&payload_json).ok()?;
+                Some(VectorPersistOutboxWork { outbox_id, payload })
+            })
+            .collect())
+    }
+
+    pub fn fetch_vector_persist_outbox_counts(&self) -> Result<(usize, usize)> {
+        let queued =
+            self.query_count("SELECT count(*) FROM VectorPersistOutbox WHERE status = 'queued'")?;
+        let inflight =
+            self.query_count("SELECT count(*) FROM VectorPersistOutbox WHERE status = 'inflight'")?;
+        Ok((
+            usize::try_from(queued).unwrap_or(0),
+            usize::try_from(inflight).unwrap_or(0),
+        ))
+    }
+
+    pub fn refresh_vector_persist_outbox_leases(&self, outbox_ids: &[String]) -> Result<usize> {
+        if outbox_ids.is_empty() {
+            return Ok(0);
+        }
+        let predicates = outbox_ids
+            .iter()
+            .map(|outbox_id| format!("(outbox_id = '{}')", Self::escape_sql(outbox_id)))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let refreshed = usize::try_from(self.query_count(&format!(
+            "SELECT count(*) FROM VectorPersistOutbox \
+             WHERE status = 'inflight' \
+               AND COALESCE(lease_owner, '') = 'outbox' \
+               AND ({})",
+            predicates
+        ))?)
+        .unwrap_or(0);
+        if refreshed == 0 {
+            return Ok(0);
+        }
+        self.execute(&format!(
+            "UPDATE VectorPersistOutbox \
+             SET claimed_at_ms = {}, \
+                 lease_heartbeat_at_ms = {} \
+             WHERE status = 'inflight' \
+               AND COALESCE(lease_owner, '') = 'outbox' \
+               AND ({})",
+            now_ms, now_ms, predicates
+        ))?;
+        Ok(refreshed)
+    }
+
+    pub fn mark_vector_persist_outbox_done(&self, outbox_id: &str) -> Result<()> {
+        self.execute(&format!(
+            "DELETE FROM VectorPersistOutbox WHERE outbox_id = '{}'",
+            Self::escape_sql(outbox_id)
+        ))
+    }
+
+    pub fn mark_vector_persist_outbox_failed(&self, outbox_id: &str, reason: &str) -> Result<()> {
+        self.execute(&format!(
+            "UPDATE VectorPersistOutbox \
+             SET status = 'queued', \
+                 last_error_reason = '{}', \
+                 claim_token = NULL, \
+                 claimed_at_ms = NULL, \
+                 lease_heartbeat_at_ms = NULL, \
+                 lease_owner = NULL \
+             WHERE outbox_id = '{}'",
+            Self::escape_sql(reason),
+            Self::escape_sql(outbox_id)
+        ))?;
+        service_guard::notify_vector_backlog_activity();
+        Ok(())
+    }
+
+    pub fn recover_stale_vector_persist_outbox_inflight(
+        &self,
+        stale_before_ms: i64,
+    ) -> Result<usize> {
+        let recovered = usize::try_from(self.query_count(&format!(
+            "SELECT count(*) FROM VectorPersistOutbox \
+             WHERE status = 'inflight' \
+               AND COALESCE(lease_heartbeat_at_ms, 0) > 0 \
+               AND COALESCE(lease_heartbeat_at_ms, 0) < {}",
+            stale_before_ms
+        ))?)
+        .unwrap_or(0);
+        if recovered == 0 {
+            return Ok(0);
+        }
+        self.execute(&format!(
+            "UPDATE VectorPersistOutbox \
+             SET status = 'queued', \
+                 claim_token = NULL, \
+                 claimed_at_ms = NULL, \
+                 lease_heartbeat_at_ms = NULL, \
+                 lease_owner = NULL, \
+                 last_error_reason = 'recovered_stale_outbox_inflight' \
+             WHERE status = 'inflight' \
+               AND COALESCE(lease_heartbeat_at_ms, 0) > 0 \
+               AND COALESCE(lease_heartbeat_at_ms, 0) < {}",
+            stale_before_ms
+        ))?;
+        service_guard::notify_vector_backlog_activity();
+        Ok(recovered)
     }
 
     pub fn refresh_hourly_vectorization_rollup(
@@ -581,7 +869,7 @@ impl GraphStore {
         relative.replace('/', "::")
     }
 
-    fn build_chunk_content(path: &str, symbol: &crate::parser::Symbol, content: &str) -> String {
+    fn build_chunk_content(_path: &str, symbol: &crate::parser::Symbol, content: &str) -> String {
         let lines: Vec<&str> = content.lines().collect();
         let start = symbol.start_line.saturating_sub(1).min(lines.len());
         let end = symbol.end_line.min(lines.len()).max(start);
@@ -598,9 +886,9 @@ impl GraphStore {
             .unwrap_or_default();
 
         format!(
-            "symbol: {}\nkind: {}\nfile: {}\nlines: {}-{}\n{}\
+            "symbol: {}\nkind: {}\n{}\
 \n{}",
-            symbol.name, symbol.kind, path, symbol.start_line, symbol.end_line, docstring, snippet
+            symbol.name, symbol.kind, docstring, snippet
         )
     }
 
@@ -1247,7 +1535,9 @@ impl GraphStore {
         let now_ms = chrono::Utc::now().timestamp_millis();
         self.execute(&file_vectorization_queue_upsert_if_needed(
             file_path, now_ms,
-        ))
+        ))?;
+        service_guard::notify_vector_backlog_activity();
+        Ok(())
     }
 
     pub fn fetch_pending_file_vectorization_work(
@@ -1663,10 +1953,14 @@ impl GraphStore {
             chrono::Utc::now().timestamp_millis(),
             chrono::Utc::now().timestamp_millis(),
             predicates.replace("file_path", "path")
-        ))
+        ))?;
+        service_guard::notify_vector_backlog_activity();
+        Ok(())
     }
 
     pub fn clear_stale_inflight_file_vectorization_work(&self) -> Result<()> {
+        let recovered = self
+            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'")?;
         self.execute(
             "UPDATE FileVectorizationQueue \
              SET status = 'queued', \
@@ -1677,7 +1971,11 @@ impl GraphStore {
                  lease_owner = NULL, \
                  lease_epoch = COALESCE(lease_epoch, 0) + 1 \
              WHERE status = 'inflight'",
-        )
+        )?;
+        if recovered > 0 {
+            service_guard::notify_vector_backlog_activity();
+        }
+        Ok(())
     }
 
     pub fn recover_stale_inflight_file_vectorization_work(
@@ -1731,6 +2029,7 @@ impl GraphStore {
                AND COALESCE(lease_heartbeat_at_ms, claimed_at_ms) <= {}",
             cutoff_ms, cutoff_ms
         ))?;
+        service_guard::notify_vector_backlog_activity();
 
         Ok(recovered)
     }
@@ -1787,6 +2086,7 @@ impl GraphStore {
         }
 
         self.execute_batch(&queries)?;
+        service_guard::notify_vector_backlog_activity();
         Ok(inserted)
     }
 
@@ -2198,6 +2498,7 @@ impl GraphStore {
             &calls_nif_values,
             200,
         ));
+        let mut enqueued_vectorization = false;
         if !file_vectorization_paths.is_empty() {
             file_vectorization_paths.sort();
             file_vectorization_paths.dedup();
@@ -2205,6 +2506,7 @@ impl GraphStore {
             for path in file_vectorization_paths {
                 if vectorizable_paths.contains(&path) {
                     queries.push(file_vectorization_queue_upsert_if_needed(&path, now_ms));
+                    enqueued_vectorization = true;
                 } else {
                     queries.push(format!(
                         "DELETE FROM FileVectorizationQueue WHERE file_path = '{}';",
@@ -2214,6 +2516,9 @@ impl GraphStore {
             }
         }
         self.execute_batch(&queries)?;
+        if enqueued_vectorization {
+            service_guard::notify_vector_backlog_activity();
+        }
 
         let now_ms = chrono::Utc::now().timestamp_millis();
         let graph_ready_paths = indexed_paths
@@ -2730,6 +3035,23 @@ impl GraphStore {
         _model_id: &str,
         projection_radius: i64,
     ) -> Result<()> {
+        self.finalize_file_vectorization_success_batch_for_owner(
+            work,
+            lease_snapshots,
+            "finalize",
+            _model_id,
+            projection_radius,
+        )
+    }
+
+    pub fn finalize_file_vectorization_success_batch_for_owner(
+        &self,
+        work: &[FileVectorizationWork],
+        lease_snapshots: &[FileVectorizationLeaseSnapshot],
+        lease_owner: &str,
+        _model_id: &str,
+        projection_radius: i64,
+    ) -> Result<()> {
         if work.is_empty() {
             return Ok(());
         }
@@ -2750,10 +3072,11 @@ impl GraphStore {
             .iter()
             .map(|item| {
                 format!(
-                    "(file_path = '{}' AND claim_token = '{}' AND COALESCE(lease_epoch, 0) = {} AND COALESCE(lease_owner, '') = 'finalize')",
+                    "(file_path = '{}' AND claim_token = '{}' AND COALESCE(lease_epoch, 0) = {} AND COALESCE(lease_owner, '') = '{}')",
                     Self::escape_sql(&item.file_path),
                     Self::escape_sql(&item.claim_token),
-                    item.lease_epoch
+                    item.lease_epoch,
+                    Self::escape_sql(lease_owner)
                 )
             })
             .collect::<Vec<_>>()
@@ -2768,8 +3091,9 @@ impl GraphStore {
         .unwrap_or(0);
         if matched != lease_snapshots.len() {
             return Err(anyhow!(
-                "finalize refused: expected {} finalize-owned rows, matched {}",
+                "finalize refused: expected {} {}-owned rows, matched {}",
                 lease_snapshots.len(),
+                lease_owner,
                 matched
             ));
         }
@@ -2799,13 +3123,15 @@ impl GraphStore {
             ),
         ];
 
-        for item in work {
-            queries.push(graph_projection_queue_upsert(
-                "file",
-                &item.file_path,
-                projection_radius,
-                now_ms,
-            ));
+        if graph_embeddings_enabled() {
+            for item in work {
+                queries.push(graph_projection_queue_upsert(
+                    "file",
+                    &item.file_path,
+                    projection_radius,
+                    now_ms,
+                ));
+            }
         }
 
         self.execute_batch(&queries)?;
@@ -2984,7 +3310,8 @@ mod tests {
     use super::{
         dedup_file_batch_rows, insert_unique_relation_queries, replace_relation_queries,
         sort_and_dedup_sql_tuples, FileUpsertSource, FileVectorizationLeaseSnapshot,
-        FileVectorizationWork,
+        FileVectorizationWork, VectorBatchRun, VectorPersistOutboxPayload,
+        VectorPersistOutboxUpdate, CHUNK_EMBEDDING_MODEL_ID,
     };
     use crate::embedding_contract::{CHUNK_MODEL_ID, DIMENSION};
     use crate::parser::{ExtractionResult, Relation, Symbol};
@@ -3210,6 +3537,73 @@ mod tests {
     }
 
     #[test]
+    fn insert_file_data_batch_builds_chunk_content_without_path_or_line_metadata() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path = "/tmp/chunk_contract.rs".to_string();
+
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 42, 1)])
+            .unwrap();
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-chunk-contract".to_string(),
+                path: path.clone(),
+                content: Some(
+                    "fn chunk_contract() {\n    hydrate_context();\n    flush_ready_queue();\n}\n"
+                        .to_string(),
+                ),
+                extraction: ExtractionResult {
+                    project_code: Some("proj".to_string()),
+                    symbols: vec![Symbol {
+                        name: "chunk_contract".to_string(),
+                        kind: "function".to_string(),
+                        start_line: 1,
+                        end_line: 3,
+                        docstring: Some(
+                            "Keeps only semantic symbol context in the embedded chunk.".to_string(),
+                        ),
+                        is_entry_point: false,
+                        is_public: true,
+                        tested: false,
+                        is_nif: false,
+                        is_unsafe: false,
+                        properties: Default::default(),
+                        embedding: None,
+                    }],
+                    relations: vec![],
+                },
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace-chunk-contract".to_string(),
+                observed_cost_bytes: 1,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        let raw = store
+            .query_json(
+                "SELECT content FROM Chunk WHERE file_path = '/tmp/chunk_contract.rs' AND project_code = 'proj'",
+            )
+            .unwrap();
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let content = rows[0][0].as_str().unwrap_or_default();
+
+        assert!(content.contains("symbol: chunk_contract"), "{content}");
+        assert!(content.contains("kind: function"), "{content}");
+        assert!(
+            content
+                .contains("docstring: Keeps only semantic symbol context in the embedded chunk."),
+            "{content}"
+        );
+        assert!(content.contains("hydrate_context();"), "{content}");
+        assert!(!content.contains("file:"), "{content}");
+        assert!(!content.contains("lines:"), "{content}");
+    }
+
+    #[test]
     fn insert_file_data_batch_replay_does_not_duplicate_calls_edges() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/replay_calls.rs".to_string();
@@ -3422,6 +3816,77 @@ mod tests {
                 )
                 .unwrap(),
             2
+        );
+    }
+
+    #[test]
+    fn enqueue_vector_persist_outbox_handoff_moves_lease_owner_and_exposes_work() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) \
+                 VALUES ('/tmp/outbox_handoff.rs', 'inflight', 1, 'claim-outbox-handoff', 1, 1, 'vector', 0)",
+            )
+            .unwrap();
+
+        let payload = VectorPersistOutboxPayload {
+            updates: vec![VectorPersistOutboxUpdate {
+                chunk_id: "chunk-outbox".to_string(),
+                source_hash: "hash-outbox".to_string(),
+                vector: vec![0.1_f32, 0.2_f32],
+            }],
+            completed_works: vec![FileVectorizationWork {
+                file_path: "/tmp/outbox_handoff.rs".to_string(),
+                resumed_after_interactive_pause: false,
+            }],
+            completed_lease_snapshots: vec![FileVectorizationLeaseSnapshot {
+                file_path: "/tmp/outbox_handoff.rs".to_string(),
+                claim_token: "claim-outbox-handoff".to_string(),
+                lease_epoch: 1,
+            }],
+            batch_run: VectorBatchRun {
+                run_id: "outbox-handoff-test".to_string(),
+                started_at_ms: 1,
+                finished_at_ms: 1,
+                provider: "cpu".to_string(),
+                model_id: CHUNK_EMBEDDING_MODEL_ID.to_string(),
+                chunk_count: 1,
+                file_count: 1,
+                input_bytes: 16,
+                fetch_ms: 1,
+                embed_ms: 1,
+                db_write_ms: 0,
+                mark_done_ms: 0,
+                success: true,
+                error_reason: None,
+            },
+        };
+
+        let outbox_id = store
+            .enqueue_vector_persist_outbox_handoff(
+                &payload,
+                &[FileVectorizationLeaseSnapshot {
+                    file_path: "/tmp/outbox_handoff.rs".to_string(),
+                    claim_token: "claim-outbox-handoff".to_string(),
+                    lease_epoch: 0,
+                }],
+            )
+            .unwrap();
+
+        let pending = store.fetch_pending_vector_persist_outbox_work(1).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].outbox_id, outbox_id);
+        assert_eq!(pending[0].payload.batch_run.run_id, "outbox-handoff-test");
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue \
+                     WHERE file_path = '/tmp/outbox_handoff.rs' \
+                       AND lease_owner = 'outbox' \
+                       AND COALESCE(lease_epoch, 0) = 1"
+                )
+                .unwrap(),
+            1
         );
     }
 

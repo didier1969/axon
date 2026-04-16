@@ -950,7 +950,7 @@ impl McpServer {
 
         let status = self.axon_status(&json!({ "mode": mode.unwrap_or("brief") }))?;
         let status_data = status.get("data").cloned().unwrap_or_else(|| json!({}));
-        
+
         // Decoupled: We no longer compute anomalies inline to prevent MCP timeouts.
         // The operator must call the `anomalies` tool explicitly.
         let anomalies_data = json!({

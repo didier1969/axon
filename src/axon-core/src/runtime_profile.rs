@@ -1,3 +1,4 @@
+use crate::runtime_mode::graph_embeddings_enabled;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -139,16 +140,24 @@ pub fn recommend_embedding_lane_sizing(profile: &RuntimeProfile) -> EmbeddingLan
     let available_background_workers = profile.recommended_workers.saturating_sub(query_workers);
 
     let (mut vector_workers, mut graph_workers) = if profile.gpu_present {
-        (1usize, 0usize)
+        (
+            1usize,
+            available_background_workers.saturating_sub(1).max(1),
+        )
     } else {
-        (1usize, 0usize)
+        let vw = (available_background_workers / 2).max(1);
+        (vw, available_background_workers.saturating_sub(vw).max(1))
     };
 
     if available_background_workers <= 2 {
         vector_workers = 1;
-        graph_workers = 0;
+        graph_workers = 1;
     } else if vector_workers + graph_workers > available_background_workers {
         vector_workers = available_background_workers.max(1);
+        graph_workers = 1;
+    }
+
+    if !graph_embeddings_enabled() {
         graph_workers = 0;
     }
 
@@ -157,7 +166,7 @@ pub fn recommend_embedding_lane_sizing(profile: &RuntimeProfile) -> EmbeddingLan
         // Keep a single GPU vector worker to avoid duplicate model residency,
         // but feed that worker more aggressively now that query embeddings live on CPU
         // and the CUDA controller can clamp under live memory pressure.
-        (48, 12, 8)
+        (96, 24, 8)
     } else {
         // CPU-only hosts should stay conservative by default.
         // Runtime evidence showed that widening the background pool here
@@ -245,6 +254,7 @@ mod tests {
 
     #[test]
     fn test_embedding_lane_sizing_disables_graph_lane_on_large_cpu_hosts_by_default() {
+        std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
         let profile = RuntimeProfile {
             cpu_cores: 16,
             ram_total_gb: 31,
@@ -258,13 +268,15 @@ mod tests {
         let sizing = recommend_embedding_lane_sizing(&profile);
         assert_eq!(sizing.query_workers, 1);
         assert_eq!(sizing.vector_workers, 1);
-        assert_eq!(sizing.graph_workers, 0);
+        assert_eq!(sizing.graph_workers, 6);
         assert_eq!(sizing.chunk_batch_size, 16);
         assert_eq!(sizing.file_vectorization_batch_size, 8);
+        std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
     }
 
     #[test]
     fn test_embedding_lane_sizing_expands_when_gpu_is_available() {
+        std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
         let profile = RuntimeProfile {
             cpu_cores: 16,
             ram_total_gb: 31,
@@ -278,14 +290,16 @@ mod tests {
         let sizing = recommend_embedding_lane_sizing(&profile);
         assert_eq!(sizing.query_workers, 1);
         assert_eq!(sizing.vector_workers, 1);
-        assert_eq!(sizing.graph_workers, 0);
-        assert_eq!(sizing.chunk_batch_size, 48);
-        assert_eq!(sizing.file_vectorization_batch_size, 12);
+        assert_eq!(sizing.graph_workers, 12);
+        assert_eq!(sizing.chunk_batch_size, 96);
+        assert_eq!(sizing.file_vectorization_batch_size, 24);
         assert_eq!(sizing.graph_batch_size, 8);
+        std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
     }
 
     #[test]
     fn test_embedding_lane_sizing_prefers_batch_depth_over_gpu_worker_fanout() {
+        std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
         let profile = RuntimeProfile {
             cpu_cores: 24,
             ram_total_gb: 64,
@@ -299,13 +313,15 @@ mod tests {
         let sizing = recommend_embedding_lane_sizing(&profile);
         assert_eq!(sizing.query_workers, 1);
         assert_eq!(sizing.vector_workers, 1);
-        assert_eq!(sizing.graph_workers, 0);
-        assert_eq!(sizing.chunk_batch_size, 48);
-        assert_eq!(sizing.file_vectorization_batch_size, 12);
+        assert_eq!(sizing.graph_workers, 18);
+        assert_eq!(sizing.chunk_batch_size, 96);
+        assert_eq!(sizing.file_vectorization_batch_size, 24);
+        std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
     }
 
     #[test]
     fn test_embedding_lane_sizing_stays_small_on_constrained_hosts() {
+        std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
         let profile = RuntimeProfile {
             cpu_cores: 4,
             ram_total_gb: 8,
@@ -319,7 +335,26 @@ mod tests {
         let sizing = recommend_embedding_lane_sizing(&profile);
         assert_eq!(sizing.query_workers, 1);
         assert_eq!(sizing.vector_workers, 1);
-        assert_eq!(sizing.graph_workers, 0);
+        assert_eq!(sizing.graph_workers, 1);
         assert_eq!(sizing.chunk_batch_size, 16);
+        std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
+    }
+
+    #[test]
+    fn test_embedding_lane_sizing_disables_graph_lane_when_canonical_flag_is_off() {
+        std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "false");
+        let profile = RuntimeProfile {
+            cpu_cores: 16,
+            ram_total_gb: 31,
+            ram_budget_gb: 23,
+            ingestion_memory_budget_gb: 9,
+            gpu_present: true,
+            recommended_workers: 14,
+            max_blocking_threads: 11,
+            queue_capacity: 200_000,
+        };
+        let sizing = recommend_embedding_lane_sizing(&profile);
+        assert_eq!(sizing.graph_workers, 0);
+        std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
     }
 }

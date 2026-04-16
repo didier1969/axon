@@ -967,12 +967,12 @@ graph TD;
                 let desc = &r[3];
                 let status = &r[4];
                 let meta = r.get(5).cloned().unwrap_or_default();
-                
+
                 if n_type != &current_type {
                     markdown.push_str(&format!("## Entités : {}\n", n_type));
                     current_type = n_type.clone();
                 }
-                
+
                 markdown.push_str(&format!("### {} - {}\n", n_id, title));
                 if !desc.is_empty() {
                     markdown.push_str(&format!("**Description:** {}\n", desc));

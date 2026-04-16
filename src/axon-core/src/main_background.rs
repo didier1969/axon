@@ -9,11 +9,7 @@ use std::time::{Duration, Instant};
 
 use axon_core::embedder::{
     apply_runtime_embedding_lane_adjustment, current_embedding_provider_diagnostics,
-    current_gpu_memory_snapshot, current_gpu_utilization_snapshot,
-    embedding_lane_config_from_env,
-};
-use axon_core::vector_control::{
-    current_vector_batch_controller_diagnostics, current_vector_drain_state,
+    current_gpu_memory_snapshot, current_gpu_utilization_snapshot, embedding_lane_config_from_env,
 };
 use axon_core::file_ingress_guard::{guard_metrics_snapshot, SharedFileIngressGuard};
 use axon_core::fs_watcher::{self, HOT_PRIORITY};
@@ -34,6 +30,9 @@ use axon_core::runtime_observability::{
 use axon_core::scanner::Scanner;
 use axon_core::service_guard;
 use axon_core::service_guard::{InteractivePriority, ServicePressure};
+use axon_core::vector_control::{
+    current_vector_batch_controller_diagnostics, current_vector_drain_state,
+};
 use axon_core::watcher_probe;
 use notify_debouncer_full::notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
@@ -715,12 +714,23 @@ fn resolve_governor_state(
     let heartbeat_stalled_without_inflight =
         !embed_inflight && worker_heartbeat_age_ms > worker_heartbeat_stale_ms;
     let embed_stalled = embed_inflight && embed_inflight_age_ms > embed_stall_ms;
+    let interactive_pressure_active = signals.interactive_requests_in_flight > 0
+        || signals.interactive_priority != "background_normal";
+    let severe_vram_pressure = signals.vram_used_mb
+        > policy
+            .max_vram_used_mb
+            .saturating_add(policy.max_vram_used_mb / 10)
+            .max(policy.max_vram_used_mb);
+    let severe_cpu_pressure =
+        interactive_pressure_active && signals.cpu_usage_ratio > policy.max_cpu_ratio;
+    let severe_mcp_pressure =
+        interactive_pressure_active && signals.mcp_latency_recent_ms > policy.max_mcp_p95_ms;
     if signals.vector_workers_active_current == 0
         || heartbeat_stalled_without_inflight
         || embed_stalled
-        || signals.mcp_latency_recent_ms > policy.max_mcp_p95_ms
-        || signals.vram_used_mb > policy.max_vram_used_mb
-        || signals.cpu_usage_ratio > policy.max_cpu_ratio
+        || severe_mcp_pressure
+        || severe_vram_pressure
+        || severe_cpu_pressure
         || signals.ram_available_ratio < policy.min_ram_available_ratio
     {
         return GovernorState::Freeze;
@@ -728,9 +738,10 @@ fn resolve_governor_state(
     if reward.is_some_and(|value| value.penalty_liveness > 0.0) {
         return GovernorState::Freeze;
     }
-    if consecutive_zero_progress_windows >= 3
+    if consecutive_zero_progress_windows >= 4
         && signals.file_vectorization_queue_depth >= 32
         && signals.ready_queue_depth_current == 0
+        && signals.prepare_inflight_current == 0
     {
         return GovernorState::Freeze;
     }
@@ -833,13 +844,23 @@ mod governor_tests {
             gpu_memory_utilization_ratio: 0.2,
             file_vectorization_queue_depth: 32,
             graph_projection_queue_depth: 0,
+            canonical_vector_backlog_depth: 32,
             ready_queue_depth_current: 1,
             ready_queue_depth_max: 1,
+            active_claimed_current: 0,
+            prepare_claimed_current: 0,
+            ready_claimed_current: 0,
             persist_queue_depth_current: 0,
             persist_queue_depth_max: 0,
+            persist_claimed_current: 0,
+            prepare_inflight_current: 0,
+            prepare_inflight_max: 0,
             gpu_idle_wait_ms_total: 0,
             prepare_queue_wait_ms_total: 0,
+            prepare_reply_wait_ms_total: 0,
             persist_queue_wait_ms_total: 0,
+            oldest_ready_batch_age_ms_current: 0,
+            oldest_ready_batch_age_ms_max: 0,
             latency_recent_fetch_p95_ms: 0,
             latency_recent_embed_p95_ms: 0,
             latency_recent_db_write_p95_ms: 0,
