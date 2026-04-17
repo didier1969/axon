@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exhaustive MCP validation runner (non-intrusive by default)."""
+"""Exhaustive MCP validation runner with explicit public/expert surface checks."""
 
 from __future__ import annotations
 
@@ -27,6 +27,35 @@ WRITE_CAPABLE_TOOLS = {
     "restore_soll",
     "resume_vectorization",
 }
+CORE_TOOL_NAMES = {
+    "status",
+    "project_status",
+    "query",
+    "inspect",
+    "retrieve_context",
+    "why",
+    "path",
+    "impact",
+    "anomalies",
+    "change_safety",
+    "conception_view",
+    "snapshot_history",
+    "snapshot_diff",
+    "fs_read",
+    "axon_pre_flight_check",
+    "axon_commit_work",
+    "soll_query_context",
+    "soll_work_plan",
+    "soll_validate",
+    "soll_export",
+    "soll_verify_requirements",
+    "soll_manager",
+    "soll_apply_plan",
+    "soll_commit_revision",
+    "soll_rollback_revision",
+    "axon_init_project",
+    "axon_apply_guidelines",
+}
 
 
 @dataclass
@@ -49,23 +78,23 @@ class ScenarioStep:
     fail_if_contains: list[str]
 
 
-HIDDEN_TOOL_SCENARIOS: list[ScenarioStep] = [
+CORE_RETRIEVE_CONTEXT_SCENARIOS: list[ScenarioStep] = [
     ScenarioStep(
-        name="hidden.retrieve_context.exact",
+        name="core.retrieve_context.exact",
         tool="retrieve_context",
         args={},
         expect_contains=["Context Retrieval"],
         fail_if_contains=[],
     ),
     ScenarioStep(
-        name="hidden.retrieve_context.wiring",
+        name="core.retrieve_context.wiring",
         tool="retrieve_context",
         args={},
         expect_contains=["Context Retrieval"],
         fail_if_contains=[],
     ),
     ScenarioStep(
-        name="hidden.retrieve_context.rationale",
+        name="core.retrieve_context.rationale",
         tool="retrieve_context",
         args={},
         expect_contains=["Context Retrieval"],
@@ -637,9 +666,9 @@ def run_hidden_tool_probes(
     symbol_probe: str,
 ) -> list[ToolResult]:
     probes = [
-        ("hidden.retrieve_context.exact", {"question": symbol_probe, "project": project, "token_budget": 900}),
-        ("hidden.retrieve_context.wiring", {"question": f"Where is {symbol_probe} wired?", "project": project, "token_budget": 900}),
-        ("hidden.retrieve_context.rationale", {"question": f"Why does {symbol_probe} exist?", "project": project, "token_budget": 900}),
+        ("core.retrieve_context.exact", {"question": symbol_probe, "project": project, "token_budget": 900}),
+        ("core.retrieve_context.wiring", {"question": f"Where is {symbol_probe} wired?", "project": project, "token_budget": 900}),
+        ("core.retrieve_context.rationale", {"question": f"Why does {symbol_probe} exist?", "project": project, "token_budget": 900}),
     ]
     results: list[ToolResult] = []
     for offset, (name, request_args) in enumerate(probes, start=9800):
@@ -673,11 +702,11 @@ def run_hidden_tool_probes(
             packet = data.get("packet", {}) if isinstance(data, dict) else {}
             if status == "ok":
                 if not isinstance(planner, dict) or not isinstance(packet, dict):
-                    status, note = "fail", "retrieve_context hidden probe missing planner/packet"
+                    status, note = "fail", "retrieve_context probe missing planner/packet"
                 elif not planner.get("route"):
-                    status, note = "fail", "retrieve_context hidden probe missing planner route"
+                    status, note = "fail", "retrieve_context probe missing planner route"
                 elif not isinstance(packet.get("direct_evidence"), list):
-                    status, note = "fail", "retrieve_context hidden probe missing direct_evidence array"
+                    status, note = "fail", "retrieve_context probe missing direct_evidence array"
                 else:
                     note = f"{note}; route={planner.get('route')}"
             results.append(
@@ -697,7 +726,7 @@ def run_hidden_tool_probes(
                     name=name,
                     status="fail",
                     duration_ms=int((time.time() - t0) * 1000),
-                    note=f"hidden retrieve_context probe failed: {type(exc).__name__}: {exc}",
+                    note=f"retrieve_context probe failed: {type(exc).__name__}: {exc}",
                     request_args=request_args,
                     response_excerpt=f"{type(exc).__name__}: {exc}",
                     response_size=0,
@@ -742,25 +771,57 @@ def run(args: argparse.Namespace) -> int:
         print(f"FATAL: initialize returned error: {init_resp['error']}")
         return 2
 
-    # 2) Tools catalog
+    # 2) Tools catalogs
     try:
-        tools_resp = rpc_call(
+        public_tools_resp = rpc_call(
             args.url,
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            args.timeout,
+        )
+        internal_tools_resp = rpc_call(
+            args.url,
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/list",
+                "params": {"include_internal": True},
+            },
             args.timeout,
         )
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
         print(f"FATAL: tools/list failed: {type(e).__name__}: {e}")
         return 2
 
-    tools = (
-        tools_resp.get("result", {}).get("tools", [])
-        if isinstance(tools_resp.get("result"), dict)
+    public_tools = (
+        public_tools_resp.get("result", {}).get("tools", [])
+        if isinstance(public_tools_resp.get("result"), dict)
         else []
     )
-    if not isinstance(tools, list) or not tools:
+    internal_tools = (
+        internal_tools_resp.get("result", {}).get("tools", [])
+        if isinstance(internal_tools_resp.get("result"), dict)
+        else []
+    )
+    if not isinstance(public_tools, list) or not public_tools:
         print("FATAL: tools/list returned no tools")
         return 2
+    if not isinstance(internal_tools, list) or not internal_tools:
+        print("FATAL: tools/list(include_internal=true) returned no tools")
+        return 2
+
+    public_names = {
+        str(tool.get("name", "")).strip()
+        for tool in public_tools
+        if isinstance(tool, dict) and str(tool.get("name", "")).strip()
+    }
+    expert_tools = [
+        tool
+        for tool in internal_tools
+        if isinstance(tool, dict)
+        and str(tool.get("name", "")).strip()
+        and str(tool.get("name", "")).strip() not in public_names
+        and str(tool.get("name", "")).strip() not in CORE_TOOL_NAMES
+    ]
 
     symbol_probe = args.symbol.strip() if isinstance(args.symbol, str) else ""
     if not symbol_probe:
@@ -769,7 +830,7 @@ def run(args: argparse.Namespace) -> int:
 
     tool_results: list[ToolResult] = []
     validation_state: dict[str, Any] = {}
-    for i, tool in enumerate(tools, start=100):
+    for i, tool in enumerate(public_tools, start=100):
         name = str(tool.get("name", "")).strip()
         schema = tool.get("inputSchema", {}) if isinstance(tool, dict) else {}
         if not name:
@@ -823,13 +884,65 @@ def run(args: argparse.Namespace) -> int:
             )
         )
 
+    for i, tool in enumerate(expert_tools, start=500):
+        name = str(tool.get("name", "")).strip()
+        schema = tool.get("inputSchema", {}) if isinstance(tool, dict) else {}
+        if not name:
+            continue
+        if (not args.allow_mutations) and name in WRITE_CAPABLE_TOOLS:
+            tool_results.append(
+                ToolResult(
+                    name=f"expert.{name}",
+                    status="skip",
+                    duration_ms=0,
+                    note="skipped write-capable expert tool (enable --allow-mutations to execute)",
+                    request_args={},
+                    response_excerpt="",
+                    response_size=0,
+                )
+            )
+            continue
+        call_args = build_args(
+            name,
+            schema if isinstance(schema, dict) else {},
+            project,
+            args.query,
+            symbol_probe,
+            validation_state,
+        )
+        payload = {
+            "jsonrpc": "2.0",
+            "id": i,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": call_args},
+        }
+        t0 = time.time()
+        try:
+            resp = rpc_call(args.url, payload, args.timeout)
+            status, note = evaluate_tool_result(name, resp, args.url, args.timeout)
+            update_validation_state(validation_state, name, call_args, resp)
+            excerpt, response_size = summarize_response(resp, args.excerpt)
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
+            status, note = "fail", f"{type(e).__name__}: {e}"
+            excerpt, response_size = f"{type(e).__name__}: {e}", 0
+        dt = int((time.time() - t0) * 1000)
+        tool_results.append(
+            ToolResult(
+                name=f"expert.{name}",
+                status=status,
+                duration_ms=dt,
+                note=note,
+                request_args=call_args,
+                response_excerpt=excerpt,
+                response_size=response_size,
+            )
+        )
+
     if scenario_steps:
         tool_results.extend(
             run_query_sequence_scenario(args.url, args.timeout, args.excerpt, scenario_steps)
         )
-    tool_results.extend(
-        run_hidden_tool_probes(args.url, args.timeout, args.excerpt, project, symbol_probe)
-    )
+    tool_results.extend(run_hidden_tool_probes(args.url, args.timeout, args.excerpt, project, symbol_probe))
 
     ok = sum(1 for r in tool_results if r.status == "ok")
     warn = sum(1 for r in tool_results if r.status == "warn")
@@ -843,7 +956,10 @@ def run(args: argparse.Namespace) -> int:
     if args.scenario_file:
         print(f"Scenario: {args.scenario_file}")
     print(f"Symbol Probe: {symbol_probe}")
-    print(f"Tools total: {len(tool_results)} | ok={ok} warn={warn} fail={fail} skip={skip}")
+    print(
+        f"Tools total: {len(tool_results)} | public={len(public_tools)} "
+        f"expert={len(expert_tools)} | ok={ok} warn={warn} fail={fail} skip={skip}"
+    )
     transport_health = "pass" if fail == 0 else "degraded"
     semantic_quality = "pass" if (fail == 0 and warn == 0) else ("warn" if fail == 0 else "degraded")
     print(f"Health gates: transport_health={transport_health} semantic_quality={semantic_quality}")

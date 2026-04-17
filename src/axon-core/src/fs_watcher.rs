@@ -368,7 +368,17 @@ fn stage_single_file_delta(
         .unwrap_or(0);
 
     let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let project_code = scanner.project_code_for_path(&absolute);
+    let project_code = match scanner.project_code_for_path(store, &absolute) {
+        Ok(project_code) => project_code,
+        Err(err) => {
+            watcher_probe::record(
+                "watcher.filtered",
+                Some(&absolute),
+                format!("reason=unregistered_project_path error={}", err),
+            );
+            return Ok(false);
+        }
+    };
 
     if let Some(shared_guard) = guard {
         let decision = shared_guard
@@ -552,7 +562,17 @@ fn enqueue_single_file_delta(
         .unwrap_or(0);
 
     let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let project_code = scanner.project_code_for_path(&absolute);
+    let project_code = match scanner.project_code.trim() {
+        "" => {
+            watcher_probe::record(
+                "watcher.filtered",
+                Some(&absolute),
+                "reason=missing_explicit_project_context_for_buffered_delta",
+            );
+            return Ok(0);
+        }
+        explicit => explicit.to_string(),
+    };
 
     if let Some(shared_guard) = guard {
         let decision = shared_guard

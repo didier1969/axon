@@ -174,3 +174,149 @@ pub fn resolve_canonical_project_identity(project_code: &str) -> Result<Canonica
 pub fn is_valid_project_code(value: &str) -> bool {
     value.len() == 3 && value.chars().all(|ch| ch.is_ascii_alphanumeric())
 }
+
+fn canonicalize_lossy(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub fn registered_project_identities(
+    graph: &crate::graph::GraphStore,
+) -> Result<Vec<CanonicalProjectIdentity>> {
+    let raw = graph.query_json(
+        "SELECT COALESCE(project_code, ''), COALESCE(project_name, ''), COALESCE(project_path, '') \
+         FROM soll.ProjectCodeRegistry \
+         WHERE project_code NOT IN ('', 'PRO')",
+    )?;
+    let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+    let mut identities = Vec::new();
+
+    for row in rows {
+        if row.len() < 3 {
+            continue;
+        }
+
+        let code = row[0].trim().to_ascii_uppercase();
+        let project_name = row[1].trim().to_string();
+        let project_path = row[2].trim().to_string();
+        if !is_valid_project_code(&code) || project_path.is_empty() {
+            continue;
+        }
+
+        let project_path_buf = canonicalize_lossy(Path::new(&project_path));
+        let meta_path = project_path_buf.join(".axon").join("meta.json");
+        let name = (!project_name.is_empty())
+            .then_some(project_name)
+            .or_else(|| {
+                project_path_buf
+                    .file_name()
+                    .map(|value| value.to_string_lossy().trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
+
+        identities.push(CanonicalProjectIdentity {
+            name,
+            code,
+            project_path: project_path_buf,
+            meta_path,
+        });
+    }
+
+    identities.sort_by(|left, right| left.code.cmp(&right.code));
+    Ok(identities)
+}
+
+pub fn resolve_registered_project_identity(
+    graph: &crate::graph::GraphStore,
+    project_code: &str,
+) -> Result<CanonicalProjectIdentity> {
+    let requested = project_code.trim().to_ascii_uppercase();
+    if !is_valid_project_code(&requested) {
+        return Err(anyhow!(
+            "Code projet canonique invalide `{}`: exactement 3 caractères alphanumériques attendus",
+            project_code.trim()
+        ));
+    }
+
+    registered_project_identities(graph)?
+        .into_iter()
+        .find(|identity| identity.code == requested)
+        .ok_or_else(|| {
+            anyhow!(
+                "Projet canonique `{}` introuvable dans soll.ProjectCodeRegistry",
+                requested
+            )
+        })
+}
+
+pub fn resolve_registered_project_identity_for_path(
+    graph: &crate::graph::GraphStore,
+    path: &Path,
+) -> Result<CanonicalProjectIdentity> {
+    let candidate = canonicalize_lossy(path);
+    registered_project_identities(graph)?
+        .into_iter()
+        .filter(|identity| candidate.starts_with(&identity.project_path))
+        .max_by_key(|identity| identity.project_path.as_os_str().len())
+        .ok_or_else(|| {
+            anyhow!(
+                "Aucun projet canonique enregistré pour le chemin `{}`",
+                candidate.display()
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_valid_project_code, resolve_canonical_project_identity,
+        resolve_registered_project_identity, resolve_registered_project_identity_for_path,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn canonical_project_code_must_have_three_alphanumeric_characters() {
+        assert!(is_valid_project_code("AXO"));
+        assert!(is_valid_project_code("BK1"));
+        assert!(!is_valid_project_code("axon"));
+        assert!(!is_valid_project_code("AX"));
+        assert!(!is_valid_project_code("A-O"));
+    }
+
+    #[test]
+    fn repo_meta_can_resolve_current_project_identity() {
+        let identity = resolve_canonical_project_identity("AXO").unwrap();
+        assert_eq!(identity.code, "AXO");
+        assert_eq!(identity.name.as_deref(), Some("axon"));
+        assert!(identity.meta_path.ends_with(".axon/meta.json"));
+    }
+
+    #[test]
+    fn registered_project_registry_can_resolve_code_and_path() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+
+        let by_code = resolve_registered_project_identity(&store, "BKS").unwrap();
+        assert_eq!(by_code.code, "BKS");
+        assert_eq!(by_code.name.as_deref(), Some("BookingSystem"));
+
+        let by_path = resolve_registered_project_identity_for_path(
+            &store,
+            Path::new("/home/dstadel/projects/BookingSystem/lib/app.ex"),
+        )
+        .unwrap();
+        assert_eq!(by_path.code, "BKS");
+    }
+
+    #[test]
+    fn unregistered_path_is_rejected() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let error = resolve_registered_project_identity_for_path(
+            &store,
+            Path::new("/tmp/axon-unregistered-project/main.rs"),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Aucun projet canonique enregistré"));
+    }
+}

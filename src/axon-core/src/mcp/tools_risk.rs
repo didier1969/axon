@@ -1,11 +1,52 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Mutex, OnceLock};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
 
+#[allow(dead_code)]
+type ImpactCache = BTreeMap<String, (i64, Value)>;
+
+#[allow(dead_code)]
+static IMPACT_CACHE: OnceLock<Mutex<ImpactCache>> = OnceLock::new();
+
+#[allow(dead_code)]
+const IMPACT_CACHE_TTL_MS: i64 = 60_000;
+
 impl McpServer {
+    #[cfg(not(test))]
+    fn impact_cache() -> &'static Mutex<ImpactCache> {
+        IMPACT_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+    }
+
+    #[cfg(not(test))]
+    fn read_impact_cache(key: &str, now_ms: i64) -> Option<Value> {
+        let guard = Self::impact_cache().lock().ok()?;
+        let (stored_at, value) = guard.get(key)?;
+        if now_ms.saturating_sub(*stored_at) > IMPACT_CACHE_TTL_MS {
+            return None;
+        }
+        Some(value.clone())
+    }
+
+    #[cfg(test)]
+    fn read_impact_cache(_key: &str, _now_ms: i64) -> Option<Value> {
+        None
+    }
+
+    #[cfg(not(test))]
+    fn write_impact_cache(key: String, now_ms: i64, value: &Value) {
+        if let Ok(mut guard) = Self::impact_cache().lock() {
+            guard.insert(key, (now_ms, value.clone()));
+        }
+    }
+
+    #[cfg(test)]
+    fn write_impact_cache(_key: String, _now_ms: i64, _value: &Value) {}
+
     fn resolve_scoped_symbol_id(&self, symbol: &str, project: Option<&str>) -> Option<String> {
         self.resolve_scoped_symbol_id_canonical(symbol, project)
     }
@@ -48,11 +89,60 @@ impl McpServer {
         let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
         let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        let cache_key = format!(
+            "{}|{}|{}|{}",
+            project.unwrap_or("*"),
+            symbol,
+            depth,
+            mode.unwrap_or("brief")
+        );
+        if let Some(cached) = Self::read_impact_cache(&cache_key, now_ms) {
+            return Some(cached);
+        }
         let Some(target_id) = self.resolve_scoped_symbol_id(symbol, project) else {
             return self.axon_impact_without_calls(symbol, project, depth);
         };
 
-        let query = format!(
+        let query = if let Some(project_code) = project {
+            let escaped_project = project_code.replace('\'', "''");
+            format!(
+                "WITH RECURSIVE bridge_edges AS (
+                    SELECT s1.id AS source_id, s2.id AS target_id
+                    FROM Symbol s1
+                    JOIN Symbol s2 ON s1.name = s2.name AND s1.id <> s2.id
+                    WHERE s1.project_code = '{project}'
+                      AND s2.project_code = '{project}'
+                      AND (COALESCE(s1.is_nif, FALSE) = TRUE OR COALESCE(s2.is_nif, FALSE) = TRUE)
+                ),
+                all_edges AS (
+                    SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS WHERE project_code = '{project}'
+                    UNION ALL
+                    SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF WHERE project_code = '{project}'
+                    UNION ALL
+                    SELECT source_id, target_id, 'bridge_name' AS edge_type FROM bridge_edges
+                ),
+                traverse(caller, callee, depth, edge_type) AS (
+                    SELECT source_id, target_id, 1 as depth, edge_type FROM all_edges WHERE target_id = $target_id
+                    UNION ALL
+                    SELECT c.source_id, c.target_id, t.depth + 1, c.edge_type
+                    FROM all_edges c JOIN traverse t ON c.target_id = t.caller
+                    WHERE t.depth < {depth}
+                )
+                SELECT t.caller, t.edge_type, COALESCE(f.path, 'Unknown') AS origin, s.name, s.kind
+                FROM traverse t
+                JOIN Symbol s ON t.caller = s.id
+                LEFT JOIN CONTAINS con ON s.id = con.target_id AND con.project_code = '{project}'
+                LEFT JOIN File f ON f.path = con.source_id",
+                project = escaped_project,
+                depth = depth
+            )
+        } else {
+            format!(
             "WITH RECURSIVE bridge_edges AS (
                 SELECT s1.id AS source_id, s2.id AS target_id
                 FROM Symbol s1
@@ -73,57 +163,87 @@ impl McpServer {
                 FROM all_edges c JOIN traverse t ON c.target_id = t.caller
                 WHERE t.depth < {}
             )
-            SELECT DISTINCT COALESCE(f.path, 'Unknown') AS origin, s.name, s.kind
+            SELECT t.caller, t.edge_type, COALESCE(f.path, 'Unknown') AS origin, s.name, s.kind
             FROM traverse t
             JOIN Symbol s ON t.caller = s.id
             LEFT JOIN CONTAINS con ON s.id = con.target_id
             LEFT JOIN File f ON f.path = con.source_id",
             depth
-        );
+        )};
         let params = json!({ "target_id": target_id });
 
         match self.graph_store.query_json_param(&query, &params) {
             Ok(res) => {
                 let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
-                let mut table = if rows.len() > 15 {
-                    format!("_Le rapport de code a été agrégé car {} symboles sont impactés. Seuls les impacts architecturaux majeurs sont détaillés ci-dessous._
+                let mut impact_rows = BTreeMap::<String, (String, String, String)>::new();
+                let mut impacted_symbol_ids = BTreeSet::<String>::new();
+                let mut impacted_symbol_names = BTreeSet::<String>::new();
+                let mut direct_edges = 0_i64;
+                let mut nif_edges = 0_i64;
+                let mut inferred_edges = 0_i64;
 
-", rows.len())
+                for row in &rows {
+                    let caller_id = row.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let edge_type = row.get(1).and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let origin = row.get(2).and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
+                    let name = row.get(3).and_then(|v| v.as_str()).unwrap_or("-").to_string();
+                    let kind = row.get(4).and_then(|v| v.as_str()).unwrap_or("-").to_string();
+
+                    if !caller_id.is_empty() {
+                        impacted_symbol_ids.insert(caller_id.clone());
+                        impact_rows
+                            .entry(caller_id)
+                            .or_insert_with(|| (origin, name.clone(), kind));
+                    }
+                    if !name.is_empty() {
+                        impacted_symbol_names.insert(name);
+                    }
+                    match edge_type {
+                        "calls" => direct_edges += 1,
+                        "calls_nif" => nif_edges += 1,
+                        "bridge_name" => inferred_edges += 1,
+                        _ => {}
+                    }
+                }
+
+                let impact_radius = impacted_symbol_ids.len() as i64;
+                if rows.is_empty() && impact_radius == 0 {
+                    return self.axon_impact_without_calls(symbol, project, depth);
+                }
+
+                let display_rows = impact_rows
+                    .values()
+                    .map(|(origin, name, kind)| json!([origin, name, kind]))
+                    .collect::<Vec<_>>();
+                let display_raw =
+                    serde_json::to_string(&display_rows).unwrap_or_else(|_| "[]".to_string());
+                let mut table = if display_rows.len() > 15 {
+                    format!(
+                        "_Le rapport de code a été agrégé car {} symboles sont impactés. Seuls les impacts architecturaux majeurs sont détaillés ci-dessous._\n\n",
+                        display_rows.len()
+                    )
                 } else {
-                    format_table_from_json(&res, &["Fichier / Projet", "Symbole Impacté", "Type"])
+                    format_table_from_json(&display_raw, &["Fichier / Projet", "Symbole Impacté", "Type"])
                 };
 
+                impacted_symbol_ids.insert(target_id.clone());
+                impacted_symbol_names.insert(symbol.to_string());
+                let ids_sql = impacted_symbol_ids
+                    .iter()
+                    .map(|id| format!("'{}'", id.replace('\'', "''")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let names_sql = impacted_symbol_names
+                    .iter()
+                    .map(|name| format!("'{}'", name.replace('\'', "''")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let soll_query = format!(
-                    "WITH RECURSIVE bridge_edges AS (
-                        SELECT s1.id AS source_id, s2.id AS target_id
-                        FROM Symbol s1
-                        JOIN Symbol s2 ON s1.name = s2.name AND s1.id <> s2.id
-                        WHERE (COALESCE(s1.is_nif, FALSE) = TRUE OR COALESCE(s2.is_nif, FALSE) = TRUE)
-                    ),
-                    all_edges AS (
-                        SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
-                        UNION ALL
-                        SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
-                        UNION ALL
-                        SELECT source_id, target_id, 'bridge_name' AS edge_type FROM bridge_edges
-                    ),
-                    code_traverse(caller, callee, depth) AS (
-                        SELECT source_id, target_id, 1 as depth FROM all_edges WHERE target_id = $target_id
-                        UNION ALL
-                        SELECT c.source_id, c.target_id, t.depth + 1
-                        FROM all_edges c JOIN code_traverse t ON c.target_id = t.caller
-                        WHERE t.depth < {code_depth}
-                    ),
-                    impacted_symbols AS (
-                        SELECT caller AS id FROM code_traverse
-                        UNION SELECT $target_id
-                    ),
-                    soll_entry_points AS (
-                        SELECT t.soll_entity_id as id
+                    "WITH RECURSIVE soll_entry_points AS (
+                        SELECT DISTINCT t.soll_entity_id as id
                         FROM soll.Traceability t
-                        JOIN Symbol s ON s.name = t.artifact_ref
-                        JOIN impacted_symbols i ON i.id = s.id
                         WHERE t.artifact_type = 'Symbol'
+                          AND (t.artifact_ref IN ({ids_sql}) OR t.artifact_ref IN ({names_sql}))
                     ),
                     soll_traverse(id, depth) AS (
                         SELECT id, 1 as depth FROM soll_entry_points
@@ -136,16 +256,13 @@ impl McpServer {
                     SELECT DISTINCT n.id, n.type, n.title
                     FROM soll_traverse st
                     JOIN soll.Node n ON st.id = n.id
-                    ORDER BY n.type DESC, n.id",
-                    code_depth = depth
+                    ORDER BY n.type DESC, n.id"
                 );
-
                 let soll_raw = self
                     .graph_store
-                    .query_json_param(&soll_query, &params)
+                    .query_json(&soll_query)
                     .unwrap_or_else(|_| "[]".to_string());
-                let soll_rows: Vec<Vec<Value>> =
-                    serde_json::from_str(&soll_raw).unwrap_or_default();
+                let soll_rows: Vec<Vec<Value>> = serde_json::from_str(&soll_raw).unwrap_or_default();
 
                 if !soll_rows.is_empty() {
                     table.push_str("\n### 🏛️ SOLL Impact (Architecture Compromise)\n\n| Entité | Type | Titre |\n| --- | --- | --- |\n");
@@ -158,80 +275,6 @@ impl McpServer {
                     table.push('\n');
                 }
 
-                let count_query = format!(
-                    "WITH RECURSIVE bridge_edges AS (
-                        SELECT s1.id AS source_id, s2.id AS target_id
-                        FROM Symbol s1
-                        JOIN Symbol s2 ON s1.name = s2.name AND s1.id <> s2.id
-                        WHERE (COALESCE(s1.is_nif, FALSE) = TRUE OR COALESCE(s2.is_nif, FALSE) = TRUE)
-                    ),
-                    all_edges AS (
-                        SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
-                        UNION ALL
-                        SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
-                        UNION ALL
-                        SELECT source_id, target_id, 'bridge_name' AS edge_type FROM bridge_edges
-                    ),
-                    traverse(caller, callee, depth, edge_type) AS (
-                        SELECT source_id, target_id, 1 as depth, edge_type FROM all_edges WHERE target_id = $target_id
-                        UNION ALL
-                        SELECT c.source_id, c.target_id, t.depth + 1, c.edge_type
-                        FROM all_edges c JOIN traverse t ON c.target_id = t.caller
-                        WHERE t.depth < {}
-                    )
-                    SELECT count(DISTINCT caller) FROM traverse",
-                    depth
-                );
-                let confidence_query = format!(
-                    "WITH RECURSIVE bridge_edges AS (
-                        SELECT s1.id AS source_id, s2.id AS target_id
-                        FROM Symbol s1
-                        JOIN Symbol s2 ON s1.name = s2.name AND s1.id <> s2.id
-                        WHERE (COALESCE(s1.is_nif, FALSE) = TRUE OR COALESCE(s2.is_nif, FALSE) = TRUE)
-                    ),
-                    all_edges AS (
-                        SELECT source_id, target_id, 'calls' AS edge_type FROM CALLS
-                        UNION ALL
-                        SELECT source_id, target_id, 'calls_nif' AS edge_type FROM CALLS_NIF
-                        UNION ALL
-                        SELECT source_id, target_id, 'bridge_name' AS edge_type FROM bridge_edges
-                    ),
-                    traverse(caller, callee, depth, edge_type) AS (
-                        SELECT source_id, target_id, 1 as depth, edge_type FROM all_edges WHERE target_id = $target_id
-                        UNION ALL
-                        SELECT c.source_id, c.target_id, t.depth + 1, c.edge_type
-                        FROM all_edges c JOIN traverse t ON c.target_id = t.caller
-                        WHERE t.depth < {}
-                    )
-                    SELECT edge_type, count(*) FROM traverse GROUP BY 1 ORDER BY 2 DESC",
-                    depth
-                );
-                let impact_radius = self
-                    .graph_store
-                    .query_count_param(&count_query, &params)
-                    .unwrap_or(0);
-                let confidence_raw = self
-                    .graph_store
-                    .query_json_param(&confidence_query, &params)
-                    .unwrap_or_else(|_| "[]".to_string());
-                let confidence_rows: Vec<Vec<Value>> =
-                    serde_json::from_str(&confidence_raw).unwrap_or_default();
-                let mut direct_edges = 0_i64;
-                let mut nif_edges = 0_i64;
-                let mut inferred_edges = 0_i64;
-                for row in confidence_rows {
-                    let edge_type = row.first().and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let count = row
-                        .get(1)
-                        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|x| x as i64)))
-                        .unwrap_or(0);
-                    match edge_type {
-                        "calls" => direct_edges += count,
-                        "calls_nif" => nif_edges += count,
-                        "bridge_name" => inferred_edges += count,
-                        _ => {}
-                    }
-                }
                 let confidence_label = if direct_edges + nif_edges > 0 {
                     "high"
                 } else if inferred_edges > 0 {
@@ -239,10 +282,6 @@ impl McpServer {
                 } else {
                     "low"
                 };
-
-                if rows.is_empty() && impact_radius == 0 {
-                    return self.axon_impact_without_calls(symbol, project, depth);
-                }
 
                 let mut evidence = String::new();
                 if let Some(note) = self.project_scope_truth_note(project) {
@@ -264,8 +303,7 @@ impl McpServer {
                     confidence_label, direct_edges, nif_edges, inferred_edges
                 ));
                 evidence.push_str(&table);
-                if let Some(section) =
-                    self.build_local_projection_section(symbol, &target_id, depth)
+                if let Some(section) = self.build_local_projection_section(symbol, &target_id, depth)
                 {
                     evidence.push_str(&section);
                 }
@@ -288,7 +326,9 @@ impl McpServer {
                     )
                 );
 
-                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                let response = json!({ "content": [{ "type": "text", "text": report }] });
+                Self::write_impact_cache(cache_key, now_ms, &response);
+                Some(response)
             }
             Err(e) => Some(
                 json!({ "content": [{ "type": "text", "text": format!("Impact Analysis Error: {}", e) }], "isError": true }),
@@ -353,11 +393,6 @@ impl McpServer {
             .graph_store
             .query_count("SELECT (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)")
             .unwrap_or(0);
-
-        println!(
-            "axon_impact_without_calls: calls_count={} in DB {:?}",
-            calls_count, self.graph_store.db_path
-        );
         if calls_count > 0 {
             return Some(json!({
                 "content": [{

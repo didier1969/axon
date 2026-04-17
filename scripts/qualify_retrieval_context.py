@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic qualification for the hidden retrieve_context MCP surface."""
+"""Deterministic qualification for the public retrieve_context MCP surface."""
 
 from __future__ import annotations
 

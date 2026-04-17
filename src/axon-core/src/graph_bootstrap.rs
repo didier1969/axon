@@ -535,14 +535,14 @@ impl GraphStore {
         self.ensure_embedding_runtime_tables()?;
         self.ensure_graph_projection_runtime_tables()?;
         self.execute("CREATE TABLE IF NOT EXISTS Project (name VARCHAR PRIMARY KEY)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_code))")?;
-        self.execute("CREATE TABLE IF NOT EXISTS CALLS (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_code))")?;
+        self.execute("CREATE TABLE IF NOT EXISTS CONTAINS (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR, PRIMARY KEY (source_id, target_id, project_code))")?;
+        self.execute("CREATE TABLE IF NOT EXISTS CALLS (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR, PRIMARY KEY (source_id, target_id, project_code))")?;
         self.execute(
-            "CREATE TABLE IF NOT EXISTS CALLS_NIF (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_code))",
+            "CREATE TABLE IF NOT EXISTS CALLS_NIF (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR, PRIMARY KEY (source_id, target_id, project_code))",
         )?;
-        self.execute("CREATE TABLE IF NOT EXISTS IMPACTS (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_code))")?;
+        self.execute("CREATE TABLE IF NOT EXISTS IMPACTS (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR, PRIMARY KEY (source_id, target_id, project_code))")?;
         self.execute(
-            "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR DEFAULT 'proj', PRIMARY KEY (source_id, target_id, project_code))",
+            "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR, PRIMARY KEY (source_id, target_id, project_code))",
         )?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_code VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_gui BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
         let _ = self.execute(
@@ -722,19 +722,11 @@ impl GraphStore {
              WHERE file_path IS NULL OR file_path = ''",
         )?;
 
-        self.execute(
-            "ALTER TABLE CALLS ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'",
-        )?;
-        self.execute(
-            "ALTER TABLE CALLS_NIF ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'",
-        )?;
-        self.execute(
-            "ALTER TABLE CONTAINS ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'",
-        )?;
-        self.execute(
-            "ALTER TABLE IMPACTS ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'",
-        )?;
-        self.execute("ALTER TABLE SUBSTANTIATES ADD COLUMN IF NOT EXISTS project_code VARCHAR DEFAULT 'proj'")?;
+        self.execute("ALTER TABLE CALLS ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
+        self.execute("ALTER TABLE CALLS_NIF ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
+        self.execute("ALTER TABLE CONTAINS ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
+        self.execute("ALTER TABLE IMPACTS ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
+        self.execute("ALTER TABLE SUBSTANTIATES ADD COLUMN IF NOT EXISTS project_code VARCHAR")?;
 
         // Performance Indexes for Advanced Graph Heuristics
         self.execute("CREATE INDEX IF NOT EXISTS calls_source_idx ON CALLS(source_id)")?;

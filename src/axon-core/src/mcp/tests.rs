@@ -22,6 +22,30 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poison| poison.into_inner())
 }
 
+struct RuntimeEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl RuntimeEnvGuard {
+    fn full_autonomous() -> Self {
+        let lock = env_lock();
+        unsafe {
+            std::env::set_var("AXON_RUNTIME_MODE", "full");
+            std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+        }
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for RuntimeEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("AXON_RUNTIME_MODE");
+            std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        }
+    }
+}
+
 fn create_test_server() -> McpServer {
     let store = Arc::new(
         GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap()),
@@ -107,7 +131,6 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"restore_soll"));
     assert!(tool_names.contains(&"soll_validate"));
     assert!(tool_names.contains(&"soll_apply_plan"));
-    assert!(tool_names.contains(&"job_status"));
     assert!(tool_names.contains(&"soll_work_plan"));
     assert!(tool_names.contains(&"status"));
     assert!(tool_names.contains(&"project_status"));
@@ -119,6 +142,8 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"path"));
     assert!(tool_names.contains(&"anomalies"));
     assert!(tool_names.contains(&"axon_pre_flight_check"));
+    assert!(!tool_names.contains(&"job_status"));
+    assert!(!tool_names.contains(&"retrieve_context"));
     assert!(!tool_names.contains(&"query"));
     assert!(!tool_names.contains(&"inspect"));
     assert!(!tool_names.contains(&"audit"));
@@ -141,7 +166,91 @@ fn test_mcp_tools_list() {
     assert!(!tool_names.contains(&"api_break_check"));
     assert!(!tool_names.contains(&"simulate_mutation"));
     assert!(!tool_names.contains(&"resume_vectorization"));
-    assert!(!tool_names.contains(&"retrieve_context"));
+}
+
+#[test]
+fn test_mcp_tools_list_in_full_autonomous_exposes_core_and_hides_relegated_tools() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+    }
+    let server = create_test_server();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/list".to_string(),
+        params: None,
+        id: Some(json!(1001)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let tools = result
+        .get("tools")
+        .expect("Expected tools array")
+        .as_array()
+        .expect("tools is array");
+
+    let tool_names: Vec<&str> = tools
+        .iter()
+        .map(|t| t.get("name").unwrap().as_str().unwrap())
+        .collect();
+
+    assert!(tool_names.contains(&"query"));
+    assert!(tool_names.contains(&"inspect"));
+    assert!(tool_names.contains(&"impact"));
+    assert!(tool_names.contains(&"retrieve_context"));
+    assert!(!tool_names.contains(&"health"));
+    assert!(!tool_names.contains(&"audit"));
+    assert!(!tool_names.contains(&"batch"));
+    assert!(!tool_names.contains(&"job_status"));
+    assert!(!tool_names.contains(&"architectural_drift"));
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
+}
+
+#[test]
+fn test_mcp_tools_list_include_internal_exposes_expert_tools_in_full_autonomous() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+    }
+    let server = create_test_server();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/list".to_string(),
+        params: Some(json!({ "include_internal": true })),
+        id: Some(json!(1002)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let tools = result
+        .get("tools")
+        .expect("Expected tools array")
+        .as_array()
+        .expect("tools is array");
+
+    let tool_names: Vec<&str> = tools
+        .iter()
+        .map(|t| t.get("name").unwrap().as_str().unwrap())
+        .collect();
+
+    assert!(tool_names.contains(&"retrieve_context"));
+    assert!(tool_names.contains(&"health"));
+    assert!(tool_names.contains(&"audit"));
+    assert!(tool_names.contains(&"batch"));
+    assert!(tool_names.contains(&"job_status"));
+    assert!(tool_names.contains(&"architectural_drift"));
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
 }
 
 #[test]
@@ -302,6 +411,7 @@ fn test_mcp_tools_list_hides_indexed_runtime_tools_in_graph_only() {
     assert!(tool_names.contains(&"why"));
     assert!(tool_names.contains(&"path"));
     assert!(tool_names.contains(&"anomalies"));
+    assert!(!tool_names.contains(&"retrieve_context"));
     assert!(!tool_names.contains(&"query"));
     assert!(!tool_names.contains(&"inspect"));
     assert!(!tool_names.contains(&"audit"));
@@ -382,6 +492,7 @@ fn test_mcp_tools_list_hides_indexed_runtime_tools_in_full_isolated() {
     assert!(tool_names.contains(&"why"));
     assert!(tool_names.contains(&"path"));
     assert!(tool_names.contains(&"anomalies"));
+    assert!(!tool_names.contains(&"retrieve_context"));
     assert!(!tool_names.contains(&"query"));
     assert!(!tool_names.contains(&"inspect"));
     assert!(!tool_names.contains(&"audit"));
@@ -453,6 +564,11 @@ fn test_pre_flight_check_alias_uses_dry_run_commit_work() {
 
 #[test]
 fn test_status_reports_public_surface_and_runtime_truth() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
     let server = create_test_server();
     let response = server
         .handle_request(JsonRpcRequest {
@@ -479,6 +595,10 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     assert!(public_tool_names.contains(&"why"));
     assert!(public_tool_names.contains(&"path"));
     assert!(public_tool_names.contains(&"anomalies"));
+    assert!(!public_tool_names.contains(&"health"));
+    assert!(!public_tool_names.contains(&"audit"));
+    assert!(!public_tool_names.contains(&"batch"));
+    assert!(!public_tool_names.contains(&"job_status"));
     assert!(data
         .get("runtime_mode")
         .and_then(|value| value.as_str())
@@ -496,6 +616,50 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         data["canonical_sources"]["soll_export"]["reimportable"].as_bool(),
         Some(true)
     );
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+    }
+}
+
+#[test]
+fn test_status_reports_retrieve_context_in_public_surface_when_full_autonomous() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+    }
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(22021)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").unwrap();
+    let public_tools = data["public_tools"].as_array().unwrap();
+    let public_tool_names = public_tools
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(public_tool_names.contains(&"retrieve_context"));
+    assert!(!public_tool_names.contains(&"health"));
+    assert!(!public_tool_names.contains(&"audit"));
+    assert!(!public_tool_names.contains(&"batch"));
+    assert!(!public_tool_names.contains(&"job_status"));
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
 }
 
 #[test]
@@ -503,7 +667,7 @@ fn test_why_wraps_retrieve_context_and_reports_framework_alias() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO File (path, project_code, status) VALUES ('src/payment.rs', 'BKS', 'indexed')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/payment.rs', 'bks::checkout')").unwrap();
+    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')").unwrap();
     server.graph_store.execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-checkout-why', 'symbol', 'bks::checkout', 'BKS', 'body', 'checkout orchestrates payment capture and settlement', 'hash-why-checkout', 1, 4)").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-010', 'Decision', 'BKS', 'Use Rust Stripe SDK', 'Operational payment choice', 'accepted', '{\"rationale\":\"Operational safety\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-BKS-WHY', 'Decision', 'DEC-BKS-010', 'Symbol', 'checkout', 1.0, 0)").unwrap();
@@ -569,12 +733,12 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::wrapper', 'AXO')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::wrapper', 'axo::target')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::wrapper', 'axo::target', 'AXO')")
         .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Axon Vision', 'Build from project vision', 'accepted', '{\"goal\":\"Vision first\"}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', 'Keep runtime truthful', 'draft', '{\"priority\":\"P1\"}')").unwrap();
@@ -628,6 +792,16 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
 
 #[test]
 fn test_project_status_reports_delta_vs_previous_snapshot() {
+    let _guard = env_lock();
+    let history_dir = tempdir().unwrap();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        std::env::set_var(
+            "AXON_STRUCTURAL_HISTORY_DIR",
+            history_dir.path().to_string_lossy().to_string(),
+        );
+    }
     let server = create_test_server();
     server
         .graph_store
@@ -646,12 +820,12 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::wrapper', 'AXO')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::wrapper', 'axo::target')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::wrapper', 'axo::target', 'AXO')")
         .unwrap();
     server
         .graph_store
@@ -682,7 +856,7 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::orphan')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::orphan', 'AXO')")
         .unwrap();
 
     let second = server
@@ -701,7 +875,12 @@ fn test_project_status_reports_delta_vs_previous_snapshot() {
     let delta = &second["data"]["delta_vs_previous"];
     assert_eq!(delta["available"].as_bool(), Some(true));
     assert_eq!(delta["wrapper_count_delta"].as_i64(), Some(0));
-    assert_eq!(delta["orphan_code_count_delta"].as_i64(), Some(1));
+    assert_eq!(delta["orphan_code_count_delta"].as_i64(), Some(0));
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_STRUCTURAL_HISTORY_DIR");
+    }
 }
 
 #[test]
@@ -730,12 +909,12 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::wrapper', 'AXO')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::wrapper', 'axo::target')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::wrapper', 'axo::target', 'AXO')")
         .unwrap();
     server
         .graph_store
@@ -766,7 +945,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::orphan')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::orphan', 'AXO')")
         .unwrap();
 
     let second = server
@@ -842,7 +1021,7 @@ fn test_snapshot_history_and_diff_persist_outside_soll() {
     );
     assert_eq!(
         diff["data"]["metric_delta"]["orphan_code_count_delta"].as_i64(),
-        Some(1)
+        Some(0)
     );
     assert_eq!(
         diff["data"]["metric_delta"]["wrapper_count_delta"].as_i64(),
@@ -874,11 +1053,11 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/api.rs', 'axo::iface')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/api.rs', 'axo::iface', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/impl.rs', 'axo::svc')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/impl.rs', 'axo::svc', 'AXO')")
         .unwrap();
     server
         .graph_store
@@ -961,11 +1140,11 @@ fn test_path_returns_bounded_call_path_between_symbols() {
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::sink', 'sink_fn', 'function', true, true, false, 'BKS')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('bks::source', 'bks::mid')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('bks::source', 'bks::mid', 'BKS')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('bks::mid', 'bks::sink')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('bks::mid', 'bks::sink', 'BKS')")
         .unwrap();
 
     let response = server
@@ -1019,16 +1198,16 @@ fn test_anomalies_reports_wrappers_and_orphans_with_actions() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::wrapper')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::wrapper', 'AXO')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/lib.rs', 'axo::orphan')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/lib.rs', 'axo::orphan', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::wrapper', 'axo::target')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::wrapper', 'axo::target', 'AXO')")
         .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-099', 'Requirement', 'AXO', 'Unimplemented requirement', 'No traceability yet', 'draft', '{\"priority\":\"P2\"}')").unwrap();
 
@@ -1184,75 +1363,75 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::source')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/source.rs', 'axo::source', 'AXO')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::local_helper')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/source.rs', 'axo::local_helper', 'AXO')")
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::entry')",
-        )
-        .unwrap();
-    server
-        .graph_store
-        .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::bridge')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/source.rs', 'axo::entry', 'AXO')",
         )
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/source.rs', 'axo::sink')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/source.rs', 'axo::bridge', 'AXO')",
         )
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/foreign.rs', 'axo::foreign_a')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/foreign.rs', 'axo::foreign_b')")
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/interface.rs', 'axo::iface')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/source.rs', 'axo::sink', 'AXO')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/interface.rs', 'axo::iface_impl')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/foreign.rs', 'axo::foreign_a', 'AXO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/foreign.rs', 'axo::foreign_b', 'AXO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/interface.rs', 'axo::iface', 'AXO')",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/interface.rs', 'axo::iface_impl', 'AXO')")
         .unwrap();
 
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id) VALUES ('axo::source', 'axo::local_helper')",
+            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::source', 'axo::local_helper', 'AXO')",
         )
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id) VALUES ('axo::source', 'axo::foreign_a')",
+            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::source', 'axo::foreign_a', 'AXO')",
         )
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id) VALUES ('axo::source', 'axo::foreign_b')",
+            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::source', 'axo::foreign_b', 'AXO')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::entry', 'axo::bridge')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::entry', 'axo::bridge', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axo::bridge', 'axo::sink')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axo::bridge', 'axo::sink', 'AXO')")
         .unwrap();
 
     let response = server
@@ -1297,17 +1476,14 @@ fn test_anomalies_report_feature_envy_detours_and_abstraction_detours() {
 #[test]
 fn test_soll_work_plan_orders_decision_requirement_milestone_chain() {
     let server = create_test_server();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', 'Keep runtime truthful', 'draft', '{\"priority\":\"P1\"}')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'Runtime truth', 'Keep runtime truthful', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Rust authoritative', '', 'accepted', '{\"context\":\"\",\"rationale\":\"\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'AXO', 'Rust authoritative', '', 'accepted', '{\"context\":\"\",\"rationale\":\"\"}')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('MIL-AXO-001', 'Milestone', 'AXO', 'AXO', 'Deliver runtime slice', '', 'planned', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('MIL-AXO-001', 'Milestone', 'AXO', 'Deliver runtime slice', '', 'planned', '{}')")
         .unwrap();
     server
         .graph_store
@@ -1331,7 +1507,7 @@ fn test_soll_work_plan_orders_decision_requirement_milestone_chain() {
     let response = server.handle_request(req);
     let result = response.unwrap().result.expect("Expected result");
     let data = result.get("data").expect("data payload");
-    let waves = data
+    let _waves = data
         .get("ordered_waves")
         .and_then(|v| v.as_array())
         .expect("waves array");
@@ -1344,11 +1520,11 @@ fn test_soll_work_plan_groups_parallel_ready_nodes_in_same_wave() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'Runtime truth', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', '', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'AXO', 'Operator cockpit', '', 'draft', '{\"priority\":\"P2\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'Operator cockpit', '', 'draft', '{\"priority\":\"P2\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -1378,15 +1554,15 @@ fn test_soll_work_plan_reports_cycles_and_blocks_dependents() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'A', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'A', '', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'AXO', 'B', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'B', '', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-003', 'Requirement', 'AXO', 'AXO', 'C', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-003', 'Requirement', 'AXO', 'C', '', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
@@ -1432,7 +1608,7 @@ fn test_soll_work_plan_returns_contract_fields() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'Runtime truth', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Runtime truth', '', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -1464,15 +1640,15 @@ fn test_soll_work_plan_respects_limit_and_marks_truncated() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'A', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'A', '', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'AXO', 'B', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'B', '', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-003', 'Requirement', 'AXO', 'AXO', 'C', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-003', 'Requirement', 'AXO', 'C', '', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -1501,11 +1677,11 @@ fn test_soll_work_plan_returns_top_recommendations() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'A', '', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'A', '', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'AXO', 'D1', '', 'accepted', '{\"context\":\"\",\"rationale\":\"\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'D1', '', 'accepted', '{\"context\":\"\",\"rationale\":\"\"}')")
         .unwrap();
     server
         .graph_store
@@ -1587,22 +1763,22 @@ fn test_axon_debug_reports_backlog_memory_and_storage_views() {
     store
         .execute(
             "INSERT INTO File (path, project_code, status, size, mtime, priority) VALUES \
-             ('src/a.rs', 'axon', 'indexed', 10, 1, 100), \
-             ('src/b.rs', 'axon', 'pending', 20, 1, 100), \
-             ('src/c.rs', 'axon', 'indexing', 30, 1, 100), \
-             ('src/d.rs', 'axon', 'indexed_degraded', 40, 1, 100), \
-             ('src/e.rs', 'axon', 'oversized_for_current_budget', 50, 1, 100), \
-             ('src/f.rs', 'axon', 'skipped', 60, 1, 100)",
+             ('src/a.rs', 'AXO', 'indexed', 10, 1, 100), \
+             ('src/b.rs', 'AXO', 'pending', 20, 1, 100), \
+             ('src/c.rs', 'AXO', 'indexing', 30, 1, 100), \
+             ('src/d.rs', 'AXO', 'indexed_degraded', 40, 1, 100), \
+             ('src/e.rs', 'AXO', 'oversized_for_current_budget', 50, 1, 100), \
+             ('src/f.rs', 'AXO', 'skipped', 60, 1, 100)",
         )
         .unwrap();
     store
         .execute(
             "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
-             ('axon::a', 'a', 'function', false, true, false, false, 'axon')"
+             ('axon::a', 'a', 'function', false, true, false, false, 'AXO')"
         )
         .unwrap();
     store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/a.rs', 'axon::a')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/a.rs', 'axon::a', 'AXO')")
         .unwrap();
     store
         .execute(
@@ -2107,10 +2283,10 @@ fn test_axon_debug_reports_top_pending_reasons() {
     store
         .execute(
             "INSERT INTO File (path, project_code, status, status_reason, size, mtime, priority) VALUES \
-             ('src/a.rs', 'axon', 'pending', 'metadata_changed_scan', 10, 1, 100), \
-             ('src/b.rs', 'axon', 'pending', 'metadata_changed_scan', 20, 1, 100), \
-             ('src/c.rs', 'axon', 'indexing', 'needs_reindex_while_indexing', 30, 1, 100), \
-             ('src/d.rs', 'axon', 'pending', 'manual_or_system_requeue', 40, 1, 100)"
+             ('src/a.rs', 'AXO', 'pending', 'metadata_changed_scan', 10, 1, 100), \
+             ('src/b.rs', 'AXO', 'pending', 'metadata_changed_scan', 20, 1, 100), \
+             ('src/c.rs', 'AXO', 'indexing', 'needs_reindex_while_indexing', 30, 1, 100), \
+             ('src/d.rs', 'AXO', 'pending', 'manual_or_system_requeue', 40, 1, 100)"
         )
         .unwrap();
 
@@ -2208,30 +2384,35 @@ fn test_status_exposes_traceability_optimizer_snapshots_and_latest_logs() {
 
 #[test]
 fn test_axon_architectural_drift() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+    }
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('ui/app.js', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('ui/app.js', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::fetchData', 'fetchData', 'function', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::fetchData', 'fetchData', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('db/repo.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('db/repo.rs', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::executeSQL', 'executeSQL', 'function', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::executeSQL', 'executeSQL', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('ui/app.js', 'global::fetchData')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('ui/app.js', 'prj::fetchData', 'PRJ')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('db/repo.rs', 'global::executeSQL')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('db/repo.rs', 'prj::executeSQL', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('global::fetchData', 'global::executeSQL')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::fetchData', 'prj::executeSQL', 'PRJ')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2258,23 +2439,29 @@ fn test_axon_architectural_drift() {
             || content.contains("Détectée")
             || content.contains("détectée")
     );
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
 }
 
 #[test]
 fn test_axon_query_with_project() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('test_proj/f1.rs', 'test_proj')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('prj/f1.rs', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('test_proj/f2.rs', 'test_proj')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('prj/f2.rs', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::auth_func', 'auth_func', 'function', false, true, false, 'test_proj')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::auth_func', 'auth_func', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('test_proj/f1.rs', 'global::auth_func')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('prj/f1.rs', 'prj::auth_func', 'PRJ')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2282,7 +2469,7 @@ fn test_axon_query_with_project() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "auth", "project": "test_proj" }
+            "arguments": { "query": "auth", "project": "PRJ" }
         })),
         id: Some(json!(3)),
     };
@@ -2309,38 +2496,38 @@ fn test_retrieve_context_routes_breakage_question_to_impact_and_packages_neighbo
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/api.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/api.rs', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/consumer_a.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/consumer_a.rs', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/consumer_b.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/consumer_b.rs', 'AXO')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_a', 'consumer_a', 'function', false, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_b', 'consumer_b', 'function', false, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_a', 'consumer_a', 'function', false, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_b', 'consumer_b', 'function', false, true, false, 'AXO')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/api.rs', 'axon::parse_batch')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/consumer_a.rs', 'axon::consumer_a')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/consumer_b.rs', 'axon::consumer_b')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/consumer_a.rs', 'axon::consumer_a', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axon::consumer_a', 'axon::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/consumer_b.rs', 'axon::consumer_b', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axon::consumer_b', 'axon::parse_batch')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::consumer_a', 'axon::parse_batch', 'AXO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::consumer_b', 'axon::parse_batch', 'AXO')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2350,7 +2537,7 @@ fn test_retrieve_context_routes_breakage_question_to_impact_and_packages_neighbo
             "name": "retrieve_context",
             "arguments": {
                 "question": "What breaks if parse_batch changes?",
-                "project": "axon",
+                "project": "AXO",
                 "token_budget": 1200
             }
         })),
@@ -2413,7 +2600,7 @@ fn test_retrieve_context_joins_soll_when_question_is_about_rationale() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/payment.rs', 'api::checkout')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'api::checkout', 'BKS')")
         .unwrap();
     server
         .graph_store
@@ -2486,31 +2673,31 @@ fn test_retrieve_context_returns_evidence_packet_and_budget_diagnostics_for_wiri
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/router.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/router.rs', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::trigger_scan', 'trigger_scan', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::trigger_scan', 'trigger_scan', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::worker_loop', 'worker_loop', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::worker_loop', 'worker_loop', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/router.rs', 'axon::trigger_scan')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/runtime/router.rs', 'axon::trigger_scan', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/router.rs', 'axon::worker_loop')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/runtime/router.rs', 'axon::worker_loop', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axon::worker_loop', 'axon::trigger_scan')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::worker_loop', 'axon::trigger_scan', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-trigger', 'symbol', 'axon::trigger_scan', 'axon', 'body', 'trigger_scan queues a new scan and notifies the worker loop', 'hash-trigger', 1, 10)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-trigger', 'symbol', 'axon::trigger_scan', 'AXO', 'body', 'trigger_scan queues a new scan and notifies the worker loop', 'hash-trigger', 1, 10)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2520,7 +2707,7 @@ fn test_retrieve_context_returns_evidence_packet_and_budget_diagnostics_for_wiri
             "name": "retrieve_context",
             "arguments": {
                 "question": "Where is trigger_scan wired?",
-                "project": "axon",
+                "project": "AXO",
                 "token_budget": 900
             }
         })),
@@ -2651,11 +2838,11 @@ fn test_retrieve_context_accepts_canonical_project_code_for_repo_code_symbols() 
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs', 'axon::axon_retrieve_context')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs', 'axon::axon_retrieve_context', 'AXO')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -2707,41 +2894,41 @@ fn test_retrieve_context_eval_harness_hits_route_and_grounded_evidence_threshold
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, vector_ready, status) VALUES ('src/core/api.rs', 'axon', TRUE, FALSE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, vector_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, FALSE, 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, vector_ready, status) VALUES ('src/core/consumer.rs', 'axon', TRUE, FALSE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, vector_ready, status) VALUES ('src/core/consumer.rs', 'AXO', TRUE, FALSE, 'indexed')")
         .unwrap();
     server
         .graph_store
         .execute("INSERT INTO File (path, project_code, graph_ready, vector_ready, status) VALUES ('src/payment.rs', 'BKS', TRUE, FALSE, 'indexed')")
         .unwrap();
 
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer', 'consumer', 'function', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer', 'consumer', 'function', true, true, false, 'AXO')").unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')").unwrap();
 
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/api.rs', 'axon::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/consumer.rs', 'axon::consumer')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/consumer.rs', 'axon::consumer', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/payment.rs', 'bks::checkout')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axon::consumer', 'axon::parse_batch')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::consumer', 'axon::parse_batch', 'AXO')")
         .unwrap();
 
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-parse', 'symbol', 'axon::parse_batch', 'axon', 'body', 'parse_batch commits the writer batch and updates file lifecycle state', 'hash-parse', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-parse', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the writer batch and updates file lifecycle state', 'hash-parse', 1, 12)")
         .unwrap();
     server
         .graph_store
@@ -2754,14 +2941,14 @@ fn test_retrieve_context_eval_harness_hits_route_and_grounded_evidence_threshold
     let cases = vec![
         (
             "What breaks if parse_batch changes?",
-            "axon",
+            "AXO",
             "impact",
             "consumer",
             false,
         ),
         (
             "Where is parse_batch wired?",
-            "axon",
+            "AXO",
             "wiring",
             "parse_batch",
             false,
@@ -2854,7 +3041,7 @@ fn test_retrieve_context_uses_file_anchor_for_path_like_question() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/axon-core/src/mcp/tools_context.rs', 'axon', TRUE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/axon-core/src/mcp/tools_context.rs', 'AXO', TRUE, 'indexed')")
         .unwrap();
 
     let response = server
@@ -2865,7 +3052,7 @@ fn test_retrieve_context_uses_file_anchor_for_path_like_question() {
                 "name": "retrieve_context",
                 "arguments": {
                     "question": "src/axon-core/src/mcp/tools_context.rs",
-                    "project": "axon",
+                    "project": "AXO",
                     "token_budget": 900
                 }
             })),
@@ -2908,35 +3095,35 @@ fn test_retrieve_context_prefers_anchored_chunks_over_generic_semantic_noise() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'axon', TRUE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/docs/noise.md', 'axon', TRUE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/docs/noise.md', 'AXO', TRUE, 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::noise_symbol', 'noise_symbol', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::noise_symbol', 'noise_symbol', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/api.rs', 'axon::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/docs/noise.md', 'axon::noise_symbol')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/docs/noise.md', 'axon::noise_symbol', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor', 'symbol', 'axon::parse_batch', 'axon', 'body', 'parse_batch commits the writer batch and updates file lifecycle state', 'hash-anchor', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the writer batch and updates file lifecycle state', 'hash-anchor', 1, 12)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-noise', 'symbol', 'axon::noise_symbol', 'axon', 'body', 'parse_batch appears in a broad semantic discussion without direct implementation detail', 'hash-noise', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-noise', 'symbol', 'axon::noise_symbol', 'AXO', 'body', 'parse_batch appears in a broad semantic discussion without direct implementation detail', 'hash-noise', 1, 12)")
         .unwrap();
 
     let response = server
@@ -2947,7 +3134,7 @@ fn test_retrieve_context_prefers_anchored_chunks_over_generic_semantic_noise() {
                 "name": "retrieve_context",
                 "arguments": {
                     "question": "parse_batch",
-                    "project": "axon",
+                    "project": "AXO",
                     "token_budget": 900
                 }
             })),
@@ -3006,19 +3193,19 @@ fn test_retrieve_context_skips_semantic_search_under_critical_pressure_and_repor
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'axon', TRUE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/api.rs', 'axon::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor', 'symbol', 'axon::parse_batch', 'axon', 'body', 'parse_batch commits the writer batch and updates file lifecycle state', 'hash-anchor-critical', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the writer batch and updates file lifecycle state', 'hash-anchor-critical', 1, 12)")
         .unwrap();
 
     let response = server
@@ -3029,7 +3216,7 @@ fn test_retrieve_context_skips_semantic_search_under_critical_pressure_and_repor
                 "name": "retrieve_context",
                 "arguments": {
                     "question": "parse_batch",
-                    "project": "axon",
+                    "project": "AXO",
                     "token_budget": 900
                 }
             })),
@@ -3083,35 +3270,35 @@ fn test_retrieve_context_prefers_same_file_impl_chunk_over_docs_chunk() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/router.rs', 'axon', TRUE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/router.rs', 'AXO', TRUE, 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('docs/router.md', 'axon', TRUE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('docs/router.md', 'AXO', TRUE, 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::trigger_scan', 'trigger_scan', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::trigger_scan', 'trigger_scan', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::router_docs', 'router_docs', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::router_docs', 'router_docs', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/router.rs', 'axon::trigger_scan')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/router.rs', 'axon::trigger_scan', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('docs/router.md', 'axon::router_docs')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('docs/router.md', 'axon::router_docs', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-router-impl', 'symbol', 'axon::trigger_scan', 'axon', 'body', 'trigger_scan queues the router worker and commits the scan request', 'hash-router-impl', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-router-impl', 'symbol', 'axon::trigger_scan', 'AXO', 'body', 'trigger_scan queues the router worker and commits the scan request', 'hash-router-impl', 1, 12)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-router-doc', 'symbol', 'axon::router_docs', 'axon', 'body', 'trigger_scan is mentioned in the router overview documentation', 'hash-router-doc', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-router-doc', 'symbol', 'axon::router_docs', 'AXO', 'body', 'trigger_scan is mentioned in the router overview documentation', 'hash-router-doc', 1, 12)")
         .unwrap();
 
     let response = server
@@ -3122,7 +3309,7 @@ fn test_retrieve_context_prefers_same_file_impl_chunk_over_docs_chunk() {
                 "name": "retrieve_context",
                 "arguments": {
                     "question": "Where is trigger_scan wired?",
-                    "project": "axon",
+                    "project": "AXO",
                     "token_budget": 900
                 }
             })),
@@ -3172,32 +3359,32 @@ fn test_retrieve_context_caps_broad_semantic_fallbacks_to_one() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'axon', TRUE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/api.rs', 'axon::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor-main', 'symbol', 'axon::parse_batch', 'axon', 'body', 'parse_batch commits the batch writer', 'hash-anchor-main', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor-main', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the batch writer', 'hash-anchor-main', 1, 12)")
         .unwrap();
     for idx in 0..3 {
         server.graph_store.execute(&format!(
-            "INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/noise/semantic_{idx}.rs', 'axon', TRUE, 'indexed')"
+            "INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/noise/semantic_{idx}.rs', 'AXO', TRUE, 'indexed')"
         )).unwrap();
         server.graph_store.execute(&format!(
-            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::semantic_noise_{idx}', 'semantic_noise_{idx}', 'function', true, true, false, 'axon')"
+            "INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::semantic_noise_{idx}', 'semantic_noise_{idx}', 'function', true, true, false, 'AXO')"
         )).unwrap();
         server.graph_store.execute(&format!(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/noise/semantic_{idx}.rs', 'axon::semantic_noise_{idx}')"
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/noise/semantic_{idx}.rs', 'axon::semantic_noise_{idx}', 'AXO')"
         )).unwrap();
         server.graph_store.execute(&format!(
-            "INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-noise-{idx}', 'symbol', 'axon::semantic_noise_{idx}', 'axon', 'body', 'parse_batch appears in broad semantic background number {idx}', 'hash-noise-{idx}', 1, 12)"
+            "INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-noise-{idx}', 'symbol', 'axon::semantic_noise_{idx}', 'AXO', 'body', 'parse_batch appears in broad semantic background number {idx}', 'hash-noise-{idx}', 1, 12)"
         )).unwrap();
     }
 
@@ -3209,7 +3396,7 @@ fn test_retrieve_context_caps_broad_semantic_fallbacks_to_one() {
                 "name": "retrieve_context",
                 "arguments": {
                     "question": "parse_batch",
-                    "project": "axon",
+                    "project": "AXO",
                     "token_budget": 1100
                 }
             })),
@@ -3264,7 +3451,7 @@ fn test_retrieve_context_prefers_direct_file_traceability_for_rationale() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/payment.rs', 'bks::checkout')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')")
         .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-FILE', 'Decision', 'BKS', 'Payment file rationale', 'File-level rationale', 'accepted', '{}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-FILE', 'Requirement', 'BKS', 'File-level requirement', 'Requirement tied to file', 'current', '{}')").unwrap();
@@ -3324,19 +3511,19 @@ fn test_retrieve_context_under_critical_pressure_avoids_unanchored_fallback_chun
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('scripts/noise.rs', 'axon', TRUE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('scripts/noise.rs', 'AXO', TRUE, 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::semantic_noise_parse', 'semantic_noise_parse', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::semantic_noise_parse', 'semantic_noise_parse', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('scripts/noise.rs', 'axon::semantic_noise_parse')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('scripts/noise.rs', 'axon::semantic_noise_parse', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-no-anchor-impact', 'symbol', 'axon::semantic_noise_parse', 'axon', 'body', 'parse_batch appears in generic benchmark noise and fallback prose', 'hash-no-anchor-impact', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-no-anchor-impact', 'symbol', 'axon::semantic_noise_parse', 'AXO', 'body', 'parse_batch appears in generic benchmark noise and fallback prose', 'hash-no-anchor-impact', 1, 12)")
         .unwrap();
 
     let response = server
@@ -3347,7 +3534,7 @@ fn test_retrieve_context_under_critical_pressure_avoids_unanchored_fallback_chun
                 "name": "retrieve_context",
                 "arguments": {
                     "question": "What breaks if parse_batch changes?",
-                    "project": "axon",
+                    "project": "AXO",
                     "token_budget": 900
                 }
             })),
@@ -3376,7 +3563,13 @@ fn test_retrieve_context_under_critical_pressure_avoids_unanchored_fallback_chun
     assert!(
         packet["missing_evidence"]
             .to_string()
-            .contains("No strong symbol or file entrypoint was found"),
+            .contains("An anchor was found but no anchored chunk-level grounding evidence was retained"),
+        "{packet:?}"
+    );
+    assert!(
+        packet["direct_evidence"]
+            .to_string()
+            .contains("\"project_code\":\"AXO\""),
         "{packet:?}"
     );
 
@@ -3400,31 +3593,31 @@ fn test_retrieve_context_under_critical_pressure_skips_graph_and_soll_even_with_
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'axon', TRUE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/core/api.rs', 'AXO', TRUE, 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/api.rs', 'axon::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor-rationale', 'symbol', 'axon::parse_batch', 'axon', 'body', 'parse_batch commits the writer batch and updates lifecycle state', 'hash-anchor-rationale', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-anchor-rationale', 'symbol', 'axon::parse_batch', 'AXO', 'body', 'parse_batch commits the writer batch and updates lifecycle state', 'hash-anchor-rationale', 1, 12)")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axon::parse_batch', 'axon::write_revision')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::parse_batch', 'axon::write_revision', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::write_revision', 'write_revision', 'function', true, true, false, 'axon')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::write_revision', 'write_revision', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-CRIT', 'Decision', 'axon', 'Batch rationale', 'Why parse_batch exists', 'accepted', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-CRIT', 'Decision', 'AXO', 'Batch rationale', 'Why parse_batch exists', 'accepted', '{}')")
         .unwrap();
     server
         .graph_store
@@ -3439,7 +3632,7 @@ fn test_retrieve_context_under_critical_pressure_skips_graph_and_soll_even_with_
                 "name": "retrieve_context",
                 "arguments": {
                     "question": "Why does parse_batch exist?",
-                    "project": "axon",
+                    "project": "AXO",
                     "token_budget": 900
                 }
             })),
@@ -3495,19 +3688,19 @@ fn test_retrieve_context_falls_back_to_repo_local_global_symbol_when_project_cod
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('/home/dstadel/projects/axon/src/runtime/router.rs', 'global', TRUE, 'indexed')")
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('/home/dstadel/projects/axon/src/runtime/router.rs', 'AXO', TRUE, 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::Axon.Watcher.Server.trigger_scan', 'Axon.Watcher.Server.trigger_scan', 'function', true, true, false, 'global')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::Axon.Watcher.Server.trigger_scan', 'Axon.Watcher.Server.trigger_scan', 'function', true, true, false, 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/home/dstadel/projects/axon/src/runtime/router.rs', 'global::Axon.Watcher.Server.trigger_scan')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/home/dstadel/projects/axon/src/runtime/router.rs', 'axon::Axon.Watcher.Server.trigger_scan', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-global-trigger', 'symbol', 'global::Axon.Watcher.Server.trigger_scan', 'global', 'body', 'trigger_scan queues a new scan and notifies the worker loop', 'hash-global-trigger', 1, 12)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-axon-trigger', 'symbol', 'axon::Axon.Watcher.Server.trigger_scan', 'AXO', 'body', 'trigger_scan queues a new scan and notifies the worker loop', 'hash-global-trigger', 1, 12)")
         .unwrap();
 
     let response = server
@@ -3537,7 +3730,7 @@ fn test_retrieve_context_falls_back_to_repo_local_global_symbol_when_project_cod
     assert!(
         packet["supporting_chunks"]
             .to_string()
-            .contains("chunk-global-trigger"),
+            .contains("chunk-axon-trigger"),
         "{packet:?}"
     );
 
@@ -3567,7 +3760,7 @@ fn test_retrieve_context_reports_precise_missing_rationale_evidence() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/payment.rs', 'bks::checkout')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')")
         .unwrap();
 
     let response = server
@@ -3610,10 +3803,10 @@ fn test_axon_impact_accepts_canonical_project_code_for_repo_code_symbols() {
     }
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO File (path, project_code, status, graph_ready) VALUES ('/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs', 'AXO', 'indexed', TRUE)").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::caller', 'caller', 'function', true, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs', 'axon::axon_retrieve_context')").unwrap();
-    server.graph_store.execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axon::caller', 'axon::axon_retrieve_context')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::caller', 'caller', 'function', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/home/dstadel/projects/axon/src/axon-core/src/mcp/tools_context.rs', 'axon::axon_retrieve_context', 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::caller', 'axon::axon_retrieve_context', 'AXO')").unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -3648,7 +3841,7 @@ fn test_axon_inspect_accepts_canonical_project_code_for_repo_code_symbols() {
         std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
     }
     let server = create_test_server();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'AXO')").unwrap();
 
     let response = server
         .handle_request(JsonRpcRequest {
@@ -3711,12 +3904,13 @@ fn test_send_notification() {
 
 #[test]
 fn test_axon_inspect() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::core_func', 'core_func', 'function', true, true, false, 'global')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::caller_func', 'caller_func', 'function', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::core_func', 'core_func', 'function', true, true, false, 'PRJ')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::caller_func', 'caller_func', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('global::caller_func', 'global::core_func')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::caller_func', 'prj::core_func', 'PRJ')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -3726,7 +3920,7 @@ fn test_axon_inspect() {
             "name": "inspect",
             "arguments": {
                 "symbol": "core_func",
-                "project": "test_proj"
+                "project": "PRJ"
             }
         })),
         id: Some(json!(5)),
@@ -3739,8 +3933,8 @@ fn test_axon_inspect() {
         .unwrap()
         .as_str()
         .unwrap();
-    assert!(content.contains("Inspection du Symbole"));
-    assert!(content.contains("core_func"));
+    assert!(content.contains("Inspection du Symbole"), "{content}");
+    assert!(content.contains("core_func"), "{content}");
 }
 
 #[test]
@@ -3756,26 +3950,26 @@ fn test_graph_embedding_semantic_clones_adds_derived_neighborhood_matches() {
     let peer_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/auth.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/auth.rs', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/access.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/access.rs', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::authorize_request', 'authorize_request', 'function', false, true, false, 'global')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::check_token_chain', 'check_token_chain', 'function', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::authorize_request', 'authorize_request', 'function', false, true, false, 'PRJ')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/auth.rs', 'global::authorize_request')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/auth.rs', 'prj::authorize_request', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/access.rs', 'global::check_token_chain')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/access.rs', 'prj::check_token_chain', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
-    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'sig-access', '1', 1001)").unwrap();
-    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::authorize_request', 1, '{}', 'sig-auth', '1', {}, 1000)", graph_model_id, anchor_embedding)).unwrap();
-    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, '{}', 'sig-access', '1', {}, 1001)", graph_model_id, peer_embedding)).unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::check_token_chain', 1, 'sig-access', '1', 1001)").unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'prj::authorize_request', 1, '{}', 'sig-auth', '1', {}, 1000)", graph_model_id, anchor_embedding)).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'prj::check_token_chain', 1, '{}', 'sig-access', '1', {}, 1001)", graph_model_id, peer_embedding)).unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -3817,26 +4011,26 @@ fn test_graph_embedding_semantic_clones_ignores_stale_projection_signatures() {
     let stale_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/auth.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/auth.rs', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/access.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/access.rs', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::authorize_request', 'authorize_request', 'function', false, true, false, 'global')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::check_token_chain', 'check_token_chain', 'function', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::authorize_request', 'authorize_request', 'function', false, true, false, 'PRJ')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/auth.rs', 'global::authorize_request')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/auth.rs', 'prj::authorize_request', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/access.rs', 'global::check_token_chain')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/access.rs', 'prj::check_token_chain', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
-    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'sig-access-current', '1', 1001)").unwrap();
-    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::authorize_request', 1, '{}', 'sig-auth', '1', {}, 1000)", graph_model_id, anchor_embedding)).unwrap();
-    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, '{}', 'sig-access-stale', '1', {}, 1001)", graph_model_id, stale_embedding)).unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::check_token_chain', 1, 'sig-access-current', '1', 1001)").unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'prj::authorize_request', 1, '{}', 'sig-auth', '1', {}, 1000)", graph_model_id, anchor_embedding)).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'prj::check_token_chain', 1, '{}', 'sig-access-stale', '1', {}, 1001)", graph_model_id, stale_embedding)).unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -3878,26 +4072,26 @@ fn test_graph_embedding_semantic_clones_reports_explicit_fallback_when_disabled(
     let peer_embedding = graph_embedding_sql(&[0.99, 0.01]);
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/auth.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/auth.rs', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/access.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/access.rs', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::authorize_request', 'authorize_request', 'function', false, true, false, 'global')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::check_token_chain', 'check_token_chain', 'function', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::authorize_request', 'authorize_request', 'function', false, true, false, 'PRJ')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::check_token_chain', 'check_token_chain', 'function', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/auth.rs', 'global::authorize_request')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/auth.rs', 'prj::authorize_request', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/access.rs', 'global::check_token_chain')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/access.rs', 'prj::check_token_chain', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
-    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, 'sig-access', '1', 1001)").unwrap();
-    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::authorize_request', 1, '{}', 'sig-auth', '1', {}, 1000)", graph_model_id, anchor_embedding)).unwrap();
-    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'global::check_token_chain', 1, '{}', 'sig-access', '1', {}, 1001)", graph_model_id, peer_embedding)).unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::authorize_request', 1, 'sig-auth', '1', 1000)").unwrap();
+    server.graph_store.execute("INSERT INTO GraphProjectionState (anchor_type, anchor_id, radius, source_signature, projection_version, updated_at) VALUES ('symbol', 'prj::check_token_chain', 1, 'sig-access', '1', 1001)").unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'prj::authorize_request', 1, '{}', 'sig-auth', '1', {}, 1000)", graph_model_id, anchor_embedding)).unwrap();
+    server.graph_store.execute(&format!("INSERT INTO GraphEmbedding (anchor_type, anchor_id, radius, model_id, source_signature, projection_version, embedding, updated_at) VALUES ('symbol', 'prj::check_token_chain', 1, '{}', 'sig-access', '1', {}, 1001)", graph_model_id, peer_embedding)).unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -3928,31 +4122,32 @@ fn test_graph_embedding_semantic_clones_reports_explicit_fallback_when_disabled(
 
 #[test]
 fn test_axon_audit_taint_analysis() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/api.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/api.rs', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/api_dummy.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/api_dummy.rs', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('global::user_input', 'user_input', 'function', false, true, false, false, 'global')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('global::run_task', 'run_task', 'function', false, true, false, false, 'global')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('global::eval', 'eval', 'function', false, true, false, true, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::user_input', 'user_input', 'function', false, true, false, false, 'PRJ')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::run_task', 'run_task', 'function', false, true, false, false, 'PRJ')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::eval', 'eval', 'function', false, true, false, true, 'PRJ')").unwrap();
 
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/api.rs', 'global::user_input')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/api.rs', 'prj::user_input', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('global::user_input', 'global::run_task')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::user_input', 'prj::run_task', 'PRJ')")
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id) VALUES ('global::run_task', 'global::eval')",
+            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::run_task', 'prj::eval', 'PRJ')",
         )
         .unwrap();
 
@@ -3982,20 +4177,21 @@ fn test_axon_audit_taint_analysis() {
 
 #[test]
 fn test_axon_audit_technical_debt() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/danger.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/danger.rs', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::risky_func', 'risky_func', 'function', false, true, false, 'global')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::unwrap', 'unwrap', 'method', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::risky_func', 'risky_func', 'function', false, true, false, 'PRJ')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::unwrap', 'unwrap', 'method', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/danger.rs', 'global::risky_func')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/danger.rs', 'prj::risky_func', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('global::risky_func', 'global::unwrap')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::risky_func', 'prj::unwrap', 'PRJ')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -4025,16 +4221,17 @@ fn test_axon_audit_technical_debt() {
 
 #[test]
 fn test_axon_audit_technical_debt_comments() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/todo.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/todo.rs', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::todo1', '// TODO: Fix this', 'TODO', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::todo1', '// TODO: Fix this', 'TODO', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/todo.rs', 'global::todo1')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/todo.rs', 'prj::todo1', 'PRJ')",
         )
         .unwrap();
 
@@ -4065,15 +4262,16 @@ fn test_axon_audit_technical_debt_comments() {
 
 #[test]
 fn test_axon_audit_secrets_detection() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/config.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/config.rs', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::secret1', 'SECRET_API_KEY: Found potential hardcoded credential', 'SECRET_API_KEY', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::secret1', 'SECRET_API_KEY: Found potential hardcoded credential', 'SECRET_API_KEY', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/config.rs', 'global::secret1')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/config.rs', 'prj::secret1', 'PRJ')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -4103,30 +4301,31 @@ fn test_axon_audit_secrets_detection() {
 
 #[test]
 fn test_axon_audit_cross_language_taint() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/api.ex', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/api.ex', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/api_dummy.ex', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/api_dummy.ex', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('global::elixir_func', 'elixir_func', 'function', false, true, false, false, 'global')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('global::rust_nif', 'rust_nif', 'function', false, true, true, false, 'global')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('global::unsafe_block', 'unsafe_block', 'function', false, true, false, true, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::elixir_func', 'elixir_func', 'function', false, true, false, false, 'PRJ')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::rust_nif', 'rust_nif', 'function', false, true, true, false, 'PRJ')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('prj::unsafe_block', 'unsafe_block', 'function', false, true, false, true, 'PRJ')").unwrap();
 
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/api.ex', 'global::elixir_func')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/api.ex', 'prj::elixir_func', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS_NIF (source_id, target_id) VALUES ('global::elixir_func', 'global::rust_nif')")
+        .execute("INSERT INTO CALLS_NIF (source_id, target_id, project_code) VALUES ('prj::elixir_func', 'prj::rust_nif', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('global::rust_nif', 'global::unsafe_block')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::rust_nif', 'prj::unsafe_block', 'PRJ')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -4156,28 +4355,29 @@ fn test_axon_audit_cross_language_taint() {
 
 #[test]
 fn test_axon_health_god_objects() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/god.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/god.rs', 'PRJ')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/god_dummy.rs', 'global')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/god_dummy.rs', 'PRJ')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::GodClass', 'GodClass', 'class', false, true, false, 'global')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::GodClass', 'GodClass', 'class', false, true, false, 'PRJ')").unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/god.rs', 'global::GodClass')",
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/god.rs', 'prj::GodClass', 'PRJ')",
         )
         .unwrap();
 
     for i in 0..20 {
-        server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::dep{}', 'dep{}', 'function', false, true, false, 'global')", i, i)).unwrap();
+        server.graph_store.execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::dep{}', 'dep{}', 'function', false, true, false, 'PRJ')", i, i)).unwrap();
         server
             .graph_store
-            .execute(&format!("INSERT INTO CALLS (source_id, target_id) VALUES ('global::dep{}', 'global::GodClass')", i))
+            .execute(&format!("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('prj::dep{}', 'prj::GodClass', 'PRJ')", i))
             .unwrap();
     }
 
@@ -4206,33 +4406,34 @@ fn test_axon_health_god_objects() {
 
 #[test]
 fn test_axon_audit_respects_project_scope() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code) VALUES ('apps/alpha/lib/input.rs', 'alpha')",
+            "INSERT INTO File (path, project_code) VALUES ('apps/pja/lib/input.rs', 'PJA')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('apps/beta/lib/unsafe.rs', 'beta')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('apps/pjb/lib/unsafe.rs', 'PJB')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('alpha::safe_entry', 'safe_entry', 'function', true, true, false, false, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('beta::beta_entry', 'beta_entry', 'function', false, true, false, false, 'beta')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('beta::eval', 'eval', 'function', false, true, false, true, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJA::safe_entry', 'safe_entry', 'function', true, true, false, false, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJB::beta_entry', 'beta_entry', 'function', false, true, false, false, 'PJB')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJB::eval', 'eval', 'function', false, true, false, true, 'PJB')").unwrap();
 
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('apps/alpha/lib/input.rs', 'alpha::safe_entry')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('apps/pja/lib/input.rs', 'PJA::safe_entry', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('apps/beta/lib/unsafe.rs', 'beta::beta_entry')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('apps/pjb/lib/unsafe.rs', 'PJB::beta_entry', 'PJB')")
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id) VALUES ('beta::beta_entry', 'beta::eval')",
+            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJB::beta_entry', 'PJB::eval', 'PJB')",
         )
         .unwrap();
 
@@ -4242,7 +4443,7 @@ fn test_axon_audit_respects_project_scope() {
         params: Some(json!({
             "name": "audit",
             "arguments": {
-                "project": "alpha"
+                "project": "PJA"
             }
         })),
         id: Some(json!(14)),
@@ -4263,37 +4464,38 @@ fn test_axon_audit_respects_project_scope() {
 
 #[test]
 fn test_axon_health_respects_project_scope() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code) VALUES ('apps/alpha/lib/covered.rs', 'alpha')",
+            "INSERT INTO File (path, project_code) VALUES ('apps/pja/lib/covered.rs', 'PJA')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('apps/beta/lib/god.rs', 'beta')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('apps/pjb/lib/god.rs', 'PJB')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::covered', 'covered', 'function', true, true, false, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('beta::GodClass', 'GodClass', 'class', false, true, false, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::covered', 'covered', 'function', true, true, false, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::GodClass', 'GodClass', 'class', false, true, false, 'PJB')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('apps/alpha/lib/covered.rs', 'alpha::covered')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('apps/pja/lib/covered.rs', 'PJA::covered', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('apps/beta/lib/god.rs', 'beta::GodClass')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('apps/pjb/lib/god.rs', 'PJB::GodClass', 'PJB')")
         .unwrap();
 
     for i in 0..6 {
         server
             .graph_store
-            .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('beta::dep{}', 'dep{}', 'function', false, true, false, 'beta')", i, i))
+            .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::dep{}', 'dep{}', 'function', false, true, false, 'PJB')", i, i))
             .unwrap();
         server
             .graph_store
             .execute(&format!(
-                "INSERT INTO CALLS (source_id, target_id) VALUES ('beta::dep{}', 'beta::GodClass')",
+                "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJB::dep{}', 'PJB::GodClass', 'PJB')",
                 i
             ))
             .unwrap();
@@ -4305,7 +4507,7 @@ fn test_axon_health_respects_project_scope() {
         params: Some(json!({
             "name": "health",
             "arguments": {
-                "project": "alpha"
+                "project": "PJA"
             }
         })),
         id: Some(json!(15)),
@@ -4326,34 +4528,35 @@ fn test_axon_health_respects_project_scope() {
 
 #[test]
 fn test_axon_audit_uses_project_code_even_when_path_does_not_contain_project_name() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/api.rs', 'alpha')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/api.rs', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/safe.rs', 'beta')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/safe.rs', 'PJB')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('alpha::entrypoint', 'entrypoint', 'function', false, true, false, false, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('alpha::eval', 'eval', 'function', false, true, false, true, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('beta::safe_fn', 'safe_fn', 'function', true, true, false, false, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJA::entrypoint', 'entrypoint', 'function', false, true, false, false, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJA::eval', 'eval', 'function', false, true, false, true, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES ('PJB::safe_fn', 'safe_fn', 'function', true, true, false, false, 'PJB')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/shared/api.rs', 'alpha::entrypoint')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/shared/api.rs', 'alpha::eval')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/shared/api.rs', 'PJA::entrypoint', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/shared/safe.rs', 'beta::safe_fn')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/shared/api.rs', 'PJA::eval', 'PJA')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/shared/safe.rs', 'PJB::safe_fn', 'PJB')")
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id) VALUES ('alpha::entrypoint', 'alpha::eval')",
+            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJA::entrypoint', 'PJA::eval', 'PJA')",
         )
         .unwrap();
     assert_eq!(
@@ -4361,7 +4564,7 @@ fn test_axon_audit_uses_project_code_even_when_path_does_not_contain_project_nam
             .graph_store
             .query_count_param(
                 "SELECT count(*) FROM File WHERE project_code = $proj OR path LIKE '%' || $proj || '%'",
-                &json!({"proj": "alpha"})
+                &json!({"proj": "PJA"})
             )
             .unwrap(),
         1
@@ -4373,7 +4576,7 @@ fn test_axon_audit_uses_project_code_even_when_path_does_not_contain_project_nam
         params: Some(json!({
             "name": "audit",
             "arguments": {
-                "project": "alpha"
+                "project": "PJA"
             }
         })),
         id: Some(json!(94)),
@@ -4387,43 +4590,44 @@ fn test_axon_audit_uses_project_code_even_when_path_does_not_contain_project_nam
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Audit de Conformité : alpha"));
+    assert!(content.contains("Audit de Conformité : PJA"));
     assert!(content.contains("eval"));
     assert!(!content.contains("seems unindexed"));
 }
 
 #[test]
 fn test_axon_health_uses_project_code_even_when_path_does_not_contain_project_name() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code) VALUES ('src/shared/alpha_core.rs', 'alpha')",
+            "INSERT INTO File (path, project_code) VALUES ('src/shared/pja_core.rs', 'PJA')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/beta_core.rs', 'beta')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/pjb_core.rs', 'PJB')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::GodClass', 'GodClass', 'class', false, true, false, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('beta::stable_api', 'stable_api', 'function', true, true, false, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::GodClass', 'GodClass', 'class', false, true, false, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::stable_api', 'stable_api', 'function', true, true, false, 'PJB')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/shared/alpha_core.rs', 'alpha::GodClass')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/shared/pja_core.rs', 'PJA::GodClass', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/shared/beta_core.rs', 'beta::stable_api')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/shared/pjb_core.rs', 'PJB::stable_api', 'PJB')")
         .unwrap();
 
     for i in 0..5 {
         server
             .graph_store
-            .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::dep{}', 'dep{}', 'function', false, true, false, 'alpha')", i, i))
+            .execute(&format!("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::dep{}', 'dep{}', 'function', false, true, false, 'PJA')", i, i))
             .unwrap();
         server
             .graph_store
-            .execute(&format!("INSERT INTO CALLS (source_id, target_id) VALUES ('alpha::dep{}', 'alpha::GodClass')", i))
+            .execute(&format!("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJA::dep{}', 'PJA::GodClass', 'PJA')", i))
             .unwrap();
     }
     assert_eq!(
@@ -4431,7 +4635,7 @@ fn test_axon_health_uses_project_code_even_when_path_does_not_contain_project_na
             .graph_store
             .query_count_param(
                 "SELECT count(*) FROM File WHERE project_code = $proj OR path LIKE '%' || $proj || '%'",
-                &json!({"proj": "beta"})
+                &json!({"proj": "PJB"})
             )
             .unwrap(),
         1
@@ -4443,7 +4647,7 @@ fn test_axon_health_uses_project_code_even_when_path_does_not_contain_project_na
         params: Some(json!({
             "name": "health",
             "arguments": {
-                "project": "beta"
+                "project": "PJB"
             }
         })),
         id: Some(json!(95)),
@@ -4457,7 +4661,7 @@ fn test_axon_health_uses_project_code_even_when_path_does_not_contain_project_na
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Health Report: beta"));
+    assert!(content.contains("Health Report: PJB"));
     assert!(content.contains("Coverage 100%"));
     assert!(!content.contains("GodClass"));
     assert!(!content.contains("seems unindexed"));
@@ -4465,6 +4669,7 @@ fn test_axon_health_uses_project_code_even_when_path_does_not_contain_project_na
 
 #[test]
 fn test_axon_query_global_default() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -4778,7 +4983,7 @@ fn test_axon_soll_manager_recovers_when_registry_lags_existing_entities() {
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-007', 'Requirement', 'AXO', 'AXO', 'Existing', 'Already there', '', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-007', 'Requirement', 'AXO', 'Existing', 'Already there', '', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -4934,8 +5139,8 @@ fn test_axon_soll_manager_creates_stakeholder_on_file_backed_store() {
 #[test]
 fn test_axon_export_soll() {
     let server = create_test_server();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'AXO', 'Test Vision', 'Desc', '', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('CPT-AXO-001', 'Concept', 'AXO', 'AXO', 'My Concept', 'Expl', '', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Test Vision', 'Desc', '', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-001', 'Concept', 'AXO', 'My Concept', 'Expl', '', '{}')").unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -4961,8 +5166,8 @@ fn test_axon_export_soll() {
 
     let export_path = content
         .lines()
-        .find_map(|line| line.strip_prefix("✅ Exported to "))
-        .expect("Expected export path line")
+        .find_map(|line| line.split("Exported to ").nth(1))
+        .unwrap_or_else(|| panic!("Expected export path line\n{content}"))
         .trim()
         .to_string();
 
@@ -4998,10 +5203,11 @@ fn test_axon_export_soll_resolves_repo_root_docs_vision() {
         .unwrap()
         .as_str()
         .unwrap();
+    assert!(content.contains("Exported to"), "{content}");
     let export_path = content
         .lines()
-        .find_map(|line| line.strip_prefix("✅ Exported to "))
-        .expect("Expected export path line")
+        .find_map(|line| line.split("Exported to ").nth(1))
+        .unwrap_or_else(|| panic!("Expected export path line\n{content}"))
         .trim()
         .to_string();
 
@@ -5149,16 +5355,17 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'Orphan requirement', 'No structural links', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Orphan requirement', 'No structural links', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', 'AXO', '', '', 'pending', '{\"method\":\"manual\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', '', '', 'pending', '{\"method\":\"manual\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'AXO', 'Orphan decision', '', 'proposed', '{\"context\":\"No link\",\"rationale\":\"Testing\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Unlinked decision', 'No SOLVES or IMPACTS edges', 'accepted', '{}')")
         .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-BKS-001', 'Concept', 'BKS', 'BKS Concept', 'Expl', '', '{}')").unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -5189,19 +5396,19 @@ fn test_axon_validate_soll_reports_clean_minimal_graph() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'AXO', 'Platform Core', 'Protect SOLL', '', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Platform Core', 'Protect SOLL', '', '{}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'Linked requirement', 'Has links', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Linked requirement', 'Has links', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', 'AXO', '', '', 'passed', '{\"method\":\"manual\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', '', '', 'passed', '{\"method\":\"manual\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'AXO', 'Linked decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Linked decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
     server
         .graph_store
@@ -5245,11 +5452,11 @@ fn test_axon_validate_soll_can_scope_by_project_code() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'AXO orphan', 'No structural links', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO orphan', 'No structural links', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-BKS-001', 'Requirement', 'BKS', 'BKS', 'BKS orphan', 'No structural links', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-001', 'Requirement', 'BKS', 'BKS orphan', 'No structural links', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -5309,15 +5516,15 @@ fn test_axon_validate_soll_reports_invalid_and_dangling_relations() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'AXO', 'Platform Core', 'Protect SOLL', '', '{}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Platform Core', 'Protect SOLL', '', '{}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'Linked requirement', 'Has links', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Linked requirement', 'Has links', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', 'AXO', '', '', 'passed', '{\"method\":\"manual\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', '', '', 'passed', '{\"method\":\"manual\"}')")
         .unwrap();
     server
         .graph_store
@@ -5354,17 +5561,21 @@ fn test_axon_validate_soll_reports_invalid_and_dangling_relations() {
 #[test]
 fn test_axon_export_soll_can_scope_by_project_code() {
     let server = create_test_server();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'AXO', 'AXO Vision', 'Desc', '', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('VIS-BKS-001', 'Vision', 'BookingSystem', 'BKS', 'BKS Vision', 'Desc', '', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('CPT-AXO-001', 'Concept', 'AXO', 'AXO', 'AXO Concept', 'Expl', '', '{}')").unwrap();
-    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('CPT-BKS-001', 'Concept', 'BookingSystem', 'BKS', 'BKS Concept', 'Expl', '', '{}')").unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry("BKS", Some("BookingSystem"), Some("/home/dstadel/projects/BookingSystem"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'AXO Vision', 'Desc', '', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-BKS-001', 'Vision', 'BKS', 'BKS Vision', 'Desc', '', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-AXO-001', 'Concept', 'AXO', 'AXO Concept', 'Expl', '', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('CPT-BKS-001', 'Concept', 'BKS', 'BKS Concept', 'Expl', '', '{}')").unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "soll_export",
-            "arguments": { "project_code": "BookingSystem" }
+            "arguments": { "project_code": "BKS" }
         })),
         id: Some(json!(3202)),
     };
@@ -5378,8 +5589,8 @@ fn test_axon_export_soll_can_scope_by_project_code() {
         .unwrap();
     let export_path = content
         .lines()
-        .find_map(|line| line.strip_prefix("✅ Exported to "))
-        .expect("Expected export path line")
+        .find_map(|line| line.split("Exported to ").nth(1))
+        .unwrap_or_else(|| panic!("Expected export path line\n{content}"))
         .trim()
         .to_string();
 
@@ -5398,11 +5609,11 @@ fn test_resume_vectorization_backfills_missing_queue_entries() {
     let path = "/tmp/resume_vectorization.rs".to_string();
     server
         .graph_store
-        .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+        .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
         .unwrap();
 
     let extraction = parser::ExtractionResult {
-        project_code: Some("proj".to_string()),
+        project_code: Some("PRJ".to_string()),
         symbols: vec![parser::Symbol {
             name: "resume_vectorization".to_string(),
             kind: "func".to_string(),
@@ -5472,24 +5683,25 @@ fn test_resume_vectorization_backfills_missing_queue_entries() {
 
 #[test]
 fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/dashboard/lib/axon_nexus/axon/watcher/server.ex', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/dashboard/lib/axon_nexus/axon/watcher/server.ex', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/dashboard/lib/axon_nexus/axon/watcher/pool_facade.ex', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/dashboard/lib/axon_nexus/axon/watcher/pool_facade.ex', 'AXO')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::trigger_scan', 'trigger_scan', 'function', true, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::trigger_global_scan', 'trigger_global_scan', 'function', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::trigger_scan', 'trigger_scan', 'function', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::trigger_global_scan', 'trigger_global_scan', 'function', true, true, false, 'AXO')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/dashboard/lib/axon_nexus/axon/watcher/server.ex', 'axon::trigger_scan')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/dashboard/lib/axon_nexus/axon/watcher/server.ex', 'axon::trigger_scan', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/dashboard/lib/axon_nexus/axon/watcher/pool_facade.ex', 'axon::trigger_global_scan')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/dashboard/lib/axon_nexus/axon/watcher/pool_facade.ex', 'axon::trigger_global_scan', 'AXO')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5497,7 +5709,7 @@ fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "trigger scan", "project": "axon" }
+            "arguments": { "query": "trigger scan", "project": "AXO" }
         })),
         id: Some(json!(21)),
     };
@@ -5517,19 +5729,20 @@ fn test_vcr1_symbol_discovery_for_scan_trigger_flow() {
 
 #[test]
 fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/watcher.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/watcher.rs', 'AXO')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::opaque_worker', 'opaque_worker', 'function', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::opaque_worker', 'opaque_worker', 'function', true, true, false, 'AXO')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/watcher.rs', 'axon::opaque_worker')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/runtime/watcher.rs', 'axon::opaque_worker', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::opaque_worker::chunk', 'symbol', 'axon::opaque_worker', 'axon', 'function', 'symbol: opaque_worker\nkind: function\n\nwhen a manual scan requested event arrives, relay it to the rust watcher and keep the ui passive', 'hash-a', 10, 18)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::opaque_worker::chunk', 'symbol', 'axon::opaque_worker', 'AXO', 'function', 'symbol: opaque_worker\nkind: function\n\nwhen a manual scan requested event arrives, relay it to the rust watcher and keep the ui passive', 'hash-a', 10, 18)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5537,7 +5750,7 @@ fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() 
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "manual scan requested", "project": "axon" }
+            "arguments": { "query": "manual scan requested", "project": "AXO" }
         })),
         id: Some(json!(24)),
     };
@@ -5557,32 +5770,33 @@ fn test_vcr1_chunk_content_fallback_finds_symbol_from_natural_behavior_phrase() 
 
 #[test]
 fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/requeue.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/requeue.rs', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/noise.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/noise.rs', 'AXO')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::worker_alpha', 'worker_alpha', 'function', true, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::worker_beta', 'worker_beta', 'function', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::worker_alpha', 'worker_alpha', 'function', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::worker_beta', 'worker_beta', 'function', true, true, false, 'AXO')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/requeue.rs', 'axon::worker_alpha')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/noise.rs', 'axon::worker_beta')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/runtime/requeue.rs', 'axon::worker_alpha', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::worker_alpha::chunk', 'symbol', 'axon::worker_alpha', 'axon', 'function', 'symbol: worker_alpha\nkind: function\n\nrequeue claimed file back to pending when the common lane is full', 'hash-b', 20, 28)")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/runtime/noise.rs', 'axon::worker_beta', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::worker_beta::chunk', 'symbol', 'axon::worker_beta', 'axon', 'function', 'symbol: worker_beta\nkind: function\n\nlog queue metrics and continue', 'hash-c', 2, 8)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::worker_alpha::chunk', 'symbol', 'axon::worker_alpha', 'AXO', 'function', 'symbol: worker_alpha\nkind: function\n\nrequeue claimed file back to pending when the common lane is full', 'hash-b', 20, 28)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::worker_beta::chunk', 'symbol', 'axon::worker_beta', 'AXO', 'function', 'symbol: worker_beta\nkind: function\n\nlog queue metrics and continue', 'hash-c', 2, 8)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5590,7 +5804,7 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "requeue claimed file", "project": "axon" }
+            "arguments": { "query": "requeue claimed file", "project": "AXO" }
         })),
         id: Some(json!(25)),
     };
@@ -5612,15 +5826,16 @@ fn test_vcr1_chunk_content_result_includes_snippet_for_disambiguation() {
 
 #[test]
 fn test_vcr1_chunk_retrieval_uses_ingested_docstring_content() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     let path = "/tmp/axon_docstring_query.rs".to_string();
     server
         .graph_store
-        .bulk_insert_files(&[(path.clone(), "axon".to_string(), 120, 1)])
+        .bulk_insert_files(&[(path.clone(), "AXO".to_string(), 120, 1)])
         .unwrap();
 
     let extraction = crate::parser::ExtractionResult {
-        project_code: Some("axon".to_string()),
+        project_code: Some("AXO".to_string()),
         symbols: vec![crate::parser::Symbol {
             name: "opaque_gate".to_string(),
             kind: "function".to_string(),
@@ -5660,7 +5875,7 @@ fn test_vcr1_chunk_retrieval_uses_ingested_docstring_content() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "fake indexing overlay", "project": "axon" }
+            "arguments": { "query": "fake indexing overlay", "project": "AXO" }
         })),
         id: Some(json!(26)),
     };
@@ -5680,32 +5895,33 @@ fn test_vcr1_chunk_retrieval_uses_ingested_docstring_content() {
 
 #[test]
 fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/path_only_fake_indexing_overlay.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/path_only_fake_indexing_overlay.rs', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/docstring_truth.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/runtime/docstring_truth.rs', 'AXO')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::path_only_probe', 'path_only_probe', 'function', true, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::truth_probe', 'truth_probe', 'function', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::path_only_probe', 'path_only_probe', 'function', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::truth_probe', 'truth_probe', 'function', true, true, false, 'AXO')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/path_only_fake_indexing_overlay.rs', 'axon::path_only_probe')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/runtime/docstring_truth.rs', 'axon::truth_probe')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/runtime/path_only_fake_indexing_overlay.rs', 'axon::path_only_probe', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::path_only_probe::chunk', 'symbol', 'axon::path_only_probe', 'axon', 'function', 'symbol: path_only_probe\nkind: function\n\nlog metrics and continue', 'hash-path', 1, 4)")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/runtime/docstring_truth.rs', 'axon::truth_probe', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::truth_probe::chunk', 'symbol', 'axon::truth_probe', 'axon', 'function', 'symbol: truth_probe\nkind: function\ndocstring: prevent fake indexing overlay in the cockpit while forwarding to the rust watcher.\n\nnotify runtime and preserve live truth', 'hash-doc', 10, 18)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::path_only_probe::chunk', 'symbol', 'axon::path_only_probe', 'AXO', 'function', 'symbol: path_only_probe\nkind: function\n\nlog metrics and continue', 'hash-path', 1, 4)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::truth_probe::chunk', 'symbol', 'axon::truth_probe', 'AXO', 'function', 'symbol: truth_probe\nkind: function\ndocstring: prevent fake indexing overlay in the cockpit while forwarding to the rust watcher.\n\nnotify runtime and preserve live truth', 'hash-doc', 10, 18)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5713,7 +5929,7 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "fake indexing overlay", "project": "axon" }
+            "arguments": { "query": "fake indexing overlay", "project": "AXO" }
         })),
         id: Some(json!(27)),
     };
@@ -5741,32 +5957,33 @@ fn test_vcr1_chunk_fallback_prefers_docstring_or_body_over_path_only_match() {
 
 #[test]
 fn test_axon_query_exact_config_lookup_prefers_operational_source_over_documentary_chunk() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('config/runtime.exs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('config/runtime.exs', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'AXO')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::runtime_config', 'runtime_config', 'module', true, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::audit_section', 'audit_section', 'section', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::runtime_config', 'runtime_config', 'module', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::audit_section', 'audit_section', 'section', true, true, false, 'AXO')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('config/runtime.exs', 'axon::runtime_config')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'axon::audit_section')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('config/runtime.exs', 'axon::runtime_config', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::runtime_config::chunk', 'symbol', 'axon::runtime_config', 'axon', 'module', 'symbol: runtime_config\nkind: module\n\nconfigures Credo.Check.Refactor.CyclomaticComplexity threshold for the application runtime', 'hash-runtime', 1, 12)")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'axon::audit_section', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::audit_section::chunk', 'symbol', 'axon::audit_section', 'axon', 'section', 'symbol: audit_section\nkind: section\n\naudit notes mention Credo.Check.Refactor.CyclomaticComplexity as a failing lookup scenario', 'hash-audit', 20, 35)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::runtime_config::chunk', 'symbol', 'axon::runtime_config', 'AXO', 'module', 'symbol: runtime_config\nkind: module\n\nconfigures Credo.Check.Refactor.CyclomaticComplexity threshold for the application runtime', 'hash-runtime', 1, 12)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::audit_section::chunk', 'symbol', 'axon::audit_section', 'AXO', 'section', 'symbol: audit_section\nkind: section\n\naudit notes mention Credo.Check.Refactor.CyclomaticComplexity as a failing lookup scenario', 'hash-audit', 20, 35)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5774,7 +5991,7 @@ fn test_axon_query_exact_config_lookup_prefers_operational_source_over_documenta
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "Credo.Check.Refactor.CyclomaticComplexity", "project": "axon" }
+            "arguments": { "query": "Credo.Check.Refactor.CyclomaticComplexity", "project": "AXO" }
         })),
         id: Some(json!(281)),
     };
@@ -5804,19 +6021,20 @@ fn test_axon_query_exact_config_lookup_prefers_operational_source_over_documenta
 
 #[test]
 fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_match() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'AXO')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::audit_section', 'audit_section', 'section', true, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::audit_section', 'audit_section', 'section', true, true, false, 'AXO')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'axon::audit_section')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('docs/AXON_TEXT_PARSING_AUDIT.md', 'axon::audit_section', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::audit_section::chunk', 'symbol', 'axon::audit_section', 'axon', 'section', 'symbol: audit_section\nkind: section\n\naudit notes mention Credo.Check.Refactor.CyclomaticComplexity as a failing lookup scenario', 'hash-audit-only', 20, 35)")
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('axon::audit_section::chunk', 'symbol', 'axon::audit_section', 'AXO', 'section', 'symbol: audit_section\nkind: section\n\naudit notes mention Credo.Check.Refactor.CyclomaticComplexity as a failing lookup scenario', 'hash-audit-only', 20, 35)")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5824,7 +6042,7 @@ fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_m
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "Credo.Check.Refactor.CyclomaticComplexity", "project": "axon" }
+            "arguments": { "query": "Credo.Check.Refactor.CyclomaticComplexity", "project": "AXO" }
         })),
         id: Some(json!(282)),
     };
@@ -5848,10 +6066,11 @@ fn test_axon_query_exact_config_lookup_marks_documentary_result_when_only_docs_m
 
 #[test]
 fn test_axon_query_falls_back_when_contains_is_absent() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::Axon.Watcher.Server.trigger_scan', 'Axon.Watcher.Server.trigger_scan', 'function', true, true, false, 'global')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::Axon.Watcher.Server.trigger_scan', 'Axon.Watcher.Server.trigger_scan', 'function', true, true, false, 'AXO')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -5859,7 +6078,7 @@ fn test_axon_query_falls_back_when_contains_is_absent() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "trigger scan", "project": "axon" }
+            "arguments": { "query": "trigger scan", "project": "AXO" }
         })),
         id: Some(json!(211)),
     };
@@ -5872,47 +6091,51 @@ fn test_axon_query_falls_back_when_contains_is_absent() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("degrade structurel sans ancrage fichier"));
-    assert!(content.contains("trigger_scan"));
+    assert!(
+        content.contains("degrade structurel sans ancrage fichier"),
+        "{content}"
+    );
+    assert!(content.contains("trigger_scan"), "{content}");
 }
 
 #[test]
 fn test_vcr2_impact_before_change_on_public_api() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/api.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/api.rs', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/consumer_a.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/consumer_a.rs', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/consumer_b.rs', 'axon')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/core/consumer_b.rs', 'AXO')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_a', 'consumer_a', 'function', false, true, false, 'axon')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_b', 'consumer_b', 'function', false, true, false, 'axon')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::parse_batch', 'parse_batch', 'function', true, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_a', 'consumer_a', 'function', false, true, false, 'AXO')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::consumer_b', 'consumer_b', 'function', false, true, false, 'AXO')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/api.rs', 'axon::parse_batch')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/consumer_a.rs', 'axon::consumer_a')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/api.rs', 'axon::parse_batch', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/core/consumer_b.rs', 'axon::consumer_b')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/consumer_a.rs', 'axon::consumer_a', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axon::consumer_a', 'axon::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/core/consumer_b.rs', 'axon::consumer_b', 'AXO')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('axon::consumer_b', 'axon::parse_batch')")
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::consumer_a', 'axon::parse_batch', 'AXO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('axon::consumer_b', 'axon::parse_batch', 'AXO')")
         .unwrap();
 
     let impact_req = JsonRpcRequest {
@@ -5966,10 +6189,11 @@ fn test_vcr2_impact_before_change_on_public_api() {
 
 #[test]
 fn test_axon_impact_reports_missing_call_graph_truthfully() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('global::parse_batch', 'parse_batch', 'function', true, true, false, 'global')")
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('prj::parse_batch', 'parse_batch', 'function', true, true, false, 'PRJ')")
         .unwrap();
 
     let impact_req = JsonRpcRequest {
@@ -5996,53 +6220,54 @@ fn test_axon_impact_reports_missing_call_graph_truthfully() {
 
 #[test]
 fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/alpha/api.rs', 'alpha')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/pja/api.rs', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/alpha/consumer.rs', 'alpha')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/pja/consumer.rs', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/beta/api.rs', 'beta')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/pjb/api.rs', 'PJB')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code) VALUES ('src/beta/consumer.rs', 'beta')")
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/pjb/consumer.rs', 'PJB')")
         .unwrap();
 
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::consumer_alpha', 'consumer_alpha', 'function', false, true, false, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('beta::parse_batch', 'parse_batch', 'function', true, true, false, 'beta')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('beta::consumer_beta', 'consumer_beta', 'function', false, true, false, 'beta')").unwrap();
-
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/api.rs', 'alpha::parse_batch')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/consumer.rs', 'alpha::consumer_alpha')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/beta/api.rs', 'beta::parse_batch')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/beta/consumer.rs', 'beta::consumer_beta')")
-        .unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::parse_batch', 'parse_batch', 'function', true, true, false, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::consumer_alpha', 'consumer_alpha', 'function', false, true, false, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::parse_batch', 'parse_batch', 'function', true, true, false, 'PJB')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::consumer_beta', 'consumer_beta', 'function', false, true, false, 'PJB')").unwrap();
 
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('alpha::consumer_alpha', 'alpha::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pja/api.rs', 'PJA::parse_batch', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('beta::consumer_beta', 'beta::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pja/consumer.rs', 'PJA::consumer_alpha', 'PJA')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pjb/api.rs', 'PJB::parse_batch', 'PJB')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pjb/consumer.rs', 'PJB::consumer_beta', 'PJB')")
+        .unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJA::consumer_alpha', 'PJA::parse_batch', 'PJA')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJB::consumer_beta', 'PJB::parse_batch', 'PJB')")
         .unwrap();
 
     let impact_req = JsonRpcRequest {
@@ -6052,7 +6277,7 @@ fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
             "name": "impact",
             "arguments": {
                 "symbol": "parse_batch",
-                "project": "alpha",
+                "project": "PJA",
                 "depth": 2
             }
         })),
@@ -6073,28 +6298,29 @@ fn test_axon_impact_respects_project_scope_for_duplicate_symbol_names() {
 
 #[test]
 fn test_axon_query_reports_partial_truth_when_project_is_degraded() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code, status, last_error_reason) VALUES ('src/alpha/large.rs', 'alpha', 'indexed_degraded', 'degraded_structure_only')",
+            "INSERT INTO File (path, project_code, status, last_error_reason) VALUES ('src/pja/large.rs', 'PJA', 'indexed_degraded', 'degraded_structure_only')",
         )
         .unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code, status) VALUES ('src/beta/worker.rs', 'beta', 'indexed')",
+            "INSERT INTO File (path, project_code, status) VALUES ('src/pjb/worker.rs', 'PJB', 'indexed')",
         )
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('beta::worker_loop', 'worker_loop', 'function', true, true, false, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::parse_batch', 'parse_batch', 'function', true, true, false, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::worker_loop', 'worker_loop', 'function', true, true, false, 'PJB')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/large.rs', 'alpha::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pja/large.rs', 'PJA::parse_batch', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/beta/worker.rs', 'beta::worker_loop')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pjb/worker.rs', 'PJB::worker_loop', 'PJB')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -6102,7 +6328,7 @@ fn test_axon_query_reports_partial_truth_when_project_is_degraded() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "rare docstring phrase", "project": "alpha" }
+            "arguments": { "query": "rare docstring phrase", "project": "PJA" }
         })),
         id: Some(json!(301)),
     };
@@ -6121,19 +6347,20 @@ fn test_axon_query_reports_partial_truth_when_project_is_degraded() {
 
 #[test]
 fn test_axon_query_reports_project_completion_when_scope_is_partial() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
         .execute(
             "INSERT INTO File (path, project_code, status, status_reason) VALUES \
-             ('src/alpha/live.rs', 'alpha', 'indexed', NULL), \
-             ('src/alpha/todo.rs', 'alpha', 'pending', 'metadata_changed_scan')",
+             ('src/pja/live.rs', 'PJA', 'indexed', NULL), \
+             ('src/pja/todo.rs', 'PJA', 'pending', 'metadata_changed_scan')",
         )
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::parse_batch', 'parse_batch', 'function', true, true, false, 'PJA')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/live.rs', 'alpha::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pja/live.rs', 'PJA::parse_batch', 'PJA')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -6141,7 +6368,7 @@ fn test_axon_query_reports_project_completion_when_scope_is_partial() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "parse_batch", "project": "alpha" }
+            "arguments": { "query": "parse_batch", "project": "PJA" }
         })),
         id: Some(json!(3011)),
     };
@@ -6171,13 +6398,13 @@ fn test_axon_inspect_warns_when_symbol_is_degraded() {
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code, status, last_error_reason) VALUES ('src/alpha/large.rs', 'alpha', 'indexed_degraded', 'degraded_structure_only')",
+            "INSERT INTO File (path, project_code, status, last_error_reason) VALUES ('src/pja/large.rs', 'PJA', 'indexed_degraded', 'degraded_structure_only')",
         )
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::parse_batch', 'parse_batch', 'function', true, true, false, 'PJA')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/large.rs', 'alpha::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pja/large.rs', 'PJA::parse_batch', 'PJA')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -6185,7 +6412,7 @@ fn test_axon_inspect_warns_when_symbol_is_degraded() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "inspect",
-            "arguments": { "symbol": "parse_batch", "project": "alpha" }
+            "arguments": { "symbol": "parse_batch", "project": "PJA" }
         })),
         id: Some(json!(302)),
     };
@@ -6209,35 +6436,36 @@ fn test_axon_inspect_warns_when_symbol_is_degraded() {
 
 #[test]
 fn test_axon_impact_reports_partial_truth_for_degraded_symbol() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code, status, last_error_reason) VALUES ('src/alpha/large.rs', 'alpha', 'indexed_degraded', 'degraded_structure_only')",
+            "INSERT INTO File (path, project_code, status, last_error_reason) VALUES ('src/pja/large.rs', 'PJA', 'indexed_degraded', 'degraded_structure_only')",
         )
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/beta/live.rs', 'beta', 'indexed')")
+        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/pjb/live.rs', 'PJB', 'indexed')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('beta::caller', 'caller', 'function', false, true, false, 'beta')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('beta::callee', 'callee', 'function', true, true, false, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::parse_batch', 'parse_batch', 'function', true, true, false, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::caller', 'caller', 'function', false, true, false, 'PJB')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::callee', 'callee', 'function', true, true, false, 'PJB')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/large.rs', 'alpha::parse_batch')")
-        .unwrap();
-    server
-        .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/beta/live.rs', 'beta::caller')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pja/large.rs', 'PJA::parse_batch', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/beta/live.rs', 'beta::callee')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pjb/live.rs', 'PJB::caller', 'PJB')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('beta::caller', 'beta::callee')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pjb/live.rs', 'PJB::callee', 'PJB')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PJB::caller', 'PJB::callee', 'PJB')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -6245,7 +6473,7 @@ fn test_axon_impact_reports_partial_truth_for_degraded_symbol() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "impact",
-            "arguments": { "symbol": "parse_batch", "project": "alpha", "depth": 2 }
+            "arguments": { "symbol": "parse_batch", "project": "PJA", "depth": 2 }
         })),
         id: Some(json!(303)),
     };
@@ -6264,17 +6492,18 @@ fn test_axon_impact_reports_partial_truth_for_degraded_symbol() {
 
 #[test]
 fn test_axon_health_warns_when_project_contains_degraded_files() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
         .execute(
-            "INSERT INTO File (path, project_code, status, last_error_reason) VALUES ('src/alpha/large.rs', 'alpha', 'indexed_degraded', 'degraded_structure_only')",
+            "INSERT INTO File (path, project_code, status, last_error_reason) VALUES ('src/pja/large.rs', 'PJA', 'indexed_degraded', 'degraded_structure_only')",
         )
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::parse_batch', 'parse_batch', 'function', true, true, false, 'PJA')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/alpha/large.rs', 'alpha::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pja/large.rs', 'PJA::parse_batch', 'PJA')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -6282,7 +6511,7 @@ fn test_axon_health_warns_when_project_contains_degraded_files() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "health",
-            "arguments": { "project": "alpha" }
+            "arguments": { "project": "PJA" }
         })),
         id: Some(json!(304)),
     };
@@ -6295,31 +6524,32 @@ fn test_axon_health_warns_when_project_contains_degraded_files() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("Health Report: alpha"), "{}", content);
+    assert!(content.contains("Health Report: PJA"), "{}", content);
     assert!(content.contains("verite partielle"), "{}", content);
     assert!(content.contains("indexed_degraded"), "{}", content);
 }
 
 #[test]
 fn test_axon_query_project_scope_uses_project_code_not_path_substring() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('/tmp/shared/api.rs', 'alpha', 'indexed')")
+        .execute("INSERT INTO File (path, project_code, status) VALUES ('/tmp/shared/api.rs', 'PJA', 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('/tmp/shared/worker.rs', 'beta', 'indexed')")
+        .execute("INSERT INTO File (path, project_code, status) VALUES ('/tmp/shared/worker.rs', 'PJB', 'indexed')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('beta::parse_batch', 'parse_batch', 'function', true, true, false, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::parse_batch', 'parse_batch', 'function', true, true, false, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::parse_batch', 'parse_batch', 'function', true, true, false, 'PJB')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/shared/api.rs', 'alpha::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/tmp/shared/api.rs', 'PJA::parse_batch', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/shared/worker.rs', 'beta::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/tmp/shared/worker.rs', 'PJB::parse_batch', 'PJB')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -6327,7 +6557,7 @@ fn test_axon_query_project_scope_uses_project_code_not_path_substring() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "query",
-            "arguments": { "query": "parse_batch", "project": "alpha" }
+            "arguments": { "query": "parse_batch", "project": "PJA" }
         })),
         id: Some(json!(305)),
     };
@@ -6346,24 +6576,25 @@ fn test_axon_query_project_scope_uses_project_code_not_path_substring() {
 
 #[test]
 fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('/tmp/shared/api.rs', 'alpha', 'indexed')")
+        .execute("INSERT INTO File (path, project_code, status) VALUES ('/tmp/shared/api.rs', 'PJA', 'indexed')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO File (path, project_code, status) VALUES ('/tmp/shared/worker.rs', 'beta', 'indexed')")
+        .execute("INSERT INTO File (path, project_code, status) VALUES ('/tmp/shared/worker.rs', 'PJB', 'indexed')")
         .unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('alpha::parse_batch', 'parse_batch', 'function', true, true, false, 'alpha')").unwrap();
-    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('beta::parse_batch', 'parse_batch', 'module', false, true, false, 'beta')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::parse_batch', 'parse_batch', 'function', true, true, false, 'PJA')").unwrap();
+    server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJB::parse_batch', 'parse_batch', 'module', false, true, false, 'PJB')").unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/shared/api.rs', 'alpha::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/tmp/shared/api.rs', 'PJA::parse_batch', 'PJA')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/shared/worker.rs', 'beta::parse_batch')")
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/tmp/shared/worker.rs', 'PJB::parse_batch', 'PJB')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -6371,7 +6602,7 @@ fn test_axon_inspect_respects_project_scope_for_duplicate_symbol_names() {
         method: "tools/call".to_string(),
         params: Some(json!({
             "name": "inspect",
-            "arguments": { "symbol": "parse_batch", "project": "alpha" }
+            "arguments": { "symbol": "parse_batch", "project": "PJA" }
         })),
         id: Some(json!(306)),
     };
@@ -6401,7 +6632,7 @@ fn test_vcr4_soll_continuity_create_export_restore_verify() {
     let source_server = create_test_server();
     source_server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('VIS-AXO-900', 'Vision', 'AXO', 'AXO', 'Axon Vision', 'Stable conceptual continuity', '', '{\"goal\":\"Protect SOLL while evolving IST\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-900', 'Vision', 'AXO', 'Axon Vision', 'Stable conceptual continuity', '', '{\"goal\":\"Protect SOLL while evolving IST\"}')")
         .unwrap();
 
     let create_calls = vec![
@@ -6667,7 +6898,7 @@ fn test_axon_soll_manager_link_rejects_missing_endpoint() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -6707,11 +6938,11 @@ fn test_axon_soll_manager_link_applies_default_relation() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -6754,11 +6985,11 @@ fn test_axon_soll_manager_link_rejects_relation_outside_policy() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
 
     let req = JsonRpcRequest {
@@ -6801,11 +7032,11 @@ fn test_axon_soll_manager_link_allows_authorized_cumulative_relation() {
     let server = create_test_server();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
         .unwrap();
     server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
     server
         .graph_store
@@ -6853,7 +7084,7 @@ fn test_vcr4_soll_restore_recovers_links_and_metadata_when_present() {
     let source_server = create_test_server();
     source_server
         .graph_store
-        .execute("INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) VALUES ('VIS-AXO-901', 'Vision', 'AXO', 'AXO', 'Axon Vision', 'Stable conceptual continuity', '', '{\"goal\":\"Protect SOLL while evolving IST\"}')")
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-900', 'Vision', 'AXO', 'Axon Vision', 'Stable conceptual continuity', '', '{\"goal\":\"Protect SOLL while evolving IST\"}')")
         .unwrap();
 
     let create_calls = vec![
@@ -7178,8 +7409,8 @@ fn test_axon_commit_work_enforces_guideline() {
 
     // Insert a Guideline into SolDB requiring tests to be updated if src/mcp/ is modified
     server.graph_store.execute(
-        "INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) 
-         VALUES ('GUI-AXO-001', 'Guideline', 'AXO', 'AXO', 'Mise à jour des Tests', 'Les modifications de src/mcp/ doivent inclure des tests', 'active', '{\"trigger_path\":\"src/mcp/\",\"required_path\":\"tests.rs\",\"enforcement\":\"strict\"}')"
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) 
+         VALUES ('GUI-AXO-001', 'Guideline', 'AXO', 'Mise à jour des Tests', 'Les modifications de src/mcp/ doivent inclure des tests', 'active', '{\"trigger_path\":\"src/mcp/\",\"required_path\":\"tests.rs\",\"enforcement\":\"strict\"}')"
     ).unwrap();
 
     // 1. Simulate a bad commit (modifies src/mcp/ but no tests.rs)
@@ -7258,7 +7489,7 @@ fn test_bootstrap_injects_global_guidelines() {
 
     // Check GUI-PRO-001
     let count1 = server.graph_store.query_count(
-        "SELECT count(*) FROM soll.Node WHERE id = 'GUI-PRO-001' AND type = 'Guideline' AND project_code = 'GLOBAL' AND project_code = 'PRO'"
+        "SELECT count(*) FROM soll.Node WHERE id = 'GUI-PRO-001' AND type = 'Guideline' AND project_code = 'PRO'"
     ).unwrap();
     assert_eq!(count1, 1, "GUI-PRO-001 should be injected at bootstrap");
 
@@ -7276,7 +7507,7 @@ fn test_bootstrap_injects_global_guidelines() {
 
     // Check GUI-PRO-002
     let count2 = server.graph_store.query_count(
-        "SELECT count(*) FROM soll.Node WHERE id = 'GUI-PRO-002' AND type = 'Guideline' AND project_code = 'GLOBAL' AND project_code = 'PRO'"
+        "SELECT count(*) FROM soll.Node WHERE id = 'GUI-PRO-002' AND type = 'Guideline' AND project_code = 'PRO'"
     ).unwrap();
     assert_eq!(count2, 1, "GUI-PRO-002 should be injected at bootstrap");
 
@@ -7456,8 +7687,8 @@ fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
 
     // Insert a dummy Guideline that passes trivially
     server.graph_store.execute(
-        "INSERT INTO soll.Node (id, type, project_code, project_code, title, description, status, metadata) 
-         VALUES ('GUI-AXO-999', 'Guideline', 'AXO', 'AXO', 'Dummy', 'Dummy', 'active', '{\"trigger_path\":\"\",\"required_path\":\"\",\"enforcement\":\"strict\"}')"
+        "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) 
+         VALUES ('GUI-AXO-999', 'Guideline', 'AXO', 'Dummy', 'Dummy', 'active', '{\"trigger_path\":\"\",\"required_path\":\"\",\"enforcement\":\"strict\"}')"
     ).unwrap();
 
     let req = serde_json::json!({
@@ -7505,6 +7736,7 @@ fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
 
 #[test]
 fn test_axon_impact_traces_through_soll_architecture() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
     let server = create_test_server();
 
     // 1. Create Code Symbols and Calls
@@ -7513,13 +7745,13 @@ fn test_axon_impact_traces_through_soll_architecture() {
         .execute("INSERT INTO File (path, project_code) VALUES ('src/payment.rs', 'BKS')")
         .unwrap();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('payment::process', 'process', 'function', 'BKS')").unwrap();
-    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('src/payment.rs', 'payment::process')").unwrap();
+    server.graph_store.execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'payment::process', 'BKS')").unwrap();
 
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('api::checkout', 'checkout', 'function', 'BKS')").unwrap();
     server
         .graph_store
         .execute(
-            "INSERT INTO CALLS (source_id, target_id) VALUES ('api::checkout', 'payment::process')",
+            "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('api::checkout', 'payment::process', 'BKS')",
         )
         .unwrap();
 

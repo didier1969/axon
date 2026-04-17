@@ -87,6 +87,7 @@ static VECTOR_BACKLOG_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 
 const SERVICE_SAMPLE_TTL_MS: u64 = 5_000;
 const SERVICE_RECOVERY_WINDOW_MS: u64 = 15_000;
+#[allow(dead_code)]
 const INTERACTIVE_PRIORITY_IDLE_MS: u64 = 2_500;
 const VECTOR_STAGE_WINDOW_CAPACITY: usize = 256;
 

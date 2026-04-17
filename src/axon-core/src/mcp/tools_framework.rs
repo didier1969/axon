@@ -15,8 +15,15 @@ type FrameworkCache = HashMap<String, (i64, Value)>;
 
 static ANOMALIES_CACHE: OnceLock<Mutex<FrameworkCache>> = OnceLock::new();
 static CONCEPTION_CACHE: OnceLock<Mutex<FrameworkCache>> = OnceLock::new();
+static STATUS_CACHE: OnceLock<Mutex<FrameworkCache>> = OnceLock::new();
+static WHY_CACHE: OnceLock<Mutex<FrameworkCache>> = OnceLock::new();
 
+#[allow(dead_code)]
 const FRAMEWORK_CACHE_TTL_MS: i64 = 5_000;
+const CONCEPTION_CACHE_TTL_MS: i64 = 60_000;
+const STATUS_CACHE_TTL_MS: i64 = 180_000;
+const WHY_CACHE_TTL_MS: i64 = 180_000;
+const ANOMALIES_CACHE_TTL_MS: i64 = 180_000;
 
 impl McpServer {
     fn anomalies_cache() -> &'static Mutex<FrameworkCache> {
@@ -25,6 +32,14 @@ impl McpServer {
 
     fn conception_cache() -> &'static Mutex<FrameworkCache> {
         CONCEPTION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn status_cache() -> &'static Mutex<FrameworkCache> {
+        STATUS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn why_cache() -> &'static Mutex<FrameworkCache> {
+        WHY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
     #[cfg(not(test))]
@@ -106,7 +121,7 @@ impl McpServer {
         writeln!(file, "{rendered}").map_err(|error| error.to_string())
     }
 
-    fn canonical_sources_snapshot() -> Value {
+    pub(crate) fn canonical_sources_snapshot() -> Value {
         json!({
             "soll_export": {
                 "role": "canonical_intention_backup",
@@ -157,12 +172,15 @@ impl McpServer {
             .query_json(&format!(
                 "SELECT f.path, count(rel.target_id) AS symbol_count
                  FROM File f
-                 LEFT JOIN CONTAINS rel ON rel.source_id = f.path
+                 LEFT JOIN CONTAINS rel
+                   ON rel.source_id = f.path
+                  AND rel.project_code = '{project}'
                  WHERE f.project_code = '{}'
                  GROUP BY 1
                  ORDER BY symbol_count DESC, f.path ASC
                  LIMIT 5",
-                escaped_project
+                escaped_project,
+                project = escaped_project
             ))
             .unwrap_or_else(|_| "[]".to_string());
         let module_rows: Vec<Vec<Value>> = serde_json::from_str(&modules_raw).unwrap_or_default();
@@ -181,13 +199,16 @@ impl McpServer {
             .query_json(&format!(
                 "SELECT s.name, f.path
                  FROM Symbol s
-                 LEFT JOIN CONTAINS rel ON rel.target_id = s.id
+                 LEFT JOIN CONTAINS rel
+                   ON rel.target_id = s.id
+                  AND rel.project_code = '{project}'
                  LEFT JOIN File f ON f.path = rel.source_id
                  WHERE s.project_code = '{}'
                    AND s.kind = 'interface'
                  ORDER BY s.name ASC
                  LIMIT 5",
-                escaped_project
+                escaped_project,
+                project = escaped_project
             ))
             .unwrap_or_else(|_| "[]".to_string());
         let interface_rows: Vec<Vec<Value>> =
@@ -207,14 +228,17 @@ impl McpServer {
             .query_json(&format!(
                 "SELECT s.name, s.kind, f.path
                  FROM Symbol s
-                 LEFT JOIN CONTAINS rel ON rel.target_id = s.id
+                 LEFT JOIN CONTAINS rel
+                   ON rel.target_id = s.id
+                  AND rel.project_code = '{project}'
                  LEFT JOIN File f ON f.path = rel.source_id
                  WHERE s.project_code = '{}'
                    AND COALESCE(s.is_public, false) = true
                    AND s.kind IN ('interface', 'module', 'class', 'struct', 'function', 'method')
                  ORDER BY s.kind ASC, s.name ASC
                  LIMIT 5",
-                escaped_project
+                escaped_project,
+                project = escaped_project
             ))
             .unwrap_or_else(|_| "[]".to_string());
         let contract_rows: Vec<Vec<Value>> =
@@ -237,10 +261,15 @@ impl McpServer {
                  FROM CALLS c
                  JOIN Symbol src ON src.id = c.source_id
                  JOIN Symbol dst ON dst.id = c.target_id
-                 JOIN CONTAINS src_rel ON src_rel.target_id = src.id
-                 JOIN CONTAINS dst_rel ON dst_rel.target_id = dst.id
+                 JOIN CONTAINS src_rel
+                   ON src_rel.target_id = src.id
+                  AND src_rel.project_code = '{project}'
+                 JOIN CONTAINS dst_rel
+                   ON dst_rel.target_id = dst.id
+                  AND dst_rel.project_code = '{project}'
                  WHERE src.project_code = '{project}'
                    AND dst.project_code = '{project}'
+                   AND c.project_code = '{project}'
                    AND src_rel.source_id != dst_rel.source_id
                  ORDER BY src.name ASC, dst.name ASC
                  LIMIT 5",
@@ -282,12 +311,17 @@ impl McpServer {
             .query_count(&format!(
                 "SELECT count(*)
                  FROM CALLS c
-                 JOIN CONTAINS src_rel ON src_rel.target_id = c.source_id
-                 JOIN CONTAINS dst_rel ON dst_rel.target_id = c.target_id
+                 JOIN CONTAINS src_rel
+                   ON src_rel.target_id = c.source_id
+                  AND src_rel.project_code = '{project}'
+                 JOIN CONTAINS dst_rel
+                   ON dst_rel.target_id = c.target_id
+                  AND dst_rel.project_code = '{project}'
                  JOIN Symbol src ON src.id = c.source_id
                  JOIN Symbol dst ON dst.id = c.target_id
                  WHERE src.project_code = '{project}'
                    AND dst.project_code = '{project}'
+                   AND c.project_code = '{project}'
                    AND src_rel.source_id != dst_rel.source_id",
                 project = escaped_project
             ))
@@ -316,7 +350,7 @@ impl McpServer {
             Self::conception_cache(),
             &cache_key,
             now_ms,
-            FRAMEWORK_CACHE_TTL_MS,
+            CONCEPTION_CACHE_TTL_MS,
         ) {
             return cached;
         }
@@ -432,22 +466,28 @@ impl McpServer {
         };
         let planner = data.get("planner").cloned().unwrap_or_else(|| json!({}));
         let packet = data.get("packet").cloned().unwrap_or_else(|| json!({}));
-        let relevant_soll_entities = packet
+        let mode = args
+            .get("mode")
+            .and_then(|value| value.as_str())
+            .unwrap_or("brief");
+        let brief_mode = mode == "brief";
+
+        let mut relevant_soll_entities = packet
             .get("relevant_soll_entities")
             .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
-        let direct_evidence = packet
+        let mut direct_evidence = packet
             .get("direct_evidence")
             .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
-        let supporting_chunks = packet
+        let mut supporting_chunks = packet
             .get("supporting_chunks")
             .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
-        let structural_neighbors = packet
+        let mut structural_neighbors = packet
             .get("structural_neighbors")
             .and_then(|value| value.as_array())
             .cloned()
@@ -464,6 +504,13 @@ impl McpServer {
             .get("confidence")
             .cloned()
             .unwrap_or_else(|| json!({}));
+
+        if brief_mode {
+            relevant_soll_entities.truncate(4);
+            direct_evidence.truncate(3);
+            supporting_chunks.truncate(3);
+            structural_neighbors.truncate(3);
+        }
 
         let linked_validations = relevant_soll_entities
             .iter()
@@ -505,6 +552,10 @@ impl McpServer {
             "canonical_sources": Self::canonical_sources_snapshot()
         });
         data.insert("why".to_string(), summary);
+        if brief_mode {
+            data.remove("planner");
+            data.remove("packet");
+        }
     }
 
     fn symbol_validation_signals(&self, project: &str, symbol_name: &str) -> Value {
@@ -807,6 +858,7 @@ impl McpServer {
 
     pub(crate) fn axon_status(&self, args: &Value) -> Option<Value> {
         let mode = args.get("mode").and_then(|value| value.as_str());
+        let now_ms = Self::now_unix_ms();
         let runtime_mode = AxonRuntimeMode::from_env();
         let runtime_profile = AxonRuntimeOperationalProfile::from_mode_and_strings(
             runtime_mode.as_str(),
@@ -814,6 +866,20 @@ impl McpServer {
                 .ok()
                 .as_deref(),
         );
+        let cache_key = format!(
+            "{}|{}|{}",
+            mode.unwrap_or("brief"),
+            runtime_mode.as_str(),
+            runtime_profile.as_str()
+        );
+        if let Some(cached) = Self::cache_read(
+            Self::status_cache(),
+            &cache_key,
+            now_ms,
+            STATUS_CACHE_TTL_MS,
+        ) {
+            return Some(cached);
+        }
         let public_tools = tools_catalog(false)
             .get("tools")
             .and_then(|value| value.as_array())
@@ -909,7 +975,7 @@ impl McpServer {
                 "high",
             )
         );
-        Some(json!({
+        let response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
                 "truth_status": if public_tool_names.iter().any(|name| *name == "impact") {
@@ -938,7 +1004,9 @@ impl McpServer {
                 "debug_snapshot": debug_data,
                 "traceability": debug_data.get("traceability").cloned().unwrap_or_else(|| json!({}))
             }
-        }))
+        });
+        Self::cache_write(Self::status_cache(), cache_key, now_ms, &response);
+        Some(response)
     }
 
     pub(crate) fn axon_project_status(&self, args: &Value) -> Option<Value> {
@@ -1157,6 +1225,27 @@ impl McpServer {
             .get("mode")
             .and_then(|value| value.as_str())
             .unwrap_or("brief");
+        let cache_key = format!(
+            "{}::{}::{}::{}",
+            args.get("symbol")
+                .and_then(|value| value.as_str())
+                .or_else(|| args.get("question").and_then(|value| value.as_str()))
+                .unwrap_or("*"),
+            args.get("project").and_then(|value| value.as_str()).unwrap_or("*"),
+            mode,
+            args.get("include_graph")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(mode != "brief")
+        );
+        let now_ms = Self::now_unix_ms();
+        if let Some(cached) = Self::cache_read(
+            Self::why_cache(),
+            &cache_key,
+            now_ms,
+            WHY_CACHE_TTL_MS,
+        ) {
+            return Some(cached);
+        }
         let include_graph = args
             .get("include_graph")
             .and_then(|value| value.as_bool())
@@ -1175,8 +1264,8 @@ impl McpServer {
             "question": question,
             "project": args.get("project").and_then(|value| value.as_str()),
             "mode": mode,
-            "top_k": args.get("top_k").cloned().unwrap_or_else(|| json!(if mode == "brief" { 4 } else { 6 })),
-            "token_budget": args.get("token_budget").cloned().unwrap_or_else(|| json!(if mode == "brief" { 900 } else { 1400 })),
+            "top_k": args.get("top_k").cloned().unwrap_or_else(|| json!(if mode == "brief" { 3 } else { 6 })),
+            "token_budget": args.get("token_budget").cloned().unwrap_or_else(|| json!(if mode == "brief" { 700 } else { 1400 })),
             "include_soll": true,
             "include_graph": include_graph
         }))?;
@@ -1187,6 +1276,7 @@ impl McpServer {
             data.insert("framework_alias".to_string(), json!("why"));
         }
         Self::summarize_why_response(args, &mut response);
+        Self::cache_write(Self::why_cache(), cache_key, now_ms, &response);
         Some(response)
     }
 
@@ -1403,10 +1493,24 @@ impl McpServer {
             Self::anomalies_cache(),
             &cache_key,
             now_ms,
-            FRAMEWORK_CACHE_TTL_MS,
+            ANOMALIES_CACHE_TTL_MS,
         ) {
             return Some(cached);
         }
+
+        let escaped_project = project.replace('\'', "''");
+        let total_symbols = if project == "*" {
+            self.graph_store
+                .query_count("SELECT count(*) FROM Symbol WHERE kind IN ('function', 'method')")
+                .unwrap_or(0)
+        } else {
+            self.graph_store
+                .query_count(&format!(
+                    "SELECT count(*) FROM Symbol WHERE project_code = '{}' AND kind IN ('function', 'method')",
+                    escaped_project
+                ))
+                .unwrap_or(0)
+        };
 
         let wrappers = self
             .graph_store
@@ -1452,19 +1556,6 @@ impl McpServer {
             .get_god_objects(project)
             .unwrap_or_default();
         let validation_coverage_score = self.graph_store.get_coverage_score(project).unwrap_or(0);
-        let escaped_project = project.replace('\'', "''");
-        let total_symbols = if project == "*" {
-            self.graph_store
-                .query_count("SELECT count(*) FROM Symbol WHERE kind IN ('function', 'method')")
-                .unwrap_or(0)
-        } else {
-            self.graph_store
-                .query_count(&format!(
-                    "SELECT count(*) FROM Symbol WHERE project_code = '{}' AND kind IN ('function', 'method')",
-                    escaped_project
-                ))
-                .unwrap_or(0)
-        };
         let total_intent_nodes = if project == "*" {
             self.graph_store
                 .query_count(
@@ -1520,27 +1611,58 @@ impl McpServer {
             .cloned()
             .collect::<Vec<_>>();
 
-        let mut symbol_signal_names = Vec::new();
-        for item in wrapper_entities
-            .iter()
-            .chain(feature_envy_entities.iter())
-            .chain(detour_entities.iter())
-            .chain(abstraction_detour_entities.iter())
-        {
-            symbol_signal_names.push(item.split(" -> ").next().unwrap_or(item).to_string());
-        }
-        symbol_signal_names.extend(orphan_code_entities.iter().cloned());
-        symbol_signal_names.extend(god_object_entities.iter().cloned());
-        symbol_signal_names.sort();
-        symbol_signal_names.dedup();
-        let symbol_validation_map =
-            self.batch_symbol_validation_signals(project, &symbol_signal_names);
+        let default_symbol_validation = if brief_mode {
+            json!({
+                "tested": false,
+                "traceability_links": 0,
+                "mode": "brief_heuristic"
+            })
+        } else {
+            json!({"tested": false, "traceability_links": 0})
+        };
+        let default_intent_validation = if brief_mode {
+            json!({
+                "traceability_links": 0,
+                "verifies_edges": 0,
+                "validation_nodes": 0,
+                "mode": "brief_heuristic"
+            })
+        } else {
+            json!({
+                "traceability_links": 0,
+                "verifies_edges": 0,
+                "validation_nodes": 0
+            })
+        };
 
-        let intent_ids = orphan_intent_entities
-            .iter()
-            .map(|node| node.split(' ').next().unwrap_or(node).to_string())
-            .collect::<Vec<_>>();
-        let intent_validation_map = self.batch_intent_validation_signals(project, &intent_ids);
+        let symbol_validation_map = if brief_mode {
+            HashMap::new()
+        } else {
+            let mut symbol_signal_names = Vec::new();
+            for item in wrapper_entities
+                .iter()
+                .chain(feature_envy_entities.iter())
+                .chain(detour_entities.iter())
+                .chain(abstraction_detour_entities.iter())
+            {
+                symbol_signal_names.push(item.split(" -> ").next().unwrap_or(item).to_string());
+            }
+            symbol_signal_names.extend(orphan_code_entities.iter().cloned());
+            symbol_signal_names.extend(god_object_entities.iter().cloned());
+            symbol_signal_names.sort();
+            symbol_signal_names.dedup();
+            self.batch_symbol_validation_signals(project, &symbol_signal_names)
+        };
+
+        let intent_validation_map = if brief_mode {
+            HashMap::new()
+        } else {
+            let intent_ids = orphan_intent_entities
+                .iter()
+                .map(|node| node.split(' ').next().unwrap_or(node).to_string())
+                .collect::<Vec<_>>();
+            self.batch_intent_validation_signals(project, &intent_ids)
+        };
 
         let mut findings = Vec::new();
         for wrapper in &wrapper_entities {
@@ -1548,7 +1670,7 @@ impl McpServer {
             let validation_signals = symbol_validation_map
                 .get(source_symbol)
                 .cloned()
-                .unwrap_or_else(|| json!({"tested": false, "traceability_links": 0}));
+                .unwrap_or_else(|| default_symbol_validation.clone());
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("wrapper", &validation_signals);
             findings.push(json!({
@@ -1572,7 +1694,7 @@ impl McpServer {
             let validation_signals = symbol_validation_map
                 .get(source_symbol)
                 .cloned()
-                .unwrap_or_else(|| json!({"tested": false, "traceability_links": 0}));
+                .unwrap_or_else(|| default_symbol_validation.clone());
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("feature_envy", &validation_signals);
             findings.push(json!({
@@ -1596,7 +1718,7 @@ impl McpServer {
             let validation_signals = symbol_validation_map
                 .get(source_symbol)
                 .cloned()
-                .unwrap_or_else(|| json!({"tested": false, "traceability_links": 0}));
+                .unwrap_or_else(|| default_symbol_validation.clone());
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("detour", &validation_signals);
             findings.push(json!({
@@ -1620,7 +1742,7 @@ impl McpServer {
             let validation_signals = symbol_validation_map
                 .get(source_symbol)
                 .cloned()
-                .unwrap_or_else(|| json!({"tested": false, "traceability_links": 0}));
+                .unwrap_or_else(|| default_symbol_validation.clone());
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("abstraction_detour", &validation_signals);
             findings.push(json!({
@@ -1643,7 +1765,7 @@ impl McpServer {
             let validation_signals = symbol_validation_map
                 .get(symbol)
                 .cloned()
-                .unwrap_or_else(|| json!({"tested": false, "traceability_links": 0}));
+                .unwrap_or_else(|| default_symbol_validation.clone());
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("orphan_code", &validation_signals);
             findings.push(json!({
@@ -1668,13 +1790,7 @@ impl McpServer {
                 intent_validation_map
                     .get(node_id)
                     .cloned()
-                    .unwrap_or_else(|| {
-                        json!({
-                            "traceability_links": 0,
-                            "verifies_edges": 0,
-                            "validation_nodes": 0
-                        })
-                    });
+                    .unwrap_or_else(|| default_intent_validation.clone());
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("orphan_intent", &validation_signals);
             findings.push(json!({
@@ -1720,12 +1836,12 @@ impl McpServer {
         for name in &god_object_entities {
             let count = god_objects
                 .get(name)
-                .and_then(|value| value.as_i64())
+                .and_then(|value: &Value| value.as_i64())
                 .unwrap_or(0);
             let validation_signals = symbol_validation_map
                 .get(name)
                 .cloned()
-                .unwrap_or_else(|| json!({"tested": false, "traceability_links": 0}));
+                .unwrap_or_else(|| default_symbol_validation.clone());
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("god_object", &validation_signals);
             findings.push(json!({

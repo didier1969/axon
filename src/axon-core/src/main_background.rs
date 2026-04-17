@@ -1362,7 +1362,7 @@ fn flush_ingress_buffer_once(
     }
 
     if !batch.subtree_hints.is_empty() {
-        let scanner = Scanner::new(projects_root, "GLOBAL");
+        let scanner = Scanner::new(projects_root, "");
         for hint in &batch.subtree_hints {
             let promoted_hint_files = scanner.scan_subtree_with_guard_and_ingress(
                 store.clone(),

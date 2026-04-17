@@ -1,4 +1,5 @@
 use crate::graph::GraphStore;
+use crate::project_meta::discover_project_identities;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -29,6 +30,146 @@ pub struct McpServer {
 impl McpServer {
     pub fn new(graph_store: Arc<GraphStore>) -> Self {
         Self { graph_store }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn mcp_prewarm_enabled() -> bool {
+        std::env::var("AXON_MCP_PREWARM")
+            .ok()
+            .map(|value| {
+                !matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+            })
+            .unwrap_or(true)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn mcp_blocking_prewarm_enabled() -> bool {
+        std::env::var("AXON_MCP_PREWARM_BLOCKING")
+            .ok()
+            .map(|value| {
+                !matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+            })
+            .unwrap_or(true)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn startup_project_code(&self) -> Option<String> {
+        let current_dir = std::env::current_dir().ok();
+        let identities = discover_project_identities();
+        current_dir
+            .as_ref()
+            .and_then(|dir| identities.iter().find(|identity| &identity.project_path == dir))
+            .or_else(|| identities.iter().find(|identity| identity.code == "AXO"))
+            .or_else(|| identities.first())
+            .map(|identity| identity.code.clone())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn startup_project_probe(&self) -> Option<(String, String, String)> {
+        let project_code = self.startup_project_code()?;
+        let escaped_project = project_code.replace('\'', "''");
+        let query = format!(
+            "SELECT id, name
+             FROM Symbol
+             WHERE project_code = '{escaped_project}'
+               AND kind IN ('function', 'method')
+             ORDER BY
+               CASE
+                 WHEN name = 'Axon.Scanner.scan' THEN 0
+                 WHEN name = 'Axon.Watcher.Application.start' THEN 1
+                 WHEN name = 'main' THEN 2
+                 WHEN lower(name) LIKE '%scan%' THEN 3
+                 WHEN lower(name) LIKE '%start%' THEN 4
+                 ELSE 10
+               END,
+               tested ASC,
+               name ASC
+             LIMIT 1"
+        );
+        let raw = self.graph_store.query_json(&query).ok()?;
+        let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let exact_symbol = rows.first()?.first()?.as_str()?.to_string();
+        let symbol = rows.first()?.get(1)?.as_str()?.to_string();
+        Some((project_code, symbol, exact_symbol))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn prewarm_observer_caches(&self) {
+        if !Self::mcp_prewarm_enabled() {
+            return;
+        }
+        let Some(project_code) = self.startup_project_code() else {
+            let _ = self.axon_status(&json!({ "mode": "brief" }));
+            return;
+        };
+
+        let _ = self.axon_status(&json!({ "mode": "brief" }));
+        let _ = self.axon_anomalies(&json!({ "project": project_code, "mode": "brief" }));
+        let _ = self.axon_soll_query_context(&json!({ "project_code": project_code, "limit": 5 }));
+        let _ = self.axon_conception_view(&json!({ "project_code": project_code, "mode": "brief" }));
+        let _ = self.axon_project_status(&json!({ "project_code": project_code, "mode": "brief" }));
+        let Some((project_code, symbol, exact_symbol)) = self.startup_project_probe() else {
+            return;
+        };
+        let _ = self.axon_retrieve_context(&json!({
+            "project": project_code,
+            "question": format!("Where is {} wired?", symbol),
+            "token_budget": 900,
+            "mode": "brief"
+        }));
+        let _ = self.axon_why(&json!({ "project": project_code, "symbol": symbol, "mode": "brief" }));
+        let _ = self.axon_impact(&json!({ "project": project_code, "symbol": exact_symbol, "mode": "brief" }));
+        let _ = self.axon_change_safety(&json!({
+            "project_code": project_code,
+            "target": exact_symbol,
+            "target_type": "symbol",
+            "mode": "brief"
+        }));
+        let _ = self.axon_inspect(&json!({ "project": project_code, "symbol": symbol, "mode": "brief" }));
+        let _ = self.axon_path(&json!({ "project": project_code, "source": exact_symbol, "mode": "brief" }));
+    }
+
+    fn spawn_prewarm_threads(
+        mcp_server: Arc<McpServer>,
+    ) -> Vec<std::thread::JoinHandle<()>> {
+        let primary = mcp_server.clone();
+        let why_server = mcp_server.clone();
+        vec![
+            thread::spawn(move || {
+                primary.prewarm_observer_caches();
+            }),
+            thread::spawn(move || {
+                if let Some((project_code, symbol, _exact_symbol)) = why_server.startup_project_probe()
+                {
+                    let _ = why_server.axon_why(
+                        &json!({ "project": project_code, "symbol": symbol, "mode": "brief" }),
+                    );
+                }
+            }),
+        ]
+    }
+
+    pub fn startup_prewarm(mcp_server: Arc<McpServer>) {
+        if !Self::mcp_prewarm_enabled() {
+            return;
+        }
+
+        if Self::mcp_blocking_prewarm_enabled() {
+            for handle in Self::spawn_prewarm_threads(mcp_server) {
+                let _ = handle.join();
+            }
+            return;
+        }
+
+        for handle in Self::spawn_prewarm_threads(mcp_server) {
+            std::mem::forget(handle);
+        }
     }
 
     #[allow(dead_code)]

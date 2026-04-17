@@ -680,7 +680,7 @@ mod tests {
 
         let write = store
             .execute_raw_sql_gateway(
-                "INSERT INTO File (path, project_code) VALUES ('/tmp/sql_gateway.ex', 'proj')",
+                "INSERT INTO File (path, project_code) VALUES ('/tmp/sql_gateway.ex', 'PRJ')",
             )
             .unwrap();
         assert!(write.contains("\"ok\":true"), "{write}");

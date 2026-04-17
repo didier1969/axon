@@ -233,11 +233,13 @@ impl GraphStore {
             WITH outbound AS (
                 SELECT source_id, count(*) AS total_calls
                 FROM CALLS
+                {}
                 GROUP BY 1
             ),
             inbound AS (
                 SELECT target_id, count(*) AS total_callers
                 FROM CALLS
+                {}
                 GROUP BY 1
             )
             SELECT s.name, target.name, COALESCE(inbound.total_callers, 0)
@@ -263,6 +265,16 @@ impl GraphStore {
             ORDER BY COALESCE(inbound.total_callers, 0) DESC, s.name ASC
             LIMIT 20
             ",
+            if scoped {
+                format!("WHERE project_code = '{}'", escaped)
+            } else {
+                String::new()
+            },
+            if scoped {
+                format!("WHERE project_code = '{}'", escaped)
+            } else {
+                String::new()
+            },
             if scoped {
                 format!(" AND s.project_code = '{}'", escaped)
             } else {
@@ -305,6 +317,7 @@ impl GraphStore {
                 FROM CALLS c
                 JOIN symbol_files src ON src.id = c.source_id
                 JOIN symbol_files dst ON dst.id = c.target_id
+                {}
                 GROUP BY 1, 2, 3
             ),
             scored AS (
@@ -332,6 +345,11 @@ impl GraphStore {
             ",
             if scoped {
                 format!(" AND s.project_code = '{}'", escaped)
+            } else {
+                String::new()
+            },
+            if scoped {
+                format!("WHERE c.project_code = '{}'", escaped)
             } else {
                 String::new()
             }
@@ -366,11 +384,13 @@ impl GraphStore {
             inbound AS (
                 SELECT target_id, count(*) AS inbound_calls
                 FROM CALLS
+                {}
                 GROUP BY 1
             ),
             outbound AS (
                 SELECT source_id, count(*) AS outbound_calls
                 FROM CALLS
+                {}
                 GROUP BY 1
             )
             SELECT
@@ -390,11 +410,30 @@ impl GraphStore {
               AND mid_in.inbound_calls = 1
               AND mid_out.outbound_calls = 1
               AND mid.is_public = false
+              {}
             ORDER BY src.name ASC, mid.name ASC, dst.name ASC
             LIMIT 20
             ",
             if scoped {
                 format!(" AND s.project_code = '{}'", escaped)
+            } else {
+                String::new()
+            },
+            if scoped {
+                format!("WHERE project_code = '{}'", escaped)
+            } else {
+                String::new()
+            },
+            if scoped {
+                format!("WHERE project_code = '{}'", escaped)
+            } else {
+                String::new()
+            },
+            if scoped {
+                format!(
+                    "AND c1.project_code = '{}' AND c2.project_code = '{}'",
+                    escaped, escaped
+                )
             } else {
                 String::new()
             }
@@ -474,19 +513,26 @@ impl GraphStore {
             "
             SELECT DISTINCT s.name
             FROM Symbol s
-            LEFT JOIN SUBSTANTIATES subst
-              ON subst.source_id = s.id OR subst.target_id = s.id
-            LEFT JOIN IMPACTS imp
-              ON imp.source_id = s.id OR imp.target_id = s.id
-            LEFT JOIN soll.Traceability t
-              ON (t.artifact_type = 'Symbol' AND (t.artifact_ref = s.id OR t.artifact_ref = s.name))
             LEFT JOIN CONTAINS rel ON rel.target_id = s.id
             LEFT JOIN File f ON f.path = rel.source_id
             WHERE s.kind IN ('function', 'method')
               AND COALESCE(s.is_public, false) = false
-              AND subst.source_id IS NULL
-              AND imp.source_id IS NULL
-              AND t.id IS NULL
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM SUBSTANTIATES subst
+                    WHERE subst.source_id = s.id OR subst.target_id = s.id
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM IMPACTS imp
+                    WHERE imp.source_id = s.id OR imp.target_id = s.id
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM soll.Traceability t
+                    WHERE t.artifact_type = 'Symbol'
+                      AND (t.artifact_ref = s.id OR t.artifact_ref = s.name)
+              )
               AND (
                 f.path IS NULL
                 OR (
@@ -500,7 +546,10 @@ impl GraphStore {
             LIMIT 20
             ",
             if scoped {
-                format!(" AND s.project_code = '{}'", escaped)
+                format!(
+                    " AND s.project_code = '{}' AND (rel.project_code = '{}' OR rel.project_code IS NULL)",
+                    escaped, escaped
+                )
             } else {
                 String::new()
             }
@@ -624,18 +673,13 @@ impl GraphStore {
                 JOIN CALLS c2
                   ON c1.source_id = c2.target_id
                  AND c1.target_id = c2.source_id
-                JOIN Symbol s1 ON s1.id = c1.source_id
-                JOIN Symbol s2 ON s2.id = c1.target_id
                 WHERE c1.source_id != c1.target_id
                   {}
                 GROUP BY 1, 2
             ) reciprocal_cycles
             ",
             if scoped {
-                format!(
-                    "AND s1.project_code = '{}' AND s2.project_code = '{}'",
-                    escaped, escaped
-                )
+                format!("AND c1.project_code = '{}' AND c2.project_code = '{}'", escaped, escaped)
             } else {
                 String::new()
             }

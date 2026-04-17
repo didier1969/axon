@@ -21,7 +21,7 @@ fn test_full_pipeline_loop() {
     // 3. Create a mock Elixir file with proper extension
     println!("[TEST] Step 3: Create mock Elixir file...");
     let temp_root = std::env::temp_dir().join("axon_pipeline_root");
-    let project_root = temp_root.join("test_proj");
+    let project_root = temp_root.join("prj");
     std::fs::create_dir_all(&project_root).unwrap();
     std::env::set_var("AXON_PROJECTS_ROOT", &temp_root);
 
@@ -33,7 +33,7 @@ fn test_full_pipeline_loop() {
     // 4. Pre-insert file into DB as pending (simulating scanner)
     println!("[TEST] Step 4: Bulk insert file...");
     graph
-        .bulk_insert_files(&[(path.clone(), "test_proj".to_string(), 100, 12345)])
+        .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 100, 12345)])
         .expect("Failed to insert file");
 
     // 5. Setup Worker infrastructure
@@ -129,7 +129,7 @@ fn test_full_pipeline_loop() {
         "Chunk rows should be tied to symbol sources"
     );
     assert!(
-        chunk_json.contains("test_proj"),
+        chunk_json.contains("PRJ"),
         "Chunk rows should inherit project code"
     );
 
@@ -145,7 +145,7 @@ fn test_full_pipeline_loop() {
         "Module name 'Test' should be present in extracted symbols"
     );
     assert!(
-        symbols_json.contains("test_proj"),
+        symbols_json.contains("PRJ"),
         "Project code should be inferred from the indexed path"
     );
 

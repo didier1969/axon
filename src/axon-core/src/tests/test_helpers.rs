@@ -20,5 +20,9 @@ pub fn create_test_db() -> Result<GraphStore> {
     );
     let _ =
         store.sync_project_registry_entry("AXO", Some("Axon"), Some("/home/dstadel/projects/axon"));
+    let _ = store.sync_project_registry_entry("PRJ", Some("ProjectFixture"), Some("/tmp/prj"));
+    let _ = store.sync_project_registry_entry("PJA", Some("ProjectFixtureA"), Some("/tmp/pja"));
+    let _ = store.sync_project_registry_entry("PJB", Some("ProjectFixtureB"), Some("/tmp/pjb"));
+    let _ = store.sync_project_registry_entry("OTH", Some("OtherFixture"), Some("/tmp/other"));
     Ok(store)
 }

@@ -875,28 +875,63 @@ impl McpServer {
         let symbol = args.get("symbol")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
+        let Some(symbol_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
+            let suggestions = self.suggest_scoped_symbols_canonical(symbol, project, 8);
+            let scope = project
+                .map(|p| format!("project:{}", p))
+                .unwrap_or_else(|| "workspace:*".to_string());
+            let evidence = format!(
+                "{}{}",
+                self.project_scope_truth_note(project).unwrap_or_default(),
+                format_table_from_json(&suggestions, &["Symbole suggéré", "Type", "Projet"])
+            );
+            let report = format!(
+                "### 🔍 Inspection du Symbole : {}\n\n{}",
+                symbol,
+                format_standard_contract(
+                    "warn_input_not_found",
+                    "symbol not found in current scope",
+                    &scope,
+                    &evidence_by_mode(&evidence, mode),
+                    &[
+                        "pick one suggested symbol",
+                        "or pass the exact canonical symbol id"
+                    ],
+                    "low",
+                )
+            );
+            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
+        };
+
         let query = if project.is_some() {
             format!(
                 "SELECT s.name, s.kind, s.tested, \
                  (SELECT count(*) FROM CALLS c1 WHERE c1.target_id = s.id) AS callers, \
                  (SELECT count(*) FROM CALLS c2 WHERE c2.source_id = s.id) AS callees \
                  FROM Symbol s \
-                 WHERE s.name = $sym{}",
+                 WHERE s.id = $sym OR s.name = $sym{}",
                 Self::sql_project_filter_for_fields(project, &["s.project_code"])
             )
         } else {
             "SELECT s.name, s.kind, s.tested, \
              (SELECT count(*) FROM CALLS c1 WHERE c1.target_id = s.id) AS callers, \
              (SELECT count(*) FROM CALLS c2 WHERE c2.source_id = s.id) AS callees \
-             FROM Symbol s WHERE s.name = $sym"
+             FROM Symbol s WHERE s.id = $sym OR s.name = $sym"
                 .to_string()
         };
-        let params = json!({"sym": symbol});
+        let params = json!({"sym": symbol_id});
         let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
         let project_note = self.project_scope_truth_note(project);
 
         match self.graph_store.query_json_param(&query, &params) {
             Ok(res) => {
+                let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
+                if rows.is_empty() {
+                    return Some(json!({
+                        "content": [{ "type": "text", "text": format!("Symbol '{}' not found in current scope", symbol) }],
+                        "isError": true
+                    }));
+                }
                 let table =
                     format_table_from_json(&res, &["Nom", "Type", "Testé", "Appelants", "Appelés"]);
                 let scope = project
@@ -934,7 +969,7 @@ impl McpServer {
         let symbol = args.get("symbol")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
-        let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(100);
+        let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(24);
         let scope = project
             .map(|p| format!("project:{}", p))
             .unwrap_or_else(|| "workspace:*".to_string());
@@ -982,42 +1017,54 @@ impl McpServer {
             return Some(json!({ "content": [{ "type": "text", "text": report }] }));
         };
 
+        let scoped_filter = if project.is_some() {
+            "WHERE src.project_code = $project AND dst.project_code = $project"
+        } else {
+            ""
+        };
+
         let up_query = format!(
-            "WITH RECURSIVE callers(sym, depth) AS (
-                SELECT source_id, 1 FROM CALLS WHERE target_id = $target_id
+            "WITH RECURSIVE scoped_calls AS (
+                SELECT c.source_id, c.target_id
+                FROM CALLS c
+                JOIN Symbol src ON src.id = c.source_id
+                JOIN Symbol dst ON dst.id = c.target_id
+                {}
+            ),
+            callers(sym, depth) AS (
+                SELECT source_id, 1 FROM scoped_calls WHERE target_id = $target_id
                 UNION ALL
                 SELECT c.source_id, callers.depth + 1
-                FROM CALLS c
+                FROM scoped_calls c
                 JOIN callers ON c.target_id = callers.sym
                 WHERE callers.depth < {}
             )
             SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callers
-            JOIN Symbol s ON s.id = callers.sym{}",
+            JOIN Symbol s ON s.id = callers.sym",
+            scoped_filter,
             depth,
-            if project.is_some() {
-                " WHERE s.project_code = $project"
-            } else {
-                ""
-            }
         );
 
         let down_query = format!(
-            "WITH RECURSIVE callees(sym, depth) AS (
-                SELECT target_id, 1 FROM CALLS WHERE source_id = $target_id
+            "WITH RECURSIVE scoped_calls AS (
+                SELECT c.source_id, c.target_id
+                FROM CALLS c
+                JOIN Symbol src ON src.id = c.source_id
+                JOIN Symbol dst ON dst.id = c.target_id
+                {}
+            ),
+            callees(sym, depth) AS (
+                SELECT target_id, 1 FROM scoped_calls WHERE source_id = $target_id
                 UNION ALL
                 SELECT c.target_id, callees.depth + 1
-                FROM CALLS c
+                FROM scoped_calls c
                 JOIN callees ON c.source_id = callees.sym
                 WHERE callees.depth < {}
             )
             SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callees
-            JOIN Symbol s ON s.id = callees.sym{}",
+            JOIN Symbol s ON s.id = callees.sym",
+            scoped_filter,
             depth,
-            if project.is_some() {
-                " WHERE s.project_code = $project"
-            } else {
-                ""
-            }
         );
 
         let params = if let Some(project) = project {
@@ -1081,7 +1128,19 @@ impl McpServer {
             )
         );
 
-        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "symbol": symbol,
+                "project": project.unwrap_or("*"),
+                "depth": depth,
+                "path_found": false,
+                "path_type": "bidirectional_trace",
+                "caller_count": up_rows.len(),
+                "callee_count": down_rows.len(),
+                "canonical_sources": crate::mcp::McpServer::canonical_sources_snapshot()
+            }
+        }))
     }
 
     pub(crate) fn axon_api_break_check(&self, args: &Value) -> Option<Value> {

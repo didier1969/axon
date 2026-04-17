@@ -200,12 +200,15 @@ def build_request_specs(project: str, soll_project: str, query: str, symbol: str
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         ),
         RequestSpec(
-            "health",
+            "project_status",
             {
                 "jsonrpc": "2.0",
                 "id": 3,
                 "method": "tools/call",
-                "params": {"name": "health", "arguments": {"project": project}},
+                "params": {
+                    "name": "project_status",
+                    "arguments": {"project_code": soll_project, "mode": "brief"},
+                },
             },
         ),
         RequestSpec(

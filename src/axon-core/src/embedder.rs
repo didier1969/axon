@@ -6031,9 +6031,9 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-b', 'symbol', 'sym-b', 'proj', '/tmp/segments.rs', 'function', 'B', 'hash-b', 20, 30), \
-                 ('chunk-a', 'symbol', 'sym-a', 'proj', '/tmp/segments.rs', 'function', 'A', 'hash-a', 5, 10), \
-                 ('chunk-c', 'symbol', 'sym-c', 'proj', '/tmp/segments.rs', 'function', 'C', 'hash-c', 31, 40)",
+                 ('chunk-b', 'symbol', 'sym-b', 'PRJ', '/tmp/segments.rs', 'function', 'B', 'hash-b', 20, 30), \
+                 ('chunk-a', 'symbol', 'sym-a', 'PRJ', '/tmp/segments.rs', 'function', 'A', 'hash-a', 5, 10), \
+                 ('chunk-c', 'symbol', 'sym-c', 'PRJ', '/tmp/segments.rs', 'function', 'C', 'hash-c', 31, 40)",
             )
             .unwrap();
 
@@ -6050,10 +6050,10 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-a1', 'symbol', 'sym-a1', 'proj', '/tmp/a.rs', 'function', 'A1', 'hash-a1', 1, 2), \
-                 ('chunk-a2', 'symbol', 'sym-a2', 'proj', '/tmp/a.rs', 'function', 'A2', 'hash-a2', 3, 4), \
-                 ('chunk-a3', 'symbol', 'sym-a3', 'proj', '/tmp/a.rs', 'function', 'A3', 'hash-a3', 5, 6), \
-                 ('chunk-b1', 'symbol', 'sym-b1', 'proj', '/tmp/b.rs', 'function', 'B1', 'hash-b1', 1, 2)",
+                 ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/a.rs', 'function', 'A1', 'hash-a1', 1, 2), \
+                 ('chunk-a2', 'symbol', 'sym-a2', 'PRJ', '/tmp/a.rs', 'function', 'A2', 'hash-a2', 3, 4), \
+                 ('chunk-a3', 'symbol', 'sym-a3', 'PRJ', '/tmp/a.rs', 'function', 'A3', 'hash-a3', 5, 6), \
+                 ('chunk-b1', 'symbol', 'sym-b1', 'PRJ', '/tmp/b.rs', 'function', 'B1', 'hash-b1', 1, 2)",
             )
             .unwrap();
 
@@ -6089,13 +6089,13 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-a1', 'symbol', 'sym-a1', 'proj', '/tmp/a.rs', 'function', 'A1', 'hash-a1', 1, 2), \
-                 ('chunk-a2', 'symbol', 'sym-a2', 'proj', '/tmp/a.rs', 'function', 'A2', 'hash-a2', 3, 4), \
-                 ('chunk-a3', 'symbol', 'sym-a3', 'proj', '/tmp/a.rs', 'function', 'A3', 'hash-a3', 5, 6), \
-                 ('chunk-b1', 'symbol', 'sym-b1', 'proj', '/tmp/b.rs', 'function', 'B1', 'hash-b1', 1, 2), \
-                 ('chunk-b2', 'symbol', 'sym-b2', 'proj', '/tmp/b.rs', 'function', 'B2', 'hash-b2', 3, 4), \
-                 ('chunk-b3', 'symbol', 'sym-b3', 'proj', '/tmp/b.rs', 'function', 'B3', 'hash-b3', 5, 6), \
-                 ('chunk-c1', 'symbol', 'sym-c1', 'proj', '/tmp/c.rs', 'function', 'C1', 'hash-c1', 1, 2)",
+                 ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/a.rs', 'function', 'A1', 'hash-a1', 1, 2), \
+                 ('chunk-a2', 'symbol', 'sym-a2', 'PRJ', '/tmp/a.rs', 'function', 'A2', 'hash-a2', 3, 4), \
+                 ('chunk-a3', 'symbol', 'sym-a3', 'PRJ', '/tmp/a.rs', 'function', 'A3', 'hash-a3', 5, 6), \
+                 ('chunk-b1', 'symbol', 'sym-b1', 'PRJ', '/tmp/b.rs', 'function', 'B1', 'hash-b1', 1, 2), \
+                 ('chunk-b2', 'symbol', 'sym-b2', 'PRJ', '/tmp/b.rs', 'function', 'B2', 'hash-b2', 3, 4), \
+                 ('chunk-b3', 'symbol', 'sym-b3', 'PRJ', '/tmp/b.rs', 'function', 'B3', 'hash-b3', 5, 6), \
+                 ('chunk-c1', 'symbol', 'sym-c1', 'PRJ', '/tmp/c.rs', 'function', 'C1', 'hash-c1', 1, 2)",
             )
             .unwrap();
 
@@ -6135,9 +6135,9 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-a1', 'symbol', 'sym-a1', 'proj', '/tmp/limited.rs', 'function', 'A1', 'hash-a1', 1, 2), \
-                 ('chunk-a2', 'symbol', 'sym-a2', 'proj', '/tmp/limited.rs', 'function', 'A2', 'hash-a2', 3, 4), \
-                 ('chunk-a3', 'symbol', 'sym-a3', 'proj', '/tmp/limited.rs', 'function', 'A3', 'hash-a3', 5, 6)",
+                 ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/limited.rs', 'function', 'A1', 'hash-a1', 1, 2), \
+                 ('chunk-a2', 'symbol', 'sym-a2', 'PRJ', '/tmp/limited.rs', 'function', 'A2', 'hash-a2', 3, 4), \
+                 ('chunk-a3', 'symbol', 'sym-a3', 'PRJ', '/tmp/limited.rs', 'function', 'A3', 'hash-a3', 5, 6)",
             )
             .unwrap();
         let active_works = vec![FileVectorizationWork {
@@ -6159,8 +6159,8 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-b1', 'symbol', 'sym-b1', 'proj', '/tmp/complete.rs', 'function', 'B1', 'hash-b1', 1, 2), \
-                 ('chunk-b2', 'symbol', 'sym-b2', 'proj', '/tmp/complete.rs', 'function', 'B2', 'hash-b2', 3, 4)",
+                 ('chunk-b1', 'symbol', 'sym-b1', 'PRJ', '/tmp/complete.rs', 'function', 'B1', 'hash-b1', 1, 2), \
+                 ('chunk-b2', 'symbol', 'sym-b2', 'PRJ', '/tmp/complete.rs', 'function', 'B2', 'hash-b2', 3, 4)",
             )
             .unwrap();
         let active_works = vec![FileVectorizationWork {
@@ -6182,8 +6182,8 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-a1', 'symbol', 'sym-a1', 'proj', '/tmp/bytes-a.rs', 'function', 'AAAA', 'hash-a1', 1, 2), \
-                 ('chunk-b1', 'symbol', 'sym-b1', 'proj', '/tmp/bytes-b.rs', 'function', 'BBBB', 'hash-b1', 1, 2)",
+                 ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/bytes-a.rs', 'function', 'AAAA', 'hash-a1', 1, 2), \
+                 ('chunk-b1', 'symbol', 'sym-b1', 'PRJ', '/tmp/bytes-b.rs', 'function', 'BBBB', 'hash-b1', 1, 2)",
             )
             .unwrap();
         let active_works = vec![
@@ -6210,8 +6210,8 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-a1', 'symbol', 'sym-a1', 'proj', '/tmp/vectorized.rs', 'function', 'A1', 'hash-a1', 1, 2), \
-                 ('chunk-a2', 'symbol', 'sym-a2', 'proj', '/tmp/vectorized.rs', 'function', 'A2', 'hash-a2', 3, 4)",
+                 ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/vectorized.rs', 'function', 'A1', 'hash-a1', 1, 2), \
+                 ('chunk-a2', 'symbol', 'sym-a2', 'PRJ', '/tmp/vectorized.rs', 'function', 'A2', 'hash-a2', 3, 4)",
             )
             .unwrap();
         store
@@ -6464,7 +6464,7 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) \
-                 VALUES ('/tmp/outbox-poison.rs', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
+                 VALUES ('/tmp/outbox-poison.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
             )
             .unwrap();
         store
@@ -6581,7 +6581,7 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) \
-                 VALUES ('/tmp/finalize_vector.rs', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
+                 VALUES ('/tmp/finalize_vector.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
             )
             .unwrap();
         store
@@ -6633,13 +6633,13 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) \
-                 VALUES ('/tmp/file_level_ready.rs', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
+                 VALUES ('/tmp/file_level_ready.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
             )
             .unwrap();
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
-                 VALUES ('chunk-1', 'symbol', 'sym-1', 'proj', '/tmp/file_level_ready.rs', 'function', 'fn a() {}', 'hash-a', 1, 1)",
+                 VALUES ('chunk-1', 'symbol', 'sym-1', 'PRJ', '/tmp/file_level_ready.rs', 'function', 'fn a() {}', 'hash-a', 1, 1)",
             )
             .unwrap();
         store
@@ -6680,8 +6680,8 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES \
-                 ('/tmp/finalize_a.rs', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100), \
-                 ('/tmp/finalize_b.rs', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
+                 ('/tmp/finalize_a.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100), \
+                 ('/tmp/finalize_b.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
             )
             .unwrap();
         store
@@ -6802,7 +6802,7 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES \
-                 ('/tmp/flush_finalize.rs', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
+                 ('/tmp/flush_finalize.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
             )
             .unwrap();
         store
@@ -6903,9 +6903,9 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store.execute(
             "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-             ('chunk-a', 'symbol', 'sym-a', 'proj', '/tmp/a.rs', 'function', 'fn a() {}', 'hash-a', 1, 1), \
-             ('chunk-b', 'symbol', 'sym-b', 'proj', '/tmp/b.rs', 'function', 'fn b() {}', 'hash-b', 1, 1), \
-             ('chunk-c', 'symbol', 'sym-c', 'proj', '/tmp/c.rs', 'function', 'fn c() {}', 'hash-c', 1, 1)"
+             ('chunk-a', 'symbol', 'sym-a', 'PRJ', '/tmp/a.rs', 'function', 'fn a() {}', 'hash-a', 1, 1), \
+             ('chunk-b', 'symbol', 'sym-b', 'PRJ', '/tmp/b.rs', 'function', 'fn b() {}', 'hash-b', 1, 1), \
+             ('chunk-c', 'symbol', 'sym-c', 'PRJ', '/tmp/c.rs', 'function', 'fn c() {}', 'hash-c', 1, 1)"
         ).unwrap();
 
         let active = vec![
@@ -6934,9 +6934,9 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store.execute(
             "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-             ('chunk-a1', 'symbol', 'sym-a1', 'proj', '/tmp/a.rs', 'function', 'fn a1() {}', 'hash-a1', 1, 1), \
-             ('chunk-a2', 'symbol', 'sym-a2', 'proj', '/tmp/a.rs', 'function', 'fn a2() {}', 'hash-a2', 2, 2), \
-             ('chunk-b1', 'symbol', 'sym-b1', 'proj', '/tmp/b.rs', 'function', 'fn b1() {}', 'hash-b1', 1, 1)"
+             ('chunk-a1', 'symbol', 'sym-a1', 'PRJ', '/tmp/a.rs', 'function', 'fn a1() {}', 'hash-a1', 1, 1), \
+             ('chunk-a2', 'symbol', 'sym-a2', 'PRJ', '/tmp/a.rs', 'function', 'fn a2() {}', 'hash-a2', 2, 2), \
+             ('chunk-b1', 'symbol', 'sym-b1', 'PRJ', '/tmp/b.rs', 'function', 'fn b1() {}', 'hash-b1', 1, 1)"
         ).unwrap();
 
         let active = vec![
@@ -6966,7 +6966,7 @@ mod tests {
         let oversized = "x".repeat(4096);
         store.execute(&format!(
             "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-             ('chunk-oversized', 'symbol', 'sym-oversized', 'proj', '/tmp/oversized.rs', 'function', '{}', 'hash-oversized', 1, 1)",
+             ('chunk-oversized', 'symbol', 'sym-oversized', 'PRJ', '/tmp/oversized.rs', 'function', '{}', 'hash-oversized', 1, 1)",
             oversized
         ))
         .unwrap();

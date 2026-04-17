@@ -1138,6 +1138,26 @@ impl McpServer {
                 ReadFreshness::StaleOk,
             )
             .unwrap_or_else(|_| "[]".to_string());
+        let table_rows: Vec<Vec<Value>> = serde_json::from_str(&rels).unwrap_or_default();
+        let mut core_tables = Vec::new();
+        let mut derived_optional_tables = Vec::new();
+        for row in table_rows {
+            let Some(table_name) = row.first().and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let rendered = vec![Value::String(table_name.to_string())];
+            if matches!(
+                table_name,
+                "GraphEmbedding"
+                    | "GraphProjection"
+                    | "GraphProjectionQueue"
+                    | "FileVectorizationQueue"
+            ) {
+                derived_optional_tables.push(rendered);
+            } else {
+                core_tables.push(rendered);
+            }
+        }
         let cols = self
             .graph_store
             .query_json_on_reader_with_freshness(
@@ -1152,8 +1172,17 @@ impl McpServer {
         let report = format!(
             "## 🗂️ Labels / Tables Discovery\n\n\
              **Core tables:**\n{}\n\n\
+             **Derived optional tables:**\n{}\n\n\
              **Key columns:**\n{}\n",
-            format_table_from_json(&rels, &["Table"]),
+            format_table_from_json(
+                &serde_json::to_string(&core_tables).unwrap_or_else(|_| "[]".to_string()),
+                &["Table"]
+            ),
+            format_table_from_json(
+                &serde_json::to_string(&derived_optional_tables)
+                    .unwrap_or_else(|_| "[]".to_string()),
+                &["Table"]
+            ),
             format_table_from_json(&cols, &["Table", "Column", "Type"])
         );
         Some(json!({ "content": [{ "type": "text", "text": report }] }))

@@ -1,5 +1,5 @@
 {
-  "project": "BookingSystem",
+  "project": "BKS",
   "steps": [
     {
       "name": "scenario.query_markdown_probe",
@@ -22,11 +22,15 @@
       ]
     },
     {
-      "name": "scenario.health_after_queries",
-      "tool": "health",
-      "args": {},
+      "name": "scenario.project_status_after_queries",
+      "tool": "project_status",
+      "args": {
+        "project_code": "BKS",
+        "mode": "brief"
+      },
       "expect_contains": [
-        "**Status:** ok"
+        "Project Status",
+        "BKS"
       ]
     }
   ]

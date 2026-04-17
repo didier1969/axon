@@ -94,6 +94,7 @@ pub(crate) fn start_runtime_services(
     let mcp_store_for_axum = graph_store;
     tokio::spawn(async move {
         let mcp_server = Arc::new(McpServer::new(mcp_store_for_axum));
+        McpServer::startup_prewarm(mcp_server.clone());
         let app = axon_core::mcp_http::app_router(mcp_server);
         let http_port = std::env::var("HYDRA_HTTP_PORT").unwrap_or_else(|_| "44129".to_string());
         let bind_addr = format!("0.0.0.0:{}", http_port);

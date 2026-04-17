@@ -53,25 +53,27 @@ pub enum TaskDispatchOutcome {
 }
 
 impl WorkerPool {
-    fn infer_project_code(path: &str) -> Option<String> {
-        let candidate = std::path::Path::new(path)
-            .canonicalize()
-            .unwrap_or_else(|_| std::path::PathBuf::from(path));
-
-        crate::project_meta::discover_project_identities()
-            .into_iter()
-            .find(|identity| candidate.starts_with(&identity.project_path))
-            .map(|identity| identity.code)
+    fn infer_project_code(graph_store: &GraphStore, path: &str) -> Option<String> {
+        crate::project_meta::resolve_registered_project_identity_for_path(
+            graph_store,
+            std::path::Path::new(path),
+        )
+        .ok()
+        .map(|identity| identity.code)
     }
 
-    fn normalize_project_code(project_code: Option<String>, path: &str) -> Option<String> {
+    fn normalize_project_code(
+        graph_store: &GraphStore,
+        project_code: Option<String>,
+        path: &str,
+    ) -> Option<String> {
         let normalized = project_code
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .and_then(|value| {
                 if crate::project_meta::is_valid_project_code(value) {
-                    crate::project_meta::resolve_canonical_project_identity(value)
+                    crate::project_meta::resolve_registered_project_identity(graph_store, value)
                         .ok()
                         .map(|identity| identity.code)
                 } else {
@@ -79,18 +81,22 @@ impl WorkerPool {
                 }
             });
 
-        normalized.or_else(|| Self::infer_project_code(path))
+        normalized.or_else(|| Self::infer_project_code(graph_store, path))
     }
 
     fn normalize_extraction_project_code(
+        graph_store: &GraphStore,
         extraction: &mut crate::parser::ExtractionResult,
         path: &str,
-    ) {
+    ) -> anyhow::Result<()> {
         extraction.project_code =
-            Self::normalize_project_code(extraction.project_code.clone(), path);
-        if extraction.project_code.is_none() {
-            extraction.project_code = Some("global".to_string());
-        }
+            Self::normalize_project_code(graph_store, extraction.project_code.clone(), path);
+        extraction.project_code.as_ref().map(|_| ()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Chemin `{}` rejeté: aucun projet canonique enregistré ne correspond",
+                path
+            )
+        })
     }
 
     pub fn new(
@@ -171,7 +177,29 @@ impl WorkerPool {
                 if let Some(parser) = parser::get_parser_for_file(std::path::Path::new(&task.path))
                 {
                     let mut extraction = parser.parse(&content);
-                    Self::normalize_extraction_project_code(&mut extraction, &task.path);
+                    if let Err(err) = Self::normalize_extraction_project_code(
+                        graph_store,
+                        &mut extraction,
+                        &task.path,
+                    ) {
+                        let observed_cost_bytes = estimate_observed_cost_bytes(
+                            &task.path,
+                            task.size_bytes.max(content.len() as u64),
+                            started_at.elapsed(),
+                            task.mode,
+                        );
+                        let _ = db_sender.send(DbWriteTask::FileSkipped {
+                            reservation_id: task.reservation_id.clone(),
+                            path: task.path.clone(),
+                            reason: format!("unknown_project_identity: {}", err),
+                            trace_id: task.trace_id.clone(),
+                            observed_cost_bytes: Some(observed_cost_bytes),
+                            t0: task.t0,
+                            t1: task.t1,
+                            t2,
+                        });
+                        return TaskDispatchOutcome::Enqueued;
+                    }
                     let t3 = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -835,7 +863,7 @@ mod tests {
         graph
             .bulk_insert_files(&[(
                 path.to_string_lossy().to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 32,
                 1,
             )])
@@ -875,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn process_one_task_marks_file_as_writer_pending_commit() {
+    fn process_one_task_keeps_file_claimed_until_writer_commit() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("writer_stage.rs");
         std::fs::write(&path, "defmodule WriterStage do\nend\n").unwrap();
@@ -883,7 +911,7 @@ mod tests {
 
         let graph = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         graph
-            .bulk_insert_files(&[(path_str.clone(), "proj".to_string(), 32, 1)])
+            .bulk_insert_files(&[(path_str.clone(), "PRJ".to_string(), 32, 1)])
             .unwrap();
         graph
             .claim_pending_paths(std::slice::from_ref(&path_str))
@@ -909,17 +937,19 @@ mod tests {
         assert_eq!(outcome, TaskDispatchOutcome::Enqueued);
 
         let row = graph
-            .query_json(&format!(
-                "SELECT status, status_reason FROM File WHERE path = '{}'",
+            .query_json_writer(&format!(
+                "SELECT status, status_reason, file_stage FROM File WHERE path = '{}'",
                 path_str.replace('\'', "''")
             ))
             .unwrap();
         assert!(row.contains("indexing"), "{row}");
-        assert!(row.contains("writer_pending_commit"), "{row}");
+        assert!(row.contains("claimed_for_indexing"), "{row}");
+        assert!(row.contains("claimed"), "{row}");
     }
 
     #[test]
     fn normalize_project_code_prefers_canonical_code_for_repo_path() {
+        let graph = crate::tests::test_helpers::create_test_db().unwrap();
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|path| path.parent())
@@ -927,10 +957,24 @@ mod tests {
         let worker_path = repo_root.join("src/axon-core/src/worker.rs");
 
         let normalized = WorkerPool::normalize_project_code(
+            &graph,
             Some("axon".to_string()),
             worker_path.to_string_lossy().as_ref(),
         );
 
         assert_eq!(normalized.as_deref(), Some("AXO"));
+    }
+
+    #[test]
+    fn normalize_project_code_rejects_unregistered_path_instead_of_falling_back_to_global() {
+        let graph = crate::tests::test_helpers::create_test_db().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("orphan.rs");
+        std::fs::write(&path, "fn orphan() {}\n").unwrap();
+
+        let normalized =
+            WorkerPool::normalize_project_code(&graph, None, path.to_string_lossy().as_ref());
+
+        assert_eq!(normalized, None);
     }
 }

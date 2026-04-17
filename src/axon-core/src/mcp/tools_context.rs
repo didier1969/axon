@@ -2,9 +2,10 @@ use crate::embedding_contract::{CHUNK_MODEL_ID, DIMENSION};
 use crate::service_guard::{self, ServicePressure};
 use ignore::WalkBuilder;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use super::format::{evidence_by_mode, format_standard_contract};
@@ -14,6 +15,14 @@ const DEFAULT_TOKEN_BUDGET: usize = 1400;
 const DEFAULT_TOP_K: usize = 8;
 const VECTOR_QUEUE_BACKLOG_WARN: usize = 128;
 const VECTOR_QUEUE_BACKLOG_HARD_STOP: usize = 512;
+#[allow(dead_code)]
+const RETRIEVE_CONTEXT_CACHE_TTL_MS: i64 = 60_000;
+
+#[allow(dead_code)]
+type RetrieveContextCache = HashMap<String, (i64, Value)>;
+
+#[allow(dead_code)]
+static RETRIEVE_CONTEXT_CACHE: OnceLock<Mutex<RetrieveContextCache>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RetrievalRoute {
@@ -172,6 +181,36 @@ impl RetrievalRuntimeState {
 }
 
 impl McpServer {
+    #[cfg(not(test))]
+    fn retrieve_context_cache() -> &'static Mutex<RetrieveContextCache> {
+        RETRIEVE_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    #[cfg(not(test))]
+    fn read_retrieve_context_cache(key: &str, now_ms: i64) -> Option<Value> {
+        let guard = Self::retrieve_context_cache().lock().ok()?;
+        let (stored_at, value) = guard.get(key)?;
+        if now_ms.saturating_sub(*stored_at) > RETRIEVE_CONTEXT_CACHE_TTL_MS {
+            return None;
+        }
+        Some(value.clone())
+    }
+
+    #[cfg(test)]
+    fn read_retrieve_context_cache(_key: &str, _now_ms: i64) -> Option<Value> {
+        None
+    }
+
+    #[cfg(not(test))]
+    fn write_retrieve_context_cache(key: String, now_ms: i64, value: &Value) {
+        if let Ok(mut guard) = Self::retrieve_context_cache().lock() {
+            guard.insert(key, (now_ms, value.clone()));
+        }
+    }
+
+    #[cfg(test)]
+    fn write_retrieve_context_cache(_key: String, _now_ms: i64, _value: &Value) {}
+
     pub(crate) fn resolve_scoped_symbol_id_canonical(
         &self,
         symbol: &str,
@@ -261,6 +300,25 @@ impl McpServer {
             .and_then(|value| value.as_bool())
             .unwrap_or(true);
         let include_soll = args.get("include_soll").and_then(|value| value.as_bool());
+        let should_include_soll = include_soll.unwrap_or(true);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        let cache_key = format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            project.unwrap_or("*"),
+            mode.unwrap_or("brief"),
+            token_budget,
+            top_k,
+            include_graph,
+            should_include_soll,
+            question
+        );
+        if let Some(cached) = Self::read_retrieve_context_cache(&cache_key, now_ms) {
+            return Some(cached);
+        }
 
         let mut timings = RetrievalTimings::default();
         let stage_started_at = Instant::now();
@@ -520,10 +578,12 @@ impl McpServer {
             )
         );
 
-        Some(json!({
+        let response = json!({
             "content": [{"type": "text", "text": report}],
             "data": data
-        }))
+        });
+        Self::write_retrieve_context_cache(cache_key, now_ms, &response);
+        Some(response)
     }
 
     fn plan_retrieval_route(question: &str) -> RetrievalRoute {
@@ -925,7 +985,16 @@ impl McpServer {
             return (Vec::new(), Vec::new());
         }
 
-        let project_code = project.unwrap_or("unknown").to_ascii_lowercase();
+        let project_code = project
+            .and_then(|value| crate::project_meta::resolve_canonical_project_identity(value).ok())
+            .map(|identity| identity.code)
+            .or_else(|| {
+                project
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "unknown".to_string());
         let mut matches = Vec::new();
         for entry in WalkBuilder::new(repo_root_path)
             .hidden(false)

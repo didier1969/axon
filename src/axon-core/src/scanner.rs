@@ -6,6 +6,7 @@ use crate::ingress_buffer::{
 };
 use crate::parser::supported_parser_ecosystems;
 use crate::service_guard;
+use anyhow::Result;
 use ignore::{gitignore::Gitignore, WalkBuilder};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -141,8 +142,8 @@ impl Scanner {
         !self.path_has_blocked_subtree_hint_segment(path)
     }
 
-    pub fn project_code_for_path(&self, path: &Path) -> String {
-        self.extract_project_code(path)
+    pub fn project_code_for_path(&self, graph: &GraphStore, path: &Path) -> Result<String> {
+        self.extract_project_code(graph, path)
     }
 
     pub fn is_ignore_control_path(&self, path: &Path) -> bool {
@@ -180,8 +181,14 @@ impl Scanner {
         "eligible".to_string()
     }
 
-    fn extract_project_code(&self, _path: &Path) -> String {
-        self.project_code.clone()
+    fn extract_project_code(&self, graph: &GraphStore, path: &Path) -> Result<String> {
+        let explicit = self.project_code.trim();
+        if !explicit.is_empty() {
+            return Ok(explicit.to_string());
+        }
+
+        crate::project_meta::resolve_registered_project_identity_for_path(graph, path)
+            .map(|identity| identity.code)
     }
 
     fn build_walker_from(&self, start: &Path) -> WalkBuilder {
@@ -397,7 +404,16 @@ impl Scanner {
                     continue;
                 }
 
-                let project_name = self.extract_project_code(path);
+                let project_name = match self.project_code_for_path(graph.as_ref(), path) {
+                    Ok(project_code) => project_code,
+                    Err(err) => {
+                        info!(
+                            "Scanner: chemin non admissible sans identité canonique {:?}: {}",
+                            path, err
+                        );
+                        continue;
+                    }
+                };
 
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name == "pyproject.toml" || name == "Cargo.toml" || name == "mix.exs" {
@@ -672,7 +688,7 @@ mod tests {
     fn test_should_process_path_respects_hierarchical_axonignore() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("prj");
         let ignored = project.join("ignored");
         std::fs::create_dir_all(&ignored).unwrap();
         std::fs::write(project.join(".axonignore"), "ignored/\n!keep.ex\n").unwrap();
@@ -681,7 +697,7 @@ mod tests {
         std::fs::write(&kept, "defmodule Keep do\nend\n").unwrap();
         std::fs::write(&skipped, "defmodule Skip do\nend\n").unwrap();
 
-        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
         assert!(scanner.should_process_path(Path::new(&kept)));
         assert!(!scanner.should_process_path(Path::new(&skipped)));
     }
@@ -691,7 +707,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let top_level_worktrees = root.join(".worktrees").join("scratch");
-        let project_worktree = root.join("proj").join(".worktrees").join("feature");
+        let project_worktree = root.join("prj").join(".worktrees").join("feature");
 
         std::fs::create_dir_all(&top_level_worktrees).unwrap();
         std::fs::create_dir_all(&project_worktree).unwrap();
@@ -702,7 +718,7 @@ mod tests {
         std::fs::write(&top_level_file, "defmodule Drop do\nend\n").unwrap();
         std::fs::write(&project_file, "defmodule Keep do\nend\n").unwrap();
 
-        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
 
         assert!(
             !scanner.should_descend_into_directory(root.join(".worktrees").as_path()),
@@ -722,12 +738,12 @@ mod tests {
     fn test_hard_directory_noise_rejects_direnv_cache_and_ruff_cache_without_ignore_file() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
 
         for relative in [
-            Path::new("proj/.direnv"),
-            Path::new("proj/.cache"),
-            Path::new("proj/.ruff_cache"),
+            Path::new("prj/.direnv"),
+            Path::new("prj/.cache"),
+            Path::new("prj/.ruff_cache"),
         ] {
             let path = root.join(relative);
             std::fs::create_dir_all(&path).unwrap();
@@ -743,12 +759,12 @@ mod tests {
     fn test_blocked_subtree_hint_segments_reject_build_like_directory_events() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
 
         for relative in [
-            Path::new("proj/_build"),
-            Path::new("proj/node_modules"),
-            Path::new("proj/.devenv/state/postgres/pg_wal"),
+            Path::new("prj/_build"),
+            Path::new("prj/node_modules"),
+            Path::new("prj/.devenv/state/postgres/pg_wal"),
         ] {
             let path = root.join(relative);
             std::fs::create_dir_all(&path).unwrap();
@@ -764,13 +780,13 @@ mod tests {
     fn test_generated_artifact_prefixes_are_treated_as_build_noise() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
 
         for relative in [
-            Path::new("proj/_build_truth_dashboard_ui"),
-            Path::new("proj/_build_truth_journeys"),
-            Path::new("proj/deps/pkg/.mix"),
-            Path::new("proj/deps/pkg/ebin"),
+            Path::new("prj/_build_truth_dashboard_ui"),
+            Path::new("prj/_build_truth_journeys"),
+            Path::new("prj/deps/pkg/.mix"),
+            Path::new("prj/deps/pkg/ebin"),
         ] {
             let path = root.join(relative);
             std::fs::create_dir_all(&path).unwrap();
@@ -791,13 +807,13 @@ mod tests {
     fn test_ecosystem_policy_blocks_framework_and_cache_directories() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
         let config = test_config();
 
         for relative in [
-            Path::new("proj/.next"),
-            Path::new("proj/.gradle"),
-            Path::new("proj/__pycache__"),
+            Path::new("prj/.next"),
+            Path::new("prj/.gradle"),
+            Path::new("prj/__pycache__"),
         ] {
             let path = root.join(relative);
             std::fs::create_dir_all(&path).unwrap();
@@ -813,9 +829,9 @@ mod tests {
     fn test_soft_excluded_vendor_can_be_reopened_for_scanner_and_subtree_hints() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
         let mut config = test_config();
-        let vendor = root.join("proj/vendor");
+        let vendor = root.join("prj/vendor");
         std::fs::create_dir_all(&vendor).unwrap();
 
         assert!(scanner.path_has_ignored_directory_noise_with_config(vendor.as_path(), &config));
@@ -860,12 +876,12 @@ mod tests {
         std::fs::write(project_a.join("keep.ex"), "defmodule Keep do\nend\n").unwrap();
         std::fs::write(project_b.join("skip.ex"), "defmodule Skip do\nend\n").unwrap();
 
-        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "proj");
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "PRJ");
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         scanner.scan_subtree(store.clone(), &project_a);
 
         let count_a = store
-            .query_count("SELECT count(*) FROM File WHERE project_code = 'proj'")
+            .query_count("SELECT count(*) FROM File WHERE project_code = 'PRJ'")
             .unwrap();
         let count_b = store
             .query_count("SELECT count(*) FROM File WHERE project_code = 'proj_b'")
@@ -873,5 +889,46 @@ mod tests {
 
         assert_eq!(count_a, 1);
         assert_eq!(count_b, 0);
+    }
+
+    #[test]
+    fn test_workspace_scan_must_not_assign_unregistered_project_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let registered_project = root.join("registered");
+        let unknown_project = root.join("unknown");
+        std::fs::create_dir_all(&registered_project).unwrap();
+        std::fs::create_dir_all(&unknown_project).unwrap();
+        std::fs::write(
+            registered_project.join("keep.ex"),
+            "defmodule Keep do\nend\n",
+        )
+        .unwrap();
+        std::fs::write(unknown_project.join("drop.ex"), "defmodule Drop do\nend\n").unwrap();
+
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        store
+            .sync_project_registry_entry(
+                "PRJ",
+                Some("registered"),
+                Some(registered_project.to_string_lossy().as_ref()),
+            )
+            .unwrap();
+
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "");
+        scanner.scan(store.clone());
+
+        let registered_count = store
+            .query_count("SELECT count(*) FROM File WHERE project_code = 'PRJ'")
+            .unwrap();
+        let unknown_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM File WHERE path LIKE '{}%'",
+                unknown_project.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        assert_eq!(registered_count, 1);
+        assert_eq!(unknown_count, 0);
     }
 }

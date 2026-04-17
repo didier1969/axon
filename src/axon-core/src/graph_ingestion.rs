@@ -906,7 +906,7 @@ impl GraphStore {
             .collect::<Vec<_>>()
             .join(", ");
         let raw = self.query_json(&format!(
-            "SELECT path, COALESCE(project_code, 'global'), worker_id, trace_id \
+            "SELECT path, COALESCE(project_code, ''), worker_id, trace_id \
              FROM File \
              WHERE path IN ({})",
             selector
@@ -920,7 +920,7 @@ impl GraphStore {
             let project_code = row
                 .get(1)
                 .and_then(|value| value.as_str())
-                .unwrap_or("global")
+                .unwrap_or("")
                 .to_string();
             let worker_id = row.get(2).and_then(parse_i64_field);
             let trace_id = row
@@ -1299,7 +1299,7 @@ impl GraphStore {
         let escaped_scope = Self::escape_sql(&scope_str);
 
         let raw = self.query_json(&format!(
-            "SELECT path, COALESCE(project_code, 'global'), status FROM File \
+            "SELECT path, COALESCE(project_code, ''), status FROM File \
              WHERE path = '{}' OR path LIKE '{}';",
             escaped_scope, prefix
         ))?;
@@ -1406,7 +1406,10 @@ impl GraphStore {
                 if !metadata.is_file() {
                     continue;
                 }
-                let project = scanner.project_code_for_path(path_obj);
+                let project = match scanner.project_code_for_path(self, path_obj) {
+                    Ok(project_code) => project_code,
+                    Err(_) => continue,
+                };
                 let size = metadata.len() as i64;
                 let mtime = metadata
                     .modified()
@@ -2429,7 +2432,10 @@ impl GraphStore {
                     {
                         file_vectorization_paths.push(path.clone());
                     }
-                    let project_code = extraction.project_code.as_deref().unwrap_or("global");
+                    let Some(project_code) = extraction.project_code.as_deref() else {
+                        skipped_paths.push(format!("'{}'", Self::escape_sql(path)));
+                        continue;
+                    };
                     for sym in &extraction.symbols {
                         let symbol_id = Self::symbol_id(project_code, path, &sym.name);
                         if !seen_symbols.insert((symbol_id.clone(), project_code.to_string())) {
@@ -3034,8 +3040,8 @@ impl GraphStore {
             ),
             format!(
                 "INSERT INTO FileLifecycleEvent (file_path, project_code, stage, status, reason, at_ms, worker_id, trace_id, run_id) \
-                 SELECT path, COALESCE(project_code, 'proj'), 'vectorization', 'oversized_for_current_budget', 'estimated cost exceeds current budget envelope', {}, NULL, NULL, NULL \
-                 FROM File WHERE path = '{}';",
+                 SELECT path, project_code, 'vectorization', 'oversized_for_current_budget', 'estimated cost exceeds current budget envelope', {}, NULL, NULL, NULL \
+                 FROM File WHERE path = '{}' AND project_code IS NOT NULL AND trim(project_code) != '';",
                 now_ms,
                 Self::escape_sql(path)
             ),
@@ -3569,11 +3575,11 @@ mod tests {
     #[test]
     fn sort_and_dedup_sql_tuples_removes_duplicate_relation_rows() {
         let mut values = vec![
-            "('b', 'c', 'proj')".to_string(),
-            "('a', 'b', 'proj')".to_string(),
-            "('b', 'c', 'proj')".to_string(),
-            "('a', 'b', 'proj')".to_string(),
-            "('c', 'd', 'proj')".to_string(),
+            "('b', 'c', 'PRJ')".to_string(),
+            "('a', 'b', 'PRJ')".to_string(),
+            "('b', 'c', 'PRJ')".to_string(),
+            "('a', 'b', 'PRJ')".to_string(),
+            "('c', 'd', 'PRJ')".to_string(),
         ];
 
         sort_and_dedup_sql_tuples(&mut values);
@@ -3581,9 +3587,9 @@ mod tests {
         assert_eq!(
             values,
             vec![
-                "('a', 'b', 'proj')".to_string(),
-                "('b', 'c', 'proj')".to_string(),
-                "('c', 'd', 'proj')".to_string(),
+                "('a', 'b', 'PRJ')".to_string(),
+                "('b', 'c', 'PRJ')".to_string(),
+                "('c', 'd', 'PRJ')".to_string(),
             ]
         );
     }
@@ -3593,8 +3599,8 @@ mod tests {
         let queries = insert_unique_relation_queries(
             "CALLS",
             &[
-                "('a', 'b', 'proj')".to_string(),
-                "('c', 'd', 'proj')".to_string(),
+                "('a', 'b', 'PRJ')".to_string(),
+                "('c', 'd', 'PRJ')".to_string(),
             ],
         );
 
@@ -3609,8 +3615,8 @@ mod tests {
         let queries = replace_relation_queries(
             "CALLS",
             &[
-                "('a', 'b', 'proj')".to_string(),
-                "('c', 'd', 'proj')".to_string(),
+                "('a', 'b', 'PRJ')".to_string(),
+                "('c', 'd', 'PRJ')".to_string(),
             ],
             200,
         );
@@ -3626,7 +3632,7 @@ mod tests {
         let rows = vec![
             (
                 "/tmp/a.rs".to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 10,
                 1,
                 100,
@@ -3634,7 +3640,7 @@ mod tests {
             ),
             (
                 "/tmp/a.rs".to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 20,
                 2,
                 200,
@@ -3642,7 +3648,7 @@ mod tests {
             ),
             (
                 "/tmp/b.rs".to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 30,
                 3,
                 100,
@@ -3665,7 +3671,7 @@ mod tests {
     fn upsert_file_queries_use_conflict_safe_insert_for_new_rows() {
         let queries = crate::graph::GraphStore::upsert_file_queries(
             "/tmp/demo.rs",
-            "proj",
+            "PRJ",
             42,
             7,
             100,
@@ -3703,7 +3709,7 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
-                 VALUES ('chunk-1', 'symbol', 'sym-1', 'proj', '/tmp/demo.rs', 'function', 'fn demo() {}', 'hash-1', 1, 1)",
+                 VALUES ('chunk-1', 'symbol', 'sym-1', 'PRJ', '/tmp/demo.rs', 'function', 'fn demo() {}', 'hash-1', 1, 1)",
             )
             .unwrap();
 
@@ -3740,7 +3746,7 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) \
-                 VALUES ('/tmp/vectorized.rs', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, 1, 1, 1)",
+                 VALUES ('/tmp/vectorized.rs', 'PRJ', 'indexed', 'graph_indexed', TRUE, FALSE, 1, 1, 1)",
             )
             .unwrap();
         store
@@ -3790,7 +3796,7 @@ mod tests {
         let path = "/tmp/chunk_contract.rs".to_string();
 
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 42, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 42, 1)])
             .unwrap();
 
         store
@@ -3802,7 +3808,7 @@ mod tests {
                         .to_string(),
                 ),
                 extraction: ExtractionResult {
-                    project_code: Some("proj".to_string()),
+                    project_code: Some("PRJ".to_string()),
                     symbols: vec![Symbol {
                         name: "chunk_contract".to_string(),
                         kind: "function".to_string(),
@@ -3833,7 +3839,7 @@ mod tests {
 
         let raw = store
             .query_json(
-                "SELECT content FROM Chunk WHERE file_path = '/tmp/chunk_contract.rs' AND project_code = 'proj'",
+                "SELECT content FROM Chunk WHERE file_path = '/tmp/chunk_contract.rs' AND project_code = 'PRJ'",
             )
             .unwrap();
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
@@ -3857,7 +3863,7 @@ mod tests {
         let path = "/tmp/full_vector_seed.rs".to_string();
 
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 42, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 42, 1)])
             .unwrap();
 
         store
@@ -3866,7 +3872,7 @@ mod tests {
                 path: path.clone(),
                 content: Some("fn full_vector_seed() { hydrate(); }".to_string()),
                 extraction: ExtractionResult {
-                    project_code: Some("proj".to_string()),
+                    project_code: Some("PRJ".to_string()),
                     symbols: vec![Symbol {
                         name: "full_vector_seed".to_string(),
                         kind: "function".to_string(),
@@ -3928,11 +3934,11 @@ mod tests {
         let path = "/tmp/replay_calls.rs".to_string();
 
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 42, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 42, 1)])
             .unwrap();
 
         let make_extraction = || ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![
                 Symbol {
                     name: "Proj.Source.call".to_string(),
@@ -3990,7 +3996,7 @@ mod tests {
 
         assert_eq!(
             store
-                .query_count("SELECT count(*) FROM CALLS WHERE project_code = 'proj'")
+                .query_count("SELECT count(*) FROM CALLS WHERE project_code = 'PRJ'")
                 .unwrap(),
             1
         );
@@ -4004,8 +4010,8 @@ mod tests {
 
         store
             .bulk_insert_files(&[
-                (path_a.clone(), "proj".to_string(), 42, 1),
-                (path_b.clone(), "proj".to_string(), 42, 1),
+                (path_a.clone(), "PRJ".to_string(), 42, 1),
+                (path_b.clone(), "PRJ".to_string(), 42, 1),
             ])
             .unwrap();
 
@@ -4014,7 +4020,7 @@ mod tests {
             path: path.to_string(),
             content: Some("def call, do: :ok".to_string()),
             extraction: ExtractionResult {
-                project_code: Some("proj".to_string()),
+                project_code: Some("PRJ".to_string()),
                 symbols: vec![
                     Symbol {
                         name: "Proj.Source.call".to_string(),
@@ -4066,7 +4072,7 @@ mod tests {
 
         assert_eq!(
             store
-                .query_count("SELECT count(*) FROM CALLS WHERE project_code = 'proj'")
+                .query_count("SELECT count(*) FROM CALLS WHERE project_code = 'PRJ'")
                 .unwrap(),
             1
         );
@@ -4078,10 +4084,10 @@ mod tests {
         let path = "/tmp/replay_file_row.rs".to_string();
 
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 10, 1)])
             .unwrap();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 10, 1)])
             .unwrap();
 
         assert_eq!(
@@ -4488,14 +4494,14 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store.execute(
             "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-             ('chunk-a', 'symbol', 'sym-a', 'proj-a', '/tmp/a.rs', 'function', 'fn a() {}', 'hash-a', 1, 1), \
-             ('chunk-b', 'symbol', 'sym-b', 'proj-b', '/tmp/b.rs', 'function', 'fn b() {}', 'hash-b', 1, 1)"
+             ('chunk-a', 'symbol', 'sym-a', 'PJA', '/tmp/a.rs', 'function', 'fn a() {}', 'hash-a', 1, 1), \
+             ('chunk-b', 'symbol', 'sym-b', 'PJB', '/tmp/b.rs', 'function', 'fn b() {}', 'hash-b', 1, 1)"
         ).unwrap();
         store
             .execute(
                 "INSERT INTO File (path, project_code, vector_ready, vector_ready_at_ms) VALUES \
-             ('/tmp/a.rs', 'proj-a', TRUE, 1000), \
-             ('/tmp/b.rs', 'proj-b', TRUE, 1000)",
+             ('/tmp/a.rs', 'PJA', TRUE, 1000), \
+             ('/tmp/b.rs', 'PJB', TRUE, 1000)",
             )
             .unwrap();
         store
@@ -4573,7 +4579,7 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
-                 ('chunk-stale', 'symbol', 'sym-stale', 'proj', '/tmp/stale.rs', 'function', 'fresh', 'hash-stale', 1, 2)",
+                 ('chunk-stale', 'symbol', 'sym-stale', 'PRJ', '/tmp/stale.rs', 'function', 'fresh', 'hash-stale', 1, 2)",
             )
             .unwrap();
 
@@ -4590,7 +4596,7 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
-                 VALUES ('/tmp/ready.rs', 'proj', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, TRUE)",
+                 VALUES ('/tmp/ready.rs', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, TRUE)",
             )
             .unwrap();
 
@@ -4614,7 +4620,7 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
-                 VALUES ('/tmp/not_ready.rs', 'proj', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
+                 VALUES ('/tmp/not_ready.rs', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
             )
             .unwrap();
 
@@ -4638,7 +4644,7 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/no_chunks.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 10, 1)])
             .unwrap();
         store
             .execute(
@@ -4651,7 +4657,7 @@ mod tests {
             path: path.clone(),
             content: Some("".to_string()),
             extraction: ExtractionResult {
-                project_code: Some("proj".to_string()),
+                project_code: Some("PRJ".to_string()),
                 symbols: vec![],
                 relations: vec![],
             },
@@ -4682,7 +4688,7 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/structure_only.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 42, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 42, 1)])
             .unwrap();
 
         let task = DbWriteTask::FileExtraction {
@@ -4690,7 +4696,7 @@ mod tests {
             path: path.clone(),
             content: None,
             extraction: ExtractionResult {
-                project_code: Some("proj".to_string()),
+                project_code: Some("PRJ".to_string()),
                 symbols: vec![Symbol {
                     name: "structure_only_fn".to_string(),
                     kind: "function".to_string(),
@@ -4753,19 +4759,19 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
-                 VALUES ('/tmp/already_queued.rs', 'proj', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
+                 VALUES ('/tmp/already_queued.rs', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
             )
             .unwrap();
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
-                 VALUES ('chunk-already-queued', 'symbol', 'sym-already-queued', 'proj', '/tmp/already_queued.rs', 'function', 'body', 'hash-already-queued', 1, 1)",
+                 VALUES ('chunk-already-queued', 'symbol', 'sym-already-queued', 'PRJ', '/tmp/already_queued.rs', 'function', 'body', 'hash-already-queued', 1, 1)",
             )
             .unwrap();
         store
             .execute(
                 "INSERT INTO CONTAINS (source_id, target_id, project_code) \
-                 VALUES ('/tmp/already_queued.rs', 'sym-already-queued', 'proj')",
+                 VALUES ('/tmp/already_queued.rs', 'sym-already-queued', 'PRJ')",
             )
             .unwrap();
         store
@@ -4797,13 +4803,13 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
-                 VALUES ('/tmp/oversized.rs', 'proj', 'oversized_for_current_budget', 1, 1, 100, 'oversized', TRUE, FALSE)",
+                 VALUES ('/tmp/oversized.rs', 'PRJ', 'oversized_for_current_budget', 1, 1, 100, 'oversized', TRUE, FALSE)",
             )
             .unwrap();
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
-                 VALUES ('chunk-oversized', 'symbol', 'sym-oversized', 'proj', '/tmp/oversized.rs', 'function', 'body', 'hash-oversized', 1, 1)",
+                 VALUES ('chunk-oversized', 'symbol', 'sym-oversized', 'PRJ', '/tmp/oversized.rs', 'function', 'body', 'hash-oversized', 1, 1)",
             )
             .unwrap();
 
@@ -4827,19 +4833,19 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
-                 VALUES ('/tmp/stale-backfill.rs', 'proj', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
+                 VALUES ('/tmp/stale-backfill.rs', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
             )
             .unwrap();
         store
             .execute(
                 "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
-                 VALUES ('chunk-stale-backfill', 'symbol', 'sym-stale-backfill', 'proj', '/tmp/stale-backfill.rs', 'function', 'body', 'hash-stale-backfill', 1, 1)",
+                 VALUES ('chunk-stale-backfill', 'symbol', 'sym-stale-backfill', 'PRJ', '/tmp/stale-backfill.rs', 'function', 'body', 'hash-stale-backfill', 1, 1)",
             )
             .unwrap();
         store
             .execute(
                 "INSERT INTO CONTAINS (source_id, target_id, project_code) \
-                 VALUES ('/tmp/stale-backfill.rs', 'sym-stale-backfill', 'proj')",
+                 VALUES ('/tmp/stale-backfill.rs', 'sym-stale-backfill', 'PRJ')",
             )
             .unwrap();
 

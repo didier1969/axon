@@ -6,6 +6,9 @@ fn is_public_tool(name: &str) -> bool {
     !matches!(
         name,
         "refine_lattice"
+            | "job_status"
+            | "audit"
+            | "health"
             | "batch"
             | "cypher"
             | "debug"
@@ -21,7 +24,6 @@ fn is_public_tool(name: &str) -> bool {
             | "api_break_check"
             | "simulate_mutation"
             | "resume_vectorization"
-            | "retrieve_context"
     )
 }
 
@@ -303,7 +305,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "job_status",
-                "description": "[SYSTEM] Retourne l'état détaillé d'un job MCP mutateur accepté par le serveur partagé.",
+                "description": "[SYSTEM/EXPERT] Retourne l'état détaillé d'un job MCP mutateur accepté par le serveur partagé.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -483,7 +485,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "audit",
-                "description": "[GOVERNANCE] Vérification de conformité (Sécurité OWASP, Qualité, Anti-patterns, Dette Technique).",
+                "description": "[GOVERNANCE/EXPERT] Vérification de conformité approfondie (sécurité, qualité, anti-patterns, dette technique). À réserver aux diagnostics experts plutôt qu'au premier choix LLM.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -509,7 +511,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "health",
-                "description": "[GOVERNANCE] Rapport de santé global (Code mort, lacunes de tests, points d'entrée).",
+                "description": "[GOVERNANCE/EXPERT] Rapport de santé agrégé (code mort, lacunes de tests, points d'entrée). À réserver aux diagnostics experts plutôt qu'au premier choix LLM.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -534,7 +536,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "batch",
-                "description": "[SYSTEM] Orchestration d'appels multiples pour optimiser la performance.",
+                "description": "[SYSTEM/EXPERT] Orchestration experte d'appels multiples pour optimiser la performance ou piloter des outils avancés.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

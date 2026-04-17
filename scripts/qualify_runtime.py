@@ -415,7 +415,7 @@ def run_retrieval_qualify(args: argparse.Namespace, mode: str, run_dir: Path) ->
             "retrieval_qualify",
             "warn",
             0,
-            f"skipped because retrieve_context is only available in full mode (mode={mode})",
+            f"skipped because retrieve_context is only available in full autonomous mode (mode={mode})",
         )
     t0 = time.time()
     json_out = run_dir / "retrieval_qualify.json"

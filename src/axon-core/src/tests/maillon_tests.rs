@@ -36,7 +36,7 @@ mod tests {
     fn test_maillon_1_scanner_discovery() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         // Simuler un scan manuel
-        let files = vec![("/tmp/test.rs".to_string(), "proj".to_string(), 100, 12345)];
+        let files = vec![("/tmp/test.rs".to_string(), "PRJ".to_string(), 100, 12345)];
         store.bulk_insert_files(&files).expect("Maillon 1 failed");
 
         let count = store
@@ -58,14 +58,14 @@ mod tests {
     fn test_maillon_1c_scanner_with_ingress_buffer_defers_canonical_write_until_promotion() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let file_path = project.join("buffered.ex");
         std::fs::write(&file_path, "defmodule Buffered do\nend\n").unwrap();
 
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         let ingress = shared_ingress_buffer();
-        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy(), "proj");
+        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy(), "PRJ");
         scanner.scan_with_guard_and_ingress(store.clone(), None, Some(&ingress));
 
         let pre_flush = store
@@ -113,7 +113,7 @@ mod tests {
         std::fs::write(root.join("docs").join("open").join("keep.md"), "# visible").unwrap();
 
         let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
-        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy(), "proj");
+        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy(), "PRJ");
         scanner.scan(store.clone());
 
         let files = store
@@ -172,7 +172,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .bulk_insert_files(&[("/tmp/unchanged.rs".to_string(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[("/tmp/unchanged.rs".to_string(), "PRJ".to_string(), 10, 1)])
             .unwrap();
         store
             .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/unchanged.rs'")
@@ -189,7 +189,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .bulk_insert_files(&[("/tmp/changed.rs".to_string(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[("/tmp/changed.rs".to_string(), "PRJ".to_string(), 10, 1)])
             .unwrap();
         store
             .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/changed.rs'")
@@ -217,7 +217,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .bulk_insert_files(&[("/tmp/indexing.rs".to_string(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[("/tmp/indexing.rs".to_string(), "PRJ".to_string(), 10, 1)])
             .unwrap();
         store
             .execute(
@@ -236,7 +236,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .bulk_insert_files(&[("/tmp/recreated.rs".to_string(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[("/tmp/recreated.rs".to_string(), "PRJ".to_string(), 10, 1)])
             .unwrap();
         store
             .execute("UPDATE File SET status = 'deleted' WHERE path = '/tmp/recreated.rs'")
@@ -272,7 +272,7 @@ mod tests {
 
         buffer.record_file(IngressFileEvent::new(
             "/tmp/collapse.ex",
-            "proj",
+            "PRJ",
             10,
             1,
             100,
@@ -281,7 +281,7 @@ mod tests {
         ));
         buffer.record_file(IngressFileEvent::new(
             "/tmp/collapse.ex",
-            "proj",
+            "PRJ",
             12,
             2,
             100,
@@ -304,7 +304,7 @@ mod tests {
 
         buffer.record_file(IngressFileEvent::new(
             "/tmp/priority.ex",
-            "proj",
+            "PRJ",
             10,
             1,
             100,
@@ -313,7 +313,7 @@ mod tests {
         ));
         buffer.record_file(IngressFileEvent::new(
             "/tmp/priority.ex",
-            "proj",
+            "PRJ",
             10,
             1,
             900,
@@ -334,7 +334,7 @@ mod tests {
 
         buffer.record_file(IngressFileEvent::new(
             "/tmp/deleted.ex",
-            "proj",
+            "PRJ",
             10,
             1,
             100,
@@ -405,7 +405,7 @@ mod tests {
 
         buffer.record_file(IngressFileEvent::new(
             "/tmp/a.ex",
-            "proj",
+            "PRJ",
             10,
             1,
             100,
@@ -414,7 +414,7 @@ mod tests {
         ));
         buffer.record_file(IngressFileEvent::new(
             "/tmp/b.ex",
-            "proj",
+            "PRJ",
             20,
             2,
             100,
@@ -423,7 +423,7 @@ mod tests {
         ));
         buffer.record_file(IngressFileEvent::new(
             "/tmp/c.ex",
-            "proj",
+            "PRJ",
             30,
             3,
             100,
@@ -448,7 +448,7 @@ mod tests {
 
         buffer.record_file(IngressFileEvent::new(
             "/tmp/promote.ex",
-            "proj",
+            "PRJ",
             10,
             1,
             100,
@@ -457,7 +457,7 @@ mod tests {
         ));
         buffer.record_file(IngressFileEvent::new(
             "/tmp/promote.ex",
-            "proj",
+            "PRJ",
             20,
             2,
             100,
@@ -497,7 +497,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 "/tmp/recover_guard.rs".to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 10,
                 1,
             )])
@@ -525,14 +525,14 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/requeue_scan.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 10, 1)])
             .unwrap();
         store
             .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/requeue_scan.rs'")
             .unwrap();
 
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 20, 2)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 20, 2)])
             .unwrap();
 
         let row = store
@@ -550,13 +550,13 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/requeue_hot.rs";
         store
-            .bulk_insert_files(&[(path.to_string(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[(path.to_string(), "PRJ".to_string(), 10, 1)])
             .unwrap();
         store
             .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/requeue_hot.rs'")
             .unwrap();
 
-        store.upsert_hot_file(path, "proj", 20, 2, 900).unwrap();
+        store.upsert_hot_file(path, "PRJ", 20, 2, 900).unwrap();
 
         let row = store
             .query_json("SELECT status, status_reason FROM File WHERE path = '/tmp/requeue_hot.rs'")
@@ -581,7 +581,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 "/tmp/recover_reason.rs".to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 10,
                 1,
             )])
@@ -609,7 +609,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let file_path = project.join("unchanged_live.ex");
         std::fs::write(&file_path, "defmodule Live do\nend\n").unwrap();
@@ -626,7 +626,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 size,
                 mtime,
             )])
@@ -644,7 +644,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta_with_guard(
             &store,
             root,
-            "proj",
+            "PRJ",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -668,7 +668,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let file_path = project.join("buffered_live.ex");
         std::fs::write(&file_path, "defmodule BufferedLive do\nend\n").unwrap();
@@ -678,7 +678,7 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
-            "proj",
+            "PRJ",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -711,7 +711,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let file_path = project.join("keep.ex");
         std::fs::write(&file_path, "defmodule Keep do\nend\n").unwrap();
@@ -729,7 +729,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 size,
                 mtime,
             )])
@@ -744,7 +744,7 @@ mod tests {
         let guard = Arc::new(Mutex::new(
             FileIngressGuard::hydrate_from_store(&store).unwrap(),
         ));
-        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy(), "proj");
+        let scanner = crate::scanner::Scanner::new(&root.to_string_lossy(), "PRJ");
         scanner.scan_with_guard(store.clone(), Some(&guard));
 
         let pending = store
@@ -800,7 +800,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 "/tmp/reader_writer.ex".to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 100,
                 12345,
             )])
@@ -856,7 +856,7 @@ mod tests {
             .unwrap();
         store
             .execute(
-                "INSERT INTO File (path, project_code, status, size, priority, mtime, worker_id, trace_id) VALUES ('/tmp/legacy_reopen.ex', 'proj', 'indexed', 100, 1, 1, NULL, 'trace-legacy')"
+                "INSERT INTO File (path, project_code, status, size, priority, mtime, worker_id, trace_id) VALUES ('/tmp/legacy_reopen.ex', 'PRJ', 'indexed', 100, 1, 1, NULL, 'trace-legacy')"
             )
             .unwrap();
         store.execute("DELETE FROM RuntimeMetadata;").unwrap();
@@ -903,16 +903,16 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 "/tmp/embed_reset.ex".to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 100,
                 1,
             )])
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('sym-embed-reset', 'embed_reset', 'function', 'proj')")
+            .execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('sym-embed-reset', 'embed_reset', 'function', 'PRJ')")
             .unwrap();
         store
-            .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-embed-reset', 'symbol', 'sym-embed-reset', 'proj', 'function', 'content', 'hash-1', 1, 1)")
+            .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-embed-reset', 'symbol', 'sym-embed-reset', 'PRJ', 'function', 'content', 'hash-1', 1, 1)")
             .unwrap();
         store
             .execute(&format!("INSERT INTO EmbeddingModel (id, kind, model_name, dimension, version, created_at) VALUES ('model-embed-reset', 'chunk', '{MODEL_NAME}', {DIMENSION}, '0', 1)"))
@@ -982,7 +982,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 "/tmp/ingestion_reset.ex".to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 100,
                 1,
             )])
@@ -991,10 +991,12 @@ mod tests {
             .execute("UPDATE File SET status = 'indexed' WHERE path = '/tmp/ingestion_reset.ex'")
             .unwrap();
         store
-            .execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('sym-ingestion-reset', 'ingestion_reset', 'function', 'proj')")
+            .execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('sym-ingestion-reset', 'ingestion_reset', 'function', 'PRJ')")
             .unwrap();
         store
-            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/ingestion_reset.ex', 'sym-ingestion-reset')")
+            .execute(
+                "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/tmp/ingestion_reset.ex', 'sym-ingestion-reset', 'PRJ')",
+            )
             .unwrap();
         store.execute("DELETE FROM RuntimeMetadata;").unwrap();
         store
@@ -1063,7 +1065,7 @@ mod tests {
             .unwrap();
         store
             .execute(
-                "INSERT INTO File (path, project_code, priority) VALUES ('/tmp/hard_reset.ex', 'proj', 1)"
+                "INSERT INTO File (path, project_code, priority) VALUES ('/tmp/hard_reset.ex', 'PRJ', 1)"
             )
             .unwrap();
         store.execute("DELETE FROM RuntimeMetadata;").unwrap();
@@ -1102,7 +1104,7 @@ mod tests {
     fn test_maillon_2d_rust_watcher_requeues_hot_delta() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let file_path = project.join("live.ex");
         std::fs::write(&file_path, "defmodule Live do\nend\n").unwrap();
@@ -1111,7 +1113,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 10,
                 1,
             )])
@@ -1126,7 +1128,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
-            "proj",
+            "PRJ",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1149,14 +1151,14 @@ mod tests {
             row.contains("900"),
             "Le delta chaud doit imposer une priorité élevée"
         );
-        assert!(row.contains("proj"), "Le code projet doit être conservé");
+        assert!(row.contains("PRJ"), "Le code projet doit être conservé");
     }
 
     #[test]
     fn test_maillon_2e_rust_watcher_respects_axonignore_for_delta() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         let ignored = project.join("ignored");
         std::fs::create_dir_all(&ignored).unwrap();
         std::fs::write(project.join(".axonignore"), "ignored/\n").unwrap();
@@ -1167,7 +1169,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
-            "proj",
+            "PRJ",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1194,13 +1196,13 @@ mod tests {
     fn test_maillon_2f_rust_watcher_ignores_missing_delta_without_failing() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let missing = root.join("proj").join("gone.ex");
+        let missing = root.join("PRJ").join("gone.ex");
         let store = crate::tests::test_helpers::create_test_db().unwrap();
 
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
-            "proj",
+            "PRJ",
             &missing,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1221,7 +1223,7 @@ mod tests {
     fn test_maillon_2g_rust_watcher_deduplicates_burst_paths() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let file_path = project.join("burst.ex");
         std::fs::write(&file_path, "defmodule Burst do\nend\n").unwrap();
@@ -1231,7 +1233,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_deltas(
             &store,
             root,
-            "proj",
+            "PRJ",
             vec![file_path.clone(), file_path.clone(), file_path.clone()],
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1255,7 +1257,7 @@ mod tests {
     fn test_maillon_2h_rust_watcher_directory_event_stages_nested_file() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         let nested = project.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         let file_path = nested.join("dir_event.ex");
@@ -1265,7 +1267,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
-            "proj",
+            "PRJ",
             &nested,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1293,7 +1295,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         let noisy = project.join("node_modules").join("pkg");
         std::fs::create_dir_all(&noisy).unwrap();
         std::fs::write(noisy.join("ignored.ex"), "defmodule Ignored do\nend\n").unwrap();
@@ -1303,7 +1305,7 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
-            "proj",
+            "PRJ",
             &project.join("node_modules"),
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -1329,7 +1331,7 @@ mod tests {
         let root = temp.path();
         std::fs::write(root.join(".axonignore"), "/.worktrees/\n").unwrap();
 
-        let project_worktree = root.join("proj").join(".worktrees").join("feature");
+        let project_worktree = root.join("PRJ").join(".worktrees").join("feature");
         std::fs::create_dir_all(&project_worktree).unwrap();
         std::fs::write(
             project_worktree.join("keep.ex"),
@@ -1342,7 +1344,7 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
-            "proj",
+            "PRJ",
             &project_worktree,
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -1364,7 +1366,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let blocked = root.join("proj").join("_build").join("dev").join("lib");
+        let blocked = root.join("PRJ").join("_build").join("dev").join("lib");
         std::fs::create_dir_all(&blocked).unwrap();
 
         let ingress = shared_ingress_buffer();
@@ -1372,8 +1374,8 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
-            "proj",
-            &root.join("proj").join("_build"),
+            "PRJ",
+            &root.join("PRJ").join("_build"),
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
             &ingress,
@@ -1396,7 +1398,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let blocked = root
-            .join("proj")
+            .join("PRJ")
             .join("_bmad-output")
             .join("planning-artifacts");
         std::fs::create_dir_all(&blocked).unwrap();
@@ -1406,8 +1408,8 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
-            "proj",
-            &root.join("proj").join("_bmad-output"),
+            "PRJ",
+            &root.join("PRJ").join("_bmad-output"),
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
             &ingress,
@@ -1429,7 +1431,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         let nested = project.join("apps").join("billing");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join(".gitignore"), "node_modules/\n").unwrap();
@@ -1439,7 +1441,7 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
-            "proj",
+            "PRJ",
             &nested.join(".gitignore"),
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -1467,7 +1469,7 @@ mod tests {
         let _guard = lock_file_ingress_guard_env();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let blocked = root.join("proj").join("_build").join("dev");
+        let blocked = root.join("PRJ").join("_build").join("dev");
         std::fs::create_dir_all(&blocked).unwrap();
         std::fs::write(blocked.join(".gitignore"), "*.beam\n").unwrap();
 
@@ -1476,7 +1478,7 @@ mod tests {
 
         let staged = crate::fs_watcher::enqueue_hot_delta_with_guard(
             root,
-            "proj",
+            "PRJ",
             &blocked.join(".gitignore"),
             crate::fs_watcher::HOT_PRIORITY,
             &guard,
@@ -1498,7 +1500,7 @@ mod tests {
     fn test_maillon_2i_hot_delta_does_not_reopen_file_already_indexing() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let file_path = project.join("live_reopen.ex");
         std::fs::write(&file_path, "defmodule LiveReopen do\nend\n").unwrap();
@@ -1507,7 +1509,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 10,
                 1,
             )])
@@ -1523,7 +1525,7 @@ mod tests {
         store
             .upsert_hot_file(
                 &file_path.to_string_lossy(),
-                "proj",
+                "PRJ",
                 10,
                 1,
                 crate::fs_watcher::HOT_PRIORITY,
@@ -1557,7 +1559,7 @@ mod tests {
     fn test_maillon_2j_hot_delta_changed_during_indexing_requeues_after_commit() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let file_path = project.join("live_changed.ex");
         std::fs::write(&file_path, "defmodule LiveChanged do\nend\n").unwrap();
@@ -1566,7 +1568,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 10,
                 1,
             )])
@@ -1582,7 +1584,7 @@ mod tests {
         store
             .upsert_hot_file(
                 &file_path.to_string_lossy(),
-                "proj",
+                "PRJ",
                 20,
                 2,
                 crate::fs_watcher::HOT_PRIORITY,
@@ -1596,7 +1598,7 @@ mod tests {
         );
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "live_changed".to_string(),
                 kind: "func".to_string(),
@@ -1651,7 +1653,7 @@ mod tests {
     fn test_maillon_2k_rust_watcher_tombstones_deleted_file_and_purges_truth() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let file_path = project.join("deleted_live.ex");
         std::fs::write(&file_path, "defmodule DeletedLive do\nend\n").unwrap();
@@ -1660,14 +1662,14 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 10,
                 1,
             )])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "deleted_live".to_string(),
                 kind: "func".to_string(),
@@ -1706,7 +1708,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
-            "proj",
+            "PRJ",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1751,7 +1753,7 @@ mod tests {
     fn test_maillon_2l_rust_watcher_rename_tombstones_old_path_and_stages_new_one() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let old_path = project.join("rename_old.ex");
         let new_path = project.join("rename_new.ex");
@@ -1761,14 +1763,14 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 old_path.to_string_lossy().to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 10,
                 1,
             )])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "rename_old".to_string(),
                 kind: "func".to_string(),
@@ -1807,7 +1809,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_deltas(
             &store,
             root,
-            "proj",
+            "PRJ",
             vec![old_path.clone(), new_path.clone()],
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -1867,7 +1869,7 @@ mod tests {
         std::fs::create_dir_all(&db_root).unwrap();
 
         let db_root_str = db_root.to_string_lossy().to_string();
-        let file_path = db_root.join("proj").join("crash_replay.ex");
+        let file_path = db_root.join("PRJ").join("crash_replay.ex");
         std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
         std::fs::write(&file_path, "defmodule CrashReplay do\nend\n").unwrap();
 
@@ -1875,7 +1877,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 10,
                 1,
             )])
@@ -1931,7 +1933,7 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/oversized_file.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10_000, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 10_000, 1)])
             .unwrap();
 
         store.mark_file_oversized_for_current_budget(&path).unwrap();
@@ -1945,7 +1947,7 @@ mod tests {
         );
 
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10_000, 2)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 10_000, 2)])
             .unwrap();
 
         let replay_row = store
@@ -1960,11 +1962,11 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/degraded_file.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "degraded_file".to_string(),
                 kind: "func".to_string(),
@@ -2013,7 +2015,7 @@ mod tests {
         assert!(row.contains("true"), "{row}");
 
         let symbol_count = store
-            .query_count("SELECT count(*) FROM Symbol WHERE project_code = 'proj'")
+            .query_count("SELECT count(*) FROM Symbol WHERE project_code = 'PRJ'")
             .unwrap();
         assert_eq!(
             symbol_count, 1,
@@ -2032,11 +2034,11 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/full_success.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "full_success".to_string(),
                 kind: "func".to_string(),
@@ -2086,11 +2088,11 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/nul_text_payload.txt".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "document_body".to_string(),
                 kind: "markdown_content".to_string(),
@@ -2133,7 +2135,7 @@ mod tests {
         assert!(row.contains("indexed_success_full"), "{row}");
 
         let chunk_count = store
-            .query_count("SELECT count(*) FROM Chunk WHERE project_code = 'proj'")
+            .query_count("SELECT count(*) FROM Chunk WHERE project_code = 'PRJ'")
             .unwrap();
         assert_eq!(
             chunk_count, 1,
@@ -2146,7 +2148,7 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/skipped_file.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 32, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 32, 1)])
             .unwrap();
 
         store
@@ -2188,11 +2190,11 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/vector_ready.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "vector_ready".to_string(),
                 kind: "func".to_string(),
@@ -2234,7 +2236,7 @@ mod tests {
         assert!(before.contains("true"), "{before}");
 
         let chunk_rows = store
-            .query_json("SELECT id, content_hash FROM Chunk WHERE project_code = 'proj'")
+            .query_json("SELECT id, content_hash FROM Chunk WHERE project_code = 'PRJ'")
             .unwrap();
         let rows: Vec<Vec<String>> = serde_json::from_str(&chunk_rows).unwrap();
         let chunk_id = rows[0][0].clone();
@@ -2286,13 +2288,13 @@ mod tests {
         let path_pending = "/tmp/vector_ready_b.rs".to_string();
         store
             .bulk_insert_files(&[
-                (path_ready.clone(), "proj".to_string(), 128, 1),
-                (path_pending.clone(), "proj".to_string(), 128, 1),
+                (path_ready.clone(), "PRJ".to_string(), 128, 1),
+                (path_pending.clone(), "PRJ".to_string(), 128, 1),
             ])
             .unwrap();
 
         let mk_extraction = |name: &str| parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: name.to_string(),
                 kind: "function".to_string(),
@@ -2343,7 +2345,7 @@ mod tests {
 
         let raw = store
             .query_json(
-                "SELECT file_path, id, content_hash FROM Chunk WHERE project_code = 'proj' ORDER BY file_path",
+                "SELECT file_path, id, content_hash FROM Chunk WHERE project_code = 'PRJ' ORDER BY file_path",
             )
             .unwrap();
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap();
@@ -2385,11 +2387,11 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/graph_only_ready.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "graph_only_ready".to_string(),
                 kind: "func".to_string(),
@@ -2446,11 +2448,11 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/chunk_file_path.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "chunk_file_path".to_string(),
                 kind: "function".to_string(),
@@ -2485,7 +2487,7 @@ mod tests {
             .unwrap();
 
         let raw = store
-            .query_json("SELECT file_path FROM Chunk WHERE project_code = 'proj' LIMIT 1")
+            .query_json("SELECT file_path FROM Chunk WHERE project_code = 'PRJ' LIMIT 1")
             .unwrap();
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap();
         assert_eq!(rows.len(), 1);
@@ -2579,7 +2581,7 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/deferred_file.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 4_096, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 4_096, 1)])
             .unwrap();
 
         store
@@ -2634,7 +2636,7 @@ mod tests {
         let path = "/tmp/requeue_specific_reason.ex".to_string();
 
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 10, 1)])
             .unwrap();
         let claimed = store
             .claim_pending_paths(std::slice::from_ref(&path))
@@ -2660,7 +2662,7 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/tombstoned_late.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
             .unwrap();
         store
             .tombstone_missing_path(Path::new(&path))
@@ -2692,7 +2694,7 @@ mod tests {
     fn test_maillon_2n_late_commit_does_not_resurrect_tombstoned_file() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let project = root.join("proj");
+        let project = root.join("PRJ");
         std::fs::create_dir_all(&project).unwrap();
         let file_path = project.join("late_deleted.ex");
         std::fs::write(&file_path, "defmodule LateDeleted do\nend\n").unwrap();
@@ -2701,7 +2703,7 @@ mod tests {
         store
             .bulk_insert_files(&[(
                 file_path.to_string_lossy().to_string(),
-                "proj".to_string(),
+                "PRJ".to_string(),
                 10,
                 1,
             )])
@@ -2714,7 +2716,7 @@ mod tests {
         let staged = crate::fs_watcher::stage_hot_delta(
             &store,
             root,
-            "proj",
+            "PRJ",
             &file_path,
             crate::fs_watcher::HOT_PRIORITY,
         )
@@ -2725,7 +2727,7 @@ mod tests {
         );
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "late_deleted".to_string(),
                 kind: "func".to_string(),
@@ -2804,7 +2806,7 @@ mod tests {
 
         // Simuler un fichier en attente
         store
-            .bulk_insert_files(&[("/tmp/test.ex".to_string(), "proj".to_string(), 10, 1)])
+            .bulk_insert_files(&[("/tmp/test.ex".to_string(), "PRJ".to_string(), 10, 1)])
             .unwrap();
 
         // Spawn Server Loop (Simulé de main.rs)
@@ -2907,11 +2909,11 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/test.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 100, 12345)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 100, 12345)])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "test".to_string(),
                 kind: "func".to_string(),
@@ -2965,11 +2967,11 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/test.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 100, 12345)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 100, 12345)])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "test".to_string(),
                 kind: "func".to_string(),
@@ -3037,11 +3039,11 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/chunk/upsert.rs".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 128, 1)])
+            .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "upsert_chunk".to_string(),
                 kind: "func".to_string(),
@@ -3118,9 +3120,9 @@ mod tests {
         let path_c = "/tmp/other/c.rs".to_string();
         store
             .bulk_insert_files(&[
-                (path_a.clone(), "proj".to_string(), 100, 1),
-                (path_b.clone(), "proj".to_string(), 100, 1),
-                (path_c.clone(), "other".to_string(), 100, 1),
+                (path_a.clone(), "PRJ".to_string(), 100, 1),
+                (path_b.clone(), "PRJ".to_string(), 100, 1),
+                (path_c.clone(), "OTH".to_string(), 100, 1),
             ])
             .unwrap();
 
@@ -3151,7 +3153,7 @@ mod tests {
                     reservation_id: "res-alpha-1".to_string(),
                     path: path_a.clone(),
                     content: Some("fn alpha() {\n    old_body();\n}\n".to_string()),
-                    extraction: extraction_for("proj", "alpha", "old_body", None),
+                    extraction: extraction_for("PRJ", "alpha", "old_body", None),
                     processing_mode: ProcessingMode::Full,
                     trace_id: "alpha-1".to_string(),
                     observed_cost_bytes: 0,
@@ -3164,7 +3166,7 @@ mod tests {
                     reservation_id: "res-beta-1".to_string(),
                     path: path_b.clone(),
                     content: Some("fn beta() {\n    stable_body();\n}\n".to_string()),
-                    extraction: extraction_for("proj", "beta", "stable_body", None),
+                    extraction: extraction_for("PRJ", "beta", "stable_body", None),
                     processing_mode: ProcessingMode::Full,
                     trace_id: "beta-1".to_string(),
                     observed_cost_bytes: 0,
@@ -3177,7 +3179,7 @@ mod tests {
                     reservation_id: "res-gamma-1".to_string(),
                     path: path_c.clone(),
                     content: Some("fn gamma() {\n    foreign_project();\n}\n".to_string()),
-                    extraction: extraction_for("other", "gamma", "foreign_project", None),
+                    extraction: extraction_for("OTH", "gamma", "foreign_project", None),
                     processing_mode: ProcessingMode::Full,
                     trace_id: "gamma-1".to_string(),
                     observed_cost_bytes: 0,
@@ -3226,7 +3228,7 @@ mod tests {
                 path: path_a.clone(),
                 content: Some("fn alpha() {\n    new_body();\n}\n".to_string()),
                 extraction: extraction_for(
-                    "proj",
+                    "PRJ",
                     "alpha",
                     "new_body",
                     Some("routes the new behavior without replaying all semantic work"),
@@ -3245,8 +3247,8 @@ mod tests {
             store
                 .query_count("SELECT count(*) FROM ChunkEmbedding")
                 .unwrap(),
-            3,
-            "Le store conserve les embeddings existants; la derive est detectee via le source_hash"
+            2,
+            "Le chunk re-ecrit purge son embedding derive; les autres embeddings restent conserves"
         );
 
         let pending = store.fetch_unembedded_chunks(CHUNK_MODEL_ID, 10).unwrap();
@@ -3263,7 +3265,7 @@ mod tests {
     fn test_maillon_7f_fetch_unembedded_chunks_detects_source_hash_drift() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-drift', 'symbol', 'sym-drift', 'proj', 'function', 'fresh content', 'hash-fresh', 1, 1)")
+            .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-drift', 'symbol', 'sym-drift', 'PRJ', 'function', 'fresh content', 'hash-fresh', 1, 1)")
             .unwrap();
         store
             .ensure_embedding_model(CHUNK_MODEL_ID, "chunk", MODEL_NAME, DIMENSION as i64, "1")
@@ -3289,13 +3291,13 @@ mod tests {
         let path_b = "/tmp/scripts/b.py".to_string();
         store
             .bulk_insert_files(&[
-                (path_a.clone(), "proj".to_string(), 100, 1),
-                (path_b.clone(), "proj".to_string(), 100, 1),
+                (path_a.clone(), "PRJ".to_string(), 100, 1),
+                (path_b.clone(), "PRJ".to_string(), 100, 1),
             ])
             .unwrap();
 
         let extraction_a = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "send_cypher".to_string(),
                 kind: "function".to_string(),
@@ -3314,7 +3316,7 @@ mod tests {
         };
 
         let extraction_b = parser::ExtractionResult {
-            project_code: Some("proj".to_string()),
+            project_code: Some("PRJ".to_string()),
             symbols: vec![parser::Symbol {
                 name: "send_cypher".to_string(),
                 kind: "function".to_string(),
@@ -3381,11 +3383,11 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/status_live.ex".to_string();
         store
-            .bulk_insert_files(&[(path.clone(), "axon".to_string(), 100, 1)])
+            .bulk_insert_files(&[(path.clone(), "AXO".to_string(), 100, 1)])
             .unwrap();
 
         let extraction = parser::ExtractionResult {
-            project_code: Some("axon".to_string()),
+            project_code: Some("AXO".to_string()),
             symbols: vec![
                 parser::Symbol {
                     name: "AxonDashboardWeb.StatusLive.handle_info".to_string(),
@@ -3450,26 +3452,26 @@ mod tests {
     fn test_graph_projection_symbol_radius_1_returns_useful_neighborhood() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/other.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'PRJ'), ('/tmp/graph/other.rs', 'PRJ')")
             .unwrap();
         store
             .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
-                ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
-                ('proj::B', 'B', 'function', true, true, false, false, 'proj'), \
-                ('proj::C', 'C', 'function', true, true, false, false, 'proj'), \
-                ('proj::X', 'X', 'function', true, true, false, false, 'proj')")
+                ('PRJ::A', 'A', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::B', 'B', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::C', 'C', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::X', 'X', 'function', true, true, false, false, 'PRJ')")
             .unwrap();
         store
             .execute(
-                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
-                ('/tmp/graph/a.rs', 'proj::A'), \
-                ('/tmp/graph/a.rs', 'proj::B'), \
-                ('/tmp/graph/other.rs', 'proj::C'), \
-                ('/tmp/graph/other.rs', 'proj::X')",
+                "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES \
+                ('/tmp/graph/a.rs', 'PRJ::A', 'PRJ'), \
+                ('/tmp/graph/a.rs', 'PRJ::B', 'PRJ'), \
+                ('/tmp/graph/other.rs', 'PRJ::C', 'PRJ'), \
+                ('/tmp/graph/other.rs', 'PRJ::X', 'PRJ')",
             )
             .unwrap();
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::B'), ('proj::B', 'proj::C'), ('proj::X', 'proj::C')")
+            .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PRJ::A', 'PRJ::B', 'PRJ'), ('PRJ::B', 'PRJ::C', 'PRJ'), ('PRJ::X', 'PRJ::C', 'PRJ')")
             .unwrap();
 
         let anchor_id = store
@@ -3480,10 +3482,10 @@ mod tests {
             .query_graph_projection("symbol", &anchor_id, 1)
             .unwrap();
 
-        assert!(projection.contains("proj::A"));
-        assert!(projection.contains("proj::B"));
-        assert!(!projection.contains("proj::C"));
-        assert!(!projection.contains("proj::X"));
+        assert!(projection.contains("PRJ::A"));
+        assert!(projection.contains("PRJ::B"));
+        assert!(!projection.contains("PRJ::C"));
+        assert!(!projection.contains("PRJ::X"));
         assert!(projection.contains("call-neighborhood"));
     }
 
@@ -3491,26 +3493,26 @@ mod tests {
     fn test_graph_projection_symbol_radius_2_expands_but_stays_bounded() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/other.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'PRJ'), ('/tmp/graph/other.rs', 'PRJ')")
             .unwrap();
         store
             .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
-                ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
-                ('proj::B', 'B', 'function', true, true, false, false, 'proj'), \
-                ('proj::C', 'C', 'function', true, true, false, false, 'proj'), \
-                ('proj::X', 'X', 'function', true, true, false, false, 'proj')")
+                ('PRJ::A', 'A', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::B', 'B', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::C', 'C', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::X', 'X', 'function', true, true, false, false, 'PRJ')")
             .unwrap();
         store
             .execute(
-                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
-                ('/tmp/graph/a.rs', 'proj::A'), \
-                ('/tmp/graph/a.rs', 'proj::B'), \
-                ('/tmp/graph/other.rs', 'proj::C'), \
-                ('/tmp/graph/other.rs', 'proj::X')",
+                "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES \
+                ('/tmp/graph/a.rs', 'PRJ::A', 'PRJ'), \
+                ('/tmp/graph/a.rs', 'PRJ::B', 'PRJ'), \
+                ('/tmp/graph/other.rs', 'PRJ::C', 'PRJ'), \
+                ('/tmp/graph/other.rs', 'PRJ::X', 'PRJ')",
             )
             .unwrap();
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::B'), ('proj::B', 'proj::C'), ('proj::X', 'proj::C')")
+            .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PRJ::A', 'PRJ::B', 'PRJ'), ('PRJ::B', 'PRJ::C', 'PRJ'), ('PRJ::X', 'PRJ::C', 'PRJ')")
             .unwrap();
 
         let anchor_id = store
@@ -3521,10 +3523,10 @@ mod tests {
             .query_graph_projection("symbol", &anchor_id, 2)
             .unwrap();
 
-        assert!(projection.contains("proj::A"));
-        assert!(projection.contains("proj::B"));
-        assert!(projection.contains("proj::C"));
-        assert!(!projection.contains("proj::X"));
+        assert!(projection.contains("PRJ::A"));
+        assert!(projection.contains("PRJ::B"));
+        assert!(projection.contains("PRJ::C"));
+        assert!(!projection.contains("PRJ::X"));
     }
 
     #[test]
@@ -3532,24 +3534,24 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let file_path = "/tmp/graph/file_anchor.rs";
         store
-            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/file_anchor.rs', 'proj'), ('/tmp/graph/helper.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/file_anchor.rs', 'PRJ'), ('/tmp/graph/helper.rs', 'PRJ')")
             .unwrap();
         store
             .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
-                ('proj::FileAlpha', 'FileAlpha', 'function', true, true, false, false, 'proj'), \
-                ('proj::FileBeta', 'FileBeta', 'function', true, true, false, false, 'proj'), \
-                ('proj::Helper', 'Helper', 'function', true, true, false, false, 'proj')")
+                ('PRJ::FileAlpha', 'FileAlpha', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::FileBeta', 'FileBeta', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::Helper', 'Helper', 'function', true, true, false, false, 'PRJ')")
             .unwrap();
         store
             .execute(
-                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
-                ('/tmp/graph/file_anchor.rs', 'proj::FileAlpha'), \
-                ('/tmp/graph/file_anchor.rs', 'proj::FileBeta'), \
-                ('/tmp/graph/helper.rs', 'proj::Helper')",
+                "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES \
+                ('/tmp/graph/file_anchor.rs', 'PRJ::FileAlpha', 'PRJ'), \
+                ('/tmp/graph/file_anchor.rs', 'PRJ::FileBeta', 'PRJ'), \
+                ('/tmp/graph/helper.rs', 'PRJ::Helper', 'PRJ')",
             )
             .unwrap();
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::FileAlpha', 'proj::Helper')")
+            .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PRJ::FileAlpha', 'PRJ::Helper', 'PRJ')")
             .unwrap();
 
         store.refresh_file_projection(file_path, 2).unwrap();
@@ -3573,26 +3575,26 @@ mod tests {
             "La même ancre et le même rayon doivent rester stables"
         );
         assert!(second_projection.contains("contains"));
-        assert!(second_projection.contains("proj::FileAlpha"));
-        assert!(second_projection.contains("proj::FileBeta"));
+        assert!(second_projection.contains("PRJ::FileAlpha"));
+        assert!(second_projection.contains("PRJ::FileBeta"));
     }
 
     #[test]
     fn test_graph_projection_refresh_reuses_unchanged_anchor_without_rebuild() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'PRJ')")
             .unwrap();
         store
             .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
-                ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
-                ('proj::B', 'B', 'function', true, true, false, false, 'proj')")
+                ('PRJ::A', 'A', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::B', 'B', 'function', true, true, false, false, 'PRJ')")
             .unwrap();
         store
-            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES ('/tmp/graph/a.rs', 'proj::A'), ('/tmp/graph/a.rs', 'proj::B')")
+            .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('/tmp/graph/a.rs', 'PRJ::A', 'PRJ'), ('/tmp/graph/a.rs', 'PRJ::B', 'PRJ')")
             .unwrap();
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::B')")
+            .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PRJ::A', 'PRJ::B', 'PRJ')")
             .unwrap();
 
         let anchor_id = store
@@ -3600,14 +3602,14 @@ mod tests {
             .unwrap()
             .expect("anchor should resolve");
         let first_state = store
-            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
+            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'PRJ::A' AND radius = 1")
             .unwrap();
         assert_ne!(
             first_state, "[]",
             "L'etat de projection doit etre materialise"
         );
         let first_projection_count = store
-            .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
+            .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = 'PRJ::A' AND radius = 1")
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -3616,14 +3618,14 @@ mod tests {
             .unwrap()
             .expect("anchor should resolve");
         let second_state = store
-            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
+            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'PRJ::A' AND radius = 1")
             .unwrap();
         assert_ne!(
             second_state, "[]",
             "L'etat de projection doit rester disponible"
         );
         let second_projection_count = store
-            .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = 'proj::A' AND radius = 1")
+            .query_count("SELECT count(*) FROM GraphProjection WHERE anchor_type = 'symbol' AND anchor_id = 'PRJ::A' AND radius = 1")
             .unwrap();
 
         assert_eq!(anchor_id, second_anchor);
@@ -3638,29 +3640,29 @@ mod tests {
     fn test_graph_projection_refresh_rebuilds_only_changed_anchor() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/d.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'PRJ'), ('/tmp/graph/d.rs', 'PRJ')")
             .unwrap();
         store
             .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
-                ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
-                ('proj::B', 'B', 'function', true, true, false, false, 'proj'), \
-                ('proj::C', 'C', 'function', true, true, false, false, 'proj'), \
-                ('proj::D', 'D', 'function', true, true, false, false, 'proj'), \
-                ('proj::E', 'E', 'function', true, true, false, false, 'proj')")
+                ('PRJ::A', 'A', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::B', 'B', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::C', 'C', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::D', 'D', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::E', 'E', 'function', true, true, false, false, 'PRJ')")
             .unwrap();
         store
-            .execute("INSERT INTO CONTAINS (source_id, target_id) VALUES \
-                ('/tmp/graph/a.rs', 'proj::A'), ('/tmp/graph/a.rs', 'proj::B'), ('/tmp/graph/a.rs', 'proj::C'), \
-                ('/tmp/graph/d.rs', 'proj::D'), ('/tmp/graph/d.rs', 'proj::E')")
+            .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES \
+                ('/tmp/graph/a.rs', 'PRJ::A', 'PRJ'), ('/tmp/graph/a.rs', 'PRJ::B', 'PRJ'), ('/tmp/graph/a.rs', 'PRJ::C', 'PRJ'), \
+                ('/tmp/graph/d.rs', 'PRJ::D', 'PRJ'), ('/tmp/graph/d.rs', 'PRJ::E', 'PRJ')")
             .unwrap();
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::B'), ('proj::D', 'proj::E')")
+            .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PRJ::A', 'PRJ::B', 'PRJ'), ('PRJ::D', 'PRJ::E', 'PRJ')")
             .unwrap();
 
         store.refresh_symbol_projection("A", 2).unwrap();
         store.refresh_symbol_projection("D", 2).unwrap();
         let before_d_state = store
-            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::D' AND radius = 2")
+            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'PRJ::D' AND radius = 2")
             .unwrap();
         assert_ne!(
             before_d_state, "[]",
@@ -3669,27 +3671,27 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(2));
         store
-            .execute("DELETE FROM CALLS WHERE source_id = 'proj::A' AND target_id = 'proj::B'")
+            .execute("DELETE FROM CALLS WHERE source_id = 'PRJ::A' AND target_id = 'PRJ::B'")
             .unwrap();
         store
-            .execute("INSERT INTO CALLS (source_id, target_id) VALUES ('proj::A', 'proj::C')")
+            .execute("INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PRJ::A', 'PRJ::C', 'PRJ')")
             .unwrap();
 
         store.refresh_symbol_projection("A", 2).unwrap();
 
         let projection_a = store
-            .query_graph_projection("symbol", "proj::A", 2)
+            .query_graph_projection("symbol", "PRJ::A", 2)
             .unwrap();
         let after_d_state = store
-            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'proj::D' AND radius = 2")
+            .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'PRJ::D' AND radius = 2")
             .unwrap();
         assert_ne!(
             after_d_state, "[]",
             "Le voisinage non touche doit rester materialise"
         );
 
-        assert!(projection_a.contains("proj::C"));
-        assert!(!projection_a.contains("proj::B"));
+        assert!(projection_a.contains("PRJ::C"));
+        assert!(!projection_a.contains("PRJ::B"));
         assert_eq!(
             before_d_state, after_d_state,
             "Le refresh d'une ancre modifiée ne doit pas réécrire les voisinages non touchés"
@@ -3700,22 +3702,22 @@ mod tests {
     fn test_graph_projection_symbol_includes_calls_nif_edges() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'proj'), ('/tmp/graph/b.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/a.rs', 'PRJ'), ('/tmp/graph/b.rs', 'PRJ')")
             .unwrap();
         store
             .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
-                ('proj::A', 'A', 'function', true, true, false, false, 'proj'), \
-                ('proj::B', 'B', 'function', true, true, true, false, 'proj')")
+                ('PRJ::A', 'A', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::B', 'B', 'function', true, true, true, false, 'PRJ')")
             .unwrap();
         store
             .execute(
-                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
-                ('/tmp/graph/a.rs', 'proj::A'), \
-                ('/tmp/graph/b.rs', 'proj::B')",
+                "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES \
+                ('/tmp/graph/a.rs', 'PRJ::A', 'PRJ'), \
+                ('/tmp/graph/b.rs', 'PRJ::B', 'PRJ')",
             )
             .unwrap();
         store
-            .execute("INSERT INTO CALLS_NIF (source_id, target_id) VALUES ('proj::A', 'proj::B')")
+            .execute("INSERT INTO CALLS_NIF (source_id, target_id, project_code) VALUES ('PRJ::A', 'PRJ::B', 'PRJ')")
             .unwrap();
 
         let anchor_id = store
@@ -3726,31 +3728,31 @@ mod tests {
             .query_graph_projection("symbol", &anchor_id, 1)
             .unwrap();
 
-        assert!(projection.contains("proj::A"));
-        assert!(projection.contains("proj::B"));
+        assert!(projection.contains("PRJ::A"));
+        assert!(projection.contains("PRJ::B"));
     }
 
     #[test]
     fn test_tombstone_missing_path_invalidates_dependent_graph_derivations() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
-            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/deleted.rs', 'proj'), ('/tmp/graph/keeper.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/graph/deleted.rs', 'PRJ'), ('/tmp/graph/keeper.rs', 'PRJ')")
             .unwrap();
         store
             .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, is_unsafe, project_code) VALUES \
-                ('proj::Deleted', 'Deleted', 'function', true, true, false, false, 'proj'), \
-                ('proj::Keeper', 'Keeper', 'function', true, true, false, false, 'proj')")
+                ('PRJ::Deleted', 'Deleted', 'function', true, true, false, false, 'PRJ'), \
+                ('PRJ::Keeper', 'Keeper', 'function', true, true, false, false, 'PRJ')")
             .unwrap();
         store
             .execute(
-                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
-                ('/tmp/graph/deleted.rs', 'proj::Deleted'), \
-                ('/tmp/graph/keeper.rs', 'proj::Keeper')",
+                "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES \
+                ('/tmp/graph/deleted.rs', 'PRJ::Deleted', 'PRJ'), \
+                ('/tmp/graph/keeper.rs', 'PRJ::Keeper', 'PRJ')",
             )
             .unwrap();
         store
             .execute(
-                "INSERT INTO CALLS (source_id, target_id) VALUES ('proj::Keeper', 'proj::Deleted')",
+                "INSERT INTO CALLS (source_id, target_id, project_code) VALUES ('PRJ::Keeper', 'PRJ::Deleted', 'PRJ')",
             )
             .unwrap();
 
@@ -3772,7 +3774,7 @@ mod tests {
         let projection_before = store
             .query_graph_projection("symbol", &keeper_anchor, 1)
             .unwrap();
-        assert!(projection_before.contains("proj::Deleted"));
+        assert!(projection_before.contains("PRJ::Deleted"));
 
         let affected = store
             .tombstone_missing_path(std::path::Path::new("/tmp/graph/deleted.rs"))
@@ -3808,28 +3810,28 @@ mod tests {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
 
         store
-            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/a.rs', 'proj')")
+            .execute("INSERT INTO File (path, project_code) VALUES ('/tmp/a.rs', 'PRJ')")
             .unwrap();
 
         store
             .execute(
                 "INSERT INTO Symbol (id, name, kind, project_code) VALUES \
-                ('proj::A', 'A', 'function', 'proj'), \
-                ('proj::B', 'B', 'function', 'proj'), \
-                ('proj::C', 'C', 'function', 'proj')",
+                ('PRJ::A', 'A', 'function', 'PRJ'), \
+                ('PRJ::B', 'B', 'function', 'PRJ'), \
+                ('PRJ::C', 'C', 'function', 'PRJ')",
             )
             .unwrap();
 
         store
             .execute(
-                "INSERT INTO CALLS (source_id, target_id) VALUES \
-                ('proj::A', 'proj::B'), \
-                ('proj::B', 'proj::C'), \
-                ('proj::C', 'proj::A')",
+                "INSERT INTO CALLS (source_id, target_id, project_code) VALUES \
+                ('PRJ::A', 'PRJ::B', 'PRJ'), \
+                ('PRJ::B', 'PRJ::C', 'PRJ'), \
+                ('PRJ::C', 'PRJ::A', 'PRJ')",
             )
             .unwrap();
 
-        let deps = store.get_circular_dependencies("proj").unwrap();
+        let deps = store.get_circular_dependencies("PRJ").unwrap();
         println!("CIRCULAR DEPS: {:?}", deps);
 
         assert!(
@@ -3854,8 +3856,8 @@ mod tests {
         store
             .execute(
                 "INSERT INTO File (path, project_code) VALUES \
-                ('src/domain/user.rs', 'proj'), \
-                ('src/infrastructure/db.rs', 'proj')",
+                ('src/domain/user.rs', 'PRJ'), \
+                ('src/infrastructure/db.rs', 'PRJ')",
             )
             .unwrap();
 
@@ -3863,30 +3865,30 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Symbol (id, name, kind, project_code) VALUES \
-                ('proj::domain::User', 'User', 'class', 'proj'), \
-                ('proj::infra::Db', 'Db', 'class', 'proj')",
+                ('PRJ::domain::User', 'User', 'class', 'PRJ'), \
+                ('PRJ::infra::Db', 'Db', 'class', 'PRJ')",
             )
             .unwrap();
 
         // 3. Insert CONTAINS
         store
             .execute(
-                "INSERT INTO CONTAINS (source_id, target_id) VALUES \
-                ('src/domain/user.rs', 'proj::domain::User'), \
-                ('src/infrastructure/db.rs', 'proj::infra::Db')",
+                "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES \
+                ('src/domain/user.rs', 'PRJ::domain::User', 'PRJ'), \
+                ('src/infrastructure/db.rs', 'PRJ::infra::Db', 'PRJ')",
             )
             .unwrap();
 
         // 4. Insert CALLS (Domain calling Infra = Leakage)
         store
             .execute(
-                "INSERT INTO CALLS (source_id, target_id) VALUES \
-                ('proj::domain::User', 'proj::infra::Db')",
+                "INSERT INTO CALLS (source_id, target_id, project_code) VALUES \
+                ('PRJ::domain::User', 'PRJ::infra::Db', 'PRJ')",
             )
             .unwrap();
 
         let leaks = store
-            .get_domain_leakage("proj", "src/domain", "src/infrastructure")
+            .get_domain_leakage("PRJ", "src/domain", "src/infrastructure")
             .unwrap();
 
         assert_eq!(leaks.len(), 1, "There should be exactly one domain leakage");
@@ -3904,24 +3906,24 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Symbol (id, name, kind, project_code, is_public, is_unsafe) VALUES \
-                ('PublicA', 'PublicFunc', 'function', 'test_proj', true, false), \
-                ('InterB', 'InterFunc', 'function', 'test_proj', false, false), \
-                ('UnwrapC', 'unwrap', 'method', 'test_proj', false, false), \
-                ('UnsafeD', 'UnsafeFunc', 'function', 'test_proj', false, true)",
+                ('PublicA', 'PublicFunc', 'function', 'PRJ', true, false), \
+                ('InterB', 'InterFunc', 'function', 'PRJ', false, false), \
+                ('UnwrapC', 'unwrap', 'method', 'PRJ', false, false), \
+                ('UnsafeD', 'UnsafeFunc', 'function', 'PRJ', false, true)",
             )
             .unwrap();
 
         // 2. Setup CALLS
         store
             .execute(
-                "INSERT INTO CALLS (source_id, target_id) VALUES \
-                ('PublicA', 'InterB'), \
-                ('InterB', 'UnwrapC'), \
-                ('PublicA', 'UnsafeD')",
+                "INSERT INTO CALLS (source_id, target_id, project_code) VALUES \
+                ('PublicA', 'InterB', 'PRJ'), \
+                ('InterB', 'UnwrapC', 'PRJ'), \
+                ('PublicA', 'UnsafeD', 'PRJ')",
             )
             .unwrap();
 
-        let exposures = store.get_unsafe_exposure("test_proj").unwrap();
+        let exposures = store.get_unsafe_exposure("PRJ").unwrap();
 
         assert_eq!(exposures.len(), 2, "There should be two unsafe exposures");
         assert!(exposures.contains(&"PublicFunc -> ... -> unwrap".to_string()));
@@ -3936,35 +3938,35 @@ mod tests {
         store
             .execute(
                 "INSERT INTO Symbol (id, name, kind, project_code, is_public, is_nif) VALUES \
-                ('ElixirFunc', 'elixir_func', 'function', 'test_proj', true, false), \
-                ('RustNif', 'rust::nif_func', 'function', 'test_proj', false, true), \
-                ('Node1', 'node1', 'function', 'test_proj', false, false), \
-                ('Node2', 'node2', 'function', 'test_proj', false, false), \
-                ('Node3', 'node3', 'function', 'test_proj', false, false), \
-                ('Node4', 'node4', 'function', 'test_proj', false, false), \
-                ('Node5', 'node5', 'function', 'test_proj', false, false)",
+                ('ElixirFunc', 'elixir_func', 'function', 'PRJ', true, false), \
+                ('RustNif', 'rust::nif_func', 'function', 'PRJ', false, true), \
+                ('Node1', 'node1', 'function', 'PRJ', false, false), \
+                ('Node2', 'node2', 'function', 'PRJ', false, false), \
+                ('Node3', 'node3', 'function', 'PRJ', false, false), \
+                ('Node4', 'node4', 'function', 'PRJ', false, false), \
+                ('Node5', 'node5', 'function', 'PRJ', false, false)",
             )
             .unwrap();
 
         // 2. Setup CALLS_NIF and CALLS
         store
             .execute(
-                "INSERT INTO CALLS_NIF (source_id, target_id) VALUES ('ElixirFunc', 'RustNif')",
+                "INSERT INTO CALLS_NIF (source_id, target_id, project_code) VALUES ('ElixirFunc', 'RustNif', 'PRJ')",
             )
             .unwrap();
 
         store
             .execute(
-                "INSERT INTO CALLS (source_id, target_id) VALUES \
-                ('RustNif', 'Node1'), \
-                ('Node1', 'Node2'), \
-                ('Node2', 'Node3'), \
-                ('Node3', 'Node4'), \
-                ('Node4', 'Node5')",
+                "INSERT INTO CALLS (source_id, target_id, project_code) VALUES \
+                ('RustNif', 'Node1', 'PRJ'), \
+                ('Node1', 'Node2', 'PRJ'), \
+                ('Node2', 'Node3', 'PRJ'), \
+                ('Node3', 'Node4', 'PRJ'), \
+                ('Node4', 'Node5', 'PRJ')",
             )
             .unwrap();
 
-        let risks = store.get_nif_blocking_risks("test_proj").unwrap();
+        let risks = store.get_nif_blocking_risks("PRJ").unwrap();
 
         assert_eq!(risks.len(), 1, "There should be one NIF blocking risk");
         assert_eq!(risks[0], "rust::nif_func (profondeur: 6)");

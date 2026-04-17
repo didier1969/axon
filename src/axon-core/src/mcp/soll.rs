@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+#[allow(dead_code)]
 #[derive(Default)]
 pub(crate) struct SollRestoreCounts {
     pub vision: usize,
@@ -26,6 +27,7 @@ pub(crate) struct ParsedSollExport {
     pub guidelines: Vec<ParsedGuideline>,
 }
 
+#[allow(dead_code)]
 pub(crate) struct ParsedGuideline {
     pub id: String,
     pub title: String,

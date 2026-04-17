@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::{Mutex, OnceLock};
 
 use super::format::format_standard_contract;
 use super::soll::{
@@ -9,6 +10,7 @@ use super::soll::{
 use super::McpServer;
 use crate::project_meta::{discover_project_identities, resolve_canonical_project_identity};
 
+#[allow(dead_code)]
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
     ("EPITOMIZES", "soll.EPITOMIZES"),
     ("BELONGS_TO", "soll.BELONGS_TO"),
@@ -23,6 +25,47 @@ const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
     ("IMPACTS", "IMPACTS"),
     ("SUBSTANTIATES", "SUBSTANTIATES"),
 ];
+
+#[allow(dead_code)]
+type SollContextCache = HashMap<String, (i64, Value)>;
+
+#[allow(dead_code)]
+static SOLL_CONTEXT_CACHE: OnceLock<Mutex<SollContextCache>> = OnceLock::new();
+
+#[allow(dead_code)]
+const SOLL_CONTEXT_CACHE_TTL_MS: i64 = 180_000;
+
+impl McpServer {
+    #[cfg(not(test))]
+    fn soll_context_cache() -> &'static Mutex<SollContextCache> {
+        SOLL_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    #[cfg(not(test))]
+    fn read_soll_context_cache(key: &str, now_ms: i64) -> Option<Value> {
+        let guard = Self::soll_context_cache().lock().ok()?;
+        let (stored_at, value) = guard.get(key)?;
+        if now_ms.saturating_sub(*stored_at) > SOLL_CONTEXT_CACHE_TTL_MS {
+            return None;
+        }
+        Some(value.clone())
+    }
+
+    #[cfg(test)]
+    fn read_soll_context_cache(_key: &str, _now_ms: i64) -> Option<Value> {
+        None
+    }
+
+    #[cfg(not(test))]
+    fn write_soll_context_cache(key: String, now_ms: i64, value: &Value) {
+        if let Ok(mut guard) = Self::soll_context_cache().lock() {
+            guard.insert(key, (now_ms, value.clone()));
+        }
+    }
+
+    #[cfg(test)]
+    fn write_soll_context_cache(_key: String, _now_ms: i64, _value: &Value) {}
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum WorkPlanEntityType {
@@ -50,6 +93,7 @@ impl WorkPlanEntityType {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct WorkPlanNode {
     id: String,
     title: String,
@@ -1704,13 +1748,21 @@ graph TD;
     }
 
     fn resolve_project_code(&self, project_code: &str) -> anyhow::Result<String> {
-        let _ = self.sync_project_code_registry_from_meta();
         let escaped = escape_sql(project_code);
         let by_code = self.query_single_column(&format!(
             "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
             escaped
         ))?;
         if let Some(code) = by_code.into_iter().next() {
+            return Ok(code);
+        }
+
+        let _ = self.sync_project_code_registry_from_meta();
+        let by_code_after_sync = self.query_single_column(&format!(
+            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
+            escaped
+        ))?;
+        if let Some(code) = by_code_after_sync.into_iter().next() {
             return Ok(code);
         }
 
@@ -1808,6 +1860,7 @@ graph TD;
         self.next_server_numeric_id(project_code, entity)
     }
 
+    #[allow(dead_code)]
     fn restore_soll_relation(
         &self,
         relation_type: &str,
@@ -2119,29 +2172,59 @@ impl McpServer {
             .and_then(|v| v.as_i64())
             .unwrap_or(25)
             .max(1);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        let cache_key = format!("{}|{}", project_code, limit);
+        if let Some(cached) = Self::read_soll_context_cache(&cache_key, now_ms) {
+            return Some(cached);
+        }
 
-        let reqs = self.query_single_column(&format!(
-            "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Requirement' AND id LIKE 'REQ-{}-%' ORDER BY id DESC LIMIT {}",
-            escape_sql(&project_code),
-            limit
-        )).unwrap_or_default();
-        let visions = self.query_single_column(&format!(
-            "SELECT id || '|' || title || '|' || COALESCE(status,'') || '|' || COALESCE(description,'') \
-             FROM soll.Node WHERE type='Vision' AND id LIKE 'VIS-{}-%' ORDER BY id DESC LIMIT {}",
-            escape_sql(&project_code),
-            limit
-        )).unwrap_or_default();
-        let decisions = self.query_single_column(&format!(
-            "SELECT id || '|' || title || '|' || COALESCE(status,'') FROM soll.Node WHERE type='Decision' AND id LIKE 'DEC-{}-%' ORDER BY id DESC LIMIT {}",
-            escape_sql(&project_code),
-            limit
-        )).unwrap_or_default();
+        let escaped_project = escape_sql(&project_code);
+        let reqs = self
+            .query_single_column(&format!(
+                "SELECT id || '|' || title || '|' || COALESCE(status,'')
+                 FROM soll.Node
+                 WHERE project_code = '{project}'
+                   AND type = 'Requirement'
+                 ORDER BY id DESC
+                 LIMIT {limit}",
+                project = escaped_project,
+                limit = limit
+            ))
+            .unwrap_or_default();
+        let visions = self
+            .query_single_column(&format!(
+                "SELECT id || '|' || title || '|' || COALESCE(status,'') || '|' || COALESCE(description,'')
+                 FROM soll.Node
+                 WHERE project_code = '{project}'
+                   AND type = 'Vision'
+                 ORDER BY id DESC
+                 LIMIT {limit}",
+                project = escaped_project,
+                limit = limit
+            ))
+            .unwrap_or_default();
+        let decisions = self
+            .query_single_column(&format!(
+                "SELECT id || '|' || title || '|' || COALESCE(status,'')
+                 FROM soll.Node
+                 WHERE project_code = '{project}'
+                   AND type = 'Decision'
+                 ORDER BY id DESC
+                 LIMIT {limit}",
+                project = escaped_project,
+                limit = limit
+            ))
+            .unwrap_or_default();
         let revisions = self.query_single_column(&format!(
             "SELECT revision_id || '|' || COALESCE(summary,'') || '|' || COALESCE(author,'') FROM soll.Revision ORDER BY committed_at DESC LIMIT {}",
             limit
         )).unwrap_or_default();
 
-        Some(json!({
+        let response = json!({
             "content": [{"type":"text","text": format!("SOLL context for {} loaded.", project_code)}],
             "data": {
                 "project_code": project_code,
@@ -2150,7 +2233,9 @@ impl McpServer {
                 "decisions": decisions,
                 "revisions": revisions
             }
-        }))
+        });
+        Self::write_soll_context_cache(cache_key, now_ms, &response);
+        Some(response)
     }
 
     pub(crate) fn axon_soll_work_plan(&self, args: &Value) -> Option<Value> {
@@ -2644,10 +2729,10 @@ impl McpServer {
             .unwrap_or("AXO");
         let project_code = self.resolve_project_code(project_code).ok()?;
         let query = format!(
-            "SELECT r.id, COALESCE(r.status,''), COALESCE(r.acceptance_criteria,''), COUNT(t.id)
-             FROM soll.Node r WHERE r.type='Requirement' AND
+            "SELECT r.id, COALESCE(r.status,''), COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), ''), COUNT(t.id)
+             FROM soll.Node r
              LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
-             WHERE r.id LIKE 'REQ-{}-%'
+             WHERE r.type='Requirement' AND r.id LIKE 'REQ-{}-%'
              GROUP BY 1,2,3
              ORDER BY r.id",
             escape_sql(&project_code)

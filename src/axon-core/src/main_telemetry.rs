@@ -268,7 +268,7 @@ pub(crate) async fn handle_telemetry_command(
 
     if command == "SCAN_ALL" {
         tokio::spawn(async move {
-            scanner::Scanner::new(&projects_root, "GLOBAL").scan(store);
+            scanner::Scanner::new(&projects_root, "").scan(store);
         });
         return;
     }
