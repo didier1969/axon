@@ -841,7 +841,7 @@ pub fn collect_recent_analytics_window(store: &GraphStore) -> RecentAnalyticsWin
         CHUNK_MODEL_ID.replace('\'', "''")
     );
     let raw = store
-        .query_json(&query)
+        .query_json_writer(&query)
         .unwrap_or_else(|_| "[]".to_string());
     let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
     let row = rows.first().cloned().unwrap_or_default();
@@ -1302,43 +1302,10 @@ fn value_u64(value: Option<&serde_json::Value>) -> u64 {
 }
 
 fn canonical_count(store: &GraphStore, query: &str) -> i64 {
-    let raw = match store.query_json(query) {
-        Ok(raw) => raw,
+    match store.query_count_writer(query) {
+        Ok(count) => count.max(0),
         Err(_) => return 0,
-    };
-
-    if let Ok(rows) = serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&raw) {
-        if let Some(value) = rows
-            .first()
-            .and_then(|row| row.first())
-            .and_then(|value| value.as_i64().or_else(|| value.as_u64().map(|v| v as i64)))
-        {
-            return value.max(0);
-        }
     }
-
-    if let Ok(rows) = serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(&raw)
-    {
-        for row in rows {
-            if let Some(value) = row
-                .get("count(*)")
-                .or_else(|| row.get("count_star()"))
-                .or_else(|| row.get("count"))
-                .and_then(|value| value.as_i64().or_else(|| value.as_u64().map(|v| v as i64)))
-            {
-                return value.max(0);
-            }
-            if let Some(value) = row
-                .values()
-                .next()
-                .and_then(|value| value.as_i64().or_else(|| value.as_u64().map(|v| v as i64)))
-            {
-                return value.max(0);
-            }
-        }
-    }
-
-    0
 }
 
 fn read_host_pressure_ratios() -> (f64, f64, f64) {
@@ -1464,6 +1431,7 @@ mod tests {
     };
     use crate::runtime_tuning::RuntimeTuningState;
     use crate::service_guard::InteractivePriority;
+    use crate::{embedding_contract::CHUNK_MODEL_ID, tests::test_helpers::create_test_db};
 
     fn host() -> HostSnapshot {
         HostSnapshot {
@@ -1552,6 +1520,31 @@ mod tests {
             ],
             evaluation_window_ms: 60_000,
         }
+    }
+
+    #[test]
+    fn canonical_count_reads_writer_truth_when_reader_snapshot_is_stale() {
+        let store = create_test_db().unwrap();
+        store.refresh_reader_snapshot().unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
+                 ('chunk-stale-canonical', 'symbol', 'symbol-stale-canonical', 'proj', '/tmp/stale_canonical.rs', 'function', 'content', 'hash-stale-canonical', 1, 1)"
+            ))
+            .unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO ChunkEmbedding (chunk_id, model_id, source_hash, embedded_at_ms) VALUES \
+                 ('chunk-stale-canonical', '{}', 'hash-stale-canonical', 1234)",
+                CHUNK_MODEL_ID
+            ))
+            .unwrap();
+
+        let count = super::canonical_count(
+            &store,
+            &format!("SELECT COUNT(*) FROM ChunkEmbedding WHERE model_id = '{}'", CHUNK_MODEL_ID),
+        );
+        assert_eq!(count, 1);
     }
 
     #[test]
