@@ -1,0 +1,385 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "query.exact_miss_with_suggestion",
+      "source": "fixture",
+      "tool": "query",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "query fallback"
+            }
+          ],
+          "data": {
+            "_shadow": {
+              "guidance": {
+                "problem_class": "input_not_found",
+                "likely_cause": "exact_symbol_mismatch",
+                "next_best_actions": [
+                  "retry_with_suggested_symbol",
+                  "use_query_to_broaden_recall"
+                ],
+                "confidence": "low",
+                "soll": null
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "input_not_found",
+        "likely_cause": "exact_symbol_mismatch",
+        "confidence": "low",
+        "next_best_actions": [
+          "retry_with_suggested_symbol",
+          "use_query_to_broaden_recall"
+        ]
+      }
+    },
+    {
+      "name": "query.ambiguous_duplicate_symbol",
+      "source": "fixture",
+      "tool": "query",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "query ambiguity"
+            }
+          ],
+          "data": {
+            "_shadow": {
+              "guidance": {
+                "problem_class": "input_ambiguous",
+                "likely_cause": "multiple_plausible_targets",
+                "next_best_actions": [
+                  "pick_exact_symbol",
+                  "narrow_project_scope"
+                ],
+                "confidence": "medium",
+                "soll": null
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "input_ambiguous",
+        "likely_cause": "multiple_plausible_targets",
+        "confidence": "medium",
+        "next_best_actions": [
+          "pick_exact_symbol",
+          "narrow_project_scope"
+        ]
+      }
+    },
+    {
+      "name": "query.wrong_project_scope",
+      "source": "fixture",
+      "tool": "query",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "query wrong scope"
+            }
+          ],
+          "data": {
+            "_shadow": {
+              "guidance": {
+                "problem_class": "wrong_project_scope",
+                "likely_cause": "non_canonical_or_incorrect_project_code",
+                "next_best_actions": [
+                  "use_canonical_project_code",
+                  "run_project_status"
+                ],
+                "confidence": "high",
+                "soll": null
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "wrong_project_scope",
+        "likely_cause": "non_canonical_or_incorrect_project_code",
+        "confidence": "high",
+        "next_best_actions": [
+          "use_canonical_project_code",
+          "run_project_status"
+        ]
+      }
+    },
+    {
+      "name": "inspect.clean_success_no_guidance",
+      "source": "fixture",
+      "tool": "inspect",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "inspect exact success"
+            }
+          ]
+        }
+      },
+      "expect": {
+        "guidance_absent": true
+      }
+    },
+    {
+      "name": "inspect.index_incomplete",
+      "source": "fixture",
+      "tool": "inspect",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "inspect partial"
+            }
+          ],
+          "data": {
+            "_shadow": {
+              "guidance": {
+                "problem_class": "index_incomplete",
+                "likely_cause": "graph_index_not_fully_ready",
+                "next_best_actions": [
+                  "treat_result_as_partial",
+                  "retry_after_indexing"
+                ],
+                "confidence": "medium",
+                "soll": null
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "index_incomplete",
+        "likely_cause": "graph_index_not_fully_ready",
+        "confidence": "medium",
+        "next_best_actions": [
+          "treat_result_as_partial",
+          "retry_after_indexing"
+        ]
+      }
+    },
+    {
+      "name": "inspect.missing_rationale_in_soll",
+      "source": "fixture",
+      "tool": "inspect",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "inspect with soll gap"
+            }
+          ],
+          "data": {
+            "_shadow": {
+              "guidance": {
+                "problem_class": "missing_rationale_in_soll",
+                "likely_cause": "code_evidence_without_maintained_rationale",
+                "next_best_actions": [
+                  "review_current_soll_context",
+                  "update_decision_or_requirement_if_authorized"
+                ],
+                "confidence": "medium",
+                "soll": {
+                  "recommended_action": "recommend_update",
+                  "update_kind": "decision_or_requirement",
+                  "reason": "missing_rationale_evidence",
+                  "requires_authorization": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "missing_rationale_in_soll",
+        "likely_cause": "code_evidence_without_maintained_rationale",
+        "confidence": "medium",
+        "next_best_actions": [
+          "review_current_soll_context",
+          "update_decision_or_requirement_if_authorized"
+        ],
+        "soll": {
+          "recommended_action": "recommend_update",
+          "update_kind": "decision_or_requirement",
+          "requires_authorization": true
+        }
+      }
+    },
+    {
+      "name": "query.tool_unavailable",
+      "source": "fixture",
+      "tool": "query",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "tool unavailable"
+            }
+          ],
+          "data": {
+            "_shadow": {
+              "guidance": {
+                "problem_class": "tool_unavailable",
+                "likely_cause": "runtime_profile_does_not_allow_tool",
+                "next_best_actions": [
+                  "switch_to_supported_runtime_profile",
+                  "retry_tool_after_runtime_change"
+                ],
+                "confidence": "high",
+                "soll": null
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "tool_unavailable",
+        "likely_cause": "runtime_profile_does_not_allow_tool",
+        "confidence": "high",
+        "next_best_actions": [
+          "switch_to_supported_runtime_profile",
+          "retry_tool_after_runtime_change"
+        ]
+      }
+    },
+    {
+      "name": "query.vectorization_incomplete",
+      "source": "fixture",
+      "tool": "query",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "query vector partial"
+            }
+          ],
+          "data": {
+            "_shadow": {
+              "guidance": {
+                "problem_class": "vectorization_incomplete",
+                "likely_cause": "semantic_layer_not_fully_ready",
+                "next_best_actions": [
+                  "treat_result_as_partial",
+                  "retry_after_vectorization"
+                ],
+                "confidence": "medium",
+                "soll": null
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "vectorization_incomplete",
+        "likely_cause": "semantic_layer_not_fully_ready",
+        "confidence": "medium",
+        "next_best_actions": [
+          "treat_result_as_partial",
+          "retry_after_vectorization"
+        ]
+      }
+    },
+    {
+      "name": "query.backend_pressure",
+      "source": "fixture",
+      "tool": "query",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "query under pressure"
+            }
+          ],
+          "data": {
+            "_shadow": {
+              "guidance": {
+                "problem_class": "backend_pressure",
+                "likely_cause": "runtime_pressure_reduces_reliability",
+                "next_best_actions": [
+                  "treat_result_as_partial",
+                  "retry_after_pressure_recovers"
+                ],
+                "confidence": "medium",
+                "soll": null
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "backend_pressure",
+        "likely_cause": "runtime_pressure_reduces_reliability",
+        "confidence": "medium",
+        "next_best_actions": [
+          "treat_result_as_partial",
+          "retry_after_pressure_recovers"
+        ]
+      }
+    },
+    {
+      "name": "inspect.intent_missing_in_soll",
+      "source": "fixture",
+      "tool": "inspect",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "inspect intent gap"
+            }
+          ],
+          "data": {
+            "_shadow": {
+              "guidance": {
+                "problem_class": "intent_missing_in_soll",
+                "likely_cause": "code_evidence_without_maintained_intent",
+                "next_best_actions": [
+                  "review_current_soll_context",
+                  "update_requirement_or_decision_if_authorized"
+                ],
+                "confidence": "medium",
+                "soll": {
+                  "recommended_action": "recommend_update",
+                  "update_kind": "requirement_or_decision",
+                  "reason": "missing_intent_evidence",
+                  "requires_authorization": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "intent_missing_in_soll",
+        "likely_cause": "code_evidence_without_maintained_intent",
+        "confidence": "medium",
+        "next_best_actions": [
+          "review_current_soll_context",
+          "update_requirement_or_decision_if_authorized"
+        ],
+        "soll": {
+          "recommended_action": "recommend_update",
+          "update_kind": "requirement_or_decision",
+          "requires_authorization": true
+        }
+      }
+    }
+  ]
+}

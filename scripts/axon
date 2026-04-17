@@ -19,6 +19,7 @@ Commands:
   measure-mcp [args...]    Run timestamped live MCP latency/behavior probes
   compare-mcp [args...]    Compare two MCP measurement runs and flag regressions
   quality-mcp              Run strict MCP quality gate on core projects
+  qualify-guidance [args...] Replay MCP guidance goldens
   soll-import [args...]    Bulk import SOLL payloads via MCP (md/json/ndjson/yaml)
   work-plan [args...]      Generate an ideal read-only work plan from SOLL
   resume-vectorization [args...] Requeue missing chunk vectorization from graph-ready files
@@ -40,6 +41,7 @@ Examples:
   ./scripts/axon measure-mcp --project AXO --label baseline
   ./scripts/axon compare-mcp
   ./scripts/axon quality-mcp
+  ./scripts/axon qualify-guidance
   ./scripts/axon soll-import --input docs/vision/SOLL_EXPORT_2026-04-04.md --format md
   ./scripts/axon soll-import --input /tmp/soll_payload.json --project AXO --author codex --dry-run
   ./scripts/axon work-plan --project AXO
@@ -91,6 +93,9 @@ case "$cmd" in
     ;;
   quality-mcp)
     exec bash "$SCRIPT_DIR/mcp_quality_gate.sh"
+    ;;
+  qualify-guidance)
+    exec python3 "$SCRIPT_DIR/qualify_mcp_guidance.py" "$@"
     ;;
   soll-import)
     exec python3 "$SCRIPT_DIR/soll_import.py" "$@"
