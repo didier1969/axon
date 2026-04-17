@@ -204,6 +204,7 @@ fn query_guidance_facts_capture_exact_symbol_miss_with_suggestion() {
         0,
         false,
         true,
+        false,
     );
 
     assert!(facts.contains(&GuidanceFact::problem_signal("input_not_found")));
@@ -227,6 +228,7 @@ fn inspect_guidance_facts_capture_symbol_miss_with_canonical_project() {
         &candidates,
         0,
         true,
+        false,
     );
 
     assert!(facts.contains(&GuidanceFact::problem_signal("input_not_found")));
@@ -243,7 +245,7 @@ fn query_guidance_facts_capture_ambiguity_for_duplicate_symbol_names_across_proj
         canonical_sources: Vec::new(),
     };
 
-    let facts = server.extract_query_guidance_facts("scan", None, &candidates, 0, false, false);
+    let facts = server.extract_query_guidance_facts("scan", None, &candidates, 0, false, false, false);
 
     assert!(facts.contains(&GuidanceFact::problem_signal("input_ambiguous")));
     assert!(facts.contains(&GuidanceFact::candidate_project_code("PJA")));
@@ -260,7 +262,7 @@ fn query_guidance_facts_capture_wrong_scope_when_candidates_exist_elsewhere() {
     };
 
     let facts =
-        server.extract_query_guidance_facts("scan", Some("AXO"), &candidates, 0, false, false);
+        server.extract_query_guidance_facts("scan", Some("AXO"), &candidates, 0, false, false, false);
 
     assert!(facts.contains(&GuidanceFact::problem_signal("wrong_project_scope")));
     assert!(facts.contains(&GuidanceFact::candidate_project_code("PJA")));
@@ -274,6 +276,7 @@ fn query_guidance_facts_capture_degraded_index_signal() {
         Some("AXO"),
         &GuidanceCandidates::default(),
         3,
+        false,
         false,
         false,
     );
@@ -292,9 +295,202 @@ fn query_guidance_facts_capture_vectorization_incomplete_signal() {
         0,
         true,
         false,
+        false,
     );
 
     assert!(facts.contains(&GuidanceFact::VectorizationIncomplete));
+}
+
+#[test]
+fn classify_guidance_marks_wrong_project_scope() {
+    let outcome = classify_guidance(&[
+        GuidanceFact::requested_target("scan"),
+        GuidanceFact::resolved_project_scope("AXO"),
+        GuidanceFact::candidate_project_code("PJA"),
+        GuidanceFact::problem_signal("wrong_project_scope"),
+    ]);
+
+    assert_eq!(outcome.problem_class.as_deref(), Some("wrong_project_scope"));
+    assert!(outcome
+        .next_best_actions
+        .contains(&"use_canonical_project_code".to_string()));
+}
+
+#[test]
+fn classify_guidance_marks_input_not_found_with_retry_action() {
+    let outcome = classify_guidance(&[
+        GuidanceFact::requested_target("trigger_scan"),
+        GuidanceFact::candidate_symbol("Axon.Scanner.scan"),
+        GuidanceFact::problem_signal("input_not_found"),
+    ]);
+
+    assert_eq!(outcome.problem_class.as_deref(), Some("input_not_found"));
+    assert!(outcome
+        .next_best_actions
+        .contains(&"retry_with_suggested_symbol".to_string()));
+}
+
+#[test]
+fn classify_guidance_marks_input_ambiguous() {
+    let outcome = classify_guidance(&[
+        GuidanceFact::requested_target("scan"),
+        GuidanceFact::candidate_project_code("PJA"),
+        GuidanceFact::candidate_project_code("PJB"),
+        GuidanceFact::problem_signal("input_ambiguous"),
+    ]);
+
+    assert_eq!(outcome.problem_class.as_deref(), Some("input_ambiguous"));
+    assert!(outcome
+        .next_best_actions
+        .contains(&"pick_exact_symbol".to_string()));
+}
+
+#[test]
+fn classify_guidance_marks_index_incomplete_without_input_signal() {
+    let outcome = classify_guidance(&[
+        GuidanceFact::requested_target("scan"),
+        GuidanceFact::IndexIncomplete,
+    ]);
+
+    assert_eq!(outcome.problem_class.as_deref(), Some("index_incomplete"));
+    assert!(outcome
+        .next_best_actions
+        .contains(&"retry_after_indexing".to_string()));
+}
+
+#[test]
+fn classify_guidance_marks_missing_rationale_in_soll_with_authorized_recommendation() {
+    let outcome = classify_guidance(&[
+        GuidanceFact::requested_target("retrieve_context"),
+        GuidanceFact::problem_signal("missing_rationale_in_soll"),
+    ]);
+
+    assert_eq!(
+        outcome.problem_class.as_deref(),
+        Some("missing_rationale_in_soll")
+    );
+    assert_eq!(
+        outcome
+            .soll
+            .as_ref()
+            .and_then(|soll| soll.requires_authorization),
+        Some(true)
+    );
+}
+
+#[test]
+fn classify_guidance_marks_tool_unavailable() {
+    let outcome = classify_guidance(&[GuidanceFact::problem_signal("tool_unavailable")]);
+    assert_eq!(outcome.problem_class.as_deref(), Some("tool_unavailable"));
+}
+
+#[test]
+fn classify_guidance_marks_backend_pressure() {
+    let outcome = classify_guidance(&[GuidanceFact::problem_signal("backend_pressure")]);
+    assert_eq!(outcome.problem_class.as_deref(), Some("backend_pressure"));
+}
+
+#[test]
+fn classify_guidance_marks_intent_missing_in_soll() {
+    let outcome = classify_guidance(&[GuidanceFact::problem_signal("intent_missing_in_soll")]);
+    assert_eq!(outcome.problem_class.as_deref(), Some("intent_missing_in_soll"));
+    assert_eq!(
+        outcome
+            .soll
+            .as_ref()
+            .map(|soll| soll.reason.as_str()),
+        Some("missing_intent_evidence")
+    );
+}
+
+#[test]
+fn query_guidance_facts_capture_backend_pressure_signal() {
+    let server = create_test_server();
+    let facts = server.extract_query_guidance_facts(
+        "scan",
+        Some("AXO"),
+        &GuidanceCandidates::default(),
+        0,
+        false,
+        false,
+        true,
+    );
+
+    assert!(facts.contains(&GuidanceFact::problem_signal("backend_pressure")));
+}
+
+#[test]
+fn inspect_shadow_guidance_emits_debug_payload_when_enabled() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+        std::env::set_var("AXON_MCP_GUIDANCE_SHADOW", "1");
+    }
+
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'AXO')")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "inspect",
+                "arguments": { "symbol": "axon_retrieve_contex", "project": "AXO" }
+            })),
+            id: Some(json!(6210)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    assert_eq!(
+        result["data"]["_shadow"]["guidance"]["problem_class"],
+        "input_not_found"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        std::env::remove_var("AXON_MCP_GUIDANCE_SHADOW");
+    }
+}
+
+#[test]
+fn query_shadow_guidance_marks_tool_unavailable_when_runtime_profile_blocks_tool() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        std::env::set_var("AXON_MCP_GUIDANCE_SHADOW", "1");
+    }
+
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "query",
+                "arguments": { "query": "scan", "project": "AXO" }
+            })),
+            id: Some(json!(6211)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    assert_eq!(
+        result["data"]["_shadow"]["guidance"]["problem_class"],
+        "tool_unavailable"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_MCP_GUIDANCE_SHADOW");
+    }
 }
 
 #[test]

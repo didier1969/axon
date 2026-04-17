@@ -29,7 +29,7 @@ impl McpServer {
                 AxonRuntimeOperationalProfile::FullAutonomous
             )
         {
-            return Some(json!({
+            let response = json!({
                 "content": [{
                     "type": "text",
                     "text": format!(
@@ -40,7 +40,17 @@ impl McpServer {
                     )
                 }],
                 "isError": true
-            }));
+            });
+            return Some(if Self::mcp_guidance_shadow_enabled() {
+                crate::mcp::attach_guidance_shadow(
+                    response,
+                    crate::mcp::guidance_outcome_to_value(&crate::mcp::classify_guidance(&[
+                        crate::mcp::GuidanceFact::problem_signal("tool_unavailable"),
+                    ])),
+                )
+            } else {
+                response
+            });
         }
 
         let response =

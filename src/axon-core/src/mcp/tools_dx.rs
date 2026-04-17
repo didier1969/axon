@@ -1,4 +1,5 @@
 use crate::embedding_contract::DIMENSION;
+use crate::service_guard::{self, ServicePressure};
 use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
@@ -47,6 +48,19 @@ impl McpServer {
             .unwrap_or_default()
     }
 
+    fn exact_candidate_missing(rows: &[Vec<Value>], requested: &str, intent: QueryIntent) -> bool {
+        if intent != QueryIntent::ConfigLookupExact {
+            return false;
+        }
+        let requested = requested.trim().to_ascii_lowercase();
+        !rows.iter().any(|row| {
+            row.first()
+                .and_then(Value::as_str)
+                .map(|name| name.trim().eq_ignore_ascii_case(&requested))
+                .unwrap_or(false)
+        })
+    }
+
     pub(crate) fn extract_query_guidance_facts(
         &self,
         query_text: &str,
@@ -55,6 +69,7 @@ impl McpServer {
         degraded_file_count: i64,
         vectorization_incomplete: bool,
         exact_match_missing: bool,
+        backend_pressure: bool,
     ) -> Vec<GuidanceFact> {
         let mut facts = vec![GuidanceFact::requested_target(query_text)];
         if let Some(project_code) = project {
@@ -77,6 +92,9 @@ impl McpServer {
         }
         if vectorization_incomplete {
             facts.push(GuidanceFact::VectorizationIncomplete);
+        }
+        if backend_pressure {
+            facts.push(GuidanceFact::problem_signal("backend_pressure"));
         }
 
         if let Some(project_code) = project {
@@ -104,6 +122,7 @@ impl McpServer {
         candidates: &GuidanceCandidates,
         degraded_symbol_count: i64,
         exact_match_missing: bool,
+        backend_pressure: bool,
     ) -> Vec<GuidanceFact> {
         let mut facts = self.extract_query_guidance_facts(
             symbol,
@@ -112,6 +131,7 @@ impl McpServer {
             degraded_symbol_count,
             false,
             exact_match_missing,
+            backend_pressure,
         );
         if degraded_symbol_count > 0 {
             facts.push(GuidanceFact::result_degraded("symbol_partial"));
@@ -544,6 +564,7 @@ impl McpServer {
         let embedding_attempt = crate::embedder::batch_embed(vec![query_text.to_string()]);
         let semantic_fallback_reason = embedding_attempt.as_ref().err().map(|err| err.to_string());
         let embedding = embedding_attempt.ok().and_then(|v| v.into_iter().next());
+        let backend_pressure = !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
         let query_limit = if query_intent == QueryIntent::ConfigLookupExact {
             25
         } else {
@@ -646,14 +667,21 @@ impl McpServer {
                     project_codes: Vec::new(),
                     canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
                 };
-                let _guidance_facts = self.extract_query_guidance_facts(
+                let exact_match_missing =
+                    Self::exact_candidate_missing(&rows, query_text, query_intent);
+                let guidance_facts = self.extract_query_guidance_facts(
                     query_text,
                     (project != "*").then_some(project),
                     &candidates,
                     self.degraded_file_count((project != "*").then_some(project)),
                     semantic_fallback_reason.is_some(),
-                    false,
+                    exact_match_missing,
+                    backend_pressure,
                 );
+                let guidance_shadow =
+                    crate::mcp::guidance_outcome_to_value(&crate::mcp::classify_guidance(
+                        &guidance_facts,
+                    ));
                 let result_category = rows
                     .first()
                     .and_then(|row| row.get(2))
@@ -694,7 +722,12 @@ impl McpServer {
                         "high",
                     )
                 );
-                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                let response = json!({ "content": [{ "type": "text", "text": report }] });
+                Some(if Self::mcp_guidance_shadow_enabled() {
+                    crate::mcp::attach_guidance_shadow(response, guidance_shadow)
+                } else {
+                    response
+                })
             }
             Err(_) => self.axon_query_from_chunks(
                 query_text,
@@ -973,6 +1006,7 @@ impl McpServer {
         let symbol = args.get("symbol")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
+        let backend_pressure = !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
         let Some(symbol_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
             let suggestions = self.suggest_scoped_symbols_canonical(symbol, project, 8);
             let suggestion_rows: Vec<Vec<Value>> =
@@ -991,13 +1025,18 @@ impl McpServer {
                     .collect(),
                 canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
             };
-            let _guidance_facts = self.extract_inspect_guidance_facts(
+            let guidance_facts = self.extract_inspect_guidance_facts(
                 symbol,
                 project,
                 &candidates,
                 self.degraded_symbol_count(symbol, project),
                 true,
+                backend_pressure,
             );
+            let guidance_shadow =
+                crate::mcp::guidance_outcome_to_value(&crate::mcp::classify_guidance(
+                    &guidance_facts,
+                ));
             let scope = project
                 .map(|p| format!("project:{}", p))
                 .unwrap_or_else(|| "workspace:*".to_string());
@@ -1021,7 +1060,12 @@ impl McpServer {
                     "low",
                 )
             );
-            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
+            let response = json!({ "content": [{ "type": "text", "text": report }] });
+            return Some(if Self::mcp_guidance_shadow_enabled() {
+                crate::mcp::attach_guidance_shadow(response, guidance_shadow)
+            } else {
+                response
+            });
         };
 
         let query = if project.is_some() {
@@ -1068,13 +1112,18 @@ impl McpServer {
                     project_codes: Vec::new(),
                     canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
                 };
-                let _guidance_facts = self.extract_inspect_guidance_facts(
+                let guidance_facts = self.extract_inspect_guidance_facts(
                     symbol,
                     project,
                     &candidates,
                     self.degraded_symbol_count(symbol, project),
                     false,
+                    backend_pressure,
                 );
+                let guidance_shadow =
+                    crate::mcp::guidance_outcome_to_value(&crate::mcp::classify_guidance(
+                        &guidance_facts,
+                    ));
                 let evidence = format!(
                     "{}{}{}",
                     project_note.unwrap_or_default(),
@@ -1097,7 +1146,12 @@ impl McpServer {
                         "high",
                     )
                 );
-                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                let response = json!({ "content": [{ "type": "text", "text": report }] });
+                Some(if Self::mcp_guidance_shadow_enabled() {
+                    crate::mcp::attach_guidance_shadow(response, guidance_shadow)
+                } else {
+                    response
+                })
             }
             Err(_) => None,
         }

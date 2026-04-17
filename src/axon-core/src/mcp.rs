@@ -24,7 +24,8 @@ mod tools_system;
 use self::catalog::tools_catalog;
 #[allow(unused_imports)]
 pub(crate) use self::guidance::{
-    build_guided_response, GuidanceCandidates, GuidanceFact, GuidanceOutcome, SollGuidance,
+    attach_guidance_shadow, build_guided_response, classify_guidance, guidance_outcome_to_value,
+    GuidanceCandidates, GuidanceFact, GuidanceOutcome, SollGuidance,
 };
 pub use self::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 
@@ -61,6 +62,18 @@ impl McpServer {
                 )
             })
             .unwrap_or(true)
+    }
+
+    pub(crate) fn mcp_guidance_shadow_enabled() -> bool {
+        std::env::var("AXON_MCP_GUIDANCE_SHADOW")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
     }
 
     #[allow(dead_code)]
