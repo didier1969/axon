@@ -81,6 +81,35 @@ pub struct VectorBatchRun {
     pub error_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct VectorWorkerFault {
+    pub fault_id: String,
+    pub lane: String,
+    pub worker_id: i64,
+    pub fatal_stage: String,
+    pub fatal_reason_raw: String,
+    pub fatal_class: String,
+    pub provider: String,
+    pub batch_id: Option<String>,
+    pub texts_count: u64,
+    pub input_bytes: u64,
+    pub vram_used_mb: u64,
+    pub occurred_at_ms: i64,
+    pub restart_attempt: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct VectorLaneStateRecord {
+    pub lane: String,
+    pub state: String,
+    pub reason: Option<String>,
+    pub updated_at_ms: i64,
+    pub worker_id: Option<i64>,
+    pub restart_attempt: u64,
+    pub last_success_at_ms: Option<i64>,
+    pub last_fault_id: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VectorPersistOutboxUpdate {
     pub chunk_id: String,
@@ -351,6 +380,157 @@ impl GraphStore {
         ))
     }
 
+    pub fn record_vector_worker_fault(&self, fault: &VectorWorkerFault) -> Result<()> {
+        self.execute(&format!(
+            "INSERT OR REPLACE INTO VectorWorkerFault \
+             (fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt) \
+             VALUES ('{}', '{}', {}, '{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {})",
+            Self::escape_sql(&fault.fault_id),
+            Self::escape_sql(&fault.lane),
+            fault.worker_id,
+            Self::escape_sql(&fault.fatal_stage),
+            Self::escape_sql(&fault.fatal_reason_raw),
+            Self::escape_sql(&fault.fatal_class),
+            Self::escape_sql(&fault.provider),
+            fault.batch_id
+                .as_ref()
+                .map(|batch_id| format!("'{}'", Self::escape_sql(batch_id)))
+                .unwrap_or_else(|| "NULL".to_string()),
+            fault.texts_count,
+            fault.input_bytes,
+            fault.vram_used_mb,
+            fault.occurred_at_ms,
+            fault.restart_attempt,
+        ))
+    }
+
+    pub fn upsert_vector_lane_state(&self, state: &VectorLaneStateRecord) -> Result<()> {
+        self.execute(&format!(
+            "INSERT OR REPLACE INTO VectorLaneState \
+             (lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id) \
+             VALUES ('{}', '{}', {}, {}, {}, {}, {}, {})",
+            Self::escape_sql(&state.lane),
+            Self::escape_sql(&state.state),
+            state.reason
+                .as_ref()
+                .map(|reason| format!("'{}'", Self::escape_sql(reason)))
+                .unwrap_or_else(|| "NULL".to_string()),
+            state.updated_at_ms,
+            state.worker_id
+                .map(|worker_id| worker_id.to_string())
+                .unwrap_or_else(|| "NULL".to_string()),
+            state.restart_attempt,
+            state.last_success_at_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "NULL".to_string()),
+            state.last_fault_id
+                .as_ref()
+                .map(|fault_id| format!("'{}'", Self::escape_sql(fault_id)))
+                .unwrap_or_else(|| "NULL".to_string()),
+        ))
+    }
+
+    pub fn latest_vector_worker_fault(&self, lane: &str) -> Result<Option<VectorWorkerFault>> {
+        let raw = self.query_json_writer(&format!(
+            "SELECT fault_id, lane, worker_id, fatal_stage, fatal_reason_raw, fatal_class, provider, batch_id, texts_count, input_bytes, vram_used_mb, occurred_at_ms, restart_attempt \
+             FROM VectorWorkerFault \
+             WHERE lane = '{}' \
+             ORDER BY occurred_at_ms DESC, fault_id DESC \
+             LIMIT 1",
+            Self::escape_sql(lane)
+        ))?;
+        if raw == "[]" || raw.is_empty() {
+            return Ok(None);
+        }
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some(VectorWorkerFault {
+            fault_id: row
+                .first()
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            lane: row
+                .get(1)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            worker_id: row.get(2).and_then(parse_i64_field).unwrap_or_default(),
+            fatal_stage: row
+                .get(3)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            fatal_reason_raw: row
+                .get(4)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            fatal_class: row
+                .get(5)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            provider: row
+                .get(6)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            batch_id: row
+                .get(7)
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string),
+            texts_count: row.get(8).and_then(parse_u64_field).unwrap_or_default(),
+            input_bytes: row.get(9).and_then(parse_u64_field).unwrap_or_default(),
+            vram_used_mb: row.get(10).and_then(parse_u64_field).unwrap_or_default(),
+            occurred_at_ms: row.get(11).and_then(parse_i64_field).unwrap_or_default(),
+            restart_attempt: row.get(12).and_then(parse_u64_field).unwrap_or_default(),
+        }))
+    }
+
+    pub fn vector_lane_state_record(&self, lane: &str) -> Result<Option<VectorLaneStateRecord>> {
+        let raw = self.query_json_writer(&format!(
+            "SELECT lane, state, reason, updated_at_ms, worker_id, restart_attempt, last_success_at_ms, last_fault_id \
+             FROM VectorLaneState \
+             WHERE lane = '{}' \
+             LIMIT 1",
+            Self::escape_sql(lane)
+        ))?;
+        if raw == "[]" || raw.is_empty() {
+            return Ok(None);
+        }
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(Some(VectorLaneStateRecord {
+            lane: row
+                .first()
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            state: row
+                .get(1)
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            reason: row
+                .get(2)
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string),
+            updated_at_ms: row.get(3).and_then(parse_i64_field).unwrap_or_default(),
+            worker_id: row.get(4).and_then(parse_i64_field),
+            restart_attempt: row.get(5).and_then(parse_u64_field).unwrap_or_default(),
+            last_success_at_ms: row.get(6).and_then(parse_i64_field),
+            last_fault_id: row
+                .get(7)
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string),
+        }))
+    }
+
     pub fn enqueue_vector_persist_outbox(
         &self,
         payload: &VectorPersistOutboxPayload,
@@ -488,7 +668,7 @@ impl GraphStore {
             count
         ))?;
 
-        let raw = self.query_json(&format!(
+        let raw = self.query_json_writer(&format!(
             "SELECT outbox_id, payload_json \
              FROM VectorPersistOutbox \
              WHERE claim_token = '{}' \
@@ -512,10 +692,12 @@ impl GraphStore {
     }
 
     pub fn fetch_vector_persist_outbox_counts(&self) -> Result<(usize, usize)> {
-        let queued =
-            self.query_count("SELECT count(*) FROM VectorPersistOutbox WHERE status = 'queued'")?;
-        let inflight =
-            self.query_count("SELECT count(*) FROM VectorPersistOutbox WHERE status = 'inflight'")?;
+        let queued = self.query_count_writer(
+            "SELECT count(*) FROM VectorPersistOutbox WHERE status = 'queued'",
+        )?;
+        let inflight = self.query_count_writer(
+            "SELECT count(*) FROM VectorPersistOutbox WHERE status = 'inflight'",
+        )?;
         Ok((
             usize::try_from(queued).unwrap_or(0),
             usize::try_from(inflight).unwrap_or(0),
@@ -1586,7 +1768,7 @@ impl GraphStore {
             count
         ))?;
 
-        let raw = self.query_json(&format!(
+        let raw = self.query_json_writer(&format!(
             "SELECT file_path, COALESCE(status_reason, '') \
              FROM FileVectorizationQueue \
              WHERE claim_token = '{}' \
@@ -2091,10 +2273,12 @@ impl GraphStore {
     }
 
     pub fn fetch_file_vectorization_queue_counts(&self) -> Result<(usize, usize)> {
-        let queued = self
-            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status IN ('queued', 'paused_for_interactive_priority')")?;
-        let inflight = self
-            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'")?;
+        let queued = self.query_count_writer(
+            "SELECT count(*) FROM FileVectorizationQueue WHERE status IN ('queued', 'paused_for_interactive_priority')",
+        )?;
+        let inflight = self.query_count_writer(
+            "SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'",
+        )?;
         let queued = usize::try_from(queued).unwrap_or(0);
         let inflight = usize::try_from(inflight).unwrap_or(0);
         Ok((queued, inflight))
@@ -2197,7 +2381,9 @@ impl GraphStore {
         let mut queries = Vec::new();
         let mut deleted_paths = Vec::new();
         let mut indexed_paths = Vec::new();
+        let mut indexed_paths_raw = Vec::new();
         let mut degraded_paths = Vec::new();
+        let mut degraded_paths_raw = Vec::new();
         let mut skipped_paths = Vec::new();
         let mut seen_symbols = std::collections::HashSet::new();
         let mut seen_calls = std::collections::HashSet::new();
@@ -2225,8 +2411,14 @@ impl GraphStore {
                     }
                     let escaped_path = format!("'{}'", Self::escape_sql(path));
                     match processing_mode {
-                        ProcessingMode::Full => indexed_paths.push(escaped_path.clone()),
-                        ProcessingMode::StructureOnly => degraded_paths.push(escaped_path.clone()),
+                        ProcessingMode::Full => {
+                            indexed_paths.push(escaped_path.clone());
+                            indexed_paths_raw.push(path.clone());
+                        }
+                        ProcessingMode::StructureOnly => {
+                            degraded_paths.push(escaped_path.clone());
+                            degraded_paths_raw.push(path.clone());
+                        }
                     }
                     if enqueue_vectorization
                         && matches!(
@@ -2381,14 +2573,37 @@ impl GraphStore {
                 indexed_filter
             ));
         }
+        let indexed_vectorizable_paths = indexed_paths_raw
+            .iter()
+            .filter(|path| vectorizable_paths.contains(*path))
+            .map(|path| format!("'{}'", Self::escape_sql(path)))
+            .collect::<Vec<_>>();
+        let degraded_vectorizable_paths = degraded_paths_raw
+            .iter()
+            .filter(|path| vectorizable_paths.contains(*path))
+            .map(|path| format!("'{}'", Self::escape_sql(path)))
+            .collect::<Vec<_>>();
+
         if !indexed_paths.is_empty() {
-            queries.push(format!(
-                "UPDATE File \
-                 SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed' END, \
-                     file_stage = CASE WHEN needs_reindex THEN 'promoted' ELSE 'graph_indexed' END, \
-                     graph_ready = CASE WHEN needs_reindex THEN FALSE ELSE TRUE END, \
-                     vector_ready = CASE \
-                         WHEN needs_reindex THEN FALSE \
+            let indexed_vector_ready_expr = if indexed_vectorizable_paths.is_empty() {
+                format!(
+                    "NOT EXISTS ( \
+                         SELECT 1 \
+                         FROM Chunk c \
+                         JOIN CONTAINS co ON co.target_id = c.source_id \
+                         LEFT JOIN ChunkEmbedding ce \
+                           ON ce.chunk_id = c.id \
+                          AND ce.model_id = '{}' \
+                          AND ce.source_hash = c.content_hash \
+                         WHERE co.source_id = File.path \
+                           AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
+                     )",
+                    Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
+                )
+            } else {
+                format!(
+                    "CASE \
+                         WHEN path IN ({}) THEN FALSE \
                          ELSE NOT EXISTS ( \
                              SELECT 1 \
                              FROM Chunk c \
@@ -2400,6 +2615,19 @@ impl GraphStore {
                              WHERE co.source_id = File.path \
                                AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
                          ) \
+                     END",
+                    indexed_vectorizable_paths.join(","),
+                    Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
+                )
+            };
+            queries.push(format!(
+                "UPDATE File \
+                 SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed' END, \
+                     file_stage = CASE WHEN needs_reindex THEN 'promoted' ELSE 'graph_indexed' END, \
+                     graph_ready = CASE WHEN needs_reindex THEN FALSE ELSE TRUE END, \
+                     vector_ready = CASE \
+                         WHEN needs_reindex THEN FALSE \
+                         ELSE {} \
                      END, \
                      worker_id = NULL, \
                      needs_reindex = FALSE, \
@@ -2411,20 +2639,32 @@ impl GraphStore {
                      last_state_change_at_ms = {}, \
                      last_error_at_ms = NULL \
                  WHERE path IN ({});",
-                Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID),
+                indexed_vector_ready_expr,
                 chrono::Utc::now().timestamp_millis(),
                 chrono::Utc::now().timestamp_millis(),
                 indexed_paths.join(",")
             ));
         }
         if !degraded_paths.is_empty() {
-            queries.push(format!(
-                "UPDATE File \
-                     SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed_degraded' END, \
-                     file_stage = CASE WHEN needs_reindex THEN 'promoted' ELSE 'graph_indexed' END, \
-                     graph_ready = CASE WHEN needs_reindex THEN FALSE ELSE TRUE END, \
-                     vector_ready = CASE \
-                         WHEN needs_reindex THEN FALSE \
+            let degraded_vector_ready_expr = if degraded_vectorizable_paths.is_empty() {
+                format!(
+                    "NOT EXISTS ( \
+                         SELECT 1 \
+                         FROM Chunk c \
+                         JOIN CONTAINS co ON co.target_id = c.source_id \
+                         LEFT JOIN ChunkEmbedding ce \
+                           ON ce.chunk_id = c.id \
+                          AND ce.model_id = '{}' \
+                          AND ce.source_hash = c.content_hash \
+                         WHERE co.source_id = File.path \
+                           AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
+                     )",
+                    Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
+                )
+            } else {
+                format!(
+                    "CASE \
+                         WHEN path IN ({}) THEN FALSE \
                          ELSE NOT EXISTS ( \
                              SELECT 1 \
                              FROM Chunk c \
@@ -2436,6 +2676,19 @@ impl GraphStore {
                              WHERE co.source_id = File.path \
                                AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
                          ) \
+                     END",
+                    degraded_vectorizable_paths.join(","),
+                    Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
+                )
+            };
+            queries.push(format!(
+                "UPDATE File \
+                     SET status = CASE WHEN needs_reindex THEN 'pending' ELSE 'indexed_degraded' END, \
+                     file_stage = CASE WHEN needs_reindex THEN 'promoted' ELSE 'graph_indexed' END, \
+                     graph_ready = CASE WHEN needs_reindex THEN FALSE ELSE TRUE END, \
+                     vector_ready = CASE \
+                         WHEN needs_reindex THEN FALSE \
+                         ELSE {} \
                      END, \
                      worker_id = NULL, \
                      needs_reindex = FALSE, \
@@ -2447,7 +2700,7 @@ impl GraphStore {
                      last_state_change_at_ms = {}, \
                      last_error_at_ms = CASE WHEN needs_reindex THEN File.last_error_at_ms ELSE {} END \
                  WHERE path IN ({});",
-                Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID),
+                degraded_vector_ready_expr,
                 chrono::Utc::now().timestamp_millis(),
                 chrono::Utc::now().timestamp_millis(),
                 chrono::Utc::now().timestamp_millis(),
@@ -2632,10 +2885,7 @@ impl GraphStore {
                 return Err(anyhow!("Pending Fetch Error: COMMIT failed"));
             }
         }
-        self.recent_write_epoch_ms.store(
-            chrono::Utc::now().timestamp_millis().max(0) as u64,
-            Ordering::Relaxed,
-        );
+        self.mark_writer_commit_visible();
         drop(guard);
 
         if res == "[]" || res.is_empty() {
@@ -2749,10 +2999,7 @@ impl GraphStore {
                 return Err(anyhow!("Claim Paths Error: COMMIT failed"));
             }
         }
-        self.recent_write_epoch_ms.store(
-            chrono::Utc::now().timestamp_millis().max(0) as u64,
-            Ordering::Relaxed,
-        );
+        self.mark_writer_commit_visible();
         drop(guard);
 
         if res == "[]" || res.is_empty() {
@@ -3310,8 +3557,8 @@ mod tests {
     use super::{
         dedup_file_batch_rows, insert_unique_relation_queries, replace_relation_queries,
         sort_and_dedup_sql_tuples, FileUpsertSource, FileVectorizationLeaseSnapshot,
-        FileVectorizationWork, VectorBatchRun, VectorPersistOutboxPayload,
-        VectorPersistOutboxUpdate, CHUNK_EMBEDDING_MODEL_ID,
+        FileVectorizationWork, VectorBatchRun, VectorLaneStateRecord, VectorPersistOutboxPayload,
+        VectorPersistOutboxUpdate, VectorWorkerFault, CHUNK_EMBEDDING_MODEL_ID,
     };
     use crate::embedding_contract::{CHUNK_MODEL_ID, DIMENSION};
     use crate::parser::{ExtractionResult, Relation, Symbol};
@@ -3604,6 +3851,77 @@ mod tests {
     }
 
     #[test]
+    fn full_file_extraction_with_chunks_starts_not_vector_ready_and_enqueues_vectorization() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path = "/tmp/full_vector_seed.rs".to_string();
+
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 42, 1)])
+            .unwrap();
+
+        store
+            .insert_file_data_batch(&[DbWriteTask::FileExtraction {
+                reservation_id: "res-full-vector-seed".to_string(),
+                path: path.clone(),
+                content: Some("fn full_vector_seed() { hydrate(); }".to_string()),
+                extraction: ExtractionResult {
+                    project_code: Some("proj".to_string()),
+                    symbols: vec![Symbol {
+                        name: "full_vector_seed".to_string(),
+                        kind: "function".to_string(),
+                        start_line: 1,
+                        end_line: 1,
+                        docstring: None,
+                        is_entry_point: false,
+                        is_public: true,
+                        tested: false,
+                        is_nif: false,
+                        is_unsafe: false,
+                        properties: Default::default(),
+                        embedding: None,
+                    }],
+                    relations: vec![],
+                },
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace-full-vector-seed".to_string(),
+                observed_cost_bytes: 1,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }])
+            .unwrap();
+
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM File \
+                     WHERE path = '/tmp/full_vector_seed.rs' \
+                       AND status = 'indexed' \
+                       AND file_stage = 'graph_indexed' \
+                       AND graph_ready = TRUE \
+                       AND vector_ready = FALSE"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM Chunk WHERE file_path = '/tmp/full_vector_seed.rs'"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/full_vector_seed.rs'")
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn insert_file_data_batch_replay_does_not_duplicate_calls_edges() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let path = "/tmp/replay_calls.rs".to_string();
@@ -3820,6 +4138,24 @@ mod tests {
     }
 
     #[test]
+    fn fetch_pending_file_vectorization_work_reads_claimed_rows_from_writer_when_reader_is_stale() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES \
+                 ('/tmp/stale-claim-a.rs', 'queued', 1), \
+                 ('/tmp/stale-claim-b.rs', 'queued', 2)",
+            )
+            .unwrap();
+        store.refresh_reader_snapshot().unwrap();
+
+        let claimed = store.fetch_pending_file_vectorization_work(2).unwrap();
+        assert_eq!(claimed.len(), 2);
+        assert_eq!(claimed[0].file_path, "/tmp/stale-claim-a.rs");
+        assert_eq!(claimed[1].file_path, "/tmp/stale-claim-b.rs");
+    }
+
+    #[test]
     fn enqueue_vector_persist_outbox_handoff_moves_lease_owner_and_exposes_work() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
@@ -3888,6 +4224,101 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn fetch_pending_vector_persist_outbox_work_reads_claimed_rows_from_writer_when_reader_is_stale(
+    ) {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let payload = VectorPersistOutboxPayload {
+            updates: vec![VectorPersistOutboxUpdate {
+                chunk_id: "chunk-stale-outbox".to_string(),
+                source_hash: "hash-stale-outbox".to_string(),
+                vector: vec![0.3_f32, 0.4_f32],
+            }],
+            completed_works: vec![],
+            completed_lease_snapshots: vec![],
+            batch_run: VectorBatchRun {
+                run_id: "outbox-stale-reader-test".to_string(),
+                started_at_ms: 1,
+                finished_at_ms: 1,
+                provider: "cpu".to_string(),
+                model_id: CHUNK_EMBEDDING_MODEL_ID.to_string(),
+                chunk_count: 1,
+                file_count: 0,
+                input_bytes: 16,
+                fetch_ms: 1,
+                embed_ms: 1,
+                db_write_ms: 0,
+                mark_done_ms: 0,
+                success: true,
+                error_reason: None,
+            },
+        };
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        store
+            .execute(&format!(
+                "INSERT INTO VectorPersistOutbox (outbox_id, status, queued_at_ms, payload_json) \
+                 VALUES ('stale-outbox-1', 'queued', 1, '{}')",
+                crate::graph::GraphStore::escape_sql(&payload_json)
+            ))
+            .unwrap();
+        store.refresh_reader_snapshot().unwrap();
+
+        let claimed = store.fetch_pending_vector_persist_outbox_work(1).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].outbox_id, "stale-outbox-1");
+        assert_eq!(
+            claimed[0].payload.batch_run.run_id,
+            "outbox-stale-reader-test"
+        );
+    }
+
+    #[test]
+    fn record_vector_worker_fault_persists_latest_fault_and_lane_state() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let fault = VectorWorkerFault {
+            fault_id: "fault-vector-1".to_string(),
+            lane: "vector".to_string(),
+            worker_id: 7,
+            fatal_stage: "embed".to_string(),
+            fatal_reason_raw: "onnxruntime failure".to_string(),
+            fatal_class: "onnxruntime".to_string(),
+            provider: "cuda".to_string(),
+            batch_id: Some("batch-1".to_string()),
+            texts_count: 96,
+            input_bytes: 8192,
+            vram_used_mb: 4096,
+            occurred_at_ms: 1234,
+            restart_attempt: 2,
+        };
+        store.record_vector_worker_fault(&fault).unwrap();
+        store
+            .upsert_vector_lane_state(&VectorLaneStateRecord {
+                lane: "vector".to_string(),
+                state: "degraded".to_string(),
+                reason: Some("recent fatal embed".to_string()),
+                updated_at_ms: 1235,
+                worker_id: Some(7),
+                restart_attempt: 2,
+                last_success_at_ms: Some(1200),
+                last_fault_id: Some("fault-vector-1".to_string()),
+            })
+            .unwrap();
+
+        let persisted_fault = store
+            .latest_vector_worker_fault("vector")
+            .unwrap()
+            .expect("latest fault");
+        assert_eq!(persisted_fault, fault);
+
+        let lane_state = store
+            .vector_lane_state_record("vector")
+            .unwrap()
+            .expect("lane state");
+        assert_eq!(lane_state.state, "degraded");
+        assert_eq!(lane_state.last_fault_id.as_deref(), Some("fault-vector-1"));
+        assert_eq!(lane_state.restart_attempt, 2);
     }
 
     #[test]
@@ -4209,6 +4640,79 @@ mod tests {
     }
 
     #[test]
+    fn structure_only_file_extraction_marks_file_vector_ready_and_does_not_enqueue_vectorization() {
+        use crate::parser::ExtractionResult;
+        use crate::worker::DbWriteTask;
+
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let path = "/tmp/structure_only.rs".to_string();
+        store
+            .bulk_insert_files(&[(path.clone(), "proj".to_string(), 42, 1)])
+            .unwrap();
+
+        let task = DbWriteTask::FileExtraction {
+            reservation_id: "res-structure-only".to_string(),
+            path: path.clone(),
+            content: None,
+            extraction: ExtractionResult {
+                project_code: Some("proj".to_string()),
+                symbols: vec![Symbol {
+                    name: "structure_only_fn".to_string(),
+                    kind: "function".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    docstring: None,
+                    is_entry_point: false,
+                    is_public: true,
+                    tested: false,
+                    is_nif: false,
+                    is_unsafe: false,
+                    properties: Default::default(),
+                    embedding: None,
+                }],
+                relations: vec![],
+            },
+            processing_mode: ProcessingMode::StructureOnly,
+            trace_id: "trace-structure-only".to_string(),
+            observed_cost_bytes: 1,
+            t0: 0,
+            t1: 0,
+            t2: 0,
+            t3: 0,
+        };
+
+        store.insert_file_data_batch(&[task]).unwrap();
+
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM File \
+                     WHERE path = '/tmp/structure_only.rs' \
+                       AND status = 'indexed_degraded' \
+                       AND file_stage = 'graph_indexed' \
+                       AND graph_ready = TRUE \
+                       AND vector_ready = TRUE"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM Chunk WHERE file_path = '/tmp/structure_only.rs'"
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/structure_only.rs'")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn backfill_file_vectorization_queue_skips_files_already_present_in_queue() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store
@@ -4278,6 +4782,42 @@ mod tests {
                 )
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn backfill_file_vectorization_queue_reads_writer_truth_when_reader_snapshot_is_stale() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store.refresh_reader_snapshot().unwrap();
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
+                 VALUES ('/tmp/stale-backfill.rs', 'proj', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
+                 VALUES ('chunk-stale-backfill', 'symbol', 'sym-stale-backfill', 'proj', '/tmp/stale-backfill.rs', 'function', 'body', 'hash-stale-backfill', 1, 1)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO CONTAINS (source_id, target_id, project_code) \
+                 VALUES ('/tmp/stale-backfill.rs', 'sym-stale-backfill', 'proj')",
+            )
+            .unwrap();
+
+        let inserted = store.backfill_file_vectorization_queue().unwrap();
+
+        assert_eq!(inserted, 1);
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/stale-backfill.rs'"
+                )
+                .unwrap(),
+            1
         );
     }
 }

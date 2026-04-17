@@ -10,6 +10,7 @@ use crate::embedder::{
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION, STORAGE_TYPE,
 };
+use crate::graph_query::ReadFreshness;
 use crate::ingress_buffer::ingress_metrics_snapshot;
 use crate::optimizer::{
     collect_host_snapshot, collect_operator_policy_snapshot, collect_recent_analytics_window,
@@ -217,23 +218,28 @@ impl McpServer {
                 .and_then(parse_scalar_count_row)
                 .unwrap_or(0)
         };
-        let canonical_json = |query: &str| -> String {
+        let snapshot_count = |query: &str| -> i64 {
             self.graph_store
-                .execute_raw_sql_gateway(query)
+                .query_count_on_reader_with_freshness(query, ReadFreshness::StaleOk)
+                .unwrap_or(0)
+        };
+        let snapshot_json = |query: &str| -> String {
+            self.graph_store
+                .query_json_on_reader_with_freshness(query, ReadFreshness::StaleOk)
                 .unwrap_or_else(|_| "[]".to_string())
         };
 
-        let file_count = canonical_count("SELECT count(*) FROM File");
-        let pending_count = canonical_count("SELECT count(*) FROM File WHERE status = 'pending'");
-        let indexing_count = canonical_count("SELECT count(*) FROM File WHERE status = 'indexing'");
+        let file_count = snapshot_count("SELECT count(*) FROM File");
+        let pending_count = snapshot_count("SELECT count(*) FROM File WHERE status = 'pending'");
+        let indexing_count = snapshot_count("SELECT count(*) FROM File WHERE status = 'indexing'");
         let degraded_count =
-            canonical_count("SELECT count(*) FROM File WHERE status = 'indexed_degraded'");
-        let oversized_count = canonical_count(
+            snapshot_count("SELECT count(*) FROM File WHERE status = 'indexed_degraded'");
+        let oversized_count = snapshot_count(
             "SELECT count(*) FROM File WHERE status = 'oversized_for_current_budget'",
         );
-        let skipped_count = canonical_count("SELECT count(*) FROM File WHERE status = 'skipped'");
+        let skipped_count = snapshot_count("SELECT count(*) FROM File WHERE status = 'skipped'");
         let graph_ready_count =
-            canonical_count("SELECT count(*) FROM File WHERE graph_ready = TRUE");
+            snapshot_count("SELECT count(*) FROM File WHERE graph_ready = TRUE");
         let vector_ready_query = format!(
             "WITH pending_vector_chunks AS ( \
                SELECT c.file_path AS file_path \
@@ -251,7 +257,7 @@ impl McpServer {
              LEFT JOIN pending_vector_chunks pvc ON pvc.file_path = f.path \
              WHERE f.graph_ready = TRUE AND pvc.file_path IS NULL"
         );
-        let vector_ready_count = canonical_count(&vector_ready_query);
+        let vector_ready_count = snapshot_count(&vector_ready_query);
         let (graph_projection_queue_queued, graph_projection_queue_inflight) = self
             .graph_store
             .fetch_graph_projection_queue_counts()
@@ -266,19 +272,17 @@ impl McpServer {
             file_vectorization_queue_queued + file_vectorization_queue_inflight;
         let reader_snapshot_age_ms = self.graph_store.reader_snapshot_age_ms();
         let reader_refresh_failures_total = self.graph_store.reader_refresh_failures_total();
-        let reader_file_count = self
-            .graph_store
-            .query_count("SELECT count(*) FROM File")
-            .unwrap_or(0);
-        let truth_drift_files = (file_count - reader_file_count).abs();
+        let reader_snapshot = self.graph_store.reader_snapshot_diagnostics();
+        let canonical_file_count = canonical_count("SELECT count(*) FROM File");
+        let truth_drift_files = (canonical_file_count - file_count).abs();
         let completed_count = (file_count - pending_count - indexing_count).max(0);
         let completion_rate = if file_count > 0 {
             (completed_count as f64 / file_count as f64) * 100.0
         } else {
             0.0
         };
-        let symbol_count = canonical_count("SELECT count(*) FROM Symbol");
-        let edge_count = canonical_count(
+        let symbol_count = snapshot_count("SELECT count(*) FROM Symbol");
+        let edge_count = snapshot_count(
             "SELECT (SELECT count(*) FROM CONTAINS) + (SELECT count(*) FROM CALLS) + (SELECT count(*) FROM CALLS_NIF)",
         );
         let memory = process_memory_snapshot();
@@ -289,6 +293,16 @@ impl McpServer {
         let lane_config = embedding_lane_config_from_env();
         let vector_runtime = service_guard::vector_runtime_metrics();
         let vector_latency = service_guard::vector_runtime_latency_summaries();
+        let vector_lane_state_record = self
+            .graph_store
+            .vector_lane_state_record("vector")
+            .ok()
+            .flatten();
+        let latest_vector_worker_fault = self
+            .graph_store
+            .latest_vector_worker_fault("vector")
+            .ok()
+            .flatten();
         let vector_controller = current_vector_batch_controller_diagnostics(&lane_config);
         let optimizer_host_snapshot = collect_host_snapshot();
         let optimizer_policy_snapshot = collect_operator_policy_snapshot(&optimizer_host_snapshot);
@@ -404,7 +418,7 @@ impl McpServer {
         } else {
             0.0
         };
-        let stage_rows = canonical_json(
+        let stage_rows = snapshot_json(
             "SELECT COALESCE(file_stage, 'unknown'), count(*) \
              FROM File \
              GROUP BY 1 \
@@ -412,7 +426,7 @@ impl McpServer {
              LIMIT 6",
         );
         let stage_counts = parse_reason_count_rows(&stage_rows);
-        let backlog_reason_rows = canonical_json(
+        let backlog_reason_rows = snapshot_json(
             "SELECT COALESCE(status_reason, 'unknown'), count(*) \
              FROM File \
              WHERE status IN ('pending', 'indexing') \
@@ -420,19 +434,19 @@ impl McpServer {
              ORDER BY count(*) DESC, 1 ASC \
              LIMIT 5",
         );
-        let vector_queue_status_rows = canonical_json(
+        let vector_queue_status_rows = snapshot_json(
             "SELECT status, count(*) \
              FROM FileVectorizationQueue \
              GROUP BY 1 \
              ORDER BY count(*) DESC, 1 ASC",
         );
-        let latest_optimizer_decision_row = canonical_json(
+        let latest_optimizer_decision_row = snapshot_json(
             "SELECT decision_id, mode, action_profile_id, at_ms, would_apply, applied, evaluation_window_start_ms, evaluation_window_end_ms \
              FROM OptimizerDecisionLog \
              ORDER BY at_ms DESC \
              LIMIT 1",
         );
-        let latest_optimizer_reward_row = canonical_json(
+        let latest_optimizer_reward_row = snapshot_json(
             "SELECT decision_id, observed_at_ms, throughput_chunks_per_hour, throughput_files_per_hour \
              FROM RewardObservationLog \
              ORDER BY observed_at_ms DESC \
@@ -818,13 +832,49 @@ impl McpServer {
                 .push_str("\n**Reader Snapshot:** indisponible (mode mémoire ou non initialisé)\n");
         } else {
             evidence.push_str(&format!(
-                "\n**Reader Snapshot:** age={} ms, refresh_failures_total={}\n",
-                reader_snapshot_age_ms, reader_refresh_failures_total
+                "\n**Reader Snapshot:** age={} ms, commit_epoch={}, reader_epoch={}, lag={}, refresh_inflight={}, refresh_failures_total={}, reads_on_reader_total={}, reads_on_writer_total={}, refresh_coalesced_total={}\n",
+                reader_snapshot_age_ms,
+                reader_snapshot.commit_epoch,
+                reader_snapshot.reader_epoch,
+                reader_snapshot.reader_epoch_lag,
+                reader_snapshot.refresh_inflight,
+                reader_refresh_failures_total,
+                reader_snapshot.reads_on_reader_total,
+                reader_snapshot.reads_on_writer_total,
+                reader_snapshot.refresh_coalesced_total
+            ));
+        }
+        evidence.push_str(&format!(
+            "**Vector Lane:** state={}, transition_at_ms={}, last_success_at_ms={}, last_fault_at_ms={}, restarts_total={}\n",
+            vector_runtime.vector_lane_state.as_str(),
+            vector_runtime.vector_lane_last_transition_at_ms,
+            vector_runtime.vector_lane_last_success_at_ms,
+            vector_runtime.vector_lane_last_fault_at_ms,
+            vector_runtime.vector_worker_restarts_total,
+        ));
+        if let Some(record) = vector_lane_state_record.as_ref() {
+            evidence.push_str(&format!(
+                "**Vector Lane Record:** state={}, updated_at_ms={}, restart_attempt={}, last_fault_id={}\n",
+                record.state,
+                record.updated_at_ms,
+                record.restart_attempt,
+                record.last_fault_id.as_deref().unwrap_or("none"),
+            ));
+        }
+        if let Some(fault) = latest_vector_worker_fault.as_ref() {
+            evidence.push_str(&format!(
+                "**Latest Vector Fault:** stage={}, class={}, provider={}, batch_id={}, restart_attempt={}, at_ms={}\n",
+                fault.fatal_stage,
+                fault.fatal_class,
+                fault.provider,
+                fault.batch_id.as_deref().unwrap_or("none"),
+                fault.restart_attempt,
+                fault.occurred_at_ms,
             ));
         }
         evidence.push_str(&format!(
             "**Truth Drift (File count):** canonical={} vs reader={} (delta={})\n",
-            file_count, reader_file_count, truth_drift_files
+            canonical_file_count, file_count, truth_drift_files
         ));
         let report = format!(
             "## 🤖 Axon Debug\n\n{}",
@@ -924,6 +974,11 @@ impl McpServer {
                         "vector_workers_stopped_total": vector_runtime.vector_workers_stopped_total,
                         "vector_workers_active_current": vector_runtime.vector_workers_active_current,
                         "vector_worker_heartbeat_at_ms": vector_runtime.vector_worker_heartbeat_at_ms,
+                        "vector_worker_restarts_total": vector_runtime.vector_worker_restarts_total,
+                        "vector_lane_state": vector_runtime.vector_lane_state.as_str(),
+                        "vector_lane_last_transition_at_ms": vector_runtime.vector_lane_last_transition_at_ms,
+                        "vector_lane_last_success_at_ms": vector_runtime.vector_lane_last_success_at_ms,
+                        "vector_lane_last_fault_at_ms": vector_runtime.vector_lane_last_fault_at_ms,
                         "finalize_enqueued_total": vector_runtime.finalize_enqueued_total,
                         "finalize_fallback_inline_total": vector_runtime.finalize_fallback_inline_total,
                         "finalize_send_wait_ms_total": vector_runtime.finalize_send_wait_ms_total,
@@ -1030,7 +1085,10 @@ impl McpServer {
                         "throughput_chunks_per_hour": row.get(2).and_then(|value| value.as_f64()),
                         "throughput_files_per_hour": row.get(3).and_then(|value| value.as_f64())
                     }))
-                }
+                },
+                "reader_snapshot": serde_json::to_value(&reader_snapshot).unwrap_or_else(|_| json!({})),
+                "vector_lane_state_record": serde_json::to_value(&vector_lane_state_record).unwrap_or_else(|_| json!(null)),
+                "latest_vector_worker_fault": serde_json::to_value(&latest_vector_worker_fault).unwrap_or_else(|_| json!(null))
             }
         }))
     }
@@ -1038,21 +1096,23 @@ impl McpServer {
     pub(crate) fn axon_schema_overview(&self, _args: &Value) -> Option<Value> {
         let tables = self
             .graph_store
-            .execute_raw_sql_gateway(
+            .query_json_on_reader_with_freshness(
                 "SELECT table_schema, table_name \
                  FROM information_schema.tables \
                  WHERE table_schema IN ('main', 'soll') \
                  ORDER BY table_schema, table_name",
+                ReadFreshness::StaleOk,
             )
             .unwrap_or_else(|_| "[]".to_string());
         let columns = self
             .graph_store
-            .execute_raw_sql_gateway(
+            .query_json_on_reader_with_freshness(
                 "SELECT table_schema, table_name, COUNT(*) \
                  FROM information_schema.columns \
                  WHERE table_schema IN ('main', 'soll') \
                  GROUP BY 1,2 \
                  ORDER BY 1,2",
+                ReadFreshness::StaleOk,
             )
             .unwrap_or_else(|_| "[]".to_string());
 
@@ -1069,22 +1129,24 @@ impl McpServer {
     pub(crate) fn axon_list_labels_tables(&self, _args: &Value) -> Option<Value> {
         let rels = self
             .graph_store
-            .execute_raw_sql_gateway(
+            .query_json_on_reader_with_freshness(
                 "SELECT table_name \
                  FROM information_schema.tables \
                  WHERE table_schema = 'main' \
                    AND table_name IN ('File','Symbol','Chunk','CONTAINS','CALLS','CALLS_NIF','IMPACTS','SUBSTANTIATES','GraphEmbedding','GraphProjection','GraphProjectionQueue','FileVectorizationQueue') \
                  ORDER BY table_name",
+                ReadFreshness::StaleOk,
             )
             .unwrap_or_else(|_| "[]".to_string());
         let cols = self
             .graph_store
-            .execute_raw_sql_gateway(
+            .query_json_on_reader_with_freshness(
                 "SELECT table_name, column_name, data_type \
                  FROM information_schema.columns \
                  WHERE table_schema = 'main' \
                    AND table_name IN ('File','Symbol','CALLS','CALLS_NIF','CONTAINS','GraphEmbedding') \
                  ORDER BY table_name, ordinal_position",
+                ReadFreshness::StaleOk,
             )
             .unwrap_or_else(|_| "[]".to_string());
         let report = format!(

@@ -1,8 +1,8 @@
 use libloading::{Library, Symbol as LibSymbol};
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingFile {
@@ -37,12 +37,62 @@ pub(crate) struct LatticePool {
 unsafe impl Send for LatticePool {}
 unsafe impl Sync for LatticePool {}
 
+#[derive(Debug)]
+pub(crate) struct ReaderSnapshotState {
+    pub(crate) commit_epoch: AtomicU64,
+    pub(crate) reader_epoch: AtomicU64,
+    pub(crate) refresh_inflight: AtomicBool,
+    pub(crate) refresh_requested_epoch: AtomicU64,
+    pub(crate) last_refresh_started_ms: AtomicU64,
+    pub(crate) last_refresh_completed_ms: AtomicU64,
+    pub(crate) refresh_coalesced_total: AtomicU64,
+    pub(crate) reads_on_reader_total: AtomicU64,
+    pub(crate) reads_on_writer_total: AtomicU64,
+    pub(crate) fresh_required_fallback_writer_total: AtomicU64,
+}
+
+impl ReaderSnapshotState {
+    pub(crate) fn new(now_ms: u64) -> Self {
+        Self {
+            commit_epoch: AtomicU64::new(1),
+            reader_epoch: AtomicU64::new(1),
+            refresh_inflight: AtomicBool::new(false),
+            refresh_requested_epoch: AtomicU64::new(1),
+            last_refresh_started_ms: AtomicU64::new(now_ms),
+            last_refresh_completed_ms: AtomicU64::new(now_ms),
+            refresh_coalesced_total: AtomicU64::new(0),
+            reads_on_reader_total: AtomicU64::new(0),
+            reads_on_writer_total: AtomicU64::new(0),
+            fresh_required_fallback_writer_total: AtomicU64::new(0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ReaderSnapshotDiagnostics {
+    pub(crate) commit_epoch: u64,
+    pub(crate) reader_epoch: u64,
+    pub(crate) reader_epoch_lag: u64,
+    pub(crate) refresh_inflight: bool,
+    pub(crate) refresh_requested_epoch: u64,
+    pub(crate) last_refresh_started_ms: u64,
+    pub(crate) last_refresh_completed_ms: u64,
+    pub(crate) refresh_coalesced_total: u64,
+    pub(crate) reads_on_reader_total: u64,
+    pub(crate) reads_on_writer_total: u64,
+    pub(crate) fresh_required_fallback_writer_total: u64,
+    pub(crate) reader_refresh_failures_total: u64,
+}
+
 pub struct GraphStore {
     pub(crate) pool: Arc<LatticePool>,
     pub(crate) db_path: Option<PathBuf>,
     pub(crate) recent_write_epoch_ms: AtomicU64,
     pub(crate) last_reader_refresh_epoch_ms: AtomicU64,
     pub(crate) reader_refresh_failures_total: AtomicU64,
+    pub(crate) reader_state: ReaderSnapshotState,
+    pub(crate) reader_refresh_wait: Mutex<u64>,
+    pub(crate) reader_refresh_notify: Condvar,
 }
 
 impl Drop for LatticePool {

@@ -45,6 +45,14 @@ pub(crate) struct PersistEnvelope {
     pub(crate) batch_run: VectorBatchRun,
 }
 
+impl PersistEnvelope {
+    pub(crate) fn sync_batch_run_counts_from_plan(&mut self) {
+        let (chunk_count, file_count) = self.persist_plan.sync_batch_run_counts();
+        self.batch_run.chunk_count = chunk_count;
+        self.batch_run.file_count = file_count;
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PreparedBatchEnvelope {
     prepared: PreparedVectorEmbedBatch,

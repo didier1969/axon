@@ -77,6 +77,11 @@ static VECTOR_WORKERS_STARTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKERS_STOPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKERS_ACTIVE_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_WORKER_HEARTBEAT_AT_MS: AtomicU64 = AtomicU64::new(0);
+static VECTOR_WORKER_RESTARTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static VECTOR_LANE_STATE_CODE: AtomicU64 = AtomicU64::new(0);
+static VECTOR_LANE_LAST_TRANSITION_AT_MS: AtomicU64 = AtomicU64::new(0);
+static VECTOR_LANE_LAST_SUCCESS_AT_MS: AtomicU64 = AtomicU64::new(0);
+static VECTOR_LANE_LAST_FAULT_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_STAGE_LATENCY_WINDOWS: OnceLock<Mutex<VectorStageLatencyWindows>> = OnceLock::new();
 static VECTOR_BACKLOG_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 
@@ -113,6 +118,48 @@ pub enum VectorStageKind {
     DbWrite,
     CompletionCheck,
     MarkDone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorLaneState {
+    #[default]
+    Starting,
+    Healthy,
+    Hold,
+    Degraded,
+    Unhealthy,
+}
+
+impl VectorLaneState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Healthy => "healthy",
+            Self::Hold => "hold",
+            Self::Degraded => "degraded",
+            Self::Unhealthy => "unhealthy",
+        }
+    }
+
+    fn code(self) -> u64 {
+        match self {
+            Self::Starting => 0,
+            Self::Healthy => 1,
+            Self::Hold => 2,
+            Self::Degraded => 3,
+            Self::Unhealthy => 4,
+        }
+    }
+
+    fn from_code(code: u64) -> Self {
+        match code {
+            1 => Self::Healthy,
+            2 => Self::Hold,
+            3 => Self::Degraded,
+            4 => Self::Unhealthy,
+            _ => Self::Starting,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -178,6 +225,11 @@ pub struct VectorRuntimeMetrics {
     pub vector_workers_stopped_total: u64,
     pub vector_workers_active_current: u64,
     pub vector_worker_heartbeat_at_ms: u64,
+    pub vector_worker_restarts_total: u64,
+    pub vector_lane_state: VectorLaneState,
+    pub vector_lane_last_transition_at_ms: u64,
+    pub vector_lane_last_success_at_ms: u64,
+    pub vector_lane_last_fault_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,6 +425,7 @@ pub fn record_vector_worker_started() {
     VECTOR_WORKERS_STARTED_TOTAL.fetch_add(1, Ordering::Relaxed);
     VECTOR_WORKERS_ACTIVE_CURRENT.fetch_add(1, Ordering::Relaxed);
     VECTOR_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+    record_vector_lane_state(VectorLaneState::Starting);
 }
 
 pub fn record_vector_worker_stopped() {
@@ -387,6 +440,29 @@ pub fn record_vector_worker_stopped() {
 
 pub fn record_vector_worker_heartbeat() {
     VECTOR_WORKER_HEARTBEAT_AT_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+pub fn record_vector_worker_restart() {
+    VECTOR_WORKER_RESTARTS_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_vector_lane_state(state: VectorLaneState) {
+    VECTOR_LANE_STATE_CODE.store(state.code(), Ordering::Relaxed);
+    VECTOR_LANE_LAST_TRANSITION_AT_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+pub fn record_vector_lane_success() {
+    let now = now_ms();
+    VECTOR_LANE_LAST_SUCCESS_AT_MS.store(now, Ordering::Relaxed);
+    VECTOR_LANE_STATE_CODE.store(VectorLaneState::Healthy.code(), Ordering::Relaxed);
+    VECTOR_LANE_LAST_TRANSITION_AT_MS.store(now, Ordering::Relaxed);
+}
+
+pub fn record_vector_lane_fault() {
+    let now = now_ms();
+    VECTOR_LANE_LAST_FAULT_AT_MS.store(now, Ordering::Relaxed);
+    VECTOR_LANE_STATE_CODE.store(VectorLaneState::Degraded.code(), Ordering::Relaxed);
+    VECTOR_LANE_LAST_TRANSITION_AT_MS.store(now, Ordering::Relaxed);
 }
 
 pub fn notify_vector_backlog_activity() {
@@ -627,6 +703,14 @@ pub fn vector_runtime_metrics() -> VectorRuntimeMetrics {
         vector_workers_stopped_total: VECTOR_WORKERS_STOPPED_TOTAL.load(Ordering::Relaxed),
         vector_workers_active_current: VECTOR_WORKERS_ACTIVE_CURRENT.load(Ordering::Relaxed),
         vector_worker_heartbeat_at_ms: VECTOR_WORKER_HEARTBEAT_AT_MS.load(Ordering::Relaxed),
+        vector_worker_restarts_total: VECTOR_WORKER_RESTARTS_TOTAL.load(Ordering::Relaxed),
+        vector_lane_state: VectorLaneState::from_code(
+            VECTOR_LANE_STATE_CODE.load(Ordering::Relaxed),
+        ),
+        vector_lane_last_transition_at_ms: VECTOR_LANE_LAST_TRANSITION_AT_MS
+            .load(Ordering::Relaxed),
+        vector_lane_last_success_at_ms: VECTOR_LANE_LAST_SUCCESS_AT_MS.load(Ordering::Relaxed),
+        vector_lane_last_fault_at_ms: VECTOR_LANE_LAST_FAULT_AT_MS.load(Ordering::Relaxed),
     }
 }
 
@@ -709,6 +793,19 @@ pub fn reset_for_tests() {
     VECTOR_EMBED_CLONE_MS_TOTAL.store(0, Ordering::Relaxed);
     VECTOR_EMBED_TRANSFORM_MS_TOTAL.store(0, Ordering::Relaxed);
     VECTOR_EMBED_EXPORT_MS_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_EMBED_ATTEMPTS_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_EMBED_INFLIGHT_STARTED_AT_MS.store(0, Ordering::Relaxed);
+    VECTOR_EMBED_INFLIGHT_TEXTS_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_EMBED_INFLIGHT_TEXT_BYTES_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_WORKERS_STARTED_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_WORKERS_STOPPED_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_WORKERS_ACTIVE_CURRENT.store(0, Ordering::Relaxed);
+    VECTOR_WORKER_HEARTBEAT_AT_MS.store(0, Ordering::Relaxed);
+    VECTOR_WORKER_RESTARTS_TOTAL.store(0, Ordering::Relaxed);
+    VECTOR_LANE_STATE_CODE.store(VectorLaneState::Starting.code(), Ordering::Relaxed);
+    VECTOR_LANE_LAST_TRANSITION_AT_MS.store(0, Ordering::Relaxed);
+    VECTOR_LANE_LAST_SUCCESS_AT_MS.store(0, Ordering::Relaxed);
+    VECTOR_LANE_LAST_FAULT_AT_MS.store(0, Ordering::Relaxed);
     *vector_stage_latency_windows()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = VectorStageLatencyWindows::default();
@@ -989,6 +1086,7 @@ mod tests {
         assert_eq!(started.vector_workers_started_total, 1);
         assert_eq!(started.vector_workers_active_current, 1);
         assert!(started.vector_worker_heartbeat_at_ms > 0);
+        assert_eq!(started.vector_lane_state, VectorLaneState::Starting);
 
         record_vector_worker_heartbeat();
         let heartbeat = vector_runtime_metrics();
@@ -999,5 +1097,23 @@ mod tests {
         let stopped = vector_runtime_metrics();
         assert_eq!(stopped.vector_workers_stopped_total, 1);
         assert_eq!(stopped.vector_workers_active_current, 0);
+    }
+
+    #[test]
+    fn test_vector_lane_state_tracks_restart_success_and_fault() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+
+        record_vector_worker_restart();
+        record_vector_lane_success();
+        let healthy = vector_runtime_metrics();
+        assert_eq!(healthy.vector_worker_restarts_total, 1);
+        assert_eq!(healthy.vector_lane_state, VectorLaneState::Healthy);
+        assert!(healthy.vector_lane_last_success_at_ms > 0);
+
+        record_vector_lane_fault();
+        let degraded = vector_runtime_metrics();
+        assert_eq!(degraded.vector_lane_state, VectorLaneState::Degraded);
+        assert!(degraded.vector_lane_last_fault_at_ms > 0);
     }
 }

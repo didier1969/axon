@@ -678,7 +678,7 @@ fn resolve_governor_state(
     mode: GovernorMode,
     signals: &axon_core::optimizer::RuntimeSignalsWindow,
     policy: &axon_core::optimizer::OperatorPolicySnapshot,
-    reward: Option<&axon_core::optimizer::RewardObservation>,
+    _reward: Option<&axon_core::optimizer::RewardObservation>,
     freeze_until_ms: i64,
     consecutive_zero_progress_windows: u64,
     current_profile_id: &str,
@@ -725,17 +725,13 @@ fn resolve_governor_state(
         interactive_pressure_active && signals.cpu_usage_ratio > policy.max_cpu_ratio;
     let severe_mcp_pressure =
         interactive_pressure_active && signals.mcp_latency_recent_ms > policy.max_mcp_p95_ms;
-    if signals.vector_workers_active_current == 0
-        || heartbeat_stalled_without_inflight
+    if heartbeat_stalled_without_inflight
         || embed_stalled
         || severe_mcp_pressure
         || severe_vram_pressure
         || severe_cpu_pressure
         || signals.ram_available_ratio < policy.min_ram_available_ratio
     {
-        return GovernorState::Freeze;
-    }
-    if reward.is_some_and(|value| value.penalty_liveness > 0.0) {
         return GovernorState::Freeze;
     }
     if consecutive_zero_progress_windows >= 4
@@ -797,6 +793,10 @@ mod governor_tests {
     use super::{resolve_governor_state, select_governor_profile, GovernorMode, GovernorState};
     use axon_core::optimizer::{ActionProfile, OperatorPolicySnapshot, RuntimeSignalsWindow};
 
+    fn now_ms() -> i64 {
+        chrono::Utc::now().timestamp_millis().max(0)
+    }
+
     fn profile(id: &str, label: &str) -> ActionProfile {
         ActionProfile {
             id: id.to_string(),
@@ -828,10 +828,11 @@ mod governor_tests {
     }
 
     fn signals() -> RuntimeSignalsWindow {
+        let captured_at_ms = now_ms();
         RuntimeSignalsWindow {
             window_start_ms: 0,
-            window_end_ms: 1_000,
-            captured_at_ms: 1_000,
+            window_end_ms: captured_at_ms,
+            captured_at_ms,
             source: "test".to_string(),
             cpu_usage_ratio: 0.1,
             ram_available_ratio: 0.8,
@@ -867,7 +868,7 @@ mod governor_tests {
             latency_recent_mark_done_p95_ms: 0,
             mcp_latency_recent_ms: 0,
             vector_workers_active_current: 1,
-            vector_worker_heartbeat_at_ms: 1_000,
+            vector_worker_heartbeat_at_ms: captured_at_ms as u64,
             embed_inflight_started_at_ms: 0,
             interactive_requests_in_flight: 0,
             interactive_priority: "background_normal".to_string(),
@@ -881,8 +882,9 @@ mod governor_tests {
     }
 
     fn policy() -> OperatorPolicySnapshot {
+        let captured_at_ms = now_ms();
         OperatorPolicySnapshot {
-            captured_at_ms: 1_000,
+            captured_at_ms,
             max_cpu_ratio: 0.8,
             min_ram_available_ratio: 0.2,
             max_mcp_p95_ms: 300,
@@ -914,6 +916,55 @@ mod governor_tests {
         );
         assert_eq!(state, GovernorState::Freeze);
         std::env::remove_var("AXON_GOVERNOR_VECTOR_HEARTBEAT_STALE_MS");
+    }
+
+    #[test]
+    fn worker_down_alone_does_not_trigger_freeze() {
+        let mut stalled = signals();
+        stalled.vector_workers_active_current = 0;
+        let state = resolve_governor_state(
+            GovernorMode::Live,
+            &stalled,
+            &policy(),
+            None,
+            0,
+            0,
+            "hold",
+            &[profile("hold", "hold")],
+        );
+        assert_eq!(state, GovernorState::Live);
+    }
+
+    #[test]
+    fn liveness_penalty_alone_does_not_trigger_freeze() {
+        let reward = axon_core::optimizer::RewardObservation {
+            decision_id: "d1".to_string(),
+            observed_at_ms: 1_000,
+            window_start_ms: 0,
+            window_end_ms: 1_000,
+            throughput_chunks_per_hour: 0.0,
+            throughput_files_per_hour: 0.0,
+            reward: -1.0,
+            penalty_cpu: 0.0,
+            penalty_ram: 0.0,
+            penalty_vram: 0.0,
+            penalty_mcp: 0.0,
+            penalty_io: 0.0,
+            penalty_liveness: 10.0,
+            penalty_stability: 0.0,
+            penalty_churn: 0.0,
+        };
+        let state = resolve_governor_state(
+            GovernorMode::Live,
+            &signals(),
+            &policy(),
+            Some(&reward),
+            0,
+            0,
+            "hold",
+            &[profile("hold", "hold")],
+        );
+        assert_eq!(state, GovernorState::Live);
     }
 
     #[test]
@@ -1008,9 +1059,6 @@ fn optimizer_constraint_flags(
     if signals.mcp_latency_recent_ms > policy.max_mcp_p95_ms {
         flags.push("mcp");
     }
-    if signals.vector_workers_active_current == 0 {
-        flags.push("liveness");
-    }
     flags
 }
 
@@ -1035,8 +1083,8 @@ pub(crate) fn spawn_reader_snapshot_refresher(store: Arc<GraphStore>) {
             sleep_ms
         );
         loop {
-            std::thread::sleep(Duration::from_millis(sleep_ms));
-            if let Err(err) = store.refresh_reader_snapshot() {
+            store.wait_for_reader_refresh_signal(Duration::from_millis(sleep_ms));
+            if let Err(err) = store.refresh_reader_snapshot_if_needed() {
                 warn!("Reader snapshot refresh failed: {}", err);
             }
         }

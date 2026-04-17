@@ -85,6 +85,9 @@ impl GraphStore {
                 recent_write_epoch_ms: AtomicU64::new(0),
                 last_reader_refresh_epoch_ms: AtomicU64::new(Self::current_epoch_ms()),
                 reader_refresh_failures_total: AtomicU64::new(0),
+                reader_state: crate::graph::ReaderSnapshotState::new(Self::current_epoch_ms()),
+                reader_refresh_wait: Mutex::new(1),
+                reader_refresh_notify: std::sync::Condvar::new(),
             };
 
             if !is_memory {
@@ -210,6 +213,7 @@ impl GraphStore {
                 store.setup_session(*r_guard, &attach_q)?;
             }
             info!("GraphStore startup: reader session setup complete.");
+            store.sync_reader_epoch_to_commit();
 
             Ok(store)
         }
@@ -217,62 +221,105 @@ impl GraphStore {
 
     pub fn refresh_reader_snapshot(&self) -> Result<()> {
         if cfg!(test) {
+            self.sync_reader_epoch_to_commit();
+            self.reader_state
+                .refresh_inflight
+                .store(false, Ordering::Release);
             return Ok(());
         }
 
         let Some(db_path) = self.db_path.as_ref() else {
-            self.last_reader_refresh_epoch_ms
-                .store(Self::current_epoch_ms(), Ordering::Relaxed);
+            self.sync_reader_epoch_to_commit();
+            self.reader_state
+                .refresh_inflight
+                .store(false, Ordering::Release);
             return Ok(());
         };
 
+        let requested_epoch = self
+            .reader_state
+            .refresh_requested_epoch
+            .load(Ordering::Acquire);
+        let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Acquire);
+        let target_epoch = requested_epoch.max(commit_epoch);
+
         let c_path = CString::new(db_path.to_string_lossy().to_string())?;
-        unsafe {
+        let refresh_result = unsafe {
             let init_fn: LibSymbol<InitDbFunc> = self.pool.lib.get(b"duckdb_init_db\0")?;
             let close_fn: LibSymbol<CloseDbFunc> = self.pool.lib.get(b"duckdb_close_db\0")?;
 
             let new_reader = init_fn(c_path.as_ptr(), true);
             if new_reader.is_null() {
-                self.reader_refresh_failures_total
-                    .fetch_add(1, Ordering::Relaxed);
-                return Err(anyhow!("Failed to init refreshed DuckDB Reader"));
-            }
+                Err(anyhow!("Failed to init refreshed DuckDB Reader"))
+            } else {
+                let mut soll_path = db_path
+                    .parent()
+                    .ok_or_else(|| anyhow!("DB parent path unavailable for reader refresh"))?
+                    .to_path_buf();
+                soll_path.push("soll.db");
+                let attach_q = format!(
+                    "ATTACH '{}' AS soll;",
+                    soll_path.to_string_lossy().replace('\'', "''")
+                );
+                self.setup_session(new_reader, &attach_q)?;
 
-            let mut soll_path = db_path
-                .parent()
-                .ok_or_else(|| anyhow!("DB parent path unavailable for reader refresh"))?
-                .to_path_buf();
-            soll_path.push("soll.db");
-            let attach_q = format!(
-                "ATTACH '{}' AS soll;",
-                soll_path.to_string_lossy().replace('\'', "''")
-            );
-            self.setup_session(new_reader, &attach_q)?;
-
-            let writer_ctx = *self
-                .pool
-                .writer_ctx
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            let old_reader = {
-                let mut reader_guard = self
+                let writer_ctx = *self
                     .pool
-                    .reader_ctx
+                    .writer_ctx
                     .lock()
                     .unwrap_or_else(|p| p.into_inner());
-                let previous = *reader_guard;
-                *reader_guard = new_reader;
-                previous
-            };
+                let old_reader = {
+                    let mut reader_guard = self
+                        .pool
+                        .reader_ctx
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    let previous = *reader_guard;
+                    *reader_guard = new_reader;
+                    previous
+                };
 
-            if !old_reader.is_null() && old_reader != writer_ctx {
-                close_fn(old_reader);
+                if !old_reader.is_null() && old_reader != writer_ctx {
+                    close_fn(old_reader);
+                }
+                Ok(())
+            }
+        };
+
+        let now_ms = Self::current_epoch_ms();
+        match refresh_result {
+            Ok(()) => {
+                let commit_epoch_after = self.reader_state.commit_epoch.load(Ordering::Acquire);
+                let requested_epoch_after = self
+                    .reader_state
+                    .refresh_requested_epoch
+                    .load(Ordering::Acquire);
+                let desired_epoch = commit_epoch_after
+                    .max(requested_epoch_after)
+                    .max(target_epoch);
+                self.last_reader_refresh_epoch_ms
+                    .store(now_ms, Ordering::Relaxed);
+                self.reader_state
+                    .reader_epoch
+                    .store(desired_epoch, Ordering::Release);
+                self.reader_state
+                    .last_refresh_completed_ms
+                    .store(now_ms, Ordering::Relaxed);
+                let _ = self.bump_refresh_requested_epoch(desired_epoch);
+                self.reader_state
+                    .refresh_inflight
+                    .store(false, Ordering::Release);
+                Ok(())
+            }
+            Err(err) => {
+                self.reader_refresh_failures_total
+                    .fetch_add(1, Ordering::Relaxed);
+                self.reader_state
+                    .refresh_inflight
+                    .store(false, Ordering::Release);
+                Err(err)
             }
         }
-
-        self.last_reader_refresh_epoch_ms
-            .store(Self::current_epoch_ms(), Ordering::Relaxed);
-        Ok(())
     }
 
     pub fn reader_snapshot_age_ms(&self) -> u64 {
@@ -285,6 +332,154 @@ impl GraphStore {
 
     pub fn reader_refresh_failures_total(&self) -> u64 {
         self.reader_refresh_failures_total.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn mark_writer_commit_visible(&self) {
+        let now_ms = Self::current_epoch_ms();
+        self.recent_write_epoch_ms.store(now_ms, Ordering::Relaxed);
+        self.reader_state
+            .commit_epoch
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn request_reader_refresh_up_to(&self, target_epoch: u64) {
+        let target_epoch = self.bump_refresh_requested_epoch(target_epoch);
+
+        if self
+            .reader_state
+            .refresh_inflight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.reader_state
+                .last_refresh_started_ms
+                .store(Self::current_epoch_ms(), Ordering::Relaxed);
+            let mut wake_target = self
+                .reader_refresh_wait
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *wake_target = (*wake_target).max(target_epoch);
+            self.reader_refresh_notify.notify_one();
+        } else {
+            self.reader_state
+                .refresh_coalesced_total
+                .fetch_add(1, Ordering::Relaxed);
+            let mut wake_target = self
+                .reader_refresh_wait
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *wake_target = (*wake_target).max(target_epoch);
+            self.reader_refresh_notify.notify_one();
+        }
+    }
+
+    fn bump_refresh_requested_epoch(&self, target_epoch: u64) -> u64 {
+        let target_epoch = target_epoch.max(self.reader_state.commit_epoch.load(Ordering::Acquire));
+        let mut requested = self
+            .reader_state
+            .refresh_requested_epoch
+            .load(Ordering::Acquire);
+        while target_epoch > requested {
+            match self.reader_state.refresh_requested_epoch.compare_exchange(
+                requested,
+                target_epoch,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return target_epoch,
+                Err(actual) => requested = actual,
+            }
+        }
+        requested
+    }
+
+    pub fn refresh_reader_snapshot_if_needed(&self) -> Result<bool> {
+        let mut refreshed = false;
+        for _ in 0..4 {
+            let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Acquire);
+            let reader_epoch = self.reader_state.reader_epoch.load(Ordering::Acquire);
+            let requested_epoch = self
+                .reader_state
+                .refresh_requested_epoch
+                .load(Ordering::Acquire);
+            let target_epoch = commit_epoch.max(requested_epoch);
+            if target_epoch > reader_epoch {
+                self.request_reader_refresh_up_to(target_epoch);
+            }
+
+            if !self.reader_state.refresh_inflight.load(Ordering::Acquire) {
+                return Ok(refreshed);
+            }
+
+            self.refresh_reader_snapshot()?;
+            refreshed = true;
+        }
+
+        Ok(refreshed)
+    }
+
+    pub fn wait_for_reader_refresh_signal(&self, timeout: std::time::Duration) {
+        let guard = self
+            .reader_refresh_wait
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _ = self.reader_refresh_notify.wait_timeout(guard, timeout);
+    }
+
+    pub(crate) fn reader_snapshot_diagnostics(&self) -> crate::graph::ReaderSnapshotDiagnostics {
+        let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Relaxed);
+        let reader_epoch = self.reader_state.reader_epoch.load(Ordering::Relaxed);
+        crate::graph::ReaderSnapshotDiagnostics {
+            commit_epoch,
+            reader_epoch,
+            reader_epoch_lag: commit_epoch.saturating_sub(reader_epoch),
+            refresh_inflight: self.reader_state.refresh_inflight.load(Ordering::Relaxed),
+            refresh_requested_epoch: self
+                .reader_state
+                .refresh_requested_epoch
+                .load(Ordering::Relaxed),
+            last_refresh_started_ms: self
+                .reader_state
+                .last_refresh_started_ms
+                .load(Ordering::Relaxed),
+            last_refresh_completed_ms: self
+                .reader_state
+                .last_refresh_completed_ms
+                .load(Ordering::Relaxed),
+            refresh_coalesced_total: self
+                .reader_state
+                .refresh_coalesced_total
+                .load(Ordering::Relaxed),
+            reads_on_reader_total: self
+                .reader_state
+                .reads_on_reader_total
+                .load(Ordering::Relaxed),
+            reads_on_writer_total: self
+                .reader_state
+                .reads_on_writer_total
+                .load(Ordering::Relaxed),
+            fresh_required_fallback_writer_total: self
+                .reader_state
+                .fresh_required_fallback_writer_total
+                .load(Ordering::Relaxed),
+            reader_refresh_failures_total: self.reader_refresh_failures_total(),
+        }
+    }
+
+    pub(crate) fn sync_reader_epoch_to_commit(&self) {
+        let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Acquire);
+        let now_ms = Self::current_epoch_ms();
+        self.reader_state
+            .reader_epoch
+            .store(commit_epoch, Ordering::Release);
+        self.reader_state
+            .refresh_requested_epoch
+            .store(commit_epoch, Ordering::Release);
+        self.reader_state
+            .last_refresh_completed_ms
+            .store(now_ms, Ordering::Relaxed);
+        self.last_reader_refresh_epoch_ms
+            .store(now_ms, Ordering::Relaxed);
     }
 
     fn setup_session(&self, ctx: *mut c_void, attach_query: &str) -> Result<()> {
@@ -361,6 +556,8 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
         self.execute("CREATE TABLE IF NOT EXISTS FileLifecycleEvent (file_path VARCHAR, project_code VARCHAR, stage VARCHAR, status VARCHAR, reason VARCHAR, at_ms BIGINT, worker_id BIGINT, trace_id VARCHAR, run_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorBatchRun (run_id VARCHAR PRIMARY KEY, started_at_ms BIGINT, finished_at_ms BIGINT, provider VARCHAR, model_id VARCHAR, chunk_count BIGINT, file_count BIGINT, input_bytes BIGINT, fetch_ms BIGINT, embed_ms BIGINT, db_write_ms BIGINT, mark_done_ms BIGINT, success BOOLEAN, error_reason VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS VectorWorkerFault (fault_id VARCHAR PRIMARY KEY, lane VARCHAR, worker_id BIGINT, fatal_stage VARCHAR, fatal_reason_raw VARCHAR, fatal_class VARCHAR, provider VARCHAR, batch_id VARCHAR, texts_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, vram_used_mb BIGINT DEFAULT 0, occurred_at_ms BIGINT, restart_attempt BIGINT DEFAULT 0)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS VectorLaneState (lane VARCHAR PRIMARY KEY, state VARCHAR, reason VARCHAR, updated_at_ms BIGINT, worker_id BIGINT, restart_attempt BIGINT DEFAULT 0, last_success_at_ms BIGINT, last_fault_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorPersistOutbox (outbox_id VARCHAR PRIMARY KEY, run_id VARCHAR, model_id VARCHAR, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at_ms BIGINT, claimed_at_ms BIGINT, completed_at_ms BIGINT, last_error_reason VARCHAR, claim_token VARCHAR, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0, chunk_count BIGINT DEFAULT 0, file_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, fetch_ms BIGINT DEFAULT 0, embed_ms BIGINT DEFAULT 0, payload_json VARCHAR)")?;
         self.execute("CREATE INDEX IF NOT EXISTS vector_persist_outbox_status_idx ON VectorPersistOutbox(status, queued_at_ms)")?;
         self.execute("CREATE TABLE IF NOT EXISTS HourlyVectorizationRollup (bucket_start_ms BIGINT, project_code VARCHAR, model_id VARCHAR, chunks_embedded BIGINT DEFAULT 0, files_vector_ready BIGINT DEFAULT 0, batches BIGINT DEFAULT 0, fetch_ms_total BIGINT DEFAULT 0, embed_ms_total BIGINT DEFAULT 0, db_write_ms_total BIGINT DEFAULT 0, mark_done_ms_total BIGINT DEFAULT 0, PRIMARY KEY (bucket_start_ms, project_code, model_id))")?;
@@ -373,6 +570,8 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS EmbeddingModel (id VARCHAR PRIMARY KEY, kind VARCHAR, model_name VARCHAR, dimension BIGINT, version VARCHAR, created_at BIGINT)")?;
         self.execute(&format!("CREATE TABLE IF NOT EXISTS ChunkEmbedding (chunk_id VARCHAR, model_id VARCHAR, embedding FLOAT[{DIMENSION}], source_hash VARCHAR, embedded_at_ms BIGINT, PRIMARY KEY (chunk_id, model_id))"))?;
         self.execute("CREATE TABLE IF NOT EXISTS FileVectorizationQueue (file_path VARCHAR PRIMARY KEY, status VARCHAR DEFAULT 'queued', status_reason VARCHAR, attempts BIGINT DEFAULT 0, queued_at BIGINT, last_error_reason VARCHAR, last_attempt_at BIGINT, next_eligible_at_ms BIGINT, interactive_pause_count BIGINT DEFAULT 0, claim_token VARCHAR, claimed_at_ms BIGINT, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS VectorWorkerFault (fault_id VARCHAR PRIMARY KEY, lane VARCHAR, worker_id BIGINT, fatal_stage VARCHAR, fatal_reason_raw VARCHAR, fatal_class VARCHAR, provider VARCHAR, batch_id VARCHAR, texts_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, vram_used_mb BIGINT DEFAULT 0, occurred_at_ms BIGINT, restart_attempt BIGINT DEFAULT 0)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS VectorLaneState (lane VARCHAR PRIMARY KEY, state VARCHAR, reason VARCHAR, updated_at_ms BIGINT, worker_id BIGINT, restart_attempt BIGINT DEFAULT 0, last_success_at_ms BIGINT, last_fault_id VARCHAR)")?;
         self.execute(&format!("CREATE TABLE IF NOT EXISTS GraphEmbedding (anchor_type VARCHAR, anchor_id VARCHAR, radius BIGINT, model_id VARCHAR, source_signature VARCHAR, projection_version VARCHAR, embedding FLOAT[{DIMENSION}], updated_at BIGINT)"))?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS graph_embedding_anchor_model_idx ON GraphEmbedding(anchor_type, anchor_id, radius, model_id)")?;
         Ok(())
@@ -393,6 +592,8 @@ impl GraphStore {
         self.execute("DROP TABLE IF EXISTS ChunkEmbedding")?;
         self.execute("DROP TABLE IF EXISTS EmbeddingModel")?;
         self.execute("DROP TABLE IF EXISTS FileVectorizationQueue")?;
+        self.execute("DROP TABLE IF EXISTS VectorWorkerFault")?;
+        self.execute("DROP TABLE IF EXISTS VectorLaneState")?;
         self.ensure_embedding_runtime_tables()
     }
 
@@ -436,6 +637,8 @@ impl GraphStore {
         self.execute("ALTER TABLE ChunkEmbedding ADD COLUMN IF NOT EXISTS embedded_at_ms BIGINT")?;
         self.execute("CREATE TABLE IF NOT EXISTS FileLifecycleEvent (file_path VARCHAR, project_code VARCHAR, stage VARCHAR, status VARCHAR, reason VARCHAR, at_ms BIGINT, worker_id BIGINT, trace_id VARCHAR, run_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorBatchRun (run_id VARCHAR PRIMARY KEY, started_at_ms BIGINT, finished_at_ms BIGINT, provider VARCHAR, model_id VARCHAR, chunk_count BIGINT, file_count BIGINT, input_bytes BIGINT, fetch_ms BIGINT, embed_ms BIGINT, db_write_ms BIGINT, mark_done_ms BIGINT, success BOOLEAN, error_reason VARCHAR)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS VectorWorkerFault (fault_id VARCHAR PRIMARY KEY, lane VARCHAR, worker_id BIGINT, fatal_stage VARCHAR, fatal_reason_raw VARCHAR, fatal_class VARCHAR, provider VARCHAR, batch_id VARCHAR, texts_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, vram_used_mb BIGINT DEFAULT 0, occurred_at_ms BIGINT, restart_attempt BIGINT DEFAULT 0)")?;
+        self.execute("CREATE TABLE IF NOT EXISTS VectorLaneState (lane VARCHAR PRIMARY KEY, state VARCHAR, reason VARCHAR, updated_at_ms BIGINT, worker_id BIGINT, restart_attempt BIGINT DEFAULT 0, last_success_at_ms BIGINT, last_fault_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorPersistOutbox (outbox_id VARCHAR PRIMARY KEY, run_id VARCHAR, model_id VARCHAR, status VARCHAR DEFAULT 'queued', attempts BIGINT DEFAULT 0, queued_at_ms BIGINT, claimed_at_ms BIGINT, completed_at_ms BIGINT, last_error_reason VARCHAR, claim_token VARCHAR, lease_heartbeat_at_ms BIGINT, lease_owner VARCHAR, lease_epoch BIGINT DEFAULT 0, chunk_count BIGINT DEFAULT 0, file_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, fetch_ms BIGINT DEFAULT 0, embed_ms BIGINT DEFAULT 0, payload_json VARCHAR)")?;
         self.execute("CREATE INDEX IF NOT EXISTS vector_persist_outbox_status_idx ON VectorPersistOutbox(status, queued_at_ms)")?;
         self.execute("CREATE TABLE IF NOT EXISTS HourlyVectorizationRollup (bucket_start_ms BIGINT, project_code VARCHAR, model_id VARCHAR, chunks_embedded BIGINT DEFAULT 0, files_vector_ready BIGINT DEFAULT 0, batches BIGINT DEFAULT 0, fetch_ms_total BIGINT DEFAULT 0, embed_ms_total BIGINT DEFAULT 0, db_write_ms_total BIGINT DEFAULT 0, mark_done_ms_total BIGINT DEFAULT 0, PRIMARY KEY (bucket_start_ms, project_code, model_id))")?;

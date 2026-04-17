@@ -9,6 +9,20 @@ use serde_json::Value;
 
 use crate::graph::{ExecFunc, FreeStrFunc, GraphStore, QueryCountFunc, QueryJsonFunc};
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadFreshness {
+    StaleOk,
+    FreshPreferred,
+    FreshRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadRoute {
+    Reader,
+    Writer,
+}
+
 impl GraphStore {
     pub(crate) fn current_epoch_ms() -> u64 {
         SystemTime::now()
@@ -17,20 +31,21 @@ impl GraphStore {
             .as_millis() as u64
     }
 
-    fn reader_freshness_grace_ms() -> u64 {
-        std::env::var("AXON_READER_FRESHNESS_GRACE_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(50)
+    fn record_reader_read(&self) {
+        self.reader_state
+            .reads_on_reader_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
-    fn should_route_read_to_writer(&self) -> bool {
-        let last_write = self.recent_write_epoch_ms.load(Ordering::Relaxed);
-        if last_write == 0 {
-            return false;
+    fn record_writer_read(&self, freshness: ReadFreshness) {
+        self.reader_state
+            .reads_on_writer_total
+            .fetch_add(1, Ordering::Relaxed);
+        if freshness == ReadFreshness::FreshRequired {
+            self.reader_state
+                .fresh_required_fallback_writer_total
+                .fetch_add(1, Ordering::Relaxed);
         }
-
-        Self::current_epoch_ms().saturating_sub(last_write) <= Self::reader_freshness_grace_ms()
     }
 
     fn query_targets_attached_soll(query: &str) -> bool {
@@ -46,75 +61,140 @@ impl GraphStore {
         self.query_on_ctx(query, *writer)
     }
 
-    pub(crate) fn query_json_on_reader(&self, query: &str) -> Result<String> {
-        if self.should_route_read_to_writer() || Self::query_targets_attached_soll(query) {
-            let writer = self
-                .pool
-                .writer_ctx
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            return self.query_on_ctx(query, *writer);
-        }
-
-        let guard = self
+    fn query_count_on_writer(&self, query: &str) -> Result<i64> {
+        let writer = self
             .pool
-            .reader_ctx
+            .writer_ctx
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let ctx = if (*guard).is_null() {
-            drop(guard);
-            let writer = self
+        unsafe {
+            let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
+            Ok(count_fn(*writer, CString::new(query)?.as_ptr()))
+        }
+    }
+
+    fn select_read_route(&self, query: &str, freshness: ReadFreshness) -> ReadRoute {
+        if Self::query_targets_attached_soll(query) {
+            self.record_writer_read(freshness);
+            return ReadRoute::Writer;
+        }
+
+        let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Acquire);
+        let reader_epoch = self.reader_state.reader_epoch.load(Ordering::Acquire);
+        let lag = commit_epoch.saturating_sub(reader_epoch);
+        let reader_available = {
+            let guard = self
                 .pool
-                .writer_ctx
+                .reader_ctx
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
-            return self.query_on_ctx(query, *writer);
-        } else {
-            *guard
+            !(*guard).is_null()
         };
-        self.query_on_ctx(query, ctx)
+
+        if !reader_available {
+            self.request_reader_refresh_up_to(commit_epoch.max(1));
+            self.record_writer_read(freshness);
+            return ReadRoute::Writer;
+        }
+
+        if lag == 0 {
+            self.record_reader_read();
+            return ReadRoute::Reader;
+        }
+
+        self.request_reader_refresh_up_to(commit_epoch);
+        match freshness {
+            ReadFreshness::StaleOk => {
+                self.record_reader_read();
+                ReadRoute::Reader
+            }
+            ReadFreshness::FreshPreferred => {
+                self.record_reader_read();
+                ReadRoute::Reader
+            }
+            ReadFreshness::FreshRequired => {
+                self.record_writer_read(freshness);
+                ReadRoute::Writer
+            }
+        }
+    }
+
+    pub(crate) fn query_json_on_reader_with_freshness(
+        &self,
+        query: &str,
+        freshness: ReadFreshness,
+    ) -> Result<String> {
+        match self.select_read_route(query, freshness) {
+            ReadRoute::Writer => self.query_json_on_writer(query),
+            ReadRoute::Reader => {
+                let guard = self
+                    .pool
+                    .reader_ctx
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if (*guard).is_null() {
+                    drop(guard);
+                    self.record_writer_read(freshness);
+                    return self.query_json_on_writer(query);
+                }
+                let result = self.query_on_ctx(query, *guard);
+                drop(guard);
+                result
+            }
+        }
+    }
+
+    pub(crate) fn query_json_on_reader(&self, query: &str) -> Result<String> {
+        self.query_json_on_reader_with_freshness(query, ReadFreshness::FreshPreferred)
+    }
+
+    pub(crate) fn query_count_on_reader_with_freshness(
+        &self,
+        query: &str,
+        freshness: ReadFreshness,
+    ) -> Result<i64> {
+        match self.select_read_route(query, freshness) {
+            ReadRoute::Writer => self.query_count_on_writer(query),
+            ReadRoute::Reader => {
+                let guard = self
+                    .pool
+                    .reader_ctx
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if (*guard).is_null() {
+                    drop(guard);
+                    self.record_writer_read(freshness);
+                    let writer = self
+                        .pool
+                        .writer_ctx
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    return unsafe {
+                        let count_fn: LibSymbol<QueryCountFunc> =
+                            self.pool.lib.get(b"duckdb_query_count\0")?;
+                        Ok(count_fn(*writer, CString::new(query)?.as_ptr()))
+                    };
+                }
+                unsafe {
+                    let count_fn: LibSymbol<QueryCountFunc> =
+                        self.pool.lib.get(b"duckdb_query_count\0")?;
+                    let result = Ok(count_fn(*guard, CString::new(query)?.as_ptr()));
+                    drop(guard);
+                    result
+                }
+            }
+        }
     }
 
     pub(crate) fn query_count_on_reader(&self, query: &str) -> Result<i64> {
-        if self.should_route_read_to_writer() || Self::query_targets_attached_soll(query) {
-            let writer = self
-                .pool
-                .writer_ctx
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            unsafe {
-                let count_fn: LibSymbol<QueryCountFunc> =
-                    self.pool.lib.get(b"duckdb_query_count\0")?;
-                return Ok(count_fn(*writer, CString::new(query)?.as_ptr()));
-            }
-        }
-
-        let guard = self
-            .pool
-            .reader_ctx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let ctx = if (*guard).is_null() {
-            drop(guard);
-            let writer = self
-                .pool
-                .writer_ctx
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            *writer
-        } else {
-            *guard
-        };
-        unsafe {
-            let count_fn: LibSymbol<QueryCountFunc> = self.pool.lib.get(b"duckdb_query_count\0")?;
-            Ok(count_fn(ctx, CString::new(query)?.as_ptr()))
-        }
+        self.query_count_on_reader_with_freshness(query, ReadFreshness::FreshPreferred)
     }
 
     pub fn execute_raw_sql_gateway(&self, query: &str) -> Result<String> {
         if is_read_only_sql(query) {
             // SQL gateway is the dashboard's canonical truth surface.
             // Force read-only SQL through writer ctx to avoid reader/writer snapshot oscillation.
+            self.record_writer_read(ReadFreshness::FreshRequired);
             return self.query_json_on_writer(query);
         }
 
@@ -142,7 +222,7 @@ impl GraphStore {
         signature: &str,
         version: &str,
     ) -> Result<bool> {
-        let res = self.query_json_param(
+        let res = self.query_json_param_with_freshness(
             "SELECT source_signature, projection_version \
              FROM GraphProjectionState \
              WHERE anchor_type = $anchor_type \
@@ -154,6 +234,7 @@ impl GraphStore {
                 "anchor_id": anchor_id,
                 "radius": radius,
             }),
+            ReadFreshness::FreshRequired,
         )?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
         let Some(row) = rows.first() else {
@@ -169,9 +250,10 @@ impl GraphStore {
     }
 
     fn resolve_symbol_anchor_id(&self, symbol: &str) -> Result<Option<String>> {
-        let res = self.query_json_param(
+        let res = self.query_json_param_with_freshness(
             "SELECT id FROM Symbol WHERE id = $sym OR name = $sym LIMIT 1",
             &serde_json::json!({ "sym": symbol }),
+            ReadFreshness::FreshRequired,
         )?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
         Ok(rows
@@ -211,7 +293,8 @@ impl GraphStore {
             SELECT node_id, MIN(distance) \
             FROM traverse \
             GROUP BY node_id";
-        let res = self.query_json_param(query, &params)?;
+        let res =
+            self.query_json_param_with_freshness(query, &params, ReadFreshness::FreshRequired)?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
         let created_at = chrono::Utc::now().timestamp_millis();
         let anchor_escaped = anchor_id.replace('\'', "''");
@@ -303,7 +386,8 @@ impl GraphStore {
             SELECT node_id, MIN(distance) \
             FROM seed \
             GROUP BY node_id";
-        let res = self.query_json_param(query, &params)?;
+        let res =
+            self.query_json_param_with_freshness(query, &params, ReadFreshness::FreshRequired)?;
         let rows: Vec<Vec<Value>> = serde_json::from_str(&res).unwrap_or_default();
         let created_at = chrono::Utc::now().timestamp_millis();
         let file_escaped = file_path.replace('\'', "''");
@@ -411,8 +495,7 @@ impl GraphStore {
                 return Err(anyhow!("Writer Error: {}", query));
             }
         }
-        self.recent_write_epoch_ms
-            .store(Self::current_epoch_ms(), Ordering::Relaxed);
+        self.mark_writer_commit_visible();
         Ok(())
     }
 
@@ -430,8 +513,22 @@ impl GraphStore {
         self.query_json_on_reader(&expanded)
     }
 
+    pub(crate) fn query_json_param_with_freshness(
+        &self,
+        query: &str,
+        params: &serde_json::Value,
+        freshness: ReadFreshness,
+    ) -> Result<String> {
+        let expanded = Self::expand_named_params(query, params)?;
+        self.query_json_on_reader_with_freshness(&expanded, freshness)
+    }
+
     pub fn query_json_writer(&self, query: &str) -> Result<String> {
         self.query_json_on_writer(query)
+    }
+
+    pub(crate) fn query_count_writer(&self, query: &str) -> Result<i64> {
+        self.query_count_on_writer(query)
     }
 
     pub fn query_count(&self, query: &str) -> Result<i64> {
@@ -494,8 +591,7 @@ impl GraphStore {
                 return Err(anyhow!("Batch Writer Error: COMMIT failed"));
             }
         }
-        self.recent_write_epoch_ms
-            .store(Self::current_epoch_ms(), Ordering::Relaxed);
+        self.mark_writer_commit_visible();
         Ok(())
     }
 
@@ -572,6 +668,8 @@ fn is_read_only_sql(query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::ReadFreshness;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn execute_raw_sql_gateway_supports_read_only_and_mutating_queries() {
@@ -591,5 +689,121 @@ mod tests {
             .query_count("SELECT count(*) FROM File WHERE path = '/tmp/sql_gateway.ex'")
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn stale_ok_reader_requests_refresh_without_writer_fallback() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let before = store.reader_snapshot_diagnostics();
+        store.reader_state.commit_epoch.store(7, Ordering::Relaxed);
+        store.reader_state.reader_epoch.store(5, Ordering::Relaxed);
+        store
+            .reader_state
+            .refresh_requested_epoch
+            .store(0, Ordering::Relaxed);
+        store
+            .reader_state
+            .refresh_inflight
+            .store(false, Ordering::Relaxed);
+
+        let _ = store
+            .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::StaleOk)
+            .unwrap();
+
+        let snapshot = store.reader_snapshot_diagnostics();
+        assert_eq!(
+            snapshot.reads_on_reader_total - before.reads_on_reader_total,
+            1
+        );
+        assert_eq!(
+            snapshot.reads_on_writer_total - before.reads_on_writer_total,
+            0
+        );
+        assert!(snapshot.refresh_inflight);
+        assert_eq!(snapshot.refresh_requested_epoch, 7);
+    }
+
+    #[test]
+    fn fresh_required_routes_stale_reads_to_writer() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let before = store.reader_snapshot_diagnostics();
+        store.reader_state.commit_epoch.store(9, Ordering::Relaxed);
+        store.reader_state.reader_epoch.store(3, Ordering::Relaxed);
+        store
+            .reader_state
+            .refresh_requested_epoch
+            .store(0, Ordering::Relaxed);
+        store
+            .reader_state
+            .refresh_inflight
+            .store(false, Ordering::Relaxed);
+
+        let _ = store
+            .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::FreshRequired)
+            .unwrap();
+
+        let snapshot = store.reader_snapshot_diagnostics();
+        assert_eq!(
+            snapshot.reads_on_reader_total - before.reads_on_reader_total,
+            0
+        );
+        assert_eq!(
+            snapshot.reads_on_writer_total - before.reads_on_writer_total,
+            1
+        );
+        assert_eq!(
+            snapshot.fresh_required_fallback_writer_total
+                - before.fresh_required_fallback_writer_total,
+            1
+        );
+        assert!(snapshot.refresh_inflight);
+        assert_eq!(snapshot.refresh_requested_epoch, 9);
+    }
+
+    #[test]
+    fn fresh_preferred_stays_on_reader_and_requests_refresh() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let before = store.reader_snapshot_diagnostics();
+        store.reader_state.commit_epoch.store(15, Ordering::Relaxed);
+        store.reader_state.reader_epoch.store(3, Ordering::Relaxed);
+        store
+            .reader_state
+            .refresh_requested_epoch
+            .store(0, Ordering::Relaxed);
+        store
+            .reader_state
+            .refresh_inflight
+            .store(false, Ordering::Relaxed);
+        store.recent_write_epoch_ms.store(0, Ordering::Relaxed);
+
+        let _ = store
+            .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::FreshPreferred)
+            .unwrap();
+
+        let snapshot = store.reader_snapshot_diagnostics();
+        assert_eq!(
+            snapshot.reads_on_reader_total - before.reads_on_reader_total,
+            1
+        );
+        assert_eq!(
+            snapshot.reads_on_writer_total - before.reads_on_writer_total,
+            0
+        );
+        assert_eq!(snapshot.refresh_requested_epoch, 15);
+    }
+
+    #[test]
+    fn reader_refresh_syncs_epoch_to_commit() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store.reader_state.commit_epoch.store(12, Ordering::Relaxed);
+        store.reader_state.reader_epoch.store(4, Ordering::Relaxed);
+
+        store.refresh_reader_snapshot().unwrap();
+
+        let snapshot = store.reader_snapshot_diagnostics();
+        assert_eq!(snapshot.commit_epoch, 12);
+        assert_eq!(snapshot.reader_epoch, 12);
+        assert_eq!(snapshot.reader_epoch_lag, 0);
+        assert!(!snapshot.refresh_inflight);
     }
 }

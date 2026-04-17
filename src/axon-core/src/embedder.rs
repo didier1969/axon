@@ -5,8 +5,9 @@ use crate::embedding_contract::{
 use crate::graph::GraphStore;
 use crate::graph_ingestion::{
     FileVectorizationLeaseSnapshot, FileVectorizationWork, GraphProjectionWork, VectorBatchRun,
-    VectorPersistOutboxPayload, VectorPersistOutboxUpdate, VectorPersistOutboxWork,
-    INTERACTIVE_VECTORIZATION_REQUEUE_COOLDOWN_MS, INTERACTIVE_VECTORIZATION_REQUEUE_LIMIT,
+    VectorLaneStateRecord, VectorPersistOutboxPayload, VectorPersistOutboxUpdate,
+    VectorPersistOutboxWork, VectorWorkerFault, INTERACTIVE_VECTORIZATION_REQUEUE_COOLDOWN_MS,
+    INTERACTIVE_VECTORIZATION_REQUEUE_LIMIT,
 };
 use crate::queue::QueueStore;
 use crate::runtime_mode::graph_embeddings_enabled;
@@ -17,7 +18,7 @@ use crate::runtime_tuning::{
     update_runtime_tuning_state as update_shared_runtime_tuning_state, RuntimeTuningSnapshot,
     RuntimeTuningState,
 };
-use crate::service_guard::{self, ServicePressure};
+use crate::service_guard::{self, ServicePressure, VectorLaneState};
 use crate::vector_control::{
     graph_projection_allowed, observe_vector_batch_controller,
     reset_vector_batch_controller_for_tests, semantic_policy, symbol_embedding_allowed,
@@ -272,6 +273,22 @@ impl Drop for LeaseRefreshGuard {
     }
 }
 
+#[derive(Debug, Clone)]
+struct FatalVectorWorkerFault {
+    stage: &'static str,
+    reason_raw: String,
+    fatal_class: String,
+    batch_id: Option<String>,
+    texts_count: u64,
+    input_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VectorWorkerSupervisorState {
+    restart_attempt: u64,
+    crash_loop_open: bool,
+}
+
 #[derive(Debug)]
 pub(crate) struct VectorPersistPlan {
     updates: Vec<(String, String, Vec<f32>)>,
@@ -279,6 +296,16 @@ pub(crate) struct VectorPersistPlan {
     next_active_after_failure: Vec<FileVectorizationWork>,
     touched_works: Vec<FileVectorizationWork>,
     batch_run: VectorBatchRun,
+}
+
+impl VectorPersistPlan {
+    pub(crate) fn sync_batch_run_counts(&mut self) -> (u64, u64) {
+        let chunk_count = self.updates.len() as u64;
+        let file_count = self.touched_works.len() as u64;
+        self.batch_run.chunk_count = chunk_count;
+        self.batch_run.file_count = file_count;
+        (chunk_count, file_count)
+    }
 }
 
 #[derive(Debug)]
@@ -499,6 +526,46 @@ fn configured_vector_max_inflight_persists() -> usize {
 
 fn wait_for_vector_backlog_or_timeout(timeout: Duration) {
     service_guard::wait_for_vector_backlog_signal(timeout);
+}
+
+fn vector_worker_restart_window_ms() -> i64 {
+    std::env::var("AXON_VECTOR_WORKER_RESTART_WINDOW_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value >= 1_000)
+        .unwrap_or(600_000)
+}
+
+fn vector_worker_restart_budget() -> usize {
+    std::env::var("AXON_VECTOR_WORKER_RESTART_BUDGET")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(3)
+}
+
+fn vector_worker_restart_backoff_ms(restart_attempt: u64) -> u64 {
+    let exponent = restart_attempt.saturating_sub(1).min(4) as u32;
+    5_000_u64
+        .saturating_mul(2_u64.saturating_pow(exponent))
+        .min(30_000)
+}
+
+fn vector_worker_crash_loop_cooldown_ms() -> u64 {
+    std::env::var("AXON_VECTOR_WORKER_CRASH_LOOP_COOLDOWN_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 1_000)
+        .unwrap_or(60_000)
+}
+
+fn sleep_with_vector_worker_heartbeat(timeout: Duration) {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        service_guard::record_vector_worker_heartbeat();
+        let remaining = timeout.saturating_sub(started.elapsed());
+        thread::sleep(remaining.min(Duration::from_millis(250)));
+    }
 }
 
 fn token_count_from_encoding(encoding: &Encoding) -> usize {
@@ -1187,16 +1254,10 @@ impl SemanticWorkerPool {
         finalize_tx: Sender<VectorFinalizeRequest>,
     ) {
         let _liveness = VectorWorkerLivenessGuard::new();
-        info!(
-            "Semantic Vector Worker [{}]: Initializing BGE-Large Model (1024d) in isolated thread...",
-            worker_idx
-        );
-
-        let Some(mut model) = Self::build_text_embedding_model("vector", worker_idx) else {
-            return;
-        };
         let lane_config = embedding_lane_config_from_env();
         let gpu_available = effective_embedding_provider_is_gpu();
+        let mut restart_window: VecDeque<i64> = VecDeque::new();
+        let mut restart_attempt = 0_u64;
 
         if let Err(e) = graph_store.ensure_embedding_model(
             SYMBOL_MODEL_ID,
@@ -1228,7 +1289,48 @@ impl SemanticWorkerPool {
             worker_idx
         );
 
-        loop {
+        'worker_lifecycle: loop {
+            persist_vector_lane_state(
+                &graph_store,
+                VectorLaneState::Starting,
+                worker_idx,
+                restart_attempt,
+                Some("model_init".to_string()),
+                None,
+            );
+            info!(
+                "Semantic Vector Worker [{}]: Initializing BGE-Large Model (1024d) in isolated thread...",
+                worker_idx
+            );
+            let Some(mut model) = Self::build_text_embedding_model("vector", worker_idx) else {
+                let init_reason = std::env::var("AXON_EMBEDDING_PROVIDER_INIT_ERROR")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "failed to initialize embedding model".to_string());
+                schedule_vector_worker_restart(
+                    &graph_store,
+                    worker_idx,
+                    FatalVectorWorkerFault {
+                        stage: "model_init",
+                        reason_raw: init_reason,
+                        fatal_class: "model_init".to_string(),
+                        batch_id: None,
+                        texts_count: 0,
+                        input_bytes: 0,
+                    },
+                    &mut restart_window,
+                    &mut restart_attempt,
+                );
+                continue;
+            };
+            persist_vector_lane_state(
+                &graph_store,
+                VectorLaneState::Healthy,
+                worker_idx,
+                restart_attempt,
+                Some("model_loaded".to_string()),
+                None,
+            );
             service_guard::record_vector_worker_heartbeat();
             let current_pressure = service_guard::current_pressure();
             let (file_vectorization_queue_queued, file_vectorization_queue_inflight) = graph_store
@@ -1721,6 +1823,7 @@ impl SemanticWorkerPool {
                         match embed_prepared_batch_with_breakdown(&mut model, &prepared) {
                             Ok((embeddings, transform_ms, export_ms)) => {
                                 service_guard::record_vector_embed_attempt_finished();
+                                service_guard::record_vector_lane_success();
                                 service_guard::record_vector_embed_breakdown(
                                     transform_ms,
                                     export_ms,
@@ -1767,10 +1870,7 @@ impl SemanticWorkerPool {
                                     }
                                 };
                                 let mut persist_envelope = persist_plan;
-                                persist_envelope.batch_run.chunk_count =
-                                    persist_envelope.persist_plan.updates.len() as u64;
-                                persist_envelope.batch_run.file_count =
-                                    persist_envelope.persist_plan.touched_works.len() as u64;
+                                persist_envelope.sync_batch_run_counts_from_plan();
                                 while inflight_persists.len() >= max_inflight_persists {
                                     let Some(inflight) = inflight_persists.pop_front() else {
                                         break;
@@ -1828,12 +1928,26 @@ impl SemanticWorkerPool {
                             Err(e) => {
                                 service_guard::record_vector_embed_attempt_finished();
                                 let reason = format!("chunk embedding failed: {:?}", e);
-                                if is_fatal_embedding_error(&e) {
+                                if let Some(fatal_class) = fatal_embedding_error_class(&e) {
                                     error!(
-                                        "Semantic Vector Worker [{}]: fatal chunk embedding error, disabling semantic worker: {:?}",
+                                        "Semantic Vector Worker [{}]: fatal chunk embedding error, restarting semantic lane: {:?}",
                                         worker_idx, e
                                     );
-                                    return;
+                                    schedule_vector_worker_restart(
+                                        &graph_store,
+                                        worker_idx,
+                                        FatalVectorWorkerFault {
+                                            stage: "embed",
+                                            reason_raw: reason,
+                                            fatal_class: fatal_class.to_string(),
+                                            batch_id: Some(prepared.batch_id.clone()),
+                                            texts_count: embed_input_texts,
+                                            input_bytes: embed_input_text_bytes,
+                                        },
+                                        &mut restart_window,
+                                        &mut restart_attempt,
+                                    );
+                                    continue 'worker_lifecycle;
                                 }
                                 error!(
                                     "Semantic Vector Worker [{}]: Chunk embedding failed: {:?}",
@@ -1954,12 +2068,29 @@ impl SemanticWorkerPool {
                             }
                         }
                         Err(e) => {
-                            if is_fatal_embedding_error(&e) {
+                            if let Some(fatal_class) = fatal_embedding_error_class(&e) {
                                 error!(
-                                    "Semantic Vector Worker [{}]: fatal symbol embedding error, disabling semantic worker: {:?}",
+                                    "Semantic Vector Worker [{}]: fatal symbol embedding error, restarting semantic lane: {:?}",
                                     worker_idx, e
                                 );
-                                return;
+                                schedule_vector_worker_restart(
+                                    &graph_store,
+                                    worker_idx,
+                                    FatalVectorWorkerFault {
+                                        stage: "symbol_embed",
+                                        reason_raw: format!("symbol embedding failed: {:?}", e),
+                                        fatal_class: fatal_class.to_string(),
+                                        batch_id: None,
+                                        texts_count: texts.len() as u64,
+                                        input_bytes: texts
+                                            .iter()
+                                            .map(|text| text.len() as u64)
+                                            .sum(),
+                                    },
+                                    &mut restart_window,
+                                    &mut restart_attempt,
+                                );
+                                continue 'worker_lifecycle;
                             }
                             error!(
                                 "Semantic Vector Worker [{}]: symbol embedding failed: {:?}",
@@ -2893,6 +3024,40 @@ fn record_vector_batch_run_failure(
     }
 }
 
+fn is_irrecoverable_outbox_finalize_error(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}");
+    message.contains("finalize refused:")
+        && (message.contains("outbox-owned rows") || message.contains("lease snapshots"))
+}
+
+fn reconcile_outbox_finalize_failure(
+    graph_store: &GraphStore,
+    outbox_id: &str,
+    payload: &VectorPersistOutboxPayload,
+    err: &anyhow::Error,
+    batch_runs: &mut [VectorBatchRun],
+    reason: &str,
+    mark_done_ms: u64,
+) -> AnyhowResult<bool> {
+    for batch_run in batch_runs {
+        record_vector_batch_run_failure(graph_store, batch_run, reason.to_string(), mark_done_ms);
+    }
+    if let Err(failure_err) =
+        graph_store.mark_file_vectorization_work_failed(&payload.completed_works, reason)
+    {
+        error!(
+            "Semantic Vector Finalize Worker: failed to persist outbox finalize failure state: {:?}",
+            failure_err
+        );
+    }
+    if is_irrecoverable_outbox_finalize_error(err) {
+        graph_store.mark_vector_persist_outbox_done(outbox_id)?;
+        return Ok(true);
+    }
+    graph_store.mark_vector_persist_outbox_failed(outbox_id, reason)?;
+    Ok(false)
+}
+
 fn process_finalize_request(
     worker_idx: usize,
     graph_store: &Arc<GraphStore>,
@@ -2997,6 +3162,15 @@ fn process_vector_persist_outbox_work(
     work: VectorPersistOutboxWork,
 ) -> AnyhowResult<()> {
     let VectorPersistOutboxWork { outbox_id, payload } = work;
+    debug!(
+        "Semantic Vector Finalize Worker [{}]: outbox {} starting db_write (updates={}, completed_works={}, batch_run_chunks={}, batch_run_files={})",
+        worker_idx,
+        outbox_id,
+        payload.updates.len(),
+        payload.completed_works.len(),
+        payload.batch_run.chunk_count,
+        payload.batch_run.file_count
+    );
     let outbox_ids = vec![outbox_id.clone()];
     let _ = graph_store.refresh_vector_persist_outbox_leases(&outbox_ids);
     let _outbox_file_lease_guard = LeaseRefreshGuard::start(
@@ -3021,9 +3195,26 @@ fn process_vector_persist_outbox_work(
     service_guard::record_vector_stage_ms(service_guard::VectorStageKind::DbWrite, db_write_ms);
     if let Err(err) = write_result {
         let reason = format!("failed to persist chunk embeddings from outbox: {:?}", err);
+        error!(
+            "Semantic Vector Finalize Worker [{}]: outbox {} db_write failed after {} ms (updates={}, completed_works={}): {:?}",
+            worker_idx,
+            outbox_id,
+            db_write_ms,
+            updates.len(),
+            payload.completed_works.len(),
+            err
+        );
         let _ = graph_store.mark_vector_persist_outbox_failed(&outbox_id, &reason);
         return Err(err);
     }
+    debug!(
+        "Semantic Vector Finalize Worker [{}]: outbox {} db_write complete in {} ms, entering finalize (completed_works={}, lease_snapshots={})",
+        worker_idx,
+        outbox_id,
+        db_write_ms,
+        payload.completed_works.len(),
+        payload.completed_lease_snapshots.len()
+    );
 
     let _ = graph_store.refresh_vector_persist_outbox_leases(&outbox_ids);
     let mark_done_started = Instant::now();
@@ -3055,7 +3246,19 @@ fn process_vector_persist_outbox_work(
                 }
             }
             service_guard::record_vector_files_completed(outcome.completed_works.len() as u64);
-            graph_store.mark_vector_persist_outbox_done(&outbox_id)?;
+            debug!(
+                "Semantic Vector Finalize Worker [{}]: outbox {} finalize complete in {} ms, deleting outbox row",
+                worker_idx,
+                outbox_id,
+                mark_done_ms
+            );
+            if let Err(err) = graph_store.mark_vector_persist_outbox_done(&outbox_id) {
+                error!(
+                    "Semantic Vector Finalize Worker [{}]: outbox {} finalize succeeded but delete failed: {:?}",
+                    worker_idx, outbox_id, err
+                );
+                return Err(err);
+            }
             Ok(())
         }
         Err((err, mut batch_runs)) => {
@@ -3068,24 +3271,42 @@ fn process_vector_persist_outbox_work(
                 "failed to finalize outbox vectorization completion: {:?}",
                 err
             );
-            for batch_run in &mut batch_runs {
-                record_vector_batch_run_failure(
-                    graph_store,
-                    batch_run,
-                    reason.clone(),
-                    mark_done_ms,
+            error!(
+                "Semantic Vector Finalize Worker [{}]: outbox {} finalize failed after {} ms (completed_works={}, lease_snapshots={}, batch_run_chunks={}, batch_run_files={}): {:?}",
+                worker_idx,
+                outbox_id,
+                mark_done_ms,
+                payload.completed_works.len(),
+                payload.completed_lease_snapshots.len(),
+                payload.batch_run.chunk_count,
+                payload.batch_run.file_count,
+                err
+            );
+            match reconcile_outbox_finalize_failure(
+                graph_store,
+                &outbox_id,
+                &payload,
+                &err,
+                &mut batch_runs,
+                &reason,
+                mark_done_ms,
+            ) {
+                Ok(true) => {
+                    error!(
+                    "Semantic Vector Finalize Worker [{}]: outbox {} is irrecoverable, deleting poisoned row after requeue",
+                    worker_idx, outbox_id
                 );
+                    Ok(())
+                }
+                Ok(false) => Err(err),
+                Err(reconcile_err) => {
+                    error!(
+                        "Semantic Vector Finalize Worker [{}]: failed to reconcile outbox {} finalize failure: {:?}",
+                        worker_idx, outbox_id, reconcile_err
+                    );
+                    Err(reconcile_err)
+                }
             }
-            if let Err(failure_err) =
-                graph_store.mark_file_vectorization_work_failed(&payload.completed_works, &reason)
-            {
-                error!(
-                    "Semantic Vector Finalize Worker [{}]: failed to persist outbox finalize failure state: {:?}",
-                    worker_idx, failure_err
-                );
-            }
-            let _ = graph_store.mark_vector_persist_outbox_failed(&outbox_id, &reason);
-            Err(err)
         }
     }
 }
@@ -4389,11 +4610,168 @@ fn pause_vectorization_work_if_interactive(
     }
 }
 
-fn is_fatal_embedding_error<E: std::fmt::Debug>(err: &E) -> bool {
+fn fatal_embedding_error_class<E: std::fmt::Debug>(err: &E) -> Option<&'static str> {
     let rendered = format!("{:?}", err);
-    rendered.contains("GetElementType is not implemented")
-        || rendered.contains("ORT")
-        || rendered.contains("onnxruntime")
+    if rendered.contains("GetElementType is not implemented") {
+        Some("ort_missing_output_type")
+    } else if rendered.contains("onnxruntime") || rendered.contains("ORT") {
+        Some("onnxruntime")
+    } else {
+        None
+    }
+}
+
+fn is_fatal_embedding_error<E: std::fmt::Debug>(err: &E) -> bool {
+    fatal_embedding_error_class(err).is_some()
+}
+
+fn persist_vector_lane_state(
+    graph_store: &Arc<GraphStore>,
+    state: VectorLaneState,
+    worker_idx: usize,
+    restart_attempt: u64,
+    reason: Option<String>,
+    last_fault_id: Option<String>,
+) {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    match state {
+        VectorLaneState::Healthy => service_guard::record_vector_lane_success(),
+        VectorLaneState::Degraded | VectorLaneState::Unhealthy => {
+            service_guard::record_vector_lane_fault()
+        }
+        VectorLaneState::Starting | VectorLaneState::Hold => {
+            service_guard::record_vector_lane_state(state)
+        }
+    }
+    if let Err(err) = graph_store.upsert_vector_lane_state(&VectorLaneStateRecord {
+        lane: "vector".to_string(),
+        state: state.as_str().to_string(),
+        reason,
+        updated_at_ms: now_ms,
+        worker_id: Some(worker_idx as i64),
+        restart_attempt,
+        last_success_at_ms: if matches!(state, VectorLaneState::Healthy) {
+            Some(now_ms)
+        } else {
+            None
+        },
+        last_fault_id,
+    }) {
+        error!(
+            "Semantic Vector Worker [{}]: failed to persist vector lane state [{}]: {:?}",
+            worker_idx,
+            state.as_str(),
+            err
+        );
+    }
+}
+
+fn record_vector_worker_fault_and_lane_state(
+    graph_store: &Arc<GraphStore>,
+    worker_idx: usize,
+    fault: FatalVectorWorkerFault,
+    supervisor: VectorWorkerSupervisorState,
+) -> String {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let provider = current_embedding_provider_diagnostics().provider_effective;
+    let vram_used_mb = current_gpu_memory_snapshot()
+        .map(|snapshot| snapshot.used_mb)
+        .unwrap_or(0);
+    let fault_id = format!("vector-fault-{}-{}-{}", worker_idx, fault.stage, now_ms);
+    let persisted = VectorWorkerFault {
+        fault_id: fault_id.clone(),
+        lane: "vector".to_string(),
+        worker_id: worker_idx as i64,
+        fatal_stage: fault.stage.to_string(),
+        fatal_reason_raw: fault.reason_raw.clone(),
+        fatal_class: fault.fatal_class.clone(),
+        provider,
+        batch_id: fault.batch_id.clone(),
+        texts_count: fault.texts_count,
+        input_bytes: fault.input_bytes,
+        vram_used_mb,
+        occurred_at_ms: now_ms,
+        restart_attempt: supervisor.restart_attempt,
+    };
+    if let Err(err) = graph_store.record_vector_worker_fault(&persisted) {
+        error!(
+            "Semantic Vector Worker [{}]: failed to persist vector fault {:?}: {:?}",
+            worker_idx, persisted.fault_id, err
+        );
+    }
+    let lane_state = if supervisor.crash_loop_open {
+        VectorLaneState::Unhealthy
+    } else {
+        VectorLaneState::Degraded
+    };
+    persist_vector_lane_state(
+        graph_store,
+        lane_state,
+        worker_idx,
+        supervisor.restart_attempt,
+        Some(fault.reason_raw),
+        Some(fault_id.clone()),
+    );
+    fault_id
+}
+
+fn schedule_vector_worker_restart(
+    graph_store: &Arc<GraphStore>,
+    worker_idx: usize,
+    fatal_fault: FatalVectorWorkerFault,
+    restart_window: &mut VecDeque<i64>,
+    restart_attempt: &mut u64,
+) {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let restart_window_ms = vector_worker_restart_window_ms();
+    while restart_window
+        .front()
+        .is_some_and(|timestamp| now_ms.saturating_sub(*timestamp) > restart_window_ms)
+    {
+        restart_window.pop_front();
+    }
+    restart_window.push_back(now_ms);
+    *restart_attempt = restart_attempt.saturating_add(1);
+    service_guard::record_vector_worker_restart();
+    let crash_loop_open = restart_window.len() > vector_worker_restart_budget();
+    let supervisor = VectorWorkerSupervisorState {
+        restart_attempt: *restart_attempt,
+        crash_loop_open,
+    };
+    let fault_id = record_vector_worker_fault_and_lane_state(
+        graph_store,
+        worker_idx,
+        fatal_fault.clone(),
+        supervisor,
+    );
+    if crash_loop_open {
+        error!(
+            "Semantic Vector Worker [{}]: crash loop opened after fault {}, cooling down for {} ms",
+            worker_idx,
+            fault_id,
+            vector_worker_crash_loop_cooldown_ms()
+        );
+        sleep_with_vector_worker_heartbeat(Duration::from_millis(
+            vector_worker_crash_loop_cooldown_ms(),
+        ));
+        restart_window.clear();
+        *restart_attempt = 0;
+        persist_vector_lane_state(
+            graph_store,
+            VectorLaneState::Hold,
+            worker_idx,
+            0,
+            Some("crash_loop_cooldown".to_string()),
+            Some(fault_id),
+        );
+    } else {
+        let backoff_ms = vector_worker_restart_backoff_ms(*restart_attempt);
+        warn!(
+            "Semantic Vector Worker [{}]: restarting after fatal {} fault in {} ms (attempt #{})",
+            worker_idx, fatal_fault.fatal_class, backoff_ms, restart_attempt
+        );
+        sleep_with_vector_worker_heartbeat(Duration::from_millis(backoff_ms));
+    }
 }
 
 pub fn batch_embed(texts: Vec<String>) -> anyhow::Result<Vec<Vec<f32>>> {
@@ -4430,15 +4808,17 @@ mod tests {
         embedding_download_progress_enabled, embedding_lane_config_from_env,
         embedding_model_cache_dir, embedding_provider_diagnostics,
         finalize_completed_vectorization_works, flush_completed_vectorization_works,
-        gpu_memory_soft_limit_mb, is_fatal_embedding_error, merge_vectorization_work,
-        query_embedding_allowed, request_prepared_vector_embed_sequence, request_query_embedding,
-        ClaimedLeaseSet, EmbeddingLaneConfig, PreparedBatchEnvelope, PreparedVectorEmbedBatch,
+        gpu_memory_soft_limit_mb, is_fatal_embedding_error, is_irrecoverable_outbox_finalize_error,
+        merge_vectorization_work, query_embedding_allowed, reconcile_outbox_finalize_failure,
+        request_prepared_vector_embed_sequence, request_query_embedding, ClaimedLeaseSet,
+        EmbeddingLaneConfig, PreparedBatchEnvelope, PreparedVectorEmbedBatch,
         PreparedVectorEmbedSequence, QueryEmbeddingRequest, VectorBatchPlan, VectorChunkWorkItem,
         VectorFinalizeRequest, VectorPrepareRequest,
     };
     use crate::embedding_contract::{fastembed_model, CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH};
     use crate::graph_ingestion::{
         FileVectorizationLeaseSnapshot, FileVectorizationWork, VectorBatchRun,
+        VectorPersistOutboxPayload,
     };
     use crate::service_guard::{ServicePressure, VectorRuntimeMetrics};
     use crate::vector_control::{
@@ -6019,6 +6399,180 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("embedding count mismatch"));
+    }
+
+    #[test]
+    fn test_persist_envelope_syncs_batch_run_counts_for_outbox_and_runtime() {
+        let mut plan = VectorBatchPlan::default();
+        plan.work_items = vec![
+            VectorChunkWorkItem {
+                chunk_id: "a1".to_string(),
+                content_hash: "ha1".to_string(),
+                text: "A1".to_string(),
+            },
+            VectorChunkWorkItem {
+                chunk_id: "b1".to_string(),
+                content_hash: "hb1".to_string(),
+                text: "B1".to_string(),
+            },
+        ];
+        plan.touched_works = vec![
+            FileVectorizationWork {
+                file_path: "src/a.rs".to_string(),
+                resumed_after_interactive_pause: false,
+            },
+            FileVectorizationWork {
+                file_path: "src/b.rs".to_string(),
+                resumed_after_interactive_pause: false,
+            },
+        ];
+
+        let prepared = PreparedBatchEnvelope::new(PreparedVectorEmbedBatch::from_plan(plan));
+        let mut envelope = prepared
+            .into_persist_envelope(
+                vec![vec![0.1_f32, 0.2_f32], vec![0.3_f32, 0.4_f32]],
+                VectorBatchRun {
+                    run_id: "persist-envelope-sync".to_string(),
+                    started_at_ms: 1,
+                    finished_at_ms: 1,
+                    provider: "cpu".to_string(),
+                    model_id: CHUNK_MODEL_ID.to_string(),
+                    chunk_count: 0,
+                    file_count: 0,
+                    input_bytes: 4,
+                    fetch_ms: 0,
+                    embed_ms: 0,
+                    db_write_ms: 0,
+                    mark_done_ms: 0,
+                    success: true,
+                    error_reason: None,
+                },
+            )
+            .expect("persist envelope");
+
+        envelope.sync_batch_run_counts_from_plan();
+
+        assert_eq!(envelope.batch_run.chunk_count, 2);
+        assert_eq!(envelope.batch_run.file_count, 2);
+        assert_eq!(envelope.persist_plan.batch_run.chunk_count, 2);
+        assert_eq!(envelope.persist_plan.batch_run.file_count, 2);
+    }
+
+    #[test]
+    fn test_irrecoverable_outbox_finalize_error_is_quarantined_and_requeued() {
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) \
+                 VALUES ('/tmp/outbox-poison.rs', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, 10, 1, 100)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) \
+                 VALUES ('/tmp/outbox-poison.rs', 'inflight', 1, 'claim-current', 1, 1, 'outbox', 7)",
+            )
+            .unwrap();
+
+        let payload = VectorPersistOutboxPayload {
+            updates: vec![],
+            completed_works: vec![FileVectorizationWork {
+                file_path: "/tmp/outbox-poison.rs".to_string(),
+                resumed_after_interactive_pause: false,
+            }],
+            completed_lease_snapshots: vec![FileVectorizationLeaseSnapshot {
+                file_path: "/tmp/outbox-poison.rs".to_string(),
+                claim_token: "claim-stale".to_string(),
+                lease_epoch: 1,
+            }],
+            batch_run: VectorBatchRun {
+                run_id: "outbox-poison-run".to_string(),
+                started_at_ms: 1,
+                finished_at_ms: 1,
+                provider: "cpu".to_string(),
+                model_id: CHUNK_MODEL_ID.to_string(),
+                chunk_count: 64,
+                file_count: 1,
+                input_bytes: 1024,
+                fetch_ms: 1,
+                embed_ms: 1,
+                db_write_ms: 0,
+                mark_done_ms: 0,
+                success: true,
+                error_reason: None,
+            },
+        };
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        let escaped_payload_json = payload_json.replace('\'', "''");
+        let escaped_run_id = payload.batch_run.run_id.replace('\'', "''");
+        let escaped_model_id = payload.batch_run.model_id.replace('\'', "''");
+        store
+            .execute(&format!(
+                "INSERT INTO VectorPersistOutbox (outbox_id, run_id, model_id, status, attempts, queued_at_ms, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, payload_json) \
+                 VALUES ('outbox-poison', '{}', '{}', 'inflight', 1, 1, 1, 1, 'outbox', '{}')",
+                escaped_run_id,
+                escaped_model_id,
+                escaped_payload_json
+            ))
+            .unwrap();
+
+        let mut batch_runs = vec![payload.batch_run.clone()];
+        let quarantined = reconcile_outbox_finalize_failure(
+            &store,
+            "outbox-poison",
+            &payload,
+            &anyhow::anyhow!("finalize refused: expected 1 outbox-owned rows, matched 0"),
+            &mut batch_runs,
+            "failed to finalize outbox vectorization completion: finalize refused",
+            7,
+        )
+        .unwrap();
+
+        assert!(quarantined);
+
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM VectorPersistOutbox WHERE outbox_id = 'outbox-poison'"
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue \
+                     WHERE file_path = '/tmp/outbox-poison.rs' \
+                       AND status = 'queued' \
+                       AND claim_token IS NULL \
+                       AND COALESCE(lease_owner, '') = ''"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM VectorBatchRun \
+                     WHERE run_id = 'outbox-poison-run' \
+                       AND success = FALSE"
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_irrecoverable_outbox_finalize_error_detection() {
+        assert!(is_irrecoverable_outbox_finalize_error(&anyhow::anyhow!(
+            "finalize refused: expected 9 outbox-owned rows, matched 0"
+        )));
+        assert!(is_irrecoverable_outbox_finalize_error(&anyhow::anyhow!(
+            "finalize refused: expected 2 lease snapshots, got 1"
+        )));
+        assert!(!is_irrecoverable_outbox_finalize_error(&anyhow::anyhow!(
+            "database is locked"
+        )));
     }
 
     #[test]
