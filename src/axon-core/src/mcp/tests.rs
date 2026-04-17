@@ -189,6 +189,115 @@ fn guided_response_includes_soll_block_when_authorization_signal_is_present() {
 }
 
 #[test]
+fn query_guidance_facts_capture_exact_symbol_miss_with_suggestion() {
+    let server = create_test_server();
+    let candidates = GuidanceCandidates {
+        symbols: vec!["Axon.Scanner.scan".to_string()],
+        project_codes: vec!["AXO".to_string()],
+        canonical_sources: vec!["soll_export".to_string()],
+    };
+
+    let facts = server.extract_query_guidance_facts(
+        "trigger_scan",
+        Some("AXO"),
+        &candidates,
+        0,
+        false,
+        true,
+    );
+
+    assert!(facts.contains(&GuidanceFact::problem_signal("input_not_found")));
+    assert!(facts.contains(&GuidanceFact::candidate_symbol("Axon.Scanner.scan")));
+    assert!(facts.contains(&GuidanceFact::resolved_project_scope("AXO")));
+    assert!(facts.contains(&GuidanceFact::canonical_source("soll_export")));
+}
+
+#[test]
+fn inspect_guidance_facts_capture_symbol_miss_with_canonical_project() {
+    let server = create_test_server();
+    let candidates = GuidanceCandidates {
+        symbols: vec!["axon_retrieve_context".to_string()],
+        project_codes: vec!["AXO".to_string()],
+        canonical_sources: Vec::new(),
+    };
+
+    let facts = server.extract_inspect_guidance_facts(
+        "axon_retrieve_contex",
+        Some("AXO"),
+        &candidates,
+        0,
+        true,
+    );
+
+    assert!(facts.contains(&GuidanceFact::problem_signal("input_not_found")));
+    assert!(facts.contains(&GuidanceFact::candidate_symbol("axon_retrieve_context")));
+    assert!(facts.contains(&GuidanceFact::resolved_project_scope("AXO")));
+}
+
+#[test]
+fn query_guidance_facts_capture_ambiguity_for_duplicate_symbol_names_across_projects() {
+    let server = create_test_server();
+    let candidates = GuidanceCandidates {
+        symbols: vec!["scan".to_string(), "scan".to_string()],
+        project_codes: vec!["PJA".to_string(), "PJB".to_string()],
+        canonical_sources: Vec::new(),
+    };
+
+    let facts = server.extract_query_guidance_facts("scan", None, &candidates, 0, false, false);
+
+    assert!(facts.contains(&GuidanceFact::problem_signal("input_ambiguous")));
+    assert!(facts.contains(&GuidanceFact::candidate_project_code("PJA")));
+    assert!(facts.contains(&GuidanceFact::candidate_project_code("PJB")));
+}
+
+#[test]
+fn query_guidance_facts_capture_wrong_scope_when_candidates_exist_elsewhere() {
+    let server = create_test_server();
+    let candidates = GuidanceCandidates {
+        symbols: vec!["scan".to_string()],
+        project_codes: vec!["PJA".to_string()],
+        canonical_sources: Vec::new(),
+    };
+
+    let facts =
+        server.extract_query_guidance_facts("scan", Some("AXO"), &candidates, 0, false, false);
+
+    assert!(facts.contains(&GuidanceFact::problem_signal("wrong_project_scope")));
+    assert!(facts.contains(&GuidanceFact::candidate_project_code("PJA")));
+}
+
+#[test]
+fn query_guidance_facts_capture_degraded_index_signal() {
+    let server = create_test_server();
+    let facts = server.extract_query_guidance_facts(
+        "scan",
+        Some("AXO"),
+        &GuidanceCandidates::default(),
+        3,
+        false,
+        false,
+    );
+
+    assert!(facts.contains(&GuidanceFact::IndexIncomplete));
+    assert!(facts.contains(&GuidanceFact::result_degraded("index_partial")));
+}
+
+#[test]
+fn query_guidance_facts_capture_vectorization_incomplete_signal() {
+    let server = create_test_server();
+    let facts = server.extract_query_guidance_facts(
+        "scan",
+        Some("AXO"),
+        &GuidanceCandidates::default(),
+        0,
+        true,
+        false,
+    );
+
+    assert!(facts.contains(&GuidanceFact::VectorizationIncomplete));
+}
+
+#[test]
 fn test_mcp_tools_list() {
     let server = create_test_server();
     let req = JsonRpcRequest {

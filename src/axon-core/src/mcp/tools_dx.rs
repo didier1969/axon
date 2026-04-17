@@ -2,6 +2,7 @@ use crate::embedding_contract::DIMENSION;
 use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
+use super::{GuidanceCandidates, GuidanceFact};
 use super::McpServer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +40,85 @@ fn json_i64(value: &Value) -> Option<i64> {
 }
 
 impl McpServer {
+    fn canonical_source_names(canonical_sources: Option<&Value>) -> Vec<String> {
+        canonical_sources
+            .and_then(Value::as_object)
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn extract_query_guidance_facts(
+        &self,
+        query_text: &str,
+        project: Option<&str>,
+        candidates: &GuidanceCandidates,
+        degraded_file_count: i64,
+        vectorization_incomplete: bool,
+        exact_match_missing: bool,
+    ) -> Vec<GuidanceFact> {
+        let mut facts = vec![GuidanceFact::requested_target(query_text)];
+        if let Some(project_code) = project {
+            facts.push(GuidanceFact::resolved_project_scope(project_code));
+        }
+
+        for symbol in &candidates.symbols {
+            facts.push(GuidanceFact::candidate_symbol(symbol.clone()));
+        }
+        for code in &candidates.project_codes {
+            facts.push(GuidanceFact::candidate_project_code(code.clone()));
+        }
+        for source in &candidates.canonical_sources {
+            facts.push(GuidanceFact::canonical_source(source.clone()));
+        }
+
+        if degraded_file_count > 0 {
+            facts.push(GuidanceFact::IndexIncomplete);
+            facts.push(GuidanceFact::result_degraded("index_partial"));
+        }
+        if vectorization_incomplete {
+            facts.push(GuidanceFact::VectorizationIncomplete);
+        }
+
+        if let Some(project_code) = project {
+            if !candidates.project_codes.is_empty()
+                && !candidates.project_codes.iter().any(|code| code == project_code)
+            {
+                facts.push(GuidanceFact::problem_signal("wrong_project_scope"));
+                return facts;
+            }
+        }
+
+        if candidates.project_codes.len() > 1 {
+            facts.push(GuidanceFact::problem_signal("input_ambiguous"));
+        } else if exact_match_missing && !candidates.symbols.is_empty() {
+            facts.push(GuidanceFact::problem_signal("input_not_found"));
+        }
+
+        facts
+    }
+
+    pub(crate) fn extract_inspect_guidance_facts(
+        &self,
+        symbol: &str,
+        project: Option<&str>,
+        candidates: &GuidanceCandidates,
+        degraded_symbol_count: i64,
+        exact_match_missing: bool,
+    ) -> Vec<GuidanceFact> {
+        let mut facts = self.extract_query_guidance_facts(
+            symbol,
+            project,
+            candidates,
+            degraded_symbol_count,
+            false,
+            exact_match_missing,
+        );
+        if degraded_symbol_count > 0 {
+            facts.push(GuidanceFact::result_degraded("symbol_partial"));
+        }
+        facts
+    }
+
     pub(crate) fn project_scope_summary(
         &self,
         project: Option<&str>,
@@ -556,6 +636,24 @@ impl McpServer {
                 } else {
                     format!("project:{}", project)
                 };
+                let canonical_sources = crate::mcp::McpServer::canonical_sources_snapshot();
+                let candidates = GuidanceCandidates {
+                    symbols: rows
+                        .iter()
+                        .filter_map(|row| row.first().and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect(),
+                    project_codes: Vec::new(),
+                    canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
+                };
+                let _guidance_facts = self.extract_query_guidance_facts(
+                    query_text,
+                    (project != "*").then_some(project),
+                    &candidates,
+                    self.degraded_file_count((project != "*").then_some(project)),
+                    semantic_fallback_reason.is_some(),
+                    false,
+                );
                 let result_category = rows
                     .first()
                     .and_then(|row| row.get(2))
@@ -877,6 +975,29 @@ impl McpServer {
         let project = args.get("project").and_then(|v| v.as_str());
         let Some(symbol_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
             let suggestions = self.suggest_scoped_symbols_canonical(symbol, project, 8);
+            let suggestion_rows: Vec<Vec<Value>> =
+                serde_json::from_str(&suggestions).unwrap_or_default();
+            let canonical_sources = crate::mcp::McpServer::canonical_sources_snapshot();
+            let candidates = GuidanceCandidates {
+                symbols: suggestion_rows
+                    .iter()
+                    .filter_map(|row| row.first().and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect(),
+                project_codes: suggestion_rows
+                    .iter()
+                    .filter_map(|row| row.get(2).and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect(),
+                canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
+            };
+            let _guidance_facts = self.extract_inspect_guidance_facts(
+                symbol,
+                project,
+                &candidates,
+                self.degraded_symbol_count(symbol, project),
+                true,
+            );
             let scope = project
                 .map(|p| format!("project:{}", p))
                 .unwrap_or_else(|| "workspace:*".to_string());
@@ -937,6 +1058,23 @@ impl McpServer {
                 let scope = project
                     .map(|p| format!("project:{}", p))
                     .unwrap_or_else(|| "workspace:*".to_string());
+                let canonical_sources = crate::mcp::McpServer::canonical_sources_snapshot();
+                let candidates = GuidanceCandidates {
+                    symbols: rows
+                        .iter()
+                        .filter_map(|row| row.first().and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect(),
+                    project_codes: Vec::new(),
+                    canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
+                };
+                let _guidance_facts = self.extract_inspect_guidance_facts(
+                    symbol,
+                    project,
+                    &candidates,
+                    self.degraded_symbol_count(symbol, project),
+                    false,
+                );
                 let evidence = format!(
                     "{}{}{}",
                     project_note.unwrap_or_default(),

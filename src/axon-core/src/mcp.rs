@@ -22,7 +22,10 @@ mod tools_soll;
 mod tools_system;
 
 use self::catalog::tools_catalog;
-pub(crate) use self::guidance::{build_guided_response, GuidanceOutcome, SollGuidance};
+#[allow(unused_imports)]
+pub(crate) use self::guidance::{
+    build_guided_response, GuidanceCandidates, GuidanceFact, GuidanceOutcome, SollGuidance,
+};
 pub use self::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 
 pub struct McpServer {
