@@ -1,6 +1,7 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
 use super::*;
+use super::guidance;
 use crate::embedder::embedding_lane_config_from_env;
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION,
@@ -102,6 +103,89 @@ fn graph_embedding_sql(seed: &[f32]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("CAST([{literal}] AS FLOAT[{dimension}])")
+}
+
+#[test]
+fn guided_response_omits_guidance_block_when_problem_class_is_none() {
+    let response = guidance::build_guided_response(
+        json!({ "status": "ok", "summary": "exact symbol resolved" }),
+        guidance::GuidanceOutcome::none(),
+    );
+
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["summary"], "exact symbol resolved");
+    assert!(response.get("problem_class").is_none());
+    assert!(response.get("next_best_actions").is_none());
+    assert!(response.get("soll").is_none());
+}
+
+#[test]
+fn guided_response_includes_compact_guidance_fields_only_when_present() {
+    let response = guidance::build_guided_response(
+        json!({ "status": "warn_input_not_found", "summary": "symbol not found in current scope" }),
+        guidance::GuidanceOutcome {
+            problem_class: Some("input_not_found".to_string()),
+            likely_cause: Some("exact_symbol_mismatch".to_string()),
+            next_best_actions: vec![
+                "retry with suggested symbol".to_string(),
+                "use query to broaden recall".to_string(),
+            ],
+            confidence: Some("low".to_string()),
+            soll: None,
+        },
+    );
+
+    assert_eq!(response["problem_class"], "input_not_found");
+    assert_eq!(response["likely_cause"], "exact_symbol_mismatch");
+    assert_eq!(response["confidence"], "low");
+    assert_eq!(response["next_best_actions"][0], "retry with suggested symbol");
+    assert!(response.get("soll").is_none());
+}
+
+#[test]
+fn guided_response_omits_invalid_soll_block_without_authorization_signal() {
+    let response = guidance::build_guided_response(
+        json!({ "status": "ok", "summary": "code evidence found" }),
+        guidance::GuidanceOutcome {
+            problem_class: Some("missing_rationale_in_soll".to_string()),
+            likely_cause: None,
+            next_best_actions: vec!["review current SOLL context".to_string()],
+            confidence: Some("medium".to_string()),
+            soll: Some(guidance::SollGuidance {
+                recommended_action: "recommend_update".to_string(),
+                update_kind: "decision_or_requirement".to_string(),
+                reason: "intentional rationale is underspecified".to_string(),
+                requires_authorization: None,
+            }),
+        },
+    );
+
+    assert_eq!(response["problem_class"], "missing_rationale_in_soll");
+    assert!(response.get("soll").is_none());
+}
+
+#[test]
+fn guided_response_includes_soll_block_when_authorization_signal_is_present() {
+    let response = guidance::build_guided_response(
+        json!({ "status": "ok", "summary": "code evidence found" }),
+        guidance::GuidanceOutcome {
+            problem_class: Some("missing_rationale_in_soll".to_string()),
+            likely_cause: None,
+            next_best_actions: vec!["review current SOLL context".to_string()],
+            confidence: Some("medium".to_string()),
+            soll: Some(guidance::SollGuidance {
+                recommended_action: "recommend_update".to_string(),
+                update_kind: "decision_or_requirement".to_string(),
+                reason: "intentional rationale is underspecified".to_string(),
+                requires_authorization: Some(true),
+            }),
+        },
+    );
+
+    assert_eq!(response["problem_class"], "missing_rationale_in_soll");
+    assert_eq!(response["soll"]["recommended_action"], "recommend_update");
+    assert_eq!(response["soll"]["update_kind"], "decision_or_requirement");
+    assert_eq!(response["soll"]["requires_authorization"], true);
 }
 
 #[test]

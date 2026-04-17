@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 mod catalog;
 mod dispatch;
 mod format;
+mod guidance;
 mod protocol;
 mod soll;
 #[cfg(test)]
@@ -21,6 +22,7 @@ mod tools_soll;
 mod tools_system;
 
 use self::catalog::tools_catalog;
+pub(crate) use self::guidance::{build_guided_response, GuidanceOutcome, SollGuidance};
 pub use self::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 
 pub struct McpServer {
