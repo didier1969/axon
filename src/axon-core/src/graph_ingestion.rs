@@ -714,7 +714,7 @@ impl GraphStore {
             .collect::<Vec<_>>()
             .join(" OR ");
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let refreshed = usize::try_from(self.query_count(&format!(
+        let refreshed = usize::try_from(self.query_count_writer(&format!(
             "SELECT count(*) FROM VectorPersistOutbox \
              WHERE status = 'inflight' \
                AND COALESCE(lease_owner, '') = 'outbox' \
@@ -1860,7 +1860,7 @@ impl GraphStore {
             max_interruptions.max(0),
             predicates
         );
-        let affected = usize::try_from(self.query_count(&affected_query)?).unwrap_or(0);
+        let affected = usize::try_from(self.query_count_writer(&affected_query)?).unwrap_or(0);
 
         if affected == 0 {
             return Ok(0);
@@ -1929,7 +1929,7 @@ impl GraphStore {
             .collect::<Vec<_>>()
             .join(" OR ");
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let refreshed = usize::try_from(self.query_count(&format!(
+        let refreshed = usize::try_from(self.query_count_writer(&format!(
             "SELECT count(*) FROM FileVectorizationQueue \
              WHERE status = 'inflight' \
                AND claim_token IS NOT NULL \
@@ -1986,7 +1986,7 @@ impl GraphStore {
             .collect::<Vec<_>>()
             .join(" OR ");
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let transferred = usize::try_from(self.query_count(&format!(
+        let transferred = usize::try_from(self.query_count_writer(&format!(
             "SELECT count(*) FROM FileVectorizationQueue \
              WHERE status = 'inflight' \
                AND claim_token IS NOT NULL \
@@ -2046,7 +2046,7 @@ impl GraphStore {
             .map(|item| format!("(file_path = '{}')", Self::escape_sql(&item.file_path)))
             .collect::<Vec<_>>()
             .join(" OR ");
-        let raw = self.query_json(&format!(
+        let raw = self.query_json_writer(&format!(
             "SELECT file_path, claim_token, COALESCE(lease_epoch, 0) \
              FROM FileVectorizationQueue \
              WHERE status = 'inflight' \
@@ -2141,8 +2141,9 @@ impl GraphStore {
     }
 
     pub fn clear_stale_inflight_file_vectorization_work(&self) -> Result<()> {
-        let recovered = self
-            .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'")?;
+        let recovered = self.query_count_writer(
+            "SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'",
+        )?;
         self.execute(
             "UPDATE FileVectorizationQueue \
              SET status = 'queued', \
@@ -2166,7 +2167,7 @@ impl GraphStore {
         max_claim_age_ms: i64,
     ) -> Result<usize> {
         let cutoff_ms = now_ms.saturating_sub(max_claim_age_ms.max(0));
-        let recovered = usize::try_from(self.query_count(&format!(
+        let recovered = usize::try_from(self.query_count_writer(&format!(
             "SELECT count(*) \
              FROM FileVectorizationQueue fq \
              LEFT JOIN File f ON f.path = fq.file_path \
@@ -2243,7 +2244,7 @@ impl GraphStore {
                )",
             Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
         );
-        let raw = self.query_json(&query)?;
+        let raw = self.query_json_writer(&query)?;
         if raw == "[]" || raw.is_empty() {
             return Ok(0);
         }
@@ -4272,6 +4273,40 @@ mod tests {
             claimed[0].payload.batch_run.run_id,
             "outbox-stale-reader-test"
         );
+    }
+
+    #[test]
+    fn capture_file_vectorization_lease_snapshots_reads_writer_truth_when_reader_is_stale() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) VALUES \
+                 ('/tmp/stale-lease-snapshot.rs', 'inflight', 1, 'claim-stale-lease', 1, 1, 'vector', 2)",
+            )
+            .unwrap();
+        store.refresh_reader_snapshot().unwrap();
+        store
+            .execute(
+                "UPDATE FileVectorizationQueue \
+                 SET lease_epoch = 3 \
+                 WHERE file_path = '/tmp/stale-lease-snapshot.rs'",
+            )
+            .unwrap();
+
+        let snapshots = store
+            .capture_file_vectorization_lease_snapshots(
+                &[FileVectorizationWork {
+                    file_path: "/tmp/stale-lease-snapshot.rs".to_string(),
+                    resumed_after_interactive_pause: false,
+                }],
+                "vector",
+            )
+            .unwrap();
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].file_path, "/tmp/stale-lease-snapshot.rs");
+        assert_eq!(snapshots[0].claim_token, "claim-stale-lease");
+        assert_eq!(snapshots[0].lease_epoch, 3);
     }
 
     #[test]
