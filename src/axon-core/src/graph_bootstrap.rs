@@ -765,6 +765,8 @@ impl GraphStore {
     }
 
     fn ensure_additive_soll_schema(&self) -> Result<()> {
+        self.normalize_soll_registry()?;
+        self.normalize_project_code_registry_schema()?;
         let _ = self.execute(
             "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0",
         );
@@ -818,6 +820,173 @@ impl GraphStore {
         self.normalize_project_code_registry()?;
         self.seed_project_code_registry()?;
         self.seed_global_guidelines()?;
+        Ok(())
+    }
+
+    fn normalize_soll_registry(&self) -> Result<()> {
+        let raw = self.query_json("SELECT * FROM pragma_table_info('soll.Registry')")?;
+        let columns: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let has_project_code = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_code"))
+                .unwrap_or(false)
+        });
+        let has_project_slug = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_slug"))
+                .unwrap_or(false)
+        });
+
+        if has_project_code && !has_project_slug {
+            return Ok(());
+        }
+
+        if !has_project_code && !has_project_slug {
+            return Ok(());
+        }
+
+        self.execute("DROP TABLE IF EXISTS soll.Registry_rebuilt")?;
+        self.execute(
+            "CREATE TABLE soll.Registry_rebuilt (
+                project_code VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL',
+                id VARCHAR DEFAULT 'AXON_GLOBAL',
+                last_vis BIGINT DEFAULT 0,
+                last_pil BIGINT DEFAULT 0,
+                last_req BIGINT DEFAULT 0,
+                last_cpt BIGINT DEFAULT 0,
+                last_dec BIGINT DEFAULT 0,
+                last_mil BIGINT DEFAULT 0,
+                last_val BIGINT DEFAULT 0,
+                last_stk BIGINT DEFAULT 0,
+                last_gui BIGINT DEFAULT 0,
+                last_prv BIGINT DEFAULT 0,
+                last_rev BIGINT DEFAULT 0
+            )",
+        )?;
+
+        let source_project_expr = match (has_project_code, has_project_slug) {
+            (true, true) => {
+                "COALESCE(NULLIF(TRIM(project_code), ''), NULLIF(TRIM(project_slug), ''), 'AXON_GLOBAL')"
+            }
+            (true, false) => "COALESCE(NULLIF(TRIM(project_code), ''), 'AXON_GLOBAL')",
+            (false, true) => "COALESCE(NULLIF(TRIM(project_slug), ''), 'AXON_GLOBAL')",
+            (false, false) => unreachable!(),
+        };
+
+        let source_gui_expr = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("last_gui"))
+                .unwrap_or(false)
+        });
+        let last_gui_expr = if source_gui_expr {
+            "MAX(COALESCE(last_gui, 0))"
+        } else {
+            "0"
+        };
+
+        self.execute(&format!(
+            "INSERT INTO soll.Registry_rebuilt (
+                project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev
+            )
+            SELECT
+                UPPER({source_project_expr}) AS project_code,
+                'AXON_GLOBAL' AS id,
+                MAX(COALESCE(last_vis, 0)) AS last_vis,
+                MAX(COALESCE(last_pil, 0)) AS last_pil,
+                MAX(COALESCE(last_req, 0)) AS last_req,
+                MAX(COALESCE(last_cpt, 0)) AS last_cpt,
+                MAX(COALESCE(last_dec, 0)) AS last_dec,
+                MAX(COALESCE(last_mil, 0)) AS last_mil,
+                MAX(COALESCE(last_val, 0)) AS last_val,
+                MAX(COALESCE(last_stk, 0)) AS last_stk,
+                {last_gui_expr} AS last_gui,
+                MAX(COALESCE(last_prv, 0)) AS last_prv,
+                MAX(COALESCE(last_rev, 0)) AS last_rev
+            FROM soll.Registry
+            GROUP BY 1"
+        ))?;
+
+        self.execute("DROP TABLE soll.Registry")?;
+        self.execute("ALTER TABLE soll.Registry_rebuilt RENAME TO Registry")?;
+        Ok(())
+    }
+
+    fn normalize_project_code_registry_schema(&self) -> Result<()> {
+        let raw = self.query_json("SELECT * FROM pragma_table_info('soll.ProjectCodeRegistry')")?;
+        let columns: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let has_project_code = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_code"))
+                .unwrap_or(false)
+        });
+        let has_project_name = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_name"))
+                .unwrap_or(false)
+        });
+        let has_project_path = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_path"))
+                .unwrap_or(false)
+        });
+        let has_legacy_slug = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_slug"))
+                .unwrap_or(false)
+        });
+
+        if has_project_code && has_project_name && has_project_path && !has_legacy_slug {
+            return Ok(());
+        }
+
+        self.execute("DROP TABLE IF EXISTS soll.ProjectCodeRegistry_rebuilt")?;
+        self.execute(
+            "CREATE TABLE soll.ProjectCodeRegistry_rebuilt (
+                project_code VARCHAR PRIMARY KEY,
+                project_name VARCHAR,
+                project_path VARCHAR
+            )",
+        )?;
+
+        let project_code_expr = match (has_project_code, has_legacy_slug) {
+            (true, true) => {
+                "UPPER(COALESCE(NULLIF(TRIM(project_code), ''), NULLIF(TRIM(project_slug), '')))"
+            }
+            (true, false) => "UPPER(NULLIF(TRIM(project_code), ''))",
+            (false, true) => "UPPER(NULLIF(TRIM(project_slug), ''))",
+            (false, false) => "NULL",
+        };
+        let project_name_expr = if has_project_name {
+            "NULLIF(TRIM(project_name), '')"
+        } else {
+            "NULL"
+        };
+        let project_path_expr = if has_project_path {
+            "NULLIF(TRIM(project_path), '')"
+        } else {
+            "NULL"
+        };
+
+        self.execute(&format!(
+            "INSERT INTO soll.ProjectCodeRegistry_rebuilt (project_code, project_name, project_path)
+             SELECT project_code, project_name, project_path
+             FROM (
+                 SELECT
+                     {project_code_expr} AS project_code,
+                     {project_name_expr} AS project_name,
+                     {project_path_expr} AS project_path,
+                     ROW_NUMBER() OVER (
+                         PARTITION BY {project_code_expr}
+                         ORDER BY CASE WHEN {project_path_expr} IS NULL THEN 1 ELSE 0 END,
+                                  CASE WHEN {project_name_expr} IS NULL THEN 1 ELSE 0 END
+                     ) AS rownum
+                 FROM soll.ProjectCodeRegistry
+             ) ranked
+             WHERE project_code IS NOT NULL AND rownum = 1"
+        ))?;
+
+        self.execute("DROP TABLE soll.ProjectCodeRegistry")?;
+        self.execute("ALTER TABLE soll.ProjectCodeRegistry_rebuilt RENAME TO ProjectCodeRegistry")?;
         Ok(())
     }
 
@@ -1807,6 +1976,118 @@ mod graph_bootstrap_tests {
         assert_eq!(row[0], "BKS");
         assert_eq!(row[1], "BookingSystem");
         assert_eq!(row[2], "/home/dstadel/projects/BookingSystem");
+    }
+
+    #[test]
+    fn test_normalize_soll_registry_rebuilds_legacy_project_column_to_project_code() {
+        let store = create_test_db().unwrap();
+        store.execute("DROP TABLE soll.Registry").unwrap();
+        store
+            .execute(
+                "CREATE TABLE soll.Registry (
+                project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL',
+                id VARCHAR DEFAULT 'AXON_GLOBAL',
+                last_req BIGINT DEFAULT 0,
+                last_cpt BIGINT DEFAULT 0,
+                last_dec BIGINT DEFAULT 0,
+                last_mil BIGINT DEFAULT 0,
+                last_val BIGINT DEFAULT 0,
+                last_pil BIGINT DEFAULT 0,
+                last_vis BIGINT DEFAULT 0,
+                last_stk BIGINT DEFAULT 0,
+                last_prv BIGINT DEFAULT 0,
+                last_rev BIGINT DEFAULT 0,
+                last_gui BIGINT DEFAULT 0
+            )",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.Registry (project_slug, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev)
+                 VALUES ('AXO', 'AXON_GLOBAL', 7, 6, 5, 4, 3, 2, 1, 0, 9, 8, 10)",
+            )
+            .unwrap();
+
+        store.normalize_soll_registry().unwrap();
+
+        let cols = store
+            .query_json("SELECT name FROM pragma_table_info('soll.Registry') ORDER BY cid")
+            .unwrap();
+        let parsed_cols: Vec<Vec<String>> = serde_json::from_str(&cols).unwrap();
+        let col_names: Vec<String> = parsed_cols
+            .into_iter()
+            .filter_map(|row| row.first().cloned())
+            .collect();
+        assert!(col_names.iter().any(|name| name == "project_code"));
+        assert!(!col_names.iter().any(|name| name == "project_slug"));
+
+        let rows = store
+            .query_json(
+                "SELECT project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev
+                 FROM soll.Registry
+                 WHERE project_code = 'AXO'",
+            )
+            .unwrap();
+        let parsed: Vec<Vec<String>> = serde_json::from_str(&rows).unwrap();
+        let row = parsed.first().expect("registry row");
+        assert_eq!(row[0], "AXO");
+        assert_eq!(row[1], "AXON_GLOBAL");
+        assert_eq!(row[2], "7");
+        assert_eq!(row[10], "9");
+        assert_eq!(row[11], "8");
+        assert_eq!(row[12], "10");
+    }
+
+    #[test]
+    fn test_normalize_project_code_registry_schema_removes_legacy_slug_column() {
+        let store = create_test_db().unwrap();
+        store
+            .execute("DROP TABLE soll.ProjectCodeRegistry")
+            .unwrap();
+        store
+            .execute(
+                "CREATE TABLE soll.ProjectCodeRegistry (
+                project_code VARCHAR PRIMARY KEY,
+                project_slug VARCHAR,
+                project_path VARCHAR,
+                project_name VARCHAR
+            )",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.ProjectCodeRegistry (project_code, project_slug, project_path, project_name)
+                 VALUES ('AXO', 'axon', '/home/dstadel/projects/axon', 'Axon')",
+            )
+            .unwrap();
+
+        store.normalize_project_code_registry_schema().unwrap();
+
+        let cols = store
+            .query_json(
+                "SELECT name FROM pragma_table_info('soll.ProjectCodeRegistry') ORDER BY cid",
+            )
+            .unwrap();
+        let parsed_cols: Vec<Vec<String>> = serde_json::from_str(&cols).unwrap();
+        let col_names: Vec<String> = parsed_cols
+            .into_iter()
+            .filter_map(|row| row.first().cloned())
+            .collect();
+        assert!(col_names.iter().any(|name| name == "project_code"));
+        assert!(!col_names.iter().any(|name| name == "project_slug"));
+
+        let rows = store
+            .query_json(
+                "SELECT project_code, project_name, project_path
+                 FROM soll.ProjectCodeRegistry
+                 WHERE project_code = 'AXO'",
+            )
+            .unwrap();
+        let parsed: Vec<Vec<String>> = serde_json::from_str(&rows).unwrap();
+        let row = parsed.first().expect("project code registry row");
+        assert_eq!(row[0], "AXO");
+        assert_eq!(row[1], "Axon");
+        assert_eq!(row[2], "/home/dstadel/projects/axon");
     }
 
     #[test]
