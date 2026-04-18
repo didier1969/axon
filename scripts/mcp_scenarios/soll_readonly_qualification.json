@@ -1,0 +1,31 @@
+{
+  "steps": [
+    {
+      "name": "scenario.soll.query_context",
+      "tool": "soll_query_context",
+      "args": {
+        "limit": 5
+      }
+    },
+    {
+      "name": "scenario.soll.work_plan",
+      "tool": "soll_work_plan",
+      "args": {
+        "format": "json",
+        "limit": 10,
+        "top": 3,
+        "include_ist": true
+      }
+    },
+    {
+      "name": "scenario.soll.validate",
+      "tool": "soll_validate",
+      "args": {}
+    },
+    {
+      "name": "scenario.soll.verify_requirements",
+      "tool": "soll_verify_requirements",
+      "args": {}
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "requires": {
+    "authoritative_guidance": true,
+    "runtime_profile": "full_autonomous"
+  },
+  "cases": [
+    {
+      "name": "live.inspect.authoritative_input_not_found",
+      "source": "live",
+      "tool": "inspect",
+      "args": {
+        "symbol": "axon_retrieve_contex",
+        "project": "AXO"
+      },
+      "expect": {
+        "problem_class": "input_not_found",
+        "likely_cause": "exact_symbol_mismatch",
+        "confidence": "low",
+        "next_best_actions": [
+          "retry_with_suggested_symbol",
+          "use_query_to_broaden_recall"
+        ]
+      }
+    }
+  ]
+}

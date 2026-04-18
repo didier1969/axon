@@ -765,6 +765,7 @@ impl GraphStore {
     }
 
     fn ensure_additive_soll_schema(&self) -> Result<()> {
+        self.normalize_project_code_registry_schema()?;
         let _ = self.execute(
             "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0",
         );
@@ -817,7 +818,181 @@ impl GraphStore {
         self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
         self.normalize_project_code_registry()?;
         self.seed_project_code_registry()?;
+        self.normalize_soll_registry()?;
+        self.normalize_revision_preview_schema()?;
         self.seed_global_guidelines()?;
+        Ok(())
+    }
+
+    fn normalize_soll_registry(&self) -> Result<()> {
+        let raw = self.query_json("SELECT * FROM pragma_table_info('soll.Registry')")?;
+        let columns: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let has_project_code = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_code"))
+                .unwrap_or(false)
+        });
+        let has_project_slug = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_slug"))
+                .unwrap_or(false)
+        });
+
+        if !has_project_code {
+            return Err(anyhow!(
+                "Legacy soll.Registry schema detected: missing canonical project_code column"
+            ));
+        }
+        if has_project_slug {
+            return Err(anyhow!(
+                "Legacy soll.Registry schema detected: forbidden project_slug column still present"
+            ));
+        }
+
+        let raw_rows = self.query_json(
+            "SELECT
+                COALESCE(NULLIF(TRIM(project_code), ''), ''),
+                COALESCE(id, 'AXON_GLOBAL')
+             FROM soll.Registry",
+        )?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw_rows).unwrap_or_default();
+        for row in rows {
+            if row.len() < 2 {
+                continue;
+            }
+            let project_code = row[0].trim();
+            if project_code.is_empty() || !crate::project_meta::is_valid_project_code(project_code)
+            {
+                return Err(anyhow!(
+                    "Invalid project_code in soll.Registry: {}",
+                    project_code
+                ));
+            }
+            let resolved = self.query_count(&format!(
+                "SELECT count(*) FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
+                project_code.replace('\'', "''")
+            ))?;
+            if resolved == 0 {
+                return Err(anyhow!(
+                    "Unknown project_code in soll.Registry: {}",
+                    project_code
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn normalize_revision_preview_schema(&self) -> Result<()> {
+        let raw = self.query_json("SELECT * FROM pragma_table_info('soll.RevisionPreview')")?;
+        let columns: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let has_project_code = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_code"))
+                .unwrap_or(false)
+        });
+        let has_project_slug = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_slug"))
+                .unwrap_or(false)
+        });
+
+        if !has_project_code {
+            return Err(anyhow!(
+                "Legacy soll.RevisionPreview schema detected: missing canonical project_code column"
+            ));
+        }
+        if has_project_slug {
+            return Err(anyhow!(
+                "Legacy soll.RevisionPreview schema detected: forbidden project_slug column still present"
+            ));
+        }
+
+        let raw_rows = self.query_json(
+            "SELECT
+                preview_id,
+                COALESCE(author, ''),
+                COALESCE(NULLIF(TRIM(project_code), ''), ''),
+                COALESCE(payload, ''),
+                COALESCE(created_at, 0)
+             FROM soll.RevisionPreview
+             ORDER BY created_at ASC, preview_id ASC",
+        )?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw_rows).unwrap_or_default();
+
+        for row in rows {
+            if row.len() < 5 {
+                continue;
+            }
+            let preview_id = row[0].trim();
+            if preview_id.is_empty() {
+                continue;
+            }
+            let project_code = row[2].trim();
+            if project_code.is_empty() || !crate::project_meta::is_valid_project_code(project_code)
+            {
+                return Err(anyhow!(
+                    "Invalid project_code in soll.RevisionPreview: {}",
+                    project_code
+                ));
+            }
+            let resolved = self.query_count(&format!(
+                "SELECT count(*) FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
+                project_code.replace('\'', "''")
+            ))?;
+            if resolved == 0 {
+                return Err(anyhow!(
+                    "Unknown project_code in soll.RevisionPreview: {}",
+                    project_code
+                ));
+            }
+
+            if let Some((_, preview_code, _)) = parse_prefixed_entity_id(preview_id) {
+                if preview_code != project_code {
+                    return Err(anyhow!(
+                        "RevisionPreview project_code mismatch: preview_id={} project_code={}",
+                        preview_id,
+                        project_code
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn normalize_project_code_registry_schema(&self) -> Result<()> {
+        let raw = self.query_json("SELECT * FROM pragma_table_info('soll.ProjectCodeRegistry')")?;
+        let columns: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let has_project_code = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_code"))
+                .unwrap_or(false)
+        });
+        let has_project_name = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_name"))
+                .unwrap_or(false)
+        });
+        let has_project_path = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_path"))
+                .unwrap_or(false)
+        });
+        let has_legacy_slug = columns.iter().any(|row| {
+            row.get(1)
+                .map(|value| value.eq_ignore_ascii_case("project_slug"))
+                .unwrap_or(false)
+        });
+
+        if !has_project_code || !has_project_name || !has_project_path {
+            return Err(anyhow!(
+                "Legacy soll.ProjectCodeRegistry schema detected: canonical columns are incomplete"
+            ));
+        }
+        if has_legacy_slug {
+            return Err(anyhow!(
+                "Legacy soll.ProjectCodeRegistry schema detected: forbidden project_slug column still present"
+            ));
+        }
         Ok(())
     }
 
@@ -1807,6 +1982,112 @@ mod graph_bootstrap_tests {
         assert_eq!(row[0], "BKS");
         assert_eq!(row[1], "BookingSystem");
         assert_eq!(row[2], "/home/dstadel/projects/BookingSystem");
+    }
+
+    #[test]
+    fn test_normalize_soll_registry_accepts_canonical_schema() {
+        let store = create_test_db().unwrap();
+
+        store.normalize_soll_registry().unwrap();
+    }
+
+    #[test]
+    fn test_normalize_soll_registry_rejects_legacy_slug_column() {
+        let store = create_test_db().unwrap();
+        store.execute("DROP TABLE soll.Registry").unwrap();
+        store
+            .execute(
+                "CREATE TABLE soll.Registry (
+                project_slug VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL',
+                id VARCHAR DEFAULT 'AXON_GLOBAL',
+                last_req BIGINT DEFAULT 0,
+                last_cpt BIGINT DEFAULT 0,
+                last_dec BIGINT DEFAULT 0,
+                last_mil BIGINT DEFAULT 0,
+                last_val BIGINT DEFAULT 0,
+                last_pil BIGINT DEFAULT 0,
+                last_vis BIGINT DEFAULT 0,
+                last_stk BIGINT DEFAULT 0,
+                last_prv BIGINT DEFAULT 0,
+                last_rev BIGINT DEFAULT 0,
+                last_gui BIGINT DEFAULT 0
+            )",
+            )
+            .unwrap();
+
+        let err = store.normalize_soll_registry().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy soll.Registry schema detected"));
+    }
+
+    #[test]
+    fn test_normalize_project_code_registry_schema_accepts_canonical_schema() {
+        let store = create_test_db().unwrap();
+        store.normalize_project_code_registry_schema().unwrap();
+    }
+
+    #[test]
+    fn test_normalize_project_code_registry_schema_rejects_legacy_slug_column() {
+        let store = create_test_db().unwrap();
+        store
+            .execute("DROP TABLE soll.ProjectCodeRegistry")
+            .unwrap();
+        store
+            .execute(
+                "CREATE TABLE soll.ProjectCodeRegistry (
+                project_code VARCHAR PRIMARY KEY,
+                project_slug VARCHAR,
+                project_path VARCHAR,
+                project_name VARCHAR
+            )",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.ProjectCodeRegistry (project_code, project_slug, project_path, project_name)
+                 VALUES ('AXO', 'axon', '/home/dstadel/projects/axon', 'Axon')",
+            )
+            .unwrap();
+
+        let err = store.normalize_project_code_registry_schema().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy soll.ProjectCodeRegistry schema detected"));
+    }
+
+    #[test]
+    fn test_normalize_revision_preview_schema_accepts_canonical_schema() {
+        let store = create_test_db().unwrap();
+        store.normalize_revision_preview_schema().unwrap();
+    }
+
+    #[test]
+    fn test_normalize_revision_preview_schema_rejects_legacy_slug_column() {
+        let store = create_test_db().unwrap();
+        store.execute("DROP TABLE soll.RevisionPreview").unwrap();
+        store
+            .execute(
+                "CREATE TABLE soll.RevisionPreview (
+                preview_id VARCHAR PRIMARY KEY,
+                author VARCHAR,
+                project_slug VARCHAR,
+                payload VARCHAR,
+                created_at BIGINT
+            )",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO soll.RevisionPreview (preview_id, author, project_slug, payload, created_at)
+                 VALUES ('PRV-HYD-002', 'unknown', 'HydraDB', '{}', 42)",
+            )
+            .unwrap();
+
+        let err = store.normalize_revision_preview_schema().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Legacy soll.RevisionPreview schema detected"));
     }
 
     #[test]

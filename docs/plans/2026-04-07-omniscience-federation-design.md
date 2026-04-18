@@ -5,7 +5,7 @@
 **Goal:** Remplacer la découverte de projet "Zero-Config" par un enregistrement explicite (via MCP) stocké dans la base unifiée, et implémenter un polling asynchrone pour que le Démon lance les Watchers dynamiquement sur les nouveaux projets.
 
 **Architecture:** 
-1. **MCP Control Plane:** L'outil `axon_init_project` prend un `project_path` absolu, génère un slug unique (3 lettres), et insère `(project_slug, project_code, project_path)` dans `soll.ProjectCodeRegistry`.
+1. **MCP Control Plane:** L'outil `axon_init_project` prend un `project_path` absolu, dérive ou valide un code canonique (3 caractères majuscules), et insère `(project_code, project_name, project_path)` dans `soll.ProjectCodeRegistry`.
 2. **Data Plane:** La table `soll.ProjectCodeRegistry` est modifiée pour inclure la colonne `project_path VARCHAR`.
 3. **Background Orchestrator:** Une boucle asynchrone interroge `ProjectCodeRegistry` toutes les secondes. Elle compare avec un état en mémoire (`HashSet`). Pour tout nouveau projet, elle déclenche `spawn_hot_delta_watcher` et `spawn_initial_scan` sur le `project_path` absolu. L'ancien mécanisme de découverte récursive par système de fichiers est supprimé.
 
@@ -83,7 +83,7 @@ Dans `main.rs`, supprimer `axon_core::project_meta::discover_project_identities(
 
 **Step 2: Créer la boucle asynchrone (Polling)**
 Dans `main_background.rs`, créer `pub fn spawn_federation_orchestrator(store: Arc<GraphStore>, ...)`.
-Cette boucle fait un `SELECT project_slug, project_path FROM soll.ProjectCodeRegistry`, compare avec un `HashSet` local, et lance les `spawn_hot_delta_watcher` pour les nouveaux.
+Cette boucle fait un `SELECT project_code, project_path FROM soll.ProjectCodeRegistry`, compare avec un `HashSet` local, et lance les `spawn_hot_delta_watcher` pour les nouveaux.
 
 **Step 3: Brancher le Polling**
 Dans `main.rs`, appeler `main_background::spawn_federation_orchestrator(...)` à la place de l'ancienne logique.

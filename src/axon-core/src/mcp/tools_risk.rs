@@ -169,7 +169,8 @@ impl McpServer {
             LEFT JOIN CONTAINS con ON s.id = con.target_id
             LEFT JOIN File f ON f.path = con.source_id",
             depth
-        )};
+        )
+        };
         let params = json!({ "target_id": target_id });
 
         match self.graph_store.query_json_param(&query, &params) {
@@ -183,11 +184,27 @@ impl McpServer {
                 let mut inferred_edges = 0_i64;
 
                 for row in &rows {
-                    let caller_id = row.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let caller_id = row
+                        .first()
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let edge_type = row.get(1).and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let origin = row.get(2).and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
-                    let name = row.get(3).and_then(|v| v.as_str()).unwrap_or("-").to_string();
-                    let kind = row.get(4).and_then(|v| v.as_str()).unwrap_or("-").to_string();
+                    let origin = row
+                        .get(2)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    let name = row
+                        .get(3)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string();
+                    let kind = row
+                        .get(4)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string();
 
                     if !caller_id.is_empty() {
                         impacted_symbol_ids.insert(caller_id.clone());
@@ -223,7 +240,10 @@ impl McpServer {
                         display_rows.len()
                     )
                 } else {
-                    format_table_from_json(&display_raw, &["Fichier / Projet", "Symbole Impacté", "Type"])
+                    format_table_from_json(
+                        &display_raw,
+                        &["Fichier / Projet", "Symbole Impacté", "Type"],
+                    )
                 };
 
                 impacted_symbol_ids.insert(target_id.clone());
@@ -262,7 +282,8 @@ impl McpServer {
                     .graph_store
                     .query_json(&soll_query)
                     .unwrap_or_else(|_| "[]".to_string());
-                let soll_rows: Vec<Vec<Value>> = serde_json::from_str(&soll_raw).unwrap_or_default();
+                let soll_rows: Vec<Vec<Value>> =
+                    serde_json::from_str(&soll_raw).unwrap_or_default();
 
                 if !soll_rows.is_empty() {
                     table.push_str("\n### 🏛️ SOLL Impact (Architecture Compromise)\n\n| Entité | Type | Titre |\n| --- | --- | --- |\n");
@@ -303,7 +324,8 @@ impl McpServer {
                     confidence_label, direct_edges, nif_edges, inferred_edges
                 ));
                 evidence.push_str(&table);
-                if let Some(section) = self.build_local_projection_section(symbol, &target_id, depth)
+                if let Some(section) =
+                    self.build_local_projection_section(symbol, &target_id, depth)
                 {
                     evidence.push_str(&section);
                 }

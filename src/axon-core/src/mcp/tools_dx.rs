@@ -1,8 +1,10 @@
 use crate::embedding_contract::DIMENSION;
+use crate::service_guard::{self, ServicePressure};
 use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
 use super::McpServer;
+use super::{GuidanceCandidates, GuidanceFact};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QueryIntent {
@@ -39,6 +41,107 @@ fn json_i64(value: &Value) -> Option<i64> {
 }
 
 impl McpServer {
+    fn canonical_source_names(canonical_sources: Option<&Value>) -> Vec<String> {
+        canonical_sources
+            .and_then(Value::as_object)
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn exact_candidate_missing(rows: &[Vec<Value>], requested: &str, intent: QueryIntent) -> bool {
+        if intent != QueryIntent::ConfigLookupExact {
+            return false;
+        }
+        let requested = requested.trim().to_ascii_lowercase();
+        !rows.iter().any(|row| {
+            row.first()
+                .and_then(Value::as_str)
+                .map(|name| name.trim().eq_ignore_ascii_case(&requested))
+                .unwrap_or(false)
+        })
+    }
+
+    pub(crate) fn extract_query_guidance_facts(
+        &self,
+        query_text: &str,
+        project: Option<&str>,
+        candidates: &GuidanceCandidates,
+        degraded_file_count: i64,
+        vectorization_incomplete: bool,
+        exact_match_missing: bool,
+        backend_pressure: bool,
+    ) -> Vec<GuidanceFact> {
+        let mut facts = vec![GuidanceFact::requested_target(query_text)];
+        if let Some(project_code) = project {
+            facts.push(GuidanceFact::resolved_project_scope(project_code));
+        }
+
+        for symbol in &candidates.symbols {
+            facts.push(GuidanceFact::candidate_symbol(symbol.clone()));
+        }
+        for code in &candidates.project_codes {
+            facts.push(GuidanceFact::candidate_project_code(code.clone()));
+        }
+        for source in &candidates.canonical_sources {
+            facts.push(GuidanceFact::canonical_source(source.clone()));
+        }
+
+        if degraded_file_count > 0 {
+            facts.push(GuidanceFact::IndexIncomplete);
+            facts.push(GuidanceFact::result_degraded("index_partial"));
+        }
+        if vectorization_incomplete {
+            facts.push(GuidanceFact::VectorizationIncomplete);
+        }
+        if backend_pressure {
+            facts.push(GuidanceFact::problem_signal("backend_pressure"));
+        }
+
+        if let Some(project_code) = project {
+            if !candidates.project_codes.is_empty()
+                && !candidates
+                    .project_codes
+                    .iter()
+                    .any(|code| code == project_code)
+            {
+                facts.push(GuidanceFact::problem_signal("wrong_project_scope"));
+                return facts;
+            }
+        }
+
+        if candidates.project_codes.len() > 1 {
+            facts.push(GuidanceFact::problem_signal("input_ambiguous"));
+        } else if exact_match_missing && !candidates.symbols.is_empty() {
+            facts.push(GuidanceFact::problem_signal("input_not_found"));
+        }
+
+        facts
+    }
+
+    pub(crate) fn extract_inspect_guidance_facts(
+        &self,
+        symbol: &str,
+        project: Option<&str>,
+        candidates: &GuidanceCandidates,
+        degraded_symbol_count: i64,
+        exact_match_missing: bool,
+        backend_pressure: bool,
+    ) -> Vec<GuidanceFact> {
+        let mut facts = self.extract_query_guidance_facts(
+            symbol,
+            project,
+            candidates,
+            degraded_symbol_count,
+            false,
+            exact_match_missing,
+            backend_pressure,
+        );
+        if degraded_symbol_count > 0 {
+            facts.push(GuidanceFact::result_degraded("symbol_partial"));
+        }
+        facts
+    }
+
     pub(crate) fn project_scope_summary(
         &self,
         project: Option<&str>,
@@ -464,6 +567,8 @@ impl McpServer {
         let embedding_attempt = crate::embedder::batch_embed(vec![query_text.to_string()]);
         let semantic_fallback_reason = embedding_attempt.as_ref().err().map(|err| err.to_string());
         let embedding = embedding_attempt.ok().and_then(|v| v.into_iter().next());
+        let backend_pressure =
+            !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
         let query_limit = if query_intent == QueryIntent::ConfigLookupExact {
             25
         } else {
@@ -556,6 +661,30 @@ impl McpServer {
                 } else {
                     format!("project:{}", project)
                 };
+                let canonical_sources = crate::mcp::McpServer::canonical_sources_snapshot();
+                let candidates = GuidanceCandidates {
+                    symbols: rows
+                        .iter()
+                        .filter_map(|row| row.first().and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect(),
+                    project_codes: Vec::new(),
+                    canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
+                };
+                let exact_match_missing =
+                    Self::exact_candidate_missing(&rows, query_text, query_intent);
+                let guidance_facts = self.extract_query_guidance_facts(
+                    query_text,
+                    (project != "*").then_some(project),
+                    &candidates,
+                    self.degraded_file_count((project != "*").then_some(project)),
+                    semantic_fallback_reason.is_some(),
+                    exact_match_missing,
+                    backend_pressure,
+                );
+                let guidance_shadow = crate::mcp::guidance_outcome_to_value(
+                    &crate::mcp::classify_guidance(&guidance_facts),
+                );
                 let result_category = rows
                     .first()
                     .and_then(|row| row.get(2))
@@ -596,7 +725,15 @@ impl McpServer {
                         "high",
                     )
                 );
-                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                let response = json!({ "content": [{ "type": "text", "text": report }] });
+                let guidance = crate::mcp::classify_guidance(&guidance_facts);
+                Some(if Self::mcp_guidance_authoritative_enabled() {
+                    crate::mcp::attach_guidance_authoritative(response, guidance)
+                } else if Self::mcp_guidance_shadow_enabled() {
+                    crate::mcp::attach_guidance_shadow(response, guidance_shadow)
+                } else {
+                    response
+                })
             }
             Err(_) => self.axon_query_from_chunks(
                 query_text,
@@ -875,8 +1012,36 @@ impl McpServer {
         let symbol = args.get("symbol")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
+        let backend_pressure =
+            !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
         let Some(symbol_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
             let suggestions = self.suggest_scoped_symbols_canonical(symbol, project, 8);
+            let suggestion_rows: Vec<Vec<Value>> =
+                serde_json::from_str(&suggestions).unwrap_or_default();
+            let canonical_sources = crate::mcp::McpServer::canonical_sources_snapshot();
+            let candidates = GuidanceCandidates {
+                symbols: suggestion_rows
+                    .iter()
+                    .filter_map(|row| row.first().and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect(),
+                project_codes: suggestion_rows
+                    .iter()
+                    .filter_map(|row| row.get(2).and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect(),
+                canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
+            };
+            let guidance_facts = self.extract_inspect_guidance_facts(
+                symbol,
+                project,
+                &candidates,
+                self.degraded_symbol_count(symbol, project),
+                true,
+                backend_pressure,
+            );
+            let guidance = crate::mcp::classify_guidance(&guidance_facts);
+            let guidance_shadow = crate::mcp::guidance_outcome_to_value(&guidance);
             let scope = project
                 .map(|p| format!("project:{}", p))
                 .unwrap_or_else(|| "workspace:*".to_string());
@@ -900,7 +1065,14 @@ impl McpServer {
                     "low",
                 )
             );
-            return Some(json!({ "content": [{ "type": "text", "text": report }] }));
+            let response = json!({ "content": [{ "type": "text", "text": report }] });
+            return Some(if Self::mcp_guidance_authoritative_enabled() {
+                crate::mcp::attach_guidance_authoritative(response, guidance)
+            } else if Self::mcp_guidance_shadow_enabled() {
+                crate::mcp::attach_guidance_shadow(response, guidance_shadow)
+            } else {
+                response
+            });
         };
 
         let query = if project.is_some() {
@@ -937,6 +1109,26 @@ impl McpServer {
                 let scope = project
                     .map(|p| format!("project:{}", p))
                     .unwrap_or_else(|| "workspace:*".to_string());
+                let canonical_sources = crate::mcp::McpServer::canonical_sources_snapshot();
+                let candidates = GuidanceCandidates {
+                    symbols: rows
+                        .iter()
+                        .filter_map(|row| row.first().and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect(),
+                    project_codes: Vec::new(),
+                    canonical_sources: Self::canonical_source_names(Some(&canonical_sources)),
+                };
+                let guidance_facts = self.extract_inspect_guidance_facts(
+                    symbol,
+                    project,
+                    &candidates,
+                    self.degraded_symbol_count(symbol, project),
+                    false,
+                    backend_pressure,
+                );
+                let guidance = crate::mcp::classify_guidance(&guidance_facts);
+                let guidance_shadow = crate::mcp::guidance_outcome_to_value(&guidance);
                 let evidence = format!(
                     "{}{}{}",
                     project_note.unwrap_or_default(),
@@ -959,7 +1151,14 @@ impl McpServer {
                         "high",
                     )
                 );
-                Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                let response = json!({ "content": [{ "type": "text", "text": report }] });
+                Some(if Self::mcp_guidance_authoritative_enabled() {
+                    crate::mcp::attach_guidance_authoritative(response, guidance)
+                } else if Self::mcp_guidance_shadow_enabled() {
+                    crate::mcp::attach_guidance_shadow(response, guidance_shadow)
+                } else {
+                    response
+                })
             }
             Err(_) => None,
         }
@@ -1041,8 +1240,7 @@ impl McpServer {
             )
             SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callers
             JOIN Symbol s ON s.id = callers.sym",
-            scoped_filter,
-            depth,
+            scoped_filter, depth,
         );
 
         let down_query = format!(
@@ -1063,8 +1261,7 @@ impl McpServer {
             )
             SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callees
             JOIN Symbol s ON s.id = callees.sym",
-            scoped_filter,
-            depth,
+            scoped_filter, depth,
         );
 
         let params = if let Some(project) = project {

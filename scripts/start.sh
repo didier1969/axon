@@ -553,7 +553,7 @@ if [ "$RUN_MCP_TESTS" = "1" ]; then
     done
 
     echo "🧪 Running MCP Quality Gate Validation..."
-    if devenv shell -- bash -lc './scripts/mcp_quality_gate.sh --allow-mutations'; then
+    if devenv shell -- bash -lc './scripts/mcp_quality_gate.sh'; then
         echo "✅ MCP Quality Gate passed."
     else
         echo "❌ MCP Quality Gate failed."

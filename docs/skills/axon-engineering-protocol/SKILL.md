@@ -12,10 +12,12 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 ## Runtime Rule
 - Production MCP is the server on `44129`. Do not start a second MCP server from a worktree or sandbox.
 - `status` is always the first truth surface.
+- For MCP surface qualification, prefer `./scripts/axon qualify-mcp`; treat older entrypoints such as `quality-mcp`, `validate-mcp`, `measure-mcp`, `compare-mcp`, `robustness-mcp`, and `qualify-guidance` as expert or compatibility flows.
 
 ## Identity Contract
 - Canonical IDs are server-owned: `TYPE-CODE-NNN`.
 - `CODE` comes from `.axon/meta.json`, mirrored into `soll.ProjectCodeRegistry`.
+- `axon_init_project` assigns `project_code` server-side and returns it; the LLM does not invent project codes.
 - LLMs use returned IDs; they do not fabricate them.
 - For batch plans, use `logical_key`; the server resolves canonical IDs.
 

@@ -901,12 +901,7 @@ mod tests {
         let store = GraphStore::new(&db_root_str).unwrap();
 
         store
-            .bulk_insert_files(&[(
-                "/tmp/embed_reset.ex".to_string(),
-                "PRJ".to_string(),
-                100,
-                1,
-            )])
+            .bulk_insert_files(&[("/tmp/embed_reset.ex".to_string(), "PRJ".to_string(), 100, 1)])
             .unwrap();
         store
             .execute("INSERT INTO Symbol (id, name, kind, project_code) VALUES ('sym-embed-reset', 'embed_reset', 'function', 'PRJ')")
@@ -3679,9 +3674,7 @@ mod tests {
 
         store.refresh_symbol_projection("A", 2).unwrap();
 
-        let projection_a = store
-            .query_graph_projection("symbol", "PRJ::A", 2)
-            .unwrap();
+        let projection_a = store.query_graph_projection("symbol", "PRJ::A", 2).unwrap();
         let after_d_state = store
             .query_json("SELECT source_signature, updated_at FROM GraphProjectionState WHERE anchor_type = 'symbol' AND anchor_id = 'PRJ::D' AND radius = 2")
             .unwrap();

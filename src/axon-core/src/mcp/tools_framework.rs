@@ -1231,19 +1231,18 @@ impl McpServer {
                 .and_then(|value| value.as_str())
                 .or_else(|| args.get("question").and_then(|value| value.as_str()))
                 .unwrap_or("*"),
-            args.get("project").and_then(|value| value.as_str()).unwrap_or("*"),
+            args.get("project")
+                .and_then(|value| value.as_str())
+                .unwrap_or("*"),
             mode,
             args.get("include_graph")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(mode != "brief")
         );
         let now_ms = Self::now_unix_ms();
-        if let Some(cached) = Self::cache_read(
-            Self::why_cache(),
-            &cache_key,
-            now_ms,
-            WHY_CACHE_TTL_MS,
-        ) {
+        if let Some(cached) =
+            Self::cache_read(Self::why_cache(), &cache_key, now_ms, WHY_CACHE_TTL_MS)
+        {
             return Some(cached);
         }
         let include_graph = args
@@ -1786,11 +1785,10 @@ impl McpServer {
         }
         for node in &orphan_intent_entities {
             let node_id = node.split(' ').next().unwrap_or(node);
-            let validation_signals =
-                intent_validation_map
-                    .get(node_id)
-                    .cloned()
-                    .unwrap_or_else(|| default_intent_validation.clone());
+            let validation_signals = intent_validation_map
+                .get(node_id)
+                .cloned()
+                .unwrap_or_else(|| default_intent_validation.clone());
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("orphan_intent", &validation_signals);
             findings.push(json!({
