@@ -112,10 +112,38 @@ fn assert_async_job_contract(data: &Value, expected_follow_up_tool: &str) {
         .and_then(|value| value.as_str())
         .is_some_and(|value| !value.is_empty()));
     assert!(data.get("result_contract").is_some());
+    assert!(data.get("polling_guidance").is_some());
+    assert_eq!(
+        data.get("polling_guidance")
+            .and_then(|value| value.get("poll_interval_seconds"))
+            .and_then(|value| value.as_i64()),
+        Some(2)
+    );
+    let until_states = data
+        .get("polling_guidance")
+        .and_then(|value| value.get("until_states"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(until_states
+        .iter()
+        .any(|value| value.as_str() == Some("completed")));
+    assert!(until_states
+        .iter()
+        .any(|value| value.as_str() == Some("failed")));
     assert!(data
         .get("recovery_hint")
         .and_then(|value| value.as_str())
         .is_some_and(|value| !value.is_empty()));
+}
+
+fn assert_sync_mutation_contract(data: &Value) {
+    assert!(data.get("job_id").is_none());
+    assert!(data.get("accepted").is_none());
+    assert!(data.get("next_action").is_none());
+    assert!(data.get("result_contract").is_none());
+    assert!(data.get("polling_guidance").is_none());
+    assert!(data.get("recovery_hint").is_none());
 }
 
 fn current_graph_model_id() -> String {
@@ -767,7 +795,9 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"soll_apply_plan"));
     assert!(tool_names.contains(&"soll_work_plan"));
     assert!(tool_names.contains(&"status"));
+    assert!(tool_names.contains(&"mcp_surface_diagnostics"));
     assert!(tool_names.contains(&"project_status"));
+    assert!(tool_names.contains(&"project_registry_lookup"));
     assert!(tool_names.contains(&"snapshot_history"));
     assert!(tool_names.contains(&"snapshot_diff"));
     assert!(tool_names.contains(&"conception_view"));
@@ -896,7 +926,7 @@ fn test_mcp_tools_list_include_internal_exposes_expert_tools_in_full_autonomous(
 }
 
 #[test]
-fn test_mutating_soll_manager_returns_job_and_reserved_entity_id() {
+fn test_soll_manager_stays_sync_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
     unsafe {
         std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
@@ -924,34 +954,13 @@ fn test_mutating_soll_manager_returns_job_and_reserved_entity_id() {
 
     let response = server.handle_request(req).unwrap();
     let result = response.result.unwrap();
-    let data = result.get("data").expect("job response must carry data");
-    assert_async_job_contract(data, "job_status");
-    let job_id = data
-        .get("job_id")
-        .and_then(|value| value.as_str())
-        .expect("job_id");
-    let entity_id = data
-        .get("reserved_ids")
-        .and_then(|value| value.get("entity_id"))
-        .and_then(|value| value.as_str())
-        .expect("reserved entity_id");
-    assert!(data
-        .get("accepted")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false));
-    assert!(entity_id.starts_with("CPT-AXO-"), "{entity_id}");
-    assert_eq!(
-        data.get("known_ids")
-            .and_then(|value| value.get("entity_id"))
-            .and_then(|value| value.as_str()),
-        Some(entity_id)
-    );
-
-    let final_status = wait_for_job_status(&server, job_id);
-    assert_eq!(
-        final_status["data"]["status"].as_str().unwrap(),
-        "succeeded"
-    );
+    let content = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(result.get("data").is_none());
+    assert!(content.contains("CPT-AXO-"), "{content}");
+    let entity_id = content
+        .split('`')
+        .find(|value| value.starts_with("CPT-AXO-"))
+        .expect("entity id in content");
     assert_eq!(
         server
             .graph_store
@@ -1034,7 +1043,7 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
 }
 
 #[test]
-fn test_mutating_axon_init_project_job_returns_known_project_identity_and_public_tool_name() {
+fn test_axon_init_project_stays_sync_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
     unsafe {
         std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
@@ -1055,30 +1064,91 @@ fn test_mutating_axon_init_project_job_returns_known_project_identity_and_public
 
     let response = server.handle_request(req).unwrap();
     let result = response.result.unwrap();
-    let data = result.get("data").expect("job response must carry data");
-    assert_async_job_contract(data, "job_status");
+    let data = result.get("data").expect("sync response must carry data");
+    assert_sync_mutation_contract(data);
     assert_eq!(
-        data.get("tool_name").and_then(|value| value.as_str()),
-        Some("axon_init_project")
-    );
-    assert_eq!(
-        data.get("known_ids")
-            .and_then(|value| value.get("project_code"))
-            .and_then(|value| value.as_str()),
+        data.get("project_code").and_then(|value| value.as_str()),
         Some("BKS")
     );
     assert_eq!(
-        data.get("known_ids")
-            .and_then(|value| value.get("project_name"))
-            .and_then(|value| value.as_str()),
+        data.get("project_name").and_then(|value| value.as_str()),
         Some("BookingSystem")
     );
     assert_eq!(
-        data.get("known_ids")
-            .and_then(|value| value.get("project_path"))
-            .and_then(|value| value.as_str()),
+        data.get("project_path").and_then(|value| value.as_str()),
         Some("/home/dstadel/projects/BookingSystem")
     );
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+}
+
+#[test]
+fn test_resume_vectorization_returns_job_when_mutation_jobs_are_enabled() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+    }
+    let server = create_test_server();
+    let path = "/tmp/resume_vectorization_async.rs".to_string();
+    server
+        .graph_store
+        .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
+        .unwrap();
+
+    let extraction = parser::ExtractionResult {
+        project_code: Some("PRJ".to_string()),
+        symbols: vec![parser::Symbol {
+            name: "resume_vectorization_async".to_string(),
+            kind: "func".to_string(),
+            start_line: 1,
+            end_line: 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: std::collections::HashMap::new(),
+            embedding: None,
+        }],
+        relations: vec![],
+    };
+
+    server
+        .graph_store
+        .insert_file_data_batch_with_vectorization_policy(
+            &[crate::worker::DbWriteTask::FileExtraction {
+                reservation_id: "resume-vectorization-async".to_string(),
+                path: path.clone(),
+                content: Some("fn resume_vectorization_async() {}".to_string()),
+                extraction,
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }],
+            false,
+        )
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "resume_vectorization",
+            "arguments": {}
+        })),
+        id: Some(json!(5005)),
+    };
+
+    let response = server.handle_request(req).unwrap();
+    let result = response.result.unwrap();
+    let data = result.get("data").expect("job response must carry data");
+    assert_async_job_contract(data, "job_status");
 
     let job_id = data
         .get("job_id")
@@ -1086,10 +1156,13 @@ fn test_mutating_axon_init_project_job_returns_known_project_identity_and_public
         .expect("job_id");
     let final_status = wait_for_job_status(&server, job_id);
     assert_eq!(
-        final_status["data"]["result"]["data"]["project_code"].as_str(),
-        Some("BKS")
+        final_status["data"]["status"].as_str().unwrap(),
+        "succeeded"
     );
-    assert_eq!(final_status["data"]["state"].as_str(), Some("completed"));
+    assert_eq!(
+        final_status["data"]["result"]["data"]["queued_files"].as_u64(),
+        Some(1)
+    );
 
     unsafe {
         std::env::remove_var("AXON_MCP_MUTATION_JOBS");
@@ -1144,7 +1217,7 @@ fn test_project_registry_lookup_finds_project_by_path_name_and_code() {
 }
 
 #[test]
-fn test_mutating_soll_manager_requires_project_code_for_job_reservation() {
+fn test_soll_manager_requires_project_code_even_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
     unsafe {
         std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
@@ -1181,10 +1254,6 @@ fn test_mutating_soll_manager_requires_project_code_for_job_reservation() {
         .and_then(|value| value.as_bool())
         .unwrap_or(false));
     assert!(
-        content.contains("Mutation job reservation failed"),
-        "{content}"
-    );
-    assert!(
         content.contains("`project_code` est obligatoire"),
         "{content}"
     );
@@ -1195,7 +1264,7 @@ fn test_mutating_soll_manager_requires_project_code_for_job_reservation() {
 }
 
 #[test]
-fn test_mutating_soll_commit_revision_requires_preview_id_for_job_reservation() {
+fn test_soll_commit_revision_requires_preview_id_even_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
     unsafe {
         std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
@@ -1227,11 +1296,7 @@ fn test_mutating_soll_commit_revision_requires_preview_id_for_job_reservation() 
         .and_then(|value| value.as_bool())
         .unwrap_or(false));
     assert!(
-        content.contains("Mutation job reservation failed"),
-        "{content}"
-    );
-    assert!(
-        content.contains("`preview_id` est obligatoire"),
+        content.contains("Missing required argument: preview_id"),
         "{content}"
     );
 
@@ -1454,7 +1519,9 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         .filter_map(|value| value.as_str())
         .collect::<Vec<_>>();
     assert!(public_tool_names.contains(&"status"));
+    assert!(public_tool_names.contains(&"mcp_surface_diagnostics"));
     assert!(public_tool_names.contains(&"project_status"));
+    assert!(public_tool_names.contains(&"project_registry_lookup"));
     assert!(public_tool_names.contains(&"why"));
     assert!(public_tool_names.contains(&"path"));
     assert!(public_tool_names.contains(&"anomalies"));
@@ -1483,6 +1550,39 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         .and_then(|value| value.as_str())
         .is_some());
     assert!(data["availability"]["degraded_notes"].as_array().is_some());
+    assert_eq!(
+        data["async_contract"]["canonical_follow_up_tool"].as_str(),
+        Some("job_status")
+    );
+    assert_eq!(data["async_policy"]["mode"].as_str(), Some("allowlist"));
+    assert_eq!(
+        data["async_policy"]["sync_by_default"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["async_policy"]["latency_target_p95_ms"].as_i64(),
+        Some(200)
+    );
+    let allowlisted_tools = data["async_policy"]["allowlisted_tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(allowlisted_tools.contains(&"restore_soll"));
+    assert!(allowlisted_tools.contains(&"soll_apply_plan"));
+    assert!(allowlisted_tools.contains(&"resume_vectorization"));
+    let monitored_sync_tools = data["async_policy"]["monitored_sync_mutation_tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(monitored_sync_tools.contains(&"soll_commit_revision"));
+    assert_eq!(
+        data["async_contract"]["stale_client_binding_possible"].as_bool(),
+        Some(true)
+    );
     assert_eq!(
         data["canonical_sources"]["soll_export"]["reimportable"].as_bool(),
         Some(true)
@@ -1546,6 +1646,51 @@ fn test_status_reports_retrieve_context_in_public_surface_when_full_autonomous()
         std::env::remove_var("AXON_RUNTIME_MODE");
         std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
     }
+}
+
+#[test]
+fn test_mcp_surface_diagnostics_exposes_server_truth_and_binding_caveat() {
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_surface_diagnostics",
+                "arguments": { "mode": "json" }
+            })),
+            id: Some(json!(22022)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").unwrap();
+    assert_eq!(
+        data["async_contract"]["canonical_follow_up_tool"].as_str(),
+        Some("job_status")
+    );
+    assert_eq!(data["async_policy"]["mode"].as_str(), Some("allowlist"));
+    let allowlisted_tools = data["async_policy"]["allowlisted_tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(allowlisted_tools.contains(&"restore_soll"));
+    assert!(allowlisted_tools.contains(&"soll_apply_plan"));
+    assert!(allowlisted_tools.contains(&"resume_vectorization"));
+    assert_eq!(
+        data["client_binding_notes"]["stale_client_binding_possible"].as_bool(),
+        Some(true)
+    );
+    let critical_tools = data["server_truth"]["critical_tools"].as_array().unwrap();
+    assert!(critical_tools
+        .iter()
+        .any(|value| value.as_str() == Some("project_registry_lookup")));
+    assert!(critical_tools
+        .iter()
+        .any(|value| value.as_str() == Some("axon_init_project")));
 }
 
 #[test]

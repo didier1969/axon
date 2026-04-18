@@ -38,11 +38,16 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - For batch plans, use `logical_key`; the server resolves canonical IDs.
 
 ## Surface Model
-- `core/public`: default discovery layer for routine LLM developer work.
-- `expert/internal`: advanced diagnostics, recovery, and low-level introspection.
+- one public MCP product surface
+- two execution flows only:
+  - `sync` by default
+  - `async` only for allowlisted heavy operations
+- the current async allowlist is published by `status` and `mcp_surface_diagnostics`; treat server truth as canonical
+- classify a tool as `async` only if it is semantically heavy or repeatedly fails the `p95 < 200 ms` interaction budget
 
 ## Core/Public Tools
 - `status`: runtime truth, availability, degradation, public surface.
+- `mcp_surface_diagnostics`: compact diagnostics for server truth vs possible stale client binding.
 - `project_status`: compact live situation for one project.
 - `project_registry_lookup`: resolve canonical project identity from code, name, or path.
 - `query`: discovery / broad recall.
@@ -66,21 +71,23 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 
 ## First-Choice Routing
 1. `status`
-2. `project_status` if you need the current project situation
-3. `project_registry_lookup` if project identity is uncertain
-4. `query` / `inspect` / `retrieve_context`
+2. `mcp_surface_diagnostics` if the client-visible tool binding seems inconsistent with the public surface advertised by the server
+3. `project_status` if you need the current project situation
+4. `project_registry_lookup` if project identity is uncertain
+5. `axon_init_project` when you want project initialization with canonical identity returned immediately
+6. `query` / `inspect` / `retrieve_context`
    - `query` = discover
    - `inspect` = zoom
    - `retrieve_context` = compact answerable context
-5. `impact` before risky refactor/change
-6. `why` when rationale matters
-7. `path` when flow/topology matters
-8. `anomalies` for cleanup, refactor, debt, or structural review
-9. `change_safety` before risky mutation
-10. `conception_view` if a derived architecture map is needed
-11. `job_status` as the canonical follow-up for async public mutations
-12. `axon_pre_flight_check`
-13. `axon_commit_work`
+7. `impact` before risky refactor/change
+8. `why` when rationale matters
+9. `path` when flow/topology matters
+10. `anomalies` for cleanup, refactor, debt, or structural review
+11. `change_safety` before risky mutation
+12. `conception_view` if a derived architecture map is needed
+13. `job_status` as the canonical follow-up for the async allowlist only, using the returned `polling_guidance`
+14. `axon_pre_flight_check`
+15. `axon_commit_work`
 
 ## SOLL Model
 - `Vision`: target outcome
@@ -96,7 +103,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 ## Mutation Rules
 - `soll_manager` for immediate unit mutations.
 - `soll_apply_plan` for transactional batch mutations.
-- `soll_commit_revision` to commit a preview.
+- `soll_commit_revision` to commit a preview synchronously unless future qualification forces review.
 - `soll_rollback_revision` to revert a revision.
 - Re-run is expected to be idempotent.
 

@@ -42,6 +42,72 @@ impl McpServer {
         WHY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    pub(crate) fn axon_mcp_surface_diagnostics(&self, _args: &Value) -> Option<Value> {
+        let public_tools = tools_catalog(false)
+            .get("tools")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let public_tool_names = public_tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let async_allowlisted_tools = McpServer::ASYNC_JOB_TOOL_NAMES
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let monitored_sync_mutation_tools = McpServer::MONITORED_SYNC_MUTATION_TOOLS
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": "Surface MCP diagnostics assembled. Server truth is authoritative for catalog and dispatch. Active client binding may still lag until the client refreshes its session."
+            }],
+            "data": {
+                "server_truth": {
+                    "public_tool_count": public_tool_names.len(),
+                    "critical_tools": [
+                        "status",
+                        "job_status",
+                        "project_registry_lookup",
+                        "axon_init_project",
+                        "soll_apply_plan",
+                        "soll_commit_revision"
+                    ],
+                    "public_tools": public_tool_names
+                },
+                "async_policy": {
+                    "mode": "allowlist",
+                    "sync_by_default": true,
+                    "latency_target_p95_ms": 200,
+                    "allowlisted_tools": async_allowlisted_tools,
+                    "monitored_sync_mutation_tools": monitored_sync_mutation_tools,
+                    "semantic_async_triggers": [
+                        "batch",
+                        "restore_import",
+                        "queue_pipeline",
+                        "vectorization_indexation",
+                        "deep_analytics"
+                    ]
+                },
+                "async_contract": {
+                    "canonical_follow_up_tool": "job_status",
+                    "acceptance_fields": ["job_id", "known_ids", "next_action", "result_contract", "polling_guidance", "recovery_hint"],
+                    "preferred_identity_tools": ["project_registry_lookup", "axon_init_project"]
+                },
+                "client_binding_notes": {
+                    "stale_client_binding_possible": true,
+                    "operator_action": "If a freshly advertised public tool is not callable in the current client session, refresh or restart the client session and compare again.",
+                    "guarantee_boundary": "The server guarantees catalog truth and dispatch truth. Client session bindings are outside direct server control."
+                }
+            }
+        }))
+    }
+
     #[cfg(not(test))]
     fn cache_read(
         cache: &'static Mutex<FrameworkCache>,
@@ -1047,6 +1113,14 @@ impl McpServer {
         let build_id = std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| package_version.clone());
         let install_generation =
             std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string());
+        let async_allowlisted_tools = McpServer::ASYNC_JOB_TOOL_NAMES
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let monitored_sync_mutation_tools = McpServer::MONITORED_SYNC_MUTATION_TOOLS
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
         let response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -1101,6 +1175,25 @@ impl McpServer {
                     "inflight": inflight_files
                 },
                 "public_tools": public_tool_names,
+                "async_policy": {
+                    "mode": "allowlist",
+                    "sync_by_default": true,
+                    "latency_target_p95_ms": 200,
+                    "allowlisted_tools": async_allowlisted_tools,
+                    "monitored_sync_mutation_tools": monitored_sync_mutation_tools,
+                    "semantic_async_triggers": [
+                        "batch",
+                        "restore_import",
+                        "queue_pipeline",
+                        "vectorization_indexation",
+                        "deep_analytics"
+                    ]
+                },
+                "async_contract": {
+                    "canonical_follow_up_tool": "job_status",
+                    "stale_client_binding_possible": true,
+                    "preferred_identity_tools": ["project_registry_lookup", "axon_init_project"]
+                },
                 "job_counts": job_counts,
                 "debug_snapshot": debug_data,
                 "traceability": debug_data.get("traceability").cloned().unwrap_or_else(|| json!({}))

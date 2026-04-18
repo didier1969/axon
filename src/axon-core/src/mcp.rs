@@ -38,6 +38,10 @@ const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 impl McpServer {
+    pub(crate) const ASYNC_JOB_TOOL_NAMES: &[&str] =
+        &["restore_soll", "soll_apply_plan", "resume_vectorization"];
+    pub(crate) const MONITORED_SYNC_MUTATION_TOOLS: &[&str] = &["soll_commit_revision"];
+
     pub fn new(graph_store: Arc<GraphStore>) -> Self {
         Self { graph_store }
     }
@@ -51,22 +55,9 @@ impl McpServer {
 
     fn async_known_ids_for(&self, normalized_name: &str, reserved_ids: &Value) -> Value {
         match normalized_name {
-            "soll_manager" => json!({
-                "project_code": reserved_ids.get("project_code").cloned().unwrap_or(json!(null)),
-                "entity_id": reserved_ids.get("entity_id").cloned().unwrap_or(json!(null))
-            }),
             "soll_apply_plan" => json!({
                 "project_code": reserved_ids.get("project_code").cloned().unwrap_or(json!(null)),
                 "preview_id": reserved_ids.get("preview_id").cloned().unwrap_or(json!(null))
-            }),
-            "soll_commit_revision" => json!({
-                "project_code": reserved_ids.get("project_code").cloned().unwrap_or(json!(null)),
-                "revision_id": reserved_ids.get("revision_id").cloned().unwrap_or(json!(null))
-            }),
-            "init_project" => json!({
-                "project_code": reserved_ids.get("project_code").cloned().unwrap_or(json!(null)),
-                "project_name": reserved_ids.get("project_name").cloned().unwrap_or(json!(null)),
-                "project_path": reserved_ids.get("project_path").cloned().unwrap_or(json!(null))
             }),
             _ => reserved_ids.clone(),
         }
@@ -74,13 +65,21 @@ impl McpServer {
 
     fn async_result_contract_for(&self, normalized_name: &str) -> Value {
         match normalized_name {
-            "init_project" => json!({
+            "restore_soll" => json!({
                 "follow_up_tool": "job_status",
                 "terminal_state_field": "state",
                 "raw_status_field": "status",
                 "terminal_states": ["completed", "failed"],
-                "result_data_fields": ["project_code", "project_name", "project_path"],
-                "notes": "Le résultat terminal expose l'identité projet canonique attribuée par le serveur."
+                "result_data_fields": ["restored_nodes", "restored_edges", "source_path"],
+                "notes": "Le résultat terminal expose le rapport de restauration SOLL."
+            }),
+            "resume_vectorization" => json!({
+                "follow_up_tool": "job_status",
+                "terminal_state_field": "state",
+                "raw_status_field": "status",
+                "terminal_states": ["completed", "failed"],
+                "result_data_fields": ["queued_files", "runtime_mode", "semantic_workers_enabled"],
+                "notes": "Le résultat terminal expose la taille du backlog re-queue et l'état du runtime."
             }),
             "soll_apply_plan" => json!({
                 "follow_up_tool": "job_status",
@@ -89,22 +88,6 @@ impl McpServer {
                 "terminal_states": ["completed", "failed"],
                 "result_data_fields": ["preview_id", "created", "updated", "skipped", "errors"],
                 "notes": "Le résultat terminal expose le preview canonique et le rapport d'application."
-            }),
-            "soll_commit_revision" => json!({
-                "follow_up_tool": "job_status",
-                "terminal_state_field": "state",
-                "raw_status_field": "status",
-                "terminal_states": ["completed", "failed"],
-                "result_data_fields": ["revision_id", "preview_id", "status"],
-                "notes": "Le résultat terminal expose la révision canonique créée par le serveur."
-            }),
-            "soll_manager" => json!({
-                "follow_up_tool": "job_status",
-                "terminal_state_field": "state",
-                "raw_status_field": "status",
-                "terminal_states": ["completed", "failed"],
-                "result_data_fields": ["id", "status", "project_code"],
-                "notes": "Le résultat terminal expose l'entité canonique créée ou modifiée."
             }),
             _ => json!({
                 "follow_up_tool": "job_status",
@@ -119,11 +102,28 @@ impl McpServer {
 
     fn async_recovery_hint_for(&self, normalized_name: &str) -> String {
         match normalized_name {
-            "init_project" => "Relancez `job_status(job_id)` jusqu'à `completed` ou `failed`. Si le job échoue, corrigez les arguments projet puis relancez `axon_init_project`.".to_string(),
+            "restore_soll" => "Relancez `job_status(job_id)` jusqu'à l'état terminal. Si le job échoue, vérifiez le chemin d'export SOLL puis relancez `restore_soll`.".to_string(),
+            "resume_vectorization" => "Relancez `job_status(job_id)` jusqu'à l'état terminal. Si le job échoue, inspectez l'état runtime puis relancez `resume_vectorization`.".to_string(),
             "soll_apply_plan" => "Relancez `job_status(job_id)` jusqu'à l'état terminal. Si le job échoue, corrigez le plan ou le `project_code`, puis relancez `soll_apply_plan`.".to_string(),
-            "soll_commit_revision" => "Relancez `job_status(job_id)` jusqu'à l'état terminal. Si le job échoue, vérifiez `preview_id` puis relancez `soll_commit_revision`.".to_string(),
             _ => "Relancez `job_status(job_id)` jusqu'à l'état terminal. En cas d'échec, corrigez les arguments et relancez la mutation.".to_string(),
         }
+    }
+
+    fn async_polling_guidance_for(&self, normalized_name: &str) -> Value {
+        let max_wait_seconds = match normalized_name {
+            "soll_apply_plan" => 60,
+            "restore_soll" => 60,
+            "resume_vectorization" => 30,
+            _ => 30,
+        };
+        json!({
+            "when_to_poll": "Call `job_status(job_id=...)` after 2 seconds, then every 2 seconds until a terminal state.",
+            "poll_interval_seconds": 2,
+            "until_states": ["completed", "failed"],
+            "max_wait_hint_seconds": max_wait_seconds,
+            "on_completed": "Read `data.result.data` from the terminal `job_status` response.",
+            "on_failed": "Read `data.error_text`, fix the arguments, then retry the original mutation."
+        })
     }
 
     fn job_state(status: &str) -> &'static str {
@@ -134,31 +134,6 @@ impl McpServer {
             "failed" => "failed",
             _ => "unknown",
         }
-    }
-
-    fn project_code_from_preview_id(&self, preview_id: &str) -> Result<String> {
-        let escaped_preview = preview_id.replace('\'', "''");
-        let raw = self.graph_store.query_json(&format!(
-            "SELECT payload FROM soll.RevisionPreview WHERE preview_id = '{escaped_preview}'"
-        ))?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-        let payload_raw = rows
-            .into_iter()
-            .next()
-            .and_then(|row| row.into_iter().next())
-            .ok_or_else(|| anyhow::anyhow!("Preview introuvable: {}", preview_id))?;
-        let payload: Value = serde_json::from_str(&payload_raw)
-            .map_err(|error| anyhow::anyhow!("Preview invalide `{}`: {}", preview_id, error))?;
-        payload
-            .get("project_code")
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Preview `{}` sans `project_code`: impossible de réserver `revision_id`",
-                    preview_id
-                )
-            })
     }
 
     #[allow(dead_code)]
@@ -400,6 +375,11 @@ impl McpServer {
             .unwrap_or(false)
     }
 
+    pub(crate) fn is_async_job_tool(name: &str) -> bool {
+        Self::ASYNC_JOB_TOOL_NAMES.contains(&name)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn is_mutating_tool(name: &str) -> bool {
         matches!(
             name,
@@ -410,9 +390,9 @@ impl McpServer {
                 | "soll_rollback_revision"
                 | "soll_export"
                 | "soll_manager"
-                | "init_project"
                 | "apply_guidelines"
                 | "commit_work"
+                | "resume_vectorization"
         )
     }
 
@@ -447,6 +427,7 @@ impl McpServer {
             "impact" => self.axon_impact(arguments),
             "health" => self.axon_health(arguments),
             "status" => self.axon_status(arguments),
+            "mcp_surface_diagnostics" => self.axon_mcp_surface_diagnostics(arguments),
             "project_status" => self.axon_project_status(arguments),
             "project_registry_lookup" => self.axon_project_registry_lookup(arguments),
             "snapshot_history" => self.axon_snapshot_history(arguments),
@@ -488,30 +469,6 @@ impl McpServer {
 
     fn reserve_mutation_ids(&self, normalized_name: &str, arguments: &Value) -> Value {
         match normalized_name {
-            "soll_manager" => {
-                if arguments.get("action").and_then(|value| value.as_str()) != Some("create") {
-                    return json!({});
-                }
-                let Some(entity) = arguments.get("entity").and_then(|value| value.as_str()) else {
-                    return json!({});
-                };
-                let Some(project_code) = arguments
-                    .get("data")
-                    .and_then(|value| value.get("project_code"))
-                    .and_then(|value| value.as_str())
-                else {
-                    return json!({
-                        "reservation_error": "`project_code` est obligatoire pour `soll_manager create`. Le serveur attribue ensuite l'ID canonique."
-                    });
-                };
-                match self.next_soll_numeric_id(project_code, entity) {
-                    Ok((canonical_project_code, project_code, prefix, next_num)) => json!({
-                        "project_code": canonical_project_code,
-                        "entity_id": format!("{prefix}-{project_code}-{next_num:03}")
-                    }),
-                    Err(error) => json!({ "reservation_error": error.to_string() }),
-                }
-            }
             "soll_apply_plan" => {
                 let Some(project_code) = arguments
                     .get("project_code")
@@ -529,66 +486,6 @@ impl McpServer {
                     Err(error) => json!({ "reservation_error": error.to_string() }),
                 }
             }
-            "soll_commit_revision" => {
-                let Some(preview_id) = arguments.get("preview_id").and_then(|value| value.as_str())
-                else {
-                    return json!({
-                        "reservation_error": "`preview_id` est obligatoire pour `soll_commit_revision`. Le serveur attribue ensuite `revision_id`."
-                    });
-                };
-                let project_code = match self.project_code_from_preview_id(preview_id) {
-                    Ok(code) => code,
-                    Err(error) => return json!({ "reservation_error": error.to_string() }),
-                };
-                match self.next_server_numeric_id(&project_code, "revision") {
-                    Ok((canonical_project_code, project_code, _, next_num)) => json!({
-                        "project_code": canonical_project_code,
-                        "revision_id": format!("REV-{project_code}-{next_num:03}")
-                    }),
-                    Err(error) => json!({ "reservation_error": error.to_string() }),
-                }
-            }
-            "init_project" => {
-                let Some(project_path) = arguments
-                    .get("project_path")
-                    .and_then(|value| value.as_str())
-                else {
-                    return json!({
-                        "reservation_error": "`project_path` est obligatoire pour `axon_init_project`."
-                    });
-                };
-                let project_name = match self.derive_project_name_from_path(project_path) {
-                    Ok(name) => name,
-                    Err(error) => return json!({ "reservation_error": error.to_string() }),
-                };
-                let project_code =
-                    match self.assign_project_code_for_init(&project_name, project_path) {
-                        Ok(code) => code,
-                        Err(error) => return json!({ "reservation_error": error.to_string() }),
-                    };
-                if let Some(requested_code) = arguments
-                    .get("project_code")
-                    .and_then(|value| value.as_str())
-                {
-                    match self.validate_explicit_canonical_project_code(
-                        Some(requested_code),
-                        "axon_init_project",
-                    ) {
-                        Ok(requested) if requested == project_code => {}
-                        Ok(_) => {
-                            return json!({
-                                "reservation_error": format!("`project_code` est attribué par le serveur. Omettez-le ou utilisez `{}` pour ce projet.", project_code)
-                            })
-                        }
-                        Err(error) => return json!({ "reservation_error": error.to_string() }),
-                    }
-                }
-                json!({
-                    "project_code": project_code,
-                    "project_name": project_name,
-                    "project_path": project_path
-                })
-            }
             _ => json!({}),
         }
     }
@@ -601,28 +498,12 @@ impl McpServer {
     ) -> Value {
         let mut patched = arguments.clone();
         match normalized_name {
-            "soll_manager" => {
-                if let Some(entity_id) = reserved_ids
-                    .get("entity_id")
-                    .and_then(|value| value.as_str())
-                {
-                    patched["reserved_id"] = json!(entity_id);
-                }
-            }
             "soll_apply_plan" => {
                 if let Some(preview_id) = reserved_ids
                     .get("preview_id")
                     .and_then(|value| value.as_str())
                 {
                     patched["reserved_preview_id"] = json!(preview_id);
-                }
-            }
-            "soll_commit_revision" => {
-                if let Some(revision_id) = reserved_ids
-                    .get("revision_id")
-                    .and_then(|value| value.as_str())
-                {
-                    patched["reserved_revision_id"] = json!(revision_id);
                 }
             }
             _ => {}
@@ -760,7 +641,9 @@ impl McpServer {
         Some(json!({
             "content": [{
                 "type": "text",
-                "text": format!("Mutation job accepted: {job_id} for tool `{accepted_tool_name}`")
+                "text": format!(
+                    "Mutation job accepted: {job_id} for tool `{accepted_tool_name}`. Call `job_status(job_id=\"{job_id}\")` after 2 seconds, then every 2 seconds until `state=completed` or `state=failed`."
+                )
             }],
             "data": {
                 "accepted": true,
@@ -777,6 +660,7 @@ impl McpServer {
                     }
                 },
                 "result_contract": self.async_result_contract_for(response_contract_name.as_str()),
+                "polling_guidance": self.async_polling_guidance_for(response_contract_name.as_str()),
                 "recovery_hint": self.async_recovery_hint_for(response_contract_name.as_str())
             }
         }))

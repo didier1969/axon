@@ -11,26 +11,56 @@ from typing import Any
 
 DEFAULT_URL = "http://127.0.0.1:44129/mcp"
 DEFAULT_SQL_URL = "http://127.0.0.1:44129/sql"
-DEFAULT_PROTOCOL_VERSION = "2025-06-18"
+DEFAULT_PROTOCOL_VERSION = "2025-11-25"
+NEGOTIATED_PROTOCOL_BY_URL: dict[str, str] = {}
 
 
-def rpc_call(url: str, payload: dict[str, Any], timeout: int) -> tuple[float, dict[str, Any]]:
+def rpc_call(
+    url: str,
+    payload: dict[str, Any],
+    timeout: int,
+    *,
+    allow_empty_body: bool = False,
+) -> tuple[float, Any]:
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    method = payload.get("method")
+    if method != "initialize":
+        negotiated = NEGOTIATED_PROTOCOL_BY_URL.get(url)
+        if negotiated:
+            headers["MCP-Protocol-Version"] = negotiated
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     started = time.perf_counter()
     with urllib.request.urlopen(req, timeout=timeout) as response:
+        response_protocol = response.headers.get("MCP-Protocol-Version")
         raw = response.read().decode("utf-8")
     duration_ms = (time.perf_counter() - started) * 1000.0
-    return duration_ms, json.loads(raw)
+    if not raw.strip():
+        if response_protocol and method == "notifications/initialized":
+            NEGOTIATED_PROTOCOL_BY_URL[url] = response_protocol
+        if allow_empty_body:
+            return duration_ms, None
+        raise ValueError("empty MCP response body")
+    parsed = json.loads(raw)
+    if method == "initialize":
+        negotiated = (
+            response_protocol
+            or parsed.get("result", {}).get("protocolVersion")
+            or DEFAULT_PROTOCOL_VERSION
+        )
+        if isinstance(negotiated, str) and negotiated:
+            NEGOTIATED_PROTOCOL_BY_URL[url] = negotiated
+    return duration_ms, parsed
 
 
 def initialize_session(url: str, timeout: int, client_name: str) -> None:
-    for payload in (
+    rpc_call(
+        url,
         {
             "jsonrpc": "2.0",
             "id": 1,
@@ -41,9 +71,14 @@ def initialize_session(url: str, timeout: int, client_name: str) -> None:
                 "capabilities": {},
             },
         },
+        timeout,
+    )
+    rpc_call(
+        url,
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
-    ):
-        rpc_call(url, payload, timeout)
+        timeout,
+        allow_empty_body=True,
+    )
 
 
 def call_tool(

@@ -58,7 +58,7 @@ impl McpServer {
         }
 
         let response =
-            if Self::mcp_mutation_jobs_enabled() && Self::is_mutating_tool(normalized_name) {
+            if Self::mcp_mutation_jobs_enabled() && Self::is_async_job_tool(normalized_name) {
                 self.launch_mutation_job(name, normalized_name, arguments)
             } else {
                 self.execute_tool_direct(normalized_name, arguments)

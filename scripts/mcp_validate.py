@@ -33,6 +33,7 @@ SURFACE_CHOICES = {"all", "core", "soll"}
 MUTATION_MODE_CHOICES = {"off", "dry-run", "safe-live", "full"}
 CORE_PUBLIC_TOOL_NAMES = {
     "status",
+    "mcp_surface_diagnostics",
     "project_status",
     "query",
     "inspect",
@@ -132,6 +133,21 @@ def extract_result_data(result_payload: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def extract_async_allowlisted_tools(result_payload: dict[str, Any]) -> set[str]:
+    data = extract_result_data(result_payload)
+    async_policy = data.get("async_policy") if isinstance(data, dict) else None
+    if not isinstance(async_policy, dict):
+        return set()
+    allowlisted_tools = async_policy.get("allowlisted_tools")
+    if not isinstance(allowlisted_tools, list):
+        return set()
+    return {
+        value.strip()
+        for value in allowlisted_tools
+        if isinstance(value, str) and value.strip()
+    }
+
+
 def rpc_call(url: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -178,6 +194,7 @@ def build_args(
     # Safe, deterministic overrides for known tools.
     overrides: dict[str, dict[str, Any]] = {
         "status": {"mode": "brief"},
+        "mcp_surface_diagnostics": {"mode": "json"},
         "project_status": {"project_code": "AXO", "mode": "brief"},
         "snapshot_history": {"project_code": "AXO", "limit": 5},
         "snapshot_diff": {"project_code": "AXO"},
@@ -276,7 +293,11 @@ def extract_text(result_payload: dict[str, Any]) -> str:
     return "\n".join(chunks)
 
 
-def evaluate_response(tool_name: str, resp: dict[str, Any]) -> tuple[str, str]:
+def evaluate_response(
+    tool_name: str,
+    resp: dict[str, Any],
+    expected_async_tools: set[str] | None = None,
+) -> tuple[str, str]:
     if "error" in resp and resp["error"] is not None:
         err = resp["error"]
         if isinstance(err, dict):
@@ -436,6 +457,57 @@ def evaluate_response(tool_name: str, resp: dict[str, Any]) -> tuple[str, str]:
         match = re.search(r"missing\\s*=\\s*(\\d+)", text)
         if match and int(match.group(1)) > 0:
             return "warn", f"soll_verify_requirements reports missing={match.group(1)}"
+    if tool_name == "status":
+        data = extract_result_data(resp)
+        async_contract = data.get("async_contract") if isinstance(data, dict) else None
+        async_policy = data.get("async_policy") if isinstance(data, dict) else None
+        if not isinstance(async_contract, dict):
+            return "fail", "status missing async_contract"
+        if not isinstance(async_policy, dict):
+            return "fail", "status missing async_policy"
+        if async_contract.get("canonical_follow_up_tool") != "job_status":
+            return "fail", "status missing canonical async follow-up"
+        if async_policy.get("mode") != "allowlist":
+            return "fail", "status missing async allowlist mode"
+        if async_policy.get("sync_by_default") is not True:
+            return "fail", "status missing sync-by-default policy"
+        if async_policy.get("latency_target_p95_ms") != 200:
+            return "fail", "status missing p95 latency target"
+        allowlisted_tools = extract_async_allowlisted_tools(resp)
+        if not allowlisted_tools:
+            return "fail", "status missing async allowlisted tools"
+        if expected_async_tools is not None and allowlisted_tools != expected_async_tools:
+            return "fail", "status async allowlisted tools do not match server policy"
+    if tool_name == "mcp_surface_diagnostics":
+        data = extract_result_data(resp)
+        server_truth = data.get("server_truth") if isinstance(data, dict) else None
+        async_contract = data.get("async_contract") if isinstance(data, dict) else None
+        async_policy = data.get("async_policy") if isinstance(data, dict) else None
+        client_binding_notes = data.get("client_binding_notes") if isinstance(data, dict) else None
+        if not isinstance(server_truth, dict) or not isinstance(async_contract, dict) or not isinstance(async_policy, dict):
+            return "fail", "mcp_surface_diagnostics missing server_truth, async_policy, or async_contract"
+        if async_contract.get("canonical_follow_up_tool") != "job_status":
+            return "fail", "mcp_surface_diagnostics missing canonical async follow-up"
+        if async_policy.get("mode") != "allowlist":
+            return "fail", "mcp_surface_diagnostics missing async allowlist mode"
+        allowlisted_tools = extract_async_allowlisted_tools(resp)
+        if not allowlisted_tools:
+            return "fail", "mcp_surface_diagnostics missing async allowlisted tools"
+        if expected_async_tools is not None and allowlisted_tools != expected_async_tools:
+            return "fail", "mcp_surface_diagnostics async allowlisted tools do not match server policy"
+        if not isinstance(client_binding_notes, dict) or client_binding_notes.get("stale_client_binding_possible") is not True:
+            return "fail", "mcp_surface_diagnostics missing client binding caveat"
+        critical_tools = server_truth.get("critical_tools")
+        if not isinstance(critical_tools, list) or not critical_tools:
+            return "fail", "mcp_surface_diagnostics missing critical_tools"
+    if tool_name == "axon_init_project":
+        data = extract_result_data(resp)
+        if not isinstance(data, dict):
+            return "fail", "axon_init_project missing data"
+        if not isinstance(data.get("project_code"), str) or not data["project_code"].strip():
+            return "fail", "axon_init_project missing project_code"
+        if any(key in data for key in ("job_id", "next_action", "polling_guidance")):
+            return "fail", "axon_init_project unexpectedly advertised async continuation fields"
 
     return "ok", "ok"
 
@@ -467,9 +539,13 @@ def poll_job_status(url: str, job_id: str, timeout: int) -> tuple[str, str]:
 
 
 def evaluate_tool_result(
-    tool_name: str, resp: dict[str, Any], url: str, timeout: int
+    tool_name: str,
+    resp: dict[str, Any],
+    url: str,
+    timeout: int,
+    expected_async_tools: set[str] | None = None,
 ) -> tuple[str, str]:
-    status, note = evaluate_response(tool_name, resp)
+    status, note = evaluate_response(tool_name, resp, expected_async_tools)
     if status == "fail":
         return status, note
 
@@ -480,9 +556,12 @@ def evaluate_tool_result(
     if not data:
         return status, note
     if data.get("accepted") is not True:
-        # Sync mutation mode remains valid; only assert the async contract when the server
-        # explicitly advertises job acceptance.
+        if expected_async_tools is not None and tool_name in expected_async_tools:
+            return "fail", "async-allowlisted mutation did not return job acceptance"
         return status, note
+
+    if expected_async_tools is None or tool_name not in expected_async_tools:
+        return "fail", "non-allowlisted mutation unexpectedly returned async job acceptance"
 
     job_id = data.get("job_id")
     if not isinstance(job_id, str) or not job_id.strip():
@@ -500,6 +579,18 @@ def evaluate_tool_result(
     result_contract = data.get("result_contract")
     if not isinstance(result_contract, dict):
         return "fail", "mutation tool did not return result_contract"
+    polling_guidance = data.get("polling_guidance")
+    if not isinstance(polling_guidance, dict):
+        return "fail", "mutation tool did not return polling_guidance"
+    if polling_guidance.get("poll_interval_seconds") != 2:
+        return "fail", "mutation tool returned invalid polling interval"
+    until_states = polling_guidance.get("until_states")
+    if not isinstance(until_states, list) or "completed" not in until_states or "failed" not in until_states:
+        return "fail", "mutation tool returned invalid polling terminal states"
+    if not isinstance(polling_guidance.get("on_completed"), str):
+        return "fail", "mutation tool missing polling on_completed guidance"
+    if not isinstance(polling_guidance.get("on_failed"), str):
+        return "fail", "mutation tool missing polling on_failed guidance"
     recovery_hint = data.get("recovery_hint")
     if not isinstance(recovery_hint, str) or not recovery_hint.strip():
         return "fail", "mutation tool did not return recovery_hint"
@@ -729,6 +820,7 @@ def run_query_sequence_scenario(
     timeout: int,
     excerpt_limit: int,
     scenario_steps: list[ScenarioStep],
+    expected_async_tools: set[str] | None = None,
 ) -> list[ToolResult]:
     results: list[ToolResult] = []
     for offset, step in enumerate(scenario_steps, start=900):
@@ -741,7 +833,9 @@ def run_query_sequence_scenario(
         t0 = time.time()
         try:
             resp = rpc_call(url, payload, timeout)
-            status, note = evaluate_tool_result(step.tool, resp, url, timeout)
+            status, note = evaluate_tool_result(
+                step.tool, resp, url, timeout, expected_async_tools
+            )
             excerpt, response_size = summarize_response(resp, excerpt_limit)
             text = extract_text(resp)
             if status == "ok":
@@ -779,6 +873,7 @@ def run_hidden_tool_probes(
     excerpt_limit: int,
     project: str,
     symbol_probe: str,
+    expected_async_tools: set[str] | None = None,
 ) -> list[ToolResult]:
     probes = [
         ("core.retrieve_context.exact", {"question": symbol_probe, "project": project, "token_budget": 900}),
@@ -811,7 +906,9 @@ def run_hidden_tool_probes(
                     )
                 )
                 continue
-            status, note = evaluate_tool_result("retrieve_context", resp, url, timeout)
+            status, note = evaluate_tool_result(
+                "retrieve_context", resp, url, timeout, expected_async_tools
+            )
             data = extract_result_data(resp)
             planner = data.get("planner", {}) if isinstance(data, dict) else {}
             packet = data.get("packet", {}) if isinstance(data, dict) else {}
@@ -932,6 +1029,26 @@ def run(args: argparse.Namespace) -> int:
         print("FATAL: tools/list(include_internal=true) returned no tools")
         return 2
 
+    try:
+        status_prefetch = rpc_call(
+            args.url,
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "status", "arguments": {"mode": "brief"}},
+            },
+            args.timeout,
+        )
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
+        print(f"FATAL: status prefetch failed: {type(e).__name__}: {e}")
+        return 2
+
+    expected_async_tools = extract_async_allowlisted_tools(status_prefetch)
+    if not expected_async_tools:
+        print("FATAL: status prefetch did not expose async allowlisted tools")
+        return 2
+
     public_names = {
         str(tool.get("name", "")).strip()
         for tool in public_tools
@@ -1002,7 +1119,9 @@ def run(args: argparse.Namespace) -> int:
         t0 = time.time()
         try:
             resp = rpc_call(args.url, payload, args.timeout)
-            status, note = evaluate_tool_result(name, resp, args.url, args.timeout)
+            status, note = evaluate_tool_result(
+                name, resp, args.url, args.timeout, expected_async_tools
+            )
             update_validation_state(validation_state, name, call_args, resp)
             excerpt, response_size = summarize_response(resp, args.excerpt)
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
@@ -1056,7 +1175,9 @@ def run(args: argparse.Namespace) -> int:
         t0 = time.time()
         try:
             resp = rpc_call(args.url, payload, args.timeout)
-            status, note = evaluate_tool_result(name, resp, args.url, args.timeout)
+            status, note = evaluate_tool_result(
+                name, resp, args.url, args.timeout, expected_async_tools
+            )
             update_validation_state(validation_state, name, call_args, resp)
             excerpt, response_size = summarize_response(resp, args.excerpt)
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
@@ -1077,10 +1198,25 @@ def run(args: argparse.Namespace) -> int:
 
     if scenario_steps:
         tool_results.extend(
-            run_query_sequence_scenario(args.url, args.timeout, args.excerpt, scenario_steps)
+            run_query_sequence_scenario(
+                args.url,
+                args.timeout,
+                args.excerpt,
+                scenario_steps,
+                expected_async_tools,
+            )
         )
     if args.surface in {"all", "core"}:
-        tool_results.extend(run_hidden_tool_probes(args.url, args.timeout, args.excerpt, project, symbol_probe))
+        tool_results.extend(
+            run_hidden_tool_probes(
+                args.url,
+                args.timeout,
+                args.excerpt,
+                project,
+                symbol_probe,
+                expected_async_tools,
+            )
+        )
 
     ok = sum(1 for r in tool_results if r.status == "ok")
     warn = sum(1 for r in tool_results if r.status == "warn")

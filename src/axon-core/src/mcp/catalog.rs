@@ -93,7 +93,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "axon_init_project",
-                "description": "[DX/SOLL] Initialise un nouveau projet Axon. Le serveur attribue le `project_code` canonique. Si la mutation est asynchrone, la réponse d'acceptation renvoie immédiatement les identifiants déjà connus dans `data.known_ids` et le suivi canonique via `job_status`.",
+                "description": "[DX/SOLL] Initialise un nouveau projet Axon. Le serveur attribue le `project_code` canonique et retourne immédiatement `project_code`, `project_name` et `project_path` dans la même réponse.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -300,6 +300,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "mcp_surface_diagnostics",
+                "description": "[SYSTEM] Diagnostic public de surface MCP: vérité serveur sur les tools exposés, outils critiques, contrat async canonique et guidance explicite si un client semble utiliser un binding stale ou incomplet.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "mode": { "type": "string", "enum": ["brief", "json"] }
                     },
                     "required": []
                 }
