@@ -19,9 +19,25 @@ fi
 DASHBOARD_URL="${DASHBOARD_URL:-$AXON_DASHBOARD_URL}"
 MCP_URL="${MCP_URL:-$AXON_MCP_URL}"
 TELEMETRY_SOCK="${TELEMETRY_SOCK:-$AXON_TELEMETRY_SOCK}"
+STATUS_PROBE_WARNINGS=0
 
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+port_listening() {
+  local port="$1"
+  ss -ltn 2>/dev/null | awk -v p="$port" '
+    $1 == "LISTEN" {
+      split($4, addr_parts, ":")
+      if (addr_parts[length(addr_parts)] == p) {
+        found = 1
+        exit
+      }
+    }
+    END {
+      exit(found ? 0 : 1)
+    }'
 }
 
 port_pid() {
@@ -60,6 +76,11 @@ warn() {
   printf "WARN    %s\n" "$1"
 }
 
+probe_warn() {
+  STATUS_PROBE_WARNINGS=1
+  warn "$1"
+}
+
 fail() {
   printf "FAIL    %s\n" "$1"
 }
@@ -79,6 +100,10 @@ check_process() {
     ok "axon-core running via instance port (pid=$pid, instance=$AXON_INSTANCE_KIND)"
     return 0
   fi
+  if port_listening "$HYDRA_HTTP_PORT"; then
+    probe_warn "axon-core listener present on port $HYDRA_HTTP_PORT but pid is unavailable from this shell"
+    return 0
+  fi
   fail "axon-core process not found for instance=$AXON_INSTANCE_KIND"
   return 1
 }
@@ -90,6 +115,10 @@ check_dashboard() {
       ok "dashboard reachable ($DASHBOARD_URL)"
       return 0
     fi
+  fi
+  if port_listening "$PHX_PORT"; then
+    probe_warn "dashboard listener present on port $PHX_PORT but HTTP probe failed from this shell ($DASHBOARD_URL)"
+    return 0
   fi
   fail "dashboard unreachable ($DASHBOARD_URL)"
   return 1
@@ -103,6 +132,10 @@ check_mcp() {
       ok "mcp reachable ($MCP_URL)"
       return 0
     fi
+  fi
+  if port_listening "$HYDRA_HTTP_PORT"; then
+    probe_warn "mcp listener present on port $HYDRA_HTTP_PORT but HTTP probe failed from this shell ($MCP_URL)"
+    return 0
   fi
   fail "mcp unreachable or invalid response ($MCP_URL)"
   return 1
@@ -155,6 +188,11 @@ main() {
   if [[ "$failed" -ne 0 ]]; then
     printf "STATUS  DEGRADED\n"
     exit 1
+  fi
+
+  if [[ "$STATUS_PROBE_WARNINGS" -ne 0 ]]; then
+    printf "STATUS  WARN\n"
+    exit 0
   fi
 
   printf "STATUS  HEALTHY\n"
