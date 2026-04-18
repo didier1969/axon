@@ -61,6 +61,16 @@ impl McpServer {
             .iter()
             .copied()
             .collect::<Vec<_>>();
+        let public_host = std::env::var("AXON_PUBLIC_HOST").unwrap_or_default();
+        let public_host_source =
+            std::env::var("AXON_PUBLIC_HOST_SOURCE").unwrap_or_else(|_| "unresolved".to_string());
+        let advertised_mcp_url = std::env::var("AXON_MCP_PUBLIC_URL").unwrap_or_default();
+        let advertised_sql_url = std::env::var("AXON_SQL_PUBLIC_URL").unwrap_or_default();
+        let advertised_dashboard_url =
+            std::env::var("AXON_DASHBOARD_PUBLIC_URL").unwrap_or_default();
+        let advertised_available =
+            std::env::var("AXON_PUBLIC_ENDPOINTS_AVAILABLE").unwrap_or_default() == "1"
+                && !advertised_mcp_url.is_empty();
 
         Some(json!({
             "content": [{
@@ -99,10 +109,19 @@ impl McpServer {
                     "acceptance_fields": ["job_id", "known_ids", "next_action", "result_contract", "polling_guidance", "recovery_hint"],
                     "preferred_identity_tools": ["project_registry_lookup", "axon_init_project"]
                 },
+                "advertised_endpoints": {
+                    "available": advertised_available,
+                    "public_host": public_host,
+                    "public_host_source": public_host_source,
+                    "mcp_url": advertised_mcp_url,
+                    "sql_url": advertised_sql_url,
+                    "dashboard_url": advertised_dashboard_url
+                },
                 "client_binding_notes": {
                     "stale_client_binding_possible": true,
                     "operator_action": "If a freshly advertised public tool is not callable in the current client session, refresh or restart the client session and compare again.",
-                    "guarantee_boundary": "The server guarantees catalog truth and dispatch truth. Client session bindings are outside direct server control."
+                    "guarantee_boundary": "The server guarantees catalog truth, dispatch truth, and advertised endpoint truth. Client session bindings are outside direct server control.",
+                    "external_endpoint_rule": "Do not use instance_identity.*_url as an external endpoint. Isolated clients must prefer advertised_endpoints.* when available."
                 }
             }
         }))
@@ -1084,6 +1103,16 @@ impl McpServer {
         let sql_url = std::env::var("AXON_SQL_URL").unwrap_or_else(|_| "unknown".to_string());
         let dashboard_url =
             std::env::var("AXON_DASHBOARD_URL").unwrap_or_else(|_| "unknown".to_string());
+        let public_host = std::env::var("AXON_PUBLIC_HOST").unwrap_or_default();
+        let public_host_source =
+            std::env::var("AXON_PUBLIC_HOST_SOURCE").unwrap_or_else(|_| "unresolved".to_string());
+        let advertised_mcp_url = std::env::var("AXON_MCP_PUBLIC_URL").unwrap_or_default();
+        let advertised_sql_url = std::env::var("AXON_SQL_PUBLIC_URL").unwrap_or_default();
+        let advertised_dashboard_url =
+            std::env::var("AXON_DASHBOARD_PUBLIC_URL").unwrap_or_default();
+        let advertised_available =
+            std::env::var("AXON_PUBLIC_ENDPOINTS_AVAILABLE").unwrap_or_default() == "1"
+                && !advertised_mcp_url.is_empty();
         let mutation_policy =
             std::env::var("AXON_MUTATION_POLICY").unwrap_or_else(|_| "unknown".to_string());
         let resource_priority =
@@ -1151,6 +1180,19 @@ impl McpServer {
                     "sql_url": sql_url,
                     "dashboard_url": dashboard_url,
                     "mutation_policy": mutation_policy
+                },
+                "advertised_endpoints": {
+                    "available": advertised_available,
+                    "public_host": public_host,
+                    "public_host_source": public_host_source,
+                    "mcp_url": advertised_mcp_url,
+                    "sql_url": advertised_sql_url,
+                    "dashboard_url": advertised_dashboard_url
+                },
+                "client_reachability_notes": {
+                    "instance_identity_is_runtime_local_only": true,
+                    "external_endpoint_rule": "Use advertised_endpoints.* for isolated clients when available. instance_identity.*_url is host-local runtime truth.",
+                    "stale_client_binding_possible": true
                 },
                 "resource_policy": {
                     "resource_priority": resource_priority,
@@ -1729,6 +1771,13 @@ impl McpServer {
             .graph_store
             .get_orphan_intent_nodes(project)
             .unwrap_or_default();
+        let soll_snapshot = self
+            .soll_completeness_snapshot(if project == "*" { None } else { Some(project) })
+            .ok();
+        let canonical_orphan_intent_ids = soll_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.canonical_orphan_intent_ids())
+            .unwrap_or_default();
         let (circular_deps, cycle_count) = if brief_mode {
             (
                 Vec::new(),
@@ -1977,27 +2026,41 @@ impl McpServer {
                 "needs_human_confirmation": true
             }));
         }
+        let mut heuristic_intent_gap_count = 0usize;
         for node in &orphan_intent_entities {
             let node_id = node.split(' ').next().unwrap_or(node);
             let validation_signals = intent_validation_map
                 .get(node_id)
                 .cloned()
                 .unwrap_or_else(|| default_intent_validation.clone());
+            let canonical_backed = canonical_orphan_intent_ids.contains(node_id);
+            let anomaly_type = if canonical_backed {
+                "orphan_intent"
+            } else {
+                heuristic_intent_gap_count += 1;
+                "heuristic_intent_gap"
+            };
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("orphan_intent", &validation_signals);
+            let mut enriched_validation_signals = validation_signals;
+            enriched_validation_signals["canonical_backed"] = json!(canonical_backed);
             findings.push(json!({
-                "type": "orphan_intent",
+                "type": anomaly_type,
                 "entity": node,
                 "scope": project,
-                "severity": "high",
-                "confidence": "medium",
-                "provenance": "missing_traceability_evidence",
+                "severity": if canonical_backed { "high" } else { "low" },
+                "confidence": if canonical_backed { "medium" } else { "low" },
+                "provenance": if canonical_backed { "missing_traceability_evidence" } else { "heuristic_missing_traceability" },
                 "evidence_sources": ["soll.Node", "soll.Traceability", "soll.Edge"],
-                "recommended_action": "attach implementation or validation evidence",
-                "validation_signals": validation_signals,
+                "recommended_action": if canonical_backed {
+                    "attach implementation or validation evidence"
+                } else {
+                    "review only if this node should carry direct proof at the current project stage"
+                },
+                "validation_signals": enriched_validation_signals,
                 "estimated_effort": estimated_effort,
                 "estimated_risk": estimated_risk,
-                "safe_to_act": false,
+                "safe_to_act": !canonical_backed,
                 "needs_human_confirmation": true
             }));
         }
@@ -2086,8 +2149,17 @@ impl McpServer {
         } else {
             100.0
         };
+        let canonical_orphan_intent_count = orphan_intent_entities
+            .iter()
+            .filter(|node| {
+                let node_id = node.split(' ').next().unwrap_or(node);
+                canonical_orphan_intent_ids.contains(node_id)
+            })
+            .count();
         let orphan_intent_rate = if total_intent_nodes > 0 {
-            ((orphan_intent.len() as f64 / total_intent_nodes as f64) * 100.0 * 10.0).round() / 10.0
+            ((canonical_orphan_intent_count as f64 / total_intent_nodes as f64) * 100.0 * 10.0)
+                .round()
+                / 10.0
         } else {
             0.0
         };
@@ -2130,6 +2202,7 @@ impl McpServer {
                     "abstraction_detour" => vec!["confirm abstraction has no second implementation planned", "inspect public API commitments"],
                     "orphan_code" => vec!["search SOLL rationale with `why`", "decide link vs delete"],
                     "orphan_intent" => vec!["inspect `soll_work_plan`", "attach implementation or proof"],
+                    "heuristic_intent_gap" => vec!["compare with `soll_validate` completeness axes", "defer if concept baseline is already complete"],
                     "cycle" => vec!["confirm if cycle is intentional", "review module boundary"],
                     "god_object" => vec!["inspect fan-in consumers", "stage decomposition carefully"],
                     _ => vec!["review manually"],
@@ -2172,7 +2245,8 @@ impl McpServer {
 **Detours:** {}\n\
 **Abstraction detours:** {}\n\
 **Orphan code:** {}\n\
-**Orphan intent:** {}\n\
+**Orphan intent (canonical):** {}\n\
+**Heuristic intent gaps:** {}\n\
 **Cycles:** {}\n\
 **God objects:** {}\n",
             project,
@@ -2181,7 +2255,8 @@ impl McpServer {
             detours.len(),
             abstraction_detours.len(),
             orphan_code.len(),
-            orphan_intent.len(),
+            canonical_orphan_intent_count,
+            heuristic_intent_gap_count,
             cycle_count,
             god_objects.len()
         );
@@ -2215,18 +2290,28 @@ impl McpServer {
                     "cycle_health_score": cycle_health_score,
                     "orphan_code_count": orphan_code.len(),
                     "orphan_code_rate": orphan_code_rate,
-                    "orphan_intent_count": orphan_intent.len(),
+                    "orphan_intent_count": canonical_orphan_intent_count,
                     "orphan_intent_rate": orphan_intent_rate,
+                    "heuristic_intent_gap_count": heuristic_intent_gap_count,
                     "cycle_count": cycle_count,
                     "god_object_count": god_objects.len(),
                     "validation_coverage_score": validation_coverage_score,
                     "total_symbols": total_symbols,
-                    "total_intent_nodes": total_intent_nodes
+                    "total_intent_nodes": total_intent_nodes,
+                    "concept_completeness": soll_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.concept_complete())
+                        .unwrap_or(false),
+                    "implementation_completeness": soll_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.implementation_complete())
+                        .unwrap_or(false)
                 },
                 "snapshot": {
                     "generated_at": Self::now_unix_ms(),
                     "provenance": "aggregated_graph_analytics",
-                    "confidence": "medium"
+                    "confidence": "medium",
+                    "semantic_boundary": "heuristic anomaly overlays must not silently override canonical SOLL completeness"
                 },
                 "findings": findings,
                 "recommendations": recommendations

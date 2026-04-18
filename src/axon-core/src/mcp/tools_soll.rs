@@ -132,6 +132,72 @@ struct WorkPlanBlocker {
     reason: String,
 }
 
+#[derive(Clone, Debug)]
+struct RequirementCoverageEntry {
+    id: String,
+    status: String,
+    evidence_count: usize,
+    state: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RequirementCoverageSummary {
+    done: usize,
+    partial: usize,
+    missing: usize,
+    entries: Vec<RequirementCoverageEntry>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SollCompletenessSnapshot {
+    project_scope: String,
+    total_nodes: usize,
+    orphan_requirements: Vec<String>,
+    validations_without_verifies: Vec<String>,
+    decisions_without_links: Vec<String>,
+    uncovered_requirements: Vec<String>,
+    duplicate_title_rows: Vec<Vec<String>>,
+    duplicate_ids: Vec<String>,
+    relation_policy_violations: Vec<String>,
+    requirement_coverage: RequirementCoverageSummary,
+}
+
+impl SollCompletenessSnapshot {
+    pub(crate) fn structurally_connected(&self) -> bool {
+        self.orphan_requirements.is_empty()
+            && self.validations_without_verifies.is_empty()
+            && self.decisions_without_links.is_empty()
+            && self.relation_policy_violations.is_empty()
+    }
+
+    pub(crate) fn duplicate_free(&self) -> bool {
+        self.duplicate_title_rows.is_empty()
+    }
+
+    pub(crate) fn evidence_ready(&self) -> bool {
+        self.uncovered_requirements.is_empty()
+    }
+
+    pub(crate) fn concept_complete(&self) -> bool {
+        self.total_nodes > 0 && self.structurally_connected() && self.duplicate_free()
+    }
+
+    pub(crate) fn implementation_complete(&self) -> bool {
+        self.requirement_coverage.missing == 0
+    }
+
+    pub(crate) fn canonical_orphan_intent_ids(&self) -> BTreeSet<String> {
+        self.orphan_requirements
+            .iter()
+            .chain(self.validations_without_verifies.iter())
+            .chain(self.decisions_without_links.iter())
+            .chain(self.uncovered_requirements.iter())
+            .chain(self.duplicate_ids.iter())
+            .cloned()
+            .collect()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LinkEndpointKind {
     Soll(&'static str),
@@ -417,6 +483,21 @@ fn requirement_state_from(status: &str, criteria: &str, evidence_count: usize) -
         "partial"
     } else {
         "missing"
+    }
+}
+
+fn normalize_traceability_entity_type(entity_type: &str) -> String {
+    match entity_type.trim().to_ascii_lowercase().as_str() {
+        "vision" | "vis" => "vision".to_string(),
+        "pillar" | "pil" => "pillar".to_string(),
+        "requirement" | "req" => "requirement".to_string(),
+        "concept" | "cpt" => "concept".to_string(),
+        "decision" | "dec" => "decision".to_string(),
+        "milestone" | "mil" => "milestone".to_string(),
+        "validation" | "val" => "validation".to_string(),
+        "stakeholder" | "stk" => "stakeholder".to_string(),
+        "guideline" | "gui" => "guideline".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -967,14 +1048,29 @@ impl McpServer {
                         });
 
                         if let Some(target_id) = attach_to {
-                            match self.select_relation_type_for_link(&formatted_id, target_id, relation_hint) {
+                            match self.select_relation_type_for_link(
+                                &formatted_id,
+                                target_id,
+                                relation_hint,
+                            ) {
                                 Ok((relation_type, policy)) => {
-                                    match self.insert_validated_relation(relation_type, &formatted_id, target_id, policy) {
+                                    match self.insert_validated_relation(
+                                        relation_type,
+                                        &formatted_id,
+                                        target_id,
+                                        policy,
+                                    ) {
                                         Ok(inserted) => {
                                             response_data["attached"] = Value::from(true);
                                             response_data["attached_to"] = Value::from(target_id);
-                                            response_data["applied_relation"] = Value::from(relation_type);
-                                            response_data["attach_status"] = Value::from(if inserted { "attached" } else { "already_present" });
+                                            response_data["applied_relation"] =
+                                                Value::from(relation_type);
+                                            response_data["attach_status"] =
+                                                Value::from(if inserted {
+                                                    "attached"
+                                                } else {
+                                                    "already_present"
+                                                });
                                             report.push_str(&format!(
                                                 "\n✅ Liaison canonique appliquée : `{}` -> `{}` via `{}`",
                                                 formatted_id, target_id, relation_type
@@ -982,10 +1078,15 @@ impl McpServer {
                                         }
                                         Err(error) => {
                                             let error_text = error.to_string();
-                                            response_data["attach_status"] =
-                                                Value::from(self.classify_attach_status_from_error(&error_text));
-                                            response_data["attach_guidance"] =
-                                                self.relation_guidance_for_link(&formatted_id, target_id, relation_hint);
+                                            response_data["attach_status"] = Value::from(
+                                                self.classify_attach_status_from_error(&error_text),
+                                            );
+                                            response_data["attach_guidance"] = self
+                                                .relation_guidance_for_link(
+                                                    &formatted_id,
+                                                    target_id,
+                                                    relation_hint,
+                                                );
                                             report.push_str(&format!(
                                                 "\n⚠️ Attachement canonique refusé : {}",
                                                 error_text
@@ -995,10 +1096,15 @@ impl McpServer {
                                 }
                                 Err(error) => {
                                     let error_text = error.to_string();
-                                    response_data["attach_status"] =
-                                        Value::from(self.classify_attach_status_from_error(&error_text));
-                                    response_data["attach_guidance"] =
-                                        self.relation_guidance_for_link(&formatted_id, target_id, relation_hint);
+                                    response_data["attach_status"] = Value::from(
+                                        self.classify_attach_status_from_error(&error_text),
+                                    );
+                                    response_data["attach_guidance"] = self
+                                        .relation_guidance_for_link(
+                                            &formatted_id,
+                                            target_id,
+                                            relation_hint,
+                                        );
                                     report.push_str(&format!(
                                         "\n⚠️ Attachement canonique refusé : {}",
                                         error_text
@@ -1276,11 +1382,8 @@ graph TD;
 
     pub(crate) fn axon_validate_soll(&self, args: &Value) -> Option<Value> {
         let project_code = args.get("project_code").and_then(|v| v.as_str());
-        let project_code = match project_code
-            .map(|code| self.resolve_project_code(code))
-            .transpose()
-        {
-            Ok(code) => code,
+        let snapshot = match self.soll_completeness_snapshot(project_code) {
+            Ok(snapshot) => snapshot,
             Err(e) => {
                 return Some(json!({
                     "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
@@ -1288,110 +1391,18 @@ graph TD;
                 }))
             }
         };
-        let total_nodes = self
-            .graph_store
-            .query_count(&format!(
-                "SELECT count(*) FROM soll.Node n WHERE 1=1 {}",
-                project_code
-                    .as_deref()
-                    .map(|code| format!("AND n.project_code = '{}'", escape_sql(code)))
-                    .unwrap_or_default()
-            ))
-            .ok()?;
-        let orphan_requirements = self
-            .query_single_column(
-                &format!("SELECT id FROM soll.Node r
-                 WHERE type = 'Requirement'
-                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE source_id = r.id OR target_id = r.id)
-                   {}
-                 ORDER BY id", project_scope_predicate("r.id", project_code.as_deref())),
-            )
-            .ok()?;
-
-        let validations_without_verifies = self
-            .query_single_column(
-                &format!("SELECT id FROM soll.Node v
-                 WHERE type = 'Validation'
-                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = v.id OR target_id = v.id) AND relation_type = 'VERIFIES')
-                   {}
-                 ORDER BY id", project_scope_predicate("v.id", project_code.as_deref())),
-            )
-            .ok()?;
-
-        let decisions_without_links = self
-            .query_single_column(
-                &format!("SELECT id FROM soll.Node d
-                 WHERE type = 'Decision'
-                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = d.id OR target_id = d.id) AND relation_type IN ('SOLVES', 'IMPACTS'))
-                   {}
-                 ORDER BY id", project_scope_predicate("d.id", project_code.as_deref())),
-            )
-            .ok()?;
-
-        let uncovered_requirements = self
-            .query_single_column(
-                &format!(
-                    "SELECT r.id FROM soll.Node r
-                     LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
-                     WHERE r.type = 'Requirement'
-                       {}
-                     GROUP BY r.id, r.status, r.metadata
-                     HAVING COUNT(t.id) = 0
-                        AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') IN ('', '[]')
-                     ORDER BY r.id",
-                    project_scope_predicate("r.id", project_code.as_deref())
-                ),
-            )
-            .ok()?;
-
-        let duplicate_title_rows_raw = self
-            .graph_store
-            .query_json(&format!(
-                "SELECT type, title, string_agg(id, ', ' ORDER BY id)
-                 FROM soll.Node
-                 WHERE type IN ('Requirement', 'Decision', 'Concept')
-                   AND COALESCE(title, '') <> ''
-                   {}
-                 GROUP BY type, title
-                 HAVING COUNT(*) > 1
-                 ORDER BY type, title",
-                project_code
-                    .as_deref()
-                    .map(|code| format!("AND project_code = '{}'", escape_sql(code)))
-                    .unwrap_or_default()
-            ))
-            .ok()?;
-        let duplicate_title_rows: Vec<Vec<String>> =
-            serde_json::from_str(&duplicate_title_rows_raw).unwrap_or_default();
-
-        let relation_policy_violations = self
-            .collect_relation_policy_violations(project_code.as_deref())
-            .ok()?;
-
-        let violation_count = orphan_requirements.len()
-            + validations_without_verifies.len()
-            + decisions_without_links.len()
-            + uncovered_requirements.len()
-            + duplicate_title_rows.len()
-            + relation_policy_violations.len();
-
-        let duplicate_ids: Vec<String> = duplicate_title_rows
-            .iter()
-            .filter_map(|row| row.get(2).cloned())
-            .flat_map(|ids| {
-                ids.split(',')
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let violation_count = snapshot.orphan_requirements.len()
+            + snapshot.validations_without_verifies.len()
+            + snapshot.decisions_without_links.len()
+            + snapshot.uncovered_requirements.len()
+            + snapshot.duplicate_title_rows.len()
+            + snapshot.relation_policy_violations.len();
 
         let mut repair_guidance = Vec::new();
-        if !orphan_requirements.is_empty() {
+        if !snapshot.orphan_requirements.is_empty() {
             repair_guidance.push(repair_guidance_entry(
                 "orphan_requirements",
-                &orphan_requirements,
+                &snapshot.orphan_requirements,
                 "Requirements should be structurally attached to the graph.",
                 &[
                     "link each requirement to its pillar or guideline with `soll_manager`",
@@ -1399,10 +1410,10 @@ graph TD;
                 ],
             ));
         }
-        if !validations_without_verifies.is_empty() {
+        if !snapshot.validations_without_verifies.is_empty() {
             repair_guidance.push(repair_guidance_entry(
                 "validations_without_verifies",
-                &validations_without_verifies,
+                &snapshot.validations_without_verifies,
                 "Validation nodes should verify at least one requirement.",
                 &[
                     "add a `VERIFIES` edge from each validation to the requirement it proves",
@@ -1410,10 +1421,10 @@ graph TD;
                 ],
             ));
         }
-        if !decisions_without_links.is_empty() {
+        if !snapshot.decisions_without_links.is_empty() {
             repair_guidance.push(repair_guidance_entry(
                 "decisions_without_solves_or_impacts",
-                &decisions_without_links,
+                &snapshot.decisions_without_links,
                 "Decision nodes should solve a requirement or impact an artifact.",
                 &[
                     "link each decision to a requirement with `SOLVES` or `REFINES` when it addresses a need",
@@ -1421,10 +1432,10 @@ graph TD;
                 ],
             ));
         }
-        if !uncovered_requirements.is_empty() {
+        if !snapshot.uncovered_requirements.is_empty() {
             repair_guidance.push(repair_guidance_entry(
                 "requirements_without_evidence_or_criteria",
-                &uncovered_requirements,
+                &snapshot.uncovered_requirements,
                 "Requirements should have acceptance criteria or explicit supporting evidence.",
                 &[
                     "update requirement metadata with `acceptance_criteria`",
@@ -1432,10 +1443,10 @@ graph TD;
                 ],
             ));
         }
-        if !duplicate_ids.is_empty() {
+        if !snapshot.duplicate_ids.is_empty() {
             repair_guidance.push(repair_guidance_entry(
                 "duplicate_titles",
-                &duplicate_ids,
+                &snapshot.duplicate_ids,
                 "Duplicate SOLL titles usually signal overlapping concepts, requirements, or decisions.",
                 &[
                     "merge or supersede duplicates instead of keeping parallel semantic copies",
@@ -1443,12 +1454,12 @@ graph TD;
                 ],
             ));
         }
-        if !relation_policy_violations.is_empty() {
+        if !snapshot.relation_policy_violations.is_empty() {
             repair_guidance.push(json!({
                 "category": "relation_policy_violations",
                 "summary": "Some edges violate the canonical SOLL relation policy.",
                 "ids": [],
-                "details": relation_policy_violations,
+                "details": snapshot.relation_policy_violations,
                 "next_steps": [
                     "remove or replace invalid edges with canonical pairs from `soll_relation_schema`",
                     "retry the link only after the source/target kinds and default relation are confirmed"
@@ -1458,13 +1469,12 @@ graph TD;
         }
 
         let completeness = json!({
-            "populated": total_nodes > 0,
-            "structurally_connected": orphan_requirements.is_empty()
-                && validations_without_verifies.is_empty()
-                && decisions_without_links.is_empty()
-                && relation_policy_violations.is_empty(),
-            "evidence_ready": uncovered_requirements.is_empty(),
-            "duplicate_free": duplicate_title_rows.is_empty()
+            "populated": snapshot.total_nodes > 0,
+            "structurally_connected": snapshot.structurally_connected(),
+            "evidence_ready": snapshot.evidence_ready(),
+            "duplicate_free": snapshot.duplicate_free(),
+            "concept_completeness": snapshot.concept_complete(),
+            "implementation_completeness": snapshot.implementation_complete()
         });
 
         let mut evidence = format!(
@@ -1473,37 +1483,37 @@ graph TD;
         );
         evidence.push_str("Mode: lecture seule, sans auto-réparation.\n");
 
-        if !orphan_requirements.is_empty() {
+        if !snapshot.orphan_requirements.is_empty() {
             evidence.push_str("\n- Requirements orphelins:\n");
-            for id in &orphan_requirements {
+            for id in &snapshot.orphan_requirements {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
-        if !validations_without_verifies.is_empty() {
+        if !snapshot.validations_without_verifies.is_empty() {
             evidence.push_str("\n- Validations sans lien VERIFIES:\n");
-            for id in &validations_without_verifies {
+            for id in &snapshot.validations_without_verifies {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
-        if !decisions_without_links.is_empty() {
+        if !snapshot.decisions_without_links.is_empty() {
             evidence.push_str("\n- Decisions sans lien SOLVES/IMPACTS:\n");
-            for id in &decisions_without_links {
+            for id in &snapshot.decisions_without_links {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
-        if !uncovered_requirements.is_empty() {
+        if !snapshot.uncovered_requirements.is_empty() {
             evidence.push_str("\n- Requirements sans critères/preuves:\n");
-            for id in &uncovered_requirements {
+            for id in &snapshot.uncovered_requirements {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
-        if !duplicate_title_rows.is_empty() {
+        if !snapshot.duplicate_title_rows.is_empty() {
             evidence.push_str("\n- Titres dupliqués (risque de doublon métier):\n");
-            for row in &duplicate_title_rows {
+            for row in &snapshot.duplicate_title_rows {
                 if row.len() < 3 {
                     continue;
                 }
@@ -1511,9 +1521,9 @@ graph TD;
             }
         }
 
-        if !relation_policy_violations.is_empty() {
+        if !snapshot.relation_policy_violations.is_empty() {
             evidence.push_str("\n- Relations invalides:\n");
-            for violation in &relation_policy_violations {
+            for violation in &snapshot.relation_policy_violations {
                 evidence.push_str(&format!("  - {}\n", violation));
             }
         }
@@ -1538,10 +1548,7 @@ graph TD;
             format_standard_contract(
                 status,
                 summary,
-                &match project_code {
-                    Some(ref code) => format!("project:{}", code),
-                    None => "workspace:*".to_string(),
-                },
+                &snapshot.project_scope,
                 &evidence,
                 &[
                     "run `soll_verify_requirements` for requirement-level coverage",
@@ -1556,20 +1563,22 @@ graph TD;
             "data": {
                 "status": status,
                 "summary": summary,
-                "scope": match &project_code {
-                    Some(code) => format!("project:{}", code),
-                    None => "workspace:*".to_string(),
-                },
+                "scope": snapshot.project_scope,
                 "violations": {
-                    "orphan_requirements": orphan_requirements,
-                    "validations_without_verifies": validations_without_verifies,
-                    "decisions_without_links": decisions_without_links,
-                    "uncovered_requirements": uncovered_requirements,
-                    "duplicate_title_rows": duplicate_title_rows,
-                    "relation_policy_violations": relation_policy_violations
+                    "orphan_requirements": snapshot.orphan_requirements,
+                    "validations_without_verifies": snapshot.validations_without_verifies,
+                    "decisions_without_links": snapshot.decisions_without_links,
+                    "uncovered_requirements": snapshot.uncovered_requirements,
+                    "duplicate_title_rows": snapshot.duplicate_title_rows,
+                    "relation_policy_violations": snapshot.relation_policy_violations
                 },
                 "repair_guidance": repair_guidance,
                 "completeness": completeness,
+                "requirement_coverage": {
+                    "done": snapshot.requirement_coverage.done,
+                    "partial": snapshot.requirement_coverage.partial,
+                    "missing": snapshot.requirement_coverage.missing
+                },
                 "guidance_source": "server-side canonical soll validation"
             }
         }))
@@ -1847,6 +1856,176 @@ graph TD;
             .into_iter()
             .filter_map(|row| row.into_iter().next())
             .collect())
+    }
+
+    fn requirement_coverage_summary(
+        &self,
+        project_code: &str,
+    ) -> anyhow::Result<RequirementCoverageSummary> {
+        let project_code = self.resolve_project_code(project_code)?;
+        let query = format!(
+            "SELECT r.id,
+                    COALESCE(r.status,''),
+                    COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), ''),
+                    COUNT(t.id)
+             FROM soll.Node r
+             LEFT JOIN soll.Traceability t
+               ON lower(t.soll_entity_type) = lower(r.type)
+              AND t.soll_entity_id = r.id
+             WHERE r.type='Requirement' AND r.id LIKE 'REQ-{}-%'
+             GROUP BY 1,2,3
+             ORDER BY r.id",
+            escape_sql(&project_code)
+        );
+        let rows_raw = self.graph_store.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+        let mut summary = RequirementCoverageSummary::default();
+
+        for row in rows {
+            if row.len() < 4 {
+                continue;
+            }
+            let id = row[0].clone();
+            let status = row[1].clone();
+            let criteria = row[2].clone();
+            let evidence_count = row[3].parse::<usize>().unwrap_or(0);
+            let state = requirement_state_from(status.as_str(), &criteria, evidence_count);
+
+            match state {
+                "done" => summary.done += 1,
+                "partial" => summary.partial += 1,
+                _ => summary.missing += 1,
+            }
+
+            summary.entries.push(RequirementCoverageEntry {
+                id,
+                status,
+                evidence_count,
+                state: state.to_string(),
+            });
+        }
+
+        Ok(summary)
+    }
+
+    pub(crate) fn soll_completeness_snapshot(
+        &self,
+        project_code: Option<&str>,
+    ) -> anyhow::Result<SollCompletenessSnapshot> {
+        let resolved_project_code = match project_code {
+            Some(code) => Some(self.resolve_project_code(code)?),
+            None => None,
+        };
+        let project_scope = resolved_project_code
+            .clone()
+            .map(|code| format!("project:{code}"))
+            .unwrap_or_else(|| "workspace:*".to_string());
+        let project_scope_predicate = |id_column: &str, project_code: Option<&str>| {
+            project_code
+                .map(|code| format!("AND {id_column} LIKE '%-{}-%'", escape_sql(code)))
+                .unwrap_or_default()
+        };
+
+        let total_nodes = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node n WHERE 1=1 {}",
+                resolved_project_code
+                    .as_deref()
+                    .map(|code| format!("AND n.project_code = '{}'", escape_sql(code)))
+                    .unwrap_or_default()
+            ))
+            .unwrap_or(0) as usize;
+
+        let orphan_requirements = self.query_single_column(&format!(
+            "SELECT id FROM soll.Node r
+             WHERE type = 'Requirement'
+               AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE source_id = r.id OR target_id = r.id)
+               {}
+             ORDER BY id",
+            project_scope_predicate("r.id", resolved_project_code.as_deref())
+        ))?;
+
+        let validations_without_verifies = self.query_single_column(&format!(
+            "SELECT id FROM soll.Node v
+             WHERE type = 'Validation'
+               AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = v.id OR target_id = v.id) AND relation_type = 'VERIFIES')
+               {}
+             ORDER BY id",
+            project_scope_predicate("v.id", resolved_project_code.as_deref())
+        ))?;
+
+        let decisions_without_links = self.query_single_column(&format!(
+            "SELECT id FROM soll.Node d
+             WHERE type = 'Decision'
+               AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = d.id OR target_id = d.id) AND relation_type IN ('SOLVES', 'IMPACTS'))
+               {}
+             ORDER BY id",
+            project_scope_predicate("d.id", resolved_project_code.as_deref())
+        ))?;
+
+        let uncovered_requirements = self.query_single_column(&format!(
+            "SELECT r.id FROM soll.Node r
+             LEFT JOIN soll.Traceability t
+               ON lower(t.soll_entity_type) = lower(r.type)
+              AND t.soll_entity_id = r.id
+             WHERE r.type = 'Requirement'
+               {}
+             GROUP BY r.id, r.status, r.metadata
+             HAVING COUNT(t.id) = 0
+                AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') IN ('', '[]')
+             ORDER BY r.id",
+            project_scope_predicate("r.id", resolved_project_code.as_deref())
+        ))?;
+
+        let duplicate_title_rows_raw = self.graph_store.query_json(&format!(
+            "SELECT type, title, string_agg(id, ', ' ORDER BY id)
+             FROM soll.Node
+             WHERE type IN ('Requirement', 'Decision', 'Concept')
+               AND COALESCE(title, '') <> ''
+               {}
+             GROUP BY type, title
+             HAVING COUNT(*) > 1
+             ORDER BY type, title",
+            resolved_project_code
+                .as_deref()
+                .map(|code| format!("AND project_code = '{}'", escape_sql(code)))
+                .unwrap_or_default()
+        ))?;
+        let duplicate_title_rows: Vec<Vec<String>> =
+            serde_json::from_str(&duplicate_title_rows_raw).unwrap_or_default();
+
+        let duplicate_ids = duplicate_title_rows
+            .iter()
+            .filter_map(|row| row.get(2).cloned())
+            .flat_map(|ids| {
+                ids.split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let relation_policy_violations =
+            self.collect_relation_policy_violations(resolved_project_code.as_deref())?;
+        let requirement_coverage = match resolved_project_code.as_deref() {
+            Some(code) => self.requirement_coverage_summary(code)?,
+            None => RequirementCoverageSummary::default(),
+        };
+
+        Ok(SollCompletenessSnapshot {
+            project_scope,
+            total_nodes,
+            orphan_requirements,
+            validations_without_verifies,
+            decisions_without_links,
+            uncovered_requirements,
+            duplicate_title_rows,
+            duplicate_ids,
+            relation_policy_violations,
+            requirement_coverage,
+        })
     }
 
     fn query_named_row(&self, query: &str, expected_columns: usize) -> anyhow::Result<Vec<String>> {
@@ -3050,12 +3229,6 @@ fn project_scope_clause_for_relation(project_code: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-fn project_scope_predicate(id_column: &str, project_code: Option<&str>) -> String {
-    project_code
-        .map(|code| format!("AND {} LIKE '%-{}-%'", id_column, escape_sql(code)))
-        .unwrap_or_default()
-}
-
 impl McpServer {
     pub(crate) fn axon_soll_commit_revision(&self, args: &Value) -> Option<Value> {
         let preview_id = match args.get("preview_id").and_then(|v| v.as_str()) {
@@ -3344,6 +3517,7 @@ impl McpServer {
         let global_validation =
             self.axon_soll_verify_requirements(&json!({ "project_code": project_code }));
         let soll_validation = self.axon_validate_soll(&json!({ "project_code": project_code }));
+        let completeness_snapshot = self.soll_completeness_snapshot(Some(project_code)).ok();
         let validation_gates = json!({
             "requirement_verification": global_validation
                 .as_ref()
@@ -3352,9 +3526,16 @@ impl McpServer {
                 .unwrap_or(json!({})),
             "soll_validation": soll_validation
                 .as_ref()
-                .and_then(|resp| resp.get("content"))
+                .and_then(|resp| resp.get("data"))
                 .cloned()
-                .unwrap_or(json!([])),
+                .unwrap_or(json!({})),
+            "completeness_axes": completeness_snapshot
+                .map(|snapshot| json!({
+                    "concept_completeness": snapshot.concept_complete(),
+                    "implementation_completeness": snapshot.implementation_complete(),
+                    "evidence_ready": snapshot.evidence_ready()
+                }))
+                .unwrap_or_else(|| json!({})),
             "backlog_visible": backlog_visible
         });
         let data = json!({
@@ -3408,6 +3589,7 @@ impl McpServer {
         let artifacts = args.get("artifacts")?.as_array()?;
         let mut attached = 0usize;
         let now = now_unix_ms();
+        let normalized_entity_type = normalize_traceability_entity_type(entity_type);
 
         for (idx, art) in artifacts.iter().enumerate() {
             let artifact_type = art
@@ -3435,7 +3617,7 @@ impl McpServer {
             if self.graph_store.execute_param(
                 "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                &json!([trace_id, entity_type, entity_id, artifact_type, artifact_ref, confidence, metadata, now]),
+                &json!([trace_id, normalized_entity_type, entity_id, artifact_type, artifact_ref, confidence, metadata, now]),
             ).is_ok() {
                 attached += 1;
             }
@@ -3443,7 +3625,7 @@ impl McpServer {
 
         Some(json!({
             "content": [{"type":"text","text": format!("Attached {} evidence item(s) to {}:{}", attached, entity_type, entity_id)}],
-            "data": {"attached": attached}
+            "data": {"attached": attached, "normalized_entity_type": normalize_traceability_entity_type(entity_type)}
         }))
     }
 
@@ -3452,19 +3634,25 @@ impl McpServer {
             return HashMap::new();
         };
         let mut nodes = HashMap::new();
+        let requirement_coverage = self
+            .requirement_coverage_summary(&project_code)
+            .unwrap_or_default();
+        let requirement_coverage_by_id = requirement_coverage
+            .entries
+            .iter()
+            .map(|entry| (entry.id.clone(), entry.clone()))
+            .collect::<HashMap<_, _>>();
         let req_query = format!(
-            "SELECT r.id, r.title, COALESCE(r.status,''), COALESCE(r.metadata,'{{}}'), COUNT(t.id)
+            "SELECT r.id, r.title, COALESCE(r.status,''), COALESCE(r.metadata,'{{}}')
              FROM soll.Node r
-             LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
              WHERE r.type = 'Requirement' AND r.id LIKE 'REQ-{}-%'
-             GROUP BY 1,2,3,4
              ORDER BY r.id",
             escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&req_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
             for row in rows {
-                if row.len() < 5 {
+                if row.len() < 4 {
                     continue;
                 }
                 let meta: serde_json::Value =
@@ -3474,16 +3662,9 @@ impl McpServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let criteria = meta
-                    .get("acceptance_criteria")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let evidence_count = row[4].parse::<usize>().unwrap_or(0);
                 let status = row[2].clone();
-                let requirement_state =
-                    requirement_state_from(status.as_str(), &criteria, evidence_count).to_string();
                 let id = row[0].clone();
+                let coverage_entry = requirement_coverage_by_id.get(&id);
                 nodes.insert(
                     id.clone(),
                     WorkPlanNode {
@@ -3492,8 +3673,14 @@ impl McpServer {
                         entity_type: WorkPlanEntityType::Requirement,
                         status,
                         priority,
-                        requirement_state: Some(requirement_state),
-                        evidence_count,
+                        requirement_state: Some(
+                            coverage_entry
+                                .map(|entry| entry.state.clone())
+                                .unwrap_or_else(|| "missing".to_string()),
+                        ),
+                        evidence_count: coverage_entry
+                            .map(|entry| entry.evidence_count)
+                            .unwrap_or(0),
                         descendants: 0,
                         ist_degraded_links: 0,
                         backlog_visible: false,
@@ -3738,52 +3925,36 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
         let project_code = self.resolve_project_code(project_code).ok()?;
-        let query = format!(
-            "SELECT r.id, COALESCE(r.status,''), COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), ''), COUNT(t.id)
-             FROM soll.Node r
-             LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
-             WHERE r.type='Requirement' AND r.id LIKE 'REQ-{}-%'
-             GROUP BY 1,2,3
-             ORDER BY r.id",
-            escape_sql(&project_code)
-        );
-        let rows_raw = self.graph_store.query_json(&query).ok()?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
-        let mut done = 0usize;
-        let mut partial = 0usize;
-        let mut missing = 0usize;
-        let mut details: Vec<Value> = Vec::new();
-
-        for row in rows {
-            if row.len() < 4 {
-                continue;
-            }
-            let id = row[0].clone();
-            let status = row[1].clone();
-            let criteria = row[2].clone();
-            let evidence_count = row[3].parse::<usize>().unwrap_or(0);
-            let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
-
-            let state = if evidence_count > 0
-                && has_criteria
-                && (status == "current" || status == "accepted")
-            {
-                done += 1;
-                "done"
-            } else if evidence_count > 0 || has_criteria {
-                partial += 1;
-                "partial"
-            } else {
-                missing += 1;
-                "missing"
-            };
-
-            details.push(json!({"id": id, "state": state, "status": status, "evidence_count": evidence_count}));
-        }
+        let summary = self.requirement_coverage_summary(&project_code).ok()?;
+        let snapshot = self.soll_completeness_snapshot(Some(&project_code)).ok()?;
+        let details = summary
+            .entries
+            .iter()
+            .map(|entry| {
+                json!({
+                    "id": entry.id,
+                    "state": entry.state,
+                    "status": entry.status,
+                    "evidence_count": entry.evidence_count
+                })
+            })
+            .collect::<Vec<_>>();
 
         Some(json!({
-            "content": [{"type":"text","text": format!("Requirement verification: done={}, partial={}, missing={}", done, partial, missing)}],
-            "data": {"project_code": project_code, "done": done, "partial": partial, "missing": missing, "details": details}
+            "content": [{"type":"text","text": format!("Requirement verification: done={}, partial={}, missing={}", summary.done, summary.partial, summary.missing)}],
+            "data": {
+                "project_code": project_code,
+                "done": summary.done,
+                "partial": summary.partial,
+                "missing": summary.missing,
+                "details": details,
+                "completeness_axes": {
+                    "concept_completeness": snapshot.concept_complete(),
+                    "implementation_completeness": snapshot.implementation_complete(),
+                    "evidence_ready": snapshot.evidence_ready()
+                },
+                "guidance_source": "server-side canonical soll completeness evaluator"
+            }
         }))
     }
 

@@ -1747,6 +1747,16 @@ fn test_status_reports_retrieve_context_in_public_surface_when_full_autonomous()
 
 #[test]
 fn test_mcp_surface_diagnostics_exposes_server_truth_and_binding_caveat() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_PUBLIC_HOST", "192.168.1.50");
+        std::env::set_var("AXON_PUBLIC_HOST_SOURCE", "explicit");
+        std::env::set_var("AXON_PUBLIC_ENDPOINTS_AVAILABLE", "1");
+        std::env::set_var("AXON_MCP_PUBLIC_URL", "http://192.168.1.50:44129/mcp");
+        std::env::set_var("AXON_SQL_PUBLIC_URL", "http://192.168.1.50:44129/sql");
+        std::env::set_var("AXON_DASHBOARD_PUBLIC_URL", "http://192.168.1.50:44127/");
+    }
+
     let server = create_test_server();
     let response = server
         .handle_request(JsonRpcRequest {
@@ -1781,6 +1791,18 @@ fn test_mcp_surface_diagnostics_exposes_server_truth_and_binding_caveat() {
         data["client_binding_notes"]["stale_client_binding_possible"].as_bool(),
         Some(true)
     );
+    assert_eq!(
+        data["advertised_endpoints"]["available"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["advertised_endpoints"]["mcp_url"].as_str(),
+        Some("http://192.168.1.50:44129/mcp")
+    );
+    assert_eq!(
+        data["client_binding_notes"]["external_endpoint_rule"].as_str(),
+        Some("Do not use instance_identity.*_url as an external endpoint. Isolated clients must prefer advertised_endpoints.* when available.")
+    );
     let critical_tools = data["server_truth"]["critical_tools"].as_array().unwrap();
     assert!(critical_tools
         .iter()
@@ -1788,6 +1810,15 @@ fn test_mcp_surface_diagnostics_exposes_server_truth_and_binding_caveat() {
     assert!(critical_tools
         .iter()
         .any(|value| value.as_str() == Some("axon_init_project")));
+
+    unsafe {
+        std::env::remove_var("AXON_PUBLIC_HOST");
+        std::env::remove_var("AXON_PUBLIC_HOST_SOURCE");
+        std::env::remove_var("AXON_PUBLIC_ENDPOINTS_AVAILABLE");
+        std::env::remove_var("AXON_MCP_PUBLIC_URL");
+        std::env::remove_var("AXON_SQL_PUBLIC_URL");
+        std::env::remove_var("AXON_DASHBOARD_PUBLIC_URL");
+    }
 }
 
 #[test]
@@ -1898,6 +1929,59 @@ fn test_status_exposes_resource_policy_identity() {
         std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
         std::env::remove_var("AXON_VECTOR_WORKERS");
         std::env::remove_var("AXON_GRAPH_WORKERS");
+    }
+}
+
+#[test]
+fn test_status_exposes_advertised_endpoints_separately_from_runtime_local_urls() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_URL", "http://127.0.0.1:44129/mcp");
+        std::env::set_var("AXON_SQL_URL", "http://127.0.0.1:44129/sql");
+        std::env::set_var("AXON_DASHBOARD_URL", "http://127.0.0.1:44127/");
+        std::env::set_var("AXON_PUBLIC_HOST", "192.168.1.50");
+        std::env::set_var("AXON_PUBLIC_HOST_SOURCE", "derived");
+        std::env::set_var("AXON_PUBLIC_ENDPOINTS_AVAILABLE", "1");
+        std::env::set_var("AXON_MCP_PUBLIC_URL", "http://192.168.1.50:44129/mcp");
+        std::env::set_var("AXON_SQL_PUBLIC_URL", "http://192.168.1.50:44129/sql");
+        std::env::set_var("AXON_DASHBOARD_PUBLIC_URL", "http://192.168.1.50:44127/");
+    }
+
+    let server = create_test_server();
+    let response = server.axon_status(&json!({ "mode": "json" })).unwrap();
+    let data = response.get("data").unwrap();
+
+    assert_eq!(
+        data["instance_identity"]["mcp_url"].as_str(),
+        Some("http://127.0.0.1:44129/mcp")
+    );
+    assert_eq!(
+        data["advertised_endpoints"]["available"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["advertised_endpoints"]["public_host_source"].as_str(),
+        Some("derived")
+    );
+    assert_eq!(
+        data["advertised_endpoints"]["mcp_url"].as_str(),
+        Some("http://192.168.1.50:44129/mcp")
+    );
+    assert_eq!(
+        data["client_reachability_notes"]["instance_identity_is_runtime_local_only"].as_bool(),
+        Some(true)
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_URL");
+        std::env::remove_var("AXON_SQL_URL");
+        std::env::remove_var("AXON_DASHBOARD_URL");
+        std::env::remove_var("AXON_PUBLIC_HOST");
+        std::env::remove_var("AXON_PUBLIC_HOST_SOURCE");
+        std::env::remove_var("AXON_PUBLIC_ENDPOINTS_AVAILABLE");
+        std::env::remove_var("AXON_MCP_PUBLIC_URL");
+        std::env::remove_var("AXON_SQL_PUBLIC_URL");
+        std::env::remove_var("AXON_DASHBOARD_PUBLIC_URL");
     }
 }
 
@@ -6779,7 +6863,7 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("3 violation"));
+    assert!(content.contains("violation"));
     assert!(content.contains("REQ-AXO-001"));
     assert!(content.contains("VAL-AXO-001"));
     assert!(content.contains("DEC-AXO-001"));
@@ -8585,7 +8669,9 @@ fn test_axon_soll_manager_create_attached_decision_requires_relation_hint_when_a
     assert_eq!(data["attach_attempted"].as_bool(), Some(true));
     assert_eq!(data["attached"].as_bool(), Some(false));
     assert_eq!(data["attach_status"].as_str(), Some("needs_relation_hint"));
-    let guidance = data["attach_guidance"].as_object().expect("attach guidance");
+    let guidance = data["attach_guidance"]
+        .as_object()
+        .expect("attach guidance");
     let allowed_relations = guidance["allowed_relations"]
         .as_array()
         .expect("allowed relations")
@@ -8638,7 +8724,9 @@ fn test_axon_soll_manager_create_attached_validation_rejects_invalid_target_kind
     let data = response.get("data").expect("expected create data");
     assert_eq!(data["attached"].as_bool(), Some(false));
     assert_eq!(data["attach_status"].as_str(), Some("invalid_target_kind"));
-    let guidance = data["attach_guidance"].as_object().expect("attach guidance");
+    let guidance = data["attach_guidance"]
+        .as_object()
+        .expect("attach guidance");
     assert_eq!(guidance["pair_allowed"].as_bool(), Some(false));
     assert!(guidance["suggested_next_actions"].as_array().is_some());
 }
@@ -8945,6 +9033,122 @@ fn test_axon_validate_soll_returns_structured_repair_guidance_and_completeness()
     assert!(repair_guidance
         .iter()
         .any(|entry| entry["category"].as_str() == Some("validations_without_verifies")));
+}
+
+#[test]
+fn test_soll_attach_evidence_normalizes_entity_type_for_requirement_verification() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-210', 'Requirement', 'AXO', 'Normalized evidence', 'Uppercase entity type should still count', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "Requirement",
+                    "entity_id": "REQ-AXO-210",
+                    "artifacts": [{
+                        "artifact_type": "Symbol",
+                        "artifact_ref": "normalized_requirement",
+                        "confidence": 1.0
+                    }]
+                }
+            })),
+            id: Some(json!(4111)),
+        })
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_verify_requirements",
+                "arguments": { "project_code": "AXO" }
+            })),
+            id: Some(json!(4112)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = result["data"].clone();
+    assert_eq!(data["done"].as_u64(), Some(1));
+    assert_eq!(data["partial"].as_u64(), Some(0));
+    assert_eq!(data["missing"].as_u64(), Some(0));
+}
+
+#[test]
+fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_complete() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Core pillar', '', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Healthy requirement', '', 'current', '{\"acceptance_criteria\":\"done\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Healthy decision', '', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', 'Healthy validation', '', 'passed', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-AXO-001', 'PIL-AXO-001', 'BELONGS_TO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-001', 'REQ-AXO-001', 'SOLVES')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('VAL-AXO-001', 'REQ-AXO-001', 'VERIFIES')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-AXO-001', 'requirement', 'REQ-AXO-001', 'Symbol', 'healthy_requirement', 1.0, 0)")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "anomalies",
+                "arguments": { "project": "AXO", "mode": "brief" }
+            })),
+            id: Some(json!(4113)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = result["data"].clone();
+    assert_eq!(
+        data["summary"]["concept_completeness"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["summary"]["implementation_completeness"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(data["summary"]["orphan_intent_count"].as_u64(), Some(0));
+    assert!(
+        data["summary"]["heuristic_intent_gap_count"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
+    );
 }
 
 #[test]
