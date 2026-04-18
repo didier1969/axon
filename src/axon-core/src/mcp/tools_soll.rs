@@ -793,6 +793,18 @@ impl McpServer {
         }
     }
 
+    fn classify_attach_status_from_error(&self, error_text: &str) -> &'static str {
+        if error_text.contains("Relation explicite requise") {
+            "needs_relation_hint"
+        } else if error_text.contains("introuvable") {
+            "invalid_target_id"
+        } else if error_text.contains("Aucune relation canonique autorisee") {
+            "invalid_target_kind"
+        } else {
+            "attach_failed"
+        }
+    }
+
     pub(crate) fn axon_soll_manager(&self, args: &Value) -> Option<Value> {
         let action = args.get("action")?.as_str()?;
         let entity = args.get("entity")?.as_str()?;
@@ -922,6 +934,8 @@ impl McpServer {
                 };
 
                 let q = "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET project_code = EXCLUDED.project_code, title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata";
+                let attach_to = data.get("attach_to").and_then(|v| v.as_str());
+                let relation_hint = data.get("relation_hint").and_then(|v| v.as_str());
 
                 let insert_res = self.graph_store.execute_param(
                     q,
@@ -938,15 +952,64 @@ impl McpServer {
 
                 match insert_res {
                     Ok(_) => {
-                        let report = format!("✅ Entité SOLL créée : `{}`", formatted_id);
+                        let created_id = formatted_id.clone();
+                        let mut report = format!("✅ Entité SOLL créée : `{}`", created_id);
+                        let mut response_data = json!({
+                            "created_id": created_id,
+                            "entity_type": entity_type_cap,
+                            "project_code": canonical_code,
+                            "canonical_next_links": self.canonical_next_link_hints(entity_type_cap),
+                            "attach_attempted": attach_to.is_some(),
+                            "attached": false,
+                            "attached_to": attach_to.map(Value::from).unwrap_or(Value::Null),
+                            "applied_relation": Value::Null,
+                            "attach_status": if attach_to.is_some() { Value::from("not_attempted") } else { Value::Null }
+                        });
+
+                        if let Some(target_id) = attach_to {
+                            match self.select_relation_type_for_link(&formatted_id, target_id, relation_hint) {
+                                Ok((relation_type, policy)) => {
+                                    match self.insert_validated_relation(relation_type, &formatted_id, target_id, policy) {
+                                        Ok(inserted) => {
+                                            response_data["attached"] = Value::from(true);
+                                            response_data["attached_to"] = Value::from(target_id);
+                                            response_data["applied_relation"] = Value::from(relation_type);
+                                            response_data["attach_status"] = Value::from(if inserted { "attached" } else { "already_present" });
+                                            report.push_str(&format!(
+                                                "\n✅ Liaison canonique appliquée : `{}` -> `{}` via `{}`",
+                                                formatted_id, target_id, relation_type
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            let error_text = error.to_string();
+                                            response_data["attach_status"] =
+                                                Value::from(self.classify_attach_status_from_error(&error_text));
+                                            response_data["attach_guidance"] =
+                                                self.relation_guidance_for_link(&formatted_id, target_id, relation_hint);
+                                            report.push_str(&format!(
+                                                "\n⚠️ Attachement canonique refusé : {}",
+                                                error_text
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    let error_text = error.to_string();
+                                    response_data["attach_status"] =
+                                        Value::from(self.classify_attach_status_from_error(&error_text));
+                                    response_data["attach_guidance"] =
+                                        self.relation_guidance_for_link(&formatted_id, target_id, relation_hint);
+                                    report.push_str(&format!(
+                                        "\n⚠️ Attachement canonique refusé : {}",
+                                        error_text
+                                    ));
+                                }
+                            }
+                        }
+
                         Some(json!({
                             "content": [{ "type": "text", "text": report }],
-                            "data": {
-                                "created_id": formatted_id,
-                                "entity_type": entity_type_cap,
-                                "project_code": canonical_code,
-                                "canonical_next_links": self.canonical_next_link_hints(entity_type_cap)
-                            }
+                            "data": response_data
                         }))
                     }
                     Err(e) => Some(

@@ -117,6 +117,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 
 ## Mutation Rules
 - `soll_manager` for immediate unit mutations.
+- `soll_manager action=create` may optionally use `attach_to` and `relation_hint` for canonical graph attachment in the same operation.
 - `soll_relation_schema` before retrying an invalid SOLL link or when canonical outgoing or incoming graph edges are unclear.
 - `soll_validate` now returns structured `repair_guidance` and `completeness`; use it to repair graph structure, not only to detect warnings.
 - `soll_apply_plan` for transactional batch mutations.

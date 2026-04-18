@@ -8501,6 +8501,149 @@ fn test_axon_soll_manager_link_applies_default_relation() {
 }
 
 #[test]
+fn test_axon_soll_manager_create_can_attach_requirement_to_pillar() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Platform Pillar', 'Protect structure', '', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "requirement",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "Attachable requirement",
+                    "description": "Should auto-link to pillar",
+                    "priority": "P1",
+                    "attach_to": "PIL-AXO-001"
+                }
+            }
+        })),
+        id: Some(json!(41015)),
+    };
+
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let data = response.get("data").expect("expected create data");
+    let created_id = data["created_id"].as_str().expect("created_id");
+    assert!(created_id.starts_with("REQ-AXO-"), "{created_id}");
+    assert_eq!(data["attached"].as_bool(), Some(true));
+    assert_eq!(data["attached_to"].as_str(), Some("PIL-AXO-001"));
+    assert_eq!(data["applied_relation"].as_str(), Some("BELONGS_TO"));
+    assert_eq!(data["attach_status"].as_str(), Some("attached"));
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Edge WHERE source_id='{}' AND target_id='PIL-AXO-001' AND relation_type='BELONGS_TO'",
+                created_id
+            ))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn test_axon_soll_manager_create_attached_decision_requires_relation_hint_when_ambiguous() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Existing decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "decision",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "New linked decision",
+                    "description": "Should need explicit relation",
+                    "context": "Context",
+                    "rationale": "Because",
+                    "status": "accepted",
+                    "attach_to": "DEC-AXO-001"
+                }
+            }
+        })),
+        id: Some(json!(41016)),
+    };
+
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let data = response.get("data").expect("expected create data");
+    let created_id = data["created_id"].as_str().expect("created_id");
+    assert!(created_id.starts_with("DEC-AXO-"), "{created_id}");
+    assert_eq!(data["attach_attempted"].as_bool(), Some(true));
+    assert_eq!(data["attached"].as_bool(), Some(false));
+    assert_eq!(data["attach_status"].as_str(), Some("needs_relation_hint"));
+    let guidance = data["attach_guidance"].as_object().expect("attach guidance");
+    let allowed_relations = guidance["allowed_relations"]
+        .as_array()
+        .expect("allowed relations")
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(allowed_relations.contains(&"SUPERSEDES"));
+    assert!(allowed_relations.contains(&"REFINES"));
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Edge WHERE source_id='{}' AND target_id='DEC-AXO-001'",
+                created_id
+            ))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn test_axon_soll_manager_create_attached_validation_rejects_invalid_target_kind_with_guidance() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Vision', 'North star', '', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "validation",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "Proof",
+                    "method": "manual",
+                    "result": "pending",
+                    "attach_to": "VIS-AXO-001"
+                }
+            }
+        })),
+        id: Some(json!(41017)),
+    };
+
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let data = response.get("data").expect("expected create data");
+    assert_eq!(data["attached"].as_bool(), Some(false));
+    assert_eq!(data["attach_status"].as_str(), Some("invalid_target_kind"));
+    let guidance = data["attach_guidance"].as_object().expect("attach guidance");
+    assert_eq!(guidance["pair_allowed"].as_bool(), Some(false));
+    assert!(guidance["suggested_next_actions"].as_array().is_some());
+}
+
+#[test]
 fn test_axon_soll_manager_link_rejects_relation_outside_policy() {
     let server = create_test_server();
     server
