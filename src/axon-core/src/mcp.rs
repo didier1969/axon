@@ -34,6 +34,9 @@ pub struct McpServer {
     graph_store: Arc<GraphStore>,
 }
 
+const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
 impl McpServer {
     pub fn new(graph_store: Arc<GraphStore>) -> Self {
         Self { graph_store }
@@ -657,6 +660,34 @@ impl McpServer {
         }))
     }
 
+    pub fn handle_notification(&self, request: JsonRpcRequest) -> bool {
+        if request.id.is_some() {
+            return false;
+        }
+
+        matches!(request.method.as_str(), "notifications/initialized")
+    }
+
+    pub fn negotiate_protocol_version(request: &JsonRpcRequest) -> &'static str {
+        let requested = request
+            .params
+            .as_ref()
+            .and_then(|params| params.get("protocolVersion"))
+            .and_then(|value| value.as_str());
+
+        if let Some(version) = requested {
+            if let Some(supported) = SUPPORTED_MCP_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|supported| *supported == version)
+            {
+                return supported;
+            }
+        }
+
+        SUPPORTED_MCP_PROTOCOL_VERSIONS[0]
+    }
+
     pub fn handle_request(&self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {
         if request.id.is_none() {
             return None;
@@ -664,7 +695,7 @@ impl McpServer {
 
         let result = match request.method.as_str() {
             "initialize" => Some(json!({
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": Self::negotiate_protocol_version(&request),
                 "capabilities": {
                     "tools": {}
                 },

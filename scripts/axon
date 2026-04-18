@@ -26,6 +26,7 @@ Commands:
   create-release-manifest [args...] Create canonical release manifest for promotion
   promote-live [args...]   Promote a qualified manifest to the live install state
   rollback-live [args...]  Roll back live install state to a prior manifest
+  seed-dev-from-live [args...] Refresh the dev graph root from the live graph root
   check-project-identity   Fail if legacy project identity terms reappear in active surfaces
   qualify-guidance [args...] Expert MCP guidance golden replay
   qualify-guidance-live    Replay live MCP guidance goldens against running server
@@ -36,6 +37,8 @@ Commands:
   reindex-project [args...] Reindex one project with before/after noise evaluation
 
 Examples:
+  ./scripts/axon-live status
+  ./scripts/axon-dev start --full
   ./scripts/axon --instance live status
   ./scripts/axon --instance dev start --full
   ./scripts/axon setup
@@ -56,6 +59,7 @@ Examples:
   ./scripts/axon create-release-manifest --state qualified
   ./scripts/axon promote-live --manifest .axon/releases/candidates/v0.7.0-abc.json
   ./scripts/axon rollback-live --manifest .axon/live-release/history/live-20260418T120000Z.json
+  ./scripts/axon seed-dev-from-live
   ./scripts/axon check-project-identity
   ./scripts/axon qualify-guidance
   ./scripts/axon qualify-guidance-live
@@ -210,6 +214,9 @@ EOF
     ;;
   rollback-live)
     exec bash "$SCRIPT_DIR/release/rollback_live.sh" "$@"
+    ;;
+  seed-dev-from-live)
+    exec bash "$SCRIPT_DIR/seed-dev-from-live.sh" "$@"
     ;;
   check-project-identity)
     exec python3 "$SCRIPT_DIR/check_no_project_slug.py"

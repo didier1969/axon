@@ -1020,6 +1020,26 @@ impl McpServer {
             std::env::var("AXON_DASHBOARD_URL").unwrap_or_else(|_| "unknown".to_string());
         let mutation_policy =
             std::env::var("AXON_MUTATION_POLICY").unwrap_or_else(|_| "unknown".to_string());
+        let resource_priority =
+            std::env::var("AXON_RESOURCE_PRIORITY").unwrap_or_else(|_| "unknown".to_string());
+        let background_budget_class =
+            std::env::var("AXON_BACKGROUND_BUDGET_CLASS").unwrap_or_else(|_| "unknown".to_string());
+        let gpu_access_policy =
+            std::env::var("AXON_GPU_ACCESS_POLICY").unwrap_or_else(|_| "unknown".to_string());
+        let watcher_policy =
+            std::env::var("AXON_WATCHER_POLICY").unwrap_or_else(|_| "unknown".to_string());
+        let max_axon_workers =
+            std::env::var("MAX_AXON_WORKERS").unwrap_or_else(|_| "unknown".to_string());
+        let queue_memory_budget_bytes = std::env::var("AXON_QUEUE_MEMORY_BUDGET_BYTES")
+            .unwrap_or_else(|_| "unknown".to_string());
+        let watcher_subtree_hint_budget = std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET")
+            .unwrap_or_else(|_| "unknown".to_string());
+        let vector_workers =
+            std::env::var("AXON_VECTOR_WORKERS").unwrap_or_else(|_| "unknown".to_string());
+        let graph_workers =
+            std::env::var("AXON_GRAPH_WORKERS").unwrap_or_else(|_| "unknown".to_string());
+        let embedding_provider =
+            std::env::var("AXON_EMBEDDING_PROVIDER").unwrap_or_else(|_| "unknown".to_string());
         let package_version = std::env::var("AXON_PACKAGE_VERSION")
             .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
         let release_version =
@@ -1057,6 +1077,18 @@ impl McpServer {
                     "sql_url": sql_url,
                     "dashboard_url": dashboard_url,
                     "mutation_policy": mutation_policy
+                },
+                "resource_policy": {
+                    "resource_priority": resource_priority,
+                    "background_budget_class": background_budget_class,
+                    "gpu_access_policy": gpu_access_policy,
+                    "watcher_policy": watcher_policy,
+                    "embedding_provider": embedding_provider,
+                    "max_axon_workers": max_axon_workers,
+                    "queue_memory_budget_bytes": queue_memory_budget_bytes,
+                    "watcher_subtree_hint_budget": watcher_subtree_hint_budget,
+                    "vector_workers": vector_workers,
+                    "graph_workers": graph_workers
                 },
                 "runtime_version": {
                     "release_version": release_version,

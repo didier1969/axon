@@ -9,12 +9,15 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_PROJECTS_ROOT="/home/dstadel/projects"
 # shellcheck source=scripts/lib/axon-instance.sh
 source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
+# shellcheck source=scripts/lib/axon-resource-policy.sh
+source "$PROJECT_ROOT/scripts/lib/axon-resource-policy.sh"
 # shellcheck source=scripts/lib/axon-version.sh
 source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
 cd "$PROJECT_ROOT"
 
 axon_load_worktree_env "$PROJECT_ROOT"
 axon_resolve_instance "$PROJECT_ROOT" "$(basename "$PROJECT_ROOT")"
+axon_resolve_resource_policy "$AXON_INSTANCE_KIND"
 axon_resolve_version "$PROJECT_ROOT"
 
 LIVE_RELEASE_CURRENT_MANIFEST="$PROJECT_ROOT/.axon/live-release/current.json"
@@ -398,6 +401,8 @@ echo "📂 Watch root: $WATCH_ROOT"
 echo "🗂️ Projects root: $PROJECTS_ROOT"
 echo "🧭 Runtime mode: $RUNTIME_MODE"
 echo "🧩 Instance kind: $AXON_INSTANCE_KIND"
+echo "📊 Resource policy: priority=$AXON_RESOURCE_PRIORITY budget=$AXON_BACKGROUND_BUDGET_CLASS gpu=$AXON_GPU_ACCESS_POLICY watcher=$AXON_WATCHER_POLICY"
+echo "🛠️ Worker cap: ${MAX_AXON_WORKERS:-auto} / Queue budget bytes: ${AXON_QUEUE_MEMORY_BUDGET_BYTES:-auto}"
 echo "🏷️ Release version: $AXON_RELEASE_VERSION"
 echo "🧱 Build id: $AXON_BUILD_ID"
 
@@ -417,6 +422,14 @@ axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
   AXON_DASHBOARD_ENABLED "$START_DASHBOARD" \
   AXON_INSTANCE_KIND "$AXON_INSTANCE_KIND" \
   AXON_RUNTIME_IDENTITY "$AXON_RUNTIME_IDENTITY" \
+  AXON_RESOURCE_PRIORITY "$AXON_RESOURCE_PRIORITY" \
+  AXON_BACKGROUND_BUDGET_CLASS "$AXON_BACKGROUND_BUDGET_CLASS" \
+  AXON_GPU_ACCESS_POLICY "$AXON_GPU_ACCESS_POLICY" \
+  AXON_WATCHER_POLICY "$AXON_WATCHER_POLICY" \
+  MAX_AXON_WORKERS "${MAX_AXON_WORKERS:-}" \
+  AXON_QUEUE_MEMORY_BUDGET_BYTES "${AXON_QUEUE_MEMORY_BUDGET_BYTES:-}" \
+  AXON_WATCHER_SUBTREE_HINT_BUDGET "${AXON_WATCHER_SUBTREE_HINT_BUDGET:-}" \
+  AXON_EMBEDDING_PROVIDER "${AXON_EMBEDDING_PROVIDER:-}" \
   AXON_RELEASE_VERSION "$AXON_RELEASE_VERSION" \
   AXON_BUILD_ID "$AXON_BUILD_ID" \
   AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
@@ -459,7 +472,13 @@ append_pass_through_export() {
     fi
 }
 for pass_through_var in \
+    AXON_RESOURCE_PRIORITY \
+    AXON_BACKGROUND_BUDGET_CLASS \
+    AXON_GPU_ACCESS_POLICY \
+    AXON_WATCHER_POLICY \
     AXON_ENABLE_FEDERATION_ORCHESTRATOR \
+    AXON_QUEUE_MEMORY_BUDGET_BYTES \
+    AXON_WATCHER_SUBTREE_HINT_BUDGET \
     AXON_VECTOR_WORKERS \
     AXON_GRAPH_WORKERS \
     AXON_CHUNK_BATCH_SIZE \
@@ -559,7 +578,7 @@ if [[ "$EMBEDDING_PROVIDER_REQUEST" == "cuda" && ! -f "$ORT_OUT_PATH/lib/libonnx
     echo "⚠️ The selected ONNX Runtime package does not include libonnxruntime_providers_cuda.so."
     echo "   CUDA embedding cannot activate with this system ORT package; Axon will fall back to CPU diagnostics."
 fi
-tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'mkdir -p \"$AXON_RUN_ROOT\"; export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_WATCH_DIR=\"$WATCH_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_MCP_MUTATION_JOBS=1; export AXON_INSTANCE_KIND=\"$AXON_INSTANCE_KIND\"; export AXON_RUNTIME_IDENTITY=\"$AXON_RUNTIME_IDENTITY\"; export AXON_DB_ROOT=\"$AXON_DB_ROOT\"; export AXON_RUN_ROOT=\"$AXON_RUN_ROOT\"; export AXON_PID_FILE=\"$AXON_PID_FILE\"; export AXON_TELEMETRY_SOCK=\"$AXON_TELEMETRY_SOCK\"; export AXON_MCP_SOCK=\"$AXON_MCP_SOCK\"; export AXON_SQL_URL=\"$AXON_SQL_URL\"; export AXON_MCP_URL=\"$AXON_MCP_URL\"; export AXON_DASHBOARD_URL=\"$AXON_DASHBOARD_URL\"; export AXON_MUTATION_POLICY=\"$AXON_MUTATION_POLICY\"; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\"$ORT_DYLIB_PATH\"; echo \"🚀 Starting Axon Core...\"; bin/axon-core & core_pid=\$!; echo \$core_pid > \"$AXON_PID_FILE\"; wait \$core_pid; core_status=\$?; rm -f \"$AXON_PID_FILE\"; exit \$core_status'" C-m
+tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'mkdir -p \"$AXON_RUN_ROOT\"; export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_WATCH_DIR=\"$WATCH_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_MCP_MUTATION_JOBS=1; export AXON_INSTANCE_KIND=\"$AXON_INSTANCE_KIND\"; export AXON_RUNTIME_IDENTITY=\"$AXON_RUNTIME_IDENTITY\"; export AXON_DB_ROOT=\"$AXON_DB_ROOT\"; export AXON_RUN_ROOT=\"$AXON_RUN_ROOT\"; export AXON_PID_FILE=\"$AXON_PID_FILE\"; export AXON_TELEMETRY_SOCK=\"$AXON_TELEMETRY_SOCK\"; export AXON_MCP_SOCK=\"$AXON_MCP_SOCK\"; export PHX_PORT=\"$PHX_PORT\"; export HYDRA_TCP_PORT=\"$HYDRA_TCP_PORT\"; export HYDRA_HTTP_PORT=\"$HYDRA_HTTP_PORT\"; export HYDRA_ODATA_PORT=\"$HYDRA_ODATA_PORT\"; export HYDRA_HTTP2_PORT=\"$HYDRA_HTTP2_PORT\"; export HYDRA_MCP_PORT=\"$HYDRA_MCP_PORT\"; export AXON_SQL_URL=\"$AXON_SQL_URL\"; export AXON_MCP_URL=\"$AXON_MCP_URL\"; export AXON_DASHBOARD_URL=\"$AXON_DASHBOARD_URL\"; export AXON_MUTATION_POLICY=\"$AXON_MUTATION_POLICY\"; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\"$ORT_DYLIB_PATH\"; echo \"🚀 Starting Axon Core...\"; bin/axon-core & core_pid=\$!; echo \$core_pid > \"$AXON_PID_FILE\"; wait \$core_pid; core_status=\$?; rm -f \"$AXON_PID_FILE\"; exit \$core_status'" C-m
 
 if [ "$START_DASHBOARD" = "1" ]; then
     # Start Visualization Plane

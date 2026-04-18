@@ -38,7 +38,7 @@ It should orchestrate them.
 
 Working name:
 
-- `consensus-driven-delivery`
+- `idea-to-delivery`
 
 Alternate acceptable names:
 

@@ -4,9 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/axon-instance.sh
 source "$ROOT_DIR/scripts/lib/axon-instance.sh"
+# shellcheck source=scripts/lib/axon-resource-policy.sh
+source "$ROOT_DIR/scripts/lib/axon-resource-policy.sh"
 source "$ROOT_DIR/scripts/lib/axon-version.sh"
 axon_load_worktree_env "$ROOT_DIR"
 axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
+axon_resolve_resource_policy "$AXON_INSTANCE_KIND"
 axon_resolve_version "$ROOT_DIR"
 if [[ -f "$AXON_RUNTIME_STATE_FILE" ]]; then
   # shellcheck disable=SC1090
@@ -124,6 +127,12 @@ main() {
   printf "SESSION  %s\n" "$TMUX_SESSION"
   printf "DB ROOT  %s\n" "$AXON_DB_ROOT"
   printf "RUN ROOT %s\n" "$AXON_RUN_ROOT"
+  printf "POLICY   priority=%s budget=%s gpu=%s watcher=%s\n" \
+    "$AXON_RESOURCE_PRIORITY" "$AXON_BACKGROUND_BUDGET_CLASS" "$AXON_GPU_ACCESS_POLICY" "$AXON_WATCHER_POLICY"
+  printf "EMBED    %s\n" "${AXON_EMBEDDING_PROVIDER:-auto}"
+  printf "WORKERS  %s\n" "${MAX_AXON_WORKERS:-auto}"
+  printf "QUEUE    %s\n" "${AXON_QUEUE_MEMORY_BUDGET_BYTES:-auto}"
+  printf "WATCHER  %s\n" "${AXON_WATCHER_SUBTREE_HINT_BUDGET:-auto}"
   printf "VERSION  %s\n" "${AXON_RELEASE_VERSION:-unknown}"
   printf "BUILD    %s\n" "${AXON_BUILD_ID:-unknown}"
   printf "GEN      %s\n" "${AXON_INSTALL_GENERATION:-unknown}"

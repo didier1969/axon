@@ -67,7 +67,7 @@ Elle doit être visible dans le protocole.
 Exemple :
 
 - `axon-live` → `http://127.0.0.1:44129/mcp`
-- `axon-dev` → `http://127.0.0.1:45129/mcp`
+- `axon-dev` → `http://127.0.0.1:44139/mcp`
 
 Les commandes MCP restent identiques :
 
@@ -83,14 +83,14 @@ Ce qui change est l’instance ciblée, pas l’API.
 
 ### 2. Deux racines d’état distinctes
 
-Exemple :
+Current intended roots:
 
 - Live :
-  - `~/.local/share/axon/live/ist.db`
-  - `~/.local/share/axon/live/soll.db`
+  - `.axon/graph_v2/ist.db`
+  - `.axon/graph_v2/sanctuary/soll.db`
 - Dev :
-  - `~/.local/share/axon/dev/ist.db`
-  - `~/.local/share/axon/dev/soll.db`
+  - `.axon-dev/graph_v2/ist.db`
+  - `.axon-dev/graph_v2/sanctuary/soll.db`
 
 La règle est dure :
 

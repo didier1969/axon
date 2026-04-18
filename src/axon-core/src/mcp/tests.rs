@@ -738,7 +738,7 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"path"));
     assert!(tool_names.contains(&"anomalies"));
     assert!(tool_names.contains(&"axon_pre_flight_check"));
-    assert!(!tool_names.contains(&"job_status"));
+    assert!(tool_names.contains(&"job_status"));
     assert!(!tool_names.contains(&"retrieve_context"));
     assert!(!tool_names.contains(&"query"));
     assert!(!tool_names.contains(&"inspect"));
@@ -746,13 +746,13 @@ fn test_mcp_tools_list() {
     assert!(!tool_names.contains(&"impact"));
     assert!(!tool_names.contains(&"health"));
     assert!(!tool_names.contains(&"soll_apply_plan_v2"));
-    assert!(!tool_names.contains(&"refine_lattice"));
-    assert!(!tool_names.contains(&"batch"));
-    assert!(!tool_names.contains(&"cypher"));
-    assert!(!tool_names.contains(&"debug"));
-    assert!(!tool_names.contains(&"schema_overview"));
-    assert!(!tool_names.contains(&"list_labels_tables"));
-    assert!(!tool_names.contains(&"query_examples"));
+    assert!(tool_names.contains(&"refine_lattice"));
+    assert!(tool_names.contains(&"batch"));
+    assert!(tool_names.contains(&"cypher"));
+    assert!(tool_names.contains(&"debug"));
+    assert!(tool_names.contains(&"schema_overview"));
+    assert!(tool_names.contains(&"list_labels_tables"));
+    assert!(tool_names.contains(&"query_examples"));
     assert!(!tool_names.contains(&"truth_check"));
     assert!(!tool_names.contains(&"diagnose_indexing"));
     assert!(!tool_names.contains(&"diff"));
@@ -761,7 +761,7 @@ fn test_mcp_tools_list() {
     assert!(!tool_names.contains(&"bidi_trace"));
     assert!(!tool_names.contains(&"api_break_check"));
     assert!(!tool_names.contains(&"simulate_mutation"));
-    assert!(!tool_names.contains(&"resume_vectorization"));
+    assert!(tool_names.contains(&"resume_vectorization"));
 }
 
 #[test]
@@ -796,11 +796,11 @@ fn test_mcp_tools_list_in_full_autonomous_exposes_core_and_hides_relegated_tools
     assert!(tool_names.contains(&"inspect"));
     assert!(tool_names.contains(&"impact"));
     assert!(tool_names.contains(&"retrieve_context"));
-    assert!(!tool_names.contains(&"health"));
-    assert!(!tool_names.contains(&"audit"));
-    assert!(!tool_names.contains(&"batch"));
-    assert!(!tool_names.contains(&"job_status"));
-    assert!(!tool_names.contains(&"architectural_drift"));
+    assert!(tool_names.contains(&"health"));
+    assert!(tool_names.contains(&"audit"));
+    assert!(tool_names.contains(&"batch"));
+    assert!(tool_names.contains(&"job_status"));
+    assert!(tool_names.contains(&"architectural_drift"));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -842,6 +842,14 @@ fn test_mcp_tools_list_include_internal_exposes_expert_tools_in_full_autonomous(
     assert!(tool_names.contains(&"batch"));
     assert!(tool_names.contains(&"job_status"));
     assert!(tool_names.contains(&"architectural_drift"));
+    assert!(tool_names.contains(&"truth_check"));
+    assert!(tool_names.contains(&"diagnose_indexing"));
+    assert!(tool_names.contains(&"diff"));
+    assert!(tool_names.contains(&"semantic_clones"));
+    assert!(tool_names.contains(&"bidi_trace"));
+    assert!(tool_names.contains(&"api_break_check"));
+    assert!(tool_names.contains(&"simulate_mutation"));
+    assert!(tool_names.contains(&"resume_vectorization"));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -1288,10 +1296,18 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     assert!(public_tool_names.contains(&"why"));
     assert!(public_tool_names.contains(&"path"));
     assert!(public_tool_names.contains(&"anomalies"));
+    assert!(public_tool_names.contains(&"refine_lattice"));
+    assert!(public_tool_names.contains(&"cypher"));
+    assert!(public_tool_names.contains(&"debug"));
+    assert!(public_tool_names.contains(&"schema_overview"));
+    assert!(public_tool_names.contains(&"list_labels_tables"));
+    assert!(public_tool_names.contains(&"query_examples"));
+    assert!(public_tool_names.contains(&"batch"));
+    assert!(public_tool_names.contains(&"job_status"));
+    assert!(public_tool_names.contains(&"resume_vectorization"));
     assert!(!public_tool_names.contains(&"health"));
     assert!(!public_tool_names.contains(&"audit"));
-    assert!(!public_tool_names.contains(&"batch"));
-    assert!(!public_tool_names.contains(&"job_status"));
+    assert!(!public_tool_names.contains(&"truth_check"));
     assert!(data
         .get("runtime_mode")
         .and_then(|value| value.as_str())
@@ -1344,10 +1360,25 @@ fn test_status_reports_retrieve_context_in_public_surface_when_full_autonomous()
         .filter_map(|value| value.as_str())
         .collect::<Vec<_>>();
     assert!(public_tool_names.contains(&"retrieve_context"));
-    assert!(!public_tool_names.contains(&"health"));
-    assert!(!public_tool_names.contains(&"audit"));
-    assert!(!public_tool_names.contains(&"batch"));
-    assert!(!public_tool_names.contains(&"job_status"));
+    assert!(public_tool_names.contains(&"refine_lattice"));
+    assert!(public_tool_names.contains(&"cypher"));
+    assert!(public_tool_names.contains(&"debug"));
+    assert!(public_tool_names.contains(&"schema_overview"));
+    assert!(public_tool_names.contains(&"list_labels_tables"));
+    assert!(public_tool_names.contains(&"query_examples"));
+    assert!(public_tool_names.contains(&"health"));
+    assert!(public_tool_names.contains(&"audit"));
+    assert!(public_tool_names.contains(&"batch"));
+    assert!(public_tool_names.contains(&"job_status"));
+    assert!(public_tool_names.contains(&"truth_check"));
+    assert!(public_tool_names.contains(&"diagnose_indexing"));
+    assert!(public_tool_names.contains(&"diff"));
+    assert!(public_tool_names.contains(&"semantic_clones"));
+    assert!(public_tool_names.contains(&"architectural_drift"));
+    assert!(public_tool_names.contains(&"bidi_trace"));
+    assert!(public_tool_names.contains(&"api_break_check"));
+    assert!(public_tool_names.contains(&"simulate_mutation"));
+    assert!(public_tool_names.contains(&"resume_vectorization"));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -1391,6 +1422,78 @@ fn test_status_exposes_runtime_version_identity() {
         std::env::remove_var("AXON_BUILD_ID");
         std::env::remove_var("AXON_PACKAGE_VERSION");
         std::env::remove_var("AXON_INSTALL_GENERATION");
+    }
+}
+
+#[test]
+fn test_status_exposes_resource_policy_identity() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RESOURCE_PRIORITY", "critical");
+        std::env::set_var("AXON_BACKGROUND_BUDGET_CLASS", "balanced");
+        std::env::set_var("AXON_GPU_ACCESS_POLICY", "preferred");
+        std::env::set_var("AXON_WATCHER_POLICY", "full");
+        std::env::set_var("AXON_EMBEDDING_PROVIDER", "cpu");
+        std::env::set_var("MAX_AXON_WORKERS", "8");
+        std::env::set_var("AXON_QUEUE_MEMORY_BUDGET_BYTES", "3221225472");
+        std::env::set_var("AXON_WATCHER_SUBTREE_HINT_BUDGET", "128");
+        std::env::set_var("AXON_VECTOR_WORKERS", "2");
+        std::env::set_var("AXON_GRAPH_WORKERS", "3");
+    }
+
+    let server = create_test_server();
+    let response = server.axon_status(&json!({ "mode": "json" })).unwrap();
+    let data = response.get("data").unwrap();
+
+    assert_eq!(
+        data["resource_policy"]["resource_priority"].as_str(),
+        Some("critical")
+    );
+    assert_eq!(
+        data["resource_policy"]["background_budget_class"].as_str(),
+        Some("balanced")
+    );
+    assert_eq!(
+        data["resource_policy"]["gpu_access_policy"].as_str(),
+        Some("preferred")
+    );
+    assert_eq!(
+        data["resource_policy"]["watcher_policy"].as_str(),
+        Some("full")
+    );
+    assert_eq!(
+        data["resource_policy"]["embedding_provider"].as_str(),
+        Some("cpu")
+    );
+    assert_eq!(
+        data["resource_policy"]["max_axon_workers"].as_str(),
+        Some("8")
+    );
+    assert_eq!(
+        data["resource_policy"]["queue_memory_budget_bytes"].as_str(),
+        Some("3221225472")
+    );
+    assert_eq!(
+        data["resource_policy"]["watcher_subtree_hint_budget"].as_str(),
+        Some("128")
+    );
+    assert_eq!(
+        data["resource_policy"]["vector_workers"].as_str(),
+        Some("2")
+    );
+    assert_eq!(data["resource_policy"]["graph_workers"].as_str(), Some("3"));
+
+    unsafe {
+        std::env::remove_var("AXON_RESOURCE_PRIORITY");
+        std::env::remove_var("AXON_BACKGROUND_BUDGET_CLASS");
+        std::env::remove_var("AXON_GPU_ACCESS_POLICY");
+        std::env::remove_var("AXON_WATCHER_POLICY");
+        std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+        std::env::remove_var("MAX_AXON_WORKERS");
+        std::env::remove_var("AXON_QUEUE_MEMORY_BUDGET_BYTES");
+        std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
+        std::env::remove_var("AXON_VECTOR_WORKERS");
+        std::env::remove_var("AXON_GRAPH_WORKERS");
     }
 }
 

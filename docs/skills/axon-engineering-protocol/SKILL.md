@@ -10,9 +10,20 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - Treat MCP output as authoritative. Do not invent IDs, project codes, or intent links.
 
 ## Runtime Rule
-- Production MCP is the server on `44129`. Do not start a second MCP server from a worktree or sandbox.
+- Axon now has two valid runtime authorities:
+  - `live`: stable truth runtime
+  - `dev`: isolated development runtime
+- Use explicit entrypoints:
+  - `./scripts/axon-live ...`
+  - `./scripts/axon-dev ...`
+  - or `./scripts/axon --instance live|dev ...`
+- `live` and `dev` share the same MCP surface, but not the same ports, sockets, pidfiles, or databases.
 - `status` is always the first truth surface.
+- Distinguish:
+  - MCP `status` = protocol truth
+  - `scripts/status*.sh` = local lifecycle probe
 - For MCP surface qualification, prefer `./scripts/axon qualify-mcp`; treat older entrypoints such as `quality-mcp`, `validate-mcp`, `measure-mcp`, `compare-mcp`, `robustness-mcp`, and `qualify-guidance` as expert or compatibility flows.
+- Do not mutate `live` implicitly from development workflows.
 
 ## Identity Contract
 - Canonical IDs are server-owned: `TYPE-CODE-NNN`.
@@ -38,15 +49,14 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - `change_safety`: practical mutation safety.
 - `conception_view`: derived module/interface/contract/flow map.
 - `snapshot_history`, `snapshot_diff`: derived structural memory.
+- advanced graph/system exploration: `refine_lattice`, `cypher`, `debug`, `schema_overview`, `list_labels_tables`, `query_examples`
+- advanced runtime/analysis tools: `health`, `audit`, `batch`, `truth_check`, `diagnose_indexing`, `diff`, `semantic_clones`, `architectural_drift`, `bidi_trace`, `api_break_check`, `simulate_mutation`, `resume_vectorization`, `job_status`
 - `axon_pre_flight_check`, `axon_commit_work`: validated delivery workflow.
 - SOLL workflow: `soll_query_context`, `soll_work_plan`, `soll_validate`, `soll_export`, `soll_verify_requirements`, `soll_manager`, `soll_apply_plan`, `soll_commit_revision`, `soll_rollback_revision`, `axon_init_project`, `axon_apply_guidelines`.
 
 ## Expert/Internal Tools
-- `architectural_drift`
-- `health`, `audit`, `batch`
-- `diagnose_indexing`, `truth_check`, `resume_vectorization`
-- `cypher`, `debug`, `schema_overview`, `list_labels_tables`, `query_examples`, `diff`
-- `semantic_clones`, `bidi_trace`, `api_break_check`, `simulate_mutation`, `job_status`
+- no additional MCP tools should be treated as hidden product surface by default
+- true internals remain transport or implementation primitives outside the normal MCP tool contract
 
 ## First-Choice Routing
 1. `status`

@@ -2,29 +2,8 @@ use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
 use serde_json::{json, Value};
 
-fn is_public_tool(name: &str) -> bool {
-    !matches!(
-        name,
-        "refine_lattice"
-            | "job_status"
-            | "audit"
-            | "health"
-            | "batch"
-            | "cypher"
-            | "debug"
-            | "schema_overview"
-            | "list_labels_tables"
-            | "query_examples"
-            | "truth_check"
-            | "diagnose_indexing"
-            | "diff"
-            | "semantic_clones"
-            | "architectural_drift"
-            | "bidi_trace"
-            | "api_break_check"
-            | "simulate_mutation"
-            | "resume_vectorization"
-    )
+fn is_public_tool(_name: &str) -> bool {
+    true
 }
 
 pub(crate) fn requires_indexed_runtime(name: &str) -> bool {
@@ -76,7 +55,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
         "tools": [
             {
                 "name": "refine_lattice",
-                "description": "[SYSTEM] Lattice Refiner: Analyse le graphe post-ingestion pour lier les frontières inter-langages (ex: Elixir NIF -> Rust natif).",
+                "description": "[SYSTEM] Raffinement avancé du graphe post-ingestion pour lier les frontières inter-langages (ex: Elixir NIF -> Rust natif) et approfondir l'analyse structurelle.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -643,7 +622,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "cypher",
-                "description": "[SYSTEM] Interface de bas niveau pour requêtes graphe brutes. Reservee au diagnostic et aux usages experts.",
+                "description": "[SYSTEM] Interface avancée pour requêtes graphe brutes et exploration profonde de la structure Axon.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -654,7 +633,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             json!({
                 "name": "debug",
-                "description": "[SYSTEM] Diagnostic système bas niveau : Affiche l'état interne du moteur Axon V2 (RAM, DB, architecture, statut d'indexation) pour éviter les hallucinations sur l'infrastructure.",
+                "description": "[SYSTEM] Diagnostic système avancé : état du moteur Axon V2 (RAM, DB, architecture, indexation) pour compréhension profonde du runtime.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

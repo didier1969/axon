@@ -47,13 +47,29 @@ Ce script:
 
 ## 3. Démarrer Axon
 
+Entrypoints canoniques:
+
 ```bash
-./scripts/start.sh
+./scripts/axon-live start --full
+./scripts/axon-dev start --full
+```
+
+Les wrappers `axon-live` et `axon-dev` ciblent explicitement les deux instances.
+La forme équivalente via la façade unique est:
+
+```bash
+./scripts/axon --instance live start --full
+./scripts/axon --instance dev start --full
+```
+
+```bash
+./scripts/axon-live start --full
 ```
 
 Le script:
 - vérifie l’environnement
-- resynchronise `bin/axon-core`
+- sélectionne l’instance `live` ou `dev`
+- resynchronise ou réhydrate `bin/axon-core` selon l’instance
 - démarre Axon dans `tmux`
 - attend le dashboard et la surface SQL
 - vérifie `MCP`
@@ -61,20 +77,26 @@ Le script:
 Modes utiles:
 
 ```bash
-./scripts/start.sh --graph-only
-./scripts/start.sh --full
+./scripts/axon-live start --graph-only
+./scripts/axon-dev start --full
 ```
 
 - `graph_only`: surface graphe/MCP légère, sans ingestion autonome complète
 - `full`: serveur partagé complet, avec surface MCP complète et mutations routées via jobs
 
-## 4. Vérifier la surface live
+## 4. Vérifier la surface
 
-Sur une instance démarrée:
+Sur `live`:
 
 - dashboard: `http://127.0.0.1:44127/cockpit`
 - SQL: `http://127.0.0.1:44129/sql`
 - MCP: `http://127.0.0.1:44129/mcp`
+
+Sur `dev`:
+
+- dashboard: `http://127.0.0.1:44137/cockpit`
+- SQL: `http://127.0.0.1:44139/sql`
+- MCP: `http://127.0.0.1:44139/mcp`
 
 Exemple:
 
@@ -87,12 +109,13 @@ curl -sS -X POST http://127.0.0.1:44129/sql \
 Vérification opératoire rapide:
 
 ```bash
-./scripts/status.sh
-python3 scripts/qualify_runtime.py --profile smoke --mode graph_only
-python3 scripts/qualify_runtime.py --profile smoke --mode full
+./scripts/status-live.sh
+./scripts/status-dev.sh
+./scripts/axon-live qualify-mcp --surface core --checks quality --project AXO
+./scripts/axon-dev qualify-mcp --surface core --checks quality --project AXO
 ```
 
-La qualification smoke vérifie le démarrage runtime, la surface MCP et le cockpit en conditions réelles.
+La qualification et le `status` doivent toujours cibler explicitement l’instance voulue.
 
 ## 5. Contrat MCP `0.1`
 
@@ -116,10 +139,27 @@ Le cockpit `http://127.0.0.1:44127/cockpit` est la surface de lecture opératoir
 
 Le dashboard n’est pas une surface d’action. Les mutations passent par MCP, puis sont observées dans le cockpit.
 
-## 7. Arrêter Axon
+## 7. Seed `dev` depuis `live`
+
+Pour rafraîchir la base de développement depuis la vérité `live`:
 
 ```bash
-./scripts/stop.sh
+./scripts/axon seed-dev-from-live
+```
+
+Par défaut:
+
+- `dev` doit être arrêté
+- `live` doit être arrêté pour un snapshot cohérent
+- un backup timestampé du root `dev` est créé sous `.axon-dev/backups/`
+
+Le mode `--allow-live-running` existe, mais reste un flux best-effort avec copie de la WAL.
+
+## 8. Arrêter Axon
+
+```bash
+./scripts/stop-live.sh
+./scripts/stop-dev.sh
 ```
 
 Le script arrête uniquement les processus Axon et nettoie sockets, locks et WAL locaux.

@@ -1,6 +1,7 @@
 use std::io::{self, BufRead, Write};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
+use std::env;
 use std::time::Duration;
 
 fn main() {
@@ -9,6 +10,8 @@ fn main() {
         .timeout(Duration::from_secs(10))
         .build()
         .expect("Failed to create HTTP client");
+    let mcp_url =
+        env::var("AXON_MCP_URL").unwrap_or_else(|_| "http://127.0.0.1:44129/mcp".to_string());
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -28,7 +31,7 @@ fn main() {
 
                 match req_val {
                     Ok(json_payload) => {
-                        match client.post("http://127.0.0.1:44129/mcp")
+                        match client.post(&mcp_url)
                             .json(&json_payload)
                             .send() 
                         {

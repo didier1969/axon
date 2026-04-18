@@ -1,9 +1,9 @@
 ---
-name: consensus-driven-delivery
+name: idea-to-delivery
 description: Use when a non-trivial idea, feature, migration, refactor, or architecture change is still partially specified and needs a rigorous path from concept to plan to implementation, with independent expert challenge and autonomous execution.
 ---
 
-# Consensus-Driven Delivery
+# Idea To Delivery
 
 ## Overview
 
