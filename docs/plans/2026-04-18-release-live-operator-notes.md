@@ -15,6 +15,11 @@ These commands define the operator-facing release cycle for the live instance.
 
 `release-preflight` is now the mandatory first gate before manifest creation or live promotion.
 
+It must prove both:
+
+- the release metadata is coherent
+- the workspace artifact body is the exact canonical build output
+
 ## Release States
 
 - `pushed`
@@ -42,6 +47,12 @@ Each manifest binds:
 
 Promotion and rollback operate on the archived artifact from the manifest, not on the mutable worktree binary.
 
+For workspace qualification, `bin/axon-core` must itself be a deterministic copy of the canonical workspace release target:
+
+- `.axon/cargo-target/release/axon-core`
+
+`build-info` is no longer sufficient by itself. The recorded artifact checksum and the workspace target checksum must agree too.
+
 For the `live` instance, ordinary `./scripts/axon --instance live start ...` now rehydrates `bin/axon-core` from `.axon/live-release/current.json` when a promoted manifest exists. A normal live restart must therefore preserve the promoted artifact lineage instead of silently replacing it with the workspace build.
 
 ## Promotion
@@ -53,6 +64,11 @@ Topological checklist:
 3. `./scripts/axon promote-live --manifest <manifest>.json --restart-live`
 4. confirm MCP `status` matches the manifest
 5. only then treat the release as `promoted`
+
+Additional invariant before step 2:
+
+- `bin/axon-core` must match `.axon/cargo-target/release/axon-core`
+- `bin/axon-core.build-info` must match the real checksum of `bin/axon-core`
 
 Stage only:
 

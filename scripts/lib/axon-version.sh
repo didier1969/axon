@@ -26,6 +26,17 @@ axon_workspace_build_id() {
     printf '%s\n' "$package_version"
 }
 
+axon_workspace_release_bin() {
+    local project_root="${1:?project root required}"
+    local cargo_target_root="${CARGO_TARGET_DIR:-$project_root/.axon/cargo-target}"
+    printf '%s\n' "$cargo_target_root/release/axon-core"
+}
+
+axon_file_sha256() {
+    local path="${1:?path required}"
+    sha256sum "$path" | awk '{print $1}'
+}
+
 axon_write_export_file() {
     local path="$1"
     shift

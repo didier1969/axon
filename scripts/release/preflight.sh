@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=scripts/lib/axon-version.sh
+source "$ROOT_DIR/scripts/lib/axon-version.sh"
 
 ARTIFACT_PATH="$ROOT_DIR/bin/axon-core"
 BUILD_INFO_PATH="$ROOT_DIR/bin/axon-core.build-info"
@@ -52,14 +54,31 @@ if [[ -z "${AXON_BUILD_ID:-}" ]]; then
   exit 1
 fi
 
+artifact_sha="$(axon_file_sha256 "$ARTIFACT_PATH")"
+if [[ -n "${AXON_ARTIFACT_SHA256:-}" && "$AXON_ARTIFACT_SHA256" != "$artifact_sha" ]]; then
+  echo "Artifact checksum mismatch: build info sha=$AXON_ARTIFACT_SHA256 actual sha=$artifact_sha" >&2
+  exit 1
+fi
+
 git_describe="$(git -C "$ROOT_DIR" describe --tags --always --dirty)"
 if [[ "$SKIP_BUILD_MATCH" -ne 1 ]]; then
   if [[ "$AXON_BUILD_ID" != "$git_describe" ]]; then
     echo "Build info mismatch: AXON_BUILD_ID=$AXON_BUILD_ID but git describe=$git_describe" >&2
     exit 1
   fi
-fi
 
-sha256sum "$ARTIFACT_PATH" >/dev/null
+  workspace_release_bin="$(axon_workspace_release_bin "$ROOT_DIR")"
+  if [[ "$(realpath "$ARTIFACT_PATH")" == "$(realpath "$ROOT_DIR/bin/axon-core")" && -f "$workspace_release_bin" ]]; then
+    workspace_sha="$(axon_file_sha256 "$workspace_release_bin")"
+    if [[ "$artifact_sha" != "$workspace_sha" ]]; then
+      echo "Workspace artifact drift: bin/axon-core sha=$artifact_sha but canonical release target sha=$workspace_sha ($workspace_release_bin)" >&2
+      exit 1
+    fi
+    if [[ -n "${AXON_ARTIFACT_SOURCE:-}" && "$(realpath "$AXON_ARTIFACT_SOURCE")" != "$(realpath "$workspace_release_bin")" ]]; then
+      echo "Artifact source mismatch: build info source=$AXON_ARTIFACT_SOURCE but canonical release target=$workspace_release_bin" >&2
+      exit 1
+    fi
+  fi
+fi
 
 echo "release preflight ok"

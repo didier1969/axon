@@ -30,6 +30,10 @@ description: Use in the Axon repository before coding, structural diagnostics, o
   3. `./scripts/axon promote-live --manifest <manifest> --restart-live`
   4. verify MCP `status`
   5. only then treat the release as `promoted`
+- `release-preflight` must prove both metadata and artifact-body integrity:
+  - `bin/axon-core.build-info` matches `git describe`
+  - `bin/axon-core` checksum matches recorded artifact checksum
+  - workspace `bin/axon-core` matches the canonical workspace release target `.axon/cargo-target/release/axon-core`
 - During release or rollback:
   - MCP `status` is final runtime truth
   - `scripts/status*.sh` remains advisory only

@@ -6,6 +6,8 @@ set -euo pipefail
 
 PROJECT_ROOT="/home/dstadel/projects/axon"
 cd "$PROJECT_ROOT"
+# shellcheck source=scripts/lib/axon-version.sh
+source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
 
 echo "🚀 Starting Axon bootstrap..."
 
@@ -28,9 +30,22 @@ mkdir -p "$BIN_DIR"
 echo "🔨 Building Rust core..."
 devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release"
 
-# Find the binary after building (it might be in .axon/cargo-target/release or target/release)
-RUST_RELEASE_BIN=$(find "$PROJECT_ROOT" -name "axon-core" -path "*/release/*" -type f | head -n 1)
+RUST_RELEASE_BIN="$(axon_workspace_release_bin "$PROJECT_ROOT")"
+if [[ ! -x "$RUST_RELEASE_BIN" ]]; then
+    echo "❌ Canonical release binary missing after build: $RUST_RELEASE_BIN"
+    exit 1
+fi
 install -m 755 "$RUST_RELEASE_BIN" "$TARGET_BIN"
+AXON_BUILD_ID="$(axon_workspace_build_id "$PROJECT_ROOT")"
+AXON_PACKAGE_VERSION="$(axon_package_version "$PROJECT_ROOT")"
+AXON_ARTIFACT_SHA256="$(axon_file_sha256 "$TARGET_BIN")"
+axon_write_export_file "$BIN_DIR/axon-core.build-info" \
+    AXON_RELEASE_VERSION "$AXON_PACKAGE_VERSION" \
+    AXON_BUILD_ID "$AXON_BUILD_ID" \
+    AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
+    AXON_INSTALL_GENERATION workspace \
+    AXON_ARTIFACT_SHA256 "$AXON_ARTIFACT_SHA256" \
+    AXON_ARTIFACT_SOURCE "$RUST_RELEASE_BIN"
 echo "✅ Rust core available at bin/axon-core"
 
 # 3. Dashboard dependencies and compile
