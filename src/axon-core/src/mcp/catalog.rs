@@ -106,7 +106,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "entity": { "type": "string", "enum": ["vision", "pillar", "requirement", "concept", "milestone", "decision", "stakeholder", "validation", "guideline"], "description": "Le type d'objet concerné." },
                         "data": {
                             "type": "object",
-                            "description": "Données JSON. \n- create (vision/pillar/requirement/concept/decision/milestone/stakeholder/validation/guideline) avec `project_code`; le serveur retourne l'ID canonique `TYPE-CODE-NNN`.\n- update (id canonique requis, status/desc/etc).\n- link (source_id, target_id canoniques)."
+                            "description": "Données JSON. \n- create (vision/pillar/requirement/concept/decision/milestone/stakeholder/validation/guideline) avec `project_code`; le serveur attribue l'ID canonique `TYPE-CODE-NNN`.\n- update (id canonique requis, status/desc/etc).\n- link (source_id, target_id canoniques)."
                         }
                     },
                     "required": ["action", "entity", "data"]
@@ -114,16 +114,16 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "axon_init_project",
-                "description": "[DX/SOLL] Initialise un nouveau projet Axon. Reçoit un Document de Concept optionnel, charge les règles globales et lance le dialogue d'héritage.",
+                "description": "[DX/SOLL] Initialise un nouveau projet Axon. Le serveur attribue le `project_code` canonique et le renvoie dans la réponse; le client/LLM ne fabrique pas ce code. Reçoit un Document de Concept optionnel, charge les règles globales et lance le dialogue d'héritage.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_name": { "type": "string", "description": "Le nom du projet (ex: BookingSystem)." },
-                        "project_code": { "type": "string", "description": "Le code canonique en 3 caractères (ex: BKS)." },
+                        "project_name": { "type": "string", "description": "Optionnel. Le nom affiché sera dérivé de la dernière partie de `project_path`." },
+                        "project_code": { "type": "string", "description": "Optionnel, réservé à compatibilité interne. En usage normal, omettez-le: le serveur attribue le code canonique et le renvoie." },
                         "project_path": { "type": "string", "description": "Le chemin absolu canonique du projet (ex: /home/dstadel/projects/BookingSystem)." },
                         "concept_document_url_or_text": { "type": "string", "description": "Optionnel: le texte ou lien vers la vision du projet." }
                     },
-                    "required": ["project_name", "project_code", "project_path"]
+                    "required": ["project_path"]
                 }
             },
             {
@@ -181,7 +181,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "project_code": { "type": "string", "description": "Code projet (ex: AXO)." },
+                        "project_code": { "type": "string", "description": "Code projet canonique existant (ex: AXO). Le serveur attribue ensuite `preview_id` et les IDs canoniques créés." },
                         "dry_run": { "type": "boolean", "description": "Si true, ne modifie rien et produit seulement le plan d'action." },
                         "plan": {
                             "type": "object",
@@ -198,7 +198,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "soll_commit_revision",
-                "description": "[SOLL] Commit atomique d'un preview SOLL vers une revision journalisée. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "description": "[SOLL] Commit atomique d'un preview SOLL vers une revision journalisée. Le client fournit `preview_id`; le serveur attribue `revision_id`. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

@@ -41,12 +41,16 @@ impl McpServer {
                 }],
                 "isError": true
             });
-            return Some(if Self::mcp_guidance_shadow_enabled() {
+            let guidance =
+                crate::mcp::classify_guidance(&[crate::mcp::GuidanceFact::problem_signal(
+                    "tool_unavailable",
+                )]);
+            return Some(if Self::mcp_guidance_authoritative_enabled() {
+                crate::mcp::attach_guidance_authoritative(response, guidance)
+            } else if Self::mcp_guidance_shadow_enabled() {
                 crate::mcp::attach_guidance_shadow(
                     response,
-                    crate::mcp::guidance_outcome_to_value(&crate::mcp::classify_guidance(&[
-                        crate::mcp::GuidanceFact::problem_signal("tool_unavailable"),
-                    ])),
+                    crate::mcp::guidance_outcome_to_value(&guidance),
                 )
             } else {
                 response

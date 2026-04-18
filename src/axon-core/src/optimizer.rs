@@ -1542,7 +1542,10 @@ mod tests {
 
         let count = super::canonical_count(
             &store,
-            &format!("SELECT COUNT(*) FROM ChunkEmbedding WHERE model_id = '{}'", CHUNK_MODEL_ID),
+            &format!(
+                "SELECT COUNT(*) FROM ChunkEmbedding WHERE model_id = '{}'",
+                CHUNK_MODEL_ID
+            ),
         );
         assert_eq!(count, 1);
     }

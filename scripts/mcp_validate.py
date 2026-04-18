@@ -26,8 +26,12 @@ WRITE_CAPABLE_TOOLS = {
     "soll_export",
     "restore_soll",
     "resume_vectorization",
+    "axon_init_project",
+    "axon_apply_guidelines",
 }
-CORE_TOOL_NAMES = {
+SURFACE_CHOICES = {"all", "core", "soll"}
+MUTATION_MODE_CHOICES = {"off", "dry-run", "safe-live", "full"}
+CORE_PUBLIC_TOOL_NAMES = {
     "status",
     "project_status",
     "query",
@@ -44,6 +48,8 @@ CORE_TOOL_NAMES = {
     "fs_read",
     "axon_pre_flight_check",
     "axon_commit_work",
+}
+SOLL_PUBLIC_TOOL_NAMES = {
     "soll_query_context",
     "soll_work_plan",
     "soll_validate",
@@ -55,6 +61,19 @@ CORE_TOOL_NAMES = {
     "soll_rollback_revision",
     "axon_init_project",
     "axon_apply_guidelines",
+}
+SAFE_LIVE_SCENARIO_WRITE_TOOLS = {
+    "soll_manager",
+    "soll_apply_plan",
+    "soll_commit_revision",
+    "soll_rollback_revision",
+}
+DRY_RUN_SCENARIO_WRITE_TOOLS = {
+    "soll_apply_plan",
+}
+CORE_TOOL_NAMES = {
+    *CORE_PUBLIC_TOOL_NAMES,
+    *SOLL_PUBLIC_TOOL_NAMES,
 }
 
 
@@ -184,10 +203,10 @@ def build_args(
         "list_labels_tables": {},
         "query_examples": {},
         "debug": {"project": project},
-        "soll_query_context": {"project_code": "AXO", "limit": 5},
-        "soll_work_plan": {"project_code": "AXO", "limit": 10, "include_ist": True, "format": "json"},
-        "soll_verify_requirements": {"project_code": "AXO"},
-        "soll_apply_plan": {"project_code": "AXO", "author": "mcp-validate", "dry_run": True, "plan": {}},
+        "soll_query_context": {"project_code": project, "limit": 5},
+        "soll_work_plan": {"project_code": project, "limit": 10, "include_ist": True, "format": "json"},
+        "soll_verify_requirements": {"project_code": project},
+        "soll_apply_plan": {"project_code": project, "author": "mcp-validate", "dry_run": True, "plan": {}},
         "soll_commit_revision": {
             "preview_id": str(state.get("preview_id") or "dry-run-preview"),
             "author": "mcp-validate",
@@ -202,7 +221,7 @@ def build_args(
             "action": "create",
             "entity": "requirement",
             "data": {
-                "project_code": "AXO",
+                "project_code": project,
                 "title": "MCP Validate Requirement",
                 "description": "Synthetic MCP validation requirement",
                 "priority": "P3",
@@ -400,6 +419,13 @@ def evaluate_response(tool_name: str, resp: dict[str, Any]) -> tuple[str, str]:
             return "fail", "soll_query_context missing project_code"
         if not isinstance(data.get("visions"), list):
             return "fail", "soll_query_context missing visions"
+    if tool_name == "soll_validate":
+        if "status:** warn_soll_invariants" in text or "status: warn_soll_invariants" in text:
+            return "warn", "soll_validate reported warn_soll_invariants"
+    if tool_name == "soll_verify_requirements":
+        match = re.search(r"missing\\s*=\\s*(\\d+)", text)
+        if match and int(match.group(1)) > 0:
+            return "warn", f"soll_verify_requirements reports missing={match.group(1)}"
 
     return "ok", "ok"
 
@@ -596,6 +622,19 @@ def load_scenario_steps(path: str, default_project: str) -> tuple[str, list[Scen
         step_args = dict(args)
         if "project" not in step_args and tool in {"query", "inspect", "health", "audit", "impact", "debug", "diagnose_indexing", "truth_check"}:
             step_args["project"] = project
+        if "project_code" not in step_args and tool in {
+            "project_status",
+            "snapshot_history",
+            "snapshot_diff",
+            "conception_view",
+            "soll_query_context",
+            "soll_work_plan",
+            "soll_validate",
+            "soll_verify_requirements",
+            "soll_apply_plan",
+            "axon_apply_guidelines",
+        }:
+            step_args["project_code"] = project
         steps.append(
             ScenarioStep(
                 name=name,
@@ -607,6 +646,54 @@ def load_scenario_steps(path: str, default_project: str) -> tuple[str, list[Scen
         )
 
     return project, steps
+
+
+def tool_allowed_in_surface(tool_name: str, surface: str) -> bool:
+    if surface == "all":
+        return True
+    if surface == "core":
+        return tool_name in CORE_PUBLIC_TOOL_NAMES
+    if surface == "soll":
+        return tool_name in SOLL_PUBLIC_TOOL_NAMES
+    return False
+
+
+def tool_allowed_in_mutation_mode(step: ScenarioStep, mutation_mode: str) -> tuple[bool, str]:
+    tool_name = step.tool
+    if tool_name not in WRITE_CAPABLE_TOOLS:
+        return True, ""
+    if mutation_mode == "off":
+        return False, f"scenario step '{step.name}' uses write-capable tool '{tool_name}' while mutation_mode=off"
+    if mutation_mode == "dry-run":
+        if tool_name not in DRY_RUN_SCENARIO_WRITE_TOOLS:
+            return False, f"scenario step '{step.name}' uses unsupported dry-run write tool '{tool_name}'"
+        if tool_name == "soll_apply_plan" and step.args.get("dry_run") is not True:
+            return False, f"scenario step '{step.name}' must set dry_run=true for mutation_mode=dry-run"
+        return True, ""
+    if mutation_mode == "safe-live":
+        if tool_name not in SAFE_LIVE_SCENARIO_WRITE_TOOLS:
+            return False, f"scenario step '{step.name}' uses unsupported safe-live write tool '{tool_name}'"
+        return True, ""
+    if mutation_mode == "full":
+        return True, ""
+    return False, f"unknown mutation_mode={mutation_mode}"
+
+
+def validate_scenario_steps(
+    scenario_steps: list[ScenarioStep],
+    *,
+    surface: str,
+    mutation_mode: str,
+) -> tuple[bool, str]:
+    if surface == "all":
+        return False, "scenario_file is not supported with surface=all; choose core or soll explicitly"
+    for step in scenario_steps:
+        if not tool_allowed_in_surface(step.tool, surface):
+            return False, f"scenario step '{step.name}' uses tool '{step.tool}' outside surface={surface}"
+        allowed, note = tool_allowed_in_mutation_mode(step, mutation_mode)
+        if not allowed:
+            return False, note
+    return True, ""
 
 
 def run_query_sequence_scenario(
@@ -645,7 +732,7 @@ def run_query_sequence_scenario(
         dt = int((time.time() - t0) * 1000)
         results.append(
             ToolResult(
-                name=step.name,
+                name=f"{step.tool}:{step.name}",
                 status=status,
                 duration_ms=dt,
                 note=note,
@@ -745,6 +832,14 @@ def run(args: argparse.Namespace) -> int:
         except (OSError, json.JSONDecodeError, ValueError) as e:
             print(f"FATAL: scenario load failed: {type(e).__name__}: {e}")
             return 2
+        ok, note = validate_scenario_steps(
+            scenario_steps,
+            surface=args.surface,
+            mutation_mode=args.mutation_mode,
+        )
+        if not ok:
+            print(f"FATAL: scenario validation failed: {note}")
+            return 2
     project = scenario_project
 
     # 1) Transport + initialize
@@ -814,6 +909,18 @@ def run(args: argparse.Namespace) -> int:
         for tool in public_tools
         if isinstance(tool, dict) and str(tool.get("name", "")).strip()
     }
+    if args.surface == "core":
+        public_tools = [
+            tool
+            for tool in public_tools
+            if isinstance(tool, dict) and str(tool.get("name", "")).strip() in CORE_PUBLIC_TOOL_NAMES
+        ]
+    elif args.surface == "soll":
+        public_tools = [
+            tool
+            for tool in public_tools
+            if isinstance(tool, dict) and str(tool.get("name", "")).strip() in SOLL_PUBLIC_TOOL_NAMES
+        ]
     expert_tools = [
         tool
         for tool in internal_tools
@@ -822,6 +929,8 @@ def run(args: argparse.Namespace) -> int:
         and str(tool.get("name", "")).strip() not in public_names
         and str(tool.get("name", "")).strip() not in CORE_TOOL_NAMES
     ]
+    if args.surface != "all":
+        expert_tools = []
 
     symbol_probe = args.symbol.strip() if isinstance(args.symbol, str) else ""
     if not symbol_probe:
@@ -942,7 +1051,8 @@ def run(args: argparse.Namespace) -> int:
         tool_results.extend(
             run_query_sequence_scenario(args.url, args.timeout, args.excerpt, scenario_steps)
         )
-    tool_results.extend(run_hidden_tool_probes(args.url, args.timeout, args.excerpt, project, symbol_probe))
+    if args.surface in {"all", "core"}:
+        tool_results.extend(run_hidden_tool_probes(args.url, args.timeout, args.excerpt, project, symbol_probe))
 
     ok = sum(1 for r in tool_results if r.status == "ok")
     warn = sum(1 for r in tool_results if r.status == "warn")
@@ -988,6 +1098,7 @@ def run(args: argparse.Namespace) -> int:
                 "transport_health": transport_health,
                 "semantic_quality": semantic_quality,
                 "scenario_file": args.scenario_file,
+                "surface": args.surface,
             },
             "results": [r.__dict__ for r in tool_results],
             "slowest_tools": [
@@ -1010,6 +1121,13 @@ def run(args: argparse.Namespace) -> int:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Exhaustive MCP tool validator")
     p.add_argument("--url", default=DEFAULT_URL, help="MCP HTTP endpoint")
+    p.add_argument("--surface", choices=sorted(SURFACE_CHOICES), default="all", help="Tool surface to validate")
+    p.add_argument(
+        "--mutation-mode",
+        choices=sorted(MUTATION_MODE_CHOICES),
+        default="off",
+        help="Mutation policy for scenario steps",
+    )
     p.add_argument("--project", default="BookingSystem", help="Project scope for project-aware tools")
     p.add_argument("--query", default="booking", help="Default semantic query term")
     p.add_argument(

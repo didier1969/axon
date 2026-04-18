@@ -134,7 +134,7 @@
       }
     },
     {
-      "name": "inspect.index_incomplete",
+      "name": "inspect.degraded_index_incomplete",
       "source": "fixture",
       "tool": "inspect",
       "response": {
@@ -148,11 +148,11 @@
           "data": {
             "_shadow": {
               "guidance": {
-                "problem_class": "index_incomplete",
+                "problem_class": "degraded",
                 "likely_cause": "graph_index_not_fully_ready",
                 "next_best_actions": [
                   "treat_result_as_partial",
-                  "retry_after_indexing"
+                  "retry_after_runtime_stabilizes"
                 ],
                 "confidence": "medium",
                 "soll": null
@@ -162,12 +162,12 @@
         }
       },
       "expect": {
-        "problem_class": "index_incomplete",
+        "problem_class": "degraded",
         "likely_cause": "graph_index_not_fully_ready",
         "confidence": "medium",
         "next_best_actions": [
           "treat_result_as_partial",
-          "retry_after_indexing"
+          "retry_after_runtime_stabilizes"
         ]
       }
     },
@@ -272,11 +272,11 @@
           "data": {
             "_shadow": {
               "guidance": {
-                "problem_class": "vectorization_incomplete",
+                "problem_class": "degraded",
                 "likely_cause": "semantic_layer_not_fully_ready",
                 "next_best_actions": [
                   "treat_result_as_partial",
-                  "retry_after_vectorization"
+                  "retry_after_runtime_stabilizes"
                 ],
                 "confidence": "medium",
                 "soll": null
@@ -286,12 +286,12 @@
         }
       },
       "expect": {
-        "problem_class": "vectorization_incomplete",
+        "problem_class": "degraded",
         "likely_cause": "semantic_layer_not_fully_ready",
         "confidence": "medium",
         "next_best_actions": [
           "treat_result_as_partial",
-          "retry_after_vectorization"
+          "retry_after_runtime_stabilizes"
         ]
       }
     },
@@ -310,11 +310,11 @@
           "data": {
             "_shadow": {
               "guidance": {
-                "problem_class": "backend_pressure",
+                "problem_class": "degraded",
                 "likely_cause": "runtime_pressure_reduces_reliability",
                 "next_best_actions": [
                   "treat_result_as_partial",
-                  "retry_after_pressure_recovers"
+                  "retry_after_runtime_stabilizes"
                 ],
                 "confidence": "medium",
                 "soll": null
@@ -324,12 +324,12 @@
         }
       },
       "expect": {
-        "problem_class": "backend_pressure",
+        "problem_class": "degraded",
         "likely_cause": "runtime_pressure_reduces_reliability",
         "confidence": "medium",
         "next_best_actions": [
           "treat_result_as_partial",
-          "retry_after_pressure_recovers"
+          "retry_after_runtime_stabilizes"
         ]
       }
     },
@@ -379,6 +379,72 @@
           "update_kind": "requirement_or_decision",
           "requires_authorization": true
         }
+      }
+    },
+    {
+      "name": "inspect.authoritative_input_not_found",
+      "source": "fixture",
+      "tool": "inspect",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "inspect exact miss authoritative"
+            }
+          ],
+          "data": {
+            "problem_class": "input_not_found",
+            "likely_cause": "exact_symbol_mismatch",
+            "next_best_actions": [
+              "retry_with_suggested_symbol",
+              "use_query_to_broaden_recall"
+            ],
+            "confidence": "low"
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "input_not_found",
+        "likely_cause": "exact_symbol_mismatch",
+        "confidence": "low",
+        "next_best_actions": [
+          "retry_with_suggested_symbol",
+          "use_query_to_broaden_recall"
+        ]
+      }
+    },
+    {
+      "name": "query.authoritative_tool_unavailable",
+      "source": "fixture",
+      "tool": "query",
+      "response": {
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "tool unavailable authoritative"
+            }
+          ],
+          "data": {
+            "problem_class": "tool_unavailable",
+            "likely_cause": "runtime_profile_does_not_allow_tool",
+            "next_best_actions": [
+              "switch_to_supported_runtime_profile",
+              "retry_tool_after_runtime_change"
+            ],
+            "confidence": "high"
+          }
+        }
+      },
+      "expect": {
+        "problem_class": "tool_unavailable",
+        "likely_cause": "runtime_profile_does_not_allow_tool",
+        "confidence": "high",
+        "next_best_actions": [
+          "switch_to_supported_runtime_profile",
+          "retry_tool_after_runtime_change"
+        ]
       }
     }
   ]

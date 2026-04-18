@@ -24,7 +24,8 @@ mod tools_system;
 use self::catalog::tools_catalog;
 #[allow(unused_imports)]
 pub(crate) use self::guidance::{
-    attach_guidance_shadow, build_guided_response, classify_guidance, guidance_outcome_to_value,
+    attach_guidance_authoritative, attach_guidance_shadow, build_guided_response,
+    classify_guidance, guidance_outcome_to_value, project_authoritative_phase1_guidance,
     GuidanceCandidates, GuidanceFact, GuidanceOutcome, SollGuidance,
 };
 pub use self::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
@@ -36,6 +37,31 @@ pub struct McpServer {
 impl McpServer {
     pub fn new(graph_store: Arc<GraphStore>) -> Self {
         Self { graph_store }
+    }
+
+    fn project_code_from_preview_id(&self, preview_id: &str) -> Result<String> {
+        let escaped_preview = preview_id.replace('\'', "''");
+        let raw = self.graph_store.query_json(&format!(
+            "SELECT payload FROM soll.RevisionPreview WHERE preview_id = '{escaped_preview}'"
+        ))?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let payload_raw = rows
+            .into_iter()
+            .next()
+            .and_then(|row| row.into_iter().next())
+            .ok_or_else(|| anyhow::anyhow!("Preview introuvable: {}", preview_id))?;
+        let payload: Value = serde_json::from_str(&payload_raw)
+            .map_err(|error| anyhow::anyhow!("Preview invalide `{}`: {}", preview_id, error))?;
+        payload
+            .get("project_code")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Preview `{}` sans `project_code`: impossible de réserver `revision_id`",
+                    preview_id
+                )
+            })
     }
 
     #[allow(dead_code)]
@@ -76,13 +102,29 @@ impl McpServer {
             .unwrap_or(false)
     }
 
+    pub(crate) fn mcp_guidance_authoritative_enabled() -> bool {
+        std::env::var("AXON_MCP_GUIDANCE_AUTHORITATIVE")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn startup_project_code(&self) -> Option<String> {
         let current_dir = std::env::current_dir().ok();
         let identities = discover_project_identities();
         current_dir
             .as_ref()
-            .and_then(|dir| identities.iter().find(|identity| &identity.project_path == dir))
+            .and_then(|dir| {
+                identities
+                    .iter()
+                    .find(|identity| &identity.project_path == dir)
+            })
             .or_else(|| identities.iter().find(|identity| identity.code == "AXO"))
             .or_else(|| identities.first())
             .map(|identity| identity.code.clone())
@@ -130,7 +172,8 @@ impl McpServer {
         let _ = self.axon_status(&json!({ "mode": "brief" }));
         let _ = self.axon_anomalies(&json!({ "project": project_code, "mode": "brief" }));
         let _ = self.axon_soll_query_context(&json!({ "project_code": project_code, "limit": 5 }));
-        let _ = self.axon_conception_view(&json!({ "project_code": project_code, "mode": "brief" }));
+        let _ =
+            self.axon_conception_view(&json!({ "project_code": project_code, "mode": "brief" }));
         let _ = self.axon_project_status(&json!({ "project_code": project_code, "mode": "brief" }));
         let Some((project_code, symbol, exact_symbol)) = self.startup_project_probe() else {
             return;
@@ -141,21 +184,25 @@ impl McpServer {
             "token_budget": 900,
             "mode": "brief"
         }));
-        let _ = self.axon_why(&json!({ "project": project_code, "symbol": symbol, "mode": "brief" }));
-        let _ = self.axon_impact(&json!({ "project": project_code, "symbol": exact_symbol, "mode": "brief" }));
+        let _ =
+            self.axon_why(&json!({ "project": project_code, "symbol": symbol, "mode": "brief" }));
+        let _ = self.axon_impact(
+            &json!({ "project": project_code, "symbol": exact_symbol, "mode": "brief" }),
+        );
         let _ = self.axon_change_safety(&json!({
             "project_code": project_code,
             "target": exact_symbol,
             "target_type": "symbol",
             "mode": "brief"
         }));
-        let _ = self.axon_inspect(&json!({ "project": project_code, "symbol": symbol, "mode": "brief" }));
-        let _ = self.axon_path(&json!({ "project": project_code, "source": exact_symbol, "mode": "brief" }));
+        let _ = self
+            .axon_inspect(&json!({ "project": project_code, "symbol": symbol, "mode": "brief" }));
+        let _ = self.axon_path(
+            &json!({ "project": project_code, "source": exact_symbol, "mode": "brief" }),
+        );
     }
 
-    fn spawn_prewarm_threads(
-        mcp_server: Arc<McpServer>,
-    ) -> Vec<std::thread::JoinHandle<()>> {
+    fn spawn_prewarm_threads(mcp_server: Arc<McpServer>) -> Vec<std::thread::JoinHandle<()>> {
         let primary = mcp_server.clone();
         let why_server = mcp_server.clone();
         vec![
@@ -163,7 +210,8 @@ impl McpServer {
                 primary.prewarm_observer_caches();
             }),
             thread::spawn(move || {
-                if let Some((project_code, symbol, _exact_symbol)) = why_server.startup_project_probe()
+                if let Some((project_code, symbol, _exact_symbol)) =
+                    why_server.startup_project_probe()
                 {
                     let _ = why_server.axon_why(
                         &json!({ "project": project_code, "symbol": symbol, "mode": "brief" }),
@@ -349,11 +397,15 @@ impl McpServer {
                 let Some(entity) = arguments.get("entity").and_then(|value| value.as_str()) else {
                     return json!({});
                 };
-                let project_code = arguments
+                let Some(project_code) = arguments
                     .get("data")
                     .and_then(|value| value.get("project_code"))
                     .and_then(|value| value.as_str())
-                    .unwrap_or("AXO");
+                else {
+                    return json!({
+                        "reservation_error": "`project_code` est obligatoire pour `soll_manager create`. Le serveur attribue ensuite l'ID canonique."
+                    });
+                };
                 match self.next_soll_numeric_id(project_code, entity) {
                     Ok((canonical_project_code, project_code, prefix, next_num)) => json!({
                         "project_code": canonical_project_code,
@@ -363,10 +415,14 @@ impl McpServer {
                 }
             }
             "soll_apply_plan" => {
-                let project_code = arguments
+                let Some(project_code) = arguments
                     .get("project_code")
                     .and_then(|value| value.as_str())
-                    .unwrap_or("AXO");
+                else {
+                    return json!({
+                        "reservation_error": "`project_code` est obligatoire pour `soll_apply_plan`. Le serveur attribue ensuite `preview_id`."
+                    });
+                };
                 match self.next_server_numeric_id(project_code, "preview") {
                     Ok((canonical_project_code, project_code, _, next_num)) => json!({
                         "project_code": canonical_project_code,
@@ -376,11 +432,17 @@ impl McpServer {
                 }
             }
             "soll_commit_revision" => {
-                let project_code = arguments
-                    .get("project_code")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("AXO");
-                match self.next_server_numeric_id(project_code, "revision") {
+                let Some(preview_id) = arguments.get("preview_id").and_then(|value| value.as_str())
+                else {
+                    return json!({
+                        "reservation_error": "`preview_id` est obligatoire pour `soll_commit_revision`. Le serveur attribue ensuite `revision_id`."
+                    });
+                };
+                let project_code = match self.project_code_from_preview_id(preview_id) {
+                    Ok(code) => code,
+                    Err(error) => return json!({ "reservation_error": error.to_string() }),
+                };
+                match self.next_server_numeric_id(&project_code, "revision") {
                     Ok((canonical_project_code, project_code, _, next_num)) => json!({
                         "project_code": canonical_project_code,
                         "revision_id": format!("REV-{project_code}-{next_num:03}")
@@ -407,12 +469,6 @@ impl McpServer {
                 {
                     patched["reserved_id"] = json!(entity_id);
                 }
-                if let Some(project_code) = reserved_ids
-                    .get("project_code")
-                    .and_then(|value| value.as_str())
-                {
-                    patched["project_code"] = json!(project_code);
-                }
             }
             "soll_apply_plan" => {
                 if let Some(preview_id) = reserved_ids
@@ -421,12 +477,6 @@ impl McpServer {
                 {
                     patched["reserved_preview_id"] = json!(preview_id);
                 }
-                if let Some(project_code) = reserved_ids
-                    .get("project_code")
-                    .and_then(|value| value.as_str())
-                {
-                    patched["project_code"] = json!(project_code);
-                }
             }
             "soll_commit_revision" => {
                 if let Some(revision_id) = reserved_ids
@@ -434,16 +484,6 @@ impl McpServer {
                     .and_then(|value| value.as_str())
                 {
                     patched["reserved_revision_id"] = json!(revision_id);
-                }
-                if reserved_ids.get("project_code").is_some()
-                    && patched.get("project_code").is_none()
-                {
-                    if let Some(project_code) = reserved_ids
-                        .get("project_code")
-                        .and_then(|value| value.as_str())
-                    {
-                        patched["project_code"] = json!(project_code);
-                    }
                 }
             }
             _ => {}
@@ -480,7 +520,7 @@ impl McpServer {
             .and_then(|value| value.as_str())
         {
             return Some(json!({
-                "content": [{ "type": "text", "text": format!("Mutation job reservation failed: {error}") }],
+                "content": [{ "type": "text", "text": format!("Mutation job reservation failed: {error}\nAction suivante: fournissez le scope projet canonique requis (`project_code`) ou l'identifiant serveur attendu (`preview_id`), puis relancez la mutation.") }],
                 "isError": true
             }));
         }

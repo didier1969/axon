@@ -4,11 +4,42 @@
 
 **Goal:** add a first narrow declarative guidance classifier for Axon MCP so `query` and `inspect` return compact, consistent, action-oriented guidance in degraded or ambiguous cases without turning MCP into a second protocol.
 
-**Architecture:** keep runtime truth, query execution, and final MCP rendering in Rust; introduce a small normalized-facts extraction layer plus a guidance classifier that emits stable semantic keys only. Phase 1 is shadow-mode first and limited to `query` and `inspect`, with validation against a golden corpus before any broader rollout.
+**Architecture:** keep runtime truth, query execution, and final MCP rendering in Rust; introduce a small normalized-facts extraction layer plus a guidance classifier that emits stable semantic keys only. Phase 1 is shadow-mode first and limited to `query` and `inspect`, with validation against a golden corpus before any broader rollout. Shadow guidance must be strictly additive, never destructive to the base tool payload.
 
 **Tech Stack:** Rust, Axon MCP core, DuckDB-backed runtime facts, JSON response assembly, test fixtures in `mcp/tests.rs`, Python evaluation scripts for replay/golden validation.
 
 ---
+
+## Tightened Phase-1 Constraints
+
+- Phase 1 remains limited to `query` and `inspect`.
+- Shadow mode must not overwrite or reshape the base business payload.
+- Guidance must be absent on clean success.
+- `next_best_actions` should stay bounded to `1-3` compact actions.
+- A `soll` block is allowed only for a material, actionable gap and must include `requires_authorization`.
+- `status` / `project_status` are not part of implementation phase 1; they are phase-2 candidates after proof on `query` / `inspect`.
+- `missing_rationale_in_soll` and `intent_missing_in_soll` must not become public authoritative classes until they are backed by real extracted facts, not placeholders.
+
+## Immediate Correction Wave
+
+Before any expansion of taxonomy or tool coverage:
+
+1. fix shadow guidance so it is strictly additive
+2. add a regression test proving the base payload survives shadow mode
+3. keep the phase-1 public contract compact
+4. defer broader SOLL guidance until evidence extraction exists
+
+## Deferred Scope
+
+The following remain intentionally out of the first authoritative rollout:
+
+- `soll_manager`
+- `soll_apply_plan`
+- `soll_validate`
+- `status`
+- `project_status`
+
+They should only be added after the phase-1 guidance contract is stable and measured on a golden corpus.
 
 ### Task 1: Freeze The Contract And Taxonomy
 
@@ -31,11 +62,9 @@ Define the initial `problem_class` set for `query` and `inspect` only:
 - `input_ambiguous`
 - `wrong_project_scope`
 - `tool_unavailable`
-- `index_incomplete`
-- `vectorization_incomplete`
-- `missing_rationale_in_soll`
-- `intent_missing_in_soll`
-- `backend_pressure`
+- `degraded`
+
+Do not expose SOLL-gap classes authoritatively in phase 1 until they are fed by explicit extracted facts.
 
 **Step 2: Save the taxonomy and contract document**
 
@@ -68,6 +97,7 @@ Add focused unit tests in `src/axon-core/src/mcp/tests.rs` or a new module for:
 - response helper omits guidance when `problem_class = none`
 - response helper includes compact guidance fields only when present
 - SOLL block requires explicit `requires_authorization`
+- shadow guidance preserves the existing payload and adds only `_shadow.guidance`
 
 Example test skeleton:
 
@@ -210,8 +240,7 @@ Add tests for classifier outputs:
 - exact symbol miss + candidate => `input_not_found` + `retry_with_suggested_symbol`
 - duplicate matches => `input_ambiguous`
 - bad project code => `wrong_project_scope`
-- degraded result => `index_incomplete` or `vectorization_incomplete`
-- evidence found without rationale marker => `missing_rationale_in_soll`
+- degraded result => `degraded`
 
 Example skeleton:
 
@@ -262,6 +291,11 @@ In `tools_dx.rs`:
 Guard with an env flag or runtime toggle such as:
 
 - `AXON_MCP_GUIDANCE_SHADOW=1`
+
+Important:
+
+- the shadow payload must be sidecar-only
+- it must never overwrite `data`
 
 **Step 5: Run tests to verify they pass**
 
@@ -566,4 +600,3 @@ Write one of:
 git add docs/plans/2026-04-17-mcp-guidance-phase1-report.md
 git commit -m "docs: record mcp guidance phase decision"
 ```
-

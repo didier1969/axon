@@ -725,8 +725,8 @@ Contenu désormais visible:
 
 Correction importante:
 
-- `axon_audit` et `axon_health` ne comptent plus un projet via `project_slug OR path LIKE`
-- le scope repose maintenant sur `project_slug` uniquement
+- `axon_audit` et `axon_health` ne comptent plus un projet via `project_code OR path LIKE`
+- le scope repose maintenant sur `project_code` uniquement
 
 Impact:
 

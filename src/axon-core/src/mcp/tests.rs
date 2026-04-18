@@ -1,7 +1,7 @@
 // Copyright (c) Didier Stadelmann. All rights reserved.
 
-use super::*;
 use super::guidance;
+use super::*;
 use crate::embedder::embedding_lane_config_from_env;
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION,
@@ -138,7 +138,10 @@ fn guided_response_includes_compact_guidance_fields_only_when_present() {
     assert_eq!(response["problem_class"], "input_not_found");
     assert_eq!(response["likely_cause"], "exact_symbol_mismatch");
     assert_eq!(response["confidence"], "low");
-    assert_eq!(response["next_best_actions"][0], "retry with suggested symbol");
+    assert_eq!(
+        response["next_best_actions"][0],
+        "retry with suggested symbol"
+    );
     assert!(response.get("soll").is_none());
 }
 
@@ -186,6 +189,104 @@ fn guided_response_includes_soll_block_when_authorization_signal_is_present() {
     assert_eq!(response["soll"]["recommended_action"], "recommend_update");
     assert_eq!(response["soll"]["update_kind"], "decision_or_requirement");
     assert_eq!(response["soll"]["requires_authorization"], true);
+}
+
+#[test]
+fn authoritative_phase1_guidance_filters_deferred_soll_gap_classes() {
+    let projected = guidance::project_authoritative_phase1_guidance(guidance::GuidanceOutcome {
+        problem_class: Some("missing_rationale_in_soll".to_string()),
+        likely_cause: Some("code_evidence_without_maintained_rationale".to_string()),
+        next_best_actions: vec!["review_current_soll_context".to_string()],
+        confidence: Some("medium".to_string()),
+        soll: Some(guidance::SollGuidance {
+            recommended_action: "recommend_update".to_string(),
+            update_kind: "decision_or_requirement".to_string(),
+            reason: "missing_rationale_evidence".to_string(),
+            requires_authorization: Some(true),
+        }),
+    });
+
+    assert_eq!(projected, guidance::GuidanceOutcome::none());
+}
+
+#[test]
+fn authoritative_phase1_guidance_keeps_supported_public_classes() {
+    let projected = guidance::project_authoritative_phase1_guidance(guidance::GuidanceOutcome {
+        problem_class: Some("degraded".to_string()),
+        likely_cause: Some("graph_index_not_fully_ready".to_string()),
+        next_best_actions: vec![
+            "treat_result_as_partial".to_string(),
+            "retry_after_runtime_stabilizes".to_string(),
+        ],
+        confidence: Some("medium".to_string()),
+        soll: None,
+    });
+
+    assert_eq!(projected.problem_class.as_deref(), Some("degraded"));
+    assert_eq!(
+        projected.likely_cause.as_deref(),
+        Some("graph_index_not_fully_ready")
+    );
+}
+
+#[test]
+fn authoritative_guidance_attaches_public_fields_without_shadow_wrapper() {
+    let response = guidance::attach_guidance_authoritative(
+        json!({
+            "status": "ok",
+            "content": [{ "type": "text", "text": "query fallback" }]
+        }),
+        guidance::GuidanceOutcome {
+            problem_class: Some("degraded".to_string()),
+            likely_cause: Some("graph_index_not_fully_ready".to_string()),
+            next_best_actions: vec![
+                "treat_result_as_partial".to_string(),
+                "retry_after_runtime_stabilizes".to_string(),
+            ],
+            confidence: Some("medium".to_string()),
+            soll: None,
+        },
+    );
+
+    assert_eq!(response["data"]["problem_class"], "degraded");
+    assert_eq!(
+        response["data"]["likely_cause"],
+        "graph_index_not_fully_ready"
+    );
+    assert_eq!(
+        response["data"]["next_best_actions"][0],
+        "treat_result_as_partial"
+    );
+    assert!(response["data"]["_shadow"].is_null());
+}
+
+#[test]
+fn guidance_shadow_is_additive_and_preserves_existing_payload() {
+    let response = guidance::attach_guidance_shadow(
+        json!({
+            "status": "ok",
+            "data": {
+                "summary": "exact symbol resolved",
+                "symbol": "Axon.Scanner.scan"
+            }
+        }),
+        json!({
+            "problem_class": "input_not_found",
+            "next_best_actions": ["retry with suggested symbol"]
+        }),
+    );
+
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["data"]["summary"], "exact symbol resolved");
+    assert_eq!(response["data"]["symbol"], "Axon.Scanner.scan");
+    assert_eq!(
+        response["data"]["_shadow"]["guidance"]["problem_class"],
+        "input_not_found"
+    );
+    assert_eq!(
+        response["data"]["_shadow"]["guidance"]["next_best_actions"][0],
+        "retry with suggested symbol"
+    );
 }
 
 #[test]
@@ -245,7 +346,8 @@ fn query_guidance_facts_capture_ambiguity_for_duplicate_symbol_names_across_proj
         canonical_sources: Vec::new(),
     };
 
-    let facts = server.extract_query_guidance_facts("scan", None, &candidates, 0, false, false, false);
+    let facts =
+        server.extract_query_guidance_facts("scan", None, &candidates, 0, false, false, false);
 
     assert!(facts.contains(&GuidanceFact::problem_signal("input_ambiguous")));
     assert!(facts.contains(&GuidanceFact::candidate_project_code("PJA")));
@@ -261,8 +363,15 @@ fn query_guidance_facts_capture_wrong_scope_when_candidates_exist_elsewhere() {
         canonical_sources: Vec::new(),
     };
 
-    let facts =
-        server.extract_query_guidance_facts("scan", Some("AXO"), &candidates, 0, false, false, false);
+    let facts = server.extract_query_guidance_facts(
+        "scan",
+        Some("AXO"),
+        &candidates,
+        0,
+        false,
+        false,
+        false,
+    );
 
     assert!(facts.contains(&GuidanceFact::problem_signal("wrong_project_scope")));
     assert!(facts.contains(&GuidanceFact::candidate_project_code("PJA")));
@@ -310,7 +419,10 @@ fn classify_guidance_marks_wrong_project_scope() {
         GuidanceFact::problem_signal("wrong_project_scope"),
     ]);
 
-    assert_eq!(outcome.problem_class.as_deref(), Some("wrong_project_scope"));
+    assert_eq!(
+        outcome.problem_class.as_deref(),
+        Some("wrong_project_scope")
+    );
     assert!(outcome
         .next_best_actions
         .contains(&"use_canonical_project_code".to_string()));
@@ -346,16 +458,20 @@ fn classify_guidance_marks_input_ambiguous() {
 }
 
 #[test]
-fn classify_guidance_marks_index_incomplete_without_input_signal() {
+fn classify_guidance_marks_degraded_for_index_incomplete() {
     let outcome = classify_guidance(&[
         GuidanceFact::requested_target("scan"),
         GuidanceFact::IndexIncomplete,
     ]);
 
-    assert_eq!(outcome.problem_class.as_deref(), Some("index_incomplete"));
+    assert_eq!(outcome.problem_class.as_deref(), Some("degraded"));
+    assert_eq!(
+        outcome.likely_cause.as_deref(),
+        Some("graph_index_not_fully_ready")
+    );
     assert!(outcome
         .next_best_actions
-        .contains(&"retry_after_indexing".to_string()));
+        .contains(&"retry_after_runtime_stabilizes".to_string()));
 }
 
 #[test]
@@ -385,20 +501,34 @@ fn classify_guidance_marks_tool_unavailable() {
 }
 
 #[test]
-fn classify_guidance_marks_backend_pressure() {
+fn classify_guidance_marks_degraded_for_backend_pressure() {
     let outcome = classify_guidance(&[GuidanceFact::problem_signal("backend_pressure")]);
-    assert_eq!(outcome.problem_class.as_deref(), Some("backend_pressure"));
+    assert_eq!(outcome.problem_class.as_deref(), Some("degraded"));
+    assert_eq!(
+        outcome.likely_cause.as_deref(),
+        Some("runtime_pressure_reduces_reliability")
+    );
+}
+
+#[test]
+fn classify_guidance_marks_degraded_for_vectorization_incomplete() {
+    let outcome = classify_guidance(&[GuidanceFact::VectorizationIncomplete]);
+    assert_eq!(outcome.problem_class.as_deref(), Some("degraded"));
+    assert_eq!(
+        outcome.likely_cause.as_deref(),
+        Some("semantic_layer_not_fully_ready")
+    );
 }
 
 #[test]
 fn classify_guidance_marks_intent_missing_in_soll() {
     let outcome = classify_guidance(&[GuidanceFact::problem_signal("intent_missing_in_soll")]);
-    assert_eq!(outcome.problem_class.as_deref(), Some("intent_missing_in_soll"));
     assert_eq!(
-        outcome
-            .soll
-            .as_ref()
-            .map(|soll| soll.reason.as_str()),
+        outcome.problem_class.as_deref(),
+        Some("intent_missing_in_soll")
+    );
+    assert_eq!(
+        outcome.soll.as_ref().map(|soll| soll.reason.as_str()),
         Some("missing_intent_evidence")
     );
 }
@@ -456,6 +586,83 @@ fn inspect_shadow_guidance_emits_debug_payload_when_enabled() {
         std::env::remove_var("AXON_RUNTIME_MODE");
         std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
         std::env::remove_var("AXON_MCP_GUIDANCE_SHADOW");
+    }
+}
+
+#[test]
+fn inspect_authoritative_guidance_emits_public_phase1_fields_when_enabled() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+        std::env::set_var("AXON_MCP_GUIDANCE_AUTHORITATIVE", "1");
+        std::env::remove_var("AXON_MCP_GUIDANCE_SHADOW");
+    }
+
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('axon::axon_retrieve_context', 'axon_retrieve_context', 'method', true, true, false, 'AXO')")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "inspect",
+                "arguments": { "symbol": "axon_retrieve_contex", "project": "AXO" }
+            })),
+            id: Some(json!(6211)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    assert_eq!(result["data"]["problem_class"], "input_not_found");
+    assert_eq!(result["data"]["likely_cause"], "exact_symbol_mismatch");
+    assert!(result["data"]["_shadow"].is_null());
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        std::env::remove_var("AXON_MCP_GUIDANCE_AUTHORITATIVE");
+    }
+}
+
+#[test]
+fn unavailable_tool_authoritative_guidance_emits_public_phase1_fields() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        std::env::set_var("AXON_MCP_GUIDANCE_AUTHORITATIVE", "1");
+        std::env::remove_var("AXON_MCP_GUIDANCE_SHADOW");
+    }
+
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "query",
+                "arguments": { "query_text": "scan", "project": "AXO" }
+            })),
+            id: Some(json!(9001)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    assert_eq!(result["data"]["problem_class"], "tool_unavailable");
+    assert_eq!(
+        result["data"]["likely_cause"],
+        "runtime_profile_does_not_allow_tool"
+    );
+    assert!(result["data"]["_shadow"].is_null());
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_MCP_GUIDANCE_AUTHORITATIVE");
     }
 }
 
@@ -760,6 +967,103 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
         .as_str()
         .expect("preview id should survive job result");
     assert_eq!(result_preview_id, preview_id);
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+}
+
+#[test]
+fn test_mutating_soll_manager_requires_project_code_for_job_reservation() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+    }
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "concept",
+                "data": {
+                    "name": "Missing project scope",
+                    "explanation": "Jobs must reject implicit project identity"
+                }
+            }
+        })),
+        id: Some(json!(5003)),
+    };
+
+    let response = server.handle_request(req).unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result
+        .get("isError")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false));
+    assert!(
+        content.contains("Mutation job reservation failed"),
+        "{content}"
+    );
+    assert!(
+        content.contains("`project_code` est obligatoire"),
+        "{content}"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+}
+
+#[test]
+fn test_mutating_soll_commit_revision_requires_preview_id_for_job_reservation() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+    }
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_commit_revision",
+            "arguments": {
+                "author": "test"
+            }
+        })),
+        id: Some(json!(5004)),
+    };
+
+    let response = server.handle_request(req).unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result
+        .get("isError")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false));
+    assert!(
+        content.contains("Mutation job reservation failed"),
+        "{content}"
+    );
+    assert!(
+        content.contains("`preview_id` est obligatoire"),
+        "{content}"
+    );
 
     unsafe {
         std::env::remove_var("AXON_MCP_MUTATION_JOBS");
@@ -2873,6 +3177,7 @@ fn test_axon_query_with_project() {
     println!("HEALTH_BETA_CONTENT={content}");
 
     assert!(content.contains("auth_func"));
+    assert!(result.get("problem_class").is_none(), "{result}");
 }
 
 #[test]
@@ -3950,9 +4255,9 @@ fn test_retrieve_context_under_critical_pressure_avoids_unanchored_fallback_chun
         "critical pressure should prefer no support over unanchored fallback noise: {packet:?}"
     );
     assert!(
-        packet["missing_evidence"]
-            .to_string()
-            .contains("An anchor was found but no anchored chunk-level grounding evidence was retained"),
+        packet["missing_evidence"].to_string().contains(
+            "An anchor was found but no anchored chunk-level grounding evidence was retained"
+        ),
         "{packet:?}"
     );
     assert!(
@@ -4799,9 +5104,7 @@ fn test_axon_audit_respects_project_scope() {
     let server = create_test_server();
     server
         .graph_store
-        .execute(
-            "INSERT INTO File (path, project_code) VALUES ('apps/pja/lib/input.rs', 'PJA')",
-        )
+        .execute("INSERT INTO File (path, project_code) VALUES ('apps/pja/lib/input.rs', 'PJA')")
         .unwrap();
     server
         .graph_store
@@ -4857,9 +5160,7 @@ fn test_axon_health_respects_project_scope() {
     let server = create_test_server();
     server
         .graph_store
-        .execute(
-            "INSERT INTO File (path, project_code) VALUES ('apps/pja/lib/covered.rs', 'PJA')",
-        )
+        .execute("INSERT INTO File (path, project_code) VALUES ('apps/pja/lib/covered.rs', 'PJA')")
         .unwrap();
     server
         .graph_store
@@ -4990,9 +5291,7 @@ fn test_axon_health_uses_project_code_even_when_path_does_not_contain_project_na
     let server = create_test_server();
     server
         .graph_store
-        .execute(
-            "INSERT INTO File (path, project_code) VALUES ('src/shared/pja_core.rs', 'PJA')",
-        )
+        .execute("INSERT INTO File (path, project_code) VALUES ('src/shared/pja_core.rs', 'PJA')")
         .unwrap();
     server
         .graph_store
@@ -5287,7 +5586,43 @@ fn test_axon_soll_apply_plan_dry_run_uses_canonical_preview_id() {
 }
 
 #[test]
-fn test_axon_soll_manager_rejects_non_canonical_project_alias() {
+fn test_axon_soll_apply_plan_scopes_duplicates_to_same_project() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-BKS-001', 'Requirement', 'BKS', 'Shared title', 'Other project duplicate', 'draft', '{\"logical_key\":\"shared-key\"}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "AXO",
+                "dry_run": true,
+                "author": "test",
+                "plan": {
+                    "requirements": [{
+                        "logical_key": "shared-key",
+                        "title": "Shared title",
+                        "description": "Should still create in AXO scope"
+                    }]
+                }
+            }
+        })),
+        id: Some(json!(100031)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let operations = result["data"]["operations"].as_array().unwrap();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0]["kind"].as_str(), Some("create"));
+}
+
+#[test]
+fn test_axon_soll_manager_create_requires_explicit_canonical_project_code() {
     let server = create_test_server();
 
     let req = JsonRpcRequest {
@@ -5299,10 +5634,9 @@ fn test_axon_soll_manager_rejects_non_canonical_project_alias() {
                 "action": "create",
                 "entity": "decision",
                 "data": {
-                    "project_code": "FSC",
-                    "title": "Alias should fail",
-                    "context": "Only canonical project codes are accepted",
-                    "rationale": "Server owns project identity",
+                    "title": "Missing project code",
+                    "context": "Mutations must declare an explicit project scope",
+                    "rationale": "The server must not guess the target project",
                     "status": "accepted"
                 }
             }
@@ -5322,8 +5656,133 @@ fn test_axon_soll_manager_rejects_non_canonical_project_alias() {
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
-    assert!(content.contains("Projet canonique"), "{content}");
-    assert!(content.contains("FSC"), "{content}");
+    assert!(
+        content.contains("`project_code` est obligatoire"),
+        "{content}"
+    );
+    assert!(content.contains("AXO"), "{content}");
+}
+
+#[test]
+fn test_axon_soll_apply_plan_rejects_non_canonical_project_identifier() {
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_apply_plan",
+            "arguments": {
+                "project_code": "BookingSystem",
+                "dry_run": true,
+                "author": "test",
+                "plan": {
+                    "requirements": [{
+                        "logical_key": "req-non-canonical-project",
+                        "title": "Bad project identity",
+                        "description": "Mutations must reject non canonical project identifiers"
+                    }]
+                }
+            }
+        })),
+        id: Some(json!(10004)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false));
+    assert!(
+        content.contains("Identifiant projet non canonique"),
+        "{content}"
+    );
+    assert!(content.contains("BookingSystem"), "{content}");
+    assert!(content.contains("3 caractères"), "{content}");
+}
+
+#[test]
+fn test_axon_init_project_rejects_non_canonical_project_code() {
+    let server = create_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_init_project",
+            "arguments": {
+                "project_name": "BookingSystem",
+                "project_code": "booking-system",
+                "project_path": "/home/dstadel/projects/BookingSystem"
+            }
+        },
+        "id": 10005
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result
+        .get("isError")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false));
+    assert!(
+        content.contains("Identifiant projet non canonique"),
+        "{content}"
+    );
+    assert!(content.contains("booking-system"), "{content}");
+}
+
+#[test]
+fn test_axon_apply_guidelines_rejects_non_canonical_project_code() {
+    let server = create_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_apply_guidelines",
+            "arguments": {
+                "project_code": "axon",
+                "accepted_global_rule_ids": ["GUI-PRO-001"]
+            }
+        },
+        "id": 10006
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result
+        .get("isError")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false));
+    assert!(
+        content.contains("Identifiant projet non canonique"),
+        "{content}"
+    );
+    assert!(content.contains("axon"), "{content}");
 }
 
 #[test]
@@ -5781,6 +6240,55 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
 }
 
 #[test]
+fn test_axon_validate_soll_reports_duplicate_titles_and_uncovered_requirements() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-010', 'Requirement', 'AXO', 'Duplicate req', 'No criteria', 'draft', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-011', 'Requirement', 'AXO', 'Duplicate req', 'Still no criteria', 'draft', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-010', 'Decision', 'AXO', 'Duplicate dec', 'No links', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-011', 'Decision', 'AXO', 'Duplicate dec', 'No links', 'accepted', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_validate",
+            "arguments": { "project_code": "AXO" }
+        })),
+        id: Some(json!(3204)),
+    };
+
+    let response = server.handle_request(req);
+    let result = response.unwrap().result.expect("Expected result");
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(content.contains("Titres dupliqués"), "{content}");
+    assert!(content.contains("Duplicate req"), "{content}");
+    assert!(content.contains("Duplicate dec"), "{content}");
+    assert!(
+        content.contains("Requirements sans critères/preuves"),
+        "{content}"
+    );
+    assert!(content.contains("REQ-AXO-010"), "{content}");
+    assert!(content.contains("REQ-AXO-011"), "{content}");
+}
+
+#[test]
 fn test_axon_validate_soll_reports_clean_minimal_graph() {
     let server = create_test_server();
     server
@@ -5952,7 +6460,11 @@ fn test_axon_export_soll_can_scope_by_project_code() {
     let server = create_test_server();
     server
         .graph_store
-        .sync_project_registry_entry("BKS", Some("BookingSystem"), Some("/home/dstadel/projects/BookingSystem"))
+        .sync_project_registry_entry(
+            "BKS",
+            Some("BookingSystem"),
+            Some("/home/dstadel/projects/BookingSystem"),
+        )
         .unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'AXO Vision', 'Desc', '', '{}')").unwrap();
     server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-BKS-001', 'Vision', 'BKS', 'BKS Vision', 'Desc', '', '{}')").unwrap();
@@ -6732,6 +7244,79 @@ fn test_axon_query_reports_partial_truth_when_project_is_degraded() {
 
     assert!(content.contains("verite partielle"), "{}", content);
     assert!(content.contains("indexed_degraded"), "{}", content);
+    assert_eq!(result["problem_class"], "index_incomplete");
+    assert_eq!(result["next_best_actions"][0], "treat_result_as_partial");
+}
+
+#[test]
+fn test_axon_query_includes_compact_guidance_for_wrong_project_scope() {
+    let _runtime = RuntimeEnvGuard::full_autonomous();
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_code, status) VALUES ('src/pja/config.ex', 'PJA', 'indexed')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('PJA::Config.Module.scan', 'Config.Module.scan', 'function', true, true, false, 'PJA')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/pja/config.ex', 'PJA::Config.Module.scan', 'PJA')")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "query",
+                "arguments": { "query": "Config.Module.scan", "project": "AXO" }
+            })),
+            id: Some(json!(6212)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    assert_eq!(result["problem_class"], "wrong_project_scope");
+    assert_eq!(
+        result["likely_cause"],
+        "non_canonical_or_incorrect_project_code"
+    );
+    assert_eq!(result["next_best_actions"][0], "use_canonical_project_code");
+}
+
+#[test]
+fn test_axon_query_includes_compact_guidance_when_runtime_profile_blocks_tool() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
+    let server = create_test_server();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "query",
+                "arguments": { "query": "scan", "project": "AXO" }
+            })),
+            id: Some(json!(6213)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    assert_eq!(result["problem_class"], "tool_unavailable");
+    assert_eq!(
+        result["next_best_actions"][0],
+        "switch_to_supported_runtime_profile"
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+    }
 }
 
 #[test]
@@ -7923,8 +8508,6 @@ fn test_axon_init_project_returns_global_guidelines() {
         "params": {
             "name": "axon_init_project",
             "arguments": {
-                "project_name": "BookingSystem",
-                "project_code": "BKS",
                 "project_path": "/home/dstadel/projects/BookingSystem",
                 "concept_document_url_or_text": "We want a booking system."
             }
@@ -7948,6 +8531,51 @@ fn test_axon_init_project_returns_global_guidelines() {
     assert!(content.contains("GUI-PRO-001"));
     assert!(content.contains("GUI-PRO-002"));
     assert!(content.contains("Voici les règles globales disponibles."));
+    assert!(content.contains("Code projet attribué par le serveur: `BKS`"));
+    assert_eq!(result["data"]["project_code"].as_str(), Some("BKS"));
+    assert_eq!(
+        result["data"]["project_name"].as_str(),
+        Some("BookingSystem")
+    );
+    assert_eq!(
+        result["data"]["project_path"].as_str(),
+        Some("/home/dstadel/projects/BookingSystem")
+    );
+}
+
+#[test]
+fn test_axon_init_project_rejects_client_project_code_when_it_differs_from_server_assignment() {
+    let server = create_test_server();
+
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+            "name": "axon_init_project",
+            "arguments": {
+                "project_code": "AXO",
+                "project_path": "/home/dstadel/projects/BookingSystem"
+            }
+        },
+        "id": 10007
+    });
+
+    let response = server
+        .handle_request(serde_json::from_value(req).unwrap())
+        .unwrap();
+    let result = response.result.unwrap();
+    let content = result.get("content").unwrap()[0]
+        .get("text")
+        .unwrap()
+        .as_str()
+        .unwrap();
+
+    assert!(result
+        .get("isError")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false));
+    assert!(content.contains("attribué par le serveur"), "{content}");
+    assert!(content.contains("BKS"), "{content}");
 }
 
 #[test]

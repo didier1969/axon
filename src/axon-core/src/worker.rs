@@ -861,12 +861,7 @@ mod tests {
 
         let graph = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
         graph
-            .bulk_insert_files(&[(
-                path.to_string_lossy().to_string(),
-                "PRJ".to_string(),
-                32,
-                1,
-            )])
+            .bulk_insert_files(&[(path.to_string_lossy().to_string(), "PRJ".to_string(), 32, 1)])
             .unwrap();
         graph
             .claim_pending_paths(&[path.to_string_lossy().to_string()])

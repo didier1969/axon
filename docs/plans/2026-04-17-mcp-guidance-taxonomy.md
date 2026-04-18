@@ -52,18 +52,14 @@ Rules:
 
 ## Phase-1 Problem Classes
 
-Only these classes are in scope for phase 1:
+Only these classes are in scope for the first authoritative rollout:
 
 - `none`
 - `input_not_found`
 - `input_ambiguous`
 - `wrong_project_scope`
 - `tool_unavailable`
-- `index_incomplete`
-- `vectorization_incomplete`
-- `missing_rationale_in_soll`
-- `intent_missing_in_soll`
-- `backend_pressure`
+- `degraded`
 
 ### Precedence Rule
 
@@ -75,19 +71,14 @@ Recommended precedence:
 2. `wrong_project_scope`
 3. `input_ambiguous`
 4. `input_not_found`
-5. `backend_pressure`
-6. `index_incomplete`
-7. `vectorization_incomplete`
-8. `intent_missing_in_soll`
-9. `missing_rationale_in_soll`
-10. `none`
+5. `degraded`
+6. `none`
 
 Meaning:
 
 - scope errors outrank symbol-resolution errors
 - ambiguity outranks absence
-- backend or index degradation should not hide a cleaner scope or resolution diagnosis
-- SOLL gaps are secondary to successful target resolution and should not mask a more immediate tool-input failure
+- degradation should not hide a cleaner scope or resolution diagnosis
 
 ### Intended Meaning
 
@@ -106,20 +97,17 @@ Meaning:
 - `tool_unavailable`
   The tool is not available in the current runtime mode or operational profile.
 
-- `index_incomplete`
-  The graph/indexing layer is incomplete enough that the result must be treated as partial.
+- `degraded`
+  Runtime pressure, indexing incompleteness, vectorization incompleteness, or similar partial-truth conditions reduce confidence or completeness.
 
-- `vectorization_incomplete`
-  The semantic layer is incomplete enough that the result must be treated as partial.
+### Deferred SOLL Gap Classes
+
+The following remain valid conceptual classes, but they are deferred from the first authoritative rollout until they are backed by explicit extracted facts:
 
 - `missing_rationale_in_soll`
-  Code evidence exists, but maintained rationale is missing or under-specified in SOLL.
-
 - `intent_missing_in_soll`
-  Code evidence exists, but a meaningful intentional anchor is absent from SOLL.
 
-- `backend_pressure`
-  Runtime pressure or temporary backend conditions reduce confidence or completeness.
+They may still appear in shadow experiments, but they should not be promoted publicly until the evidence path is real and testable.
 
 ### Vision Handling In Phase 1
 
@@ -129,8 +117,8 @@ Rules:
 
 - do not introduce a `missing_vision` class in phase 1
 - do not recommend `Vision` updates by default in `query` or `inspect`
-- if a phase-1 case reveals a project-purpose gap, map it under `intent_missing_in_soll` only when the evidence is strong and the recommendation remains authorization-gated
-- otherwise keep `Vision` concerns outside the phase-1 public guidance envelope
+- if a future case reveals a project-purpose gap, map it under `intent_missing_in_soll` only when the evidence is strong and the recommendation remains authorization-gated
+- until then, keep `Vision` concerns outside the first authoritative public guidance envelope
 
 ## Guidance Emission Rules
 
@@ -214,11 +202,8 @@ Case:
 
 Expected:
 
-- `status = ok`
-- `problem_class = missing_rationale_in_soll`
-- `soll.recommended_action = recommend_update`
-- `soll.update_kind = decision_or_requirement`
-- `soll.requires_authorization = true`
+- keep this case in shadow mode until the SOLL gap is backed by explicit extracted facts
+- do not emit it as part of the first authoritative rollout
 
 ## Non-Goals
 

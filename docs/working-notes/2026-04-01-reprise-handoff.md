@@ -86,8 +86,8 @@ Conséquence:
 
 Une tranche supplémentaire a maintenant été validée sur la fidélité des réponses développeur et du cockpit:
 
-- `axon_audit`, `axon_health`, `axon_impact` et `axon_query` respectent maintenant explicitement le `project_slug` demandé, sans dépendre d'une sous-chaîne de chemin
-- `axon_inspect` respecte aussi le `project_slug` pour des symboles homonymes entre projets
+- `axon_audit`, `axon_health`, `axon_impact` et `axon_query` respectent maintenant explicitement le `project_code` demandé, sans dépendre d'une sous-chaîne de chemin
+- `axon_inspect` respecte aussi le `project_code` pour des symboles homonymes entre projets
 - quand un scope contient des fichiers `indexed_degraded`, les outils MCP exposent maintenant une bannière de `verite partielle` au lieu de présenter silencieusement une réponse complète
 - `indexed_degraded` est maintenant rendu comme succès dégradé dans le cockpit Phoenix, pas comme erreur
 - `Axon.Watcher.Progress` ne maintient plus d'overlay mutable local; la progression dashboard reste issue de SQL seulement

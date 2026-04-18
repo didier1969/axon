@@ -1,0 +1,30 @@
+{
+  "steps": [
+    {
+      "name": "scenario.soll.query_context",
+      "tool": "soll_query_context",
+      "args": {
+        "limit": 5
+      }
+    },
+    {
+      "name": "scenario.soll.work_plan",
+      "tool": "soll_work_plan",
+      "args": {
+        "format": "json",
+        "limit": 10,
+        "top": 3,
+        "include_ist": true
+      }
+    },
+    {
+      "name": "scenario.soll.apply_plan_dry_run",
+      "tool": "soll_apply_plan",
+      "args": {
+        "author": "qualify-mcp",
+        "dry_run": true,
+        "plan": {}
+      }
+    }
+  ]
+}

@@ -3,8 +3,8 @@ use crate::service_guard::{self, ServicePressure};
 use serde_json::{json, Value};
 
 use super::format::{evidence_by_mode, format_standard_contract, format_table_from_json};
-use super::{GuidanceCandidates, GuidanceFact};
 use super::McpServer;
+use super::{GuidanceCandidates, GuidanceFact};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QueryIntent {
@@ -99,7 +99,10 @@ impl McpServer {
 
         if let Some(project_code) = project {
             if !candidates.project_codes.is_empty()
-                && !candidates.project_codes.iter().any(|code| code == project_code)
+                && !candidates
+                    .project_codes
+                    .iter()
+                    .any(|code| code == project_code)
             {
                 facts.push(GuidanceFact::problem_signal("wrong_project_scope"));
                 return facts;
@@ -564,7 +567,8 @@ impl McpServer {
         let embedding_attempt = crate::embedder::batch_embed(vec![query_text.to_string()]);
         let semantic_fallback_reason = embedding_attempt.as_ref().err().map(|err| err.to_string());
         let embedding = embedding_attempt.ok().and_then(|v| v.into_iter().next());
-        let backend_pressure = !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
+        let backend_pressure =
+            !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
         let query_limit = if query_intent == QueryIntent::ConfigLookupExact {
             25
         } else {
@@ -678,10 +682,9 @@ impl McpServer {
                     exact_match_missing,
                     backend_pressure,
                 );
-                let guidance_shadow =
-                    crate::mcp::guidance_outcome_to_value(&crate::mcp::classify_guidance(
-                        &guidance_facts,
-                    ));
+                let guidance_shadow = crate::mcp::guidance_outcome_to_value(
+                    &crate::mcp::classify_guidance(&guidance_facts),
+                );
                 let result_category = rows
                     .first()
                     .and_then(|row| row.get(2))
@@ -723,7 +726,10 @@ impl McpServer {
                     )
                 );
                 let response = json!({ "content": [{ "type": "text", "text": report }] });
-                Some(if Self::mcp_guidance_shadow_enabled() {
+                let guidance = crate::mcp::classify_guidance(&guidance_facts);
+                Some(if Self::mcp_guidance_authoritative_enabled() {
+                    crate::mcp::attach_guidance_authoritative(response, guidance)
+                } else if Self::mcp_guidance_shadow_enabled() {
                     crate::mcp::attach_guidance_shadow(response, guidance_shadow)
                 } else {
                     response
@@ -1006,7 +1012,8 @@ impl McpServer {
         let symbol = args.get("symbol")?.as_str()?;
         let mode = args.get("mode").and_then(|v| v.as_str());
         let project = args.get("project").and_then(|v| v.as_str());
-        let backend_pressure = !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
+        let backend_pressure =
+            !matches!(service_guard::current_pressure(), ServicePressure::Healthy);
         let Some(symbol_id) = self.resolve_scoped_symbol_id_dx(symbol, project) else {
             let suggestions = self.suggest_scoped_symbols_canonical(symbol, project, 8);
             let suggestion_rows: Vec<Vec<Value>> =
@@ -1033,10 +1040,8 @@ impl McpServer {
                 true,
                 backend_pressure,
             );
-            let guidance_shadow =
-                crate::mcp::guidance_outcome_to_value(&crate::mcp::classify_guidance(
-                    &guidance_facts,
-                ));
+            let guidance = crate::mcp::classify_guidance(&guidance_facts);
+            let guidance_shadow = crate::mcp::guidance_outcome_to_value(&guidance);
             let scope = project
                 .map(|p| format!("project:{}", p))
                 .unwrap_or_else(|| "workspace:*".to_string());
@@ -1061,7 +1066,9 @@ impl McpServer {
                 )
             );
             let response = json!({ "content": [{ "type": "text", "text": report }] });
-            return Some(if Self::mcp_guidance_shadow_enabled() {
+            return Some(if Self::mcp_guidance_authoritative_enabled() {
+                crate::mcp::attach_guidance_authoritative(response, guidance)
+            } else if Self::mcp_guidance_shadow_enabled() {
                 crate::mcp::attach_guidance_shadow(response, guidance_shadow)
             } else {
                 response
@@ -1120,10 +1127,8 @@ impl McpServer {
                     false,
                     backend_pressure,
                 );
-                let guidance_shadow =
-                    crate::mcp::guidance_outcome_to_value(&crate::mcp::classify_guidance(
-                        &guidance_facts,
-                    ));
+                let guidance = crate::mcp::classify_guidance(&guidance_facts);
+                let guidance_shadow = crate::mcp::guidance_outcome_to_value(&guidance);
                 let evidence = format!(
                     "{}{}{}",
                     project_note.unwrap_or_default(),
@@ -1147,7 +1152,9 @@ impl McpServer {
                     )
                 );
                 let response = json!({ "content": [{ "type": "text", "text": report }] });
-                Some(if Self::mcp_guidance_shadow_enabled() {
+                Some(if Self::mcp_guidance_authoritative_enabled() {
+                    crate::mcp::attach_guidance_authoritative(response, guidance)
+                } else if Self::mcp_guidance_shadow_enabled() {
                     crate::mcp::attach_guidance_shadow(response, guidance_shadow)
                 } else {
                     response
@@ -1233,8 +1240,7 @@ impl McpServer {
             )
             SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callers
             JOIN Symbol s ON s.id = callers.sym",
-            scoped_filter,
-            depth,
+            scoped_filter, depth,
         );
 
         let down_query = format!(
@@ -1255,8 +1261,7 @@ impl McpServer {
             )
             SELECT DISTINCT s.name, s.kind, COALESCE(s.project_code, 'unknown') FROM callees
             JOIN Symbol s ON s.id = callees.sym",
-            scoped_filter,
-            depth,
+            scoped_filter, depth,
         );
 
         let params = if let Some(project) = project {

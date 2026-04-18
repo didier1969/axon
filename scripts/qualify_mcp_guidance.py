@@ -41,6 +41,11 @@ def extract_guidance(response: dict[str, Any]) -> dict[str, Any] | None:
     data = result.get("data")
     if not isinstance(data, dict):
         return None
+    if any(
+        key in data
+        for key in ("problem_class", "likely_cause", "next_best_actions", "confidence", "soll")
+    ):
+        return data
     shadow = data.get("_shadow")
     if not isinstance(shadow, dict):
         return None
@@ -148,6 +153,16 @@ def main() -> int:
     parser.add_argument("--url", default=DEFAULT_URL, help="MCP HTTP endpoint for live cases")
     parser.add_argument("--timeout", type=int, default=10, help="RPC timeout in seconds")
     parser.add_argument("--json-out", help="Optional path to save the full result JSON")
+    parser.add_argument(
+        "--source",
+        choices=("fixture", "live", "all"),
+        default="all",
+        help="Restrict execution to fixture cases, live cases, or all",
+    )
+    parser.add_argument(
+        "--name-pattern",
+        help="Only run cases whose name contains this substring",
+    )
     args = parser.parse_args()
 
     corpus_path = Path(args.goldens)
@@ -155,6 +170,17 @@ def main() -> int:
     cases = corpus.get("cases", [])
     if not isinstance(cases, list) or not cases:
         print("guidance corpus has no cases", file=sys.stderr)
+        return 2
+
+    if args.source != "all":
+        cases = [case for case in cases if case.get("source", "fixture") == args.source]
+
+    if args.name_pattern:
+        needle = args.name_pattern
+        cases = [case for case in cases if needle in str(case.get("name", ""))]
+
+    if not cases:
+        print("no guidance cases selected", file=sys.stderr)
         return 2
 
     results: list[CaseResult] = []

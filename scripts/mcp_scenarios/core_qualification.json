@@ -1,0 +1,18 @@
+{
+  "steps": [
+    {
+      "name": "scenario.core.query_probe",
+      "tool": "query",
+      "args": {
+        "query": "project status"
+      }
+    },
+    {
+      "name": "scenario.core.project_status_probe",
+      "tool": "project_status",
+      "args": {
+        "mode": "brief"
+      }
+    }
+  ]
+}

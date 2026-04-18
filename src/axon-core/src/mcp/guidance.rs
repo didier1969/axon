@@ -85,14 +85,43 @@ impl GuidanceOutcome {
 }
 
 #[allow(dead_code)]
+pub(crate) fn project_authoritative_phase1_guidance(outcome: GuidanceOutcome) -> GuidanceOutcome {
+    let Some(problem_class) = outcome.problem_class.as_deref() else {
+        return outcome;
+    };
+
+    match problem_class {
+        "input_not_found"
+        | "input_ambiguous"
+        | "wrong_project_scope"
+        | "tool_unavailable"
+        | "degraded" => outcome,
+        _ => GuidanceOutcome::none(),
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) fn classify_guidance(facts: &[GuidanceFact]) -> GuidanceOutcome {
     // Precedence must stay aligned with the frozen taxonomy document.
     let has_signal = |needle: &str| {
-        facts.iter().any(|fact| {
-            matches!(fact, GuidanceFact::ProblemSignal(signal) if signal == needle)
-        })
+        facts
+            .iter()
+            .any(|fact| matches!(fact, GuidanceFact::ProblemSignal(signal) if signal == needle))
     };
     let has_fact = |expected: &GuidanceFact| facts.iter().any(|fact| fact == expected);
+
+    if has_signal("tool_unavailable") {
+        return GuidanceOutcome {
+            problem_class: Some("tool_unavailable".to_string()),
+            likely_cause: Some("runtime_profile_does_not_allow_tool".to_string()),
+            next_best_actions: vec![
+                "switch_to_supported_runtime_profile".to_string(),
+                "retry_tool_after_runtime_change".to_string(),
+            ],
+            confidence: Some("high".to_string()),
+            soll: None,
+        };
+    }
 
     if has_signal("wrong_project_scope") {
         return GuidanceOutcome {
@@ -133,58 +162,31 @@ pub(crate) fn classify_guidance(facts: &[GuidanceFact]) -> GuidanceOutcome {
         };
     }
 
-    if has_signal("tool_unavailable") {
-        return GuidanceOutcome {
-            problem_class: Some("tool_unavailable".to_string()),
-            likely_cause: Some("runtime_profile_does_not_allow_tool".to_string()),
-            next_best_actions: vec![
-                "switch_to_supported_runtime_profile".to_string(),
-                "retry_tool_after_runtime_change".to_string(),
-            ],
-            confidence: Some("high".to_string()),
-            soll: None,
+    if has_signal("backend_pressure")
+        || has_fact(&GuidanceFact::IndexIncomplete)
+        || has_fact(&GuidanceFact::VectorizationIncomplete)
+    {
+        let likely_cause = if has_signal("backend_pressure") {
+            "runtime_pressure_reduces_reliability"
+        } else if has_fact(&GuidanceFact::IndexIncomplete) {
+            "graph_index_not_fully_ready"
+        } else {
+            "semantic_layer_not_fully_ready"
         };
-    }
 
-    if has_signal("backend_pressure") {
         return GuidanceOutcome {
-            problem_class: Some("backend_pressure".to_string()),
-            likely_cause: Some("runtime_pressure_reduces_reliability".to_string()),
+            problem_class: Some("degraded".to_string()),
+            likely_cause: Some(likely_cause.to_string()),
             next_best_actions: vec![
                 "treat_result_as_partial".to_string(),
-                "retry_after_pressure_recovers".to_string(),
+                "retry_after_runtime_stabilizes".to_string(),
             ],
             confidence: Some("medium".to_string()),
             soll: None,
         };
     }
 
-    if has_fact(&GuidanceFact::IndexIncomplete) {
-        return GuidanceOutcome {
-            problem_class: Some("index_incomplete".to_string()),
-            likely_cause: Some("graph_index_not_fully_ready".to_string()),
-            next_best_actions: vec![
-                "treat_result_as_partial".to_string(),
-                "retry_after_indexing".to_string(),
-            ],
-            confidence: Some("medium".to_string()),
-            soll: None,
-        };
-    }
-
-    if has_fact(&GuidanceFact::VectorizationIncomplete) {
-        return GuidanceOutcome {
-            problem_class: Some("vectorization_incomplete".to_string()),
-            likely_cause: Some("semantic_layer_not_fully_ready".to_string()),
-            next_best_actions: vec![
-                "treat_result_as_partial".to_string(),
-                "retry_after_vectorization".to_string(),
-            ],
-            confidence: Some("medium".to_string()),
-            soll: None,
-        };
-    }
-
+    // Deferred SOLL-gap classes remain available for shadow experiments only.
     if has_signal("intent_missing_in_soll") {
         return GuidanceOutcome {
             problem_class: Some("intent_missing_in_soll".to_string()),
@@ -245,23 +247,66 @@ pub(crate) fn guidance_outcome_to_value(outcome: &GuidanceOutcome) -> Value {
 }
 
 #[allow(dead_code)]
-pub(crate) fn attach_guidance_shadow(mut response: Value, guidance_shadow: Value) -> Value {
-    if guidance_shadow.is_null() {
+pub(crate) fn attach_guidance_authoritative(
+    mut response: Value,
+    outcome: GuidanceOutcome,
+) -> Value {
+    let projected = project_authoritative_phase1_guidance(outcome);
+    if projected == GuidanceOutcome::none() {
         return response;
     }
-    response["data"] = json!({
-        "_shadow": {
-            "guidance": guidance_shadow
-        }
-    });
+
+    let Some(object) = response.as_object_mut() else {
+        return response;
+    };
+
+    let data = object
+        .entry("data".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+
+    if !data.is_object() {
+        *data = json!({ "value": data.clone() });
+    }
+
+    let next = build_guided_response(data.clone(), projected);
+    *data = next;
     response
 }
 
 #[allow(dead_code)]
-pub(crate) fn build_guided_response(
-    mut payload: Value,
-    outcome: GuidanceOutcome,
-) -> Value {
+pub(crate) fn attach_guidance_shadow(mut response: Value, guidance_shadow: Value) -> Value {
+    if guidance_shadow.is_null() {
+        return response;
+    }
+    let Some(object) = response.as_object_mut() else {
+        return response;
+    };
+
+    let data = object
+        .entry("data".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+
+    if !data.is_object() {
+        *data = json!({ "value": data.clone() });
+    }
+
+    if let Some(data_object) = data.as_object_mut() {
+        let shadow = data_object
+            .entry("_shadow".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !shadow.is_object() {
+            *shadow = Value::Object(serde_json::Map::new());
+        }
+        if let Some(shadow_object) = shadow.as_object_mut() {
+            shadow_object.insert("guidance".to_string(), guidance_shadow);
+        }
+    }
+
+    response
+}
+
+#[allow(dead_code)]
+pub(crate) fn build_guided_response(mut payload: Value, outcome: GuidanceOutcome) -> Value {
     if outcome.problem_class.is_none()
         && outcome.next_best_actions.is_empty()
         && outcome.soll.is_none()
@@ -293,7 +338,10 @@ pub(crate) fn build_guided_response(
         if let Some(confidence) = outcome.confidence {
             object.insert("confidence".to_string(), Value::String(confidence));
         }
-        if let Some(soll) = outcome.soll.filter(|soll| soll.requires_authorization.is_some()) {
+        if let Some(soll) = outcome
+            .soll
+            .filter(|soll| soll.requires_authorization.is_some())
+        {
             object.insert(
                 "soll".to_string(),
                 serde_json::to_value(soll).unwrap_or(Value::Null),

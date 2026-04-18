@@ -679,7 +679,10 @@ impl GraphStore {
             ) reciprocal_cycles
             ",
             if scoped {
-                format!("AND c1.project_code = '{}' AND c2.project_code = '{}'", escaped, escaped)
+                format!(
+                    "AND c1.project_code = '{}' AND c2.project_code = '{}'",
+                    escaped, escaped
+                )
             } else {
                 String::new()
             }

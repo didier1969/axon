@@ -21,7 +21,7 @@ Acceptance:
 2. Cause categories are explicit: watch root mismatch, ignore filters, unsupported parser, parse failure, permission, empty repo.
 
 Tasks:
-1. Add `diagnose_project_indexing(project_slug)` in core.
+1. Add `diagnose_project_indexing(project_code)` in core.
 2. Return structured diagnostics in `health`, `audit`, and `debug`.
 3. Add remediation hints per cause.
 4. Add MCP tool `diagnose_indexing` (read-only).

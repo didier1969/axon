@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use super::format::format_standard_contract;
@@ -8,7 +9,9 @@ use super::soll::{
     canonical_soll_export_dir, find_latest_soll_export, parse_soll_export, SollRestoreCounts,
 };
 use super::McpServer;
-use crate::project_meta::{discover_project_identities, resolve_canonical_project_identity};
+use crate::project_meta::{
+    discover_project_identities, is_valid_project_code, resolve_canonical_project_identity,
+};
 
 #[allow(dead_code)]
 const SOLL_RELATION_EXPORTS: [(&str, &str); 12] = [
@@ -678,18 +681,28 @@ impl McpServer {
 
         match action {
             "create" => {
-                let project_code = args
+                let project_code_raw = args
                     .get("project_code")
                     .and_then(|v| v.as_str())
-                    .or_else(|| args.get("project_code").and_then(|v| v.as_str()))
                     .or_else(|| data.get("project_code").and_then(|v| v.as_str()))
-                    .or_else(|| data.get("project_code").and_then(|v| v.as_str()))
-                    .unwrap_or("AXO");
+                    .map(str::trim);
+                let project_code = match self.require_registered_mutation_project_code(
+                    project_code_raw,
+                    "soll_manager create",
+                ) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        return Some(json!({
+                            "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                            "isError": true
+                        }))
+                    }
+                };
                 let reserved_id = args.get("reserved_id").and_then(|value| value.as_str());
                 let (_requested_code, canonical_code, formatted_id) = if let Some(reserved_id) =
                     reserved_id
                 {
-                    match self.resolve_canonical_project_identity_for_mutation(project_code) {
+                    match self.resolve_canonical_project_identity_for_mutation(&project_code) {
                         Ok((canonical_code, project_code)) => {
                             (canonical_code, project_code, reserved_id.to_string())
                         }
@@ -700,7 +713,7 @@ impl McpServer {
                         }
                     }
                 } else {
-                    match self.next_soll_numeric_id(project_code, entity) {
+                    match self.next_soll_numeric_id(&project_code, entity) {
                         Ok((canonical_code, project_code, prefix, next_num)) => (
                             canonical_code,
                             project_code.clone(),
@@ -1111,6 +1124,42 @@ graph TD;
             )
             .ok()?;
 
+        let uncovered_requirements = self
+            .query_single_column(
+                &format!(
+                    "SELECT r.id FROM soll.Node r
+                     LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
+                     WHERE r.type = 'Requirement'
+                       {}
+                     GROUP BY r.id, r.status, r.metadata
+                     HAVING COUNT(t.id) = 0
+                        AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') IN ('', '[]')
+                     ORDER BY r.id",
+                    project_scope_predicate("r.id", project_code.as_deref())
+                ),
+            )
+            .ok()?;
+
+        let duplicate_title_rows_raw = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT type, title, string_agg(id, ', ' ORDER BY id)
+                 FROM soll.Node
+                 WHERE type IN ('Requirement', 'Decision', 'Concept')
+                   AND COALESCE(title, '') <> ''
+                   {}
+                 GROUP BY type, title
+                 HAVING COUNT(*) > 1
+                 ORDER BY type, title",
+                project_code
+                    .as_deref()
+                    .map(|code| format!("AND project_code = '{}'", escape_sql(code)))
+                    .unwrap_or_default()
+            ))
+            .ok()?;
+        let duplicate_title_rows: Vec<Vec<String>> =
+            serde_json::from_str(&duplicate_title_rows_raw).unwrap_or_default();
+
         let relation_policy_violations = self
             .collect_relation_policy_violations(project_code.as_deref())
             .ok()?;
@@ -1118,6 +1167,8 @@ graph TD;
         let violation_count = orphan_requirements.len()
             + validations_without_verifies.len()
             + decisions_without_links.len()
+            + uncovered_requirements.len()
+            + duplicate_title_rows.len()
             + relation_policy_violations.len();
 
         let mut evidence = format!(
@@ -1144,6 +1195,23 @@ graph TD;
             evidence.push_str("\n- Decisions sans lien SOLVES/IMPACTS:\n");
             for id in decisions_without_links {
                 evidence.push_str(&format!("  - {}\n", id));
+            }
+        }
+
+        if !uncovered_requirements.is_empty() {
+            evidence.push_str("\n- Requirements sans critères/preuves:\n");
+            for id in uncovered_requirements {
+                evidence.push_str(&format!("  - {}\n", id));
+            }
+        }
+
+        if !duplicate_title_rows.is_empty() {
+            evidence.push_str("\n- Titres dupliqués (risque de doublon métier):\n");
+            for row in duplicate_title_rows {
+                if row.len() < 3 {
+                    continue;
+                }
+                evidence.push_str(&format!("  - {} :: {} -> {}\n", row[0], row[1], row[2]));
             }
         }
 
@@ -1181,7 +1249,8 @@ graph TD;
                 &evidence,
                 &[
                     "run `soll_verify_requirements` for requirement-level coverage",
-                    "apply targeted SOLL links with `soll_manager` if needed"
+                    "apply targeted SOLL links with `soll_manager` if needed",
+                    "deduplicate by updating existing nodes or using stable `logical_key` in `soll_apply_plan`"
                 ],
                 confidence,
             )
@@ -1733,18 +1802,264 @@ graph TD;
         Ok(())
     }
 
+    fn known_project_codes_hint(&self) -> String {
+        self.query_single_column(
+            "SELECT project_code FROM soll.ProjectCodeRegistry ORDER BY project_code ASC",
+        )
+        .map(|codes| {
+            let codes: Vec<String> = codes
+                .into_iter()
+                .filter(|value| !value.trim().is_empty())
+                .collect();
+            if codes.is_empty() {
+                "aucun code connu".to_string()
+            } else {
+                codes.join(", ")
+            }
+        })
+        .unwrap_or_else(|_| "aucun code connu".to_string())
+    }
+
+    fn validate_explicit_canonical_project_code(
+        &self,
+        project_code: Option<&str>,
+        action_label: &str,
+    ) -> anyhow::Result<String> {
+        let raw = project_code.unwrap_or("").trim();
+        if raw.is_empty() {
+            return Err(anyhow!(
+                "`project_code` est obligatoire pour {}. Utilisez un code canonique de 3 caractères alphanumériques majuscules, par exemple `AXO`.",
+                action_label
+            ));
+        }
+
+        if !is_valid_project_code(raw) || raw != raw.to_ascii_uppercase() {
+            return Err(anyhow!(
+                "Identifiant projet non canonique `{}` pour {}. Les mutations SOLL acceptent uniquement `project_code` au format canonique de 3 caractères alphanumériques majuscules, par exemple `AXO`. Codes connus: {}",
+                raw,
+                action_label,
+                self.known_project_codes_hint()
+            ));
+        }
+
+        Ok(raw.to_string())
+    }
+
+    fn require_registered_mutation_project_code(
+        &self,
+        project_code: Option<&str>,
+        action_label: &str,
+    ) -> anyhow::Result<String> {
+        let canonical_code =
+            self.validate_explicit_canonical_project_code(project_code, action_label)?;
+
+        let _ = self.sync_project_code_registry_from_meta();
+        let escaped = escape_sql(&canonical_code);
+        let rows = self.query_single_column(&format!(
+            "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
+            escaped
+        ))?;
+        if let Some(code) = rows.into_iter().next() {
+            return Ok(code);
+        }
+
+        if let Ok(identity) = resolve_canonical_project_identity(&canonical_code) {
+            let project_path = identity.project_path.to_string_lossy().to_string();
+            self.graph_store.sync_project_registry_entry(
+                &identity.code,
+                identity.name.as_deref(),
+                Some(&project_path),
+            )?;
+            return Ok(identity.code);
+        }
+
+        Err(anyhow!(
+            "Code projet canonique `{}` introuvable dans soll.ProjectCodeRegistry ou `.axon/meta.json`. Codes connus: {}",
+            canonical_code,
+            self.known_project_codes_hint()
+        ))
+    }
+
+    fn derive_project_name_from_path(&self, project_path: &str) -> anyhow::Result<String> {
+        Path::new(project_path)
+            .file_name()
+            .map(|value| value.to_string_lossy().trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "Impossible de dériver le nom projet depuis le chemin `{}`",
+                    project_path
+                )
+            })
+    }
+
+    fn split_project_name_parts(&self, raw: &str) -> Vec<String> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        let mut previous_is_lowercase = false;
+
+        for ch in raw.chars() {
+            if !ch.is_ascii_alphanumeric() {
+                if !current.is_empty() {
+                    parts.push(current.clone());
+                    current.clear();
+                }
+                previous_is_lowercase = false;
+                continue;
+            }
+
+            let is_uppercase = ch.is_ascii_uppercase();
+            if is_uppercase && previous_is_lowercase && !current.is_empty() {
+                parts.push(current.clone());
+                current.clear();
+            }
+            current.push(ch.to_ascii_uppercase());
+            previous_is_lowercase = ch.is_ascii_lowercase();
+        }
+
+        if !current.is_empty() {
+            parts.push(current);
+        }
+
+        parts
+    }
+
+    fn candidate_project_codes_for_name(&self, project_name: &str) -> Vec<String> {
+        fn is_consonant(ch: char) -> bool {
+            matches!(
+                ch,
+                'B' | 'C'
+                    | 'D'
+                    | 'F'
+                    | 'G'
+                    | 'H'
+                    | 'J'
+                    | 'K'
+                    | 'L'
+                    | 'M'
+                    | 'N'
+                    | 'P'
+                    | 'Q'
+                    | 'R'
+                    | 'S'
+                    | 'T'
+                    | 'V'
+                    | 'W'
+                    | 'X'
+                    | 'Y'
+                    | 'Z'
+            )
+        }
+
+        let normalized: String = project_name
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .map(|ch| ch.to_ascii_uppercase())
+            .collect();
+        let parts = self.split_project_name_parts(project_name);
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        let mut push_candidate = |candidate: String| {
+            if is_valid_project_code(&candidate) && seen.insert(candidate.clone()) {
+                candidates.push(candidate);
+            }
+        };
+
+        if let Some(first) = parts.first() {
+            let mut heuristic = String::new();
+            if let Some(ch) = first.chars().next() {
+                heuristic.push(ch);
+            }
+            for ch in first.chars().skip(1).filter(|ch| is_consonant(*ch)) {
+                if heuristic.len() >= 2 {
+                    break;
+                }
+                heuristic.push(ch);
+            }
+            for ch in parts.iter().skip(1).filter_map(|part| part.chars().next()) {
+                if heuristic.len() >= 3 {
+                    break;
+                }
+                heuristic.push(ch);
+            }
+            for ch in normalized.chars() {
+                if heuristic.len() >= 3 {
+                    break;
+                }
+                heuristic.push(ch);
+            }
+            push_candidate(heuristic);
+        }
+
+        if normalized.len() >= 3 {
+            push_candidate(normalized.chars().take(3).collect());
+        }
+
+        let chars: Vec<char> = normalized.chars().collect();
+        if chars.len() >= 3 {
+            for window in chars.windows(3) {
+                push_candidate(window.iter().collect());
+            }
+            push_candidate(format!(
+                "{}{}{}",
+                chars[0],
+                chars[1],
+                chars[chars.len() - 1]
+            ));
+            push_candidate(format!(
+                "{}{}{}",
+                chars[0],
+                chars[chars.len() / 2],
+                chars[chars.len() - 1]
+            ));
+        }
+
+        candidates
+    }
+
+    fn assign_project_code_for_init(
+        &self,
+        project_name: &str,
+        project_path: &str,
+    ) -> anyhow::Result<String> {
+        let _ = self.sync_project_code_registry_from_meta();
+        let escaped_path = escape_sql(project_path);
+        if let Some(existing) = self
+            .query_single_column(&format!(
+                "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_path = '{}'",
+                escaped_path
+            ))?
+            .into_iter()
+            .next()
+        {
+            return Ok(existing);
+        }
+
+        let known_codes: HashSet<String> = self
+            .query_single_column("SELECT project_code FROM soll.ProjectCodeRegistry")?
+            .into_iter()
+            .collect();
+        for candidate in self.candidate_project_codes_for_name(project_name) {
+            if !known_codes.contains(&candidate) {
+                return Ok(candidate);
+            }
+        }
+
+        Err(anyhow!(
+            "Impossible d'attribuer un `project_code` canonique unique pour `{}` depuis `{}`. Codes connus: {}",
+            project_name,
+            project_path,
+            self.known_project_codes_hint()
+        ))
+    }
+
     fn resolve_canonical_project_identity_for_mutation(
         &self,
         project_code: &str,
     ) -> anyhow::Result<(String, String)> {
-        let identity = resolve_canonical_project_identity(project_code)?;
-        let project_path = identity.project_path.to_string_lossy().to_string();
-        self.graph_store.sync_project_registry_entry(
-            &identity.code,
-            identity.name.as_deref(),
-            Some(&project_path),
-        )?;
-        Ok((identity.code.clone(), identity.code))
+        let canonical_code = self
+            .require_registered_mutation_project_code(Some(project_code), "cette mutation SOLL")?;
+        Ok((canonical_code.clone(), canonical_code))
     }
 
     fn resolve_project_code(&self, project_code: &str) -> anyhow::Result<String> {
@@ -1877,10 +2192,18 @@ graph TD;
 
 impl McpServer {
     pub(crate) fn axon_soll_apply_plan(&self, args: &Value) -> Option<Value> {
-        let project_code = args
-            .get("project_code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("AXO");
+        let project_code = match self.require_registered_mutation_project_code(
+            args.get("project_code").and_then(|v| v.as_str()),
+            "soll_apply_plan",
+        ) {
+            Ok(code) => code,
+            Err(e) => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                    "isError": true
+                }))
+            }
+        };
         let author = args
             .get("author")
             .and_then(|v| v.as_str())
@@ -1892,7 +2215,7 @@ impl McpServer {
         let _plan = args.get("plan")?;
 
         let (canonical_project_code, _) = match self
-            .resolve_canonical_project_identity_for_mutation(project_code)
+            .resolve_canonical_project_identity_for_mutation(&project_code)
         {
             Ok(identity) => identity,
             Err(e) => {
@@ -1966,18 +2289,34 @@ fn query_first_sql_cell(server: &McpServer, query: &str) -> Option<String> {
 }
 
 impl McpServer {
-    fn resolve_soll_id(&self, entity: &str, title: &str, logical_key: &str) -> Option<String> {
-        let table = match entity {
-            "pillar" => "soll.Node",
-            "requirement" => "soll.Node",
-            "decision" => "soll.Node",
-            "milestone" => "soll.Node",
-            _ => return None,
-        };
+    fn soll_node_type_for_entity(entity: &str) -> Option<&'static str> {
+        match entity {
+            "vision" => Some("Vision"),
+            "pillar" => Some("Pillar"),
+            "requirement" => Some("Requirement"),
+            "concept" => Some("Concept"),
+            "decision" => Some("Decision"),
+            "milestone" => Some("Milestone"),
+            "stakeholder" => Some("Stakeholder"),
+            "validation" => Some("Validation"),
+            "guideline" => Some("Guideline"),
+            _ => None,
+        }
+    }
+
+    fn resolve_soll_id(
+        &self,
+        entity: &str,
+        project_code: &str,
+        title: &str,
+        logical_key: &str,
+    ) -> Option<String> {
+        let node_type = Self::soll_node_type_for_entity(entity)?;
 
         let by_metadata = format!(
-            "SELECT id FROM {} WHERE metadata LIKE '%\"logical_key\":\"{}\"%' ORDER BY id DESC LIMIT 1",
-            table,
+            "SELECT id FROM soll.Node WHERE type = '{}' AND project_code = '{}' AND metadata LIKE '%\"logical_key\":\"{}\"%' ORDER BY id DESC LIMIT 1",
+            escape_sql(node_type),
+            escape_sql(project_code),
             escape_sql(logical_key)
         );
         if let Some(found) = query_first_sql_cell(self, &by_metadata) {
@@ -1986,8 +2325,9 @@ impl McpServer {
 
         if !title.trim().is_empty() {
             let by_title = format!(
-                "SELECT id FROM {} WHERE title = '{}' ORDER BY id DESC LIMIT 1",
-                table,
+                "SELECT id FROM soll.Node WHERE type = '{}' AND project_code = '{}' AND title = '{}' ORDER BY id DESC LIMIT 1",
+                escape_sql(node_type),
+                escape_sql(project_code),
                 escape_sql(title)
             );
             if let Some(found) = query_first_sql_cell(self, &by_title) {
@@ -2848,7 +3188,8 @@ impl McpServer {
                             if logical_key.is_empty() {
                                 continue;
                             }
-                            let existing_id = self.resolve_soll_id(entity, title, logical_key);
+                            let existing_id =
+                                self.resolve_soll_id(entity, project_code, title, logical_key);
                             let kind = if existing_id.is_some() {
                                 "update"
                             } else {
@@ -3230,22 +3571,61 @@ impl McpServer {
     }
 
     pub(crate) fn axon_init_project(&self, args: &serde_json::Value) -> Option<serde_json::Value> {
-        let project_name = args.get("project_name")?.as_str()?;
-        let project_code = args
-            .get("project_code")
-            .and_then(|value| value.as_str())
-            .or_else(|| args.get("project_code").and_then(|value| value.as_str()))?;
+        let project_path = match args.get("project_path").and_then(|value| value.as_str()) {
+            Some(path) if !path.trim().is_empty() => path.trim(),
+            _ => {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": "`project_path` est obligatoire pour `axon_init_project`." }],
+                    "isError": true
+                }))
+            }
+        };
+        let project_name = match self.derive_project_name_from_path(project_path) {
+            Ok(name) => name,
+            Err(e) => {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet: {}", e) }],
+                    "isError": true
+                }))
+            }
+        };
+        let project_code = match self.assign_project_code_for_init(&project_name, project_path) {
+            Ok(code) => code,
+            Err(e) => {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                    "isError": true
+                }))
+            }
+        };
+        if let Some(requested_code) = args.get("project_code").and_then(|value| value.as_str()) {
+            let requested = match self
+                .validate_explicit_canonical_project_code(Some(requested_code), "axon_init_project")
+            {
+                Ok(code) => code,
+                Err(e) => {
+                    return Some(serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                        "isError": true
+                    }))
+                }
+            };
+            if requested != project_code {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: `project_code` est attribué par le serveur. Omettez-le ou utilisez `{}` pour ce projet.", project_code) }],
+                    "isError": true
+                }));
+            }
+        }
         let concept_text = args
             .get("concept_document_url_or_text")
             .and_then(|v| v.as_str());
 
         // 1. Register project
-        let project_path = args.get("project_path").and_then(|value| value.as_str());
-
         if let Err(e) = self.graph_store.sync_project_registry_entry(
-            project_code,
-            Some(project_name),
-            project_path,
+            &project_code,
+            Some(&project_name),
+            Some(project_path),
         ) {
             return Some(serde_json::json!({
                 "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],
@@ -3280,13 +3660,22 @@ impl McpServer {
             ));
         }
 
+        response_text.push_str(&format!(
+            "Code projet attribué par le serveur: `{}`.\n\n",
+            project_code
+        ));
         response_text.push_str("Voici les règles globales disponibles. Lesquelles souhaitez-vous activer, ignorer ou spécialiser pour ce projet ?\n");
         response_text.push_str(&rules_text);
         response_text
             .push_str("\n(Utilisez l'outil `axon_apply_guidelines` pour appliquer ces choix).");
 
         Some(serde_json::json!({
-            "content": [{ "type": "text", "text": response_text }]
+            "content": [{ "type": "text", "text": response_text }],
+            "data": {
+                "project_code": project_code,
+                "project_name": project_name,
+                "project_path": project_path
+            }
         }))
     }
 
@@ -3294,7 +3683,18 @@ impl McpServer {
         &self,
         args: &serde_json::Value,
     ) -> Option<serde_json::Value> {
-        let project_code = args.get("project_code").and_then(|value| value.as_str())?;
+        let project_code = match self.require_registered_mutation_project_code(
+            args.get("project_code").and_then(|value| value.as_str()),
+            "axon_apply_guidelines",
+        ) {
+            Ok(code) => code,
+            Err(e) => {
+                return Some(serde_json::json!({
+                    "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
+                    "isError": true
+                }))
+            }
+        };
         let accepted_ids = args.get("accepted_global_rule_ids")?.as_array()?;
 
         let mut applied = Vec::new();
@@ -3317,9 +3717,17 @@ impl McpServer {
                 let meta = &row[2];
 
                 // Create local rule
-                let (_scope_code, p_code, prefix, num) = self
-                    .next_soll_numeric_id(project_code, "guideline")
-                    .unwrap();
+                let (_scope_code, p_code, prefix, num) = match self
+                    .next_soll_numeric_id(&project_code, "guideline")
+                {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        return Some(serde_json::json!({
+                            "content": [{ "type": "text", "text": format!("Erreur registre SOLL: {}", e) }],
+                            "isError": true
+                        }))
+                    }
+                };
                 let local_id = format!("{}-{}-{:03}", prefix, p_code, num);
 
                 // Insert local rule

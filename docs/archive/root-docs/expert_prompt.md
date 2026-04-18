@@ -35,7 +35,7 @@ Any modification to the project MUST follow this loop:
 
 ## ⚙️ Technical Constraints (No Simplification)
 
-*   **DNA Rule:** Never invent IDs. Use `axon_soll_manager` action `create` with a valid `project_slug`. The server generates sequential IDs (e.g., `REQ-CORE-001`).
+*   **DNA Rule:** Never invent IDs. Use `axon_soll_manager` action `create` with a valid `project_code`. The server generates sequential IDs (e.g., `REQ-AXO-001`).
 *   **Metadata JSON:** Use the `metadata` field in `axon_soll_manager` to store secondary attributes (risk scores, cost estimates, specific tags).
 *   **Blast Radius:** Use the `ImpactRadius` view to assess the risk of changing a high-level requirement.
 *   **Tone:** Strictly pragmatic, cold, and technical. Banish all marketing fluff and non-measurable adjectives.
