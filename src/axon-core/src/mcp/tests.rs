@@ -798,6 +798,7 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"mcp_surface_diagnostics"));
     assert!(tool_names.contains(&"project_status"));
     assert!(tool_names.contains(&"project_registry_lookup"));
+    assert!(tool_names.contains(&"soll_relation_schema"));
     assert!(tool_names.contains(&"snapshot_history"));
     assert!(tool_names.contains(&"snapshot_diff"));
     assert!(tool_names.contains(&"conception_view"));
@@ -1217,6 +1218,101 @@ fn test_project_registry_lookup_finds_project_by_path_name_and_code() {
 }
 
 #[test]
+fn test_soll_apply_plan_accepts_freshly_initialized_project_code_across_runtime_boundary() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("graph-store");
+    let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let server = McpServer::new(store);
+
+    let init_response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_init_project",
+                "arguments": {
+                    "project_path": "/home/dstadel/projects/nutri-opti",
+                    "project_name": "nutri-opti"
+                }
+            })),
+            id: Some(json!(5011)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(init_response["data"]["project_code"].as_str(), Some("NTO"));
+    drop(server);
+
+    let reopened_store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let reopened_server = McpServer::new(reopened_store);
+
+    let lookup_response = reopened_server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_registry_lookup",
+                "arguments": {
+                    "project_path": "/home/dstadel/projects/nutri-opti"
+                }
+            })),
+            id: Some(json!(5012)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        lookup_response["data"]["project_code"].as_str(),
+        Some("NTO")
+    );
+
+    let apply_plan_response = reopened_server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_apply_plan",
+                "arguments": {
+                    "project_code": "NTO",
+                    "author": "test",
+                    "dry_run": true,
+                    "plan": {
+                        "visions": [
+                            {
+                                "logical_key": "vision-1",
+                                "title": "Vision NTO",
+                                "description": "Nutri Opti vision"
+                            }
+                        ],
+                        "pillars": [
+                            {
+                                "logical_key": "pillar-1",
+                                "title": "Pillar NTO",
+                                "description": "Nutri Opti pillar"
+                            }
+                        ]
+                    }
+                }
+            })),
+            id: Some(json!(5013)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_ne!(
+        apply_plan_response
+            .get("isError")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert!(apply_plan_response["data"]["preview_id"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("PRV-NTO-")));
+}
+
+#[test]
 fn test_soll_manager_requires_project_code_even_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
     unsafe {
@@ -1522,6 +1618,7 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     assert!(public_tool_names.contains(&"mcp_surface_diagnostics"));
     assert!(public_tool_names.contains(&"project_status"));
     assert!(public_tool_names.contains(&"project_registry_lookup"));
+    assert!(public_tool_names.contains(&"soll_relation_schema"));
     assert!(public_tool_names.contains(&"why"));
     assert!(public_tool_names.contains(&"path"));
     assert!(public_tool_names.contains(&"anomalies"));
@@ -8448,6 +8545,22 @@ fn test_axon_soll_manager_link_rejects_relation_outside_policy() {
     assert!(content.contains("Relations autorisées"), "{content}");
     assert!(content.contains("SOLVES"), "{content}");
     assert!(content.contains("REFINES"), "{content}");
+    let data = result
+        .get("data")
+        .expect("expected structured relation guidance");
+    assert_eq!(data["source_kind"].as_str(), Some("DEC"));
+    assert_eq!(data["target_kind"].as_str(), Some("REQ"));
+    assert_eq!(data["pair_allowed"].as_bool(), Some(true));
+    assert_eq!(data["default_relation"].as_str(), Some("SOLVES"));
+    let allowed_relations = data["allowed_relations"]
+        .as_array()
+        .expect("allowed_relations should be present")
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(allowed_relations.contains(&"SOLVES"));
+    assert!(allowed_relations.contains(&"REFINES"));
+    assert!(data["suggested_next_actions"].as_array().is_some());
 }
 
 #[test]
@@ -8500,6 +8613,78 @@ fn test_axon_soll_manager_link_allows_authorized_cumulative_relation() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn test_soll_relation_schema_resolves_pair_by_ids() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_id": "DEC-AXO-001",
+                    "target_id": "REQ-AXO-001"
+                }
+            })),
+            id: Some(json!(4105)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").expect("expected relation schema data");
+    assert_eq!(data["pair_allowed"].as_bool(), Some(true));
+    assert_eq!(data["source_kind"].as_str(), Some("DEC"));
+    assert_eq!(data["target_kind"].as_str(), Some("REQ"));
+    assert_eq!(data["default_relation"].as_str(), Some("SOLVES"));
+    assert!(data["allowed_target_kinds_from_source"]
+        .as_array()
+        .is_some());
+}
+
+#[test]
+fn test_soll_relation_schema_unresolved_ids_return_guided_discovery_payload() {
+    let server = create_test_server();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_id": "DEC-AXO-999",
+                    "target_id": "REQ-AXO-001"
+                }
+            })),
+            id: Some(json!(4106)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_ne!(
+        response.get("isError").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    let data = response
+        .get("data")
+        .expect("expected guided discovery payload");
+    assert_eq!(data["resolved"].as_bool(), Some(false));
+    assert_eq!(data["lookup_stage"].as_str(), Some("source_id"));
+    assert!(data["suggested_next_actions"].as_array().is_some());
 }
 
 #[test]

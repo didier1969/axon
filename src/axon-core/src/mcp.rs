@@ -430,6 +430,7 @@ impl McpServer {
             "mcp_surface_diagnostics" => self.axon_mcp_surface_diagnostics(arguments),
             "project_status" => self.axon_project_status(arguments),
             "project_registry_lookup" => self.axon_project_registry_lookup(arguments),
+            "soll_relation_schema" => self.axon_soll_relation_schema(arguments),
             "snapshot_history" => self.axon_snapshot_history(arguments),
             "snapshot_diff" => self.axon_snapshot_diff(arguments),
             "conception_view" => self.axon_conception_view(arguments),

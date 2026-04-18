@@ -341,6 +341,20 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "soll_relation_schema",
+                "description": "[SOLL] Expose la politique canonique des relations SOLL pour un couple source/cible ou depuis un type/id source. Sert à découvrir les liaisons valides sans essai-erreur.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source_type": { "type": "string", "description": "Type canonique court ex: VIS, PIL, REQ, DEC." },
+                        "target_type": { "type": "string", "description": "Type canonique court ex: VIS, PIL, REQ, DEC, ART." },
+                        "source_id": { "type": "string", "description": "ID canonique source optionnel." },
+                        "target_id": { "type": "string", "description": "ID canonique cible optionnel." }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "snapshot_history",
                 "description": "[SYSTEM] Historique dérivé non canonique des snapshots structurels exportés par `project_status` pour un projet.",
                 "inputSchema": {

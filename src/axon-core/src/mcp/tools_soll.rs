@@ -154,6 +154,10 @@ struct RelationPolicy {
     allow_multiple_types: bool,
 }
 
+const SOLL_RELATION_ENDPOINT_KINDS: &[&str] = &[
+    "VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "ART",
+];
+
 fn relation_table_name(_relation_type: &str) -> Option<&'static str> {
     Some("soll.Edge")
 }
@@ -249,6 +253,44 @@ fn relation_policy_for_pair(source_type: &str, target_type: &str) -> Option<Rela
         }),
         _ => None,
     }
+}
+
+fn relation_policy_payload(source_type: &str, target_type: &str) -> Value {
+    if let Some(policy) = relation_policy_for_pair(source_type, target_type) {
+        json!({
+            "pair_allowed": true,
+            "source_kind": source_type,
+            "target_kind": target_type,
+            "allowed_relations": policy.allowed,
+            "default_relation": policy.default,
+            "allow_multiple_types": policy.allow_multiple_types
+        })
+    } else {
+        json!({
+            "pair_allowed": false,
+            "source_kind": source_type,
+            "target_kind": target_type,
+            "allowed_relations": [],
+            "default_relation": Value::Null,
+            "allow_multiple_types": false
+        })
+    }
+}
+
+fn allowed_relation_targets_from_source(source_type: &str) -> Vec<Value> {
+    SOLL_RELATION_ENDPOINT_KINDS
+        .iter()
+        .filter_map(|target_type| {
+            relation_policy_for_pair(source_type, target_type).map(|policy| {
+                json!({
+                    "target_kind": target_type,
+                    "allowed_relations": policy.allowed,
+                    "default_relation": policy.default,
+                    "allow_multiple_types": policy.allow_multiple_types
+                })
+            })
+        })
+        .collect()
 }
 
 fn relation_scope_matches(source_id: &str, target_id: &str, project_code: Option<&str>) -> bool {
@@ -674,6 +716,10 @@ fn wave_to_json(wave: &WorkPlanWave) -> Value {
 }
 
 impl McpServer {
+    fn canonical_next_link_hints(&self, entity_type_cap: &str) -> Vec<Value> {
+        allowed_relation_targets_from_source(entity_type_cap)
+    }
+
     pub(crate) fn axon_soll_manager(&self, args: &Value) -> Option<Value> {
         let action = args.get("action")?.as_str()?;
         let entity = args.get("entity")?.as_str()?;
@@ -820,7 +866,15 @@ impl McpServer {
                 match insert_res {
                     Ok(_) => {
                         let report = format!("✅ Entité SOLL créée : `{}`", formatted_id);
-                        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                        Some(json!({
+                            "content": [{ "type": "text", "text": report }],
+                            "data": {
+                                "created_id": formatted_id,
+                                "entity_type": entity_type_cap,
+                                "project_code": canonical_code,
+                                "canonical_next_links": self.canonical_next_link_hints(entity_type_cap)
+                            }
+                        }))
                     }
                     Err(e) => Some(
                         json!({ "content": [{ "type": "text", "text": format!("Erreur d'insertion: {}", e) }], "isError": true }),
@@ -928,14 +982,18 @@ impl McpServer {
                             Ok(false) => Some(
                                 json!({ "content": [{ "type": "text", "text": format!("ℹ️ Liaison déjà présente : `{}` -> `{}` (via {})", src, tgt, rel_table) }] }),
                             ),
-                            Err(e) => Some(
-                                json!({ "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }], "isError": true }),
-                            ),
+                            Err(e) => Some(json!({
+                                "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }],
+                                "isError": true,
+                                "data": self.relation_guidance_for_link(src, tgt, explicit_rel)
+                            })),
                         }
                     }
-                    Err(e) => Some(
-                        json!({ "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }], "isError": true }),
-                    ),
+                    Err(e) => Some(json!({
+                        "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }],
+                        "isError": true,
+                        "data": self.relation_guidance_for_link(src, tgt, explicit_rel)
+                    })),
                 }
             }
             _ => None,
@@ -1643,6 +1701,79 @@ graph TD;
         Ok((selected_static, policy))
     }
 
+    fn relation_guidance_for_link(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        explicit_relation_type: Option<&str>,
+    ) -> Value {
+        let requested_relation = explicit_relation_type.map(|value| value.to_ascii_uppercase());
+        let source_kind = self.classify_existing_link_endpoint(source_id);
+        let target_kind = self.classify_existing_link_endpoint(target_id);
+
+        match (source_kind, target_kind) {
+            (Ok(source_kind), Ok(target_kind)) => {
+                let source_label = source_kind.label();
+                let target_label = target_kind.label();
+                let mut payload = relation_policy_payload(source_label, target_label);
+                payload["source_id"] = json!(source_id);
+                payload["target_id"] = json!(target_id);
+                payload["requested_relation"] = requested_relation
+                    .clone()
+                    .map(Value::from)
+                    .unwrap_or(Value::Null);
+                payload["allowed_target_kinds_from_source"] =
+                    Value::Array(allowed_relation_targets_from_source(source_label));
+                payload["suggested_next_actions"] = if payload
+                    .get("pair_allowed")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+                {
+                    let default_relation = payload
+                        .get("default_relation")
+                        .and_then(|value| value.as_str());
+                    let mut actions = Vec::new();
+                    if let Some(default_relation) = default_relation {
+                        actions.push(format!(
+                            "retry `soll_manager` link with relation_type `{}`",
+                            default_relation
+                        ));
+                    }
+                    actions.push(
+                        "call `soll_relation_schema` with the same source/target ids".to_string(),
+                    );
+                    Value::Array(actions.into_iter().map(Value::from).collect())
+                } else {
+                    Value::Array(vec![
+                        Value::from("call `soll_relation_schema` with `source_id` to inspect allowed target kinds"),
+                        Value::from("choose a target id whose kind matches one of `allowed_target_kinds_from_source`"),
+                    ])
+                };
+                payload
+            }
+            (source_result, target_result) => {
+                let mut errors = Vec::new();
+                if let Err(error) = source_result {
+                    errors.push(format!("source lookup failed: {}", error));
+                }
+                if let Err(error) = target_result {
+                    errors.push(format!("target lookup failed: {}", error));
+                }
+                json!({
+                    "pair_allowed": false,
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "requested_relation": requested_relation,
+                    "lookup_errors": errors,
+                    "suggested_next_actions": [
+                        "verify that both ids exist and are canonical",
+                        "call `soll_relation_schema` with the known ids or kinds before retrying"
+                    ]
+                })
+            }
+        }
+    }
+
     fn insert_validated_relation(
         &self,
         relation_type: &str,
@@ -1820,6 +1951,16 @@ graph TD;
         .unwrap_or_else(|_| "aucun code connu".to_string())
     }
 
+    fn ensure_soll_registry_row(&self, project_code: &str) -> anyhow::Result<()> {
+        self.graph_store.execute_param(
+            "INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev)
+             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+             ON CONFLICT (project_code) DO NOTHING",
+            &json!([project_code]),
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn validate_explicit_canonical_project_code(
         &self,
         project_code: Option<&str>,
@@ -1860,6 +2001,7 @@ graph TD;
             escaped
         ))?;
         if let Some(code) = rows.into_iter().next() {
+            self.ensure_soll_registry_row(&code)?;
             return Ok(code);
         }
 
@@ -1870,6 +2012,7 @@ graph TD;
                 identity.name.as_deref(),
                 Some(&project_path),
             )?;
+            self.ensure_soll_registry_row(&identity.code)?;
             return Ok(identity.code);
         }
 
@@ -2200,6 +2343,127 @@ graph TD;
                 "project_path": first.get("project_path").cloned().unwrap_or(serde_json::json!(null)),
                 "matches": matches
             }
+        }))
+    }
+
+    pub(crate) fn axon_soll_relation_schema(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let source_type = args
+            .get("source_type")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_uppercase());
+        let target_type = args
+            .get("target_type")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_uppercase());
+        let source_id = args
+            .get("source_id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let target_id = args
+            .get("target_id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if source_type.is_none()
+            && target_type.is_none()
+            && source_id.is_none()
+            && target_id.is_none()
+        {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "`soll_relation_schema` attend au moins un de: `source_type`, `target_type`, `source_id`, `target_id`." }],
+                "isError": true
+            }));
+        }
+
+        let resolved_source_type = match (source_type, source_id) {
+            (Some(kind), _) => Some(kind),
+            (None, Some(id)) => match self.classify_existing_link_endpoint(id) {
+                Ok(kind) => Some(kind.label().to_string()),
+                Err(error) => {
+                    return Some(json!({
+                        "content": [{ "type": "text", "text": format!("Impossible de résoudre `source_id`. Discovery remains available via guidance fields: {}", error) }],
+                        "data": {
+                            "resolved": false,
+                            "lookup_stage": "source_id",
+                            "source_id": id,
+                            "target_id": target_id,
+                            "suggested_next_actions": [
+                                "verify source_id is canonical",
+                                "retry with `source_type` if known"
+                            ]
+                        }
+                    }))
+                }
+            },
+            (None, None) => None,
+        };
+        let resolved_target_type = match (target_type, target_id) {
+            (Some(kind), _) => Some(kind),
+            (None, Some(id)) => match self.classify_existing_link_endpoint(id) {
+                Ok(kind) => Some(kind.label().to_string()),
+                Err(error) => {
+                    return Some(json!({
+                        "content": [{ "type": "text", "text": format!("Impossible de résoudre `target_id`. Discovery remains available via guidance fields: {}", error) }],
+                        "data": {
+                            "resolved": false,
+                            "lookup_stage": "target_id",
+                            "source_id": source_id,
+                            "target_id": id,
+                            "suggested_next_actions": [
+                                "verify target_id is canonical",
+                                "retry with `target_type` if known"
+                            ]
+                        }
+                    }))
+                }
+            },
+            (None, None) => None,
+        };
+
+        let data = match (
+            resolved_source_type.as_deref(),
+            resolved_target_type.as_deref(),
+        ) {
+            (Some(source_kind), Some(target_kind)) => {
+                let mut payload = relation_policy_payload(source_kind, target_kind);
+                payload["allowed_target_kinds_from_source"] =
+                    Value::Array(allowed_relation_targets_from_source(source_kind));
+                payload["source_id"] = source_id.map(Value::from).unwrap_or(Value::Null);
+                payload["target_id"] = target_id.map(Value::from).unwrap_or(Value::Null);
+                payload
+            }
+            (Some(source_kind), None) => json!({
+                "resolved": true,
+                "source_kind": source_kind,
+                "allowed_target_kinds_from_source": allowed_relation_targets_from_source(source_kind)
+            }),
+            (None, Some(target_kind)) => json!({
+                "resolved": true,
+                "target_kind": target_kind,
+                "incoming_from_source_kinds": SOLL_RELATION_ENDPOINT_KINDS.iter().filter_map(|source_kind| {
+                    relation_policy_for_pair(source_kind, target_kind).map(|policy| json!({
+                        "source_kind": source_kind,
+                        "allowed_relations": policy.allowed,
+                        "default_relation": policy.default,
+                        "allow_multiple_types": policy.allow_multiple_types
+                    }))
+                }).collect::<Vec<_>>()
+            }),
+            (None, None) => unreachable!(),
+        };
+
+        Some(json!({
+            "content": [{ "type": "text", "text": "Canonical SOLL relation policy resolved." }],
+            "data": data
         }))
     }
 
@@ -3731,6 +3995,12 @@ impl McpServer {
         ) {
             return Some(serde_json::json!({
                 "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],
+                "isError": true
+            }));
+        }
+        if let Err(e) = self.ensure_soll_registry_row(&project_code) {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Erreur lors de l'initialisation SOLL du projet: {}", e) }],
                 "isError": true
             }));
         }

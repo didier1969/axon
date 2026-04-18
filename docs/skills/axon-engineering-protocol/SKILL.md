@@ -73,7 +73,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - advanced graph/system exploration: `refine_lattice`, `cypher`, `debug`, `schema_overview`, `list_labels_tables`, `query_examples`
 - advanced runtime/analysis tools: `health`, `audit`, `batch`, `truth_check`, `diagnose_indexing`, `diff`, `semantic_clones`, `architectural_drift`, `bidi_trace`, `api_break_check`, `simulate_mutation`, `resume_vectorization`, `job_status`
 - `axon_pre_flight_check`, `axon_commit_work`: validated delivery workflow.
-- SOLL workflow: `soll_query_context`, `soll_work_plan`, `soll_validate`, `soll_export`, `soll_verify_requirements`, `soll_manager`, `soll_apply_plan`, `soll_commit_revision`, `soll_rollback_revision`, `axon_init_project`, `axon_apply_guidelines`.
+- SOLL workflow: `soll_query_context`, `soll_work_plan`, `soll_validate`, `soll_export`, `soll_verify_requirements`, `soll_relation_schema`, `soll_manager`, `soll_apply_plan`, `soll_commit_revision`, `soll_rollback_revision`, `axon_init_project`, `axon_apply_guidelines`.
 
 ## Expert/Internal Tools
 - no additional MCP tools should be treated as hidden product surface by default
@@ -95,9 +95,10 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 10. `anomalies` for cleanup, refactor, debt, or structural review
 11. `change_safety` before risky mutation
 12. `conception_view` if a derived architecture map is needed
-13. `job_status` as the canonical follow-up for the async allowlist only, using the returned `polling_guidance`
-14. `axon_pre_flight_check`
-15. `axon_commit_work`
+13. `soll_relation_schema` when SOLL link policy or valid target kinds are unclear
+14. `job_status` as the canonical follow-up for the async allowlist only, using the returned `polling_guidance`
+15. `axon_pre_flight_check`
+16. `axon_commit_work`
 
 ## SOLL Model
 - `Vision`: target outcome
@@ -112,6 +113,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 
 ## Mutation Rules
 - `soll_manager` for immediate unit mutations.
+- `soll_relation_schema` before retrying an invalid SOLL link or when canonical relation targets are unclear.
 - `soll_apply_plan` for transactional batch mutations.
 - `soll_commit_revision` to commit a preview synchronously unless future qualification forces review.
 - `soll_rollback_revision` to revert a revision.
