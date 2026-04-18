@@ -85,7 +85,7 @@ def main() -> int:
     git_commit = git_output(repo, "rev-parse", "HEAD")
     git_describe = git_output(repo, "describe", "--tags", "--always", "--dirty")
     git_tag = git_output(repo, "describe", "--tags", "--abbrev=0")
-    git_dirty = git_output(repo, "status", "--short")
+    git_dirty = git_output(repo, "status", "--short", "--untracked-files=no")
 
     artifact_sha = sha256_file(artifact)
     artifacts_root = repo / ".axon" / "releases" / "artifacts" / artifact_sha[:16]
