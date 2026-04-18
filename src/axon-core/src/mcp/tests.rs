@@ -8561,6 +8561,10 @@ fn test_axon_soll_manager_link_rejects_relation_outside_policy() {
     assert!(allowed_relations.contains(&"SOLVES"));
     assert!(allowed_relations.contains(&"REFINES"));
     assert!(data["suggested_next_actions"].as_array().is_some());
+    assert!(data["canonical_examples"].as_array().is_some());
+    assert!(data["recommended_incoming_links_to_target_kind"]
+        .as_array()
+        .is_some());
 }
 
 #[test]
@@ -8652,6 +8656,11 @@ fn test_soll_relation_schema_resolves_pair_by_ids() {
     assert!(data["allowed_target_kinds_from_source"]
         .as_array()
         .is_some());
+    assert_eq!(
+        data["source_graph_role"].as_str(),
+        Some("decision that solves, refines, or impacts implementation")
+    );
+    assert!(data["canonical_examples"].as_array().is_some());
 }
 
 #[test]
@@ -8685,6 +8694,114 @@ fn test_soll_relation_schema_unresolved_ids_return_guided_discovery_payload() {
     assert_eq!(data["resolved"].as_bool(), Some(false));
     assert_eq!(data["lookup_stage"].as_str(), Some("source_id"));
     assert!(data["suggested_next_actions"].as_array().is_some());
+}
+
+#[test]
+fn test_soll_relation_schema_source_only_is_constructive_for_vision_and_pillar() {
+    let server = create_test_server();
+
+    let vision_response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_type": "VIS"
+                }
+            })),
+            id: Some(json!(4107)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let vision_data = vision_response.get("data").expect("vision guidance");
+    assert_eq!(vision_data["source_kind"].as_str(), Some("VIS"));
+    assert_eq!(
+        vision_data["graph_role"].as_str(),
+        Some("project north star")
+    );
+    assert!(vision_data["recommended_incoming_links_to_source_kind"]
+        .as_array()
+        .expect("incoming guidance")
+        .iter()
+        .any(|item| item["source_kind"].as_str() == Some("PIL")));
+
+    let pillar_response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_type": "PIL"
+                }
+            })),
+            id: Some(json!(4108)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let pillar_data = pillar_response.get("data").expect("pillar guidance");
+    assert_eq!(pillar_data["source_kind"].as_str(), Some("PIL"));
+    assert!(pillar_data["allowed_target_kinds_from_source"]
+        .as_array()
+        .expect("outgoing guidance")
+        .iter()
+        .any(|item| item["target_kind"].as_str() == Some("VIS")));
+    assert!(pillar_data["recommended_incoming_links_to_source_kind"]
+        .as_array()
+        .expect("incoming guidance")
+        .iter()
+        .any(|item| item["source_kind"].as_str() == Some("REQ")));
+}
+
+#[test]
+fn test_axon_validate_soll_returns_structured_repair_guidance_and_completeness() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-200', 'Requirement', 'AXO', 'Lonely requirement', 'No links', 'draft', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-200', 'Validation', 'AXO', '', '', 'pending', '{\"method\":\"manual\"}')")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_validate",
+                "arguments": { "project_code": "AXO" }
+            })),
+            id: Some(json!(4109)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").expect("structured validation data");
+    assert_eq!(data["status"].as_str(), Some("warn_soll_invariants"));
+    assert_eq!(data["completeness"]["populated"].as_bool(), Some(true));
+    assert_eq!(
+        data["completeness"]["structurally_connected"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        data["completeness"]["evidence_ready"].as_bool(),
+        Some(false)
+    );
+    let repair_guidance = data["repair_guidance"]
+        .as_array()
+        .expect("repair guidance array");
+    assert!(repair_guidance
+        .iter()
+        .any(|entry| entry["category"].as_str() == Some("orphan_requirements")));
+    assert!(repair_guidance
+        .iter()
+        .any(|entry| entry["category"].as_str() == Some("validations_without_verifies")));
 }
 
 #[test]

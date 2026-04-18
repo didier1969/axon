@@ -263,7 +263,8 @@ fn relation_policy_payload(source_type: &str, target_type: &str) -> Value {
             "target_kind": target_type,
             "allowed_relations": policy.allowed,
             "default_relation": policy.default,
-            "allow_multiple_types": policy.allow_multiple_types
+            "allow_multiple_types": policy.allow_multiple_types,
+            "guidance_source": "derived_from_relation_policy"
         })
     } else {
         json!({
@@ -272,9 +273,33 @@ fn relation_policy_payload(source_type: &str, target_type: &str) -> Value {
             "target_kind": target_type,
             "allowed_relations": [],
             "default_relation": Value::Null,
-            "allow_multiple_types": false
+            "allow_multiple_types": false,
+            "guidance_source": "derived_from_relation_policy"
         })
     }
+}
+
+fn graph_role_for_kind(kind: &str) -> &'static str {
+    match kind {
+        "VIS" => "project north star",
+        "PIL" => "structural pillar under a vision",
+        "REQ" => "obligation that must be satisfied",
+        "CPT" => "concept that explains or refines a requirement",
+        "DEC" => "decision that solves, refines, or impacts implementation",
+        "MIL" => "delivery checkpoint tied to a requirement",
+        "VAL" => "evidence or proof that verifies a requirement",
+        "STK" => "stakeholder source of demand or contribution",
+        "GUI" => "guideline or policy constraint",
+        "ART" => "implementation or runtime artifact",
+        _ => "soll graph node",
+    }
+}
+
+fn relation_example_sentence(source_kind: &str, target_kind: &str, relation_type: &str) -> String {
+    format!(
+        "A {} node typically uses `{}` to connect to a {} node.",
+        source_kind, relation_type, target_kind
+    )
 }
 
 fn allowed_relation_targets_from_source(source_type: &str) -> Vec<Value> {
@@ -282,15 +307,58 @@ fn allowed_relation_targets_from_source(source_type: &str) -> Vec<Value> {
         .iter()
         .filter_map(|target_type| {
             relation_policy_for_pair(source_type, target_type).map(|policy| {
+                let default_relation = policy.default.unwrap_or(policy.allowed[0]);
                 json!({
+                    "source_kind": source_type,
                     "target_kind": target_type,
                     "allowed_relations": policy.allowed,
                     "default_relation": policy.default,
-                    "allow_multiple_types": policy.allow_multiple_types
+                    "allow_multiple_types": policy.allow_multiple_types,
+                    "source_graph_role": graph_role_for_kind(source_type),
+                    "target_graph_role": graph_role_for_kind(target_type),
+                    "canonical_example": relation_example_sentence(source_type, target_type, default_relation),
+                    "guidance_source": "derived_from_relation_policy"
                 })
             })
         })
         .collect()
+}
+
+fn incoming_relation_sources_for_target(target_type: &str) -> Vec<Value> {
+    SOLL_RELATION_ENDPOINT_KINDS
+        .iter()
+        .filter_map(|source_type| {
+            relation_policy_for_pair(source_type, target_type).map(|policy| {
+                let default_relation = policy.default.unwrap_or(policy.allowed[0]);
+                json!({
+                    "source_kind": source_type,
+                    "target_kind": target_type,
+                    "allowed_relations": policy.allowed,
+                    "default_relation": policy.default,
+                    "allow_multiple_types": policy.allow_multiple_types,
+                    "source_graph_role": graph_role_for_kind(source_type),
+                    "target_graph_role": graph_role_for_kind(target_type),
+                    "canonical_example": relation_example_sentence(source_type, target_type, default_relation),
+                    "guidance_source": "derived_from_relation_policy"
+                })
+            })
+        })
+        .collect()
+}
+
+fn repair_guidance_entry(
+    category: &str,
+    ids: &[String],
+    summary: &str,
+    next_steps: &[&str],
+) -> Value {
+    json!({
+        "category": category,
+        "summary": summary,
+        "ids": ids,
+        "next_steps": next_steps,
+        "guidance_source": "server-side canonical soll validation"
+    })
 }
 
 fn relation_scope_matches(source_id: &str, target_id: &str, project_code: Option<&str>) -> bool {
@@ -717,7 +785,12 @@ fn wave_to_json(wave: &WorkPlanWave) -> Value {
 
 impl McpServer {
     fn canonical_next_link_hints(&self, entity_type_cap: &str) -> Vec<Value> {
-        allowed_relation_targets_from_source(entity_type_cap)
+        let outgoing = allowed_relation_targets_from_source(entity_type_cap);
+        if !outgoing.is_empty() {
+            outgoing
+        } else {
+            incoming_relation_sources_for_target(entity_type_cap)
+        }
     }
 
     pub(crate) fn axon_soll_manager(&self, args: &Value) -> Option<Value> {
@@ -1152,6 +1225,16 @@ graph TD;
                 }))
             }
         };
+        let total_nodes = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node n WHERE 1=1 {}",
+                project_code
+                    .as_deref()
+                    .map(|code| format!("AND n.project_code = '{}'", escape_sql(code)))
+                    .unwrap_or_default()
+            ))
+            .ok()?;
         let orphan_requirements = self
             .query_single_column(
                 &format!("SELECT id FROM soll.Node r
@@ -1229,6 +1312,98 @@ graph TD;
             + duplicate_title_rows.len()
             + relation_policy_violations.len();
 
+        let duplicate_ids: Vec<String> = duplicate_title_rows
+            .iter()
+            .filter_map(|row| row.get(2).cloned())
+            .flat_map(|ids| {
+                ids.split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        let mut repair_guidance = Vec::new();
+        if !orphan_requirements.is_empty() {
+            repair_guidance.push(repair_guidance_entry(
+                "orphan_requirements",
+                &orphan_requirements,
+                "Requirements should be structurally attached to the graph.",
+                &[
+                    "link each requirement to its pillar or guideline with `soll_manager`",
+                    "call `soll_relation_schema` with `source_id` or `target_id` before retrying if the valid edge is unclear",
+                ],
+            ));
+        }
+        if !validations_without_verifies.is_empty() {
+            repair_guidance.push(repair_guidance_entry(
+                "validations_without_verifies",
+                &validations_without_verifies,
+                "Validation nodes should verify at least one requirement.",
+                &[
+                    "add a `VERIFIES` edge from each validation to the requirement it proves",
+                    "use `soll_relation_schema` on the validation id to inspect canonical targets if needed",
+                ],
+            ));
+        }
+        if !decisions_without_links.is_empty() {
+            repair_guidance.push(repair_guidance_entry(
+                "decisions_without_solves_or_impacts",
+                &decisions_without_links,
+                "Decision nodes should solve a requirement or impact an artifact.",
+                &[
+                    "link each decision to a requirement with `SOLVES` or `REFINES` when it addresses a need",
+                    "link each decision to an artifact with `IMPACTS` or `SUBSTANTIATES` when it changes implementation reality",
+                ],
+            ));
+        }
+        if !uncovered_requirements.is_empty() {
+            repair_guidance.push(repair_guidance_entry(
+                "requirements_without_evidence_or_criteria",
+                &uncovered_requirements,
+                "Requirements should have acceptance criteria or explicit supporting evidence.",
+                &[
+                    "update requirement metadata with `acceptance_criteria`",
+                    "attach evidence refs or add concept / decision / validation nodes that explain, solve, or verify the requirement",
+                ],
+            ));
+        }
+        if !duplicate_ids.is_empty() {
+            repair_guidance.push(repair_guidance_entry(
+                "duplicate_titles",
+                &duplicate_ids,
+                "Duplicate SOLL titles usually signal overlapping concepts, requirements, or decisions.",
+                &[
+                    "merge or supersede duplicates instead of keeping parallel semantic copies",
+                    "prefer stable logical keys or update existing ids rather than creating near-identical nodes",
+                ],
+            ));
+        }
+        if !relation_policy_violations.is_empty() {
+            repair_guidance.push(json!({
+                "category": "relation_policy_violations",
+                "summary": "Some edges violate the canonical SOLL relation policy.",
+                "ids": [],
+                "details": relation_policy_violations,
+                "next_steps": [
+                    "remove or replace invalid edges with canonical pairs from `soll_relation_schema`",
+                    "retry the link only after the source/target kinds and default relation are confirmed"
+                ],
+                "guidance_source": "server-side canonical soll validation"
+            }));
+        }
+
+        let completeness = json!({
+            "populated": total_nodes > 0,
+            "structurally_connected": orphan_requirements.is_empty()
+                && validations_without_verifies.is_empty()
+                && decisions_without_links.is_empty()
+                && relation_policy_violations.is_empty(),
+            "evidence_ready": uncovered_requirements.is_empty(),
+            "duplicate_free": duplicate_title_rows.is_empty()
+        });
+
         let mut evidence = format!(
             "Validation SOLL: {} violation(s) de cohérence minimale détectée(s).\n",
             violation_count
@@ -1237,35 +1412,35 @@ graph TD;
 
         if !orphan_requirements.is_empty() {
             evidence.push_str("\n- Requirements orphelins:\n");
-            for id in orphan_requirements {
+            for id in &orphan_requirements {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
         if !validations_without_verifies.is_empty() {
             evidence.push_str("\n- Validations sans lien VERIFIES:\n");
-            for id in validations_without_verifies {
+            for id in &validations_without_verifies {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
         if !decisions_without_links.is_empty() {
             evidence.push_str("\n- Decisions sans lien SOLVES/IMPACTS:\n");
-            for id in decisions_without_links {
+            for id in &decisions_without_links {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
         if !uncovered_requirements.is_empty() {
             evidence.push_str("\n- Requirements sans critères/preuves:\n");
-            for id in uncovered_requirements {
+            for id in &uncovered_requirements {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
         if !duplicate_title_rows.is_empty() {
             evidence.push_str("\n- Titres dupliqués (risque de doublon métier):\n");
-            for row in duplicate_title_rows {
+            for row in &duplicate_title_rows {
                 if row.len() < 3 {
                     continue;
                 }
@@ -1275,7 +1450,7 @@ graph TD;
 
         if !relation_policy_violations.is_empty() {
             evidence.push_str("\n- Relations invalides:\n");
-            for violation in relation_policy_violations {
+            for violation in &relation_policy_violations {
                 evidence.push_str(&format!("  - {}\n", violation));
             }
         }
@@ -1301,7 +1476,7 @@ graph TD;
                 status,
                 summary,
                 &match project_code {
-                    Some(code) => format!("project:{}", code),
+                    Some(ref code) => format!("project:{}", code),
                     None => "workspace:*".to_string(),
                 },
                 &evidence,
@@ -1313,7 +1488,28 @@ graph TD;
                 confidence,
             )
         );
-        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "status": status,
+                "summary": summary,
+                "scope": match &project_code {
+                    Some(code) => format!("project:{}", code),
+                    None => "workspace:*".to_string(),
+                },
+                "violations": {
+                    "orphan_requirements": orphan_requirements,
+                    "validations_without_verifies": validations_without_verifies,
+                    "decisions_without_links": decisions_without_links,
+                    "uncovered_requirements": uncovered_requirements,
+                    "duplicate_title_rows": duplicate_title_rows,
+                    "relation_policy_violations": relation_policy_violations
+                },
+                "repair_guidance": repair_guidance,
+                "completeness": completeness,
+                "guidance_source": "server-side canonical soll validation"
+            }
+        }))
     }
 
     pub(crate) fn axon_restore_soll(&self, args: &Value) -> Option<Value> {
@@ -1724,6 +1920,27 @@ graph TD;
                     .unwrap_or(Value::Null);
                 payload["allowed_target_kinds_from_source"] =
                     Value::Array(allowed_relation_targets_from_source(source_label));
+                payload["recommended_incoming_links_to_source_kind"] =
+                    Value::Array(incoming_relation_sources_for_target(source_label));
+                payload["recommended_incoming_links_to_target_kind"] =
+                    Value::Array(incoming_relation_sources_for_target(target_label));
+                payload["source_graph_role"] = Value::from(graph_role_for_kind(source_label));
+                payload["target_graph_role"] = Value::from(graph_role_for_kind(target_label));
+                payload["canonical_examples"] = Value::Array(
+                    payload
+                        .get("allowed_relations")
+                        .and_then(|value| value.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|value| value.as_str().map(|relation| {
+                            json!({
+                                "relation_type": relation,
+                                "example": relation_example_sentence(source_label, target_label, relation)
+                            })
+                        }))
+                        .collect(),
+                );
                 payload["suggested_next_actions"] = if payload
                     .get("pair_allowed")
                     .and_then(|value| value.as_bool())
@@ -1742,11 +1959,15 @@ graph TD;
                     actions.push(
                         "call `soll_relation_schema` with the same source/target ids".to_string(),
                     );
+                    actions.push(
+                        "if the graph is still incomplete, inspect `recommended_incoming_links_to_target_kind` for the target node".to_string(),
+                    );
                     Value::Array(actions.into_iter().map(Value::from).collect())
                 } else {
                     Value::Array(vec![
                         Value::from("call `soll_relation_schema` with `source_id` to inspect allowed target kinds"),
                         Value::from("choose a target id whose kind matches one of `allowed_target_kinds_from_source`"),
+                        Value::from("inspect `recommended_incoming_links_to_target_kind` if the current target should be reached from another source kind"),
                     ])
                 };
                 payload
@@ -2437,6 +2658,28 @@ graph TD;
                 let mut payload = relation_policy_payload(source_kind, target_kind);
                 payload["allowed_target_kinds_from_source"] =
                     Value::Array(allowed_relation_targets_from_source(source_kind));
+                payload["recommended_incoming_links_to_source_kind"] =
+                    Value::Array(incoming_relation_sources_for_target(source_kind));
+                payload["recommended_incoming_links_to_target_kind"] =
+                    Value::Array(incoming_relation_sources_for_target(target_kind));
+                payload["source_graph_role"] = Value::from(graph_role_for_kind(source_kind));
+                payload["target_graph_role"] = Value::from(graph_role_for_kind(target_kind));
+                payload["canonical_examples"] = Value::Array(
+                    relation_policy_for_pair(source_kind, target_kind)
+                        .map(|policy| {
+                            policy
+                                .allowed
+                                .iter()
+                                .map(|relation| {
+                                    json!({
+                                        "relation_type": relation,
+                                        "example": relation_example_sentence(source_kind, target_kind, relation)
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                );
                 payload["source_id"] = source_id.map(Value::from).unwrap_or(Value::Null);
                 payload["target_id"] = target_id.map(Value::from).unwrap_or(Value::Null);
                 payload
@@ -2444,19 +2687,17 @@ graph TD;
             (Some(source_kind), None) => json!({
                 "resolved": true,
                 "source_kind": source_kind,
-                "allowed_target_kinds_from_source": allowed_relation_targets_from_source(source_kind)
+                "graph_role": graph_role_for_kind(source_kind),
+                "allowed_target_kinds_from_source": allowed_relation_targets_from_source(source_kind),
+                "recommended_incoming_links_to_source_kind": incoming_relation_sources_for_target(source_kind),
+                "guidance_source": "derived_from_relation_policy"
             }),
             (None, Some(target_kind)) => json!({
                 "resolved": true,
                 "target_kind": target_kind,
-                "incoming_from_source_kinds": SOLL_RELATION_ENDPOINT_KINDS.iter().filter_map(|source_kind| {
-                    relation_policy_for_pair(source_kind, target_kind).map(|policy| json!({
-                        "source_kind": source_kind,
-                        "allowed_relations": policy.allowed,
-                        "default_relation": policy.default,
-                        "allow_multiple_types": policy.allow_multiple_types
-                    }))
-                }).collect::<Vec<_>>()
+                "graph_role": graph_role_for_kind(target_kind),
+                "incoming_from_source_kinds": incoming_relation_sources_for_target(target_kind),
+                "guidance_source": "derived_from_relation_policy"
             }),
             (None, None) => unreachable!(),
         };

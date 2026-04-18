@@ -99,7 +99,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 10. `anomalies` for cleanup, refactor, debt, or structural review
 11. `change_safety` before risky mutation
 12. `conception_view` if a derived architecture map is needed
-13. `soll_relation_schema` when SOLL link policy or valid target kinds are unclear
+13. `soll_relation_schema` when SOLL link policy, valid target kinds, or canonical incoming/outgoing graph edges are unclear
 14. `job_status` as the canonical follow-up for the async allowlist only, using the returned `polling_guidance`
 15. `axon_pre_flight_check`
 16. `axon_commit_work`
@@ -117,7 +117,8 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 
 ## Mutation Rules
 - `soll_manager` for immediate unit mutations.
-- `soll_relation_schema` before retrying an invalid SOLL link or when canonical relation targets are unclear.
+- `soll_relation_schema` before retrying an invalid SOLL link or when canonical outgoing or incoming graph edges are unclear.
+- `soll_validate` now returns structured `repair_guidance` and `completeness`; use it to repair graph structure, not only to detect warnings.
 - `soll_apply_plan` for transactional batch mutations.
 - `soll_commit_revision` to commit a preview synchronously unless future qualification forces review.
 - `soll_rollback_revision` to revert a revision.
