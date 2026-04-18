@@ -80,6 +80,44 @@ fn wait_for_job_status(server: &McpServer, job_id: &str) -> Value {
     panic!("job {} did not finish in time", job_id);
 }
 
+fn assert_async_job_contract(data: &Value, expected_follow_up_tool: &str) {
+    assert_eq!(
+        data.get("accepted").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert!(data
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty()));
+    assert!(data
+        .get("tool_name")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty()));
+    assert!(data
+        .get("status")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty()));
+    assert!(data.get("reserved_ids").is_some());
+    assert!(data.get("known_ids").is_some());
+    assert_eq!(
+        data.get("next_action")
+            .and_then(|value| value.get("tool"))
+            .and_then(|value| value.as_str()),
+        Some(expected_follow_up_tool)
+    );
+    assert!(data
+        .get("next_action")
+        .and_then(|value| value.get("arguments"))
+        .and_then(|value| value.get("job_id"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty()));
+    assert!(data.get("result_contract").is_some());
+    assert!(data
+        .get("recovery_hint")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty()));
+}
+
 fn current_graph_model_id() -> String {
     crate::embedding_contract::GRAPH_MODEL_ID.to_string()
 }
@@ -887,6 +925,7 @@ fn test_mutating_soll_manager_returns_job_and_reserved_entity_id() {
     let response = server.handle_request(req).unwrap();
     let result = response.result.unwrap();
     let data = result.get("data").expect("job response must carry data");
+    assert_async_job_contract(data, "job_status");
     let job_id = data
         .get("job_id")
         .and_then(|value| value.as_str())
@@ -901,6 +940,12 @@ fn test_mutating_soll_manager_returns_job_and_reserved_entity_id() {
         .and_then(|value| value.as_bool())
         .unwrap_or(false));
     assert!(entity_id.starts_with("CPT-AXO-"), "{entity_id}");
+    assert_eq!(
+        data.get("known_ids")
+            .and_then(|value| value.get("entity_id"))
+            .and_then(|value| value.as_str()),
+        Some(entity_id)
+    );
 
     let final_status = wait_for_job_status(&server, job_id);
     assert_eq!(
@@ -955,6 +1000,7 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
     let response = server.handle_request(req).unwrap();
     let result = response.result.unwrap();
     let data = result.get("data").expect("job response must carry data");
+    assert_async_job_contract(data, "job_status");
     let job_id = data
         .get("job_id")
         .and_then(|value| value.as_str())
@@ -965,6 +1011,12 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
         .and_then(|value| value.as_str())
         .expect("reserved preview_id");
     assert!(preview_id.starts_with("PRV-AXO-"), "{preview_id}");
+    assert_eq!(
+        data.get("known_ids")
+            .and_then(|value| value.get("preview_id"))
+            .and_then(|value| value.as_str()),
+        Some(preview_id)
+    );
 
     let final_status = wait_for_job_status(&server, job_id);
     assert_eq!(
@@ -978,6 +1030,116 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
 
     unsafe {
         std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+}
+
+#[test]
+fn test_mutating_axon_init_project_job_returns_known_project_identity_and_public_tool_name() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+    }
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_init_project",
+            "arguments": {
+                "project_path": "/home/dstadel/projects/BookingSystem"
+            }
+        })),
+        id: Some(json!(5003)),
+    };
+
+    let response = server.handle_request(req).unwrap();
+    let result = response.result.unwrap();
+    let data = result.get("data").expect("job response must carry data");
+    assert_async_job_contract(data, "job_status");
+    assert_eq!(
+        data.get("tool_name").and_then(|value| value.as_str()),
+        Some("axon_init_project")
+    );
+    assert_eq!(
+        data.get("known_ids")
+            .and_then(|value| value.get("project_code"))
+            .and_then(|value| value.as_str()),
+        Some("BKS")
+    );
+    assert_eq!(
+        data.get("known_ids")
+            .and_then(|value| value.get("project_name"))
+            .and_then(|value| value.as_str()),
+        Some("BookingSystem")
+    );
+    assert_eq!(
+        data.get("known_ids")
+            .and_then(|value| value.get("project_path"))
+            .and_then(|value| value.as_str()),
+        Some("/home/dstadel/projects/BookingSystem")
+    );
+
+    let job_id = data
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .expect("job_id");
+    let final_status = wait_for_job_status(&server, job_id);
+    assert_eq!(
+        final_status["data"]["result"]["data"]["project_code"].as_str(),
+        Some("BKS")
+    );
+    assert_eq!(final_status["data"]["state"].as_str(), Some("completed"));
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+}
+
+#[test]
+fn test_project_registry_lookup_finds_project_by_path_name_and_code() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry(
+            "BKS",
+            Some("BookingSystem"),
+            Some("/home/dstadel/projects/BookingSystem"),
+        )
+        .unwrap();
+
+    for arguments in [
+        json!({ "project_code": "BKS" }),
+        json!({ "project_name": "BookingSystem" }),
+        json!({ "project_path": "/home/dstadel/projects/BookingSystem" }),
+    ] {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_registry_lookup",
+                "arguments": arguments
+            })),
+            id: Some(json!(5010)),
+        };
+        let response = server.handle_request(req).unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result["data"]["found"].as_bool(), Some(true));
+        assert_eq!(result["data"]["project_code"].as_str(), Some("BKS"));
+        assert_eq!(
+            result["data"]["project_name"].as_str(),
+            Some("BookingSystem")
+        );
+        assert_eq!(
+            result["data"]["project_path"].as_str(),
+            Some("/home/dstadel/projects/BookingSystem")
+        );
+        assert_eq!(
+            result["data"]["matches"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(1)
+        );
     }
 }
 

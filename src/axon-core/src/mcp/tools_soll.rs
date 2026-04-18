@@ -1820,7 +1820,7 @@ graph TD;
         .unwrap_or_else(|_| "aucun code connu".to_string())
     }
 
-    fn validate_explicit_canonical_project_code(
+    pub(crate) fn validate_explicit_canonical_project_code(
         &self,
         project_code: Option<&str>,
         action_label: &str,
@@ -1880,7 +1880,10 @@ graph TD;
         ))
     }
 
-    fn derive_project_name_from_path(&self, project_path: &str) -> anyhow::Result<String> {
+    pub(crate) fn derive_project_name_from_path(
+        &self,
+        project_path: &str,
+    ) -> anyhow::Result<String> {
         Path::new(project_path)
             .file_name()
             .map(|value| value.to_string_lossy().trim().to_string())
@@ -2017,7 +2020,7 @@ graph TD;
         candidates
     }
 
-    fn assign_project_code_for_init(
+    pub(crate) fn assign_project_code_for_init(
         &self,
         project_name: &str,
         project_path: &str,
@@ -2099,6 +2102,105 @@ graph TD;
             "Projet canonique `{}` introuvable dans `.axon/meta.json` ou soll.ProjectCodeRegistry",
             project_code
         ))
+    }
+
+    pub(crate) fn axon_project_registry_lookup(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let _ = self.sync_project_code_registry_from_meta();
+
+        let project_code = args
+            .get("project_code")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let project_name = args
+            .get("project_name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let project_path = args
+            .get("project_path")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if project_code.is_none() && project_name.is_none() && project_path.is_none() {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": "`project_registry_lookup` attend au moins un de: `project_code`, `project_name`, `project_path`." }],
+                "isError": true
+            }));
+        }
+
+        let mut clauses = Vec::new();
+        if let Some(code) = project_code {
+            clauses.push(format!("project_code = '{}'", escape_sql(code)));
+        }
+        if let Some(name) = project_name {
+            clauses.push(format!("project_name = '{}'", escape_sql(name)));
+        }
+        if let Some(path) = project_path {
+            clauses.push(format!("project_path = '{}'", escape_sql(path)));
+        }
+
+        let query = format!(
+            "SELECT project_code, COALESCE(project_name,''), COALESCE(project_path,'')
+             FROM soll.ProjectCodeRegistry
+             WHERE {}
+             ORDER BY project_code ASC",
+            clauses.join(" OR ")
+        );
+        let raw = self
+            .graph_store
+            .query_json(&query)
+            .unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let matches: Vec<serde_json::Value> = rows
+            .iter()
+            .filter(|row| row.len() >= 3)
+            .map(|row| {
+                serde_json::json!({
+                    "project_code": row[0],
+                    "project_name": row[1],
+                    "project_path": row[2]
+                })
+            })
+            .collect();
+
+        let first = matches
+            .first()
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let found = !matches.is_empty();
+        let content = if found {
+            format!(
+                "Projet canonique trouvé: {} ({})",
+                first
+                    .get("project_name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(""),
+                first
+                    .get("project_code")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+            )
+        } else {
+            "Aucun projet canonique trouvé dans ProjectCodeRegistry pour les critères fournis."
+                .to_string()
+        };
+
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": content }],
+            "data": {
+                "found": found,
+                "ambiguous": matches.len() > 1,
+                "project_code": first.get("project_code").cloned().unwrap_or(serde_json::json!(null)),
+                "project_name": first.get("project_name").cloned().unwrap_or(serde_json::json!(null)),
+                "project_path": first.get("project_path").cloned().unwrap_or(serde_json::json!(null)),
+                "matches": matches
+            }
+        }))
     }
 
     pub(crate) fn next_server_numeric_id(

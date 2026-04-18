@@ -42,6 +42,100 @@ impl McpServer {
         Self { graph_store }
     }
 
+    fn public_tool_name_for(requested_name: &str, normalized_name: &str) -> String {
+        if requested_name.trim().is_empty() {
+            return normalized_name.to_string();
+        }
+        requested_name.to_string()
+    }
+
+    fn async_known_ids_for(&self, normalized_name: &str, reserved_ids: &Value) -> Value {
+        match normalized_name {
+            "soll_manager" => json!({
+                "project_code": reserved_ids.get("project_code").cloned().unwrap_or(json!(null)),
+                "entity_id": reserved_ids.get("entity_id").cloned().unwrap_or(json!(null))
+            }),
+            "soll_apply_plan" => json!({
+                "project_code": reserved_ids.get("project_code").cloned().unwrap_or(json!(null)),
+                "preview_id": reserved_ids.get("preview_id").cloned().unwrap_or(json!(null))
+            }),
+            "soll_commit_revision" => json!({
+                "project_code": reserved_ids.get("project_code").cloned().unwrap_or(json!(null)),
+                "revision_id": reserved_ids.get("revision_id").cloned().unwrap_or(json!(null))
+            }),
+            "init_project" => json!({
+                "project_code": reserved_ids.get("project_code").cloned().unwrap_or(json!(null)),
+                "project_name": reserved_ids.get("project_name").cloned().unwrap_or(json!(null)),
+                "project_path": reserved_ids.get("project_path").cloned().unwrap_or(json!(null))
+            }),
+            _ => reserved_ids.clone(),
+        }
+    }
+
+    fn async_result_contract_for(&self, normalized_name: &str) -> Value {
+        match normalized_name {
+            "init_project" => json!({
+                "follow_up_tool": "job_status",
+                "terminal_state_field": "state",
+                "raw_status_field": "status",
+                "terminal_states": ["completed", "failed"],
+                "result_data_fields": ["project_code", "project_name", "project_path"],
+                "notes": "Le résultat terminal expose l'identité projet canonique attribuée par le serveur."
+            }),
+            "soll_apply_plan" => json!({
+                "follow_up_tool": "job_status",
+                "terminal_state_field": "state",
+                "raw_status_field": "status",
+                "terminal_states": ["completed", "failed"],
+                "result_data_fields": ["preview_id", "created", "updated", "skipped", "errors"],
+                "notes": "Le résultat terminal expose le preview canonique et le rapport d'application."
+            }),
+            "soll_commit_revision" => json!({
+                "follow_up_tool": "job_status",
+                "terminal_state_field": "state",
+                "raw_status_field": "status",
+                "terminal_states": ["completed", "failed"],
+                "result_data_fields": ["revision_id", "preview_id", "status"],
+                "notes": "Le résultat terminal expose la révision canonique créée par le serveur."
+            }),
+            "soll_manager" => json!({
+                "follow_up_tool": "job_status",
+                "terminal_state_field": "state",
+                "raw_status_field": "status",
+                "terminal_states": ["completed", "failed"],
+                "result_data_fields": ["id", "status", "project_code"],
+                "notes": "Le résultat terminal expose l'entité canonique créée ou modifiée."
+            }),
+            _ => json!({
+                "follow_up_tool": "job_status",
+                "terminal_state_field": "state",
+                "raw_status_field": "status",
+                "terminal_states": ["completed", "failed"],
+                "result_data_fields": [],
+                "notes": "Consultez le résultat terminal du job pour la charge utile finale."
+            }),
+        }
+    }
+
+    fn async_recovery_hint_for(&self, normalized_name: &str) -> String {
+        match normalized_name {
+            "init_project" => "Relancez `job_status(job_id)` jusqu'à `completed` ou `failed`. Si le job échoue, corrigez les arguments projet puis relancez `axon_init_project`.".to_string(),
+            "soll_apply_plan" => "Relancez `job_status(job_id)` jusqu'à l'état terminal. Si le job échoue, corrigez le plan ou le `project_code`, puis relancez `soll_apply_plan`.".to_string(),
+            "soll_commit_revision" => "Relancez `job_status(job_id)` jusqu'à l'état terminal. Si le job échoue, vérifiez `preview_id` puis relancez `soll_commit_revision`.".to_string(),
+            _ => "Relancez `job_status(job_id)` jusqu'à l'état terminal. En cas d'échec, corrigez les arguments et relancez la mutation.".to_string(),
+        }
+    }
+
+    fn job_state(status: &str) -> &'static str {
+        match status {
+            "queued" => "queued",
+            "running" => "running",
+            "succeeded" => "completed",
+            "failed" => "failed",
+            _ => "unknown",
+        }
+    }
+
     fn project_code_from_preview_id(&self, preview_id: &str) -> Result<String> {
         let escaped_preview = preview_id.replace('\'', "''");
         let raw = self.graph_store.query_json(&format!(
@@ -354,6 +448,7 @@ impl McpServer {
             "health" => self.axon_health(arguments),
             "status" => self.axon_status(arguments),
             "project_status" => self.axon_project_status(arguments),
+            "project_registry_lookup" => self.axon_project_registry_lookup(arguments),
             "snapshot_history" => self.axon_snapshot_history(arguments),
             "snapshot_diff" => self.axon_snapshot_diff(arguments),
             "conception_view" => self.axon_conception_view(arguments),
@@ -453,6 +548,47 @@ impl McpServer {
                     Err(error) => json!({ "reservation_error": error.to_string() }),
                 }
             }
+            "init_project" => {
+                let Some(project_path) = arguments
+                    .get("project_path")
+                    .and_then(|value| value.as_str())
+                else {
+                    return json!({
+                        "reservation_error": "`project_path` est obligatoire pour `axon_init_project`."
+                    });
+                };
+                let project_name = match self.derive_project_name_from_path(project_path) {
+                    Ok(name) => name,
+                    Err(error) => return json!({ "reservation_error": error.to_string() }),
+                };
+                let project_code =
+                    match self.assign_project_code_for_init(&project_name, project_path) {
+                        Ok(code) => code,
+                        Err(error) => return json!({ "reservation_error": error.to_string() }),
+                    };
+                if let Some(requested_code) = arguments
+                    .get("project_code")
+                    .and_then(|value| value.as_str())
+                {
+                    match self.validate_explicit_canonical_project_code(
+                        Some(requested_code),
+                        "axon_init_project",
+                    ) {
+                        Ok(requested) if requested == project_code => {}
+                        Ok(_) => {
+                            return json!({
+                                "reservation_error": format!("`project_code` est attribué par le serveur. Omettez-le ou utilisez `{}` pour ce projet.", project_code)
+                            })
+                        }
+                        Err(error) => return json!({ "reservation_error": error.to_string() }),
+                    }
+                }
+                json!({
+                    "project_code": project_code,
+                    "project_name": project_name,
+                    "project_path": project_path
+                })
+            }
             _ => json!({}),
         }
     }
@@ -516,7 +652,12 @@ impl McpServer {
         )
     }
 
-    fn launch_mutation_job(&self, normalized_name: &str, arguments: &Value) -> Option<Value> {
+    fn launch_mutation_job(
+        &self,
+        requested_tool_name: &str,
+        normalized_name: &str,
+        arguments: &Value,
+    ) -> Option<Value> {
         let reserved_ids = self.reserve_mutation_ids(normalized_name, arguments);
         if let Some(error) = reserved_ids
             .get("reservation_error")
@@ -530,15 +671,17 @@ impl McpServer {
 
         let submitted_at = Self::now_unix_ms();
         let job_id = format!("JOB-{submitted_at}");
+        let public_tool_name = Self::public_tool_name_for(requested_tool_name, normalized_name);
+        let known_ids = self.async_known_ids_for(normalized_name, &reserved_ids);
         let request_json = json!({
-            "tool_name": normalized_name,
+            "tool_name": public_tool_name,
             "arguments": arguments,
         });
 
         if let Err(error) = Self::persist_mcp_job(
             self.graph_store.as_ref(),
             &job_id,
-            normalized_name,
+            &public_tool_name,
             "queued",
             submitted_at,
             &request_json,
@@ -552,15 +695,20 @@ impl McpServer {
 
         let graph_store = self.graph_store.clone();
         let normalized_name = normalized_name.to_string();
-        let accepted_tool_name = normalized_name.clone();
+        let response_contract_name = normalized_name.clone();
+        let accepted_tool_name = public_tool_name.clone();
         let queued_args = self.inject_reserved_ids(&normalized_name, arguments, &reserved_ids);
         let job_id_for_thread = job_id.clone();
         thread::spawn(move || {
             let server = McpServer::new(graph_store.clone());
             let started_at = McpServer::now_unix_ms();
             let _ = graph_store.execute_param(
-                "UPDATE soll.McpJob SET status = ?, started_at = ? WHERE job_id = ?",
-                &json!(["running", started_at, job_id_for_thread]),
+                "UPDATE soll.McpJob SET status = $status, started_at = $started_at WHERE job_id = $job_id",
+                &json!({
+                    "status": "running",
+                    "started_at": started_at,
+                    "job_id": job_id_for_thread
+                }),
             );
 
             match server.execute_tool_direct(&normalized_name, &queued_args) {
@@ -584,15 +732,26 @@ impl McpServer {
                         String::new()
                     };
                     let _ = graph_store.execute_param(
-                        "UPDATE soll.McpJob SET status = ?, finished_at = ?, result_json = ?, error_text = ? WHERE job_id = ?",
-                        &json!([status, finished_at, result.to_string(), error_text, job_id_for_thread]),
+                        "UPDATE soll.McpJob SET status = $status, finished_at = $finished_at, result_json = $result_json, error_text = $error_text WHERE job_id = $job_id",
+                        &json!({
+                            "status": status,
+                            "finished_at": finished_at,
+                            "result_json": result.to_string(),
+                            "error_text": error_text,
+                            "job_id": job_id_for_thread
+                        }),
                     );
                 }
                 None => {
                     let finished_at = McpServer::now_unix_ms();
                     let _ = graph_store.execute_param(
-                        "UPDATE soll.McpJob SET status = ?, finished_at = ?, error_text = ? WHERE job_id = ?",
-                        &json!(["failed", finished_at, format!("Invalid arguments for tool: {normalized_name}"), job_id_for_thread]),
+                        "UPDATE soll.McpJob SET status = $status, finished_at = $finished_at, error_text = $error_text WHERE job_id = $job_id",
+                        &json!({
+                            "status": "failed",
+                            "finished_at": finished_at,
+                            "error_text": format!("Invalid arguments for tool: {normalized_name}"),
+                            "job_id": job_id_for_thread
+                        }),
                     );
                 }
             }
@@ -608,7 +767,17 @@ impl McpServer {
                 "job_id": job_id,
                 "tool_name": accepted_tool_name,
                 "status": "queued",
-                "reserved_ids": reserved_ids
+                "state": "queued",
+                "reserved_ids": reserved_ids,
+                "known_ids": known_ids,
+                "next_action": {
+                    "tool": "job_status",
+                    "arguments": {
+                        "job_id": job_id
+                    }
+                },
+                "result_contract": self.async_result_contract_for(response_contract_name.as_str()),
+                "recovery_hint": self.async_recovery_hint_for(response_contract_name.as_str())
             }
         }))
     }
@@ -650,6 +819,7 @@ impl McpServer {
                 "job_id": row.first().and_then(|value| value.as_str()).unwrap_or(job_id),
                 "tool_name": row.get(1).and_then(|value| value.as_str()).unwrap_or("unknown"),
                 "status": row.get(2).and_then(|value| value.as_str()).unwrap_or("unknown"),
+                "state": Self::job_state(row.get(2).and_then(|value| value.as_str()).unwrap_or("unknown")),
                 "submitted_at": row.get(3).cloned().unwrap_or(json!(null)),
                 "started_at": row.get(4).cloned().unwrap_or(json!(null)),
                 "finished_at": row.get(5).cloned().unwrap_or(json!(null)),

@@ -29,6 +29,11 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - Canonical IDs are server-owned: `TYPE-CODE-NNN`.
 - `CODE` comes from `.axon/meta.json`, mirrored into `soll.ProjectCodeRegistry`.
 - `axon_init_project` assigns `project_code` server-side and returns it; the LLM does not invent project codes.
+- When a public mutation is async, the acceptance payload is authoritative:
+  - `data.known_ids`
+  - `data.next_action`
+  - `data.result_contract`
+  - canonical follow-up via `job_status`
 - LLMs use returned IDs; they do not fabricate them.
 - For batch plans, use `logical_key`; the server resolves canonical IDs.
 
@@ -39,6 +44,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 ## Core/Public Tools
 - `status`: runtime truth, availability, degradation, public surface.
 - `project_status`: compact live situation for one project.
+- `project_registry_lookup`: resolve canonical project identity from code, name, or path.
 - `query`: discovery / broad recall.
 - `inspect`: precise zoom on a known target.
 - `retrieve_context`: answerable evidence packet for LLM work.
@@ -61,18 +67,20 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 ## First-Choice Routing
 1. `status`
 2. `project_status` if you need the current project situation
-3. `query` / `inspect` / `retrieve_context`
+3. `project_registry_lookup` if project identity is uncertain
+4. `query` / `inspect` / `retrieve_context`
    - `query` = discover
    - `inspect` = zoom
    - `retrieve_context` = compact answerable context
-4. `impact` before risky refactor/change
-5. `why` when rationale matters
-6. `path` when flow/topology matters
-7. `anomalies` for cleanup, refactor, debt, or structural review
-8. `change_safety` before risky mutation
-9. `conception_view` if a derived architecture map is needed
-10. `axon_pre_flight_check`
-11. `axon_commit_work`
+5. `impact` before risky refactor/change
+6. `why` when rationale matters
+7. `path` when flow/topology matters
+8. `anomalies` for cleanup, refactor, debt, or structural review
+9. `change_safety` before risky mutation
+10. `conception_view` if a derived architecture map is needed
+11. `job_status` as the canonical follow-up for async public mutations
+12. `axon_pre_flight_check`
+13. `axon_commit_work`
 
 ## SOLL Model
 - `Vision`: target outcome

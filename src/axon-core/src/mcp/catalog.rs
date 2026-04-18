@@ -93,7 +93,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "axon_init_project",
-                "description": "[DX/SOLL] Initialise un nouveau projet Axon. Le serveur attribue le `project_code` canonique et le renvoie dans la réponse; le client/LLM ne fabrique pas ce code. Reçoit un Document de Concept optionnel, charge les règles globales et lance le dialogue d'héritage.",
+                "description": "[DX/SOLL] Initialise un nouveau projet Axon. Le serveur attribue le `project_code` canonique. Si la mutation est asynchrone, la réponse d'acceptation renvoie immédiatement les identifiants déjà connus dans `data.known_ids` et le suivi canonique via `job_status`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -284,7 +284,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "job_status",
-                "description": "[SYSTEM/EXPERT] Retourne l'état détaillé d'un job MCP mutateur accepté par le serveur partagé.",
+                "description": "[SYSTEM] Retourne l'état détaillé d'un job MCP mutateur accepté par le serveur partagé. Suivi canonique des mutations asynchrones: lire `data.state`, `data.result`, `data.error_text`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -312,6 +312,19 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "properties": {
                         "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "project_registry_lookup",
+                "description": "[SYSTEM/SOLL] Résout un projet canonique depuis `project_code`, `project_name` ou `project_path`. Retourne l'identité projet stable sans passer par la recherche indirecte.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique si connu." },
+                        "project_name": { "type": "string", "description": "Nom projet attendu, généralement la dernière partie du chemin." },
+                        "project_path": { "type": "string", "description": "Chemin absolu canonique du projet." }
                     },
                     "required": []
                 }

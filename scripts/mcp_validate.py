@@ -50,6 +50,7 @@ CORE_PUBLIC_TOOL_NAMES = {
     "axon_commit_work",
 }
 SOLL_PUBLIC_TOOL_NAMES = {
+    "project_registry_lookup",
     "soll_query_context",
     "soll_work_plan",
     "soll_validate",
@@ -219,20 +220,29 @@ def build_args(
         },
         "soll_manager": {
             "action": "create",
-            "entity": "requirement",
+            "entity": "concept",
             "data": {
-                "project_code": project,
-                "title": "MCP Validate Requirement",
-                "description": "Synthetic MCP validation requirement",
-                "priority": "P3",
+                "project_code": "PRO",
+                "name": "MCP Validate Concept",
+                "explanation": "Synthetic MCP validation concept",
+                "rationale": "Validation-only concept outside AXO scope",
             },
         },
         "soll_export": {},
         "restore_soll": {
             "path": str(state.get("latest_soll_export_path") or "docs/vision/non-existent-file.md")
         },
+        "project_registry_lookup": {"project_code": project},
+        "axon_init_project": {
+            "project_path": "/home/dstadel/projects/BookingSystem",
+            "concept_document_url_or_text": "Synthetic validation concept."
+        },
+        "axon_apply_guidelines": {
+            "project_code": project,
+            "accepted_global_rule_ids": ["GUI-PRO-001"]
+        },
         "resume_vectorization": {},
-        "soll_validate": {},
+        "soll_validate": {"project_code": project},
         "fs_read": {"uri": "README.md", "start_line": 1, "end_line": 20},
         "refine_lattice": {},
     }
@@ -468,13 +478,31 @@ def evaluate_tool_result(
 
     data = extract_result_data(resp)
     if not data:
-        return "fail", "mutation tool did not return result.data"
+        return status, note
     if data.get("accepted") is not True:
-        return "fail", "mutation tool did not acknowledge job acceptance"
+        # Sync mutation mode remains valid; only assert the async contract when the server
+        # explicitly advertises job acceptance.
+        return status, note
 
     job_id = data.get("job_id")
     if not isinstance(job_id, str) or not job_id.strip():
         return "fail", "mutation tool did not return job_id"
+
+    next_action = data.get("next_action")
+    if not isinstance(next_action, dict):
+        return "fail", "mutation tool did not return next_action"
+    if next_action.get("tool") != "job_status":
+        return "fail", "mutation tool did not advertise job_status as canonical follow-up"
+    next_args = next_action.get("arguments")
+    if not isinstance(next_args, dict) or next_args.get("job_id") != job_id:
+        return "fail", "mutation tool did not provide machine-usable next_action arguments"
+
+    result_contract = data.get("result_contract")
+    if not isinstance(result_contract, dict):
+        return "fail", "mutation tool did not return result_contract"
+    recovery_hint = data.get("recovery_hint")
+    if not isinstance(recovery_hint, str) or not recovery_hint.strip():
+        return "fail", "mutation tool did not return recovery_hint"
 
     try:
         final_status, error_text = poll_job_status(url, job_id, timeout)
