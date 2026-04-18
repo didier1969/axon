@@ -216,7 +216,18 @@ fn main() -> anyhow::Result<()> {
             let db_root = db_root_env.leak();
             let runtime_mode = AxonRuntimeMode::from_env();
 
-            info!("Starting Axon Core v2.2 (Nexus Seal - Zero-Sleep Edition)");
+            let package_version = env!("CARGO_PKG_VERSION");
+            let release_version =
+                std::env::var("AXON_RELEASE_VERSION").unwrap_or_else(|_| package_version.to_string());
+            let build_id =
+                std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| package_version.to_string());
+            let install_generation = std::env::var("AXON_INSTALL_GENERATION")
+                .unwrap_or_else(|_| "workspace".to_string());
+
+            info!(
+                "Starting Axon Core v{} (package={}, build={}, generation={})",
+                release_version, package_version, build_id, install_generation
+            );
             info!("Engine Boot Time: {}", boot_time);
             info!("Runtime Mode: {:?}", runtime_mode);
             info!(
@@ -304,13 +315,19 @@ fn main() -> anyhow::Result<()> {
                 Arc::new(Mutex::new(hydrated_guard));
             let ingress_buffer: SharedIngressBuffer =
                 Arc::new(Mutex::new(IngressBuffer::default()));
-            let tel_socket_path = "/tmp/axon-telemetry.sock";
-            let mcp_socket_path = "/tmp/axon-mcp.sock";
+            let tel_socket_path = std::env::var("AXON_TELEMETRY_SOCK")
+                .unwrap_or_else(|_| "/tmp/axon-telemetry.sock".to_string());
+            let mcp_socket_path = std::env::var("AXON_MCP_SOCK")
+                .unwrap_or_else(|_| "/tmp/axon-mcp.sock".to_string());
 
-            if std::path::Path::new(tel_socket_path).exists() { let _ = fs::remove_file(tel_socket_path); }
-            if std::path::Path::new(mcp_socket_path).exists() { let _ = fs::remove_file(mcp_socket_path); }
+            if std::path::Path::new(&tel_socket_path).exists() {
+                let _ = fs::remove_file(&tel_socket_path);
+            }
+            if std::path::Path::new(&mcp_socket_path).exists() {
+                let _ = fs::remove_file(&mcp_socket_path);
+            }
 
-            let tel_listener = UnixListener::bind(tel_socket_path)?;
+            let tel_listener = UnixListener::bind(&tel_socket_path)?;
 
             let http_port = std::env::var("HYDRA_HTTP_PORT").unwrap_or_else(|_| "44129".to_string());
             info!("Telemetry Server listening on {}", tel_socket_path);

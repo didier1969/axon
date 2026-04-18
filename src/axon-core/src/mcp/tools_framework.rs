@@ -93,6 +93,26 @@ impl McpServer {
         Self::structural_history_dir().join(format!("{project_code}.jsonl"))
     }
 
+    fn compact_runtime_path(path: String) -> String {
+        let current_dir = std::env::current_dir().ok();
+        let current_dir = current_dir.as_ref().map(|dir| dir.as_path());
+        let as_path = PathBuf::from(&path);
+        if let Some(root) = current_dir {
+            if let Ok(stripped) = as_path.strip_prefix(root) {
+                let display = stripped.display().to_string();
+                return if display.is_empty() {
+                    ".".to_string()
+                } else {
+                    format!("./{}", display)
+                };
+            }
+        }
+        if let Some(name) = as_path.file_name().and_then(|value| value.to_str()) {
+            return format!("<{}>", name);
+        }
+        path
+    }
+
     fn load_structural_snapshots(project_code: &str) -> Vec<Value> {
         let path = Self::structural_history_path(project_code);
         let file = match std::fs::File::open(path) {
@@ -867,10 +887,12 @@ impl McpServer {
                 .as_deref(),
         );
         let cache_key = format!(
-            "{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             mode.unwrap_or("brief"),
             runtime_mode.as_str(),
-            runtime_profile.as_str()
+            runtime_profile.as_str(),
+            std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string()),
+            std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string())
         );
         if let Some(cached) = Self::cache_read(
             Self::status_cache(),
@@ -940,12 +962,16 @@ impl McpServer {
         let evidence = format!(
             "**Runtime mode:** `{}`\n\
 **Runtime profile:** `{}`\n\
+**Instance kind:** `{}`\n\
+**Runtime identity:** `{}`\n\
 **Advanced indexed surfaces visible:** {}\n\
 **Vector backlog:** queued={} inflight={}\n\
 **Drain state:** `{}`\n\
 **Public tools:** {}\n",
             runtime_mode.as_str(),
             runtime_profile.as_str(),
+            std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string()),
+            std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string()),
             if public_tool_names.iter().any(|name| *name == "impact") {
                 "yes"
             } else {
@@ -975,6 +1001,32 @@ impl McpServer {
                 "high",
             )
         );
+        let instance_kind =
+            std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string());
+        let runtime_identity =
+            std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string());
+        let data_root = Self::compact_runtime_path(
+            std::env::var("AXON_DB_ROOT").unwrap_or_else(|_| "unknown".to_string()),
+        );
+        let run_root = Self::compact_runtime_path(
+            std::env::var("AXON_RUN_ROOT").unwrap_or_else(|_| "unknown".to_string()),
+        );
+        let project_root = Self::compact_runtime_path(
+            std::env::var("AXON_PROJECT_ROOT").unwrap_or_else(|_| "unknown".to_string()),
+        );
+        let mcp_url = std::env::var("AXON_MCP_URL").unwrap_or_else(|_| "unknown".to_string());
+        let sql_url = std::env::var("AXON_SQL_URL").unwrap_or_else(|_| "unknown".to_string());
+        let dashboard_url =
+            std::env::var("AXON_DASHBOARD_URL").unwrap_or_else(|_| "unknown".to_string());
+        let mutation_policy =
+            std::env::var("AXON_MUTATION_POLICY").unwrap_or_else(|_| "unknown".to_string());
+        let package_version = std::env::var("AXON_PACKAGE_VERSION")
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+        let release_version =
+            std::env::var("AXON_RELEASE_VERSION").unwrap_or_else(|_| package_version.clone());
+        let build_id = std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| package_version.clone());
+        let install_generation =
+            std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string());
         let response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -995,6 +1047,23 @@ impl McpServer {
                     }
                 },
                 "canonical_sources": Self::canonical_sources_snapshot(),
+                "instance_identity": {
+                    "instance_kind": instance_kind,
+                    "runtime_identity": runtime_identity,
+                    "data_root": data_root,
+                    "run_root": run_root,
+                    "project_root": project_root,
+                    "mcp_url": mcp_url,
+                    "sql_url": sql_url,
+                    "dashboard_url": dashboard_url,
+                    "mutation_policy": mutation_policy
+                },
+                "runtime_version": {
+                    "release_version": release_version,
+                    "package_version": package_version,
+                    "build_id": build_id,
+                    "install_generation": install_generation
+                },
                 "file_vectorization_queue": {
                     "queued": queued_files,
                     "inflight": inflight_files

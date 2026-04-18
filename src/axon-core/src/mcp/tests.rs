@@ -1356,6 +1356,45 @@ fn test_status_reports_retrieve_context_in_public_surface_when_full_autonomous()
 }
 
 #[test]
+fn test_status_exposes_runtime_version_identity() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RELEASE_VERSION", "0.7.0");
+        std::env::set_var("AXON_BUILD_ID", "v0.7.0-rc1-12-gabcdef");
+        std::env::set_var("AXON_PACKAGE_VERSION", "2.0.0");
+        std::env::set_var("AXON_INSTALL_GENERATION", "live-2026-04-18");
+    }
+
+    let server = create_test_server();
+    let response = server.axon_status(&json!({ "mode": "json" })).unwrap();
+    let data = response.get("data").unwrap();
+
+    assert_eq!(
+        data["runtime_version"]["release_version"].as_str(),
+        Some("0.7.0")
+    );
+    assert_eq!(
+        data["runtime_version"]["build_id"].as_str(),
+        Some("v0.7.0-rc1-12-gabcdef")
+    );
+    assert_eq!(
+        data["runtime_version"]["package_version"].as_str(),
+        Some("2.0.0")
+    );
+    assert_eq!(
+        data["runtime_version"]["install_generation"].as_str(),
+        Some("live-2026-04-18")
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_RELEASE_VERSION");
+        std::env::remove_var("AXON_BUILD_ID");
+        std::env::remove_var("AXON_PACKAGE_VERSION");
+        std::env::remove_var("AXON_INSTALL_GENERATION");
+    }
+}
+
+#[test]
 fn test_why_wraps_retrieve_context_and_reports_framework_alias() {
     let server = create_test_server();
     server.graph_store.execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')").unwrap();

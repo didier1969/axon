@@ -2,10 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=scripts/lib/axon-instance.sh
+source "$SCRIPT_DIR/lib/axon-instance.sh"
 
 usage() {
   cat <<'USAGE'
-Usage: ./scripts/axon <command> [options]
+Usage: ./scripts/axon [--instance live|dev] <command> [options]
 
 Commands:
   setup                    Bootstrap environment and build artifacts
@@ -20,6 +23,9 @@ Commands:
   measure-mcp [args...]    Expert timestamped MCP latency/behavior probes
   compare-mcp [args...]    Expert comparison of MCP measurement runs
   quality-mcp [args...]    Compatibility wrapper around qualify-mcp for core projects
+  create-release-manifest [args...] Create canonical release manifest for promotion
+  promote-live [args...]   Promote a qualified manifest to the live install state
+  rollback-live [args...]  Roll back live install state to a prior manifest
   check-project-identity   Fail if legacy project identity terms reappear in active surfaces
   qualify-guidance [args...] Expert MCP guidance golden replay
   qualify-guidance-live    Replay live MCP guidance goldens against running server
@@ -30,6 +36,8 @@ Commands:
   reindex-project [args...] Reindex one project with before/after noise evaluation
 
 Examples:
+  ./scripts/axon --instance live status
+  ./scripts/axon --instance dev start --full
   ./scripts/axon setup
   ./scripts/axon start --full
   ./scripts/axon start --graph-only
@@ -45,6 +53,9 @@ Examples:
   ./scripts/axon measure-mcp --project AXO --label baseline
   ./scripts/axon compare-mcp
   ./scripts/axon quality-mcp
+  ./scripts/axon create-release-manifest --state qualified
+  ./scripts/axon promote-live --manifest .axon/releases/candidates/v0.7.0-abc.json
+  ./scripts/axon rollback-live --manifest .axon/live-release/history/live-20260418T120000Z.json
   ./scripts/axon check-project-identity
   ./scripts/axon qualify-guidance
   ./scripts/axon qualify-guidance-live
@@ -58,12 +69,71 @@ Examples:
 USAGE
 }
 
+instance_kind=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --instance)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --instance" >&2
+        exit 1
+      fi
+      instance_kind="$2"
+      shift 2
+      ;;
+    --instance=*)
+      instance_kind="${1#*=}"
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ -n "$instance_kind" ]]; then
+  export AXON_INSTANCE_KIND="$instance_kind"
+fi
+axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
+
 cmd="${1:-}"
 if [[ -z "$cmd" ]]; then
   usage
   exit 1
 fi
 shift || true
+
+maybe_with_url() {
+  local url="$1"
+  shift
+  for arg in "$@"; do
+    if [[ "$arg" == "--url" || "$arg" == --url=* ]]; then
+      printf '%s\0' "$@"
+      return 0
+    fi
+  done
+  printf '%s\0' --url "$url" "$@"
+}
+
+split_restart_args() {
+  local stop_file="$1"
+  local start_file="$2"
+  shift 2
+
+  : > "$stop_file"
+  : > "$start_file"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --hard|--verify)
+        printf '%s\n' "$1" >> "$stop_file"
+        ;;
+      *)
+        printf '%s\n' "$1" >> "$start_file"
+        ;;
+    esac
+    shift
+  done
+}
 
 case "$cmd" in
   setup)
@@ -76,8 +146,33 @@ case "$cmd" in
     exec bash "$SCRIPT_DIR/stop.sh" "$@"
     ;;
   restart)
-    bash "$SCRIPT_DIR/stop.sh" "$@"
-    exec bash "$SCRIPT_DIR/start.sh" "$@"
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+      cat <<'EOF'
+Usage: ./scripts/axon [--instance live|dev] restart [stop options] [start mode options]
+
+Stop options:
+  --hard
+  --verify
+
+Start mode options:
+  --full
+  --graph-only
+  --read-only
+  --mcp-only
+  --no-dashboard
+  --skip-mcp-tests
+  --skip-elixir-prewarm
+EOF
+      exit 0
+    fi
+    stop_args_file="$(mktemp)"
+    start_args_file="$(mktemp)"
+    trap 'rm -f "$stop_args_file" "$start_args_file"' EXIT
+    split_restart_args "$stop_args_file" "$start_args_file" "$@"
+    mapfile -t stop_args < "$stop_args_file"
+    mapfile -t start_args < "$start_args_file"
+    bash "$SCRIPT_DIR/stop.sh" "${stop_args[@]}"
+    exec bash "$SCRIPT_DIR/start.sh" "${start_args[@]}"
     ;;
   status)
     exec bash "$SCRIPT_DIR/status.sh" "$@"
@@ -86,37 +181,54 @@ case "$cmd" in
     exec python3 "$SCRIPT_DIR/qualify_runtime.py" "$@"
     ;;
   qualify-mcp)
-    exec python3 "$SCRIPT_DIR/qualify_mcp.py" "$@"
+    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
+    exec python3 "$SCRIPT_DIR/qualify_mcp.py" "${forwarded[@]}"
     ;;
   validate-mcp)
-    exec python3 "$SCRIPT_DIR/mcp_validate.py" "$@"
+    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
+    exec python3 "$SCRIPT_DIR/mcp_validate.py" "${forwarded[@]}"
     ;;
   robustness-mcp)
-    exec python3 "$SCRIPT_DIR/qualify_mcp_robustness.py" "$@"
+    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
+    exec python3 "$SCRIPT_DIR/qualify_mcp_robustness.py" "${forwarded[@]}"
     ;;
   measure-mcp)
-    exec python3 "$SCRIPT_DIR/measure_mcp_suite.py" "$@"
+    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
+    exec python3 "$SCRIPT_DIR/measure_mcp_suite.py" "${forwarded[@]}"
     ;;
   compare-mcp)
     exec python3 "$SCRIPT_DIR/compare_mcp_runs.py" "$@"
     ;;
   quality-mcp)
-    exec bash "$SCRIPT_DIR/mcp_quality_gate.sh" "$@"
+    exec env AXON_MCP_URL="$AXON_MCP_URL" bash "$SCRIPT_DIR/mcp_quality_gate.sh" "$@"
+    ;;
+  create-release-manifest)
+    exec python3 "$SCRIPT_DIR/release/create_manifest.py" "$@"
+    ;;
+  promote-live)
+    exec bash "$SCRIPT_DIR/release/promote_live.sh" "$@"
+    ;;
+  rollback-live)
+    exec bash "$SCRIPT_DIR/release/rollback_live.sh" "$@"
     ;;
   check-project-identity)
     exec python3 "$SCRIPT_DIR/check_no_project_slug.py"
     ;;
   qualify-guidance)
-    exec python3 "$SCRIPT_DIR/qualify_mcp_guidance.py" "$@"
+    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
+    exec python3 "$SCRIPT_DIR/qualify_mcp_guidance.py" "${forwarded[@]}"
     ;;
   qualify-guidance-live)
-    exec python3 "$SCRIPT_DIR/qualify_mcp_guidance.py" --goldens "$SCRIPT_DIR/mcp_guidance_live_goldens.json" --source live "$@"
+    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
+    exec python3 "$SCRIPT_DIR/qualify_mcp_guidance.py" --goldens "$SCRIPT_DIR/mcp_guidance_live_goldens.json" --source live "${forwarded[@]}"
     ;;
   soll-import)
-    exec python3 "$SCRIPT_DIR/soll_import.py" "$@"
+    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
+    exec python3 "$SCRIPT_DIR/soll_import.py" "${forwarded[@]}"
     ;;
   work-plan)
-    exec python3 "$SCRIPT_DIR/work_plan.py" "$@"
+    mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")
+    exec python3 "$SCRIPT_DIR/work_plan.py" "${forwarded[@]}"
     ;;
   resume-vectorization)
     exec python3 "$SCRIPT_DIR/resume_vectorization.py" "$@"

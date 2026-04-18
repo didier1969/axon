@@ -49,10 +49,12 @@ Chaque instance doit exposer explicitement dans `status` et dans ses métadonné
 
 - `instance_kind = live | dev`
 - `runtime_identity`
+- `release_version`
 - `data_root`
 - `project_root`
 - `mutation_policy`
 - `build_id`
+- `install_generation`
 - `mcp_url`
 
 La séparation ne doit pas être seulement mentale ou documentaire.
@@ -212,7 +214,133 @@ Le cycle sain devient :
 1. observer et comprendre via `live` ;
 2. implémenter et qualifier via `dev` ;
 3. valider les migrations et les invariants sur `dev` ;
-4. promouvoir ensuite vers `live` de manière contrôlée.
+4. préparer une version installable avec `release_version` incrémentée ;
+5. promouvoir ensuite vers `live` de manière contrôlée ;
+6. vérifier après promotion que `live` annonce bien la nouvelle identité de version.
+
+## Qualification vs Promotion
+
+Un `git push` n’est pas une promotion production.
+
+Il faut distinguer trois états :
+
+- `pushed`
+  - le code est sauvegardé et partagé sur GitHub ;
+  - aucune valeur de production n’est impliquée.
+
+- `qualified`
+  - un commit ou un tag immuable a passé les gates définis ;
+  - les preuves de qualification existent ;
+  - la version est candidate à la promotion.
+
+- `promoted`
+  - la version qualifiée a été effectivement installée sur `live` ;
+  - `live status` annonce cette identité exacte ;
+  - la promotion est vérifiée après installation.
+
+Le principe dur est :
+
+- `push` ≠ `qualified`
+- `qualified` ≠ `promoted`
+
+## Cycle de mise en production cible
+
+Le cycle cible devient :
+
+1. développement et qualification sur `dev` ;
+2. merge sur `main` ;
+3. exécution des gates de qualification ;
+4. création d’une version immuable :
+   - tag `vX.Y.Z`
+   - artefact installable immuable
+   - manifest de release
+   - preuves de qualification
+5. promotion explicite vers `live` ;
+6. post-check sur `live` :
+   - `release_version`
+   - `build_id`
+   - `install_generation`
+   - santé runtime
+7. rollback vers la version précédente si le post-check échoue.
+
+## Promotion maîtrisée
+
+La promotion de `live` doit être un cycle séparé et contrôlé.
+
+Elle doit reposer sur :
+
+- une version qualifiée immuable ;
+- un artefact installable identifié exactement ;
+- un manifest de release canonique ;
+- un script ou workflow de promotion explicite ;
+- un post-check obligatoire ;
+- un chemin de rollback simple.
+
+La décision “cette version est production” doit donc venir :
+
+- d’un état de qualification prouvé ;
+- puis d’une promotion explicite ;
+- jamais d’un simple push GitHub.
+
+## Identité d’artefact
+
+Le manifest de release ne doit pas seulement identifier le code source.
+Il doit identifier **l’artefact exact** qui a été qualifié puis promu.
+
+Le manifest doit donc porter au minimum :
+
+- le tag ou commit source ;
+- `release_version` ;
+- `build_id` ;
+- l’identifiant d’artefact installable ;
+- un checksum ou digest de l’artefact ;
+- les preuves de qualification attachées à cet artefact.
+
+La règle dure est :
+
+- la promotion doit installer l’artefact qualifié ;
+- elle ne doit pas reconstruire implicitement “quelque chose d’équivalent” à partir du même commit.
+
+## Contrat de rollback
+
+Le rollback ne peut pas être défini seulement comme “revenir à la version précédente”.
+Il faut aussi définir ce qui arrive aux données et au schéma live.
+
+Une release promouvable doit donc satisfaire au moins une des deux conditions :
+
+- soit elle ne réalise que des changements backward-compatible sur les données et le schéma live ;
+- soit elle fournit un plan de rollback explicite pour l’état live :
+  - snapshot / backup requis ;
+  - stratégie de retour ;
+  - limites connues.
+
+Donc la promotion `live` doit lier :
+
+- le code / artefact ;
+- la version annoncée ;
+- et la compatibilité ou la stratégie de retour sur l’état de données live.
+
+## Contrat de version de production
+
+La promotion vers `live` ne doit pas seulement remplacer du code.
+Elle doit remplacer une **version identifiée**.
+
+Chaque runtime doit pouvoir annoncer :
+
+- `release_version`
+  - la version opératoire humaine qui est censée être installée ;
+- `package_version`
+  - la version de package / build interne ;
+- `build_id`
+  - l’identité exacte du build (commit, tag, dirty/clean) ;
+- `install_generation`
+  - l’identifiant de l’installation ou de la promotion active.
+
+Cela permet de dire explicitement :
+
+- “voici ce qui tourne en `live` maintenant” ;
+- “voici la version candidate qui remplacera `live`” ;
+- “la promotion a bien été effectuée”.
 
 ## Non-objectifs
 

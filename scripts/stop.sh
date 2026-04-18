@@ -4,26 +4,33 @@ set -euo pipefail
 # Axon v2 - Industrial Precision Stop Script
 # Kills Axon-related processes while preserving other projects.
 
-PROJECT_ROOT="$(pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
-if [ -f "$PROJECT_ROOT/.env.worktree" ]; then
-    source "$PROJECT_ROOT/.env.worktree"
-fi
+# shellcheck source=scripts/lib/axon-instance.sh
+source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
+axon_load_worktree_env "$PROJECT_ROOT"
+axon_resolve_instance "$PROJECT_ROOT" "$REPO_SLUG"
 
-AXON_ENV="${AXON_ENV:-prod}"
-TMUX_SESSION="${TMUX_SESSION:-axon}"
-
-if [ "$AXON_ENV" = "dev" ]; then
-    AXON_TCP_PORTS=(44137 44138 44139 44140 44141 44142)
-    TMUX_SESSION="axon-dev"
-    ELIXIR_NODE_NAME="axon_dev_nexus"
-else
-    AXON_TCP_PORTS=(44127 44128 44129 44130 44131 44132)
-    ELIXIR_NODE_NAME="axon_nexus"
-fi
+AXON_TCP_PORTS=("$PHX_PORT" "$HYDRA_TCP_PORT" "$HYDRA_HTTP_PORT" "$HYDRA_ODATA_PORT" "$HYDRA_HTTP2_PORT" "$HYDRA_MCP_PORT")
 
 HARD_MODE=0
 VERIFY_ONLY=0
+
+port_regex() {
+    local port
+    local first=1
+    local pattern=""
+    for port in "${AXON_TCP_PORTS[@]}"; do
+        if [[ "$first" -eq 1 ]]; then
+            pattern="$port"
+            first=0
+        else
+            pattern="${pattern}|${port}"
+        fi
+    done
+    printf '%s\n' "$pattern"
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -103,6 +110,34 @@ $port_pids"
     echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -u
 }
 
+primary_listener_pid() {
+    ss -ltnp 2>/dev/null | awk -v p="$HYDRA_HTTP_PORT" '
+        $1 == "LISTEN" {
+            split($4, addr_parts, ":")
+            if (addr_parts[length(addr_parts)] != p) {
+                next
+            }
+            match($0, /pid=([0-9]+)/, m)
+            if (m[1] != "") {
+                print m[1]
+                exit
+            }
+        }' || true
+}
+
+pid_matches_instance() {
+    local pid="$1"
+    local cmdline=""
+    local listener_pid=""
+
+    [[ -n "$pid" && -e "/proc/$pid" ]] || return 1
+    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    [[ "$cmdline" == *"axon-core"* ]] || return 1
+
+    listener_pid="$(primary_listener_pid)"
+    [[ -n "$listener_pid" && "$listener_pid" == "$pid" ]]
+}
+
 collect_process_pids() {
     local -n patterns_ref="$1"
     local pid cmd
@@ -126,10 +161,9 @@ collect_process_pids() {
 is_axon_process_cmd() {
     local cmd="$1"
     
-    # We must ONLY kill processes that belong to our exact PROJECT_ROOT
+    # We must ONLY kill instance-qualified auxiliary processes. The shared
+    # axon-core binary path is not sufficient to identify live vs dev.
     if [[ "$cmd" == *"$PROJECT_ROOT"* ]]; then
-        [[ "$cmd" == *"/bin/axon-core"* ]] && return 0
-        [[ "$cmd" == *"/bin/axon-mcp-tunnel"* ]] && return 0
         [[ "$cmd" == *"_build/esbuild"* ]] && return 0
         [[ "$cmd" == *"_build/tailwind"* ]] && return 0
         [[ "$cmd" == *"${ELIXIR_NODE_NAME}"* && "$cmd" == *"beam.smp"* ]] && return 0
@@ -175,11 +209,11 @@ kill_pids() {
 }
 
 kill_tmux_session() {
-    if tmux has-session -t axon 2>/dev/null; then
+    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
         echo "Closing TMUX session '$TMUX_SESSION'..."
         tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
         for _ in {1..5}; do
-            if ! tmux has-session -t axon 2>/dev/null; then
+            if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
                 break
             fi
             sleep 0.10
@@ -188,7 +222,7 @@ kill_tmux_session() {
 
     # Fallback in case socket resolution fails inside the current runner context.
     local tmux_fallback_pids
-    tmux_fallback_pids="$(ps -eo pid=,cmd= | grep -E 'tmux .*new-session -d -s axon|tmux .* -t axon|tmux .* -s axon' | awk '{print $1}' | sort -u || true)"
+    tmux_fallback_pids="$(ps -eo pid=,cmd= | grep -E "tmux .*new-session -d -s ${TMUX_SESSION}|tmux .* -t ${TMUX_SESSION}|tmux .* -s ${TMUX_SESSION}" | awk '{print $1}' | sort -u || true)"
     if [ -n "$tmux_fallback_pids" ]; then
         echo "Killing fallback TMUX process(es): $tmux_fallback_pids"
         for pid in $tmux_fallback_pids; do
@@ -202,6 +236,10 @@ kill_tmux_session() {
 }
 
 kill_by_devenv() {
+    if [[ "${AXON_ALLOW_BROAD_STOP:-0}" != "1" ]]; then
+        echo "Skipping 'devenv processes down' because it is not instance-safe by default."
+        return 0
+    fi
     if command -v devenv >/dev/null 2>&1; then
         echo "Attempting 'devenv processes down' as authoritative cleanup..."
         devenv processes down >/dev/null 2>&1 || true
@@ -213,8 +251,6 @@ kill_hard_patterns() {
     local raw
     local pids
     local match_patterns=(
-        "$PROJECT_ROOT/bin/axon-core"
-        "$PROJECT_ROOT/bin/axon-mcp-tunnel"
         "${ELIXIR_NODE_NAME}"
         "$PROJECT_ROOT/src/dashboard/_build/esbuild"
         "$PROJECT_ROOT/src/dashboard/_build/tailwind"
@@ -237,7 +273,7 @@ $raw"
     fi
 
     # Final hard fallback for stubborn visible names
-    for pattern in "$PROJECT_ROOT/bin/axon-core" "${ELIXIR_NODE_NAME}@127.0.0.1" "$PROJECT_ROOT/src/dashboard/_build"; do
+    for pattern in "${ELIXIR_NODE_NAME}@127.0.0.1" "$PROJECT_ROOT/src/dashboard/_build"; do
         pkill -9 -f "$pattern" 2>/dev/null || true
     done
 }
@@ -275,7 +311,7 @@ verify_only_exit_if_needed() {
     if [ -n "$stale" ]; then
         echo "⚠️ Non-visible/stale listener pids (namespace-shifted): $stale"
     fi
-    ss -ltnp 2>/dev/null | rg "4412[7-9]|4413[0-2]" || true
+    ss -ltnp 2>/dev/null | rg "$(port_regex)" || true
     return 1
 }
 
@@ -283,12 +319,8 @@ echo "🛑 Stopping Axon v2 Architecture (Chirurgical Mode)..."
 
 # 1. Axon process signatures for checks and teardown.
 PATTERNS=(
-    "$PROJECT_ROOT/bin/axon-core"
-    "bin/axon-core"
-    "bin/axon-mcp-tunnel"
-    "axon-core"
-    "axon_nexus"
-    "axon_nexus@127.0.0.1"
+    "$ELIXIR_NODE_NAME"
+    "$ELIXIR_NODE_NAME@127.0.0.1"
     "$PROJECT_ROOT/src/dashboard/_build/esbuild-linux-x64"
     "$PROJECT_ROOT/src/dashboard/_build/tailwind-linux-x64"
     "src/dashboard/_build/esbuild-linux-x64"
@@ -300,10 +332,18 @@ if [ "$VERIFY_ONLY" = "1" ]; then
     exit $?
 fi
 
+# 1b. Kill the tracked core pid first when available.
+if [[ -f "$AXON_PID_FILE" ]]; then
+    TRACKED_PID="$(cat "$AXON_PID_FILE" 2>/dev/null || true)"
+    if pid_matches_instance "${TRACKED_PID:-}"; then
+        kill_pids "$TRACKED_PID" "tracked core"
+    fi
+fi
+
 # 2. Graceful Elixir shutdown via RPC (if node is named)
 if command -v elixir >/dev/null 2>&1; then
     echo "Sending shutdown signal to Axon Nexus node..."
-    elixir --name stop_script@127.0.0.1 --cookie axon_secret --rpc "axon_nexus@127.0.0.1" :init :stop >/dev/null 2>&1 || true
+    elixir --name stop_script@127.0.0.1 --cookie axon_secret --rpc "${ELIXIR_NODE_NAME}@127.0.0.1" :init :stop >/dev/null 2>&1 || true
     sleep 0.20
 fi
 
@@ -347,12 +387,12 @@ for port in "${AXON_TCP_PORTS[@]}"; do
     fuser -k "${port}/tcp" 2>/dev/null || true &
 done
 wait || true
-rm -f /tmp/axon-mcp.sock /tmp/axon-telemetry.sock /tmp/axon-v2.sock
-rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.lock
+rm -f "$AXON_MCP_SOCK" "$AXON_TELEMETRY_SOCK" "$AXON_PID_FILE" "$AXON_RUNTIME_STATE_FILE" /tmp/axon-v2.sock
+rm -f "$AXON_DB_ROOT/"*.lock
 
 if [[ "${AXON_DROP_WAL_ON_STOP:-0}" == "1" ]]; then
     echo "⚠️ AXON_DROP_WAL_ON_STOP=1 set: deleting DuckDB WAL files during stop."
-    rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.wal
+    rm -f "$AXON_DB_ROOT/"*.wal
 fi
 
 # 5. Final verification
@@ -373,12 +413,12 @@ fi
 if [ -n "$AFTER_PATTERN_PIDS" ] || [ -n "$AFTER_PORT_PIDS" ]; then
     if [ -n "$AFTER_PORT_PIDS" ]; then
         echo "⚠️ Port listeners still present after cleanup:"
-        ss -ltnp 2>/dev/null | rg "4412[7-9]|4413[0-2]" || true
+        ss -ltnp 2>/dev/null | rg "$(port_regex)" || true
     fi
     if [ -n "$AFTER_STALE" ]; then
         echo "⚠️ Some listener PIDs are stale/non-visible from this execution context: $AFTER_STALE"
         echo "   This usually means the listener process runs in another PID namespace/runner."
-        echo "   Run from host context: pkill -f 'axon-core|axon_nexus|bin/axon-core|_build/esbuild|_build/tailwind'"
+        echo "   Run from host context: pkill -f 'axon-core|$ELIXIR_NODE_NAME|bin/axon-core|_build/esbuild|_build/tailwind'"
         echo "   or run: devenv processes down"
     fi
 fi
@@ -407,9 +447,9 @@ if [ -n "$AFTER_PORT_PIDS" ]; then
     done
 fi
 
-if tmux has-session -t axon 2>/dev/null; then
-    echo "⚠️ TMUX session 'axon' still present after cleanup."
-    echo "   If this is stale, please run: tmux kill-session -t axon"
+if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    echo "⚠️ TMUX session '$TMUX_SESSION' still present after cleanup."
+    echo "   If this is stale, please run: tmux kill-session -t $TMUX_SESSION"
     exit 1
 fi
 
