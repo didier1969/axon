@@ -5,12 +5,15 @@
 Use:
 
 ```bash
+./scripts/axon release-preflight
 ./scripts/axon create-release-manifest --state qualified
 ./scripts/axon promote-live --manifest <manifest.json>
 ./scripts/axon rollback-live --manifest <manifest.json>
 ```
 
 These commands define the operator-facing release cycle for the live instance.
+
+`release-preflight` is now the mandatory first gate before manifest creation or live promotion.
 
 ## Release States
 
@@ -43,6 +46,14 @@ For the `live` instance, ordinary `./scripts/axon --instance live start ...` now
 
 ## Promotion
 
+Topological checklist:
+
+1. `./scripts/axon release-preflight`
+2. `./scripts/axon create-release-manifest --state qualified`
+3. `./scripts/axon promote-live --manifest <manifest>.json --restart-live`
+4. confirm MCP `status` matches the manifest
+5. only then treat the release as `promoted`
+
 Stage only:
 
 ```bash
@@ -70,6 +81,8 @@ With restart, the script now verifies live via MCP `status` and compares:
 - `runtime_version.install_generation`
 
 Only then does the manifest become `promoted`.
+
+The restart now boots from the exact staged manifest under verification, not from a different active manifest.
 
 ## Rollback
 
@@ -127,6 +140,7 @@ Use `--dry-run` to validate:
 
 ## Safety Rules
 
+- Do not skip `release-preflight`.
 - Do not promote from an unqualified manifest.
 - Do not bypass the archived artifact with a worktree binary.
 - Do not call a version `live` unless MCP `status` proves it.

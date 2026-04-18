@@ -23,6 +23,7 @@ Commands:
   measure-mcp [args...]    Expert timestamped MCP latency/behavior probes
   compare-mcp [args...]    Expert comparison of MCP measurement runs
   quality-mcp [args...]    Compatibility wrapper around qualify-mcp for core projects
+  release-preflight [args...] Verify tracked-clean build/manifests prerequisites before release actions
   create-release-manifest [args...] Create canonical release manifest for promotion
   promote-live [args...]   Promote a qualified manifest to the live install state
   rollback-live [args...]  Roll back live install state to a prior manifest
@@ -56,6 +57,7 @@ Examples:
   ./scripts/axon measure-mcp --project AXO --label baseline
   ./scripts/axon compare-mcp
   ./scripts/axon quality-mcp
+  ./scripts/axon release-preflight
   ./scripts/axon create-release-manifest --state qualified
   ./scripts/axon promote-live --manifest .axon/releases/candidates/v0.7.0-abc.json
   ./scripts/axon rollback-live --manifest .axon/live-release/history/live-20260418T120000Z.json
@@ -205,6 +207,9 @@ EOF
     ;;
   quality-mcp)
     exec env AXON_MCP_URL="$AXON_MCP_URL" bash "$SCRIPT_DIR/mcp_quality_gate.sh" "$@"
+    ;;
+  release-preflight)
+    exec bash "$SCRIPT_DIR/release/preflight.sh" "$@"
     ;;
   create-release-manifest)
     exec python3 "$SCRIPT_DIR/release/create_manifest.py" "$@"

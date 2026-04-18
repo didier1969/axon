@@ -24,6 +24,16 @@ description: Use in the Axon repository before coding, structural diagnostics, o
   - `scripts/status*.sh` = local lifecycle probe
 - For MCP surface qualification, prefer `./scripts/axon qualify-mcp`; treat older entrypoints such as `quality-mcp`, `validate-mcp`, `measure-mcp`, `compare-mcp`, `robustness-mcp`, and `qualify-guidance` as expert or compatibility flows.
 - Do not mutate `live` implicitly from development workflows.
+- For release work on `live`, use the topological checklist:
+  1. `./scripts/axon release-preflight`
+  2. `./scripts/axon create-release-manifest --state qualified`
+  3. `./scripts/axon promote-live --manifest <manifest> --restart-live`
+  4. verify MCP `status`
+  5. only then treat the release as `promoted`
+- During release or rollback:
+  - MCP `status` is final runtime truth
+  - `scripts/status*.sh` remains advisory only
+  - `pending` and `current` must never drift silently
 
 ## Identity Contract
 - Canonical IDs are server-owned: `TYPE-CODE-NNN`.
@@ -127,3 +137,4 @@ Update this skill immediately when:
 - public/expert routing changes
 - identity rules change
 - SOLL workflow or schema changes
+- release/promotion protocol changes

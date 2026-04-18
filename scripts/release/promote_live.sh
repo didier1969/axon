@@ -15,6 +15,13 @@ RESTART_LIVE=0
 SKIP_POSTCHECK=0
 DRY_RUN=0
 
+assert_live_stopped() {
+  if ! bash "$ROOT_DIR/scripts/stop.sh" --verify >/dev/null 2>&1; then
+    echo "Live hard-stop verification failed; refusing restart." >&2
+    return 1
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage: bash scripts/release/promote_live.sh --manifest <manifest.json> [--restart-live] [--skip-postcheck] [--dry-run]
@@ -36,6 +43,13 @@ done
 
 MANIFEST_PATH="$(realpath "$MANIFEST_PATH")"
 export RELEASE_MANIFEST="$MANIFEST_PATH"
+
+if [[ -f "$ROOT_DIR/.axon/live-release/pending.json" ]]; then
+  echo "Stale pending live release exists; clear .axon/live-release/pending.json before promoting." >&2
+  exit 1
+fi
+
+bash "$ROOT_DIR/scripts/release/preflight.sh" --artifact "$ROOT_DIR/bin/axon-core" --build-info "$ROOT_DIR/bin/axon-core.build-info" --check-pending
 
 python3 - <<'PY'
 import hashlib, json, os, pathlib
@@ -129,7 +143,9 @@ if [[ "$RESTART_LIVE" -eq 1 ]]; then
   fi
   if ! "$ROOT_DIR/scripts/axon" --instance live stop; then
     restart_failed=1
-  elif ! AXON_SKIP_BIN_SYNC=1 "$ROOT_DIR/scripts/axon" --instance live start "${start_args[@]}"; then
+  elif ! assert_live_stopped; then
+    restart_failed=1
+  elif ! AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 "$ROOT_DIR/scripts/axon" --instance live start "${start_args[@]}"; then
     restart_failed=1
   elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
     if python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \

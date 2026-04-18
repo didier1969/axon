@@ -21,15 +21,16 @@ axon_resolve_resource_policy "$AXON_INSTANCE_KIND"
 axon_resolve_version "$PROJECT_ROOT"
 
 LIVE_RELEASE_CURRENT_MANIFEST="$PROJECT_ROOT/.axon/live-release/current.json"
+LIVE_RELEASE_MANIFEST_SOURCE="${AXON_LIVE_RELEASE_MANIFEST:-$LIVE_RELEASE_CURRENT_MANIFEST}"
 LIVE_RELEASE_ACTIVE=0
 LIVE_RELEASE_ARTIFACT=""
 LIVE_RELEASE_BUILD_INFO=""
 
 load_live_release_current() {
-    [[ "$AXON_INSTANCE_KIND" == "live" && -f "$LIVE_RELEASE_CURRENT_MANIFEST" ]] || return 1
+    [[ "$AXON_INSTANCE_KIND" == "live" && -f "$LIVE_RELEASE_MANIFEST_SOURCE" ]] || return 1
 
     local payload=""
-    payload="$(python3 - "$LIVE_RELEASE_CURRENT_MANIFEST" <<'PY'
+    payload="$(python3 - "$LIVE_RELEASE_MANIFEST_SOURCE" <<'PY'
 import json, pathlib, sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
 runtime = manifest.get("runtime_version") or {}

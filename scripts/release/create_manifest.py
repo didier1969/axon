@@ -71,6 +71,18 @@ def main() -> int:
         return 2
 
     build_info_path = pathlib.Path(args.build_info).resolve()
+    preflight = repo / "scripts" / "release" / "preflight.sh"
+    subprocess.run(
+        [
+            "bash",
+            str(preflight),
+            "--artifact",
+            str(artifact),
+            "--build-info",
+            str(build_info_path),
+        ],
+        check=True,
+    )
     build_info = load_build_info(build_info_path)
 
     package_version = build_info.get("AXON_PACKAGE_VERSION") or default_package_version(repo)
@@ -98,6 +110,21 @@ def main() -> int:
         shutil.copy2(build_info_path, archived_build_info)
 
     created_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    evidence = []
+    artifact_mtime = artifact.stat().st_mtime
+    for raw in args.evidence:
+        evidence_path = pathlib.Path(raw).resolve()
+        if not evidence_path.exists():
+            print(f"Evidence not found: {evidence_path}", file=sys.stderr)
+            return 2
+        if evidence_path.stat().st_mtime < artifact_mtime:
+            print(
+                f"Evidence appears older than artifact build: {evidence_path}",
+                file=sys.stderr,
+            )
+            return 2
+        evidence.append(str(evidence_path))
+
     manifest = {
         "schema_version": 1,
         "created_at": created_at,
@@ -123,7 +150,7 @@ def main() -> int:
             "build_info_sha256": sha256_file(archived_build_info) if archived_build_info.exists() else None,
         },
         "qualification": {
-            "evidence": args.evidence,
+            "evidence": evidence,
         },
     }
 
