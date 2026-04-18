@@ -406,15 +406,11 @@ echo "📊 Resource policy: priority=$AXON_RESOURCE_PRIORITY budget=$AXON_BACKGR
 echo "🛠️ Worker cap: ${MAX_AXON_WORKERS:-auto} / Queue budget bytes: ${AXON_QUEUE_MEMORY_BUDGET_BYTES:-auto}"
 echo "🏷️ Release version: $AXON_RELEASE_VERSION"
 echo "🧱 Build id: $AXON_BUILD_ID"
-
-export WSL_IP
-WSL_IP=$(ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
-if [ -z "$WSL_IP" ]; then
-    WSL_IP="127.0.0.1"
+if [[ "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" == "1" ]]; then
+    echo "🌐 Advertised host: $AXON_PUBLIC_HOST ($AXON_PUBLIC_HOST_SOURCE)"
+else
+    echo "🌐 Advertised host: unresolved"
 fi
-export AXON_SQL_URL="http://127.0.0.1:$HYDRA_HTTP_PORT/sql"
-export AXON_MCP_URL="http://127.0.0.1:$HYDRA_HTTP_PORT/mcp"
-export AXON_DASHBOARD_URL="http://127.0.0.1:$PHX_PORT/"
 export SQL_URL="$AXON_SQL_URL"
 
 mkdir -p "$AXON_DB_ROOT" "$AXON_RUN_ROOT"
@@ -434,7 +430,13 @@ axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
   AXON_RELEASE_VERSION "$AXON_RELEASE_VERSION" \
   AXON_BUILD_ID "$AXON_BUILD_ID" \
   AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
-  AXON_INSTALL_GENERATION "$AXON_INSTALL_GENERATION"
+  AXON_INSTALL_GENERATION "$AXON_INSTALL_GENERATION" \
+  AXON_PUBLIC_HOST "${AXON_PUBLIC_HOST:-}" \
+  AXON_PUBLIC_HOST_SOURCE "${AXON_PUBLIC_HOST_SOURCE:-unresolved}" \
+  AXON_PUBLIC_ENDPOINTS_AVAILABLE "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" \
+  AXON_MCP_PUBLIC_URL "${AXON_MCP_PUBLIC_URL:-}" \
+  AXON_SQL_PUBLIC_URL "${AXON_SQL_PUBLIC_URL:-}" \
+  AXON_DASHBOARD_PUBLIC_URL "${AXON_DASHBOARD_PUBLIC_URL:-}"
 
 # Clean only the sockets and locks used by the selected runtime
 rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK"
@@ -497,6 +499,12 @@ for pass_through_var in \
     AXON_BUILD_ID \
     AXON_PACKAGE_VERSION \
     AXON_INSTALL_GENERATION \
+    AXON_PUBLIC_HOST \
+    AXON_PUBLIC_HOST_SOURCE \
+    AXON_PUBLIC_ENDPOINTS_AVAILABLE \
+    AXON_MCP_PUBLIC_URL \
+    AXON_SQL_PUBLIC_URL \
+    AXON_DASHBOARD_PUBLIC_URL \
     OMP_NUM_THREADS \
     OMP_WAIT_POLICY
 do
@@ -686,10 +694,19 @@ fi
 echo ""
 echo "🛡️ Axon is rising in TMUX session '$TMUX_SESSION'."
 echo "To view processes: 'tmux attach -t $TMUX_SESSION'"
-if [ "$START_DASHBOARD" = "1" ]; then
-    echo "Dashboard: http://$WSL_IP:$PHX_PORT/cockpit"
+if [[ "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" == "1" ]]; then
+    if [ "$START_DASHBOARD" = "1" ]; then
+        echo "Dashboard: ${AXON_DASHBOARD_PUBLIC_URL}cockpit"
+    fi
+    echo "SQL Gateway: $AXON_SQL_PUBLIC_URL"
+    echo "MCP Server: $AXON_MCP_PUBLIC_URL"
+else
+    if [ "$START_DASHBOARD" = "1" ]; then
+        echo "Dashboard (host-local): ${AXON_DASHBOARD_URL}cockpit"
+    fi
+    echo "SQL Gateway (host-local): $AXON_SQL_URL"
+    echo "MCP Server (host-local): $AXON_MCP_URL"
+    echo "Advertised endpoints unresolved. Set AXON_PUBLIC_HOST for isolated clients."
 fi
-echo "SQL Gateway: http://$WSL_IP:$HYDRA_HTTP_PORT/sql"
-echo "MCP Server: http://$WSL_IP:$HYDRA_HTTP_PORT/mcp"
 echo "Stop services with: ./scripts/axon --instance $AXON_INSTANCE_KIND stop"
 echo ""

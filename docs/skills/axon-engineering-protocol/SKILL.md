@@ -22,6 +22,10 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - Distinguish:
   - MCP `status` = protocol truth
   - `scripts/status*.sh` = local lifecycle probe
+- Distinguish endpoint classes:
+  - `instance_identity.*_url` = runtime-local host truth
+  - `advertised_endpoints.*` = client-facing endpoint truth for isolated clients/subagents
+- Isolated clients must prefer `advertised_endpoints` when available; do not treat loopback runtime URLs as externally reachable by default.
 - For MCP surface qualification, prefer `./scripts/axon qualify-mcp`; treat older entrypoints such as `quality-mcp`, `validate-mcp`, `measure-mcp`, `compare-mcp`, `robustness-mcp`, and `qualify-guidance` as expert or compatibility flows.
 - Do not mutate `live` implicitly from development workflows.
 - For release work on `live`, use the topological checklist:
@@ -62,6 +66,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 ## Core/Public Tools
 - `status`: runtime truth, availability, degradation, public surface.
 - `mcp_surface_diagnostics`: compact diagnostics for server truth vs possible stale client binding.
+- `./scripts/axon sync-codex-mcp-config`: operator path to print or explicitly refresh Codex MCP config from advertised endpoints.
 - `project_status`: compact live situation for one project.
 - `project_registry_lookup`: resolve canonical project identity from code, name, or path.
 - `query`: discovery / broad recall.
@@ -71,6 +76,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - `path`: topology / flow view.
 - `impact`: blast radius for change.
 - `anomalies`: structural findings.
+- `anomalies`: structural findings; for SOLL/greenfield intent, treat it as heuristic unless it explicitly aligns with canonical completeness.
 - `change_safety`: practical mutation safety.
 - `conception_view`: derived module/interface/contract/flow map.
 - `snapshot_history`, `snapshot_diff`: derived structural memory.
@@ -86,6 +92,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 ## First-Choice Routing
 1. `status`
 2. `mcp_surface_diagnostics` if the client-visible tool binding seems inconsistent with the public surface advertised by the server
+   - if isolated clients cannot reach Axon while the runtime is healthy, compare `instance_identity` vs `advertised_endpoints`
 3. `project_status` if you need the current project situation
 4. `project_registry_lookup` if project identity is uncertain
 5. `axon_init_project` when you want project initialization with canonical identity returned immediately
@@ -120,6 +127,10 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - `soll_manager action=create` may optionally use `attach_to` and `relation_hint` for canonical graph attachment in the same operation.
 - `soll_relation_schema` before retrying an invalid SOLL link or when canonical outgoing or incoming graph edges are unclear.
 - `soll_validate` now returns structured `repair_guidance` and `completeness`; use it to repair graph structure, not only to detect warnings.
+- canonical completeness model for greenfield work:
+  - `concept_completeness` = structural intentional baseline
+  - `implementation_completeness` = evidence/proof readiness
+  - `heuristic anomalies` must not silently override the first two
 - `soll_apply_plan` for transactional batch mutations.
 - `soll_commit_revision` to commit a preview synchronously unless future qualification forces review.
 - `soll_rollback_revision` to revert a revision.
@@ -138,6 +149,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - Prefer `retrieve_context` when an LLM needs a compact packet, not raw recall.
 - Prefer `mode=brief` by default; only expand when the first answer is insufficient.
 - Keep expert tools out of first-choice routing unless the task is truly diagnostic.
+- When `anomalies`, `soll_validate`, `soll_verify_requirements`, and `soll_work_plan` differ on a greenfield project, prefer the canonical completeness axes exposed by SOLL surfaces and treat anomaly-only intent gaps as heuristic until proven canonical.
 
 ## Maintenance Rule
 Update this skill immediately when:

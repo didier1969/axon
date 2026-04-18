@@ -28,6 +28,7 @@ Commands:
   promote-live [args...]   Promote a qualified manifest to the live install state
   rollback-live [args...]  Roll back live install state to a prior manifest
   seed-dev-from-live [args...] Refresh the dev graph root from the live graph root
+  sync-codex-mcp-config [args...] Print or refresh Codex MCP config with advertised Axon endpoints
   check-project-identity   Fail if legacy project identity terms reappear in active surfaces
   qualify-guidance [args...] Expert MCP guidance golden replay
   qualify-guidance-live    Replay live MCP guidance goldens against running server
@@ -62,6 +63,8 @@ Examples:
   ./scripts/axon promote-live --manifest .axon/releases/candidates/v0.7.0-abc.json
   ./scripts/axon rollback-live --manifest .axon/live-release/history/live-20260418T120000Z.json
   ./scripts/axon seed-dev-from-live
+  ./scripts/axon sync-codex-mcp-config
+  ./scripts/axon sync-codex-mcp-config --apply
   ./scripts/axon check-project-identity
   ./scripts/axon qualify-guidance
   ./scripts/axon qualify-guidance-live
@@ -222,6 +225,9 @@ EOF
     ;;
   seed-dev-from-live)
     exec bash "$SCRIPT_DIR/seed-dev-from-live.sh" "$@"
+    ;;
+  sync-codex-mcp-config)
+    exec bash "$SCRIPT_DIR/sync-codex-mcp-config.sh" "$@"
     ;;
   check-project-identity)
     exec python3 "$SCRIPT_DIR/check_no_project_slug.py"

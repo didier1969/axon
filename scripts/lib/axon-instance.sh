@@ -32,6 +32,92 @@ axon_normalize_instance_kind() {
     esac
 }
 
+axon_is_loopback_host() {
+    local host="${1:-}"
+    case "$host" in
+        ""|localhost|127.0.0.1|::1)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+axon_detect_public_host() {
+    local candidate=""
+
+    for candidate in \
+        "${AXON_PUBLIC_HOST:-}" \
+        "${AXON_ADVERTISED_HOST:-}" \
+        "${WSL_IP:-}"
+    do
+        if [[ -n "$candidate" ]] && ! axon_is_loopback_host "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    if command -v ip >/dev/null 2>&1; then
+        candidate="$(
+            ip route get 1.1.1.1 2>/dev/null | awk '{
+                for (i = 1; i <= NF; i++) {
+                    if ($i == "src" && (i + 1) <= NF) {
+                        print $(i + 1)
+                        exit
+                    }
+                }
+            }' || true
+        )"
+        if [[ -n "$candidate" ]] && ! axon_is_loopback_host "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+
+        candidate="$(
+            ip addr show eth0 2>/dev/null | awk '/inet / { split($2, addr, "/"); print addr[1]; exit }' || true
+        )"
+        if [[ -n "$candidate" ]] && ! axon_is_loopback_host "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+axon_resolve_public_endpoints() {
+    local public_host=""
+    local public_host_source="unresolved"
+
+    if [[ -n "${AXON_PUBLIC_HOST:-}" ]] && ! axon_is_loopback_host "${AXON_PUBLIC_HOST}"; then
+        public_host="${AXON_PUBLIC_HOST}"
+        public_host_source="explicit"
+    elif public_host="$(axon_detect_public_host 2>/dev/null || true)"; then
+        if [[ -n "$public_host" ]]; then
+            public_host_source="derived"
+        fi
+    fi
+
+    if [[ -n "$public_host" ]] && ! axon_is_loopback_host "$public_host"; then
+        export AXON_PUBLIC_HOST="$public_host"
+        export AXON_PUBLIC_HOST_SOURCE="$public_host_source"
+        export AXON_PUBLIC_ENDPOINTS_AVAILABLE="1"
+        export AXON_MCP_PUBLIC_URL="http://${public_host}:${HYDRA_HTTP_PORT}/mcp"
+        export AXON_SQL_PUBLIC_URL="http://${public_host}:${HYDRA_HTTP_PORT}/sql"
+        export AXON_DASHBOARD_PUBLIC_URL="http://${public_host}:${PHX_PORT}/"
+        return 0
+    fi
+
+    export AXON_PUBLIC_HOST=""
+    export AXON_PUBLIC_HOST_SOURCE="unresolved"
+    export AXON_PUBLIC_ENDPOINTS_AVAILABLE="0"
+    export AXON_MCP_PUBLIC_URL=""
+    export AXON_SQL_PUBLIC_URL=""
+    export AXON_DASHBOARD_PUBLIC_URL=""
+    return 1
+}
+
 axon_resolve_instance() {
     local project_root="${1:?project root required}"
     local repo_slug="${2:-$(basename "$project_root")}"
@@ -84,4 +170,5 @@ axon_resolve_instance() {
     export AXON_DASHBOARD_URL="http://127.0.0.1:${PHX_PORT}/"
     export AXON_SQL_URL="http://127.0.0.1:${HYDRA_HTTP_PORT}/sql"
     export AXON_MCP_URL="http://127.0.0.1:${HYDRA_HTTP_PORT}/mcp"
+    axon_resolve_public_endpoints || true
 }
