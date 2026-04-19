@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use super::format::format_standard_contract;
@@ -141,7 +141,12 @@ struct RequirementCoverageEntry {
     id: String,
     status: String,
     evidence_count: usize,
+    validation_count: usize,
+    has_criteria: bool,
+    broken_file_evidence_count: usize,
     state: String,
+    missing_dimensions: Vec<String>,
+    suggested_next_actions: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -745,15 +750,73 @@ fn recommendation_reason(node: &WorkPlanNode) -> String {
     }
 }
 
-fn requirement_state_from(status: &str, criteria: &str, evidence_count: usize) -> &'static str {
+fn requirement_state_from(
+    status: &str,
+    criteria: &str,
+    evidence_count: usize,
+    broken_file_evidence_count: usize,
+) -> &'static str {
     let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
-    if evidence_count > 0 && has_criteria && matches!(status, "current" | "accepted") {
+    if evidence_count > 0
+        && broken_file_evidence_count == 0
+        && has_criteria
+        && matches!(status, "current" | "accepted")
+    {
         "done"
-    } else if evidence_count > 0 || has_criteria {
+    } else if evidence_count > 0 || has_criteria || broken_file_evidence_count > 0 {
         "partial"
     } else {
         "missing"
     }
+}
+
+fn requirement_missing_dimensions(
+    status: &str,
+    has_criteria: bool,
+    evidence_count: usize,
+    validation_count: usize,
+    broken_file_evidence_count: usize,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    if !matches!(status, "current" | "accepted") {
+        missing.push("status".to_string());
+    }
+    if !has_criteria {
+        missing.push("criteria".to_string());
+    }
+    if evidence_count == 0 {
+        missing.push("evidence".to_string());
+    }
+    if validation_count == 0 {
+        missing.push("validation".to_string());
+    }
+    if broken_file_evidence_count > 0 {
+        missing.push("broken_file_evidence".to_string());
+    }
+    missing
+}
+
+fn requirement_next_actions(missing_dimensions: &[String]) -> Vec<String> {
+    let mut actions = Vec::new();
+    for dimension in missing_dimensions {
+        let action = match dimension.as_str() {
+            "status" => "set requirement status to `current` or `accepted`".to_string(),
+            "criteria" => "add acceptance criteria in requirement metadata".to_string(),
+            "evidence" => "attach proof with `soll_attach_evidence`".to_string(),
+            "validation" => {
+                "create or link a validation node that `VERIFIES` the requirement".to_string()
+            }
+            "broken_file_evidence" => {
+                "repair or replace broken file evidence paths before relying on coverage"
+                    .to_string()
+            }
+            _ => continue,
+        };
+        if !actions.contains(&action) {
+            actions.push(action);
+        }
+    }
+    actions
 }
 
 fn normalize_traceability_entity_type(entity_type: &str) -> String {
@@ -769,6 +832,63 @@ fn normalize_traceability_entity_type(entity_type: &str) -> String {
         "guideline" | "gui" => "guideline".to_string(),
         other => other.to_string(),
     }
+}
+
+fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'static str> {
+    match normalize_traceability_entity_type(entity_type).as_str() {
+        "requirement" => vec!["document", "file", "symbol", "test", "metric", "validation"],
+        "decision" => vec![
+            "document",
+            "file",
+            "symbol",
+            "rationale",
+            "diff",
+            "validation",
+        ],
+        "validation" => vec!["document", "file", "symbol", "test", "metric", "diff"],
+        "concept" => vec!["document", "file", "symbol", "rationale"],
+        "guideline" => vec!["document", "file", "symbol", "diff"],
+        "vision" | "pillar" | "milestone" | "stakeholder" => {
+            vec!["document", "file", "symbol", "metric"]
+        }
+        _ => vec!["document", "file", "symbol"],
+    }
+}
+
+fn normalize_evidence_artifact_type(raw: &str, artifact_ref: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "document" | "doc" => {
+            if artifact_ref.contains('/') || artifact_ref.ends_with(".md") {
+                "File".to_string()
+            } else {
+                "Document".to_string()
+            }
+        }
+        "file" | "path" | "uri" => "File".to_string(),
+        "symbol" | "code" => "Symbol".to_string(),
+        "test" => "Test".to_string(),
+        "metric" => "Metric".to_string(),
+        "validation" => "Validation".to_string(),
+        "rationale" => "Rationale".to_string(),
+        "diff" => "Diff".to_string(),
+        other => {
+            let mut chars = other.chars();
+            if let Some(first) = chars.next() {
+                format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+            } else {
+                "Unknown".to_string()
+            }
+        }
+    }
+}
+
+fn artifact_schema_accepts(entity_type: &str, artifact_type: &str) -> bool {
+    let normalized = artifact_type.to_ascii_lowercase();
+    accepted_evidence_artifact_schema(entity_type)
+        .iter()
+        .any(|candidate| {
+            *candidate == normalized || (*candidate == "document" && normalized == "file")
+        })
 }
 
 fn project_code_from_canonical_entity_id(entity_id: &str) -> Option<String> {
@@ -3692,6 +3812,124 @@ graph TD;
             .collect())
     }
 
+    fn canonical_project_root_for_entity(&self, entity_id: &str) -> Option<PathBuf> {
+        let project_code = project_code_from_canonical_entity_id(entity_id)?;
+        resolve_canonical_project_identity(&project_code)
+            .ok()
+            .map(|identity| identity.project_path)
+    }
+
+    fn normalize_file_artifact_ref(
+        &self,
+        entity_id: &str,
+        raw_ref: &str,
+    ) -> (Option<String>, Vec<String>) {
+        let raw = raw_ref.trim();
+        if raw.is_empty() {
+            return (None, vec!["empty_path".to_string()]);
+        }
+
+        let mut diagnostics = Vec::new();
+        let raw_path = Path::new(raw);
+        let project_root = self.canonical_project_root_for_entity(entity_id);
+        let mut candidates = Vec::new();
+        candidates.push(raw.to_string());
+
+        if raw_path.is_absolute() {
+            candidates.push(raw_path.to_string_lossy().into_owned());
+        } else if let Some(root) = project_root.as_ref() {
+            candidates.push(root.join(raw_path).to_string_lossy().into_owned());
+        }
+
+        if let Some(root) = project_root.as_ref() {
+            let candidate_absolute = if raw_path.is_absolute() {
+                raw_path.to_path_buf()
+            } else {
+                root.join(raw_path)
+            };
+
+            if let Ok(relative) = candidate_absolute.strip_prefix(root) {
+                candidates.push(relative.to_string_lossy().into_owned());
+                diagnostics.push("normalized_relative_project_path".to_string());
+            }
+        }
+
+        candidates.sort();
+        candidates.dedup();
+
+        for candidate in &candidates {
+            let query = format!(
+                "SELECT path FROM File WHERE path = '{}' LIMIT 1",
+                escape_sql(candidate)
+            );
+            if let Ok(paths) = self.query_single_column(&query) {
+                if let Some(path) = paths.into_iter().next() {
+                    diagnostics.push("matched_indexed_file".to_string());
+                    return (Some(path), diagnostics);
+                }
+            }
+        }
+
+        let preferred = if let Some(root) = project_root.as_ref() {
+            let absolute = if raw_path.is_absolute() {
+                raw_path.to_path_buf()
+            } else {
+                root.join(raw_path)
+            };
+            if absolute.exists() {
+                if let Ok(relative) = absolute.strip_prefix(root) {
+                    diagnostics.push("resolved_existing_project_file".to_string());
+                    Some(relative.to_string_lossy().into_owned())
+                } else {
+                    diagnostics.push("resolved_existing_absolute_file".to_string());
+                    Some(absolute.to_string_lossy().into_owned())
+                }
+            } else {
+                None
+            }
+        } else if raw_path.exists() {
+            diagnostics.push("resolved_existing_absolute_file".to_string());
+            Some(raw_path.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+
+        if preferred.is_none() {
+            diagnostics.push("path_not_resolvable".to_string());
+        }
+
+        (preferred, diagnostics)
+    }
+
+    fn broken_file_evidence_count_for_requirement(&self, requirement_id: &str) -> usize {
+        let project_root = self.canonical_project_root_for_entity(requirement_id);
+        let query = format!(
+            "SELECT COALESCE(artifact_ref, '') FROM soll.Traceability
+             WHERE lower(soll_entity_type) = 'requirement'
+               AND soll_entity_id = '{}'
+               AND lower(artifact_type) IN ('file', 'document')",
+            escape_sql(requirement_id)
+        );
+        let refs = self.query_single_column(&query).unwrap_or_default();
+        refs.into_iter()
+            .filter(|artifact_ref| {
+                let raw = artifact_ref.trim();
+                if raw.is_empty() {
+                    return false;
+                }
+                let path = Path::new(raw);
+                let candidate = if path.is_absolute() {
+                    path.to_path_buf()
+                } else if let Some(root) = project_root.as_ref() {
+                    root.join(path)
+                } else {
+                    path.to_path_buf()
+                };
+                !candidate.exists()
+            })
+            .count()
+    }
+
     fn requirement_coverage_summary(
         &self,
         project_code: &str,
@@ -3701,14 +3939,20 @@ graph TD;
             "SELECT r.id,
                     COALESCE(r.status,''),
                     COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), ''),
-                    COUNT(t.id)
+                    COUNT(DISTINCT t.id),
+                    COUNT(DISTINCT CASE WHEN e.relation_type = 'VERIFIES' THEN e.source_id END)
              FROM soll.Node r
              LEFT JOIN soll.Traceability t
                ON lower(t.soll_entity_type) = lower(r.type)
               AND t.soll_entity_id = r.id
+             LEFT JOIN soll.Edge e
+               ON e.target_id = r.id
+              AND e.relation_type = 'VERIFIES'
+              AND e.source_id LIKE 'VAL-{}-%'
              WHERE r.type='Requirement' AND r.id LIKE 'REQ-{}-%'
              GROUP BY 1,2,3
              ORDER BY r.id",
+            escape_sql(&project_code),
             escape_sql(&project_code)
         );
         let rows_raw = self.graph_store.query_json(&query)?;
@@ -3716,14 +3960,30 @@ graph TD;
         let mut summary = RequirementCoverageSummary::default();
 
         for row in rows {
-            if row.len() < 4 {
+            if row.len() < 5 {
                 continue;
             }
             let id = row[0].clone();
             let status = row[1].clone();
             let criteria = row[2].clone();
             let evidence_count = row[3].parse::<usize>().unwrap_or(0);
-            let state = requirement_state_from(status.as_str(), &criteria, evidence_count);
+            let validation_count = row[4].parse::<usize>().unwrap_or(0);
+            let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
+            let broken_file_evidence_count = self.broken_file_evidence_count_for_requirement(&id);
+            let state = requirement_state_from(
+                status.as_str(),
+                &criteria,
+                evidence_count,
+                broken_file_evidence_count,
+            );
+            let missing_dimensions = requirement_missing_dimensions(
+                status.as_str(),
+                has_criteria,
+                evidence_count,
+                validation_count,
+                broken_file_evidence_count,
+            );
+            let suggested_next_actions = requirement_next_actions(&missing_dimensions);
 
             match state {
                 "done" => summary.done += 1,
@@ -3735,7 +3995,12 @@ graph TD;
                 id,
                 status,
                 evidence_count,
+                validation_count,
+                has_criteria,
+                broken_file_evidence_count,
                 state: state.to_string(),
+                missing_dimensions,
+                suggested_next_actions,
             });
         }
 
@@ -6553,17 +6818,60 @@ impl McpServer {
         let mut attached = 0usize;
         let now = now_unix_ms();
         let normalized_entity_type = normalize_traceability_entity_type(entity_type);
+        let accepted_schema = accepted_evidence_artifact_schema(&normalized_entity_type)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut artifact_diagnostics = Vec::new();
+        let mut fallback_guidance = Vec::new();
 
         for (idx, art) in artifacts.iter().enumerate() {
+            let raw_artifact_ref = art
+                .get("artifact_ref")
+                .or_else(|| art.get("path"))
+                .or_else(|| art.get("file_path"))
+                .or_else(|| art.get("uri"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let artifact_type = art
                 .get("artifact_type")
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let artifact_ref = art
-                .get("artifact_ref")
-                .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let normalized_artifact_type =
+                normalize_evidence_artifact_type(artifact_type, raw_artifact_ref);
+            let mut diagnostic_reasons = Vec::new();
+            let artifact_ref = if normalized_artifact_type == "File" {
+                let (normalized, normalization_diagnostics) =
+                    self.normalize_file_artifact_ref(entity_id, raw_artifact_ref);
+                diagnostic_reasons.extend(normalization_diagnostics);
+                normalized.unwrap_or_default()
+            } else {
+                raw_artifact_ref.trim().to_string()
+            };
+
             if artifact_ref.is_empty() {
+                diagnostic_reasons.push("missing_artifact_ref".to_string());
+                artifact_diagnostics.push(json!({
+                    "index": idx,
+                    "input": art,
+                    "status": "rejected",
+                    "normalized_artifact_type": normalized_artifact_type,
+                    "normalized_artifact_ref": artifact_ref,
+                    "reasons": diagnostic_reasons
+                }));
+                continue;
+            }
+            if !artifact_schema_accepts(&normalized_entity_type, &normalized_artifact_type) {
+                diagnostic_reasons.push("artifact_type_not_allowed_for_entity".to_string());
+                artifact_diagnostics.push(json!({
+                    "index": idx,
+                    "input": art,
+                    "status": "rejected",
+                    "normalized_artifact_type": normalized_artifact_type,
+                    "normalized_artifact_ref": artifact_ref,
+                    "reasons": diagnostic_reasons,
+                    "accepted_artifact_schema": accepted_schema
+                }));
                 continue;
             }
             let confidence = art
@@ -6580,15 +6888,51 @@ impl McpServer {
             if self.graph_store.execute_param(
                 "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                &json!([trace_id, normalized_entity_type, entity_id, artifact_type, artifact_ref, confidence, metadata, now]),
+                &json!([trace_id, normalized_entity_type, entity_id, normalized_artifact_type, artifact_ref, confidence, metadata, now]),
             ).is_ok() {
                 attached += 1;
+                diagnostic_reasons.push("traceability_inserted".to_string());
+                artifact_diagnostics.push(json!({
+                    "index": idx,
+                    "input": art,
+                    "status": "attached",
+                    "normalized_artifact_type": normalized_artifact_type,
+                    "normalized_artifact_ref": artifact_ref,
+                    "reasons": diagnostic_reasons
+                }));
+            } else {
+                diagnostic_reasons.push("traceability_insert_failed".to_string());
+                artifact_diagnostics.push(json!({
+                    "index": idx,
+                    "input": art,
+                    "status": "rejected",
+                    "normalized_artifact_type": normalized_artifact_type,
+                    "normalized_artifact_ref": artifact_ref,
+                    "reasons": diagnostic_reasons
+                }));
             }
+        }
+
+        if attached == 0 {
+            if normalized_entity_type == "requirement" {
+                fallback_guidance
+                    .push("If file evidence still fails, attach the proof to a validation node first and link that validation with `VERIFIES`.".to_string());
+            }
+            fallback_guidance.push(
+                "Use `artifact_ref`, `path`, `file_path`, or `uri`; file artifacts are normalized against the canonical project root when possible."
+                    .to_string(),
+            );
         }
 
         Some(json!({
             "content": [{"type":"text","text": format!("Attached {} evidence item(s) to {}:{}", attached, entity_type, entity_id)}],
-            "data": {"attached": attached, "normalized_entity_type": normalize_traceability_entity_type(entity_type)}
+            "data": {
+                "attached": attached,
+                "normalized_entity_type": normalize_traceability_entity_type(entity_type),
+                "accepted_artifact_schema": accepted_schema,
+                "artifact_diagnostics": artifact_diagnostics,
+                "fallback_guidance": fallback_guidance
+            }
         }))
     }
 
@@ -6898,7 +7242,12 @@ impl McpServer {
                     "id": entry.id,
                     "state": entry.state,
                     "status": entry.status,
-                    "evidence_count": entry.evidence_count
+                    "evidence_count": entry.evidence_count,
+                    "validation_count": entry.validation_count,
+                    "has_criteria": entry.has_criteria,
+                    "broken_file_evidence_count": entry.broken_file_evidence_count,
+                    "missing_dimensions": entry.missing_dimensions,
+                    "suggested_next_actions": entry.suggested_next_actions
                 })
             })
             .collect::<Vec<_>>();

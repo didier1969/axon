@@ -281,6 +281,7 @@ impl McpServer {
         }
 
         let mode = args.get("mode").and_then(|value| value.as_str());
+        let prefer_project_intent = Self::prefer_project_intent(question, mode);
         let project = args.get("project").and_then(|value| value.as_str());
         let project_scope_variants = Self::project_scope_variants(project);
         let token_budget = args
@@ -352,6 +353,7 @@ impl McpServer {
             &terms_for_reasoning,
             &path_hints,
             &project_scope_variants,
+            prefer_project_intent,
         );
         let entry_candidates = self.select_entry_candidates(&entry_candidates, top_k);
         timings.entry_lookup_ms = stage_started_at.elapsed().as_millis() as u64;
@@ -399,6 +401,7 @@ impl McpServer {
             &terms_for_reasoning,
             &entry_candidates,
             &project_scope_variants,
+            prefer_project_intent,
         );
         timings.chunk_lookup_ms = stage_started_at.elapsed().as_millis() as u64;
 
@@ -796,6 +799,49 @@ impl McpServer {
             route,
             RetrievalRoute::ExactLookup | RetrievalRoute::Wiring | RetrievalRoute::Impact
         )
+    }
+
+    fn prefer_project_intent(question: &str, mode: Option<&str>) -> bool {
+        if mode.is_some_and(|value| value.eq_ignore_ascii_case("intent")) {
+            return true;
+        }
+        let lower = question.to_ascii_lowercase();
+        [
+            "soll mutation",
+            "what soll mutation",
+            "implementation plan",
+            "concept foundation",
+            "must support",
+            "weekly plan",
+            "project intent",
+            "entrench",
+            "recipe creation",
+            "normalization",
+            "attachment",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    }
+
+    pub(crate) fn project_intent_doc_weight(uri: &str) -> f64 {
+        let lower = uri.to_ascii_lowercase();
+        let mut score = 0.0;
+        if lower.contains("/docs/plans/") || lower.starts_with("docs/plans/") {
+            score += 4.0;
+        }
+        if lower.contains("concept-foundation") {
+            score += 3.0;
+        }
+        if lower.contains("implementation-plan") {
+            score += 3.0;
+        }
+        if lower.contains("feedback-axon") {
+            score -= 6.0;
+        }
+        if lower.contains("operator") || lower.contains("retrospective") {
+            score -= 2.0;
+        }
+        score
     }
 
     fn uri_penalty_reason(uri: &str) -> Option<&'static str> {
@@ -1302,6 +1348,7 @@ impl McpServer {
         terms: &[String],
         path_hints: &[String],
         project_scope_variants: &[String],
+        prefer_project_intent: bool,
     ) {
         let scope_lc = project_scope_variants
             .iter()
@@ -1332,6 +1379,20 @@ impl McpServer {
             if candidate.kind == "file" {
                 score += 1.0;
                 candidate.reasons.push("file_entrypoint".to_string());
+            }
+            if prefer_project_intent {
+                let intent_weight = Self::project_intent_doc_weight(&candidate.uri);
+                if intent_weight > 0.0 {
+                    score += intent_weight;
+                    candidate
+                        .reasons
+                        .push("intent_canonical_plan_bonus".to_string());
+                } else if intent_weight < 0.0 {
+                    score += intent_weight;
+                    candidate
+                        .reasons
+                        .push("intent_feedback_penalty".to_string());
+                }
             }
             if path_hints
                 .iter()
@@ -1669,6 +1730,7 @@ impl McpServer {
         terms: &[String],
         entry_candidates: &[EntryCandidate],
         project_scope_variants: &[String],
+        prefer_project_intent: bool,
     ) {
         let entry_uris = entry_candidates
             .iter()
@@ -1707,6 +1769,20 @@ impl McpServer {
             }
             if entry_uris.contains(&candidate.uri.to_ascii_lowercase()) {
                 score += 1.0;
+            }
+            if prefer_project_intent {
+                let intent_weight = Self::project_intent_doc_weight(&candidate.uri);
+                if intent_weight > 0.0 {
+                    score += intent_weight;
+                    candidate
+                        .reasons
+                        .push("intent_canonical_plan_bonus".to_string());
+                } else if intent_weight < 0.0 {
+                    score += intent_weight;
+                    candidate
+                        .reasons
+                        .push("intent_feedback_penalty".to_string());
+                }
             }
             if Self::route_prefers_operational_code(route) {
                 if let Some(reason) = Self::chunk_penalty_reason(candidate) {

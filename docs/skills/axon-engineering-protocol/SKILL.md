@@ -66,12 +66,18 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 ## Core/Public Tools
 - `status`: runtime truth, availability, degradation, public surface.
 - `mcp_surface_diagnostics`: compact diagnostics for server truth vs possible stale client binding.
+- `mcp_surface_diagnostics` now exposes explicit client freshness semantics:
+  - `session_freshness_status`
+  - `canonical_refresh_instruction`
+  - `safe_to_rely_on_now`
+  - `may_require_client_refresh`
 - `./scripts/axon sync-codex-mcp-config`: operator path to print or explicitly refresh Codex MCP config from advertised endpoints.
 - `project_status`: compact live situation for one project.
 - `project_registry_lookup`: resolve canonical project identity from code, name, or path.
 - `query`: discovery / broad recall.
 - `inspect`: precise zoom on a known target.
 - `retrieve_context`: answerable evidence packet for LLM work.
+- prefer `retrieve_context(..., mode="intent")` for project steering, SOLL mutation suggestions, concept docs, and implementation plan recovery.
 - `why`: rationale view.
 - `path`: topology / flow view.
 - `impact`: blast radius for change.
@@ -145,6 +151,15 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - human navigation must not depend only on clickable Mermaid nodes; tree links and surrounding HTML links are the canonical path.
 - side panes may be resized or collapsed completely; the center pane must expand accordingly.
 - `soll_validate` now returns structured `repair_guidance` and `completeness`; use it to repair graph structure, not only to detect warnings.
+- `soll_attach_evidence` should be read as an operational proof tool, not a blind append:
+  - it accepts `artifact_ref`, `path`, `file_path`, or `uri`
+  - file artifacts are normalized against the canonical project root when possible
+  - it returns per-artifact diagnostics, accepted artifact schema, and fallback guidance on rejection
+- `soll_verify_requirements` now returns richer requirement-level proof diagnostics:
+  - `missing_dimensions`
+  - `suggested_next_actions`
+  - `validation_count`
+  - `broken_file_evidence_count`
 - successful bounded SOLL mutations should return machine-readable `mutation_feedback`:
   - `changed_entities`
   - `topology_delta`

@@ -75,7 +75,7 @@ impl McpServer {
         Some(json!({
             "content": [{
                 "type": "text",
-                "text": "Surface MCP diagnostics assembled. Server truth is authoritative for catalog and dispatch. Active client binding may still lag until the client refreshes its session."
+                "text": "Surface MCP diagnostics assembled. Server truth is authoritative for catalog and dispatch. Client session freshness is explicit below; refresh the client session when a freshly advertised tool is missing locally."
             }],
             "data": {
                 "server_truth": {
@@ -119,7 +119,19 @@ impl McpServer {
                 },
                 "client_binding_notes": {
                     "stale_client_binding_possible": true,
+                    "session_freshness_status": "unknown_outside_server",
                     "operator_action": "If a freshly advertised public tool is not callable in the current client session, refresh or restart the client session and compare again.",
+                    "canonical_refresh_instruction": "Refresh or reconnect the MCP client session, then compare its visible tool surface with `mcp_surface_diagnostics.server_truth.public_tools`.",
+                    "safe_to_rely_on_now": [
+                        "server truth for catalog and dispatch",
+                        "advertised_endpoints for isolated clients",
+                        "existing tools already visible in the active session"
+                    ],
+                    "may_require_client_refresh": [
+                        "newly added public tools",
+                        "freshly promoted endpoint changes",
+                        "session-local tool bindings cached by the client"
+                    ],
                     "guarantee_boundary": "The server guarantees catalog truth, dispatch truth, and advertised endpoint truth. Client session bindings are outside direct server control.",
                     "external_endpoint_rule": "Do not use instance_identity.*_url as an external endpoint. Isolated clients must prefer advertised_endpoints.* when available."
                 }

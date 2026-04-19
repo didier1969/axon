@@ -1827,6 +1827,16 @@ fn test_mcp_surface_diagnostics_exposes_server_truth_and_binding_caveat() {
         Some(true)
     );
     assert_eq!(
+        data["client_binding_notes"]["session_freshness_status"].as_str(),
+        Some("unknown_outside_server")
+    );
+    assert!(
+        data["client_binding_notes"]["canonical_refresh_instruction"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Refresh or reconnect")
+    );
+    assert_eq!(
         data["advertised_endpoints"]["available"].as_bool(),
         Some(true)
     );
@@ -2018,6 +2028,20 @@ fn test_status_exposes_advertised_endpoints_separately_from_runtime_local_urls()
         std::env::remove_var("AXON_SQL_PUBLIC_URL");
         std::env::remove_var("AXON_DASHBOARD_PUBLIC_URL");
     }
+}
+
+#[test]
+fn test_retrieve_context_intent_mode_prefers_plan_docs_over_feedback_docs() {
+    let plan_weight = McpServer::project_intent_doc_weight(
+        "docs/plans/2026-04-19-nutri-opti-concept-foundation.md",
+    );
+    let feedback_weight = McpServer::project_intent_doc_weight("feedback-axon-soll-2026-04-19.md");
+    assert!(plan_weight > feedback_weight);
+    assert!(plan_weight > 0.0);
+    assert!(
+        feedback_weight < 0.0,
+        "expected feedback docs to be penalized, got {feedback_weight}"
+    );
 }
 
 #[test]
@@ -9349,6 +9373,121 @@ fn test_soll_attach_evidence_normalizes_entity_type_for_requirement_verification
     assert_eq!(data["done"].as_u64(), Some(1));
     assert_eq!(data["partial"].as_u64(), Some(0));
     assert_eq!(data["missing"].as_u64(), Some(0));
+}
+
+#[test]
+fn test_soll_attach_evidence_accepts_file_path_aliases_and_reports_rejections() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-211', 'Requirement', 'AXO', 'File evidence alias', 'File path aliases should attach and explain failures', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("repo root");
+    let valid_path = repo_root.join("README.md");
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "Requirement",
+                    "entity_id": "REQ-AXO-211",
+                    "artifacts": [
+                        {
+                            "artifact_type": "document",
+                            "path": valid_path.to_string_lossy().to_string(),
+                            "confidence": 1.0
+                        },
+                        {
+                            "artifact_type": "document",
+                            "path": "docs/plans/does-not-exist.md"
+                        }
+                    ]
+                }
+            })),
+            id: Some(json!(41121)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = result["data"].clone();
+    assert_eq!(data["attached"].as_u64(), Some(1));
+    let accepted_schema = data["accepted_artifact_schema"].as_array().expect("schema");
+    assert!(accepted_schema
+        .iter()
+        .any(|value| value.as_str() == Some("document")));
+    let diagnostics = data["artifact_diagnostics"]
+        .as_array()
+        .expect("artifact diagnostics");
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(diagnostics[0]["status"].as_str(), Some("attached"));
+    assert_eq!(
+        diagnostics[0]["normalized_artifact_type"].as_str(),
+        Some("File")
+    );
+    assert_eq!(diagnostics[1]["status"].as_str(), Some("rejected"));
+    let rejected_reasons = diagnostics[1]["reasons"]
+        .as_array()
+        .expect("rejected reasons");
+    assert!(
+        rejected_reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("path_not_resolvable")),
+        "{result}"
+    );
+}
+
+#[test]
+fn test_soll_verify_requirements_returns_missing_dimensions_and_actions() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-212', 'Requirement', 'AXO', 'Actionable verification', 'Verification should explain why this requirement is partial', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_verify_requirements",
+                "arguments": { "project_code": "AXO" }
+            })),
+            id: Some(json!(41122)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let details = result["data"]["details"].as_array().expect("details");
+    let entry = details
+        .iter()
+        .find(|value| value["id"].as_str() == Some("REQ-AXO-212"))
+        .expect("requirement entry");
+    assert_eq!(entry["state"].as_str(), Some("partial"));
+    let missing_dimensions = entry["missing_dimensions"]
+        .as_array()
+        .expect("missing dimensions");
+    assert!(missing_dimensions
+        .iter()
+        .any(|value| value.as_str() == Some("evidence")));
+    assert!(missing_dimensions
+        .iter()
+        .any(|value| value.as_str() == Some("validation")));
+    let next_actions = entry["suggested_next_actions"]
+        .as_array()
+        .expect("next actions");
+    assert!(next_actions.iter().any(|value| value
+        .as_str()
+        .unwrap_or_default()
+        .contains("soll_attach_evidence")));
 }
 
 #[test]
