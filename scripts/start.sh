@@ -120,6 +120,25 @@ instance_runtime_pids() {
     echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -u
 }
 
+cleanup_stale_runtime_state() {
+    rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK" "$AXON_PID_FILE" "$AXON_RUNTIME_STATE_FILE"
+}
+
+has_live_runtime_dataplane() {
+    local pid
+    for pid in $(instance_runtime_pids); do
+        if [[ -n "$pid" && -e "/proc/$pid" ]]; then
+            return 0
+        fi
+    done
+
+    if nc -z localhost "$HYDRA_HTTP_PORT" 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --full)
@@ -243,7 +262,7 @@ if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
         bash "$PROJECT_ROOT/scripts/stop.sh"
     fi
 
-    if nc -z localhost "$HYDRA_HTTP_PORT" 2>/dev/null || [ -S "$AXON_TELEMETRY_SOCK" ]; then
+    if has_live_runtime_dataplane; then
         echo "ℹ️ Axon is already running in TMUX session '$TMUX_SESSION'."
         echo "   Attach with: tmux attach -t $TMUX_SESSION"
         exit 0
@@ -251,6 +270,10 @@ if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
 
     echo "⚠️ Found stale TMUX session '$TMUX_SESSION' without a healthy data plane. Resetting local runtime state..."
     tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    cleanup_stale_runtime_state
+elif [[ -S "$AXON_TELEMETRY_SOCK" || -S "$AXON_MCP_SOCK" || -f "$AXON_PID_FILE" ]]; then
+    echo "⚠️ Found stale local runtime state without a TMUX session. Cleaning sockets/pid and continuing..."
+    cleanup_stale_runtime_state
 fi
 
 # 1. Verify nix-daemon is running (WSL2 specific mitigation)

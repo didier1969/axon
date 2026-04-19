@@ -47,6 +47,28 @@ impl Drop for RuntimeEnvGuard {
     }
 }
 
+struct SollSiteRootGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl SollSiteRootGuard {
+    fn new(path: &Path) -> Self {
+        let lock = env_lock();
+        unsafe {
+            std::env::set_var("AXON_SOLL_SITE_ROOT", path);
+        }
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for SollSiteRootGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("AXON_SOLL_SITE_ROOT");
+        }
+    }
+}
+
 fn create_test_server() -> McpServer {
     let store = Arc::new(
         GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap()),
@@ -799,6 +821,9 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"project_status"));
     assert!(tool_names.contains(&"project_registry_lookup"));
     assert!(tool_names.contains(&"soll_relation_schema"));
+    assert!(tool_names.contains(&"infer_soll_mutation"));
+    assert!(tool_names.contains(&"entrench_nuance"));
+    assert!(tool_names.contains(&"soll_generate_docs"));
     assert!(tool_names.contains(&"snapshot_history"));
     assert!(tool_names.contains(&"snapshot_diff"));
     assert!(tool_names.contains(&"conception_view"));
@@ -870,6 +895,8 @@ fn test_mcp_tools_list_in_full_autonomous_exposes_core_and_hides_relegated_tools
     assert!(tool_names.contains(&"batch"));
     assert!(tool_names.contains(&"job_status"));
     assert!(tool_names.contains(&"architectural_drift"));
+    assert!(tool_names.contains(&"infer_soll_mutation"));
+    assert!(tool_names.contains(&"entrench_nuance"));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -981,8 +1008,10 @@ fn test_soll_manager_stays_sync_when_mutation_jobs_are_enabled() {
 #[test]
 fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
     let _guard = env_lock();
+    let site_root = tempdir().unwrap();
     unsafe {
         std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+        std::env::set_var("AXON_SOLL_SITE_ROOT", site_root.path());
     }
     let server = create_test_server();
 
@@ -1037,9 +1066,15 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
         .as_str()
         .expect("preview id should survive job result");
     assert_eq!(result_preview_id, preview_id);
+    assert_eq!(
+        final_status["data"]["result"]["data"]["derived_docs_refresh"]["status"].as_str(),
+        Some("ok")
+    );
+    assert!(site_root.path().join("AXO/index.html").is_file());
 
     unsafe {
         std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+        std::env::remove_var("AXON_SOLL_SITE_ROOT");
     }
 }
 
@@ -6294,6 +6329,221 @@ fn test_axon_soll_manager_create_requires_explicit_canonical_project_code() {
 }
 
 #[test]
+fn test_infer_soll_mutation_returns_impacted_existing_candidates() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'Perishability ordering', 'Short-life ingredients must be consumed earlier in the week.', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "infer_soll_mutation",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Weekly shopping should allow grouped purchases."
+                }
+            })),
+            id: Some(json!(1)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(
+        result["data"]["proposed_operation_kind"].as_str(),
+        Some("update_existing_entities")
+    );
+    assert_eq!(
+        result["data"]["candidate_entity_type"].as_str(),
+        Some("Requirement")
+    );
+    assert_eq!(
+        result["data"]["target_ids"][0].as_str(),
+        Some("REQ-AXO-001")
+    );
+}
+
+#[test]
+fn test_entrench_nuance_requires_confirmation_before_write() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "entrench_nuance",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Weekly shopping should allow grouped purchases."
+                }
+            })),
+            id: Some(json!(2)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["data"]["confirm_required"].as_bool(), Some(true));
+
+    let rows = server
+        .graph_store
+        .query_json("SELECT metadata FROM soll.Node WHERE id = 'REQ-AXO-001'")
+        .unwrap();
+    assert!(!rows.contains("nuances"));
+}
+
+#[test]
+fn test_entrench_nuance_confirmed_updates_existing_nodes_and_returns_feedback() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "entrench_nuance",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Weekly shopping should allow grouped purchases.",
+                    "confirm": true,
+                    "target_ids": ["REQ-AXO-001"]
+                }
+            })),
+            id: Some(json!(3)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["data"]["confirm_required"].as_bool(), Some(false));
+    assert_eq!(
+        result["data"]["mutation_feedback"]["changed_entities"][0]["id"].as_str(),
+        Some("REQ-AXO-001")
+    );
+
+    let rows = server
+        .graph_store
+        .query_json("SELECT metadata FROM soll.Node WHERE id = 'REQ-AXO-001'")
+        .unwrap();
+    assert!(rows.contains("Weekly shopping should allow grouped purchases."));
+    assert!(rows.contains("nuances"));
+}
+
+#[test]
+fn test_entrench_nuance_confirmed_rejects_cross_project_target_ids() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry("NTO", Some("Nutri"), Some("/tmp/nutri"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-NTO-001', 'Requirement', 'NTO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "entrench_nuance",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Weekly shopping should allow grouped purchases.",
+                    "confirm": true,
+                    "target_ids": ["REQ-NTO-001"]
+                }
+            })),
+            id: Some(json!(31)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    assert_eq!(
+        result["data"]["invalid_target_ids"][0].as_str(),
+        Some("REQ-NTO-001")
+    );
+}
+
+#[test]
+fn test_entrench_nuance_confirmed_requires_explicit_scope_when_inference_is_ambiguous() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'Grouped shopping purchases v2', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "entrench_nuance",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Weekly shopping should allow grouped purchases.",
+                    "confirm": true
+                }
+            })),
+            id: Some(json!(32)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    assert!(result["data"]["ambiguity_warnings"].is_array());
+}
+
+#[test]
+fn test_soll_manager_create_returns_mutation_feedback() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "create",
+                    "entity": "requirement",
+                    "project_code": "AXO",
+                    "data": {
+                        "project_code": "AXO",
+                        "title": "Roadmap feedback requirement",
+                        "description": "A new canonical requirement from roadmap feedback."
+                    }
+                }
+            })),
+            id: Some(json!(4)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert!(result["data"]["mutation_feedback"].is_object());
+    assert_eq!(
+        result["data"]["mutation_feedback"]["topology_delta"]["nodes_created"].as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
 fn test_axon_soll_apply_plan_rejects_non_canonical_project_identifier() {
     let server = create_test_server();
 
@@ -8884,6 +9134,11 @@ fn test_soll_relation_schema_resolves_pair_by_ids() {
     assert_eq!(data["source_kind"].as_str(), Some("DEC"));
     assert_eq!(data["target_kind"].as_str(), Some("REQ"));
     assert_eq!(data["default_relation"].as_str(), Some("SOLVES"));
+    assert_eq!(data["projection"]["role"].as_str(), Some("primary"));
+    assert_eq!(
+        data["projection"]["parent_preference_rank"].as_u64(),
+        Some(10)
+    );
     assert!(data["allowed_target_kinds_from_source"]
         .as_array()
         .is_some());
@@ -8952,6 +9207,10 @@ fn test_soll_relation_schema_source_only_is_constructive_for_vision_and_pillar()
         vision_data["graph_role"].as_str(),
         Some("project north star")
     );
+    assert_eq!(
+        vision_data["kind_projection"]["root_eligible"].as_bool(),
+        Some(true)
+    );
     assert!(vision_data["recommended_incoming_links_to_source_kind"]
         .as_array()
         .expect("incoming guidance")
@@ -8975,6 +9234,10 @@ fn test_soll_relation_schema_source_only_is_constructive_for_vision_and_pillar()
         .unwrap();
     let pillar_data = pillar_response.get("data").expect("pillar guidance");
     assert_eq!(pillar_data["source_kind"].as_str(), Some("PIL"));
+    assert_eq!(
+        pillar_data["kind_projection"]["tree_order_rank"].as_u64(),
+        Some(20)
+    );
     assert!(pillar_data["allowed_target_kinds_from_source"]
         .as_array()
         .expect("outgoing guidance")
@@ -8985,6 +9248,11 @@ fn test_soll_relation_schema_source_only_is_constructive_for_vision_and_pillar()
         .expect("incoming guidance")
         .iter()
         .any(|item| item["source_kind"].as_str() == Some("REQ")));
+    assert!(pillar_data["allowed_target_kinds_from_source"]
+        .as_array()
+        .expect("outgoing guidance")
+        .iter()
+        .any(|item| item["projection"]["role"].as_str() == Some("primary")));
 }
 
 #[test]
@@ -9847,6 +10115,441 @@ fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
         content
     );
     assert!(content.contains("Exported to"), "{}", content);
+    if let Some(export_path) = content
+        .lines()
+        .find_map(|line| line.strip_prefix("✅ Exported to "))
+        .map(str::trim)
+    {
+        let _ = std::fs::remove_file(export_path);
+    }
+}
+
+#[test]
+fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Operational truth', 'Pillar desc', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Human-readable docs', 'Readable docs for humans', 'current', '{\"priority\":\"P1\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Generate derived site', 'Decision desc', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('PIL-AXO-001', 'VIS-AXO-001', 'EPITOMIZES')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-AXO-001', 'PIL-AXO-001', 'BELONGS_TO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-001', 'REQ-AXO-001', 'SOLVES')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_generate_docs",
+                "arguments": {
+                    "project_code": "AXO",
+                    "output_dir": out.path().to_string_lossy().to_string()
+                }
+            })),
+            id: Some(json!(9910)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(result["data"]["pages_total"].as_u64(), Some(7));
+    assert!(result["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Generated navigable SOLL docs"));
+
+    let index_path = out.path().join("index.html");
+    let node_path = out.path().join("nodes/REQ-AXO-001.html");
+    let subtree_path = out.path().join("subtrees/VIS-AXO-001.html");
+    let manifest_path = out.path().join("_manifest.json");
+
+    assert!(index_path.is_file());
+    assert!(node_path.is_file());
+    assert!(subtree_path.is_file());
+    assert!(manifest_path.is_file());
+
+    let index_html = std::fs::read_to_string(index_path).unwrap();
+    assert!(index_html.contains("mermaid.initialize"));
+    assert!(index_html.contains("PIL-AXO-001"));
+    assert!(index_html.contains("toggle-left"));
+    assert!(index_html.contains("toggle-right"));
+    assert!(index_html.contains("Project Tree"));
+    assert!(index_html.contains("Vision Children"));
+    assert!(index_html.contains("derived / non-canonical"));
+    assert!(index_html.contains("All Node Pages"));
+    assert!(index_html.contains("nodes/REQ-AXO-001.html"));
+    assert!(index_html.contains("flowchart LR"));
+
+    let node_html = std::fs::read_to_string(node_path).unwrap();
+    assert!(node_html.contains("Readable docs for humans"));
+    assert!(node_html.contains("Incoming Neighbors"));
+    assert!(node_html.contains("Canonical Relations"));
+    assert!(node_html.contains("Primary Hierarchy Parents"));
+    assert!(node_html.contains("Primary Hierarchy Children"));
+    assert!(node_html.contains("Containing Subtrees"));
+    assert!(node_html.contains("Primary Parent Node Pages"));
+    assert!(node_html.contains("toggle-left"));
+    assert!(node_html.contains("toggle-right"));
+    assert!(node_html.contains("not as canonical restore input"));
+    assert!(node_html
+        .contains("Parent/child sections below show only the primary hierarchy projection"));
+
+    let subtree_html = std::fs::read_to_string(subtree_path).unwrap();
+    assert!(subtree_html.contains("All Nodes In This Subtree"));
+    assert!(subtree_html.contains("../nodes/REQ-AXO-001.html"));
+    assert!(subtree_html.contains("derived / non-canonical"));
+
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["project_code"].as_str(), Some("AXO"));
+    assert_eq!(manifest["pages_total"].as_u64(), Some(7));
+}
+
+#[test]
+fn test_soll_generate_docs_keeps_unattached_nodes_out_of_primary_project_roots() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-999', 'Decision', 'AXO', 'Detached decision', 'No hierarchy parent', 'draft', '{}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_generate_docs",
+                "arguments": {
+                    "project_code": "AXO",
+                    "output_dir": out.path().to_string_lossy().to_string()
+                }
+            })),
+            id: Some(json!(9918)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert!(result["data"]["pages_total"].as_u64().unwrap_or(0) >= 3);
+
+    let index_html = std::fs::read_to_string(out.path().join("index.html")).unwrap();
+    assert!(index_html.contains("Unattached Node Pages"));
+    assert!(index_html.contains("nodes/DEC-AXO-999.html"));
+    assert!(!index_html.contains("mermaid-id-DEC-AXO-999"));
+}
+
+#[test]
+fn test_soll_generate_docs_is_incremental_when_content_is_unchanged() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Operational truth', 'Pillar desc', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('PIL-AXO-001', 'VIS-AXO-001', 'EPITOMIZES')")
+        .unwrap();
+
+    let call = |server: &McpServer| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_generate_docs",
+                    "arguments": {
+                        "project_code": "AXO",
+                        "output_dir": out.path().to_string_lossy().to_string()
+                    }
+                })),
+                id: Some(json!(9911)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    let first = call(&server);
+    assert!(first["data"]["pages_written"].as_u64().unwrap_or(0) > 0);
+
+    let second = call(&server);
+    assert_eq!(second["data"]["pages_written"].as_u64(), Some(0));
+    assert!(second["data"]["pages_unchanged"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
+fn test_soll_generate_docs_with_site_root_builds_project_and_global_root() {
+    let server = create_test_server();
+    let site_root = tempdir().unwrap();
+
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/dstadel/projects/axon"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry(
+            "NTO",
+            Some("nutri-opti"),
+            Some("/home/dstadel/projects/nutri-opti"),
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_generate_docs",
+                "arguments": {
+                    "project_code": "AXO",
+                    "site_root_dir": site_root.path().to_string_lossy().to_string()
+                }
+            })),
+            id: Some(json!(9912)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(result["data"]["refresh_mode"].as_str(), Some("full"));
+    assert!(site_root.path().join("index.html").is_file());
+    assert!(site_root.path().join("_root_manifest.json").is_file());
+    assert!(site_root.path().join("AXO/index.html").is_file());
+
+    let root_html = std::fs::read_to_string(site_root.path().join("index.html")).unwrap();
+    assert!(root_html.contains("SOLL Derived Projects"));
+    assert!(root_html.contains("AXO/index.html"));
+    assert!(root_html.contains("NTO"));
+    assert!(root_html.contains("GLO"));
+}
+
+#[test]
+fn test_sync_mutation_auto_refreshes_derived_docs_and_root() {
+    let site_root = tempdir().unwrap();
+    let _site_root = SollSiteRootGuard::new(site_root.path());
+    let server = create_test_server();
+
+    let init_result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_init_project",
+                "arguments": {
+                    "project_path": "/tmp/nutri-opti",
+                    "project_name": "nutri-opti",
+                    "project_code": "NTO"
+                }
+            })),
+            id: Some(json!(9913)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(
+        init_result["data"]["derived_docs_refresh"]["status"].as_str(),
+        Some("ok")
+    );
+    assert!(site_root.path().join("NTO/index.html").is_file());
+    assert!(site_root.path().join("index.html").is_file());
+
+    let create_result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "create",
+                    "entity": "vision",
+                    "data": {
+                        "project_code": "NTO",
+                        "title": "Preventive nutrition platform",
+                        "description": "Greenfield vision"
+                    }
+                }
+            })),
+            id: Some(json!(9914)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(
+        create_result["data"]["derived_docs_refresh"]["status"].as_str(),
+        Some("ok")
+    );
+    let project_html = std::fs::read_to_string(site_root.path().join("NTO/index.html")).unwrap();
+    assert!(project_html.contains("Preventive nutrition platform"));
+}
+
+#[test]
+fn test_soll_generate_docs_deletes_obsolete_project_pages_from_manifest() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Human-readable docs', 'Readable docs for humans', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-AXO-001', 'VIS-AXO-001', 'BELONGS_TO')")
+        .unwrap();
+
+    let call = |server: &McpServer| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_generate_docs",
+                    "arguments": {
+                        "project_code": "AXO",
+                        "output_dir": out.path().to_string_lossy().to_string()
+                    }
+                })),
+                id: Some(json!(9915)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    let first = call(&server);
+    assert!(first["data"]["pages_total"].as_u64().unwrap_or(0) >= 3);
+    assert!(out.path().join("nodes/REQ-AXO-001.html").is_file());
+
+    server
+        .graph_store
+        .execute(
+            "DELETE FROM soll.Edge WHERE source_id = 'REQ-AXO-001' AND target_id = 'VIS-AXO-001'",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id = 'REQ-AXO-001'")
+        .unwrap();
+
+    let second = call(&server);
+    assert_eq!(second["data"]["refresh_mode"].as_str(), Some("incremental"));
+    assert_eq!(second["data"]["pages_deleted"].as_u64(), Some(1));
+    assert!(!out.path().join("nodes/REQ-AXO-001.html").exists());
+}
+
+#[test]
+fn test_soll_generate_docs_for_project_only_returns_null_root_fields() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_generate_docs",
+                "arguments": {
+                    "project_code": "AXO",
+                    "output_dir": out.path().to_string_lossy().to_string()
+                }
+            })),
+            id: Some(json!(9916)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert!(result["data"]["site_root"].is_null());
+    assert!(result["data"]["root_manifest_path"].is_null());
+    assert!(result["data"]["root_index_path"].is_null());
+}
+
+#[test]
+fn test_soll_generate_docs_forces_full_rebuild_when_manifest_is_incompatible() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+    std::fs::create_dir_all(out.path().join("nodes")).unwrap();
+    std::fs::write(out.path().join("nodes/STALE-AXO-001.html"), "stale").unwrap();
+    std::fs::write(
+        out.path().join("_manifest.json"),
+        r#"{"generator_version":"legacy","pages":[{"path":"nodes/STALE-AXO-001.html"}]}"#,
+    )
+    .unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_generate_docs",
+                "arguments": {
+                    "project_code": "AXO",
+                    "output_dir": out.path().to_string_lossy().to_string()
+                }
+            })),
+            id: Some(json!(9917)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(result["data"]["refresh_mode"].as_str(), Some("full"));
+    assert!(!out.path().join("nodes/STALE-AXO-001.html").exists());
 }
 
 #[test]

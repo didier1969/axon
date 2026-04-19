@@ -57,12 +57,16 @@ impl McpServer {
             });
         }
 
-        let response =
-            if Self::mcp_mutation_jobs_enabled() && Self::is_async_job_tool(normalized_name) {
-                self.launch_mutation_job(name, normalized_name, arguments)
-            } else {
-                self.execute_tool_direct(normalized_name, arguments)
-            };
+        let response = if Self::mcp_mutation_jobs_enabled()
+            && Self::is_async_job_tool(normalized_name)
+        {
+            self.launch_mutation_job(name, normalized_name, arguments)
+        } else {
+            self.execute_tool_direct(normalized_name, arguments)
+                .map(|result| {
+                    self.attach_derived_docs_refresh_metadata(normalized_name, arguments, result)
+                })
+        };
 
         Some(response.unwrap_or_else(|| {
             json!({

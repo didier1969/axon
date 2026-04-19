@@ -83,7 +83,7 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - advanced graph/system exploration: `refine_lattice`, `cypher`, `debug`, `schema_overview`, `list_labels_tables`, `query_examples`
 - advanced runtime/analysis tools: `health`, `audit`, `batch`, `truth_check`, `diagnose_indexing`, `diff`, `semantic_clones`, `architectural_drift`, `bidi_trace`, `api_break_check`, `simulate_mutation`, `resume_vectorization`, `job_status`
 - `axon_pre_flight_check`, `axon_commit_work`: validated delivery workflow.
-- SOLL workflow: `soll_query_context`, `soll_work_plan`, `soll_validate`, `soll_export`, `soll_verify_requirements`, `soll_relation_schema`, `soll_manager`, `soll_apply_plan`, `soll_commit_revision`, `soll_rollback_revision`, `axon_init_project`, `axon_apply_guidelines`.
+- SOLL workflow: `soll_query_context`, `soll_work_plan`, `soll_validate`, `soll_export`, `soll_generate_docs`, `soll_verify_requirements`, `soll_relation_schema`, `soll_manager`, `infer_soll_mutation`, `entrench_nuance`, `soll_apply_plan`, `soll_commit_revision`, `soll_rollback_revision`, `axon_init_project`, `axon_apply_guidelines`.
 
 ## Expert/Internal Tools
 - no additional MCP tools should be treated as hidden product surface by default
@@ -126,7 +126,34 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - `soll_manager` for immediate unit mutations.
 - `soll_manager action=create` may optionally use `attach_to` and `relation_hint` for canonical graph attachment in the same operation.
 - `soll_relation_schema` before retrying an invalid SOLL link or when canonical outgoing or incoming graph edges are unclear.
+- `infer_soll_mutation` for read-only assistive capture before a higher-level SOLL mutation; it may suggest scope, entity type, and target IDs, but it does not reserve IDs or mutate the graph.
+- `entrench_nuance` is a bounded high-level workflow for wave 1:
+  - it only updates existing canonical entities
+  - it proposes first and requires `confirm=true` to write
+  - if nuance truly requires new nodes or topology changes, fall back to `soll_manager` or `soll_apply_plan`
+- `soll_generate_docs` for human-readable navigable docs derived from live SOLL.
+- treat `soll_generate_docs` output as derived reading surface only; live SOLL and `soll_export` remain canonical.
+- default derived output root is separate from canonical exports: `docs/derived/soll/<project_code>`.
+- canonical auto-sync also maintains a global derived root at `docs/derived/soll/index.html`, listing all known projects.
+- the global derived reading root is `GLO`; it is a portfolio navigation concept, not a canonical SOLL entity.
+- if the derived site does not exist yet, generate a full project site; otherwise refresh incrementally and delete obsolete derived pages from the manifest.
+- successful SOLL mutations should return machine-readable `data.derived_docs_refresh` so clients can see whether derived docs stayed fresh or became stale.
+- the derived site should now be read as a three-pane shell:
+  - left = collapsible tree navigation
+  - center = hierarchy focus graph
+  - right = structured details
+- human navigation must not depend only on clickable Mermaid nodes; tree links and surrounding HTML links are the canonical path.
+- side panes may be resized or collapsed completely; the center pane must expand accordingly.
 - `soll_validate` now returns structured `repair_guidance` and `completeness`; use it to repair graph structure, not only to detect warnings.
+- successful bounded SOLL mutations should return machine-readable `mutation_feedback`:
+  - `changed_entities`
+  - `topology_delta`
+  - `newly_unblocked`
+  - `remaining_blockers`
+  - `next_best_actions`
+  - `completeness_before`
+  - `completeness_after`
+- prefer this feedback to improvise follow-up steps after `soll_manager` or `entrench_nuance`.
 - canonical completeness model for greenfield work:
   - `concept_completeness` = structural intentional baseline
   - `implementation_completeness` = evidence/proof readiness
@@ -141,8 +168,16 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 2. Read code truth with `query`, `inspect`, or `retrieve_context`.
 3. Use `impact`, `why`, `path`, `anomalies`, `change_safety` only as needed.
 4. Update SOLL in the same wave when intention changes.
-5. Run `axon_pre_flight_check`.
-6. Use `axon_commit_work`.
+5. Keep derived docs aligned:
+   - automatic refresh should happen after successful SOLL mutations
+   - `soll_generate_docs` remains the explicit operator tool for manual rebuilds or repairs
+6. Run `axon_pre_flight_check`.
+7. Use `axon_commit_work`.
+
+## Commit Hygiene
+- `axon_commit_work` no longer auto-stages the whole `docs/vision/` tree.
+- archival `SOLL_EXPORT_*.md` snapshots must not pollute routine delivery commits by default.
+- derived site outputs should be committed intentionally, not by broad `git add docs/vision/`.
 
 ## Context Efficiency Rules
 - Prefer `project_status` over composing many tools for a first pass.

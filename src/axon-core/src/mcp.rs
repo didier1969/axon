@@ -29,6 +29,7 @@ pub(crate) use self::guidance::{
     GuidanceCandidates, GuidanceFact, GuidanceOutcome, SollGuidance,
 };
 pub use self::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use self::soll::canonical_soll_site_dir;
 
 pub struct McpServer {
     graph_store: Arc<GraphStore>,
@@ -41,6 +42,17 @@ impl McpServer {
     pub(crate) const ASYNC_JOB_TOOL_NAMES: &[&str] =
         &["restore_soll", "soll_apply_plan", "resume_vectorization"];
     pub(crate) const MONITORED_SYNC_MUTATION_TOOLS: &[&str] = &["soll_commit_revision"];
+    pub(crate) const SOLL_DERIVED_DOCS_REFRESH_TOOLS: &[&str] = &[
+        "restore_soll",
+        "soll_apply_plan",
+        "soll_commit_revision",
+        "soll_attach_evidence",
+        "soll_rollback_revision",
+        "soll_manager",
+        "entrench_nuance",
+        "init_project",
+        "apply_guidelines",
+    ];
 
     pub fn new(graph_store: Arc<GraphStore>) -> Self {
         Self { graph_store }
@@ -134,6 +146,144 @@ impl McpServer {
             "failed" => "failed",
             _ => "unknown",
         }
+    }
+
+    fn should_refresh_derived_docs_for_tool(normalized_name: &str) -> bool {
+        Self::SOLL_DERIVED_DOCS_REFRESH_TOOLS.contains(&normalized_name)
+    }
+
+    fn project_code_from_soll_entity_id(entity_id: &str) -> Option<String> {
+        let mut parts = entity_id.split('-');
+        let _prefix = parts.next()?;
+        let project_code = parts.next()?.trim();
+        if project_code.len() == 3
+            && project_code
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() && !ch.is_ascii_lowercase())
+        {
+            Some(project_code.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn derive_docs_refresh_project_code(
+        &self,
+        normalized_name: &str,
+        arguments: &Value,
+        result: &Value,
+    ) -> Option<String> {
+        let candidate = result
+            .get("data")
+            .and_then(|value| value.get("project_code"))
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                result
+                    .get("data")
+                    .and_then(|value| value.get("known_ids"))
+                    .and_then(|value| value.get("project_code"))
+                    .and_then(|value| value.as_str())
+            })
+            .or_else(|| {
+                arguments
+                    .get("project_code")
+                    .and_then(|value| value.as_str())
+            })
+            .or_else(|| {
+                arguments
+                    .get("data")
+                    .and_then(|value| value.get("project_code"))
+                    .and_then(|value| value.as_str())
+            });
+
+        if let Some(project_code) = candidate {
+            return self.resolve_project_code(project_code).ok();
+        }
+
+        match normalized_name {
+            "soll_attach_evidence" => arguments
+                .get("entity_id")
+                .and_then(|value| value.as_str())
+                .and_then(Self::project_code_from_soll_entity_id)
+                .and_then(|project_code| self.resolve_project_code(&project_code).ok()),
+            _ => None,
+        }
+    }
+
+    fn attach_derived_docs_refresh_metadata(
+        &self,
+        normalized_name: &str,
+        arguments: &Value,
+        result: Value,
+    ) -> Value {
+        if !Self::should_refresh_derived_docs_for_tool(normalized_name)
+            || result
+                .get("isError")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+        {
+            return result;
+        }
+
+        let mut enriched = result;
+        let refresh_payload = if let Some(project_code) =
+            self.derive_docs_refresh_project_code(normalized_name, arguments, &enriched)
+        {
+            if let Some(site_root) = canonical_soll_site_dir() {
+                match self.generate_soll_derived_docs(
+                    &project_code,
+                    Some(&site_root),
+                    &site_root.join(&project_code),
+                ) {
+                    Ok(summary) => json!({
+                        "status": "ok",
+                        "project_code": summary.project_code,
+                        "site_root": if summary.site_root.is_empty() { Value::Null } else { json!(summary.site_root) },
+                        "output_root": summary.project_output_root,
+                        "manifest_path": summary.project_manifest_path,
+                        "root_manifest_path": if summary.root_manifest_path.is_empty() { Value::Null } else { json!(summary.root_manifest_path) },
+                        "root_index_path": if summary.root_index_path.is_empty() { Value::Null } else { json!(summary.root_index_path) },
+                        "refresh_mode": summary.refresh_mode,
+                        "pages_total": summary.pages_total,
+                        "pages_written": summary.pages_written,
+                        "pages_unchanged": summary.pages_unchanged,
+                        "pages_deleted": summary.pages_deleted,
+                        "deleted_paths": summary.deleted_paths,
+                        "root_written": summary.root_written,
+                        "stale_docs": summary.stale_docs,
+                    }),
+                    Err(error) => json!({
+                        "status": "failed",
+                        "project_code": project_code,
+                        "stale_docs": true,
+                        "error_text": error,
+                    }),
+                }
+            } else {
+                json!({
+                    "status": "failed",
+                    "project_code": project_code,
+                    "stale_docs": true,
+                    "error_text": "Impossible de résoudre docs/derived/soll pour le refresh automatique."
+                })
+            }
+        } else {
+            json!({
+                "status": "skipped",
+                "stale_docs": false,
+                "reason": format!("No canonical project scope detected for `{}`.", normalized_name)
+            })
+        };
+
+        if !enriched
+            .get("data")
+            .map(|value| value.is_object())
+            .unwrap_or(false)
+        {
+            enriched["data"] = json!({});
+        }
+        enriched["data"]["derived_docs_refresh"] = refresh_payload;
+        enriched
     }
 
     #[allow(dead_code)]
@@ -389,7 +539,9 @@ impl McpServer {
                 | "soll_attach_evidence"
                 | "soll_rollback_revision"
                 | "soll_export"
+                | "soll_generate_docs"
                 | "soll_manager"
+                | "entrench_nuance"
                 | "apply_guidelines"
                 | "commit_work"
                 | "resume_vectorization"
@@ -406,6 +558,8 @@ impl McpServer {
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
             "soll_validate" => self.axon_validate_soll(arguments),
+            "infer_soll_mutation" => self.axon_infer_soll_mutation(arguments),
+            "entrench_nuance" => self.axon_entrench_nuance(arguments),
             "soll_apply_plan" => self.axon_soll_apply_plan(arguments),
             "soll_commit_revision" => self.axon_soll_commit_revision(arguments),
             "soll_query_context" => self.axon_soll_query_context(arguments),
@@ -421,6 +575,7 @@ impl McpServer {
             "commit_work" => self.axon_commit_work(arguments),
             "pre_flight_check" => self.axon_pre_flight_check(arguments),
             "soll_export" => self.axon_export_soll(arguments),
+            "soll_generate_docs" => self.axon_soll_generate_docs(arguments),
             "diagnose_indexing" => self.axon_diagnose_indexing(arguments),
             "inspect" => self.axon_inspect(arguments),
             "audit" => self.axon_audit(arguments),
@@ -595,6 +750,11 @@ impl McpServer {
 
             match server.execute_tool_direct(&normalized_name, &queued_args) {
                 Some(result) => {
+                    let result = server.attach_derived_docs_refresh_metadata(
+                        &normalized_name,
+                        &queued_args,
+                        result,
+                    );
                     let finished_at = McpServer::now_unix_ms();
                     let is_error = result
                         .get("isError")

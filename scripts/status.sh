@@ -27,7 +27,7 @@ have_cmd() {
 
 port_listening() {
   local port="$1"
-  ss -ltn 2>/dev/null | awk -v p="$port" '
+  ss -H -ltn 2>/dev/null | awk -v p="$port" '
     $1 == "LISTEN" {
       split($4, addr_parts, ":")
       if (addr_parts[length(addr_parts)] == p) {
@@ -41,7 +41,7 @@ port_listening() {
 }
 
 port_pid() {
-  ss -ltnp 2>/dev/null | awk -v p="$HYDRA_HTTP_PORT" '
+  ss -H -ltnp 2>/dev/null | awk -v p="$HYDRA_HTTP_PORT" '
     $1 == "LISTEN" {
       split($4, addr_parts, ":")
       if (addr_parts[length(addr_parts)] != p) {

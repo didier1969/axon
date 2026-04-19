@@ -92,6 +92,36 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "infer_soll_mutation",
+                "description": "[SOLL] Analyse assistive en lecture seule. Propose le type d'entité, les IDs canoniques impactés, l'opération suggérée, le niveau de confiance et les ambiguïtés avant mutation.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique." },
+                        "statement": { "type": "string", "description": "Nuance, contrainte ou clarification à stabiliser." }
+                    },
+                    "required": ["project_code", "statement"]
+                }
+            },
+            {
+                "name": "entrench_nuance",
+                "description": "[SOLL] Workflow haut niveau borné pour stabiliser une nuance sur des entités canoniques existantes. Par défaut propose seulement; nécessite `confirm=true` pour écrire.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique." },
+                        "statement": { "type": "string", "description": "Nuance ou contrainte à entériner." },
+                        "target_ids": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "IDs canoniques ciblés. Si omis, le serveur réutilise les candidats inférés."
+                        },
+                        "confirm": { "type": "boolean", "description": "Doit être `true` pour appliquer les mises à jour en wave 1." }
+                    },
+                    "required": ["project_code", "statement"]
+                }
+            },
+            {
                 "name": "axon_init_project",
                 "description": "[DX/SOLL] Initialise un nouveau projet Axon. Le serveur attribue le `project_code` canonique et retourne immédiatement `project_code`, `project_name` et `project_path` dans la même réponse.",
                 "inputSchema": {
@@ -258,6 +288,19 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                         "project_code": { "type": "string", "description": "Filtre l'export au projet demandé." }
                     },
                     "required": []
+                }
+            },
+            {
+                "name": "soll_generate_docs",
+                "description": "[SOLL] Génère une documentation humaine navigable dérivée de SOLL sous forme de site statique HTML+Mermaid. En mode canonique, maintient aussi un root global multi-projets sous docs/derived/soll/index.html. Cette sortie est non canonique: elle sert à la lecture, pas au restore. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Projet canonique à documenter." },
+                        "output_dir": { "type": "string", "description": "Répertoire racine projet optionnel. Si fourni seul, génère uniquement le site projet ciblé." },
+                        "site_root_dir": { "type": "string", "description": "Racine de site optionnelle. Génère <site_root_dir>/index.html et <site_root_dir>/<project_code>/..." }
+                    },
+                    "required": ["project_code"]
                 }
             },
             {
