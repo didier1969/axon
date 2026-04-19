@@ -9,6 +9,35 @@ cd "$PROJECT_ROOT"
 # shellcheck source=scripts/lib/axon-version.sh
 source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
 
+ARTIFACT_ONLY=0
+
+usage() {
+    cat <<'EOF'
+Usage: bash scripts/setup.sh [--artifact-only]
+
+Options:
+  --artifact-only  Build only the canonical Rust release artifact and build-info, then exit.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --artifact-only)
+            ARTIFACT_ONLY=1
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
 echo "🚀 Starting Axon bootstrap..."
 
 # 1. Environment Check (Devenv)
@@ -47,6 +76,11 @@ axon_write_export_file "$BIN_DIR/axon-core.build-info" \
     AXON_ARTIFACT_SHA256 "$AXON_ARTIFACT_SHA256" \
     AXON_ARTIFACT_SOURCE "$RUST_RELEASE_BIN"
 echo "✅ Rust core available at bin/axon-core"
+
+if [[ "$ARTIFACT_ONLY" -eq 1 ]]; then
+    echo "🏁 Artifact-only bootstrap complete."
+    exit 0
+fi
 
 # 3. Dashboard dependencies and compile
 DASHBOARD_DIR="$PROJECT_ROOT/src/dashboard"

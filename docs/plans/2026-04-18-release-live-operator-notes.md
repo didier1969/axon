@@ -5,15 +5,31 @@
 Use:
 
 ```bash
-./scripts/axon release-preflight
-./scripts/axon create-release-manifest --state qualified
-./scripts/axon promote-live --manifest <manifest.json>
+./scripts/axon promote-live-safe --project AXO
 ./scripts/axon rollback-live --manifest <manifest.json>
 ```
 
 These commands define the operator-facing release cycle for the live instance.
 
-`release-preflight` is now the mandatory first gate before manifest creation or live promotion.
+`promote-live-safe` is now the canonical one-shot promotion path. It performs:
+
+- canonical artifact rebuild
+- `release-preflight`
+- qualified manifest creation
+- live restart promotion
+- MCP runtime identity post-check
+- final `qualify-mcp` core quality/latency gate
+- final `status-live.sh`
+
+The manual sequence remains expert-only:
+
+```bash
+./scripts/axon release-preflight
+./scripts/axon create-release-manifest --state qualified
+./scripts/axon promote-live --manifest <manifest.json> --restart-live
+```
+
+`release-preflight` remains the mandatory first gate before manifest creation or live promotion.
 
 It must prove both:
 
@@ -59,11 +75,16 @@ For the `live` instance, ordinary `./scripts/axon --instance live start ...` now
 
 Topological checklist:
 
-1. `./scripts/axon release-preflight`
-2. `./scripts/axon create-release-manifest --state qualified`
-3. `./scripts/axon promote-live --manifest <manifest>.json --restart-live`
-4. confirm MCP `status` matches the manifest
-5. only then treat the release as `promoted`
+1. `./scripts/axon promote-live-safe --project AXO`
+2. confirm MCP `status` matches the manifest
+3. only then treat the release as `promoted`
+
+The safe one-shot flow must fail closed if:
+
+- `HEAD` changes during the sequence
+- the artifact no longer matches the canonical workspace release target
+- MCP runtime identity diverges from the staged manifest
+- the final MCP quality/latency gate fails
 
 Additional invariant before step 2:
 

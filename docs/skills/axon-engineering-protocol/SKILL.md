@@ -29,11 +29,21 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - For MCP surface qualification, prefer `./scripts/axon qualify-mcp`; treat older entrypoints such as `quality-mcp`, `validate-mcp`, `measure-mcp`, `compare-mcp`, `robustness-mcp`, and `qualify-guidance` as expert or compatibility flows.
 - Do not mutate `live` implicitly from development workflows.
 - For release work on `live`, use the topological checklist:
-  1. `./scripts/axon release-preflight`
-  2. `./scripts/axon create-release-manifest --state qualified`
-  3. `./scripts/axon promote-live --manifest <manifest> --restart-live`
-  4. verify MCP `status`
-  5. only then treat the release as `promoted`
+  1. prefer `./scripts/axon promote-live-safe --project AXO`
+  2. only fall back to the manual sequence for expert recovery:
+     `./scripts/axon release-preflight`
+     `./scripts/axon create-release-manifest --state qualified`
+     `./scripts/axon promote-live --manifest <manifest> --restart-live`
+  3. verify MCP `status`
+  4. only then treat the release as `promoted`
+- `promote-live-safe` is the canonical operator path because it hard-gates:
+  - canonical artifact rebuild
+  - release preflight
+  - manifest creation
+  - live restart + MCP runtime identity check
+  - final `qualify-mcp` core quality/latency gate
+  - final `status-live.sh`
+- if `HEAD` changes during the one-shot sequence, `promote-live-safe` must fail closed and restart from the top.
 - `release-preflight` must prove both metadata and artifact-body integrity:
   - `bin/axon-core.build-info` matches `git describe`
   - `bin/axon-core` checksum matches recorded artifact checksum
