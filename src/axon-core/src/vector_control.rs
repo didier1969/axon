@@ -14,6 +14,10 @@ pub const AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD: usize = 128;
 pub const SYMBOL_BACKLOG_RESIDUAL_THRESHOLD: usize = 64;
 pub const CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD: usize = 512;
 pub const GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD: usize = 2048;
+pub const SEMANTIC_REFILL_BACKLOG_THRESHOLD: usize = 16;
+pub const SEMANTIC_REFILL_READY_LOW_WATERMARK: u64 = 1;
+pub const SEMANTIC_REFILL_PREPARE_LOW_WATERMARK: u64 = 1;
+pub const UTILITY_FIRST_SCHEDULER_HOLD_WINDOW_MS: u64 = 2_000;
 const MAX_CHUNKS_PER_FILE: usize = 64;
 const MAX_EMBED_BATCH_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_GPU_WARMUP_EMBED_BATCH_CHUNKS: usize = 64;
@@ -51,6 +55,25 @@ pub enum VectorDrainState {
     GpuScalingBlocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UtilityFirstSchedulerState {
+    GraphPriority,
+    SemanticRefillProtection,
+    BalancedDrain,
+    RecoveryOverride,
+}
+
+impl UtilityFirstSchedulerState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GraphPriority => "graph_priority",
+            Self::SemanticRefillProtection => "semantic_refill_protection",
+            Self::BalancedDrain => "balanced_drain",
+            Self::RecoveryOverride => "recovery_override",
+        }
+    }
+}
+
 impl VectorDrainState {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -77,6 +100,15 @@ pub struct VectorBatchControllerDiagnostics {
     pub avg_chunks_per_embed_call: f64,
     pub avg_files_per_embed_call: f64,
     pub embed_ms_per_chunk: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UtilityFirstSchedulerDiagnostics {
+    pub state: UtilityFirstSchedulerState,
+    pub reason: &'static str,
+    pub semantic_underfeed: bool,
+    pub ready_reserve_target: usize,
+    pub hold_window_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,6 +162,26 @@ pub struct SemanticPolicy {
 }
 
 static VECTOR_BATCH_CONTROLLER: OnceLock<Mutex<VectorBatchController>> = OnceLock::new();
+static UTILITY_FIRST_SCHEDULER: OnceLock<Mutex<UtilityFirstScheduler>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy)]
+struct UtilityFirstScheduler {
+    state: UtilityFirstSchedulerState,
+    entered_at_ms: u64,
+}
+
+impl Default for UtilityFirstScheduler {
+    fn default() -> Self {
+        Self {
+            state: UtilityFirstSchedulerState::BalancedDrain,
+            entered_at_ms: 0,
+        }
+    }
+}
+
+fn utility_first_scheduler() -> &'static Mutex<UtilityFirstScheduler> {
+    UTILITY_FIRST_SCHEDULER.get_or_init(|| Mutex::new(UtilityFirstScheduler::default()))
+}
 
 impl VectorBatchController {
     pub fn new(lane_config: &EmbeddingLaneConfig) -> Self {
@@ -623,6 +675,76 @@ pub fn current_vector_drain_state(
     VectorDrainState::AggressiveDrain
 }
 
+pub fn current_utility_first_scheduler_diagnostics(
+    graph_queue_depth: usize,
+    file_backlog_depth: usize,
+    service_pressure: ServicePressure,
+) -> UtilityFirstSchedulerDiagnostics {
+    let metrics = service_guard::vector_runtime_metrics();
+    let interactive_active = service_guard::interactive_priority_active()
+        || service_guard::interactive_requests_in_flight() > 0;
+    let ready_reserve_target = vector_ready_reserve_target(
+        READY_RESERVE_FLOOR,
+        file_backlog_depth,
+        metrics.prepare_inflight_current as usize,
+        metrics.ready_queue_depth_current as usize,
+        metrics.ready_queue_depth_current as usize,
+    );
+    let semantic_underfeed = file_backlog_depth >= SEMANTIC_REFILL_BACKLOG_THRESHOLD
+        && metrics.ready_queue_depth_current <= SEMANTIC_REFILL_READY_LOW_WATERMARK
+        && metrics.prepare_inflight_current <= SEMANTIC_REFILL_PREPARE_LOW_WATERMARK;
+    let persist_congested = metrics.persist_queue_depth_current > 0;
+    let desired_state =
+        if interactive_active || matches!(service_pressure, ServicePressure::Critical) {
+            UtilityFirstSchedulerState::RecoveryOverride
+        } else if semantic_underfeed && !persist_congested {
+            UtilityFirstSchedulerState::SemanticRefillProtection
+        } else if graph_queue_depth > 0 {
+            UtilityFirstSchedulerState::GraphPriority
+        } else {
+            UtilityFirstSchedulerState::BalancedDrain
+        };
+    let reason = if interactive_active {
+        "interactive_priority"
+    } else if matches!(service_pressure, ServicePressure::Critical) {
+        "service_pressure_critical"
+    } else if semantic_underfeed && !persist_congested {
+        "semantic_underfed"
+    } else if persist_congested {
+        "persist_congested"
+    } else if graph_queue_depth > 0 {
+        "graph_backlog_present"
+    } else {
+        "steady_balanced"
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let mut guard = utility_first_scheduler()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let hold_active = guard.entered_at_ms > 0
+        && now_ms.saturating_sub(guard.entered_at_ms) < UTILITY_FIRST_SCHEDULER_HOLD_WINDOW_MS;
+    if desired_state != guard.state
+        && (!hold_active
+            || matches!(
+                desired_state,
+                UtilityFirstSchedulerState::RecoveryOverride
+                    | UtilityFirstSchedulerState::SemanticRefillProtection
+            ))
+    {
+        guard.state = desired_state;
+        guard.entered_at_ms = now_ms;
+    } else if guard.entered_at_ms == 0 {
+        guard.entered_at_ms = now_ms;
+    }
+    UtilityFirstSchedulerDiagnostics {
+        state: guard.state,
+        reason,
+        semantic_underfeed,
+        ready_reserve_target,
+        hold_window_ms: UTILITY_FIRST_SCHEDULER_HOLD_WINDOW_MS,
+    }
+}
+
 pub fn allowed_gpu_vector_workers(
     file_backlog_depth: usize,
     service_pressure: ServicePressure,
@@ -669,6 +791,14 @@ pub fn vector_worker_admitted(
 }
 
 pub fn semantic_policy(queue_len: usize, service_pressure: ServicePressure) -> SemanticPolicy {
+    semantic_policy_with_graph(queue_len, 0, service_pressure)
+}
+
+pub fn semantic_policy_with_graph(
+    queue_len: usize,
+    graph_queue_depth: usize,
+    service_pressure: ServicePressure,
+) -> SemanticPolicy {
     if service_guard::interactive_priority_active() {
         service_guard::record_vectorization_suppressed();
         return SemanticPolicy {
@@ -689,6 +819,22 @@ pub fn semantic_policy(queue_len: usize, service_pressure: ServicePressure) -> S
             pause: true,
             sleep: Duration::from_secs(2),
             idle_sleep: Duration::from_secs(2),
+        };
+    }
+    let scheduler =
+        current_utility_first_scheduler_diagnostics(graph_queue_depth, queue_len, service_pressure);
+    if scheduler.state == UtilityFirstSchedulerState::GraphPriority {
+        return SemanticPolicy {
+            pause: false,
+            sleep: Duration::from_millis(400),
+            idle_sleep: Duration::from_millis(1_000),
+        };
+    }
+    if scheduler.state == UtilityFirstSchedulerState::SemanticRefillProtection {
+        return SemanticPolicy {
+            pause: false,
+            sleep: Duration::from_millis(100),
+            idle_sleep: Duration::from_millis(250),
         };
     }
     if service_guard::interactive_requests_in_flight() > 0 {
@@ -742,7 +888,7 @@ pub fn symbol_embedding_allowed(
 }
 
 pub fn graph_projection_allowed(
-    _queue_len: usize,
+    queue_len: usize,
     service_pressure: ServicePressure,
     vector_backlog_depth: usize,
     gpu_available: bool,
@@ -759,15 +905,28 @@ pub fn graph_projection_allowed(
         service_guard::record_projection_suppressed();
         return false;
     }
-    if !gpu_available && vector_backlog_depth >= CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD {
+    let scheduler = current_utility_first_scheduler_diagnostics(
+        queue_len,
+        vector_backlog_depth,
+        service_pressure,
+    );
+    if scheduler.state == UtilityFirstSchedulerState::SemanticRefillProtection {
         service_guard::record_projection_suppressed();
-        return false;
-    }
-    if gpu_available && vector_backlog_depth >= GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD {
-        service_guard::record_projection_suppressed();
-        return false;
+        return if gpu_available {
+            vector_backlog_depth < GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD
+        } else {
+            vector_backlog_depth < CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD
+        };
     }
     true
+}
+
+#[cfg(test)]
+pub fn reset_utility_first_scheduler_for_tests() {
+    let mut guard = utility_first_scheduler()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    *guard = UtilityFirstScheduler::default();
 }
 
 fn embedding_provider_requested_is_gpu() -> bool {

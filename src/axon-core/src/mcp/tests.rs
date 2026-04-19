@@ -1712,6 +1712,14 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         .collect::<Vec<_>>();
     assert!(monitored_sync_tools.contains(&"soll_commit_revision"));
     assert_eq!(
+        data["utility_first_scheduler"]["state"].as_str(),
+        Some("balanced_drain")
+    );
+    assert!(data["utility_first_scheduler"]["reason"].as_str().is_some());
+    assert!(data["utility_first_scheduler"]["ready_reserve_target"]
+        .as_u64()
+        .is_some());
+    assert_eq!(
         data["async_contract"]["stale_client_binding_possible"].as_bool(),
         Some(true)
     );

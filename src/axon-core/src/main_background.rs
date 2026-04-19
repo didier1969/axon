@@ -31,7 +31,8 @@ use axon_core::scanner::Scanner;
 use axon_core::service_guard;
 use axon_core::service_guard::{InteractivePriority, ServicePressure};
 use axon_core::vector_control::{
-    current_vector_batch_controller_diagnostics, current_vector_drain_state,
+    current_utility_first_scheduler_diagnostics, current_vector_batch_controller_diagnostics,
+    current_vector_drain_state,
 };
 use axon_core::watcher_probe;
 use notify_debouncer_full::notify::RecursiveMode;
@@ -177,6 +178,15 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub file_vectorization_queue_queued: usize,
     pub file_vectorization_queue_inflight: usize,
     pub file_vectorization_queue_depth: usize,
+    pub orphan_vectorization_files: usize,
+    pub stale_vector_inflight_files: usize,
+    pub oldest_graph_pending_age_ms: u64,
+    pub oldest_semantic_pending_age_ms: u64,
+    pub utility_first_scheduler_state: String,
+    pub utility_first_scheduler_reason: String,
+    pub semantic_underfeed: bool,
+    pub semantic_ready_reserve_target: usize,
+    pub utility_first_scheduler_hold_window_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -509,6 +519,15 @@ pub(crate) fn spawn_runtime_trace_logger(
                     "interactive_requests_in_flight": telemetry.interactive_requests_in_flight,
                     "file_vectorization_queue_depth": telemetry.file_vectorization_queue_depth,
                     "graph_projection_queue_depth": telemetry.graph_projection_queue_depth,
+                    "orphan_vectorization_files": telemetry.orphan_vectorization_files,
+                    "stale_vector_inflight_files": telemetry.stale_vector_inflight_files,
+                    "oldest_graph_pending_age_ms": telemetry.oldest_graph_pending_age_ms,
+                    "oldest_semantic_pending_age_ms": telemetry.oldest_semantic_pending_age_ms,
+                    "utility_first_scheduler_state": telemetry.utility_first_scheduler_state,
+                    "utility_first_scheduler_reason": telemetry.utility_first_scheduler_reason,
+                    "semantic_underfeed": telemetry.semantic_underfeed,
+                    "semantic_ready_reserve_target": telemetry.semantic_ready_reserve_target,
+                    "utility_first_scheduler_hold_window_ms": telemetry.utility_first_scheduler_hold_window_ms,
                 },
                 "signals": {
                     "cpu_usage_ratio": signals.cpu_usage_ratio,
@@ -1212,6 +1231,22 @@ pub(crate) fn runtime_telemetry_snapshot(
         .unwrap_or((0, 0));
     let file_vectorization_queue_depth =
         file_vectorization_queue_queued + file_vectorization_queue_inflight;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let stale_threshold_ms = std::env::var("AXON_VECTOR_LEASE_STALE_MS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(120_000);
+    let orphan_vectorization_files = store.count_orphaned_file_vectorization_files().unwrap_or(0);
+    let stale_vector_inflight_files = store
+        .count_stale_inflight_file_vectorization_files(now_ms, stale_threshold_ms)
+        .unwrap_or(0);
+    let oldest_graph_pending_age_ms = store.oldest_graph_pending_age_ms(now_ms).unwrap_or(0);
+    let oldest_semantic_pending_age_ms = store.oldest_semantic_pending_age_ms(now_ms).unwrap_or(0);
+    let utility_scheduler = current_utility_first_scheduler_diagnostics(
+        graph_projection_queue_depth,
+        file_vectorization_queue_depth,
+        service_pressure,
+    );
 
     let interactive_priority = service_guard::current_interactive_priority();
 
@@ -1283,6 +1318,15 @@ pub(crate) fn runtime_telemetry_snapshot(
         file_vectorization_queue_queued,
         file_vectorization_queue_inflight,
         file_vectorization_queue_depth,
+        orphan_vectorization_files,
+        stale_vector_inflight_files,
+        oldest_graph_pending_age_ms,
+        oldest_semantic_pending_age_ms,
+        utility_first_scheduler_state: utility_scheduler.state.as_str().to_string(),
+        utility_first_scheduler_reason: utility_scheduler.reason.to_string(),
+        semantic_underfeed: utility_scheduler.semantic_underfeed,
+        semantic_ready_reserve_target: utility_scheduler.ready_reserve_target,
+        utility_first_scheduler_hold_window_ms: utility_scheduler.hold_window_ms,
     }
 }
 

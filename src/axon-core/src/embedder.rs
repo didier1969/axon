@@ -21,7 +21,7 @@ use crate::runtime_tuning::{
 use crate::service_guard::{self, ServicePressure, VectorLaneState};
 use crate::vector_control::{
     graph_projection_allowed, observe_vector_batch_controller,
-    reset_vector_batch_controller_for_tests, semantic_policy, symbol_embedding_allowed,
+    reset_vector_batch_controller_for_tests, semantic_policy_with_graph, symbol_embedding_allowed,
     vector_claim_target, vector_ready_reserve_target, vector_worker_admitted,
     VectorBatchControllerObservation,
 };
@@ -1356,7 +1356,16 @@ impl SemanticWorkerPool {
                 }
                 continue;
             }
-            let policy = semantic_policy(file_backlog_depth, current_pressure);
+            let (graph_projection_queue_queued, graph_projection_queue_inflight) = graph_store
+                .fetch_graph_projection_queue_counts()
+                .unwrap_or((0, 0));
+            let graph_backlog_depth =
+                graph_projection_queue_queued + graph_projection_queue_inflight;
+            let policy = semantic_policy_with_graph(
+                file_backlog_depth,
+                graph_backlog_depth,
+                current_pressure,
+            );
             if policy.pause {
                 if file_backlog_depth == 0 {
                     wait_for_vector_backlog_or_timeout(policy.idle_sleep);
@@ -2350,8 +2359,16 @@ impl SemanticWorkerPool {
         let mut graph_model_registered = false;
 
         loop {
-            let policy =
-                semantic_policy(queue_store.common_len(), service_guard::current_pressure());
+            let (graph_projection_queue_queued, graph_projection_queue_inflight) = graph_store
+                .fetch_graph_projection_queue_counts()
+                .unwrap_or((0, 0));
+            let graph_backlog_depth =
+                graph_projection_queue_queued + graph_projection_queue_inflight;
+            let policy = semantic_policy_with_graph(
+                queue_store.common_len(),
+                graph_backlog_depth,
+                service_guard::current_pressure(),
+            );
             let service_pressure = service_guard::current_pressure();
             let (vector_queue_queued, vector_queue_inflight) = graph_store
                 .fetch_file_vectorization_queue_counts()
@@ -4822,11 +4839,13 @@ mod tests {
     };
     use crate::service_guard::{ServicePressure, VectorRuntimeMetrics};
     use crate::vector_control::{
-        allowed_gpu_vector_workers, current_vector_batch_controller_diagnostics,
-        current_vector_drain_state, graph_projection_allowed, semantic_policy,
-        symbol_embedding_allowed, vector_claim_target, vector_embed_target_chunks,
-        vector_worker_admitted, VectorBatchController, VectorBatchControllerObservation,
-        VectorBatchControllerState, VectorDrainState, AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
+        allowed_gpu_vector_workers, current_utility_first_scheduler_diagnostics,
+        current_vector_batch_controller_diagnostics, current_vector_drain_state,
+        graph_projection_allowed, reset_utility_first_scheduler_for_tests, semantic_policy,
+        semantic_policy_with_graph, symbol_embedding_allowed, vector_claim_target,
+        vector_embed_target_chunks, vector_worker_admitted, UtilityFirstSchedulerState,
+        VectorBatchController, VectorBatchControllerObservation, VectorBatchControllerState,
+        VectorDrainState, AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
         CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD, GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD,
         QUIET_CRUISE_FILE_BACKLOG_THRESHOLD, SYMBOL_BACKLOG_RESIDUAL_THRESHOLD,
     };
@@ -4852,6 +4871,9 @@ mod tests {
     fn test_semantic_policy_runs_when_system_is_healthy() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
+        crate::service_guard::record_vector_ready_queue_depth(8);
+        crate::service_guard::record_vector_prepare_inflight_depth(2);
         let policy = semantic_policy(100, ServicePressure::Healthy);
         assert!(!policy.pause);
         assert_eq!(policy.idle_sleep, Duration::from_millis(750));
@@ -4861,6 +4883,9 @@ mod tests {
     fn test_semantic_policy_prefers_aggressive_drain_under_high_healthy_backlog() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
+        crate::service_guard::record_vector_ready_queue_depth(8);
+        crate::service_guard::record_vector_prepare_inflight_depth(2);
         let policy = semantic_policy(2_000, ServicePressure::Healthy);
         assert!(!policy.pause);
         assert_eq!(policy.idle_sleep, Duration::from_millis(250));
@@ -4868,6 +4893,7 @@ mod tests {
 
     #[test]
     fn test_graph_projection_allowed_under_queue_pressure_when_service_is_healthy() {
+        reset_utility_first_scheduler_for_tests();
         assert!(graph_projection_allowed(
             2_000,
             ServicePressure::Healthy,
@@ -4900,6 +4926,7 @@ mod tests {
 
     #[test]
     fn test_graph_projection_yields_to_large_vector_backlog_on_cpu_only_hosts() {
+        reset_utility_first_scheduler_for_tests();
         assert!(!graph_projection_allowed(
             100,
             ServicePressure::Healthy,
@@ -4910,6 +4937,7 @@ mod tests {
 
     #[test]
     fn test_graph_projection_can_run_with_large_vector_backlog_when_gpu_is_available() {
+        reset_utility_first_scheduler_for_tests();
         assert!(graph_projection_allowed(
             100,
             ServicePressure::Healthy,
@@ -4921,6 +4949,7 @@ mod tests {
     #[test]
     fn test_graph_projection_yields_to_large_vector_backlog_on_gpu_hosts_too() {
         crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
         assert!(!graph_projection_allowed(
             100,
             ServicePressure::Healthy,
@@ -4933,6 +4962,7 @@ mod tests {
     fn test_semantic_policy_pauses_when_live_service_is_critical() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
         let policy = semantic_policy(100, ServicePressure::Critical);
         assert!(policy.pause);
         assert_eq!(policy.sleep, Duration::from_secs(2));
@@ -4942,6 +4972,9 @@ mod tests {
     fn test_semantic_policy_throttles_without_pausing_when_service_is_degraded() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
+        crate::service_guard::record_vector_ready_queue_depth(4);
+        crate::service_guard::record_vector_prepare_inflight_depth(2);
         let policy = semantic_policy(100, ServicePressure::Degraded);
         assert!(!policy.pause);
         assert_eq!(policy.sleep, Duration::from_millis(350));
@@ -4951,6 +4984,9 @@ mod tests {
     fn test_semantic_policy_stays_throttled_while_service_recovers() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
+        crate::service_guard::record_vector_ready_queue_depth(4);
+        crate::service_guard::record_vector_prepare_inflight_depth(2);
         let policy = semantic_policy(100, ServicePressure::Recovering);
         assert!(!policy.pause);
         assert_eq!(policy.sleep, Duration::from_millis(350));
@@ -5091,6 +5127,7 @@ mod tests {
     fn test_semantic_policy_pauses_while_interactive_priority_is_active() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
         crate::service_guard::mcp_request_started();
         let policy = semantic_policy(100, ServicePressure::Healthy);
         crate::service_guard::mcp_request_finished();
@@ -5102,12 +5139,46 @@ mod tests {
     fn test_semantic_policy_prefers_drain_mode_when_mcp_is_idle() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
+        crate::service_guard::record_vector_ready_queue_depth(4);
+        crate::service_guard::record_vector_prepare_inflight_depth(2);
         let policy = semantic_policy(2_000, ServicePressure::Recovering);
         assert!(
             !policy.pause,
             "idle MCP should allow semantic drain despite recovering pressure"
         );
         assert_eq!(policy.idle_sleep, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn test_utility_first_scheduler_prefers_graph_priority_when_graph_backlog_exists() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
+        crate::service_guard::record_vector_ready_queue_depth(8);
+        crate::service_guard::record_vector_prepare_inflight_depth(4);
+        let diagnostics =
+            current_utility_first_scheduler_diagnostics(32, 64, ServicePressure::Healthy);
+        assert_eq!(diagnostics.state, UtilityFirstSchedulerState::GraphPriority);
+        assert!(!diagnostics.semantic_underfeed);
+    }
+
+    #[test]
+    fn test_utility_first_scheduler_enters_semantic_refill_when_underfed() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
+        crate::service_guard::record_vector_ready_queue_depth(0);
+        crate::service_guard::record_vector_prepare_inflight_depth(0);
+        let diagnostics =
+            current_utility_first_scheduler_diagnostics(0, 64, ServicePressure::Healthy);
+        assert_eq!(
+            diagnostics.state,
+            UtilityFirstSchedulerState::SemanticRefillProtection
+        );
+        assert!(diagnostics.semantic_underfeed);
+        let policy = semantic_policy_with_graph(64, 0, ServicePressure::Healthy);
+        assert_eq!(policy.sleep, Duration::from_millis(100));
     }
 
     #[test]

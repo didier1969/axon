@@ -447,7 +447,8 @@ impl McpServer {
         });
         let stage_started_at = Instant::now();
         let relevant_soll_entities = if should_join_soll && !runtime.should_skip_soll_join() {
-            let entities = self.collect_soll_entities(&entry_candidates, project, top_k);
+            let entities =
+                self.collect_soll_entities(&entry_candidates, project, &terms_for_reasoning, top_k);
             diagnostics.soll_entities_selected = entities.len();
             entities
         } else if should_join_soll && runtime.should_skip_soll_join() {
@@ -2092,6 +2093,7 @@ impl McpServer {
         &self,
         entry_candidates: &[EntryCandidate],
         project: Option<&str>,
+        terms: &[String],
         top_k: usize,
     ) -> Vec<Value> {
         let symbol_names = entry_candidates
@@ -2171,7 +2173,8 @@ impl McpServer {
             .query_json(&query)
             .unwrap_or_else(|_| "[]".to_string());
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        rows.into_iter()
+        let mut selected = rows
+            .into_iter()
             .filter_map(|row| {
                 Some(json!({
                     "id": row.first()?.as_str()?.to_string(),
@@ -2185,7 +2188,85 @@ impl McpServer {
                     "evidence_class": "soll_traceability",
                 }))
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        if !selected.is_empty() {
+            return selected;
+        }
+
+        let filtered_terms = terms
+            .iter()
+            .filter(|term| term.len() >= 4)
+            .cloned()
+            .collect::<Vec<_>>();
+        if filtered_terms.is_empty() {
+            return Vec::new();
+        }
+
+        let project_filter = project
+            .map(|value| {
+                format!(
+                    " AND lower(n.project_code) IN ({})",
+                    Self::project_scope_variants(Some(value))
+                        .iter()
+                        .map(|variant| format!(
+                            "'{}'",
+                            Self::escape_sql(&variant.to_ascii_lowercase())
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .unwrap_or_default();
+        let lexical_predicate = filtered_terms
+            .iter()
+            .map(|term| {
+                format!(
+                    "(lower(n.title) LIKE '%{t}%' OR lower(COALESCE(n.description, '')) LIKE '%{t}%')",
+                    t = Self::escape_sql(term)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let fallback_query = format!(
+            "SELECT n.id, n.type, COALESCE(n.title, ''), \
+                    CASE \
+                        WHEN n.type = 'Requirement' THEN 'direct_requirement_match' \
+                        WHEN n.type = 'Decision' THEN 'direct_decision_match' \
+                        ELSE 'direct_intent_match' \
+                    END AS ranking_reason, \
+                    CASE \
+                        WHEN n.type = 'Requirement' THEN 95 \
+                        WHEN n.type = 'Decision' THEN 90 \
+                        WHEN n.type = 'Concept' THEN 80 \
+                        ELSE 70 \
+                    END AS ranking_score
+             FROM soll.Node n
+             WHERE ({lexical_predicate}){project_filter}
+             ORDER BY ranking_score DESC, n.id ASC
+             LIMIT {limit}",
+            limit = top_k.min(4),
+        );
+        let fallback_raw = self
+            .graph_store
+            .query_json(&fallback_query)
+            .unwrap_or_else(|_| "[]".to_string());
+        let fallback_rows: Vec<Vec<Value>> =
+            serde_json::from_str(&fallback_raw).unwrap_or_default();
+        selected.extend(fallback_rows.into_iter().filter_map(|row| {
+            Some(json!({
+                "id": row.first()?.as_str()?.to_string(),
+                "type": row.get(1)?.as_str()?.to_string(),
+                "title": row.get(2)?.as_str().unwrap_or_default().to_string(),
+                "relation_type": "",
+                "source_symbol": "",
+                "artifact_type": "",
+                "ranking_reasons": [row.get(3)?.as_str().unwrap_or_default().to_string()],
+                "ranking_score": row.get(4)?.as_i64().unwrap_or_default(),
+                "evidence_class": "soll_lexical_fallback",
+            }))
+        }));
+        selected
     }
 
     fn build_answer_sketch(
@@ -2232,6 +2313,32 @@ impl McpServer {
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("Relevant SOLL intent joined: {}.", ids));
+            let requirement_ids = relevant_soll_entities
+                .iter()
+                .filter(|row| {
+                    row.get("type").and_then(|value| value.as_str()) == Some("Requirement")
+                })
+                .filter_map(|row| row.get("id").and_then(|value| value.as_str()))
+                .take(2)
+                .collect::<Vec<_>>();
+            let decision_ids = relevant_soll_entities
+                .iter()
+                .filter(|row| row.get("type").and_then(|value| value.as_str()) == Some("Decision"))
+                .filter_map(|row| row.get("id").and_then(|value| value.as_str()))
+                .take(2)
+                .collect::<Vec<_>>();
+            if !requirement_ids.is_empty() {
+                lines.push(format!(
+                    "Likely governing requirement(s): {}.",
+                    requirement_ids.join(", ")
+                ));
+            }
+            if !decision_ids.is_empty() {
+                lines.push(format!(
+                    "Likely governing decision(s): {}.",
+                    decision_ids.join(", ")
+                ));
+            }
         }
         lines.join(" ")
     }

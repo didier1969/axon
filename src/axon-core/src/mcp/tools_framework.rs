@@ -1,5 +1,7 @@
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
+use crate::service_guard;
+use crate::vector_control::current_utility_first_scheduler_diagnostics;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -1038,6 +1040,36 @@ impl McpServer {
             .pointer("/embedding_contract/drain_state")
             .and_then(|value| value.as_str())
             .unwrap_or("unknown");
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let stale_threshold_ms = std::env::var("AXON_VECTOR_LEASE_STALE_MS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(120_000);
+        let graph_queue_depth = debug_data
+            .pointer("/embedding_contract/runtime_telemetry/graph_projection_queue_depth")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let orphan_vectorization_files = self
+            .graph_store
+            .count_orphaned_file_vectorization_files()
+            .unwrap_or(0);
+        let stale_vector_inflight_files = self
+            .graph_store
+            .count_stale_inflight_file_vectorization_files(now_ms, stale_threshold_ms)
+            .unwrap_or(0);
+        let oldest_graph_pending_age_ms = self
+            .graph_store
+            .oldest_graph_pending_age_ms(now_ms)
+            .unwrap_or(0);
+        let oldest_semantic_pending_age_ms = self
+            .graph_store
+            .oldest_semantic_pending_age_ms(now_ms)
+            .unwrap_or(0);
+        let utility_scheduler = current_utility_first_scheduler_diagnostics(
+            graph_queue_depth,
+            queued_files as usize + inflight_files as usize,
+            service_guard::current_pressure(),
+        );
 
         let job_counts_raw = self
             .graph_store
@@ -1063,6 +1095,7 @@ impl McpServer {
 **Runtime identity:** `{}`\n\
 **Advanced indexed surfaces visible:** {}\n\
 **Vector backlog:** queued={} inflight={}\n\
+**Utility-first scheduler:** `{}` ({})\n\
 **Drain state:** `{}`\n\
 **Public tools:** {}\n",
             runtime_mode.as_str(),
@@ -1076,6 +1109,8 @@ impl McpServer {
             },
             queued_files,
             inflight_files,
+            utility_scheduler.state.as_str(),
+            utility_scheduler.reason,
             drain_state,
             public_tool_names.join(", ")
         );
@@ -1227,6 +1262,17 @@ impl McpServer {
                 "file_vectorization_queue": {
                     "queued": queued_files,
                     "inflight": inflight_files
+                },
+                "utility_first_scheduler": {
+                    "state": utility_scheduler.state.as_str(),
+                    "reason": utility_scheduler.reason,
+                    "semantic_underfeed": utility_scheduler.semantic_underfeed,
+                    "ready_reserve_target": utility_scheduler.ready_reserve_target,
+                    "hold_window_ms": utility_scheduler.hold_window_ms,
+                    "orphan_vectorization_files": orphan_vectorization_files,
+                    "stale_vector_inflight_files": stale_vector_inflight_files,
+                    "oldest_graph_pending_age_ms": oldest_graph_pending_age_ms,
+                    "oldest_semantic_pending_age_ms": oldest_semantic_pending_age_ms
                 },
                 "public_tools": public_tool_names,
                 "async_policy": {

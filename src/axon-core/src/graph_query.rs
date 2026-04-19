@@ -531,6 +531,24 @@ impl GraphStore {
         self.query_count_on_writer(query)
     }
 
+    pub(crate) fn query_single_i64_writer(&self, query: &str) -> Result<Option<i64>> {
+        let raw = self.query_json_on_writer(query)?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let Some(val) = row.first() else {
+            return Ok(None);
+        };
+        if let Some(number) = val.as_i64() {
+            return Ok(Some(number));
+        }
+        if let Some(text) = val.as_str() {
+            return Ok(text.parse::<i64>().ok());
+        }
+        Ok(None)
+    }
+
     pub fn query_count(&self, query: &str) -> Result<i64> {
         self.query_count_on_reader(query)
     }
