@@ -2291,7 +2291,7 @@ fn test_status_exposes_runtime_version_identity() {
     unsafe {
         std::env::set_var("AXON_RELEASE_VERSION", "0.7.0");
         std::env::set_var("AXON_BUILD_ID", "v0.7.0-rc1-12-gabcdef");
-        std::env::set_var("AXON_PACKAGE_VERSION", "2.0.0");
+        std::env::set_var("AXON_PACKAGE_VERSION", "0.7.0");
         std::env::set_var("AXON_INSTALL_GENERATION", "live-2026-04-18");
     }
 
@@ -2309,7 +2309,7 @@ fn test_status_exposes_runtime_version_identity() {
     );
     assert_eq!(
         data["runtime_version"]["package_version"].as_str(),
-        Some("2.0.0")
+        Some("0.7.0")
     );
     assert_eq!(
         data["runtime_version"]["install_generation"].as_str(),
