@@ -1,12 +1,14 @@
 use anyhow::anyhow;
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use super::format::format_standard_contract;
 use super::soll::{
-    canonical_soll_export_dir, find_latest_soll_export, parse_soll_export, SollRestoreCounts,
+    canonical_soll_export_dir, canonical_soll_site_dir, find_latest_soll_export, parse_soll_export,
+    SollRestoreCounts,
 };
 use super::McpServer;
 use crate::project_meta::{
@@ -37,6 +39,8 @@ static SOLL_CONTEXT_CACHE: OnceLock<Mutex<SollContextCache>> = OnceLock::new();
 
 #[allow(dead_code)]
 const SOLL_CONTEXT_CACHE_TTL_MS: i64 = 180_000;
+const SOLL_PROJECT_DOCS_GENERATOR_VERSION: &str = "soll_generate_docs_v3";
+const SOLL_ROOT_DOCS_GENERATOR_VERSION: &str = "soll_generate_docs_root_v2";
 
 impl McpServer {
     #[cfg(not(test))]
@@ -132,6 +136,151 @@ struct WorkPlanBlocker {
     reason: String,
 }
 
+#[derive(Clone, Debug)]
+struct RequirementCoverageEntry {
+    id: String,
+    status: String,
+    evidence_count: usize,
+    validation_count: usize,
+    has_criteria: bool,
+    broken_file_evidence_count: usize,
+    state: String,
+    missing_dimensions: Vec<String>,
+    suggested_next_actions: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SollDocNode {
+    id: String,
+    entity_type: String,
+    title: String,
+    description: String,
+    status: String,
+    metadata: String,
+}
+
+#[derive(Clone, Debug)]
+struct SollDocEdge {
+    source_id: String,
+    target_id: String,
+    relation_type: String,
+}
+
+#[derive(Clone, Debug)]
+struct SollDocPageSpec {
+    relative_path: String,
+    title: String,
+    html: String,
+    node_ids: Vec<String>,
+    edge_keys: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SollMutationCandidate {
+    id: String,
+    entity_type: String,
+    title: String,
+    score: usize,
+    reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SollMutationInference {
+    project_code: String,
+    statement: String,
+    candidate_entity_type: String,
+    confidence: String,
+    impacted_candidates: Vec<SollMutationCandidate>,
+    target_ids: Vec<String>,
+    ambiguity_warnings: Vec<String>,
+    proposed_operation_kind: String,
+}
+
+#[derive(Clone, Debug)]
+struct SollDerivedProjectEntry {
+    project_code: String,
+    project_name: String,
+    project_path: String,
+    node_count: usize,
+    has_docs: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SollDerivedDocsRefreshSummary {
+    pub(crate) project_code: String,
+    pub(crate) site_root: String,
+    pub(crate) project_output_root: String,
+    pub(crate) project_manifest_path: String,
+    pub(crate) root_manifest_path: String,
+    pub(crate) root_index_path: String,
+    pub(crate) refresh_mode: String,
+    pub(crate) pages_total: usize,
+    pub(crate) pages_written: usize,
+    pub(crate) pages_unchanged: usize,
+    pub(crate) pages_deleted: usize,
+    pub(crate) deleted_paths: Vec<String>,
+    pub(crate) root_written: bool,
+    pub(crate) stale_docs: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RequirementCoverageSummary {
+    done: usize,
+    partial: usize,
+    missing: usize,
+    entries: Vec<RequirementCoverageEntry>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SollCompletenessSnapshot {
+    project_scope: String,
+    total_nodes: usize,
+    orphan_requirements: Vec<String>,
+    validations_without_verifies: Vec<String>,
+    decisions_without_links: Vec<String>,
+    uncovered_requirements: Vec<String>,
+    duplicate_title_rows: Vec<Vec<String>>,
+    duplicate_ids: Vec<String>,
+    relation_policy_violations: Vec<String>,
+    requirement_coverage: RequirementCoverageSummary,
+}
+
+impl SollCompletenessSnapshot {
+    pub(crate) fn structurally_connected(&self) -> bool {
+        self.orphan_requirements.is_empty()
+            && self.validations_without_verifies.is_empty()
+            && self.decisions_without_links.is_empty()
+            && self.relation_policy_violations.is_empty()
+    }
+
+    pub(crate) fn duplicate_free(&self) -> bool {
+        self.duplicate_title_rows.is_empty()
+    }
+
+    pub(crate) fn evidence_ready(&self) -> bool {
+        self.uncovered_requirements.is_empty()
+    }
+
+    pub(crate) fn concept_complete(&self) -> bool {
+        self.total_nodes > 0 && self.structurally_connected() && self.duplicate_free()
+    }
+
+    pub(crate) fn implementation_complete(&self) -> bool {
+        self.requirement_coverage.missing == 0
+    }
+
+    pub(crate) fn canonical_orphan_intent_ids(&self) -> BTreeSet<String> {
+        self.orphan_requirements
+            .iter()
+            .chain(self.validations_without_verifies.iter())
+            .chain(self.decisions_without_links.iter())
+            .chain(self.uncovered_requirements.iter())
+            .chain(self.duplicate_ids.iter())
+            .cloned()
+            .collect()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LinkEndpointKind {
     Soll(&'static str),
@@ -148,11 +297,47 @@ impl LinkEndpointKind {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum ProjectionRole {
+    Primary,
+    Lateral,
+    Supporting,
+}
+
+impl ProjectionRole {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Lateral => "lateral",
+            Self::Supporting => "supporting",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct KindProjectionPolicy {
+    breadcrumb_eligible: bool,
+    root_eligible: bool,
+    tree_order_rank: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RelationProjectionPolicy {
+    role: ProjectionRole,
+    parent_preference_rank: usize,
+    child_order_rank: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct RelationPolicy {
     allowed: &'static [&'static str],
     default: Option<&'static str>,
     allow_multiple_types: bool,
+    projection: RelationProjectionPolicy,
 }
+
+const SOLL_RELATION_ENDPOINT_KINDS: &[&str] = &[
+    "VIS", "PIL", "REQ", "CPT", "DEC", "MIL", "VAL", "STK", "GUI", "ART",
+];
 
 fn relation_table_name(_relation_type: &str) -> Option<&'static str> {
     Some("soll.Edge")
@@ -171,84 +356,401 @@ fn relation_policy_for_pair(source_type: &str, target_type: &str) -> Option<Rela
             allowed: &["EPITOMIZES"],
             default: Some("EPITOMIZES"),
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 10,
+                child_order_rank: 20,
+            },
         }),
         ("REQ", "PIL") => Some(RelationPolicy {
             allowed: &["BELONGS_TO"],
             default: Some("BELONGS_TO"),
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 10,
+                child_order_rank: 30,
+            },
         }),
         ("CPT", "REQ") => Some(RelationPolicy {
             allowed: &["EXPLAINS", "REFINES"],
             default: Some("EXPLAINS"),
             allow_multiple_types: true,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 40,
+                child_order_rank: 70,
+            },
         }),
         ("DEC", "REQ") => Some(RelationPolicy {
             allowed: &["SOLVES", "REFINES"],
             default: Some("SOLVES"),
             allow_multiple_types: true,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 10,
+                child_order_rank: 40,
+            },
         }),
         ("MIL", "REQ") => Some(RelationPolicy {
             allowed: &["TARGETS"],
             default: Some("TARGETS"),
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 50,
+                child_order_rank: 80,
+            },
         }),
         ("VAL", "REQ") => Some(RelationPolicy {
             allowed: &["VERIFIES"],
             default: Some("VERIFIES"),
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 20,
+                child_order_rank: 50,
+            },
         }),
         ("STK", "REQ") => Some(RelationPolicy {
             allowed: &["ORIGINATES", "CONTRIBUTES_TO"],
             default: Some("ORIGINATES"),
             allow_multiple_types: true,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Primary,
+                parent_preference_rank: 60,
+                child_order_rank: 90,
+            },
         }),
         ("GUI", "GUI") => Some(RelationPolicy {
             allowed: &["INHERITS_FROM"],
             default: Some("INHERITS_FROM"),
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 80,
+                child_order_rank: 60,
+            },
         }),
         ("REQ", "GUI") => Some(RelationPolicy {
             allowed: &["BELONGS_TO", "COMPLIES_WITH"],
             default: Some("BELONGS_TO"),
             allow_multiple_types: true,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Supporting,
+                parent_preference_rank: 90,
+                child_order_rank: 999,
+            },
         }),
         ("DEC", "GUI") => Some(RelationPolicy {
             allowed: &["COMPLIES_WITH"],
             default: Some("COMPLIES_WITH"),
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 90,
+                child_order_rank: 999,
+            },
         }),
         ("DEC", "DEC") => Some(RelationPolicy {
             allowed: &["SUPERSEDES", "REFINES"],
             default: None,
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 95,
+                child_order_rank: 999,
+            },
         }),
         ("REQ", "REQ") => Some(RelationPolicy {
             allowed: &["REFINES", "BELONGS_TO"],
             default: Some("REFINES"),
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 95,
+                child_order_rank: 999,
+            },
         }),
         ("MIL", "MIL") => Some(RelationPolicy {
             allowed: &["SUPERSEDES"],
             default: None,
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 95,
+                child_order_rank: 999,
+            },
         }),
         ("VAL", "VAL") => Some(RelationPolicy {
             allowed: &["REFINES", "SUPERSEDES"],
             default: None,
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Lateral,
+                parent_preference_rank: 95,
+                child_order_rank: 999,
+            },
         }),
         ("DEC", "ART") => Some(RelationPolicy {
             allowed: &["IMPACTS", "SUBSTANTIATES"],
             default: Some("IMPACTS"),
             allow_multiple_types: true,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Supporting,
+                parent_preference_rank: 100,
+                child_order_rank: 999,
+            },
         }),
         ("REQ", "ART") | ("VAL", "ART") => Some(RelationPolicy {
             allowed: &["SUBSTANTIATES"],
             default: Some("SUBSTANTIATES"),
             allow_multiple_types: false,
+            projection: RelationProjectionPolicy {
+                role: ProjectionRole::Supporting,
+                parent_preference_rank: 100,
+                child_order_rank: 999,
+            },
         }),
         _ => None,
     }
+}
+
+fn kind_projection_policy(kind: &str) -> Option<KindProjectionPolicy> {
+    match kind {
+        "VIS" => Some(KindProjectionPolicy {
+            breadcrumb_eligible: true,
+            root_eligible: true,
+            tree_order_rank: 10,
+        }),
+        "PIL" => Some(KindProjectionPolicy {
+            breadcrumb_eligible: true,
+            root_eligible: false,
+            tree_order_rank: 20,
+        }),
+        "REQ" => Some(KindProjectionPolicy {
+            breadcrumb_eligible: true,
+            root_eligible: false,
+            tree_order_rank: 30,
+        }),
+        "DEC" => Some(KindProjectionPolicy {
+            breadcrumb_eligible: true,
+            root_eligible: false,
+            tree_order_rank: 40,
+        }),
+        "VAL" => Some(KindProjectionPolicy {
+            breadcrumb_eligible: true,
+            root_eligible: false,
+            tree_order_rank: 50,
+        }),
+        "GUI" => Some(KindProjectionPolicy {
+            breadcrumb_eligible: true,
+            root_eligible: false,
+            tree_order_rank: 60,
+        }),
+        "CPT" => Some(KindProjectionPolicy {
+            breadcrumb_eligible: true,
+            root_eligible: false,
+            tree_order_rank: 70,
+        }),
+        "MIL" => Some(KindProjectionPolicy {
+            breadcrumb_eligible: true,
+            root_eligible: false,
+            tree_order_rank: 80,
+        }),
+        "STK" => Some(KindProjectionPolicy {
+            breadcrumb_eligible: true,
+            root_eligible: false,
+            tree_order_rank: 90,
+        }),
+        "ART" => Some(KindProjectionPolicy {
+            breadcrumb_eligible: false,
+            root_eligible: false,
+            tree_order_rank: 100,
+        }),
+        _ => None,
+    }
+}
+
+fn projection_metadata_payload(
+    source_type: &str,
+    target_type: &str,
+    policy: RelationPolicy,
+) -> Value {
+    let source_projection = kind_projection_policy(source_type);
+    let target_projection = kind_projection_policy(target_type);
+    json!({
+        "role": policy.projection.role.as_str(),
+        "parent_preference_rank": policy.projection.parent_preference_rank,
+        "child_order_rank": policy.projection.child_order_rank,
+        "source_breadcrumb_eligible": source_projection.map(|value| value.breadcrumb_eligible),
+        "target_breadcrumb_eligible": target_projection.map(|value| value.breadcrumb_eligible),
+        "source_root_eligible": source_projection.map(|value| value.root_eligible),
+        "target_root_eligible": target_projection.map(|value| value.root_eligible),
+        "source_tree_order_rank": source_projection.map(|value| value.tree_order_rank),
+        "target_tree_order_rank": target_projection.map(|value| value.tree_order_rank)
+    })
+}
+
+fn relation_policy_payload(source_type: &str, target_type: &str) -> Value {
+    if let Some(policy) = relation_policy_for_pair(source_type, target_type) {
+        json!({
+            "pair_allowed": true,
+            "source_kind": source_type,
+            "target_kind": target_type,
+            "allowed_relations": policy.allowed,
+            "default_relation": policy.default,
+            "allow_multiple_types": policy.allow_multiple_types,
+            "projection": projection_metadata_payload(source_type, target_type, policy),
+            "guidance_source": "derived_from_relation_policy"
+        })
+    } else {
+        json!({
+            "pair_allowed": false,
+            "source_kind": source_type,
+            "target_kind": target_type,
+            "allowed_relations": [],
+            "default_relation": Value::Null,
+            "allow_multiple_types": false,
+            "projection": Value::Null,
+            "guidance_source": "derived_from_relation_policy"
+        })
+    }
+}
+
+fn relation_schema_summary_for_kind(kind: &str) -> Value {
+    let allowed_targets = allowed_relation_targets_from_source(kind);
+    let forbidden_targets = SOLL_RELATION_ENDPOINT_KINDS
+        .iter()
+        .filter(|target_kind| **target_kind != kind)
+        .filter(|target_kind| relation_policy_for_pair(kind, target_kind).is_none())
+        .map(|target_kind| {
+            let reverse_exists = relation_policy_for_pair(target_kind, kind).is_some();
+            let reason = if reverse_exists {
+                "canonical direction exists in the reverse direction"
+            } else if *target_kind == "MIL" || kind == "MIL" {
+                "milestones are not part of this canonical edge family"
+            } else {
+                "no canonical relation policy exists for this pair"
+            };
+            json!({
+                "target_kind": target_kind,
+                "reason": reason
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "source_kind": kind,
+        "allowed_targets": allowed_targets,
+        "forbidden_targets": forbidden_targets,
+        "incoming_from_source_kinds": incoming_relation_sources_for_target(kind),
+        "graph_role": graph_role_for_kind(kind),
+        "kind_projection": kind_projection_policy(kind).map(|policy| json!({
+            "breadcrumb_eligible": policy.breadcrumb_eligible,
+            "root_eligible": policy.root_eligible,
+            "tree_order_rank": policy.tree_order_rank
+        })),
+        "guidance_source": "derived_from_relation_policy"
+    })
+}
+
+fn reverse_relation_hint_payload(source_kind: &str, target_kind: &str) -> Value {
+    relation_policy_for_pair(target_kind, source_kind)
+        .map(|reverse_policy| {
+            let relation = reverse_policy.default.unwrap_or(reverse_policy.allowed[0]);
+            json!({
+                "source_kind": target_kind,
+                "target_kind": source_kind,
+                "relation_type": relation,
+                "projection": projection_metadata_payload(target_kind, source_kind, reverse_policy),
+                "example": relation_example_sentence(target_kind, source_kind, relation)
+            })
+        })
+        .unwrap_or(Value::Null)
+}
+
+fn graph_role_for_kind(kind: &str) -> &'static str {
+    match kind {
+        "VIS" => "project north star",
+        "PIL" => "structural pillar under a vision",
+        "REQ" => "obligation that must be satisfied",
+        "CPT" => "concept that explains or refines a requirement",
+        "DEC" => "decision that solves, refines, or impacts implementation",
+        "MIL" => "delivery checkpoint tied to a requirement",
+        "VAL" => "evidence or proof that verifies a requirement",
+        "STK" => "stakeholder source of demand or contribution",
+        "GUI" => "guideline or policy constraint",
+        "ART" => "implementation or runtime artifact",
+        _ => "soll graph node",
+    }
+}
+
+fn relation_example_sentence(source_kind: &str, target_kind: &str, relation_type: &str) -> String {
+    format!(
+        "A {} node typically uses `{}` to connect to a {} node.",
+        source_kind, relation_type, target_kind
+    )
+}
+
+fn allowed_relation_targets_from_source(source_type: &str) -> Vec<Value> {
+    SOLL_RELATION_ENDPOINT_KINDS
+        .iter()
+        .filter_map(|target_type| {
+            relation_policy_for_pair(source_type, target_type).map(|policy| {
+                let default_relation = policy.default.unwrap_or(policy.allowed[0]);
+                json!({
+                    "source_kind": source_type,
+                    "target_kind": target_type,
+                    "allowed_relations": policy.allowed,
+                    "default_relation": policy.default,
+                    "allow_multiple_types": policy.allow_multiple_types,
+                    "projection": projection_metadata_payload(source_type, target_type, policy),
+                    "source_graph_role": graph_role_for_kind(source_type),
+                    "target_graph_role": graph_role_for_kind(target_type),
+                    "canonical_example": relation_example_sentence(source_type, target_type, default_relation),
+                    "guidance_source": "derived_from_relation_policy"
+                })
+            })
+        })
+        .collect()
+}
+
+fn incoming_relation_sources_for_target(target_type: &str) -> Vec<Value> {
+    SOLL_RELATION_ENDPOINT_KINDS
+        .iter()
+        .filter_map(|source_type| {
+            relation_policy_for_pair(source_type, target_type).map(|policy| {
+                let default_relation = policy.default.unwrap_or(policy.allowed[0]);
+                json!({
+                    "source_kind": source_type,
+                    "target_kind": target_type,
+                    "allowed_relations": policy.allowed,
+                    "default_relation": policy.default,
+                    "allow_multiple_types": policy.allow_multiple_types,
+                    "projection": projection_metadata_payload(source_type, target_type, policy),
+                    "source_graph_role": graph_role_for_kind(source_type),
+                    "target_graph_role": graph_role_for_kind(target_type),
+                    "canonical_example": relation_example_sentence(source_type, target_type, default_relation),
+                    "guidance_source": "derived_from_relation_policy"
+                })
+            })
+        })
+        .collect()
+}
+
+fn repair_guidance_entry(
+    category: &str,
+    ids: &[String],
+    summary: &str,
+    next_steps: &[&str],
+) -> Value {
+    json!({
+        "category": category,
+        "summary": summary,
+        "ids": ids,
+        "next_steps": next_steps,
+        "guidance_source": "server-side canonical soll validation"
+    })
 }
 
 fn relation_scope_matches(source_id: &str, target_id: &str, project_code: Option<&str>) -> bool {
@@ -299,15 +801,292 @@ fn recommendation_reason(node: &WorkPlanNode) -> String {
     }
 }
 
-fn requirement_state_from(status: &str, criteria: &str, evidence_count: usize) -> &'static str {
+fn requirement_state_from(
+    status: &str,
+    criteria: &str,
+    evidence_count: usize,
+    broken_file_evidence_count: usize,
+) -> &'static str {
     let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
-    if evidence_count > 0 && has_criteria && matches!(status, "current" | "accepted") {
+    if evidence_count > 0
+        && broken_file_evidence_count == 0
+        && has_criteria
+        && matches!(status, "current" | "accepted")
+    {
         "done"
-    } else if evidence_count > 0 || has_criteria {
+    } else if evidence_count > 0 || has_criteria || broken_file_evidence_count > 0 {
         "partial"
     } else {
         "missing"
     }
+}
+
+fn requirement_missing_dimensions(
+    status: &str,
+    has_criteria: bool,
+    evidence_count: usize,
+    validation_count: usize,
+    broken_file_evidence_count: usize,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    if !matches!(status, "current" | "accepted") {
+        missing.push("status".to_string());
+    }
+    if !has_criteria {
+        missing.push("criteria".to_string());
+    }
+    if evidence_count == 0 {
+        missing.push("evidence".to_string());
+    }
+    if validation_count == 0 {
+        missing.push("validation".to_string());
+    }
+    if broken_file_evidence_count > 0 {
+        missing.push("broken_file_evidence".to_string());
+    }
+    missing
+}
+
+fn requirement_dimension_canonical_name(dimension: &str) -> &str {
+    match dimension {
+        "status" => "accepted_runtime_status",
+        "criteria" => "structured_acceptance_criteria",
+        "evidence" => "supporting_evidence",
+        "validation" => "qualifying_validation_edge",
+        "broken_file_evidence" => "resolvable_file_evidence",
+        _ => dimension,
+    }
+}
+
+fn requirement_dimension_descriptor(dimension: &str) -> Value {
+    match dimension {
+        "status" => json!({
+            "legacy_key": "status",
+            "canonical_key": "accepted_runtime_status",
+            "label": "Accepted runtime status",
+            "severity": "blocking",
+            "meaning": "Requirement status should be `current` or `accepted` before it is treated as complete.",
+            "next_action": "set requirement status to `current` or `accepted`"
+        }),
+        "criteria" => json!({
+            "legacy_key": "criteria",
+            "canonical_key": "structured_acceptance_criteria",
+            "label": "Structured acceptance criteria",
+            "severity": "blocking",
+            "meaning": "Requirement metadata must include explicit acceptance criteria.",
+            "next_action": "add acceptance criteria in requirement metadata"
+        }),
+        "evidence" => json!({
+            "legacy_key": "evidence",
+            "canonical_key": "supporting_evidence",
+            "label": "Supporting evidence",
+            "severity": "blocking",
+            "meaning": "At least one traceability or proof artifact should support this requirement.",
+            "next_action": "attach proof with `soll_attach_evidence`"
+        }),
+        "validation" => json!({
+            "legacy_key": "validation",
+            "canonical_key": "qualifying_validation_edge",
+            "label": "Qualifying validation edge",
+            "severity": "blocking",
+            "meaning": "A validation node should `VERIFIES` this requirement before it is considered done.",
+            "next_action": "create or link a validation node that `VERIFIES` the requirement"
+        }),
+        "broken_file_evidence" => json!({
+            "legacy_key": "broken_file_evidence",
+            "canonical_key": "resolvable_file_evidence",
+            "label": "Resolvable file evidence",
+            "severity": "warning",
+            "meaning": "Some attached file evidence is no longer reachable on disk and weakens proof quality.",
+            "next_action": "repair or replace broken file evidence paths before relying on coverage"
+        }),
+        _ => json!({
+            "legacy_key": dimension,
+            "canonical_key": dimension,
+            "label": dimension,
+            "severity": "warning",
+            "meaning": "Additional requirement coverage dimension",
+            "next_action": Value::Null
+        }),
+    }
+}
+
+fn requirement_next_actions(missing_dimensions: &[String]) -> Vec<String> {
+    let mut actions = Vec::new();
+    for dimension in missing_dimensions {
+        let action = match dimension.as_str() {
+            "status" => "set requirement status to `current` or `accepted`".to_string(),
+            "criteria" => "add acceptance criteria in requirement metadata".to_string(),
+            "evidence" => "attach proof with `soll_attach_evidence`".to_string(),
+            "validation" => {
+                "create or link a validation node that `VERIFIES` the requirement".to_string()
+            }
+            "broken_file_evidence" => {
+                "repair or replace broken file evidence paths before relying on coverage"
+                    .to_string()
+            }
+            _ => continue,
+        };
+        if !actions.contains(&action) {
+            actions.push(action);
+        }
+    }
+    actions
+}
+
+fn requirement_state_reason(state: &str, missing_dimensions: &[String]) -> String {
+    if missing_dimensions.is_empty() {
+        return "Requirement is complete across status, criteria, evidence, and validation coverage."
+            .to_string();
+    }
+    let canonical = missing_dimensions
+        .iter()
+        .map(|dimension| requirement_dimension_canonical_name(dimension))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match state {
+        "done" => format!(
+            "Requirement is complete, but operator attention is still required for: {canonical}."
+        ),
+        "partial" => format!(
+            "Requirement is partially complete because coverage is still missing for: {canonical}."
+        ),
+        _ => format!("Requirement is missing required coverage dimensions: {canonical}."),
+    }
+}
+
+fn normalize_traceability_entity_type(entity_type: &str) -> String {
+    match entity_type.trim().to_ascii_lowercase().as_str() {
+        "vision" | "vis" => "vision".to_string(),
+        "pillar" | "pil" => "pillar".to_string(),
+        "requirement" | "req" => "requirement".to_string(),
+        "concept" | "cpt" => "concept".to_string(),
+        "decision" | "dec" => "decision".to_string(),
+        "milestone" | "mil" => "milestone".to_string(),
+        "validation" | "val" => "validation".to_string(),
+        "stakeholder" | "stk" => "stakeholder".to_string(),
+        "guideline" | "gui" => "guideline".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn accepted_evidence_artifact_schema(entity_type: &str) -> Vec<&'static str> {
+    match normalize_traceability_entity_type(entity_type).as_str() {
+        "requirement" => vec!["document", "file", "symbol", "test", "metric", "validation"],
+        "decision" => vec![
+            "document",
+            "file",
+            "symbol",
+            "rationale",
+            "diff",
+            "validation",
+        ],
+        "validation" => vec!["document", "file", "symbol", "test", "metric", "diff"],
+        "concept" => vec!["document", "file", "symbol", "rationale"],
+        "guideline" => vec!["document", "file", "symbol", "diff"],
+        "vision" | "pillar" | "milestone" | "stakeholder" => {
+            vec!["document", "file", "symbol", "metric"]
+        }
+        _ => vec!["document", "file", "symbol"],
+    }
+}
+
+fn normalize_evidence_artifact_type(raw: &str, artifact_ref: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "document" | "doc" => {
+            if artifact_ref.contains('/') || artifact_ref.ends_with(".md") {
+                "File".to_string()
+            } else {
+                "Document".to_string()
+            }
+        }
+        "file" | "path" | "uri" => "File".to_string(),
+        "symbol" | "code" => "Symbol".to_string(),
+        "test" => "Test".to_string(),
+        "metric" => "Metric".to_string(),
+        "validation" => "Validation".to_string(),
+        "rationale" => "Rationale".to_string(),
+        "diff" => "Diff".to_string(),
+        other => {
+            let mut chars = other.chars();
+            if let Some(first) = chars.next() {
+                format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+            } else {
+                "Unknown".to_string()
+            }
+        }
+    }
+}
+
+fn artifact_schema_accepts(entity_type: &str, artifact_type: &str) -> bool {
+    let normalized = artifact_type.to_ascii_lowercase();
+    accepted_evidence_artifact_schema(entity_type)
+        .iter()
+        .any(|candidate| {
+            *candidate == normalized || (*candidate == "document" && normalized == "file")
+        })
+}
+
+fn project_code_from_canonical_entity_id(entity_id: &str) -> Option<String> {
+    let mut parts = entity_id.split('-');
+    let _prefix = parts.next()?;
+    let project_code = parts.next()?.trim();
+    if project_code.len() == 3
+        && project_code
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() && !ch.is_ascii_lowercase())
+    {
+        Some(project_code.to_string())
+    } else {
+        None
+    }
+}
+
+fn tokenize_inference_text(input: &str) -> Vec<String> {
+    input
+        .to_ascii_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 3)
+        .map(|token| token.to_string())
+        .collect()
+}
+
+fn preferred_entity_type_for_statement(statement: &str) -> &'static str {
+    let lower = statement.to_ascii_lowercase();
+    if ["constraint", "must", "should", "need", "requires", "rule"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        "Requirement"
+    } else if [
+        "decision",
+        "choose",
+        "adopt",
+        "use ",
+        "switch",
+        "architecture",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        "Decision"
+    } else if ["guideline", "policy", "convention", "standard"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        "Guideline"
+    } else if ["concept", "means", "term", "definition"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        "Concept"
+    } else {
+        "Requirement"
+    }
+}
+
+fn canonical_blocker_ids(snapshot: &SollCompletenessSnapshot) -> BTreeSet<String> {
+    snapshot.canonical_orphan_intent_ids()
 }
 
 fn build_adjacency_map(edges: &[(String, String)]) -> HashMap<String, BTreeSet<String>> {
@@ -674,6 +1453,468 @@ fn wave_to_json(wave: &WorkPlanWave) -> Value {
 }
 
 impl McpServer {
+    fn canonical_next_link_hints(&self, entity_type_cap: &str) -> Vec<Value> {
+        let outgoing = allowed_relation_targets_from_source(entity_type_cap);
+        if !outgoing.is_empty() {
+            outgoing
+        } else {
+            incoming_relation_sources_for_target(entity_type_cap)
+        }
+    }
+
+    fn derive_next_best_actions_from_snapshot(
+        &self,
+        snapshot: &SollCompletenessSnapshot,
+    ) -> Vec<String> {
+        if !snapshot.orphan_requirements.is_empty() {
+            vec![
+                "link each orphan requirement to its pillar or guideline".to_string(),
+                "use `soll_relation_schema` before retrying if canonical edges are unclear"
+                    .to_string(),
+            ]
+        } else if !snapshot.validations_without_verifies.is_empty() {
+            vec![
+                "attach each validation to a requirement with `VERIFIES`".to_string(),
+                "rerun `soll_validate` after adding the missing proof links".to_string(),
+            ]
+        } else if !snapshot.uncovered_requirements.is_empty() {
+            vec![
+                "add acceptance criteria or evidence to uncovered requirements".to_string(),
+                "use `soll_attach_evidence` or update requirement metadata".to_string(),
+            ]
+        } else {
+            vec![
+                "rerun `soll_work_plan` to open the next delivery wave".to_string(),
+                "use `soll_verify_requirements` for requirement-level proof status".to_string(),
+            ]
+        }
+    }
+
+    fn mutation_feedback_payload(
+        &self,
+        before: &SollCompletenessSnapshot,
+        after: &SollCompletenessSnapshot,
+        changed_entities: Vec<Value>,
+        topology_delta: Value,
+    ) -> Value {
+        let before_blockers = canonical_blocker_ids(before);
+        let after_blockers = canonical_blocker_ids(after);
+        let newly_unblocked = before_blockers
+            .difference(&after_blockers)
+            .cloned()
+            .collect::<Vec<_>>();
+        let remaining_blockers = after_blockers.into_iter().collect::<Vec<_>>();
+
+        json!({
+            "changed_entities": changed_entities,
+            "topology_delta": topology_delta,
+            "newly_unblocked": newly_unblocked,
+            "remaining_blockers": remaining_blockers,
+            "next_best_actions": self.derive_next_best_actions_from_snapshot(after),
+            "completeness_before": {
+                "concept_completeness": before.concept_complete(),
+                "implementation_completeness": before.implementation_complete(),
+                "structurally_connected": before.structurally_connected(),
+                "evidence_ready": before.evidence_ready(),
+                "duplicate_free": before.duplicate_free()
+            },
+            "completeness_after": {
+                "concept_completeness": after.concept_complete(),
+                "implementation_completeness": after.implementation_complete(),
+                "structurally_connected": after.structurally_connected(),
+                "evidence_ready": after.evidence_ready(),
+                "duplicate_free": after.duplicate_free()
+            },
+            "guidance_source": "server-side canonical soll mutation feedback"
+        })
+    }
+
+    fn infer_soll_mutation_internal(
+        &self,
+        project_code: &str,
+        statement: &str,
+    ) -> anyhow::Result<SollMutationInference> {
+        let project_code = self.resolve_project_code(project_code)?;
+        let preferred_type = preferred_entity_type_for_statement(statement);
+        let tokens = tokenize_inference_text(statement);
+        let rows_raw = self.graph_store.query_json(&format!(
+            "SELECT id, type, COALESCE(title,''), COALESCE(description,'')
+             FROM soll.Node
+             WHERE project_code = '{}'
+             ORDER BY type, id",
+            escape_sql(&project_code)
+        ))?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+
+        let mut candidates = rows
+            .into_iter()
+            .filter(|row| row.len() >= 4)
+            .map(|row| {
+                let haystack = format!("{} {}", row[2], row[3]).to_ascii_lowercase();
+                let token_hits = tokens
+                    .iter()
+                    .filter(|token| haystack.contains(token.as_str()))
+                    .count();
+                let type_bonus = usize::from(row[1] == preferred_type) * 2;
+                let score = token_hits + type_bonus;
+                let mut reasons = Vec::new();
+                if token_hits > 0 {
+                    reasons.push(format!("matched {} statement token(s)", token_hits));
+                }
+                if row[1] == preferred_type {
+                    reasons.push(format!("preferred entity type `{}`", preferred_type));
+                }
+                SollMutationCandidate {
+                    id: row[0].clone(),
+                    entity_type: row[1].clone(),
+                    title: row[2].clone(),
+                    score,
+                    reasons,
+                }
+            })
+            .filter(|candidate| candidate.score > 0)
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        candidates.truncate(5);
+
+        let target_ids = candidates
+            .iter()
+            .take(2)
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        let confidence = if candidates
+            .first()
+            .is_some_and(|candidate| candidate.score >= 4)
+        {
+            "high"
+        } else if !candidates.is_empty() {
+            "medium"
+        } else {
+            "low"
+        };
+        let mut ambiguity_warnings = Vec::new();
+        if candidates.is_empty() {
+            ambiguity_warnings.push(
+                "No existing canonical nodes matched strongly; wave 1 entrenchment will not create new entities automatically.".to_string(),
+            );
+        } else if candidates.len() > 1
+            && candidates
+                .get(1)
+                .is_some_and(|candidate| candidate.score == candidates[0].score)
+        {
+            ambiguity_warnings
+                .push("Multiple candidate nodes scored equally; confirm target_ids explicitly before write mode.".to_string());
+        }
+
+        Ok(SollMutationInference {
+            project_code,
+            statement: statement.to_string(),
+            candidate_entity_type: preferred_type.to_string(),
+            confidence: confidence.to_string(),
+            impacted_candidates: candidates.clone(),
+            target_ids,
+            ambiguity_warnings,
+            proposed_operation_kind: if candidates.is_empty() {
+                "needs_manual_scope".to_string()
+            } else {
+                "update_existing_entities".to_string()
+            },
+        })
+    }
+
+    pub(crate) fn axon_infer_soll_mutation(&self, args: &Value) -> Option<Value> {
+        let project_code = args.get("project_code").and_then(|value| value.as_str())?;
+        let statement = args.get("statement").and_then(|value| value.as_str())?;
+        match self.infer_soll_mutation_internal(project_code, statement) {
+            Ok(inference) => Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "Assistive SOLL inference for `{}` suggests `{}` with {} impacted candidate(s).",
+                        inference.project_code,
+                        inference.proposed_operation_kind,
+                        inference.impacted_candidates.len()
+                    )
+                }],
+                "data": {
+                    "project_code": inference.project_code,
+                    "statement": inference.statement,
+                    "candidate_entity_type": inference.candidate_entity_type,
+                    "proposed_operation_kind": inference.proposed_operation_kind,
+                    "confidence": inference.confidence,
+                    "target_ids": inference.target_ids,
+                    "impacted_candidates": inference.impacted_candidates.iter().map(|candidate| json!({
+                        "id": candidate.id,
+                        "entity_type": candidate.entity_type,
+                        "title": candidate.title,
+                        "score": candidate.score,
+                        "reasons": candidate.reasons
+                    })).collect::<Vec<_>>(),
+                    "ambiguity_warnings": inference.ambiguity_warnings,
+                    "next_best_actions": if inference.impacted_candidates.is_empty() {
+                        vec![
+                            "inspect the current SOLL context and choose explicit target_ids".to_string(),
+                            "create or update canonical nodes manually with `soll_manager` if the nuance truly requires a new entity".to_string()
+                        ]
+                    } else {
+                        vec![
+                            "confirm the target_ids and call `entrench_nuance` with `confirm=true`".to_string(),
+                            "override target_ids explicitly if the proposed scope is too broad".to_string()
+                        ]
+                    }
+                }
+            })),
+            Err(error) => Some(json!({
+                "content": [{ "type": "text", "text": format!("Inference failed: {}", error) }],
+                "isError": true
+            })),
+        }
+    }
+
+    pub(crate) fn axon_entrench_nuance(&self, args: &Value) -> Option<Value> {
+        let project_code = args.get("project_code").and_then(|value| value.as_str())?;
+        let statement = args.get("statement").and_then(|value| value.as_str())?;
+        let confirm = args
+            .get("confirm")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        let inference = match self.infer_soll_mutation_internal(project_code, statement) {
+            Ok(inference) => inference,
+            Err(error) => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Entrenchment failed: {}", error) }],
+                    "isError": true
+                }))
+            }
+        };
+
+        let explicit_target_ids = args
+            .get("target_ids")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str())
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let target_ids = if explicit_target_ids.is_empty() {
+            inference.target_ids.clone()
+        } else {
+            explicit_target_ids.clone()
+        };
+
+        if !confirm {
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Entrenchment proposal only. Re-run with `confirm=true` to apply bounded updates on the selected canonical entities."
+                }],
+                "data": {
+                    "project_code": inference.project_code,
+                    "statement": inference.statement,
+                    "confirm_required": true,
+                    "candidate_entity_type": inference.candidate_entity_type,
+                    "proposed_operation_kind": inference.proposed_operation_kind,
+                    "target_ids": target_ids,
+                    "impacted_candidates": inference.impacted_candidates.iter().map(|candidate| json!({
+                        "id": candidate.id,
+                        "entity_type": candidate.entity_type,
+                        "title": candidate.title,
+                        "score": candidate.score,
+                        "reasons": candidate.reasons
+                    })).collect::<Vec<_>>(),
+                    "ambiguity_warnings": inference.ambiguity_warnings,
+                    "next_best_actions": vec![
+                        "review the proposed target_ids".to_string(),
+                        "rerun with `confirm=true` once the scope is explicit".to_string()
+                    ]
+                }
+            }));
+        }
+
+        if target_ids.is_empty() {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "Wave 1 entrenchment cannot write without explicit or inferred existing target_ids." }],
+                "isError": true,
+                "data": {
+                    "project_code": inference.project_code,
+                    "confirm_required": false,
+                    "target_ids": [],
+                    "next_best_actions": [
+                        "call `infer_soll_mutation` to inspect impacted nodes",
+                        "provide `target_ids` explicitly or use `soll_manager` for manual graph changes"
+                    ]
+                }
+            }));
+        }
+
+        if explicit_target_ids.is_empty() && !inference.ambiguity_warnings.is_empty() {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "Entrenchment confirmation refused because the inferred scope is still ambiguous. Provide explicit `target_ids` first." }],
+                "isError": true,
+                "data": {
+                    "project_code": inference.project_code,
+                    "confirm_required": false,
+                    "target_ids": target_ids,
+                    "ambiguity_warnings": inference.ambiguity_warnings,
+                    "next_best_actions": [
+                        "review the impacted_candidates returned by `infer_soll_mutation`",
+                        "rerun `entrench_nuance` with explicit `target_ids` once the scope is fully explicit"
+                    ]
+                }
+            }));
+        }
+
+        let cross_project_targets = target_ids
+            .iter()
+            .filter(|target_id| {
+                project_code_from_canonical_entity_id(target_id)
+                    .is_none_or(|candidate_project| candidate_project != inference.project_code)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !cross_project_targets.is_empty() {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "Entrenchment confirmation refused because some target_ids do not belong to the requested project_code." }],
+                "isError": true,
+                "data": {
+                    "project_code": inference.project_code,
+                    "confirm_required": false,
+                    "target_ids": target_ids,
+                    "invalid_target_ids": cross_project_targets,
+                    "next_best_actions": [
+                        "use only canonical IDs that belong to the requested project_code",
+                        "re-run `infer_soll_mutation` if the intended scope is uncertain"
+                    ]
+                }
+            }));
+        }
+
+        let before = match self.soll_completeness_snapshot(Some(&inference.project_code)) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Entrenchment baseline failed: {}", error) }],
+                    "isError": true
+                }))
+            }
+        };
+
+        let mut changed_entities = Vec::new();
+        for target_id in &target_ids {
+            let row = match self.query_named_row(
+                &format!(
+                    "SELECT title, description, status, metadata FROM soll.Node WHERE id = '{}'",
+                    escape_sql(target_id)
+                ),
+                4,
+            ) {
+                Ok(row) => row,
+                Err(error) => {
+                    return Some(json!({
+                        "content": [{ "type": "text", "text": format!("Entrenchment target lookup failed for `{}`: {}", target_id, error) }],
+                        "isError": true
+                    }))
+                }
+            };
+            let mut metadata: Value = serde_json::from_str(&row[3]).unwrap_or(json!({}));
+            let entry = json!({
+                "statement": statement,
+                "source": "entrench_nuance",
+                "entrenched_at": now_unix_ms()
+            });
+            if !metadata
+                .get("nuances")
+                .is_some_and(|value| value.is_array())
+            {
+                metadata["nuances"] = json!([]);
+            }
+            if let Some(items) = metadata
+                .get_mut("nuances")
+                .and_then(|value| value.as_array_mut())
+            {
+                items.push(entry);
+            }
+            metadata["updated_at"] = json!(now_unix_ms());
+
+            if let Err(error) = self.graph_store.execute_param(
+                "UPDATE soll.Node SET metadata = ? WHERE id = ?",
+                &json!([metadata.to_string(), target_id]),
+            ) {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Entrenchment update failed for `{}`: {}", target_id, error) }],
+                    "isError": true
+                }));
+            }
+
+            changed_entities.push(json!({
+                "id": target_id,
+                "change_kind": "metadata_update",
+                "fields": ["metadata.nuances", "metadata.updated_at"]
+            }));
+        }
+
+        let after = match self.soll_completeness_snapshot(Some(&inference.project_code)) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": format!("Entrenchment follow-up failed: {}", error) }],
+                    "isError": true
+                }))
+            }
+        };
+
+        let mutation_feedback = self.mutation_feedback_payload(
+            &before,
+            &after,
+            changed_entities.clone(),
+            json!({
+                "nodes_created": 0,
+                "nodes_updated": changed_entities.len(),
+                "edges_created": 0
+            }),
+        );
+
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Nuance entrenched across {} canonical node(s).",
+                    changed_entities.len()
+                )
+            }],
+            "data": {
+                "project_code": inference.project_code,
+                "statement": inference.statement,
+                "confirm_required": false,
+                "target_ids": target_ids,
+                "mutation_feedback": mutation_feedback
+            }
+        }))
+    }
+
+    fn classify_attach_status_from_error(&self, error_text: &str) -> &'static str {
+        if error_text.contains("Relation explicite requise") {
+            "needs_relation_hint"
+        } else if error_text.contains("introuvable") {
+            "invalid_target_id"
+        } else if error_text.contains("\"error\":\"forbidden_relation\"")
+            || error_text.contains("Aucune relation canonique autorisee")
+        {
+            "forbidden_relation"
+        } else {
+            "attach_failed"
+        }
+    }
+
     pub(crate) fn axon_soll_manager(&self, args: &Value) -> Option<Value> {
         let action = args.get("action")?.as_str()?;
         let entity = args.get("entity")?.as_str()?;
@@ -698,6 +1939,7 @@ impl McpServer {
                         }))
                     }
                 };
+                let before_snapshot = self.soll_completeness_snapshot(Some(&project_code)).ok();
                 let reserved_id = args.get("reserved_id").and_then(|value| value.as_str());
                 let (_requested_code, canonical_code, formatted_id) = if let Some(reserved_id) =
                     reserved_id
@@ -803,6 +2045,8 @@ impl McpServer {
                 };
 
                 let q = "INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET project_code = EXCLUDED.project_code, title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, metadata = EXCLUDED.metadata";
+                let attach_to = data.get("attach_to").and_then(|v| v.as_str());
+                let relation_hint = data.get("relation_hint").and_then(|v| v.as_str());
 
                 let insert_res = self.graph_store.execute_param(
                     q,
@@ -819,8 +2063,110 @@ impl McpServer {
 
                 match insert_res {
                     Ok(_) => {
-                        let report = format!("✅ Entité SOLL créée : `{}`", formatted_id);
-                        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+                        let created_id = formatted_id.clone();
+                        let mut report = format!("✅ Entité SOLL créée : `{}`", created_id);
+                        let mut response_data = json!({
+                            "created_id": created_id,
+                            "entity_type": entity_type_cap,
+                            "project_code": canonical_code,
+                            "canonical_next_links": self.canonical_next_link_hints(entity_type_cap),
+                            "attach_attempted": attach_to.is_some(),
+                            "attached": false,
+                            "attached_to": attach_to.map(Value::from).unwrap_or(Value::Null),
+                            "applied_relation": Value::Null,
+                            "attach_status": if attach_to.is_some() { Value::from("not_attempted") } else { Value::Null }
+                        });
+
+                        if let Some(target_id) = attach_to {
+                            match self.select_relation_type_for_link(
+                                &formatted_id,
+                                target_id,
+                                relation_hint,
+                            ) {
+                                Ok((relation_type, policy)) => {
+                                    match self.insert_validated_relation(
+                                        relation_type,
+                                        &formatted_id,
+                                        target_id,
+                                        policy,
+                                    ) {
+                                        Ok(inserted) => {
+                                            response_data["attached"] = Value::from(true);
+                                            response_data["attached_to"] = Value::from(target_id);
+                                            response_data["applied_relation"] =
+                                                Value::from(relation_type);
+                                            response_data["attach_status"] =
+                                                Value::from(if inserted {
+                                                    "attached"
+                                                } else {
+                                                    "already_present"
+                                                });
+                                            report.push_str(&format!(
+                                                "\n✅ Liaison canonique appliquée : `{}` -> `{}` via `{}`",
+                                                formatted_id, target_id, relation_type
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            let error_text = error.to_string();
+                                            response_data["attach_status"] = Value::from(
+                                                self.classify_attach_status_from_error(&error_text),
+                                            );
+                                            response_data["attach_guidance"] = self
+                                                .relation_guidance_for_link(
+                                                    &formatted_id,
+                                                    target_id,
+                                                    relation_hint,
+                                                );
+                                            report.push_str(&format!(
+                                                "\n⚠️ Attachement canonique refusé : {}",
+                                                error_text
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    let error_text = error.to_string();
+                                    response_data["attach_status"] = Value::from(
+                                        self.classify_attach_status_from_error(&error_text),
+                                    );
+                                    response_data["attach_guidance"] = self
+                                        .relation_guidance_for_link(
+                                            &formatted_id,
+                                            target_id,
+                                            relation_hint,
+                                        );
+                                    report.push_str(&format!(
+                                        "\n⚠️ Attachement canonique refusé : {}",
+                                        error_text
+                                    ));
+                                }
+                            }
+                        }
+
+                        if let (Some(before), Ok(after)) = (
+                            before_snapshot.as_ref(),
+                            self.soll_completeness_snapshot(Some(&canonical_code)),
+                        ) {
+                            response_data["mutation_feedback"] = self.mutation_feedback_payload(
+                                before,
+                                &after,
+                                vec![json!({
+                                    "id": formatted_id,
+                                    "change_kind": "created",
+                                    "entity_type": entity_type_cap
+                                })],
+                                json!({
+                                    "nodes_created": 1,
+                                    "nodes_updated": 0,
+                                    "edges_created": usize::from(response_data["attached"].as_bool().unwrap_or(false))
+                                }),
+                            );
+                        }
+
+                        Some(json!({
+                            "content": [{ "type": "text", "text": report }],
+                            "data": response_data
+                        }))
                     }
                     Err(e) => Some(
                         json!({ "content": [{ "type": "text", "text": format!("Erreur d'insertion: {}", e) }], "isError": true }),
@@ -829,6 +2175,10 @@ impl McpServer {
             }
             "update" => {
                 let id = data.get("id")?.as_str()?;
+                let project_code = project_code_from_canonical_entity_id(id);
+                let before_snapshot = project_code
+                    .as_deref()
+                    .and_then(|code| self.soll_completeness_snapshot(Some(code)).ok());
 
                 let update_res: anyhow::Result<()> = (|| {
                     let current = self.query_named_row(
@@ -906,9 +2256,37 @@ impl McpServer {
                 })();
 
                 match update_res {
-                    Ok(_) => Some(
-                        json!({ "content": [{ "type": "text", "text": format!("✅ Mise à jour réussie pour `{}`", id) }] }),
-                    ),
+                    Ok(_) => {
+                        let mut payload = json!({
+                            "content": [{ "type": "text", "text": format!("✅ Mise à jour réussie pour `{}`", id) }],
+                            "data": {}
+                        });
+                        if let (Some(code), Some(before), Ok(after)) = (
+                            project_code.as_deref(),
+                            before_snapshot.as_ref(),
+                            project_code
+                                .as_deref()
+                                .ok_or_else(|| anyhow!("missing project"))
+                                .and_then(|value| self.soll_completeness_snapshot(Some(value))),
+                        ) {
+                            let _ = code;
+                            payload["data"]["mutation_feedback"] = self.mutation_feedback_payload(
+                                before,
+                                &after,
+                                vec![json!({
+                                    "id": id,
+                                    "change_kind": "updated",
+                                    "fields": ["title", "description", "status", "metadata"]
+                                })],
+                                json!({
+                                    "nodes_created": 0,
+                                    "nodes_updated": 1,
+                                    "edges_created": 0
+                                }),
+                            );
+                        }
+                        Some(payload)
+                    }
                     Err(e) => Some(
                         json!({ "content": [{ "type": "text", "text": format!("Erreur update: {}", e) }], "isError": true }),
                     ),
@@ -918,27 +2296,1077 @@ impl McpServer {
                 let src = data.get("source_id")?.as_str()?;
                 let tgt = data.get("target_id")?.as_str()?;
                 let explicit_rel = data.get("relation_type").and_then(|v| v.as_str());
+                let project_code = project_code_from_canonical_entity_id(src)
+                    .or_else(|| project_code_from_canonical_entity_id(tgt));
+                let before_snapshot = project_code
+                    .as_deref()
+                    .and_then(|code| self.soll_completeness_snapshot(Some(code)).ok());
                 match self.select_relation_type_for_link(src, tgt, explicit_rel) {
                     Ok((relation_type, policy)) => {
                         let rel_table = relation_table_name(relation_type).unwrap_or(relation_type);
                         match self.insert_validated_relation(relation_type, src, tgt, policy) {
-                            Ok(true) => Some(
-                                json!({ "content": [{ "type": "text", "text": format!("✅ Liaison établie : `{}` -> `{}` (via {})", src, tgt, rel_table) }] }),
-                            ),
-                            Ok(false) => Some(
-                                json!({ "content": [{ "type": "text", "text": format!("ℹ️ Liaison déjà présente : `{}` -> `{}` (via {})", src, tgt, rel_table) }] }),
-                            ),
-                            Err(e) => Some(
-                                json!({ "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }], "isError": true }),
-                            ),
+                            Ok(inserted) => {
+                                let mut payload = json!({
+                                    "content": [{ "type": "text", "text": if inserted {
+                                        format!("✅ Liaison établie : `{}` -> `{}` (via {})", src, tgt, rel_table)
+                                    } else {
+                                        format!("ℹ️ Liaison déjà présente : `{}` -> `{}` (via {})", src, tgt, rel_table)
+                                    }}],
+                                    "data": {}
+                                });
+                                if inserted {
+                                    if let (Some(before), Some(code), Ok(after)) = (
+                                        before_snapshot.as_ref(),
+                                        project_code.as_deref(),
+                                        project_code
+                                            .as_deref()
+                                            .ok_or_else(|| anyhow!("missing project"))
+                                            .and_then(|value| {
+                                                self.soll_completeness_snapshot(Some(value))
+                                            }),
+                                    ) {
+                                        let _ = code;
+                                        payload["data"]["mutation_feedback"] =
+                                            self.mutation_feedback_payload(
+                                                before,
+                                                &after,
+                                                vec![json!({
+                                                    "id": format!("{}:{}:{}", src, relation_type, tgt),
+                                                    "change_kind": "edge_created",
+                                                    "source_id": src,
+                                                    "target_id": tgt,
+                                                    "relation_type": relation_type
+                                                })],
+                                                json!({
+                                                    "nodes_created": 0,
+                                                    "nodes_updated": 0,
+                                                    "edges_created": 1
+                                                }),
+                                            );
+                                    }
+                                }
+                                Some(payload)
+                            }
+                            Err(e) => Some(json!({
+                                "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }],
+                                "isError": true,
+                                "data": self.relation_guidance_for_link(src, tgt, explicit_rel)
+                            })),
                         }
                     }
-                    Err(e) => Some(
-                        json!({ "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }], "isError": true }),
-                    ),
+                    Err(e) => Some(json!({
+                        "content": [{ "type": "text", "text": format!("Erreur liaison: {}", e) }],
+                        "isError": true,
+                        "data": self.relation_guidance_for_link(src, tgt, explicit_rel)
+                    })),
                 }
             }
             _ => None,
+        }
+    }
+
+    fn load_soll_doc_nodes(&self, project_code: &str) -> Result<Vec<SollDocNode>, String> {
+        let raw = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT id, type, COALESCE(title, ''), COALESCE(description, ''), COALESCE(status, ''), COALESCE(metadata, '{{}}') \
+                 FROM soll.Node{} ORDER BY type, id",
+                project_scope_clause_for_table("id", Some(project_code))
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter(|row| row.len() >= 6)
+            .map(|row| SollDocNode {
+                id: row[0].clone(),
+                entity_type: row[1].clone(),
+                title: row[2].clone(),
+                description: row[3].clone(),
+                status: row[4].clone(),
+                metadata: row[5].clone(),
+            })
+            .collect())
+    }
+
+    fn load_soll_doc_edges(&self, project_code: &str) -> Result<Vec<SollDocEdge>, String> {
+        let raw = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT source_id, target_id, relation_type FROM soll.Edge{}",
+                project_scope_clause_for_relation(Some(project_code))
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .filter(|row| row.len() >= 3)
+            .map(|row| SollDocEdge {
+                source_id: row[0].clone(),
+                target_id: row[1].clone(),
+                relation_type: row[2].clone(),
+            })
+            .collect())
+    }
+
+    fn generate_soll_doc_pages(
+        &self,
+        project_code: &str,
+        nodes: &[SollDocNode],
+        edges: &[SollDocEdge],
+    ) -> Vec<SollDocPageSpec> {
+        let nodes_by_id = nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut incoming = HashMap::<String, Vec<SollDocEdge>>::new();
+        let mut outgoing = HashMap::<String, Vec<SollDocEdge>>::new();
+        for edge in edges {
+            incoming
+                .entry(edge.target_id.clone())
+                .or_default()
+                .push(edge.clone());
+            outgoing
+                .entry(edge.source_id.clone())
+                .or_default()
+                .push(edge.clone());
+        }
+
+        let preferred_parent_map =
+            build_preferred_hierarchy_parent_map(nodes, &outgoing, &nodes_by_id);
+        let hierarchy_children_map =
+            build_hierarchy_children_map(&preferred_parent_map, &nodes_by_id);
+        let hierarchy_root_ids = hierarchy_root_ids_for_project(nodes, &preferred_parent_map);
+        let unattached_ids = hierarchy_unattached_ids_for_project(nodes, &preferred_parent_map);
+
+        let mut pages = Vec::new();
+        let project_summary = {
+            let counts = nodes
+                .iter()
+                .fold(HashMap::<String, usize>::new(), |mut acc, node| {
+                    *acc.entry(node.entity_type.clone()).or_insert(0) += 1;
+                    acc
+                });
+            let mut items = counts.into_iter().collect::<Vec<_>>();
+            items.sort_by(|left, right| left.0.cmp(&right.0));
+            items
+                .into_iter()
+                .map(|(kind, count)| {
+                    format!(
+                        "<div class=\"cell\"><strong>{}</strong><div>{}</div></div>",
+                        html_escape(&kind),
+                        count
+                    )
+                })
+                .collect::<String>()
+        };
+
+        let project_tree_html = render_project_tree_html(
+            project_code,
+            &hierarchy_root_ids,
+            &hierarchy_children_map,
+            &nodes_by_id,
+            None,
+            "nodes/",
+            "index.html",
+            true,
+            &HashSet::new(),
+        );
+        let project_focus_nodes = hierarchy_root_ids
+            .iter()
+            .filter_map(|root_id| nodes_by_id.get(root_id).cloned())
+            .collect::<Vec<_>>();
+        let mut project_graph_nodes = vec![SollDocNode {
+            id: format!("PRJ-{}", project_code),
+            entity_type: "Project".to_string(),
+            title: project_code.to_string(),
+            description: format!("Derived project root for {}", project_code),
+            status: "derived".to_string(),
+            metadata: "{}".to_string(),
+        }];
+        project_graph_nodes.extend(project_focus_nodes.clone());
+        let project_graph_edges = project_focus_nodes
+            .iter()
+            .map(|node| SollDocEdge {
+                source_id: format!("PRJ-{}", project_code),
+                target_id: node.id.clone(),
+                relation_type: "CONTAINS".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let project_graph_links = project_focus_nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.id.clone(),
+                    format!("nodes/{}", node_file_name(&node.id)),
+                )
+            })
+            .chain(std::iter::once((
+                format!("PRJ-{}", project_code),
+                "index.html".to_string(),
+            )))
+            .collect::<HashMap<_, _>>();
+        let project_right_html = format!(
+            "{}{}{}{}{}",
+            linked_node_list_html("Vision Children", &hierarchy_root_ids, &nodes_by_id, "nodes/"),
+            linked_node_list_html(
+                "Unattached Node Pages",
+                &unattached_ids,
+                &nodes_by_id,
+                "nodes/"
+            ),
+            linked_node_list_html(
+                "All Node Pages",
+                &nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>(),
+                &nodes_by_id,
+                "nodes/"
+            ),
+            linked_page_list_html(
+                "Compatibility Subtree Pages",
+                &hierarchy_root_ids
+                    .iter()
+                    .filter_map(|node_id| nodes_by_id.get(node_id))
+                    .map(|node| (
+                        format!("subtrees/{}", subtree_file_name(&node.id)),
+                        format!("{} subtree · {}", entity_type_short_label(&node.entity_type), node.title),
+                        node.id.clone()
+                    ))
+                    .collect::<Vec<_>>()
+            ),
+            "<section class=\"card\"><h3>Reading Model</h3><p class=\"muted\">Project root on the left, attached visions on the right. Use the tree to descend, or click a focus child to open its own page.</p></section>"
+        );
+        pages.push(SollDocPageSpec {
+            relative_path: "index.html".to_string(),
+            title: format!("{} Project Root", project_code),
+            html: render_site_page(
+                &format!("{} Project Root", project_code),
+                "SOLL Derived Project",
+                "Project-level hierarchy page derived from live SOLL. This is a human-readable navigation surface, not canonical truth.",
+                &format!("<a href=\"../index.html\">GLO</a><span>/</span><span>{}</span>", html_escape(project_code)),
+                "Project Tree",
+                &project_tree_html,
+                "Hierarchy Focus",
+                &render_mermaid_graph(&project_graph_nodes, &project_graph_edges, &project_graph_links),
+                "Details",
+                &project_right_html,
+                &format!(
+                    "{}<div class=\"cell\"><strong>Focus</strong><div>{}</div></div><div class=\"cell\"><strong>Boundary</strong><div>derived / non-canonical</div></div>",
+                    project_summary,
+                    html_escape(project_code)
+                ),
+            ),
+            node_ids: project_focus_nodes.iter().map(|node| node.id.clone()).collect(),
+            edge_keys: project_graph_edges.iter().map(edge_key).collect(),
+        });
+
+        let mut subtree_roots = nodes
+            .iter()
+            .filter(|node| subtree_anchor_type(&node.entity_type))
+            .cloned()
+            .collect::<Vec<_>>();
+        subtree_roots.sort_by(|left, right| left.id.cmp(&right.id));
+        let mut subtree_membership = HashMap::<String, Vec<String>>::new();
+        for root in subtree_roots {
+            let mut subtree_ids = HashSet::new();
+            let mut queue = vec![root.id.clone()];
+            while let Some(current) = queue.pop() {
+                if !subtree_ids.insert(current.clone()) {
+                    continue;
+                }
+                if let Some(parent_edges) = incoming.get(&current) {
+                    queue.extend(parent_edges.iter().map(|edge| edge.source_id.clone()));
+                }
+            }
+            if let Some(root_outgoing) = outgoing.get(&root.id) {
+                subtree_ids.extend(root_outgoing.iter().map(|edge| edge.target_id.clone()));
+            }
+            for node_id in &subtree_ids {
+                subtree_membership
+                    .entry(node_id.clone())
+                    .or_default()
+                    .push(root.id.clone());
+            }
+
+            let mut subtree_nodes = subtree_ids
+                .iter()
+                .filter_map(|id| nodes_by_id.get(id).cloned())
+                .collect::<Vec<_>>();
+            subtree_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+            let subtree_edges = edges
+                .iter()
+                .filter(|edge| {
+                    subtree_ids.contains(&edge.source_id) && subtree_ids.contains(&edge.target_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let subtree_links = subtree_nodes
+                .iter()
+                .map(|node| {
+                    (
+                        node.id.clone(),
+                        format!("../nodes/{}", node_file_name(&node.id)),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            let inbound_ids = incoming
+                .get(&root.id)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|edge| edge.source_id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let outbound_ids = outgoing
+                .get(&root.id)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|edge| edge.target_id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let hierarchy_root_set = hierarchy_root_ids.iter().cloned().collect::<HashSet<_>>();
+            let related_subtree_items = inbound_ids
+                .iter()
+                .chain(outbound_ids.iter())
+                .filter(|candidate| hierarchy_root_set.contains(*candidate))
+                .filter_map(|candidate| nodes_by_id.get(candidate))
+                .map(|candidate| {
+                    (
+                        subtree_file_name(&candidate.id),
+                        format!(
+                            "{} · {}",
+                            entity_type_short_label(&candidate.entity_type),
+                            candidate.title
+                        ),
+                        candidate.id.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let subtree_node_ids = subtree_nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect::<Vec<_>>();
+            let subtree_inclusion_reason_items = subtree_nodes
+                .iter()
+                .map(|member| {
+                    format!(
+                        "<li><a href=\"../nodes/{}\">{}</a><div class=\"muted\">{}</div></li>",
+                        html_escape(&node_file_name(&member.id)),
+                        html_escape(&format!(
+                            "{} · {}",
+                            entity_type_short_label(&member.entity_type),
+                            member.title
+                        )),
+                        subtree_membership_reason_html(&root, &member.id, &outgoing, &nodes_by_id)
+                    )
+                })
+                .collect::<String>();
+            let left_tree_html = render_project_tree_html(
+                project_code,
+                &hierarchy_root_ids,
+                &hierarchy_children_map,
+                &nodes_by_id,
+                Some(&root.id),
+                "../nodes/",
+                "../index.html",
+                true,
+                &ancestor_chain_ids(&root.id, &preferred_parent_map),
+            );
+            let right_html = format!(
+                "{}{}{}{}<section class=\"card\"><h3>Subtree Inclusion Reasons</h3><ul class=\"node-list\">{}</ul></section><section class=\"card\"><h3>Relations</h3>{}</section>{}",
+                linked_page_list_html("Related Subtrees", &related_subtree_items),
+                linked_node_list_html(
+                    "Feeds Into This Root",
+                    &inbound_ids,
+                    &nodes_by_id,
+                    "../nodes/"
+                ),
+                linked_node_list_html(
+                    "Root Outgoing Context",
+                    &outbound_ids,
+                    &nodes_by_id,
+                    "../nodes/"
+                ),
+                linked_node_list_html(
+                    "All Nodes In This Subtree",
+                    &subtree_node_ids,
+                    &nodes_by_id,
+                    "../nodes/"
+                ),
+                subtree_inclusion_reason_items,
+                relation_line_html(&subtree_edges, &nodes_by_id),
+                relation_diagnostic_table_html(&subtree_edges, &nodes_by_id)
+            );
+            let summary_html = format!(
+                "<div class=\"cell\"><strong>Root</strong><div>{}</div></div>\
+                 <div class=\"cell\"><strong>Nodes</strong><div>{}</div></div>\
+                 <div class=\"cell\"><strong>Edges</strong><div>{}</div></div>\
+                 <div class=\"cell\"><strong>Boundary</strong><div>derived / non-canonical</div></div>\
+                 <div class=\"cell\"><strong>Diagnostics</strong><div>subtree inclusion reasons + relation tagging</div></div>",
+                html_escape(&root.id),
+                subtree_nodes.len(),
+                subtree_edges.len()
+            );
+            let subtree_graph =
+                render_mermaid_graph(&subtree_nodes, &subtree_edges, &subtree_links);
+            pages.push(SollDocPageSpec {
+                relative_path: format!("subtrees/{}", subtree_file_name(&root.id)),
+                title: format!("{} · {} subtree", root.id, root.title),
+                html: render_site_page(
+                    &format!("{} · {}", root.id, root.title),
+                    &format!("{} subtree", root.entity_type),
+                    "Subtree page derived from reverse reachability plus immediate root context. This page is navigable and non-canonical.",
+                    &format!(
+                        "<a href=\"../../index.html\">GLO</a><span>/</span><a href=\"../index.html\">{}</a><span>/</span><span>{}</span>",
+                        html_escape(project_code),
+                        html_escape(&root.id)
+                    ),
+                    "Project Tree",
+                    &left_tree_html,
+                    "Hierarchy Focus",
+                    &subtree_graph,
+                    "Details",
+                    &right_html,
+                    &summary_html,
+                ),
+                node_ids: subtree_nodes.iter().map(|node| node.id.clone()).collect(),
+                edge_keys: subtree_edges.iter().map(edge_key).collect(),
+            });
+        }
+
+        let mut ordered_nodes = nodes.to_vec();
+        ordered_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        for node in ordered_nodes {
+            let incoming_edges = incoming.get(&node.id).cloned().unwrap_or_default();
+            let outgoing_edges = outgoing.get(&node.id).cloned().unwrap_or_default();
+            let parent_ids = hierarchy_candidate_parent_ids(&node.id, &outgoing, &nodes_by_id);
+            let child_ids = hierarchy_children_map
+                .get(&node.id)
+                .cloned()
+                .unwrap_or_default();
+            let mut local_ids = HashSet::from([node.id.clone()]);
+            local_ids.extend(parent_ids.iter().cloned());
+            local_ids.extend(child_ids.iter().cloned());
+            let mut local_edges = Vec::new();
+            for parent_id in &parent_ids {
+                if let Some(edge) = outgoing_edges
+                    .iter()
+                    .find(|edge| edge.target_id == *parent_id)
+                {
+                    local_edges.push(SollDocEdge {
+                        source_id: parent_id.clone(),
+                        target_id: node.id.clone(),
+                        relation_type: edge.relation_type.clone(),
+                    });
+                } else {
+                    local_edges.push(SollDocEdge {
+                        source_id: parent_id.clone(),
+                        target_id: node.id.clone(),
+                        relation_type: "PARENT_OF".to_string(),
+                    });
+                }
+            }
+            for child_id in &child_ids {
+                if let Some(edge) = incoming_edges
+                    .iter()
+                    .find(|edge| edge.source_id == *child_id)
+                {
+                    local_edges.push(SollDocEdge {
+                        source_id: node.id.clone(),
+                        target_id: child_id.clone(),
+                        relation_type: edge.relation_type.clone(),
+                    });
+                } else {
+                    local_edges.push(SollDocEdge {
+                        source_id: node.id.clone(),
+                        target_id: child_id.clone(),
+                        relation_type: "CHILD_OF".to_string(),
+                    });
+                }
+            }
+            local_edges.sort_by(|left, right| {
+                (&left.source_id, &left.relation_type, &left.target_id).cmp(&(
+                    &right.source_id,
+                    &right.relation_type,
+                    &right.target_id,
+                ))
+            });
+            local_edges.dedup_by(|left, right| edge_key(left) == edge_key(right));
+            let mut local_nodes = local_ids
+                .iter()
+                .filter_map(|id| nodes_by_id.get(id).cloned())
+                .collect::<Vec<_>>();
+            local_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+            let local_links = local_nodes
+                .iter()
+                .map(|candidate| (candidate.id.clone(), node_file_name(&candidate.id)))
+                .collect::<HashMap<_, _>>();
+            let incoming_ids = incoming_edges
+                .iter()
+                .map(|edge| edge.source_id.clone())
+                .collect::<Vec<_>>();
+            let outgoing_ids = outgoing_edges
+                .iter()
+                .map(|edge| edge.target_id.clone())
+                .collect::<Vec<_>>();
+            let containing_subtree_items = subtree_membership
+                .get(&node.id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|root_id| nodes_by_id.get(&root_id).cloned())
+                .map(|root_node| {
+                    (
+                        format!("../subtrees/{}", subtree_file_name(&root_node.id)),
+                        format!(
+                            "{} subtree · {}",
+                            entity_type_short_label(&root_node.entity_type),
+                            root_node.title
+                        ),
+                        format!(
+                            "{} · {}",
+                            root_node.id,
+                            subtree_membership_reason_html(
+                                &root_node,
+                                &node.id,
+                                &outgoing,
+                                &nodes_by_id
+                            )
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let parent_page_items = parent_ids
+                .iter()
+                .filter_map(|candidate| nodes_by_id.get(candidate))
+                .map(|candidate| {
+                    (
+                        node_file_name(&candidate.id),
+                        format!(
+                            "{} · {}",
+                            entity_type_short_label(&candidate.entity_type),
+                            candidate.title
+                        ),
+                        candidate.id.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let child_page_items = child_ids
+                .iter()
+                .filter_map(|candidate| nodes_by_id.get(candidate))
+                .map(|candidate| {
+                    (
+                        node_file_name(&candidate.id),
+                        format!(
+                            "{} · {}",
+                            entity_type_short_label(&candidate.entity_type),
+                            candidate.title
+                        ),
+                        candidate.id.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let summary_html = format!(
+                "<div class=\"cell\"><strong>Type</strong><div>{}</div></div>\
+                 <div class=\"cell\"><strong>Status</strong><div>{}</div></div>\
+                 <div class=\"cell\"><strong>Parents</strong><div>{}</div></div>\
+                 <div class=\"cell\"><strong>Children</strong><div>{}</div></div>\
+                 <div class=\"cell\"><strong>Boundary</strong><div>derived / non-canonical</div></div>",
+                html_escape(&node.entity_type),
+                html_escape(if node.status.is_empty() {
+                    "n/a"
+                } else {
+                    &node.status
+                }),
+                parent_ids.len(),
+                child_ids.len()
+            );
+            let left_tree_html = render_project_tree_html(
+                project_code,
+                &hierarchy_root_ids,
+                &hierarchy_children_map,
+                &nodes_by_id,
+                Some(&node.id),
+                "../nodes/",
+                "../index.html",
+                true,
+                &ancestor_chain_ids(&node.id, &preferred_parent_map),
+            );
+            let detail_section = format!(
+                "<section class=\"card\"><h3>Description</h3><p>{}</p></section>\
+                 <section class=\"card\"><h3>Metadata</h3><pre>{}</pre></section>\
+                 <section class=\"card\"><h3>Projection Boundary</h3><p class=\"muted\">Parent/child sections below show only the primary hierarchy projection. Supporting or lateral relations remain visible under neighbor and relation sections.</p></section>\
+                 <section class=\"card\"><h3>Operator Diagnostics</h3><p class=\"muted\">Derived page; relation diagnostics below distinguish canonical vs derived, primary vs supporting/lateral, and score-bearing vs non-score-bearing.</p></section>\
+                 {}{}{}{}{}{}{}\
+                 <section class=\"card\"><h3>Canonical Relations</h3>{}</section>{}",
+                html_escape(if node.description.is_empty() {
+                    "No description."
+                } else {
+                    &node.description
+                }),
+                html_escape(&node.metadata),
+                linked_page_list_html("Containing Subtrees", &containing_subtree_items),
+                linked_page_list_html("Primary Parent Node Pages", &parent_page_items),
+                linked_page_list_html("Primary Child Node Pages", &child_page_items),
+                linked_node_list_html("Primary Hierarchy Parents", &parent_ids, &nodes_by_id, ""),
+                linked_node_list_html("Primary Hierarchy Children", &child_ids, &nodes_by_id, ""),
+                linked_node_list_html("Incoming Neighbors", &incoming_ids, &nodes_by_id, ""),
+                linked_node_list_html("Outgoing Neighbors", &outgoing_ids, &nodes_by_id, ""),
+                relation_line_html(
+                    &incoming_edges
+                        .iter()
+                        .chain(outgoing_edges.iter())
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    &nodes_by_id
+                ),
+                relation_diagnostic_table_html(
+                    &incoming_edges
+                        .iter()
+                        .chain(outgoing_edges.iter())
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    &nodes_by_id
+                )
+            );
+            let node_graph = render_mermaid_graph(&local_nodes, &local_edges, &local_links);
+            pages.push(SollDocPageSpec {
+                relative_path: format!("nodes/{}", node_file_name(&node.id)),
+                title: format!("{} · {}", node.id, node.title),
+                html: render_site_page(
+                    &format!("{} · {}", node.id, node.title),
+                    &node.entity_type,
+                    "Node detail page derived from live SOLL. Use this as a readable lens, not as canonical restore input.",
+                    &format!(
+                        "<a href=\"../../index.html\">GLO</a><span>/</span><a href=\"../index.html\">{}</a><span>/</span><span>{}</span>",
+                        html_escape(project_code),
+                        html_escape(&node.id)
+                    ),
+                    "Project Tree",
+                    &left_tree_html,
+                    "Hierarchy Focus",
+                    &node_graph,
+                    "Details",
+                    &detail_section,
+                    &summary_html,
+                ),
+                node_ids: local_nodes.iter().map(|candidate| candidate.id.clone()).collect(),
+                edge_keys: local_edges.iter().map(edge_key).collect(),
+            });
+        }
+
+        pages
+    }
+
+    fn delete_obsolete_derived_doc_paths(
+        &self,
+        manifest_path: &Path,
+        output_root: &Path,
+        current_relative_paths: &HashSet<String>,
+    ) -> Result<Vec<String>, String> {
+        let existing_manifest = match std::fs::read_to_string(manifest_path) {
+            Ok(contents) => contents,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let manifest: Value =
+            serde_json::from_str(&existing_manifest).unwrap_or_else(|_| json!({}));
+        let mut deleted = Vec::new();
+        if let Some(pages) = manifest.get("pages").and_then(|value| value.as_array()) {
+            for relative_path in pages
+                .iter()
+                .filter_map(|page| page.get("path").and_then(|value| value.as_str()))
+            {
+                if current_relative_paths.contains(relative_path) {
+                    continue;
+                }
+                let stale_path = output_root.join(relative_path);
+                if stale_path.is_file() {
+                    std::fs::remove_file(&stale_path).map_err(|error| error.to_string())?;
+                    deleted.push(stale_path.to_string_lossy().to_string());
+                }
+            }
+        }
+        Ok(deleted)
+    }
+
+    fn should_use_incremental_project_docs(&self, manifest_path: &Path) -> bool {
+        let Ok(existing_manifest) = std::fs::read_to_string(manifest_path) else {
+            return false;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&existing_manifest) else {
+            return false;
+        };
+        manifest
+            .get("generator_version")
+            .and_then(|value| value.as_str())
+            .map(|value| value == SOLL_PROJECT_DOCS_GENERATOR_VERSION)
+            .unwrap_or(false)
+            && manifest
+                .get("pages")
+                .and_then(|value| value.as_array())
+                .is_some()
+    }
+
+    fn load_soll_derived_project_entries(&self, site_root: &Path) -> Vec<SollDerivedProjectEntry> {
+        let _ = self.sync_project_code_registry_from_meta();
+        let registry_raw = self
+            .graph_store
+            .query_json(
+                "SELECT project_code, COALESCE(project_name,''), COALESCE(project_path,'') \
+                 FROM soll.ProjectCodeRegistry ORDER BY project_code ASC, project_name ASC",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let registry_rows: Vec<Vec<String>> =
+            serde_json::from_str(&registry_raw).unwrap_or_default();
+
+        let counts_raw = self
+            .graph_store
+            .query_json(
+                "SELECT project_code, CAST(COUNT(*) AS TEXT) FROM soll.Node GROUP BY project_code ORDER BY project_code ASC",
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        let count_rows: Vec<Vec<String>> = serde_json::from_str(&counts_raw).unwrap_or_default();
+        let node_counts = count_rows
+            .into_iter()
+            .filter(|row| row.len() >= 2)
+            .map(|row| (row[0].clone(), row[1].parse::<usize>().unwrap_or_default()))
+            .collect::<HashMap<_, _>>();
+
+        let mut entries = registry_rows
+            .into_iter()
+            .filter(|row| row.len() >= 3)
+            .map(|row| {
+                let project_code = row[0].clone();
+                let has_docs = site_root.join(&project_code).join("index.html").is_file();
+                SollDerivedProjectEntry {
+                    node_count: *node_counts.get(&project_code).unwrap_or(&0),
+                    has_docs,
+                    project_code,
+                    project_name: row[1].clone(),
+                    project_path: row[2].clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            (&left.project_code, &left.project_name)
+                .cmp(&(&right.project_code, &right.project_name))
+        });
+        entries
+    }
+
+    fn render_soll_root_page(&self, entries: &[SollDerivedProjectEntry]) -> String {
+        let mut graph_nodes = vec![SollDocNode {
+            id: "GLO".to_string(),
+            entity_type: "Portfolio".to_string(),
+            title: "Global portfolio".to_string(),
+            description: "Derived reading root for all known projects".to_string(),
+            status: "derived".to_string(),
+            metadata: "{}".to_string(),
+        }];
+        let mut graph_edges = Vec::new();
+        let mut links = HashMap::new();
+        let mut cards = String::new();
+        let mut tree_items = String::new();
+        let docs_ready = entries.iter().filter(|entry| entry.has_docs).count();
+
+        for entry in entries {
+            let entry_label = if entry.project_name.is_empty() {
+                entry.project_code.clone()
+            } else {
+                format!("{} · {}", entry.project_code, entry.project_name)
+            };
+            graph_nodes.push(SollDocNode {
+                id: entry.project_code.clone(),
+                entity_type: "Project".to_string(),
+                title: if entry.project_name.is_empty() {
+                    entry.project_code.clone()
+                } else {
+                    format!("{} · {}", entry.project_code, entry.project_name)
+                },
+                description: entry.project_path.clone(),
+                status: if entry.has_docs { "ready" } else { "pending" }.to_string(),
+                metadata: "{}".to_string(),
+            });
+            graph_edges.push(SollDocEdge {
+                source_id: "GLO".to_string(),
+                target_id: entry.project_code.clone(),
+                relation_type: "CONTAINS".to_string(),
+            });
+            if entry.has_docs {
+                links.insert(
+                    entry.project_code.clone(),
+                    format!("{}/index.html", entry.project_code),
+                );
+            }
+            cards.push_str(&format!(
+                "<section class=\"card\"><h3>{}</h3><p class=\"muted\">{}</p><p><strong>Nodes:</strong> {}<br><strong>Status:</strong> {}</p>{}</section>",
+                html_escape(&entry.project_code),
+                html_escape(if entry.project_name.is_empty() { "Unnamed project" } else { &entry.project_name }),
+                entry.node_count,
+                if entry.has_docs { "docs ready" } else { "docs pending" },
+                if entry.has_docs {
+                    format!("<p><a href=\"{}/index.html\">Open project docs</a><br><span class=\"muted\">{}</span></p>", html_escape(&entry.project_code), html_escape(&entry.project_path))
+                } else {
+                    format!("<p class=\"muted\">No derived site yet.<br>{}</p>", html_escape(&entry.project_path))
+                }
+            ));
+            if entry.has_docs {
+                tree_items.push_str(&format!(
+                    "<li class=\"tree-item leaf\"><a class=\"tree-link\" href=\"{}/index.html\"><span class=\"tree-tag\">PRJ</span><span>{}</span></a></li>",
+                    html_escape(&entry.project_code),
+                    html_escape(&entry_label)
+                ));
+            } else {
+                tree_items.push_str(&format!(
+                    "<li class=\"tree-item leaf\"><span class=\"tree-link muted\"><span class=\"tree-tag\">PRJ</span><span>{}</span></span></li>",
+                    html_escape(&entry_label)
+                ));
+            }
+        }
+
+        let summary_html = format!(
+            "<div class=\"cell\"><strong>Projects</strong><div>{}</div></div>\
+             <div class=\"cell\"><strong>Docs Ready</strong><div>{}</div></div>\
+             <div class=\"cell\"><strong>Scope</strong><div>all projects</div></div>\
+             <div class=\"cell\"><strong>Boundary</strong><div>derived / non-canonical</div></div>",
+            entries.len(),
+            docs_ready,
+        );
+
+        let root_graph = render_mermaid_graph(&graph_nodes, &graph_edges, &links);
+        let left_tree_html = format!(
+            "<nav class=\"tree-shell\" aria-label=\"Portfolio tree\"><ul class=\"tree-root\">\
+               <li class=\"tree-item branch root\"><details open>\
+                 <summary><a class=\"tree-link current\" href=\"index.html\"><span class=\"tree-tag\">GLO</span><span>Global portfolio</span></a></summary>\
+                 <ul class=\"tree-children\">{}</ul>\
+               </details></li>\
+             </ul></nav>",
+            tree_items
+        );
+        render_site_page(
+            "SOLL Derived Projects",
+            "SOLL Derived Root",
+            "Global human-readable index derived from live SOLL. This root is generated, incrementally refreshed when possible, and non-canonical.",
+            "<span>GLO</span>",
+            "Portfolio Tree",
+            &left_tree_html,
+            "Portfolio Focus",
+            &root_graph,
+            "Details",
+            &cards,
+            &summary_html,
+        )
+    }
+
+    pub(crate) fn generate_soll_derived_docs(
+        &self,
+        project_code: &str,
+        site_root: Option<&Path>,
+        project_output_root: &Path,
+    ) -> Result<SollDerivedDocsRefreshSummary, String> {
+        if let Err(error) = self.resolve_canonical_project_identity_for_mutation(project_code) {
+            return Err(format!("Projet canonique invalide: {}", error));
+        }
+
+        let nodes = match self.load_soll_doc_nodes(project_code) {
+            Ok(items) => items,
+            Err(error) => return Err(format!("Erreur de lecture SOLL: {}", error)),
+        };
+
+        let edges = self
+            .load_soll_doc_edges(project_code)
+            .map_err(|error| format!("Erreur de lecture des relations SOLL: {}", error))?;
+
+        let generated_at_ms = now_unix_ms();
+        let project_manifest_path = project_output_root.join("_manifest.json");
+        let refresh_mode = if self.should_use_incremental_project_docs(&project_manifest_path) {
+            "incremental"
+        } else {
+            if project_output_root.exists() {
+                let _ = std::fs::remove_dir_all(project_output_root);
+            }
+            "full"
+        };
+        let pages = self.generate_soll_doc_pages(project_code, &nodes, &edges);
+        let current_relative_paths = pages
+            .iter()
+            .map(|page| page.relative_path.clone())
+            .collect::<HashSet<_>>();
+        let deleted_paths = self.delete_obsolete_derived_doc_paths(
+            &project_manifest_path,
+            project_output_root,
+            &current_relative_paths,
+        )?;
+
+        let mut pages_written = 0usize;
+        let mut pages_unchanged = 0usize;
+        let mut manifest_pages = Vec::new();
+        let mut page_paths = Vec::new();
+        for page in &pages {
+            let page_path = project_output_root.join(&page.relative_path);
+            match write_if_changed(&page_path, &page.html) {
+                Ok(true) => pages_written += 1,
+                Ok(false) => pages_unchanged += 1,
+                Err(error) => {
+                    return Err(format!("Erreur d'écriture des docs dérivées: {}", error))
+                }
+            }
+            manifest_pages.push(json!({
+                "path": page.relative_path,
+                "title": page.title,
+                "content_hash": content_hash_hex(&page.html),
+                "node_ids": page.node_ids,
+                "edge_keys": page.edge_keys,
+            }));
+            page_paths.push(page_path.to_string_lossy().to_string());
+        }
+
+        let project_manifest = json!({
+            "project_code": project_code,
+            "generator_version": SOLL_PROJECT_DOCS_GENERATOR_VERSION,
+            "refresh_mode": refresh_mode,
+            "generated_at": generated_at_ms,
+            "pages_total": pages.len(),
+            "pages_written": pages_written,
+            "pages_unchanged": pages_unchanged,
+            "pages_deleted": deleted_paths.len(),
+            "deleted_paths": deleted_paths,
+            "pages": manifest_pages,
+        });
+        let project_manifest_pretty = serde_json::to_string_pretty(&project_manifest)
+            .map_err(|error| format!("Erreur de sérialisation du manifeste: {}", error))?;
+        write_if_changed(&project_manifest_path, &project_manifest_pretty)
+            .map_err(|error| format!("Erreur d'écriture du manifeste: {}", error))?;
+
+        let (site_root_value, root_manifest_value, root_index_value, root_written) =
+            if let Some(site_root) = site_root {
+                let entries = self.load_soll_derived_project_entries(site_root);
+                let root_index_path = site_root.join("index.html");
+                let root_manifest_path = site_root.join("_root_manifest.json");
+                let root_html = self.render_soll_root_page(&entries);
+                let root_written = write_if_changed(&root_index_path, &root_html)
+                    .map_err(|error| format!("Erreur d'écriture du root dérivé: {}", error))?;
+                let root_manifest = json!({
+                    "generator_version": SOLL_ROOT_DOCS_GENERATOR_VERSION,
+                    "refresh_mode": refresh_mode,
+                    "generated_at": generated_at_ms,
+                    "projects_total": entries.len(),
+                    "projects_with_docs": entries.iter().filter(|entry| entry.has_docs).count(),
+                    "projects": entries.iter().map(|entry| json!({
+                        "project_code": entry.project_code,
+                        "project_name": entry.project_name,
+                        "project_path": entry.project_path,
+                        "node_count": entry.node_count,
+                        "has_docs": entry.has_docs
+                    })).collect::<Vec<_>>()
+                });
+                let root_manifest_pretty =
+                    serde_json::to_string_pretty(&root_manifest).map_err(|error| {
+                        format!("Erreur de sérialisation du root manifest: {}", error)
+                    })?;
+                write_if_changed(&root_manifest_path, &root_manifest_pretty)
+                    .map_err(|error| format!("Erreur d'écriture du root manifest: {}", error))?;
+                (
+                    site_root.to_string_lossy().to_string(),
+                    root_manifest_path.to_string_lossy().to_string(),
+                    root_index_path.to_string_lossy().to_string(),
+                    root_written,
+                )
+            } else {
+                (String::new(), String::new(), String::new(), false)
+            };
+
+        Ok(SollDerivedDocsRefreshSummary {
+            project_code: project_code.to_string(),
+            site_root: site_root_value,
+            project_output_root: project_output_root.to_string_lossy().to_string(),
+            project_manifest_path: project_manifest_path.to_string_lossy().to_string(),
+            root_manifest_path: root_manifest_value,
+            root_index_path: root_index_value,
+            refresh_mode: refresh_mode.to_string(),
+            pages_total: pages.len(),
+            pages_written,
+            pages_unchanged,
+            pages_deleted: deleted_paths.len(),
+            deleted_paths,
+            root_written,
+            stale_docs: false,
+        })
+    }
+
+    pub(crate) fn axon_soll_generate_docs(&self, args: &serde_json::Value) -> Option<Value> {
+        let project_code = match args.get("project_code").and_then(|value| value.as_str()) {
+            Some(value) if !value.trim().is_empty() => value.trim().to_ascii_uppercase(),
+            _ => {
+                return Some(json!({
+                    "content": [{ "type": "text", "text": "`project_code` est obligatoire pour `soll_generate_docs`." }],
+                    "isError": true
+                }))
+            }
+        };
+
+        let explicit_project_root = args.get("output_dir").and_then(|value| value.as_str());
+        let explicit_site_root = args.get("site_root_dir").and_then(|value| value.as_str());
+        let (site_root, project_output_root) = if let Some(site_root_dir) = explicit_site_root {
+            let site_root = Path::new(site_root_dir).to_path_buf();
+            (Some(site_root.clone()), site_root.join(&project_code))
+        } else if let Some(project_root) = explicit_project_root {
+            (None, Path::new(project_root).to_path_buf())
+        } else {
+            match canonical_soll_site_dir() {
+                Some(path) => (Some(path.clone()), path.join(&project_code)),
+                None => {
+                    return Some(json!({
+                        "content": [{ "type": "text", "text": "Impossible de résoudre le répertoire canonique docs/derived/soll du dépôt." }],
+                        "isError": true
+                    }))
+                }
+            }
+        };
+
+        match self.generate_soll_derived_docs(
+            &project_code,
+            site_root.as_deref(),
+            &project_output_root,
+        ) {
+            Ok(summary) => Some(json!({
+                "content": [{ "type": "text", "text": format!(
+                    "Generated navigable SOLL docs for `{}`.\nSite root: {}\nProject root: {}\nRefresh mode: {}\nPages total: {}\nPages written: {}\nPages unchanged: {}\nPages deleted: {}\nProject manifest: {}\nRoot index: {}",
+                    summary.project_code,
+                    summary.site_root,
+                    summary.project_output_root,
+                    summary.refresh_mode,
+                    summary.pages_total,
+                    summary.pages_written,
+                    summary.pages_unchanged,
+                    summary.pages_deleted,
+                    summary.project_manifest_path,
+                    summary.root_index_path
+                ) }],
+                "data": {
+                    "project_code": summary.project_code,
+                    "site_root": json_optional_string(&summary.site_root),
+                    "output_root": summary.project_output_root,
+                    "manifest_path": summary.project_manifest_path,
+                    "root_manifest_path": json_optional_string(&summary.root_manifest_path),
+                    "root_index_path": json_optional_string(&summary.root_index_path),
+                    "refresh_mode": summary.refresh_mode,
+                    "pages_total": summary.pages_total,
+                    "pages_written": summary.pages_written,
+                    "pages_unchanged": summary.pages_unchanged,
+                    "pages_deleted": summary.pages_deleted,
+                    "deleted_paths": summary.deleted_paths,
+                    "root_written": summary.root_written,
+                    "stale_docs": summary.stale_docs,
+                    "canonical_boundary": "Derived human docs only. Live SOLL and SOLL_EXPORT remain canonical."
+                }
+            })),
+            Err(error) => Some(json!({
+                "content": [{ "type": "text", "text": error }],
+                "isError": true
+            })),
         }
     }
 
@@ -1082,11 +3510,8 @@ graph TD;
 
     pub(crate) fn axon_validate_soll(&self, args: &Value) -> Option<Value> {
         let project_code = args.get("project_code").and_then(|v| v.as_str());
-        let project_code = match project_code
-            .map(|code| self.resolve_project_code(code))
-            .transpose()
-        {
-            Ok(code) => code,
+        let snapshot = match self.soll_completeness_snapshot(project_code) {
+            Ok(snapshot) => snapshot,
             Err(e) => {
                 return Some(json!({
                     "content": [{ "type": "text", "text": format!("Erreur projet canonique: {}", e) }],
@@ -1094,82 +3519,91 @@ graph TD;
                 }))
             }
         };
-        let orphan_requirements = self
-            .query_single_column(
-                &format!("SELECT id FROM soll.Node r
-                 WHERE type = 'Requirement'
-                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE source_id = r.id OR target_id = r.id)
-                   {}
-                 ORDER BY id", project_scope_predicate("r.id", project_code.as_deref())),
-            )
-            .ok()?;
+        let violation_count = snapshot.orphan_requirements.len()
+            + snapshot.validations_without_verifies.len()
+            + snapshot.decisions_without_links.len()
+            + snapshot.uncovered_requirements.len()
+            + snapshot.duplicate_title_rows.len()
+            + snapshot.relation_policy_violations.len();
 
-        let validations_without_verifies = self
-            .query_single_column(
-                &format!("SELECT id FROM soll.Node v
-                 WHERE type = 'Validation'
-                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = v.id OR target_id = v.id) AND relation_type = 'VERIFIES')
-                   {}
-                 ORDER BY id", project_scope_predicate("v.id", project_code.as_deref())),
-            )
-            .ok()?;
+        let mut repair_guidance = Vec::new();
+        if !snapshot.orphan_requirements.is_empty() {
+            repair_guidance.push(repair_guidance_entry(
+                "orphan_requirements",
+                &snapshot.orphan_requirements,
+                "Requirements should be structurally attached to the graph.",
+                &[
+                    "link each requirement to its pillar or guideline with `soll_manager`",
+                    "call `soll_relation_schema` with `source_id` or `target_id` before retrying if the valid edge is unclear",
+                ],
+            ));
+        }
+        if !snapshot.validations_without_verifies.is_empty() {
+            repair_guidance.push(repair_guidance_entry(
+                "validations_without_verifies",
+                &snapshot.validations_without_verifies,
+                "Validation nodes should verify at least one requirement.",
+                &[
+                    "add a `VERIFIES` edge from each validation to the requirement it proves",
+                    "use `soll_relation_schema` on the validation id to inspect canonical targets if needed",
+                ],
+            ));
+        }
+        if !snapshot.decisions_without_links.is_empty() {
+            repair_guidance.push(repair_guidance_entry(
+                "decisions_without_solves_or_impacts",
+                &snapshot.decisions_without_links,
+                "Decision nodes should solve a requirement or impact an artifact.",
+                &[
+                    "link each decision to a requirement with `SOLVES` or `REFINES` when it addresses a need",
+                    "link each decision to an artifact with `IMPACTS` or `SUBSTANTIATES` when it changes implementation reality",
+                ],
+            ));
+        }
+        if !snapshot.uncovered_requirements.is_empty() {
+            repair_guidance.push(repair_guidance_entry(
+                "requirements_without_evidence_or_criteria",
+                &snapshot.uncovered_requirements,
+                "Requirements should have acceptance criteria or explicit supporting evidence.",
+                &[
+                    "update requirement metadata with `acceptance_criteria`",
+                    "attach evidence refs or add concept / decision / validation nodes that explain, solve, or verify the requirement",
+                ],
+            ));
+        }
+        if !snapshot.duplicate_ids.is_empty() {
+            repair_guidance.push(repair_guidance_entry(
+                "duplicate_titles",
+                &snapshot.duplicate_ids,
+                "Duplicate SOLL titles usually signal overlapping concepts, requirements, or decisions.",
+                &[
+                    "merge or supersede duplicates instead of keeping parallel semantic copies",
+                    "prefer stable logical keys or update existing ids rather than creating near-identical nodes",
+                ],
+            ));
+        }
+        if !snapshot.relation_policy_violations.is_empty() {
+            repair_guidance.push(json!({
+                "category": "relation_policy_violations",
+                "summary": "Some edges violate the canonical SOLL relation policy.",
+                "ids": [],
+                "details": snapshot.relation_policy_violations,
+                "next_steps": [
+                    "remove or replace invalid edges with canonical pairs from `soll_relation_schema`",
+                    "retry the link only after the source/target kinds and default relation are confirmed"
+                ],
+                "guidance_source": "server-side canonical soll validation"
+            }));
+        }
 
-        let decisions_without_links = self
-            .query_single_column(
-                &format!("SELECT id FROM soll.Node d
-                 WHERE type = 'Decision'
-                   AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = d.id OR target_id = d.id) AND relation_type IN ('SOLVES', 'IMPACTS'))
-                   {}
-                 ORDER BY id", project_scope_predicate("d.id", project_code.as_deref())),
-            )
-            .ok()?;
-
-        let uncovered_requirements = self
-            .query_single_column(
-                &format!(
-                    "SELECT r.id FROM soll.Node r
-                     LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
-                     WHERE r.type = 'Requirement'
-                       {}
-                     GROUP BY r.id, r.status, r.metadata
-                     HAVING COUNT(t.id) = 0
-                        AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') IN ('', '[]')
-                     ORDER BY r.id",
-                    project_scope_predicate("r.id", project_code.as_deref())
-                ),
-            )
-            .ok()?;
-
-        let duplicate_title_rows_raw = self
-            .graph_store
-            .query_json(&format!(
-                "SELECT type, title, string_agg(id, ', ' ORDER BY id)
-                 FROM soll.Node
-                 WHERE type IN ('Requirement', 'Decision', 'Concept')
-                   AND COALESCE(title, '') <> ''
-                   {}
-                 GROUP BY type, title
-                 HAVING COUNT(*) > 1
-                 ORDER BY type, title",
-                project_code
-                    .as_deref()
-                    .map(|code| format!("AND project_code = '{}'", escape_sql(code)))
-                    .unwrap_or_default()
-            ))
-            .ok()?;
-        let duplicate_title_rows: Vec<Vec<String>> =
-            serde_json::from_str(&duplicate_title_rows_raw).unwrap_or_default();
-
-        let relation_policy_violations = self
-            .collect_relation_policy_violations(project_code.as_deref())
-            .ok()?;
-
-        let violation_count = orphan_requirements.len()
-            + validations_without_verifies.len()
-            + decisions_without_links.len()
-            + uncovered_requirements.len()
-            + duplicate_title_rows.len()
-            + relation_policy_violations.len();
+        let completeness = json!({
+            "populated": snapshot.total_nodes > 0,
+            "structurally_connected": snapshot.structurally_connected(),
+            "evidence_ready": snapshot.evidence_ready(),
+            "duplicate_free": snapshot.duplicate_free(),
+            "concept_completeness": snapshot.concept_complete(),
+            "implementation_completeness": snapshot.implementation_complete()
+        });
 
         let mut evidence = format!(
             "Validation SOLL: {} violation(s) de cohérence minimale détectée(s).\n",
@@ -1177,37 +3611,37 @@ graph TD;
         );
         evidence.push_str("Mode: lecture seule, sans auto-réparation.\n");
 
-        if !orphan_requirements.is_empty() {
+        if !snapshot.orphan_requirements.is_empty() {
             evidence.push_str("\n- Requirements orphelins:\n");
-            for id in orphan_requirements {
+            for id in &snapshot.orphan_requirements {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
-        if !validations_without_verifies.is_empty() {
+        if !snapshot.validations_without_verifies.is_empty() {
             evidence.push_str("\n- Validations sans lien VERIFIES:\n");
-            for id in validations_without_verifies {
+            for id in &snapshot.validations_without_verifies {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
-        if !decisions_without_links.is_empty() {
+        if !snapshot.decisions_without_links.is_empty() {
             evidence.push_str("\n- Decisions sans lien SOLVES/IMPACTS:\n");
-            for id in decisions_without_links {
+            for id in &snapshot.decisions_without_links {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
-        if !uncovered_requirements.is_empty() {
+        if !snapshot.uncovered_requirements.is_empty() {
             evidence.push_str("\n- Requirements sans critères/preuves:\n");
-            for id in uncovered_requirements {
+            for id in &snapshot.uncovered_requirements {
                 evidence.push_str(&format!("  - {}\n", id));
             }
         }
 
-        if !duplicate_title_rows.is_empty() {
+        if !snapshot.duplicate_title_rows.is_empty() {
             evidence.push_str("\n- Titres dupliqués (risque de doublon métier):\n");
-            for row in duplicate_title_rows {
+            for row in &snapshot.duplicate_title_rows {
                 if row.len() < 3 {
                     continue;
                 }
@@ -1215,9 +3649,9 @@ graph TD;
             }
         }
 
-        if !relation_policy_violations.is_empty() {
+        if !snapshot.relation_policy_violations.is_empty() {
             evidence.push_str("\n- Relations invalides:\n");
-            for violation in relation_policy_violations {
+            for violation in &snapshot.relation_policy_violations {
                 evidence.push_str(&format!("  - {}\n", violation));
             }
         }
@@ -1242,10 +3676,7 @@ graph TD;
             format_standard_contract(
                 status,
                 summary,
-                &match project_code {
-                    Some(code) => format!("project:{}", code),
-                    None => "workspace:*".to_string(),
-                },
+                &snapshot.project_scope,
                 &evidence,
                 &[
                     "run `soll_verify_requirements` for requirement-level coverage",
@@ -1255,7 +3686,30 @@ graph TD;
                 confidence,
             )
         );
-        Some(json!({ "content": [{ "type": "text", "text": report }] }))
+        Some(json!({
+            "content": [{ "type": "text", "text": report }],
+            "data": {
+                "status": status,
+                "summary": summary,
+                "scope": snapshot.project_scope,
+                "violations": {
+                    "orphan_requirements": snapshot.orphan_requirements,
+                    "validations_without_verifies": snapshot.validations_without_verifies,
+                    "decisions_without_links": snapshot.decisions_without_links,
+                    "uncovered_requirements": snapshot.uncovered_requirements,
+                    "duplicate_title_rows": snapshot.duplicate_title_rows,
+                    "relation_policy_violations": snapshot.relation_policy_violations
+                },
+                "repair_guidance": repair_guidance,
+                "completeness": completeness,
+                "requirement_coverage": {
+                    "done": snapshot.requirement_coverage.done,
+                    "partial": snapshot.requirement_coverage.partial,
+                    "missing": snapshot.requirement_coverage.missing
+                },
+                "guidance_source": "server-side canonical soll validation"
+            }
+        }))
     }
 
     pub(crate) fn axon_restore_soll(&self, args: &Value) -> Option<Value> {
@@ -1532,6 +3986,321 @@ graph TD;
             .collect())
     }
 
+    fn canonical_project_root_for_entity(&self, entity_id: &str) -> Option<PathBuf> {
+        let project_code = project_code_from_canonical_entity_id(entity_id)?;
+        resolve_canonical_project_identity(&project_code)
+            .ok()
+            .map(|identity| identity.project_path)
+    }
+
+    fn normalize_file_artifact_ref(
+        &self,
+        entity_id: &str,
+        raw_ref: &str,
+    ) -> (Option<String>, Vec<String>) {
+        let raw = raw_ref.trim();
+        if raw.is_empty() {
+            return (None, vec!["empty_path".to_string()]);
+        }
+
+        let mut diagnostics = Vec::new();
+        let raw_path = Path::new(raw);
+        let project_root = self.canonical_project_root_for_entity(entity_id);
+        let mut candidates = Vec::new();
+        candidates.push(raw.to_string());
+
+        if raw_path.is_absolute() {
+            candidates.push(raw_path.to_string_lossy().into_owned());
+        } else if let Some(root) = project_root.as_ref() {
+            candidates.push(root.join(raw_path).to_string_lossy().into_owned());
+        }
+
+        if let Some(root) = project_root.as_ref() {
+            let candidate_absolute = if raw_path.is_absolute() {
+                raw_path.to_path_buf()
+            } else {
+                root.join(raw_path)
+            };
+
+            if let Ok(relative) = candidate_absolute.strip_prefix(root) {
+                candidates.push(relative.to_string_lossy().into_owned());
+                diagnostics.push("normalized_relative_project_path".to_string());
+            }
+        }
+
+        candidates.sort();
+        candidates.dedup();
+
+        for candidate in &candidates {
+            let query = format!(
+                "SELECT path FROM File WHERE path = '{}' LIMIT 1",
+                escape_sql(candidate)
+            );
+            if let Ok(paths) = self.query_single_column(&query) {
+                if let Some(path) = paths.into_iter().next() {
+                    diagnostics.push("matched_indexed_file".to_string());
+                    return (Some(path), diagnostics);
+                }
+            }
+        }
+
+        let preferred = if let Some(root) = project_root.as_ref() {
+            let absolute = if raw_path.is_absolute() {
+                raw_path.to_path_buf()
+            } else {
+                root.join(raw_path)
+            };
+            if absolute.exists() {
+                if let Ok(relative) = absolute.strip_prefix(root) {
+                    diagnostics.push("resolved_existing_project_file".to_string());
+                    Some(relative.to_string_lossy().into_owned())
+                } else {
+                    diagnostics.push("resolved_existing_absolute_file".to_string());
+                    Some(absolute.to_string_lossy().into_owned())
+                }
+            } else {
+                None
+            }
+        } else if raw_path.exists() {
+            diagnostics.push("resolved_existing_absolute_file".to_string());
+            Some(raw_path.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+
+        if preferred.is_none() {
+            diagnostics.push("path_not_resolvable".to_string());
+        }
+
+        (preferred, diagnostics)
+    }
+
+    fn broken_file_evidence_count_for_requirement(&self, requirement_id: &str) -> usize {
+        let project_root = self.canonical_project_root_for_entity(requirement_id);
+        let query = format!(
+            "SELECT COALESCE(artifact_ref, '') FROM soll.Traceability
+             WHERE lower(soll_entity_type) = 'requirement'
+               AND soll_entity_id = '{}'
+               AND lower(artifact_type) IN ('file', 'document')",
+            escape_sql(requirement_id)
+        );
+        let refs = self.query_single_column(&query).unwrap_or_default();
+        refs.into_iter()
+            .filter(|artifact_ref| {
+                let raw = artifact_ref.trim();
+                if raw.is_empty() {
+                    return false;
+                }
+                let path = Path::new(raw);
+                let candidate = if path.is_absolute() {
+                    path.to_path_buf()
+                } else if let Some(root) = project_root.as_ref() {
+                    root.join(path)
+                } else {
+                    path.to_path_buf()
+                };
+                !candidate.exists()
+            })
+            .count()
+    }
+
+    fn requirement_coverage_summary(
+        &self,
+        project_code: &str,
+    ) -> anyhow::Result<RequirementCoverageSummary> {
+        let project_code = self.resolve_project_code(project_code)?;
+        let query = format!(
+            "SELECT r.id,
+                    COALESCE(r.status,''),
+                    COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), ''),
+                    COUNT(DISTINCT t.id),
+                    COUNT(DISTINCT CASE WHEN e.relation_type = 'VERIFIES' THEN e.source_id END)
+             FROM soll.Node r
+             LEFT JOIN soll.Traceability t
+               ON lower(t.soll_entity_type) = lower(r.type)
+              AND t.soll_entity_id = r.id
+             LEFT JOIN soll.Edge e
+               ON e.target_id = r.id
+              AND e.relation_type = 'VERIFIES'
+              AND e.source_id LIKE 'VAL-{}-%'
+             WHERE r.type='Requirement' AND r.id LIKE 'REQ-{}-%'
+             GROUP BY 1,2,3
+             ORDER BY r.id",
+            escape_sql(&project_code),
+            escape_sql(&project_code)
+        );
+        let rows_raw = self.graph_store.query_json(&query)?;
+        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
+        let mut summary = RequirementCoverageSummary::default();
+
+        for row in rows {
+            if row.len() < 5 {
+                continue;
+            }
+            let id = row[0].clone();
+            let status = row[1].clone();
+            let criteria = row[2].clone();
+            let evidence_count = row[3].parse::<usize>().unwrap_or(0);
+            let validation_count = row[4].parse::<usize>().unwrap_or(0);
+            let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
+            let broken_file_evidence_count = self.broken_file_evidence_count_for_requirement(&id);
+            let state = requirement_state_from(
+                status.as_str(),
+                &criteria,
+                evidence_count,
+                broken_file_evidence_count,
+            );
+            let missing_dimensions = requirement_missing_dimensions(
+                status.as_str(),
+                has_criteria,
+                evidence_count,
+                validation_count,
+                broken_file_evidence_count,
+            );
+            let suggested_next_actions = requirement_next_actions(&missing_dimensions);
+
+            match state {
+                "done" => summary.done += 1,
+                "partial" => summary.partial += 1,
+                _ => summary.missing += 1,
+            }
+
+            summary.entries.push(RequirementCoverageEntry {
+                id,
+                status,
+                evidence_count,
+                validation_count,
+                has_criteria,
+                broken_file_evidence_count,
+                state: state.to_string(),
+                missing_dimensions,
+                suggested_next_actions,
+            });
+        }
+
+        Ok(summary)
+    }
+
+    pub(crate) fn soll_completeness_snapshot(
+        &self,
+        project_code: Option<&str>,
+    ) -> anyhow::Result<SollCompletenessSnapshot> {
+        let resolved_project_code = match project_code {
+            Some(code) => Some(self.resolve_project_code(code)?),
+            None => None,
+        };
+        let project_scope = resolved_project_code
+            .clone()
+            .map(|code| format!("project:{code}"))
+            .unwrap_or_else(|| "workspace:*".to_string());
+        let project_scope_predicate = |id_column: &str, project_code: Option<&str>| {
+            project_code
+                .map(|code| format!("AND {id_column} LIKE '%-{}-%'", escape_sql(code)))
+                .unwrap_or_default()
+        };
+
+        let total_nodes = self
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Node n WHERE 1=1 {}",
+                resolved_project_code
+                    .as_deref()
+                    .map(|code| format!("AND n.project_code = '{}'", escape_sql(code)))
+                    .unwrap_or_default()
+            ))
+            .unwrap_or(0) as usize;
+
+        let orphan_requirements = self.query_single_column(&format!(
+            "SELECT id FROM soll.Node r
+             WHERE type = 'Requirement'
+               AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE source_id = r.id OR target_id = r.id)
+               {}
+             ORDER BY id",
+            project_scope_predicate("r.id", resolved_project_code.as_deref())
+        ))?;
+
+        let validations_without_verifies = self.query_single_column(&format!(
+            "SELECT id FROM soll.Node v
+             WHERE type = 'Validation'
+               AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = v.id OR target_id = v.id) AND relation_type = 'VERIFIES')
+               {}
+             ORDER BY id",
+            project_scope_predicate("v.id", resolved_project_code.as_deref())
+        ))?;
+
+        let decisions_without_links = self.query_single_column(&format!(
+            "SELECT id FROM soll.Node d
+             WHERE type = 'Decision'
+               AND NOT EXISTS (SELECT 1 FROM soll.Edge WHERE (source_id = d.id OR target_id = d.id) AND relation_type IN ('SOLVES', 'IMPACTS'))
+               {}
+             ORDER BY id",
+            project_scope_predicate("d.id", resolved_project_code.as_deref())
+        ))?;
+
+        let uncovered_requirements = self.query_single_column(&format!(
+            "SELECT r.id FROM soll.Node r
+             LEFT JOIN soll.Traceability t
+               ON lower(t.soll_entity_type) = lower(r.type)
+              AND t.soll_entity_id = r.id
+             WHERE r.type = 'Requirement'
+               {}
+             GROUP BY r.id, r.status, r.metadata
+             HAVING COUNT(t.id) = 0
+                AND COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), '') IN ('', '[]')
+             ORDER BY r.id",
+            project_scope_predicate("r.id", resolved_project_code.as_deref())
+        ))?;
+
+        let duplicate_title_rows_raw = self.graph_store.query_json(&format!(
+            "SELECT type, title, string_agg(id, ', ' ORDER BY id)
+             FROM soll.Node
+             WHERE type IN ('Requirement', 'Decision', 'Concept')
+               AND COALESCE(title, '') <> ''
+               {}
+             GROUP BY type, title
+             HAVING COUNT(*) > 1
+             ORDER BY type, title",
+            resolved_project_code
+                .as_deref()
+                .map(|code| format!("AND project_code = '{}'", escape_sql(code)))
+                .unwrap_or_default()
+        ))?;
+        let duplicate_title_rows: Vec<Vec<String>> =
+            serde_json::from_str(&duplicate_title_rows_raw).unwrap_or_default();
+
+        let duplicate_ids = duplicate_title_rows
+            .iter()
+            .filter_map(|row| row.get(2).cloned())
+            .flat_map(|ids| {
+                ids.split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let relation_policy_violations =
+            self.collect_relation_policy_violations(resolved_project_code.as_deref())?;
+        let requirement_coverage = match resolved_project_code.as_deref() {
+            Some(code) => self.requirement_coverage_summary(code)?,
+            None => RequirementCoverageSummary::default(),
+        };
+
+        Ok(SollCompletenessSnapshot {
+            project_scope,
+            total_nodes,
+            orphan_requirements,
+            validations_without_verifies,
+            decisions_without_links,
+            uncovered_requirements,
+            duplicate_title_rows,
+            duplicate_ids,
+            relation_policy_violations,
+            requirement_coverage,
+        })
+    }
+
     fn query_named_row(&self, query: &str, expected_columns: usize) -> anyhow::Result<Vec<String>> {
         let res = self.graph_store.query_json(query)?;
         let rows: Vec<Vec<String>> = serde_json::from_str(&res).unwrap_or_default();
@@ -1598,9 +4367,18 @@ graph TD;
         let policy = relation_policy_for_pair(source_kind.label(), target_kind.label())
             .ok_or_else(|| {
                 anyhow!(
-                    "Aucune relation canonique autorisee pour {} -> {}",
-                    source_kind.label(),
-                    target_kind.label()
+                    "{}",
+                    json!({
+                        "error": "forbidden_relation",
+                        "attempted": format!("{} -> {}", source_kind.label(), target_kind.label()),
+                        "reason": if relation_policy_for_pair(target_kind.label(), source_kind.label()).is_some() {
+                            "canonical direction exists in the reverse direction"
+                        } else {
+                            "no canonical relation policy exists for this pair"
+                        },
+                        "did_you_mean": reverse_relation_hint_payload(source_kind.label(), target_kind.label())
+                    })
+                    .to_string()
                 )
             })?;
 
@@ -1641,6 +4419,104 @@ graph TD;
             })?;
 
         Ok((selected_static, policy))
+    }
+
+    fn relation_guidance_for_link(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        explicit_relation_type: Option<&str>,
+    ) -> Value {
+        let requested_relation = explicit_relation_type.map(|value| value.to_ascii_uppercase());
+        let source_kind = self.classify_existing_link_endpoint(source_id);
+        let target_kind = self.classify_existing_link_endpoint(target_id);
+
+        match (source_kind, target_kind) {
+            (Ok(source_kind), Ok(target_kind)) => {
+                let source_label = source_kind.label();
+                let target_label = target_kind.label();
+                let mut payload = relation_policy_payload(source_label, target_label);
+                payload["source_id"] = json!(source_id);
+                payload["target_id"] = json!(target_id);
+                payload["requested_relation"] = requested_relation
+                    .clone()
+                    .map(Value::from)
+                    .unwrap_or(Value::Null);
+                payload["allowed_target_kinds_from_source"] =
+                    Value::Array(allowed_relation_targets_from_source(source_label));
+                payload["recommended_incoming_links_to_source_kind"] =
+                    Value::Array(incoming_relation_sources_for_target(source_label));
+                payload["recommended_incoming_links_to_target_kind"] =
+                    Value::Array(incoming_relation_sources_for_target(target_label));
+                payload["source_graph_role"] = Value::from(graph_role_for_kind(source_label));
+                payload["target_graph_role"] = Value::from(graph_role_for_kind(target_label));
+                payload["canonical_examples"] = Value::Array(
+                    payload
+                        .get("allowed_relations")
+                        .and_then(|value| value.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|value| value.as_str().map(|relation| {
+                            json!({
+                                "relation_type": relation,
+                                "example": relation_example_sentence(source_label, target_label, relation)
+                            })
+                        }))
+                        .collect(),
+                );
+                payload["suggested_next_actions"] = if payload
+                    .get("pair_allowed")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+                {
+                    let default_relation = payload
+                        .get("default_relation")
+                        .and_then(|value| value.as_str());
+                    let mut actions = Vec::new();
+                    if let Some(default_relation) = default_relation {
+                        actions.push(format!(
+                            "retry `soll_manager` link with relation_type `{}`",
+                            default_relation
+                        ));
+                    }
+                    actions.push(
+                        "call `soll_relation_schema` with the same source/target ids".to_string(),
+                    );
+                    actions.push(
+                        "if the graph is still incomplete, inspect `recommended_incoming_links_to_target_kind` for the target node".to_string(),
+                    );
+                    Value::Array(actions.into_iter().map(Value::from).collect())
+                } else {
+                    Value::Array(vec![
+                        Value::from("call `soll_relation_schema` with `source_id` to inspect allowed target kinds"),
+                        Value::from("choose a target id whose kind matches one of `allowed_target_kinds_from_source`"),
+                        Value::from("inspect `recommended_incoming_links_to_target_kind` if the current target should be reached from another source kind"),
+                    ])
+                };
+                payload
+            }
+            (source_result, target_result) => {
+                let mut errors = Vec::new();
+                if let Err(error) = source_result {
+                    errors.push(format!("source lookup failed: {}", error));
+                }
+                if let Err(error) = target_result {
+                    errors.push(format!("target lookup failed: {}", error));
+                }
+                json!({
+                    "pair_allowed": false,
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "requested_relation": requested_relation,
+                    "lookup_errors": errors,
+                    "suggested_next_actions": [
+                        "verify that both ids exist and are canonical",
+                        "call `soll_relation_schema` with the known ids or kinds before retrying"
+                    ]
+                })
+            }
+        }
     }
 
     fn insert_validated_relation(
@@ -1820,7 +4696,17 @@ graph TD;
         .unwrap_or_else(|_| "aucun code connu".to_string())
     }
 
-    fn validate_explicit_canonical_project_code(
+    fn ensure_soll_registry_row(&self, project_code: &str) -> anyhow::Result<()> {
+        self.graph_store.execute_param(
+            "INSERT INTO soll.Registry (project_code, id, last_vis, last_pil, last_req, last_cpt, last_dec, last_mil, last_val, last_stk, last_gui, last_prv, last_rev)
+             VALUES (?, 'AXON_GLOBAL', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+             ON CONFLICT (project_code) DO NOTHING",
+            &json!([project_code]),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_explicit_canonical_project_code(
         &self,
         project_code: Option<&str>,
         action_label: &str,
@@ -1860,6 +4746,7 @@ graph TD;
             escaped
         ))?;
         if let Some(code) = rows.into_iter().next() {
+            self.ensure_soll_registry_row(&code)?;
             return Ok(code);
         }
 
@@ -1870,6 +4757,7 @@ graph TD;
                 identity.name.as_deref(),
                 Some(&project_path),
             )?;
+            self.ensure_soll_registry_row(&identity.code)?;
             return Ok(identity.code);
         }
 
@@ -1880,7 +4768,10 @@ graph TD;
         ))
     }
 
-    fn derive_project_name_from_path(&self, project_path: &str) -> anyhow::Result<String> {
+    pub(crate) fn derive_project_name_from_path(
+        &self,
+        project_path: &str,
+    ) -> anyhow::Result<String> {
         Path::new(project_path)
             .file_name()
             .map(|value| value.to_string_lossy().trim().to_string())
@@ -2017,7 +4908,7 @@ graph TD;
         candidates
     }
 
-    fn assign_project_code_for_init(
+    pub(crate) fn assign_project_code_for_init(
         &self,
         project_name: &str,
         project_path: &str,
@@ -2062,7 +4953,7 @@ graph TD;
         Ok((canonical_code.clone(), canonical_code))
     }
 
-    fn resolve_project_code(&self, project_code: &str) -> anyhow::Result<String> {
+    pub(crate) fn resolve_project_code(&self, project_code: &str) -> anyhow::Result<String> {
         let escaped = escape_sql(project_code);
         let by_code = self.query_single_column(&format!(
             "SELECT project_code FROM soll.ProjectCodeRegistry WHERE project_code = '{}'",
@@ -2099,6 +4990,313 @@ graph TD;
             "Projet canonique `{}` introuvable dans `.axon/meta.json` ou soll.ProjectCodeRegistry",
             project_code
         ))
+    }
+
+    pub(crate) fn axon_project_registry_lookup(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let _ = self.sync_project_code_registry_from_meta();
+
+        let project_code = args
+            .get("project_code")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let project_name = args
+            .get("project_name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let project_path = args
+            .get("project_path")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if project_code.is_none() && project_name.is_none() && project_path.is_none() {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": "`project_registry_lookup` attend au moins un de: `project_code`, `project_name`, `project_path`." }],
+                "isError": true
+            }));
+        }
+
+        let mut clauses = Vec::new();
+        if let Some(code) = project_code {
+            clauses.push(format!("project_code = '{}'", escape_sql(code)));
+        }
+        if let Some(name) = project_name {
+            clauses.push(format!("project_name = '{}'", escape_sql(name)));
+        }
+        if let Some(path) = project_path {
+            clauses.push(format!("project_path = '{}'", escape_sql(path)));
+        }
+
+        let query = format!(
+            "SELECT project_code, COALESCE(project_name,''), COALESCE(project_path,'')
+             FROM soll.ProjectCodeRegistry
+             WHERE {}
+             ORDER BY project_code ASC",
+            clauses.join(" OR ")
+        );
+        let raw = self
+            .graph_store
+            .query_json(&query)
+            .unwrap_or_else(|_| "[]".to_string());
+        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
+        let matches: Vec<serde_json::Value> = rows
+            .iter()
+            .filter(|row| row.len() >= 3)
+            .map(|row| {
+                serde_json::json!({
+                    "project_code": row[0],
+                    "project_name": row[1],
+                    "project_path": row[2]
+                })
+            })
+            .collect();
+
+        let first = matches
+            .first()
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let found = !matches.is_empty();
+        let content = if found {
+            format!(
+                "Projet canonique trouvé: {} ({})",
+                first
+                    .get("project_name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(""),
+                first
+                    .get("project_code")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+            )
+        } else {
+            "Aucun projet canonique trouvé dans ProjectCodeRegistry pour les critères fournis."
+                .to_string()
+        };
+
+        Some(serde_json::json!({
+            "content": [{ "type": "text", "text": content }],
+            "data": {
+                "found": found,
+                "ambiguous": matches.len() > 1,
+                "project_code": first.get("project_code").cloned().unwrap_or(serde_json::json!(null)),
+                "project_name": first.get("project_name").cloned().unwrap_or(serde_json::json!(null)),
+                "project_path": first.get("project_path").cloned().unwrap_or(serde_json::json!(null)),
+                "matches": matches,
+                "operator_guidance": if found {
+                    serde_json::json!({
+                        "actionable_now": true,
+                        "blocking_factors": if matches.len() > 1 {
+                            vec![serde_json::json!({
+                                "factor": "registry_match_ambiguous",
+                                "severity": "medium",
+                                "recommended_action": "prefer the exact canonical project_code from the returned matches before mutating"
+                            })]
+                        } else {
+                            Vec::<serde_json::Value>::new()
+                        },
+                        "remediation_actions": if matches.len() > 1 {
+                            vec!["prefer the exact canonical project_code from the returned matches before mutating"]
+                        } else {
+                            Vec::<&str>::new()
+                        },
+                        "follow_up_tools": ["project_status", "soll_query_context"],
+                        "next_action": {
+                            "kind": "use_canonical_project_code",
+                            "tool": "project_status",
+                            "when": "now"
+                        }
+                    })
+                } else {
+                    serde_json::json!({
+                        "actionable_now": false,
+                        "blocking_factors": [{
+                            "factor": "project_not_found_in_registry",
+                            "severity": "high",
+                            "recommended_action": "use axon_init_project or retry with the exact canonical code, name, or path"
+                        }],
+                        "remediation_actions": [
+                            "use axon_init_project or retry with the exact canonical code, name, or path"
+                        ],
+                        "follow_up_tools": ["axon_init_project", "project_registry_lookup"],
+                        "next_action": {
+                            "kind": "initialize_or_retry_project_identity",
+                            "tool": "axon_init_project",
+                            "when": "after_identity_confirmation"
+                        }
+                    })
+                },
+                "next_action": if found {
+                    serde_json::json!({
+                        "kind": "use_canonical_project_code",
+                        "tool": "project_status",
+                        "when": "now"
+                    })
+                } else {
+                    serde_json::json!({
+                        "kind": "initialize_or_retry_project_identity",
+                        "tool": "axon_init_project",
+                        "when": "after_identity_confirmation"
+                    })
+                }
+            }
+        }))
+    }
+
+    pub(crate) fn axon_soll_relation_schema(
+        &self,
+        args: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let source_type = args
+            .get("source_type")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_uppercase());
+        let target_type = args
+            .get("target_type")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_uppercase());
+        let source_id = args
+            .get("source_id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let target_id = args
+            .get("target_id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if source_type.is_none()
+            && target_type.is_none()
+            && source_id.is_none()
+            && target_id.is_none()
+        {
+            return Some(json!({
+                "content": [{ "type": "text", "text": "`soll_relation_schema` attend au moins un de: `source_type`, `target_type`, `source_id`, `target_id`." }],
+                "isError": true
+            }));
+        }
+
+        let resolved_source_type = match (source_type, source_id) {
+            (Some(kind), _) => Some(kind),
+            (None, Some(id)) => match self.classify_existing_link_endpoint(id) {
+                Ok(kind) => Some(kind.label().to_string()),
+                Err(error) => {
+                    return Some(json!({
+                        "content": [{ "type": "text", "text": format!("Impossible de résoudre `source_id`. Discovery remains available via guidance fields: {}", error) }],
+                        "data": {
+                            "resolved": false,
+                            "lookup_stage": "source_id",
+                            "source_id": id,
+                            "target_id": target_id,
+                            "suggested_next_actions": [
+                                "verify source_id is canonical",
+                                "retry with `source_type` if known"
+                            ]
+                        }
+                    }))
+                }
+            },
+            (None, None) => None,
+        };
+        let resolved_target_type = match (target_type, target_id) {
+            (Some(kind), _) => Some(kind),
+            (None, Some(id)) => match self.classify_existing_link_endpoint(id) {
+                Ok(kind) => Some(kind.label().to_string()),
+                Err(error) => {
+                    return Some(json!({
+                        "content": [{ "type": "text", "text": format!("Impossible de résoudre `target_id`. Discovery remains available via guidance fields: {}", error) }],
+                        "data": {
+                            "resolved": false,
+                            "lookup_stage": "target_id",
+                            "source_id": source_id,
+                            "target_id": id,
+                            "suggested_next_actions": [
+                                "verify target_id is canonical",
+                                "retry with `target_type` if known"
+                            ]
+                        }
+                    }))
+                }
+            },
+            (None, None) => None,
+        };
+
+        let data = match (
+            resolved_source_type.as_deref(),
+            resolved_target_type.as_deref(),
+        ) {
+            (Some(source_kind), Some(target_kind)) => {
+                let mut payload = relation_policy_payload(source_kind, target_kind);
+                let reverse_hint = reverse_relation_hint_payload(source_kind, target_kind);
+                payload["allowed_target_kinds_from_source"] =
+                    Value::Array(allowed_relation_targets_from_source(source_kind));
+                payload["allowed_targets"] =
+                    Value::Array(allowed_relation_targets_from_source(source_kind));
+                payload["forbidden_targets"] = relation_schema_summary_for_kind(source_kind)
+                    .get("forbidden_targets")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(vec![]));
+                payload["recommended_incoming_links_to_source_kind"] =
+                    Value::Array(incoming_relation_sources_for_target(source_kind));
+                payload["recommended_incoming_links_to_target_kind"] =
+                    Value::Array(incoming_relation_sources_for_target(target_kind));
+                payload["source_graph_role"] = Value::from(graph_role_for_kind(source_kind));
+                payload["target_graph_role"] = Value::from(graph_role_for_kind(target_kind));
+                payload["source_type"] = Value::from(source_kind);
+                payload["target_type"] = Value::from(target_kind);
+                payload["direction"] = Value::from("source_to_target");
+                payload["canonical_examples"] = Value::Array(
+                    relation_policy_for_pair(source_kind, target_kind)
+                        .map(|policy| {
+                            policy
+                                .allowed
+                                .iter()
+                                .map(|relation| {
+                                    json!({
+                                        "relation_type": relation,
+                                        "example": relation_example_sentence(source_kind, target_kind, relation)
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                );
+                payload["source_id"] = source_id.map(Value::from).unwrap_or(Value::Null);
+                payload["target_id"] = target_id.map(Value::from).unwrap_or(Value::Null);
+                if !payload["pair_allowed"].as_bool().unwrap_or(false) && !reverse_hint.is_null() {
+                    payload["did_you_mean"] = reverse_hint;
+                }
+                payload
+            }
+            (Some(source_kind), None) => relation_schema_summary_for_kind(source_kind),
+            (None, Some(target_kind)) => json!({
+                "resolved": true,
+                "target_kind": target_kind,
+                "graph_role": graph_role_for_kind(target_kind),
+                "kind_projection": kind_projection_policy(target_kind).map(|policy| json!({
+                    "breadcrumb_eligible": policy.breadcrumb_eligible,
+                    "root_eligible": policy.root_eligible,
+                    "tree_order_rank": policy.tree_order_rank
+                })),
+                "incoming_from_source_kinds": incoming_relation_sources_for_target(target_kind),
+                "guidance_source": "derived_from_relation_policy"
+            }),
+            (None, None) => unreachable!(),
+        };
+
+        Some(json!({
+            "content": [{ "type": "text", "text": "Canonical SOLL relation policy resolved with explicit directional guidance." }],
+            "data": data
+        }))
     }
 
     pub(crate) fn next_server_numeric_id(
@@ -2265,10 +5463,16 @@ impl McpServer {
         }
 
         let counts = summarize_ops(&operations);
+        let result_contract = apply_plan_operation_contract(&operations);
         if dry_run {
             return Some(json!({
                 "content": [{"type":"text","text": format!("SOLL apply_plan DRY-RUN ready. preview_id={} (create={}, update={})", preview_id, counts.0, counts.1)}],
-                "data": { "preview_id": preview_id, "counts": {"create": counts.0, "update": counts.1}, "operations": operations }
+                "data": {
+                    "preview_id": preview_id,
+                    "counts": {"create": counts.0, "update": counts.1},
+                    "operations": operations,
+                    "result_contract": result_contract
+                }
             }));
         }
 
@@ -2362,6 +5566,1277 @@ fn extract_soll_id_from_message(text: String) -> Option<String> {
     Some(text[start + 1..start + 1 + end].to_string())
 }
 
+fn json_optional_string(value: &str) -> Value {
+    if value.is_empty() {
+        Value::Null
+    } else {
+        json!(value)
+    }
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn mermaid_escape_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "&quot;")
+        .replace('\n', "<br/>")
+}
+
+fn summarize_for_label(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut summary = trimmed
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    summary.push('…');
+    summary
+}
+
+fn entity_type_short_label(entity_type: &str) -> &str {
+    match entity_type {
+        "Portfolio" => "GLO",
+        "Project" => "PRJ",
+        "Vision" => "VIS",
+        "Pillar" => "PIL",
+        "Requirement" => "REQ",
+        "Decision" => "DEC",
+        "Concept" => "CPT",
+        "Guideline" => "GUI",
+        "Milestone" => "MIL",
+        "Validation" => "VAL",
+        "Stakeholder" => "STK",
+        _ => entity_type,
+    }
+}
+
+fn content_hash_hex(value: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn write_if_changed(path: &Path, content: &str) -> std::io::Result<bool> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        if existing == content {
+            return Ok(false);
+        }
+    }
+
+    std::fs::write(path, content)?;
+    Ok(true)
+}
+
+fn edge_key(edge: &SollDocEdge) -> String {
+    format!(
+        "{}--{}-->{}",
+        edge.source_id, edge.relation_type, edge.target_id
+    )
+}
+
+fn node_file_name(node_id: &str) -> String {
+    format!("{}.html", node_id)
+}
+
+fn subtree_file_name(node_id: &str) -> String {
+    format!("{}.html", node_id)
+}
+
+fn entity_type_to_kind(entity_type: &str) -> Option<&'static str> {
+    match entity_type {
+        "Vision" => Some("VIS"),
+        "Pillar" => Some("PIL"),
+        "Requirement" => Some("REQ"),
+        "Decision" => Some("DEC"),
+        "Concept" => Some("CPT"),
+        "Guideline" => Some("GUI"),
+        "Milestone" => Some("MIL"),
+        "Validation" => Some("VAL"),
+        "Stakeholder" => Some("STK"),
+        _ => None,
+    }
+}
+
+fn projection_child_types(parent_type: &str) -> Vec<&'static str> {
+    let Some(parent_kind) = entity_type_to_kind(parent_type) else {
+        return Vec::new();
+    };
+    let mut children = SOLL_RELATION_ENDPOINT_KINDS
+        .iter()
+        .filter_map(|source_kind| {
+            let policy = relation_policy_for_pair(source_kind, parent_kind)?;
+            if !matches!(policy.projection.role, ProjectionRole::Primary) {
+                return None;
+            }
+            let source_projection = kind_projection_policy(source_kind)?;
+            if !source_projection.breadcrumb_eligible {
+                return None;
+            }
+            let child_type = match *source_kind {
+                "VIS" => "Vision",
+                "PIL" => "Pillar",
+                "REQ" => "Requirement",
+                "DEC" => "Decision",
+                "CPT" => "Concept",
+                "GUI" => "Guideline",
+                "MIL" => "Milestone",
+                "VAL" => "Validation",
+                "STK" => "Stakeholder",
+                _ => return None,
+            };
+            Some((policy.projection.child_order_rank, child_type))
+        })
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| left.cmp(right));
+    children
+        .into_iter()
+        .map(|(_, child_type)| child_type)
+        .collect()
+}
+
+fn hierarchy_child_types(parent_type: &str) -> &'static [&'static str] {
+    match parent_type {
+        "Project" => &["Vision"],
+        "Vision" => &["Pillar"],
+        "Pillar" => &["Requirement"],
+        "Requirement" => &[
+            "Decision",
+            "Validation",
+            "Guideline",
+            "Concept",
+            "Milestone",
+            "Stakeholder",
+        ],
+        _ => &[],
+    }
+}
+
+fn hierarchy_relation_allowed(parent_type: &str, child_type: &str) -> bool {
+    let canonical = projection_child_types(parent_type);
+    if !canonical.is_empty() {
+        return canonical.iter().any(|candidate| *candidate == child_type);
+    }
+    hierarchy_child_types(parent_type)
+        .iter()
+        .any(|candidate| *candidate == child_type)
+}
+
+fn entity_type_sort_rank(entity_type: &str) -> usize {
+    if let Some(kind) = entity_type_to_kind(entity_type) {
+        if let Some(policy) = kind_projection_policy(kind) {
+            return policy.tree_order_rank;
+        }
+    }
+    match entity_type {
+        "Project" => 0,
+        "Vision" => 1,
+        "Pillar" => 2,
+        "Requirement" => 3,
+        "Decision" => 4,
+        "Validation" => 5,
+        "Guideline" => 6,
+        "Concept" => 7,
+        "Milestone" => 8,
+        "Stakeholder" => 9,
+        _ => 99,
+    }
+}
+
+fn preferred_parent_sort_key(node: &SollDocNode) -> (usize, &str, &str) {
+    (
+        entity_type_sort_rank(&node.entity_type),
+        node.id.as_str(),
+        node.title.as_str(),
+    )
+}
+
+fn hierarchy_candidate_parent_ids(
+    node_id: &str,
+    outgoing: &HashMap<String, Vec<SollDocEdge>>,
+    nodes_by_id: &HashMap<String, SollDocNode>,
+) -> Vec<String> {
+    let Some(node) = nodes_by_id.get(node_id) else {
+        return Vec::new();
+    };
+    let mut parent_ids = outgoing
+        .get(node_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|edge| {
+            let candidate = nodes_by_id.get(&edge.target_id)?;
+            if hierarchy_relation_allowed(&candidate.entity_type, &node.entity_type) {
+                let pair_projection = entity_type_to_kind(&node.entity_type)
+                    .zip(entity_type_to_kind(&candidate.entity_type))
+                    .and_then(|(child_kind, parent_kind)| {
+                        relation_policy_for_pair(child_kind, parent_kind).map(|policy| {
+                            (
+                                policy.projection.parent_preference_rank,
+                                entity_type_sort_rank(&candidate.entity_type),
+                            )
+                        })
+                    })
+                    .unwrap_or((usize::MAX, entity_type_sort_rank(&candidate.entity_type)));
+                Some((pair_projection, candidate.id.clone()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    parent_ids.sort_by(|left, right| {
+        let left_node = nodes_by_id
+            .get(&left.1)
+            .expect("left hierarchy parent exists");
+        let right_node = nodes_by_id
+            .get(&right.1)
+            .expect("right hierarchy parent exists");
+        left.0.cmp(&right.0).then_with(|| {
+            preferred_parent_sort_key(left_node).cmp(&preferred_parent_sort_key(right_node))
+        })
+    });
+    parent_ids.dedup_by(|left, right| left.1 == right.1);
+    parent_ids.into_iter().map(|(_, id)| id).collect()
+}
+
+fn build_preferred_hierarchy_parent_map(
+    nodes: &[SollDocNode],
+    outgoing: &HashMap<String, Vec<SollDocEdge>>,
+    nodes_by_id: &HashMap<String, SollDocNode>,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for node in nodes {
+        let parent_ids = hierarchy_candidate_parent_ids(&node.id, outgoing, nodes_by_id);
+        if let Some(parent_id) = parent_ids.first() {
+            map.insert(node.id.clone(), parent_id.clone());
+        }
+    }
+    map
+}
+
+fn build_hierarchy_children_map(
+    preferred_parent_map: &HashMap<String, String>,
+    nodes_by_id: &HashMap<String, SollDocNode>,
+) -> HashMap<String, Vec<String>> {
+    let mut children = HashMap::<String, Vec<String>>::new();
+    for (child_id, parent_id) in preferred_parent_map {
+        children
+            .entry(parent_id.clone())
+            .or_default()
+            .push(child_id.clone());
+    }
+    for child_ids in children.values_mut() {
+        child_ids.sort_by(|left, right| {
+            let left_node = nodes_by_id.get(left).expect("child node exists");
+            let right_node = nodes_by_id.get(right).expect("child node exists");
+            (
+                entity_type_sort_rank(&left_node.entity_type),
+                left_node.id.as_str(),
+                left_node.title.as_str(),
+            )
+                .cmp(&(
+                    entity_type_sort_rank(&right_node.entity_type),
+                    right_node.id.as_str(),
+                    right_node.title.as_str(),
+                ))
+        });
+        child_ids.dedup();
+    }
+    children
+}
+
+fn hierarchy_root_ids_for_project(
+    nodes: &[SollDocNode],
+    preferred_parent_map: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut canonical_roots = nodes
+        .iter()
+        .filter(|node| {
+            !preferred_parent_map.contains_key(&node.id)
+                && entity_type_to_kind(&node.entity_type)
+                    .and_then(kind_projection_policy)
+                    .is_some_and(|policy| policy.root_eligible)
+        })
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    let mut fallback_roots = nodes
+        .iter()
+        .filter(|node| {
+            !preferred_parent_map.contains_key(&node.id)
+                && !entity_type_to_kind(&node.entity_type)
+                    .and_then(kind_projection_policy)
+                    .is_some_and(|policy| policy.root_eligible)
+        })
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    canonical_roots.sort();
+    fallback_roots.sort();
+    if canonical_roots.is_empty() {
+        fallback_roots
+    } else {
+        canonical_roots
+    }
+}
+
+fn hierarchy_unattached_ids_for_project(
+    nodes: &[SollDocNode],
+    preferred_parent_map: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut unattached = nodes
+        .iter()
+        .filter(|node| {
+            !preferred_parent_map.contains_key(&node.id)
+                && !entity_type_to_kind(&node.entity_type)
+                    .and_then(kind_projection_policy)
+                    .is_some_and(|policy| policy.root_eligible)
+        })
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    unattached.sort();
+    unattached
+}
+
+fn ancestor_chain_ids(
+    current_node_id: &str,
+    preferred_parent_map: &HashMap<String, String>,
+) -> HashSet<String> {
+    let mut expanded = HashSet::new();
+    let mut cursor = Some(current_node_id.to_string());
+    while let Some(node_id) = cursor {
+        expanded.insert(node_id.clone());
+        cursor = preferred_parent_map.get(&node_id).cloned();
+    }
+    expanded
+}
+
+fn subtree_anchor_type(entity_type: &str) -> bool {
+    if entity_type_to_kind(entity_type)
+        .and_then(kind_projection_policy)
+        .is_some_and(|policy| policy.root_eligible)
+    {
+        return true;
+    }
+    let parent_kind = entity_type_to_kind("Vision");
+    let candidate_kind = entity_type_to_kind(entity_type);
+    match (candidate_kind, parent_kind) {
+        (Some(source_kind), Some(target_kind)) => {
+            relation_policy_for_pair(source_kind, target_kind)
+                .is_some_and(|policy| matches!(policy.projection.role, ProjectionRole::Primary))
+        }
+        _ => false,
+    }
+}
+
+fn relation_diagnostic_row(
+    edge: &SollDocEdge,
+    nodes_by_id: &HashMap<String, SollDocNode>,
+) -> Value {
+    let relation_type = edge.relation_type.as_str();
+    let source_kind = nodes_by_id
+        .get(&edge.source_id)
+        .and_then(|node| entity_type_to_kind(&node.entity_type));
+    let target_kind = nodes_by_id
+        .get(&edge.target_id)
+        .and_then(|node| entity_type_to_kind(&node.entity_type));
+    let policy = source_kind
+        .zip(target_kind)
+        .and_then(|(source_kind, target_kind)| relation_policy_for_pair(source_kind, target_kind));
+    let projection_role = policy
+        .map(|policy| policy.projection.role.as_str())
+        .unwrap_or("derived");
+    let is_primary = projection_role == "primary";
+    let score_bearing = matches!(
+        relation_type,
+        "EPITOMIZES" | "BELONGS_TO" | "SOLVES" | "VERIFIES" | "IMPACTS"
+    );
+    json!({
+        "relation_type": relation_type,
+        "source_id": edge.source_id,
+        "target_id": edge.target_id,
+        "boundary": if policy.is_some() { "canonical" } else { "derived" },
+        "projection_role": projection_role,
+        "score_class": if score_bearing { "score_bearing" } else { "non_score_bearing" },
+        "primary_class": if is_primary { "primary" } else { "supporting_or_lateral" }
+    })
+}
+
+fn relation_diagnostic_table_html(
+    edges: &[SollDocEdge],
+    nodes_by_id: &HashMap<String, SollDocNode>,
+) -> String {
+    if edges.is_empty() {
+        return "<p class=\"muted\">No relation diagnostics in this scope.</p>".to_string();
+    }
+    let mut items = edges
+        .iter()
+        .map(|edge| relation_diagnostic_row(edge, nodes_by_id))
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        (
+            left["relation_type"].as_str().unwrap_or_default(),
+            left["source_id"].as_str().unwrap_or_default(),
+            left["target_id"].as_str().unwrap_or_default(),
+        )
+            .cmp(&(
+                right["relation_type"].as_str().unwrap_or_default(),
+                right["source_id"].as_str().unwrap_or_default(),
+                right["target_id"].as_str().unwrap_or_default(),
+            ))
+    });
+
+    let mut html = String::from(
+        "<section class=\"card\"><h3>Operator Relation Diagnostics</h3><ul class=\"relation-list\">",
+    );
+    for item in items {
+        html.push_str(&format!(
+            "<li><code>{}</code> <span class=\"rel\">{}</span> <code>{}</code>\
+             <div class=\"muted\">boundary: {} · projection: {} · scoring: {}</div></li>",
+            html_escape(item["source_id"].as_str().unwrap_or_default()),
+            html_escape(item["relation_type"].as_str().unwrap_or_default()),
+            html_escape(item["target_id"].as_str().unwrap_or_default()),
+            html_escape(item["boundary"].as_str().unwrap_or_default()),
+            html_escape(item["projection_role"].as_str().unwrap_or_default()),
+            html_escape(item["score_class"].as_str().unwrap_or_default())
+        ));
+    }
+    html.push_str("</ul></section>");
+    html
+}
+
+fn find_path_to_root_via_outgoing(
+    start_id: &str,
+    root_id: &str,
+    outgoing: &HashMap<String, Vec<SollDocEdge>>,
+) -> Option<Vec<SollDocEdge>> {
+    if start_id == root_id {
+        return Some(Vec::new());
+    }
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back((start_id.to_string(), Vec::<SollDocEdge>::new()));
+    while let Some((current, path)) = queue.pop_front() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        if let Some(edges) = outgoing.get(&current) {
+            for edge in edges {
+                let mut next_path = path.clone();
+                next_path.push(edge.clone());
+                if edge.target_id == root_id {
+                    return Some(next_path);
+                }
+                queue.push_back((edge.target_id.clone(), next_path));
+            }
+        }
+    }
+    None
+}
+
+fn subtree_membership_reason_html(
+    root: &SollDocNode,
+    member_id: &str,
+    outgoing: &HashMap<String, Vec<SollDocEdge>>,
+    nodes_by_id: &HashMap<String, SollDocNode>,
+) -> String {
+    if member_id == root.id {
+        return format!(
+            "Included because this node is the subtree root <code>{}</code>.",
+            html_escape(&root.id)
+        );
+    }
+    if let Some(edges) = outgoing.get(&root.id) {
+        if let Some(edge) = edges.iter().find(|edge| edge.target_id == member_id) {
+            return format!(
+                "Included by direct root context edge <code>{}</code> <span class=\"rel\">{}</span> <code>{}</code>.",
+                html_escape(&edge.source_id),
+                html_escape(&edge.relation_type),
+                html_escape(&edge.target_id)
+            );
+        }
+    }
+    if let Some(path) = find_path_to_root_via_outgoing(member_id, &root.id, outgoing) {
+        if let Some(first_edge) = path.first() {
+            let target_label = nodes_by_id
+                .get(&first_edge.target_id)
+                .map(|node| {
+                    format!(
+                        "{} · {}",
+                        entity_type_short_label(&node.entity_type),
+                        node.title
+                    )
+                })
+                .unwrap_or_else(|| first_edge.target_id.clone());
+            return format!(
+                "Included by reverse reachability toward root <code>{}</code>; canonical chain starts with <code>{}</code> <span class=\"rel\">{}</span> <code>{}</code> ({}) .",
+                html_escape(&root.id),
+                html_escape(&first_edge.source_id),
+                html_escape(&first_edge.relation_type),
+                html_escape(&first_edge.target_id),
+                html_escape(&target_label)
+            );
+        }
+    }
+    "Included by subtree derivation logic, but no explicit canonical path explanation is currently available.".to_string()
+}
+
+fn render_tree_node_html(
+    node_id: &str,
+    children_map: &HashMap<String, Vec<String>>,
+    nodes_by_id: &HashMap<String, SollDocNode>,
+    current_node_id: Option<&str>,
+    node_href_prefix: &str,
+    expanded_nodes: &HashSet<String>,
+) -> String {
+    let Some(node) = nodes_by_id.get(node_id) else {
+        return String::new();
+    };
+    let child_ids = children_map.get(node_id).cloned().unwrap_or_default();
+    let is_current = current_node_id.is_some_and(|candidate| candidate == node_id);
+    let current_class = if is_current { " current" } else { "" };
+    let label_html = format!(
+        "<a class=\"tree-link{}\" href=\"{}{}\"><span class=\"tree-tag\">{}</span><span>{}</span></a>",
+        current_class,
+        node_href_prefix,
+        html_escape(&node_file_name(&node.id)),
+        html_escape(entity_type_short_label(&node.entity_type)),
+        html_escape(&node.title)
+    );
+    if child_ids.is_empty() {
+        return format!("<li class=\"tree-item leaf\">{}</li>", label_html);
+    }
+
+    let child_html = child_ids
+        .iter()
+        .map(|child_id| {
+            render_tree_node_html(
+                child_id,
+                children_map,
+                nodes_by_id,
+                current_node_id,
+                node_href_prefix,
+                expanded_nodes,
+            )
+        })
+        .collect::<String>();
+    let open_attr = if expanded_nodes.contains(node_id) {
+        " open"
+    } else {
+        ""
+    };
+    format!(
+        "<li class=\"tree-item branch\"><details{}><summary>{}</summary><ul class=\"tree-children\">{}</ul></details></li>",
+        open_attr, label_html, child_html
+    )
+}
+
+fn render_project_tree_html(
+    project_code: &str,
+    root_ids: &[String],
+    children_map: &HashMap<String, Vec<String>>,
+    nodes_by_id: &HashMap<String, SollDocNode>,
+    current_node_id: Option<&str>,
+    node_href_prefix: &str,
+    project_root_href: &str,
+    default_open: bool,
+    expanded_nodes: &HashSet<String>,
+) -> String {
+    let root_children_html = root_ids
+        .iter()
+        .map(|root_id| {
+            render_tree_node_html(
+                root_id,
+                children_map,
+                nodes_by_id,
+                current_node_id,
+                node_href_prefix,
+                expanded_nodes,
+            )
+        })
+        .collect::<String>();
+    let open_attr = if default_open { " open" } else { "" };
+    format!(
+        "<nav class=\"tree-shell\" aria-label=\"Project hierarchy\"><ul class=\"tree-root\">\
+           <li class=\"tree-item branch root\"><details{}>\
+             <summary><a class=\"tree-link{}\" href=\"{}\"><span class=\"tree-tag\">PRJ</span><span>{}</span></a></summary>\
+             <ul class=\"tree-children\">{}</ul>\
+           </details></li>\
+         </ul></nav>",
+        open_attr,
+        if current_node_id.is_none() { " current" } else { "" },
+        html_escape(project_root_href),
+        html_escape(project_code),
+        root_children_html
+    )
+}
+
+fn relation_line_html(edges: &[SollDocEdge], nodes_by_id: &HashMap<String, SollDocNode>) -> String {
+    if edges.is_empty() {
+        return "<p class=\"muted\">No relations in this scope.</p>".to_string();
+    }
+
+    let mut items = edges.to_vec();
+    items.sort_by(|left, right| {
+        (&left.relation_type, &left.source_id, &left.target_id).cmp(&(
+            &right.relation_type,
+            &right.source_id,
+            &right.target_id,
+        ))
+    });
+
+    let mut html = String::from("<ul class=\"relation-list\">");
+    for edge in items {
+        let source_label = nodes_by_id
+            .get(&edge.source_id)
+            .map(|node| {
+                format!(
+                    "{} · {}",
+                    entity_type_short_label(&node.entity_type),
+                    node.title
+                )
+            })
+            .unwrap_or_else(|| edge.source_id.clone());
+        let target_label = nodes_by_id
+            .get(&edge.target_id)
+            .map(|node| {
+                format!(
+                    "{} · {}",
+                    entity_type_short_label(&node.entity_type),
+                    node.title
+                )
+            })
+            .unwrap_or_else(|| edge.target_id.clone());
+        html.push_str(&format!(
+            "<li><code>{}</code> <span class=\"rel\">{}</span> <code>{}</code><div class=\"muted\">{} -> {}</div></li>",
+            html_escape(&edge.source_id),
+            html_escape(&edge.relation_type),
+            html_escape(&edge.target_id),
+            html_escape(&source_label),
+            html_escape(&target_label)
+        ));
+    }
+    html.push_str("</ul>");
+    html
+}
+
+fn linked_node_list_html(
+    title: &str,
+    node_ids: &[String],
+    nodes_by_id: &HashMap<String, SollDocNode>,
+    page_prefix: &str,
+) -> String {
+    if node_ids.is_empty() {
+        return format!(
+            "<section class=\"card\"><h3>{}</h3><p class=\"muted\">None.</p></section>",
+            html_escape(title)
+        );
+    }
+
+    let mut ids = node_ids.to_vec();
+    ids.sort();
+    ids.dedup();
+
+    let mut html = format!(
+        "<section class=\"card\"><h3>{}</h3><ul class=\"node-list\">",
+        html_escape(title)
+    );
+    for node_id in ids {
+        let Some(node) = nodes_by_id.get(&node_id) else {
+            continue;
+        };
+        html.push_str(&format!(
+            "<li><a href=\"{}{}\">{} · {}</a><span class=\"muted\">{}</span></li>",
+            page_prefix,
+            html_escape(&node_file_name(&node.id)),
+            html_escape(entity_type_short_label(&node.entity_type)),
+            html_escape(&node.title),
+            html_escape(&node.id)
+        ));
+    }
+    html.push_str("</ul></section>");
+    html
+}
+
+fn linked_page_list_html(title: &str, items: &[(String, String, String)]) -> String {
+    if items.is_empty() {
+        return format!(
+            "<section class=\"card\"><h3>{}</h3><p class=\"muted\">None.</p></section>",
+            html_escape(title)
+        );
+    }
+
+    let mut ordered = items.to_vec();
+    ordered.sort_by(|left, right| (&left.1, &left.0).cmp(&(&right.1, &right.0)));
+    ordered.dedup_by(|left, right| left.0 == right.0);
+
+    let mut html = format!(
+        "<section class=\"card\"><h3>{}</h3><ul class=\"node-list\">",
+        html_escape(title)
+    );
+    for (href, label, meta) in ordered {
+        html.push_str(&format!(
+            "<li><a href=\"{}\">{}</a><span class=\"muted\">{}</span></li>",
+            html_escape(&href),
+            html_escape(&label),
+            html_escape(&meta)
+        ));
+    }
+    html.push_str("</ul></section>");
+    html
+}
+
+struct RenderedMermaidGraph {
+    definition: String,
+    link_map_json: String,
+}
+
+fn render_mermaid_graph(
+    nodes: &[SollDocNode],
+    edges: &[SollDocEdge],
+    links: &HashMap<String, String>,
+) -> RenderedMermaidGraph {
+    let mut ordered_nodes = nodes.to_vec();
+    ordered_nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    let mermaid_ids = ordered_nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, node)| (node.id.clone(), format!("N{}", idx)))
+        .collect::<HashMap<_, _>>();
+
+    let mut ordered_edges = edges.to_vec();
+    ordered_edges.sort_by(|left, right| {
+        (&left.source_id, &left.relation_type, &left.target_id).cmp(&(
+            &right.source_id,
+            &right.relation_type,
+            &right.target_id,
+        ))
+    });
+
+    let mut graph = String::from("flowchart LR\n");
+    for node in ordered_nodes {
+        let label = format!(
+            "{} {}: {}",
+            entity_type_short_label(&node.entity_type),
+            node.id,
+            summarize_for_label(&node.title, 42)
+        );
+        graph.push_str(&format!(
+            "  {}[\"{}\"]\n",
+            mermaid_ids
+                .get(&node.id)
+                .map(String::as_str)
+                .unwrap_or("NODE"),
+            mermaid_escape_label(&label)
+        ));
+    }
+    for edge in ordered_edges {
+        let source_id = mermaid_ids
+            .get(&edge.source_id)
+            .map(String::as_str)
+            .unwrap_or("NODE");
+        let target_id = mermaid_ids
+            .get(&edge.target_id)
+            .map(String::as_str)
+            .unwrap_or("NODE");
+        graph.push_str(&format!(
+            "  {} -- {} --> {}\n",
+            source_id,
+            mermaid_escape_label(&edge.relation_type),
+            target_id
+        ));
+    }
+
+    let mut link_pairs = links.iter().collect::<Vec<_>>();
+    link_pairs.sort_by(|left, right| left.0.cmp(right.0));
+    for (canonical_node_id, href) in link_pairs {
+        let Some(mermaid_id) = mermaid_ids.get(canonical_node_id) else {
+            continue;
+        };
+        graph.push_str(&format!(
+            "  click {} href \"{}\" \"Open {}\"\n",
+            mermaid_id,
+            href,
+            mermaid_escape_label(canonical_node_id)
+        ));
+    }
+
+    let link_map_json = serde_json::to_string(
+        &mermaid_ids
+            .iter()
+            .filter_map(|(canonical_id, mermaid_id)| {
+                links
+                    .get(canonical_id)
+                    .map(|href| (mermaid_id.clone(), href.clone()))
+            })
+            .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap_or_else(|_| "{}".to_string());
+
+    RenderedMermaidGraph {
+        definition: graph,
+        link_map_json,
+    }
+}
+
+fn render_site_page(
+    page_title: &str,
+    eyebrow: &str,
+    intro: &str,
+    breadcrumb_html: &str,
+    left_title: &str,
+    left_panel_html: &str,
+    center_title: &str,
+    graph: &RenderedMermaidGraph,
+    right_title: &str,
+    right_panel_html: &str,
+    summary_html: &str,
+) -> String {
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{page_title}</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root {{
+      --bg: #f5f1e8;
+      --surface: rgba(255,255,255,0.92);
+      --border: rgba(64, 49, 21, 0.14);
+      --text: #22170d;
+      --muted: #6f5f49;
+      --accent: #1f7a6b;
+      --accent-2: #b55c2f;
+      --shadow: 0 20px 60px rgba(48, 34, 12, 0.12);
+      --radius: 22px;
+      --left-pane-width: 300px;
+      --right-pane-width: 360px;
+      --handle-width: 12px;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: "Space Grotesk", system-ui, sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(31,122,107,0.14), transparent 20%),
+        radial-gradient(circle at top left, rgba(181,92,47,0.14), transparent 22%),
+        var(--bg);
+      color: var(--text);
+    }}
+    .page {{ width: calc(100vw - 24px); margin: 12px auto 24px; }}
+    .hero, .card {{
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }}
+    .hero {{ padding: 24px 26px; }}
+    .eyebrow {{
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 10px;
+    }}
+    h1 {{ margin: 0 0 10px; font-size: clamp(2rem, 4vw, 3.6rem); line-height: 0.95; }}
+    .lede {{ margin: 0; color: var(--muted); max-width: 70ch; }}
+    .breadcrumb {{
+      margin: 14px 0 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      font-size: 0.94rem;
+      color: var(--muted);
+    }}
+    .breadcrumb a {{ color: var(--accent); text-decoration: none; }}
+    .toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 20px;
+    }}
+    .toolbar button {{
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.78);
+      padding: 10px 14px;
+      font: inherit;
+      color: var(--text);
+      cursor: pointer;
+    }}
+    .workspace {{
+      display: grid;
+      grid-template-columns: var(--left-pane-width) var(--handle-width) minmax(0, 1fr) var(--handle-width) var(--right-pane-width);
+      gap: 0;
+      align-items: stretch;
+      min-height: calc(100vh - 220px);
+      margin-top: 18px;
+    }}
+    body.left-collapsed .workspace {{
+      grid-template-columns: 0px 0px minmax(0, 1fr) var(--handle-width) var(--right-pane-width);
+    }}
+    body.right-collapsed .workspace {{
+      grid-template-columns: var(--left-pane-width) var(--handle-width) minmax(0, 1fr) 0px 0px;
+    }}
+    body.left-collapsed.right-collapsed .workspace {{
+      grid-template-columns: 0px 0px minmax(0, 1fr) 0px 0px;
+    }}
+    .pane, .center-pane {{
+      min-width: 0;
+    }}
+    .pane-inner, .center-pane {{
+      height: 100%;
+      overflow: auto;
+      padding: 18px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }}
+    .center-pane h2, .pane h2 {{ margin-top: 0; }}
+    .resize-handle {{
+      position: relative;
+      width: var(--handle-width);
+      cursor: col-resize;
+      background: transparent;
+    }}
+    .resize-handle::before {{
+      content: "";
+      position: absolute;
+      top: 14px;
+      bottom: 14px;
+      left: calc(50% - 1px);
+      width: 2px;
+      border-radius: 999px;
+      background: rgba(64, 49, 21, 0.16);
+    }}
+    body.left-collapsed .resize-left,
+    body.right-collapsed .resize-right {{
+      display: none;
+    }}
+    .card {{ padding: 18px 18px 16px; }}
+    .card h2, .card h3 {{ margin-top: 0; }}
+    .mermaid {{
+      background: rgba(255,255,255,0.62);
+      border-radius: 16px;
+      padding: 8px;
+      overflow: auto;
+    }}
+    .node-list, .relation-list {{
+      margin: 0;
+      padding-left: 18px;
+    }}
+    .node-list li, .relation-list li {{ margin: 8px 0; }}
+    a {{ color: var(--accent-2); }}
+    code {{
+      background: rgba(31,122,107,0.08);
+      border-radius: 8px;
+      padding: 0 6px;
+      font-size: 0.92em;
+    }}
+    .muted {{ color: var(--muted); }}
+    .rel {{ font-weight: 700; color: var(--accent); }}
+    .summary-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }}
+    .summary-grid .cell {{
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      background: rgba(181,92,47,0.05);
+    }}
+    .tree-shell, .tree-root, .tree-children {{
+      margin: 0;
+      padding-left: 0;
+      list-style: none;
+    }}
+    .tree-item {{ margin: 4px 0; }}
+    .tree-item > details > summary {{
+      list-style: none;
+      cursor: pointer;
+    }}
+    .tree-item > details > summary::-webkit-details-marker {{ display: none; }}
+    .tree-link {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: calc(100% - 18px);
+      padding: 8px 10px;
+      border-radius: 12px;
+      text-decoration: none;
+      color: var(--text);
+    }}
+    .tree-link:hover {{ background: rgba(31,122,107,0.08); }}
+    .tree-link.current {{
+      background: rgba(31,122,107,0.14);
+      font-weight: 700;
+    }}
+    .tree-tag {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 42px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: rgba(181,92,47,0.12);
+      font-size: 0.76rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--accent-2);
+    }}
+    .tree-children {{
+      margin-left: 18px;
+      padding-left: 12px;
+      border-left: 1px dashed rgba(64, 49, 21, 0.18);
+    }}
+    .panel-meta {{
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }}
+    @media (max-width: 960px) {{
+      .page {{ width: calc(100vw - 12px); }}
+      .workspace {{
+        grid-template-columns: 1fr;
+        min-height: auto;
+      }}
+      .resize-handle {{ display: none; }}
+      body.left-collapsed .workspace,
+      body.right-collapsed .workspace,
+      body.left-collapsed.right-collapsed .workspace {{
+        grid-template-columns: 1fr;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <div class="eyebrow">{eyebrow}</div>
+      <h1>{page_title}</h1>
+      <p class="lede">{intro}</p>
+      <div class="breadcrumb">{breadcrumb_html}</div>
+      <div class="summary-grid">{summary_html}</div>
+    </section>
+    <section class="toolbar" aria-label="Pane controls">
+      <button id="toggle-left" type="button" aria-expanded="true" aria-controls="left-pane">Toggle tree</button>
+      <button id="toggle-right" type="button" aria-expanded="true" aria-controls="right-pane">Toggle details</button>
+    </section>
+    <section class="workspace">
+      <aside class="pane pane-left" id="left-pane" aria-label="Hierarchy tree">
+        <div class="pane-inner">
+          <h2>{left_title}</h2>
+          <p class="panel-meta">Primary navigation path. HTML links and tree links are canonical; Mermaid clicks are enhancement only.</p>
+          {left_panel_html}
+        </div>
+      </aside>
+      <div class="resize-handle resize-left" data-side="left" aria-hidden="true"></div>
+      <article class="center-pane">
+        <h2>{center_title}</h2>
+        <div class="mermaid" data-link-map='{graph_link_map_json}'>
+{graph_definition}
+        </div>
+        <details>
+          <summary>Graph source</summary>
+          <pre>{graph_source_html}</pre>
+        </details>
+      </article>
+      <div class="resize-handle resize-right" data-side="right" aria-hidden="true"></div>
+      <aside class="pane pane-right" id="right-pane" aria-label="Details">
+        <div class="pane-inner">
+          <h2>{right_title}</h2>
+          {right_panel_html}
+        </div>
+      </aside>
+    </section>
+  </div>
+  <script>
+    mermaid.initialize({{
+      startOnLoad: true,
+      securityLevel: "loose",
+      theme: "base",
+      flowchart: {{
+        useMaxWidth: true,
+        htmlLabels: true
+      }},
+      themeVariables: {{
+        primaryColor: "#eae3d3",
+        primaryTextColor: "#22170d",
+        primaryBorderColor: "#83633f",
+        lineColor: "#4f6f67",
+        tertiaryColor: "#f7f3eb"
+      }}
+    }});
+
+    function safeStorage() {{
+      try {{
+        const key = "__axon_docs_probe__";
+        window.localStorage.setItem(key, "1");
+        window.localStorage.removeItem(key);
+        return window.localStorage;
+      }} catch (_error) {{
+        return null;
+      }}
+    }}
+
+    const storage = safeStorage();
+
+    function applyPaneState() {{
+      if (!storage) {{
+        return;
+      }}
+      const leftWidth = storage.getItem("axon-docs-left-width");
+      const rightWidth = storage.getItem("axon-docs-right-width");
+      const leftCollapsed = storage.getItem("axon-docs-left-collapsed") === "1";
+      const rightCollapsed = storage.getItem("axon-docs-right-collapsed") === "1";
+      if (leftWidth) {{
+        document.documentElement.style.setProperty("--left-pane-width", leftWidth);
+      }}
+      if (rightWidth) {{
+        document.documentElement.style.setProperty("--right-pane-width", rightWidth);
+      }}
+      document.body.classList.toggle("left-collapsed", leftCollapsed);
+      document.body.classList.toggle("right-collapsed", rightCollapsed);
+      const leftButton = document.getElementById("toggle-left");
+      const rightButton = document.getElementById("toggle-right");
+      if (leftButton) {{
+        leftButton.setAttribute("aria-expanded", String(!leftCollapsed));
+      }}
+      if (rightButton) {{
+        rightButton.setAttribute("aria-expanded", String(!rightCollapsed));
+      }}
+    }}
+
+    function persistPaneState() {{
+      if (!storage) {{
+        return;
+      }}
+      storage.setItem("axon-docs-left-collapsed", document.body.classList.contains("left-collapsed") ? "1" : "0");
+      storage.setItem("axon-docs-right-collapsed", document.body.classList.contains("right-collapsed") ? "1" : "0");
+      storage.setItem("axon-docs-left-width", getComputedStyle(document.documentElement).getPropertyValue("--left-pane-width").trim() || "300px");
+      storage.setItem("axon-docs-right-width", getComputedStyle(document.documentElement).getPropertyValue("--right-pane-width").trim() || "360px");
+    }}
+
+    function togglePane(side) {{
+      const className = side === "left" ? "left-collapsed" : "right-collapsed";
+      document.body.classList.toggle(className);
+      const button = document.getElementById(side === "left" ? "toggle-left" : "toggle-right");
+      if (button) {{
+        button.setAttribute("aria-expanded", String(!document.body.classList.contains(className)));
+      }}
+      persistPaneState();
+    }}
+
+    function installPaneControls() {{
+      const leftButton = document.getElementById("toggle-left");
+      const rightButton = document.getElementById("toggle-right");
+      if (leftButton) {{
+        leftButton.addEventListener("click", () => togglePane("left"));
+      }}
+      if (rightButton) {{
+        rightButton.addEventListener("click", () => togglePane("right"));
+      }}
+
+      document.querySelectorAll(".resize-handle[data-side]").forEach((handle) => {{
+        handle.addEventListener("pointerdown", (event) => {{
+          const side = handle.dataset.side;
+          const startX = event.clientX;
+          const startLeft = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--left-pane-width")) || 300;
+          const startRight = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--right-pane-width")) || 360;
+          const onMove = (moveEvent) => {{
+            if (side === "left") {{
+              const next = Math.max(180, Math.min(520, startLeft + (moveEvent.clientX - startX)));
+              document.documentElement.style.setProperty("--left-pane-width", `${{next}}px`);
+            }} else {{
+              const next = Math.max(220, Math.min(620, startRight - (moveEvent.clientX - startX)));
+              document.documentElement.style.setProperty("--right-pane-width", `${{next}}px`);
+            }}
+          }};
+          const onUp = () => {{
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", onUp);
+            persistPaneState();
+          }};
+          window.addEventListener("pointermove", onMove);
+          window.addEventListener("pointerup", onUp);
+        }});
+      }});
+    }}
+
+    function bindMermaidNodeLinks() {{
+      document.querySelectorAll('.mermaid[data-link-map]').forEach((container) => {{
+        let linkMap = {{}};
+        try {{
+          linkMap = JSON.parse(container.dataset.linkMap || '{{}}');
+        }} catch (_error) {{
+          linkMap = {{}};
+        }}
+        const svg = container.querySelector('svg');
+        if (!svg) {{
+          return;
+        }}
+        Object.entries(linkMap).forEach(([nodeId, href]) => {{
+          const node = svg.querySelector(`g.node[id*="flowchart-${{nodeId}}-"]`);
+          if (!node || node.dataset.axonBound === '1') {{
+            return;
+          }}
+          node.dataset.axonBound = '1';
+          node.style.cursor = 'pointer';
+          node.addEventListener('click', () => {{
+            window.location.href = href;
+          }});
+        }});
+      }});
+    }}
+
+    window.addEventListener('load', () => {{
+      applyPaneState();
+      installPaneControls();
+      let attempts = 0;
+      const timer = window.setInterval(() => {{
+        bindMermaidNodeLinks();
+        attempts += 1;
+        if (document.querySelector('.mermaid svg') || attempts >= 20) {{
+          window.clearInterval(timer);
+        }}
+      }}, 150);
+    }});
+  </script>
+</body>
+</html>
+"##,
+        page_title = html_escape(page_title),
+        eyebrow = html_escape(eyebrow),
+        intro = html_escape(intro),
+        breadcrumb_html = breadcrumb_html,
+        left_title = html_escape(left_title),
+        left_panel_html = left_panel_html,
+        center_title = html_escape(center_title),
+        summary_html = summary_html,
+        graph_definition = graph.definition,
+        graph_link_map_json = html_escape(&graph.link_map_json),
+        graph_source_html = html_escape(&graph.definition),
+        right_title = html_escape(right_title),
+        right_panel_html = right_panel_html,
+    )
+}
+
 fn project_scope_clause_for_table(id_column: &str, project_code: Option<&str>) -> String {
     project_code
         .map(|code| format!(" WHERE {} LIKE '%-{}-%'", id_column, escape_sql(code)))
@@ -2377,12 +6852,6 @@ fn project_scope_clause_for_relation(project_code: Option<&str>) -> String {
                 escaped, escaped
             )
         })
-        .unwrap_or_default()
-}
-
-fn project_scope_predicate(id_column: &str, project_code: Option<&str>) -> String {
-    project_code
-        .map(|code| format!("AND {} LIKE '%-{}-%'", id_column, escape_sql(code)))
         .unwrap_or_default()
 }
 
@@ -2467,10 +6936,23 @@ impl McpServer {
         }
 
         let mut identity_mapping = std::collections::HashMap::new();
+        let mut linked_results = Vec::new();
         for op in &operations {
             match self.apply_operation_with_audit(&revision_id, op, &mut identity_mapping) {
                 Ok(generated_id) => {
-                    if !generated_id.is_empty() {
+                    let kind = op
+                        .get("kind")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if kind == "link" {
+                        let payload = op.get("payload").cloned().unwrap_or_else(|| json!({}));
+                        linked_results.push(json!({
+                            "source_id": payload.get("source_id").cloned().unwrap_or(Value::Null),
+                            "target_id": payload.get("target_id").cloned().unwrap_or(Value::Null),
+                            "relation_type": payload.get("relation_type").cloned().unwrap_or(Value::Null),
+                            "status": "linked"
+                        }));
+                    } else if !generated_id.is_empty() {
                         if let Some(lk) = op.get("logical_key").and_then(|v| v.as_str()) {
                             identity_mapping.insert(lk.to_string(), generated_id);
                         }
@@ -2491,12 +6973,48 @@ impl McpServer {
             escape_sql(preview_id)
         ));
 
+        let mut result_contract = apply_plan_operation_contract(&operations);
+        if let Some(items) = result_contract
+            .get_mut("created")
+            .and_then(|value| value.as_array_mut())
+        {
+            for item in items.iter_mut() {
+                if let Some(logical_key) = item.get("logical_key").and_then(|value| value.as_str())
+                {
+                    if let Some(actual_id) = identity_mapping.get(logical_key) {
+                        item["id"] = Value::from(actual_id.clone());
+                        item["status"] = Value::from("created");
+                    }
+                }
+            }
+        }
+        if let Some(items) = result_contract
+            .get_mut("updated")
+            .and_then(|value| value.as_array_mut())
+        {
+            for item in items.iter_mut() {
+                if let Some(logical_key) = item.get("logical_key").and_then(|value| value.as_str())
+                {
+                    if let Some(actual_id) = identity_mapping.get(logical_key) {
+                        item["id"] = Value::from(actual_id.clone());
+                    }
+                }
+                item["status"] = Value::from("updated");
+            }
+        }
+        result_contract["linked"] = Value::Array(linked_results);
+
         Some(json!({
             "content": [{"type":"text","text": format!("SOLL revision committed: {} ({} operations)", revision_id, operations.len())}],
             "data": {
                 "revision_id": revision_id,
                 "operations": operations.len(),
-                "identity_mapping": identity_mapping
+                "identity_mapping": identity_mapping,
+                "created": result_contract.get("created").cloned().unwrap_or_else(|| Value::Array(vec![])),
+                "updated": result_contract.get("updated").cloned().unwrap_or_else(|| Value::Array(vec![])),
+                "linked": result_contract.get("linked").cloned().unwrap_or_else(|| Value::Array(vec![])),
+                "skipped": result_contract.get("skipped").cloned().unwrap_or_else(|| Value::Array(vec![])),
+                "errors": result_contract.get("errors").cloned().unwrap_or_else(|| Value::Array(vec![]))
             }
         }))
     }
@@ -2559,10 +7077,106 @@ impl McpServer {
                 limit = limit
             ))
             .unwrap_or_default();
-        let revisions = self.query_single_column(&format!(
-            "SELECT revision_id || '|' || COALESCE(summary,'') || '|' || COALESCE(author,'') FROM soll.Revision ORDER BY committed_at DESC LIMIT {}",
-            limit
-        )).unwrap_or_default();
+        let revisions = self
+            .query_single_column(&format!(
+                "SELECT revision_id || '|' || COALESCE(summary,'') || '|' || COALESCE(author,'')
+             FROM soll.Revision
+             ORDER BY committed_at DESC
+             LIMIT {}",
+                limit
+            ))
+            .unwrap_or_default();
+        let completeness_snapshot = self.soll_completeness_snapshot(Some(&project_code)).ok();
+        let entity_counts_raw = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT type, count(*)
+                 FROM soll.Node
+                 WHERE project_code = '{}'
+                 GROUP BY type
+                 ORDER BY type",
+                escaped_project
+            ))
+            .ok()?;
+        let entity_count_rows: Vec<Vec<String>> =
+            serde_json::from_str(&entity_counts_raw).unwrap_or_default();
+        let entity_counts = entity_count_rows
+            .into_iter()
+            .filter_map(|row| {
+                let entity_type = row.first()?.clone();
+                let count = row.get(1)?.parse::<usize>().ok()?;
+                Some(json!({
+                    "entity_type": entity_type,
+                    "count": count
+                }))
+            })
+            .collect::<Vec<_>>();
+        let last_revision_metadata = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT r.revision_id,
+                        COALESCE(r.summary,''),
+                        COALESCE(r.author,''),
+                        COALESCE(r.status,''),
+                        COALESCE(r.committed_at, r.created_at)
+                 FROM soll.Revision r
+                 JOIN soll.RevisionChange c
+                   ON c.revision_id = r.revision_id
+                 WHERE c.entity_id LIKE '%-{}-%'
+                 GROUP BY r.revision_id, r.summary, r.author, r.status, r.committed_at, r.created_at
+                 ORDER BY COALESCE(r.committed_at, r.created_at) DESC
+                 LIMIT 1",
+                escaped_project
+            ))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+            .and_then(|rows| rows.into_iter().next())
+            .map(|row| {
+                json!({
+                    "revision_id": row.first().cloned().unwrap_or_default(),
+                    "summary": row.get(1).cloned().unwrap_or_default(),
+                    "author": row.get(2).cloned().unwrap_or_default(),
+                    "status": row.get(3).cloned().unwrap_or_default(),
+                    "committed_at": row.get(4).cloned().unwrap_or_default()
+                })
+            })
+            .unwrap_or(json!({
+                "available": false
+            }));
+        let operational_digest = completeness_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                json!({
+                    "project_scope": snapshot.project_scope,
+                    "entity_counts": entity_counts,
+                    "topology_summary": {
+                        "total_nodes": snapshot.total_nodes,
+                        "structurally_connected": snapshot.structurally_connected(),
+                        "orphan_requirement_count": snapshot.orphan_requirements.len(),
+                        "orphan_requirements": snapshot.orphan_requirements,
+                        "validations_without_verifies_count": snapshot.validations_without_verifies.len(),
+                        "validations_without_verifies": snapshot.validations_without_verifies,
+                        "decisions_without_links_count": snapshot.decisions_without_links.len(),
+                        "decisions_without_links": snapshot.decisions_without_links,
+                        "relation_policy_violation_count": snapshot.relation_policy_violations.len(),
+                        "relation_policy_violations": snapshot.relation_policy_violations
+                    },
+                    "requirement_coverage_summary": {
+                        "done": snapshot.requirement_coverage.done,
+                        "partial": snapshot.requirement_coverage.partial,
+                        "missing": snapshot.requirement_coverage.missing,
+                        "total": snapshot.requirement_coverage.entries.len(),
+                        "uncovered_requirements": snapshot.uncovered_requirements
+                    },
+                    "last_meaningful_revision": last_revision_metadata
+                })
+            })
+            .unwrap_or(json!({
+                "entity_counts": entity_counts,
+                "topology_summary": Value::Null,
+                "requirement_coverage_summary": Value::Null,
+                "last_meaningful_revision": last_revision_metadata
+            }));
 
         let response = json!({
             "content": [{"type":"text","text": format!("SOLL context for {} loaded.", project_code)}],
@@ -2571,7 +7185,8 @@ impl McpServer {
                 "visions": visions,
                 "requirements": reqs,
                 "decisions": decisions,
-                "revisions": revisions
+                "revisions": revisions,
+                "operational_digest": operational_digest
             }
         });
         Self::write_soll_context_cache(cache_key, now_ms, &response);
@@ -2674,6 +7289,7 @@ impl McpServer {
         let global_validation =
             self.axon_soll_verify_requirements(&json!({ "project_code": project_code }));
         let soll_validation = self.axon_validate_soll(&json!({ "project_code": project_code }));
+        let completeness_snapshot = self.soll_completeness_snapshot(Some(project_code)).ok();
         let validation_gates = json!({
             "requirement_verification": global_validation
                 .as_ref()
@@ -2682,9 +7298,16 @@ impl McpServer {
                 .unwrap_or(json!({})),
             "soll_validation": soll_validation
                 .as_ref()
-                .and_then(|resp| resp.get("content"))
+                .and_then(|resp| resp.get("data"))
                 .cloned()
-                .unwrap_or(json!([])),
+                .unwrap_or(json!({})),
+            "completeness_axes": completeness_snapshot
+                .map(|snapshot| json!({
+                    "concept_completeness": snapshot.concept_complete(),
+                    "implementation_completeness": snapshot.implementation_complete(),
+                    "evidence_ready": snapshot.evidence_ready()
+                }))
+                .unwrap_or_else(|| json!({})),
             "backlog_visible": backlog_visible
         });
         let data = json!({
@@ -2738,17 +7361,61 @@ impl McpServer {
         let artifacts = args.get("artifacts")?.as_array()?;
         let mut attached = 0usize;
         let now = now_unix_ms();
+        let normalized_entity_type = normalize_traceability_entity_type(entity_type);
+        let accepted_schema = accepted_evidence_artifact_schema(&normalized_entity_type)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut artifact_diagnostics = Vec::new();
+        let mut fallback_guidance = Vec::new();
 
         for (idx, art) in artifacts.iter().enumerate() {
+            let raw_artifact_ref = art
+                .get("artifact_ref")
+                .or_else(|| art.get("path"))
+                .or_else(|| art.get("file_path"))
+                .or_else(|| art.get("uri"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let artifact_type = art
                 .get("artifact_type")
                 .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let artifact_ref = art
-                .get("artifact_ref")
-                .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let normalized_artifact_type =
+                normalize_evidence_artifact_type(artifact_type, raw_artifact_ref);
+            let mut diagnostic_reasons = Vec::new();
+            let artifact_ref = if normalized_artifact_type == "File" {
+                let (normalized, normalization_diagnostics) =
+                    self.normalize_file_artifact_ref(entity_id, raw_artifact_ref);
+                diagnostic_reasons.extend(normalization_diagnostics);
+                normalized.unwrap_or_default()
+            } else {
+                raw_artifact_ref.trim().to_string()
+            };
+
             if artifact_ref.is_empty() {
+                diagnostic_reasons.push("missing_artifact_ref".to_string());
+                artifact_diagnostics.push(json!({
+                    "index": idx,
+                    "input": art,
+                    "status": "rejected",
+                    "normalized_artifact_type": normalized_artifact_type,
+                    "normalized_artifact_ref": artifact_ref,
+                    "reasons": diagnostic_reasons
+                }));
+                continue;
+            }
+            if !artifact_schema_accepts(&normalized_entity_type, &normalized_artifact_type) {
+                diagnostic_reasons.push("artifact_type_not_allowed_for_entity".to_string());
+                artifact_diagnostics.push(json!({
+                    "index": idx,
+                    "input": art,
+                    "status": "rejected",
+                    "normalized_artifact_type": normalized_artifact_type,
+                    "normalized_artifact_ref": artifact_ref,
+                    "reasons": diagnostic_reasons,
+                    "accepted_artifact_schema": accepted_schema
+                }));
                 continue;
             }
             let confidence = art
@@ -2765,15 +7432,51 @@ impl McpServer {
             if self.graph_store.execute_param(
                 "INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, metadata, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                &json!([trace_id, entity_type, entity_id, artifact_type, artifact_ref, confidence, metadata, now]),
+                &json!([trace_id, normalized_entity_type, entity_id, normalized_artifact_type, artifact_ref, confidence, metadata, now]),
             ).is_ok() {
                 attached += 1;
+                diagnostic_reasons.push("traceability_inserted".to_string());
+                artifact_diagnostics.push(json!({
+                    "index": idx,
+                    "input": art,
+                    "status": "attached",
+                    "normalized_artifact_type": normalized_artifact_type,
+                    "normalized_artifact_ref": artifact_ref,
+                    "reasons": diagnostic_reasons
+                }));
+            } else {
+                diagnostic_reasons.push("traceability_insert_failed".to_string());
+                artifact_diagnostics.push(json!({
+                    "index": idx,
+                    "input": art,
+                    "status": "rejected",
+                    "normalized_artifact_type": normalized_artifact_type,
+                    "normalized_artifact_ref": artifact_ref,
+                    "reasons": diagnostic_reasons
+                }));
             }
+        }
+
+        if attached == 0 {
+            if normalized_entity_type == "requirement" {
+                fallback_guidance
+                    .push("If file evidence still fails, attach the proof to a validation node first and link that validation with `VERIFIES`.".to_string());
+            }
+            fallback_guidance.push(
+                "Use `artifact_ref`, `path`, `file_path`, or `uri`; file artifacts are normalized against the canonical project root when possible."
+                    .to_string(),
+            );
         }
 
         Some(json!({
             "content": [{"type":"text","text": format!("Attached {} evidence item(s) to {}:{}", attached, entity_type, entity_id)}],
-            "data": {"attached": attached}
+            "data": {
+                "attached": attached,
+                "normalized_entity_type": normalize_traceability_entity_type(entity_type),
+                "accepted_artifact_schema": accepted_schema,
+                "artifact_diagnostics": artifact_diagnostics,
+                "fallback_guidance": fallback_guidance
+            }
         }))
     }
 
@@ -2782,19 +7485,25 @@ impl McpServer {
             return HashMap::new();
         };
         let mut nodes = HashMap::new();
+        let requirement_coverage = self
+            .requirement_coverage_summary(&project_code)
+            .unwrap_or_default();
+        let requirement_coverage_by_id = requirement_coverage
+            .entries
+            .iter()
+            .map(|entry| (entry.id.clone(), entry.clone()))
+            .collect::<HashMap<_, _>>();
         let req_query = format!(
-            "SELECT r.id, r.title, COALESCE(r.status,''), COALESCE(r.metadata,'{{}}'), COUNT(t.id)
+            "SELECT r.id, r.title, COALESCE(r.status,''), COALESCE(r.metadata,'{{}}')
              FROM soll.Node r
-             LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
              WHERE r.type = 'Requirement' AND r.id LIKE 'REQ-{}-%'
-             GROUP BY 1,2,3,4
              ORDER BY r.id",
             escape_sql(&project_code)
         );
         if let Ok(raw) = self.graph_store.query_json(&req_query) {
             let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
             for row in rows {
-                if row.len() < 5 {
+                if row.len() < 4 {
                     continue;
                 }
                 let meta: serde_json::Value =
@@ -2804,16 +7513,9 @@ impl McpServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let criteria = meta
-                    .get("acceptance_criteria")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let evidence_count = row[4].parse::<usize>().unwrap_or(0);
                 let status = row[2].clone();
-                let requirement_state =
-                    requirement_state_from(status.as_str(), &criteria, evidence_count).to_string();
                 let id = row[0].clone();
+                let coverage_entry = requirement_coverage_by_id.get(&id);
                 nodes.insert(
                     id.clone(),
                     WorkPlanNode {
@@ -2822,8 +7524,14 @@ impl McpServer {
                         entity_type: WorkPlanEntityType::Requirement,
                         status,
                         priority,
-                        requirement_state: Some(requirement_state),
-                        evidence_count,
+                        requirement_state: Some(
+                            coverage_entry
+                                .map(|entry| entry.state.clone())
+                                .unwrap_or_else(|| "missing".to_string()),
+                        ),
+                        evidence_count: coverage_entry
+                            .map(|entry| entry.evidence_count)
+                            .unwrap_or(0),
                         descendants: 0,
                         ist_degraded_links: 0,
                         backlog_visible: false,
@@ -3068,52 +7776,91 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("AXO");
         let project_code = self.resolve_project_code(project_code).ok()?;
-        let query = format!(
-            "SELECT r.id, COALESCE(r.status,''), COALESCE(CAST(json_extract(r.metadata, '$.acceptance_criteria') AS VARCHAR), ''), COUNT(t.id)
-             FROM soll.Node r
-             LEFT JOIN soll.Traceability t ON t.soll_entity_type = 'requirement' AND t.soll_entity_id = r.id
-             WHERE r.type='Requirement' AND r.id LIKE 'REQ-{}-%'
-             GROUP BY 1,2,3
-             ORDER BY r.id",
-            escape_sql(&project_code)
-        );
-        let rows_raw = self.graph_store.query_json(&query).ok()?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&rows_raw).unwrap_or_default();
-        let mut done = 0usize;
-        let mut partial = 0usize;
-        let mut missing = 0usize;
-        let mut details: Vec<Value> = Vec::new();
-
-        for row in rows {
-            if row.len() < 4 {
-                continue;
-            }
-            let id = row[0].clone();
-            let status = row[1].clone();
-            let criteria = row[2].clone();
-            let evidence_count = row[3].parse::<usize>().unwrap_or(0);
-            let has_criteria = !criteria.trim().is_empty() && criteria.trim() != "[]";
-
-            let state = if evidence_count > 0
-                && has_criteria
-                && (status == "current" || status == "accepted")
-            {
-                done += 1;
-                "done"
-            } else if evidence_count > 0 || has_criteria {
-                partial += 1;
-                "partial"
-            } else {
-                missing += 1;
-                "missing"
-            };
-
-            details.push(json!({"id": id, "state": state, "status": status, "evidence_count": evidence_count}));
-        }
+        let summary = self.requirement_coverage_summary(&project_code).ok()?;
+        let snapshot = self.soll_completeness_snapshot(Some(&project_code)).ok()?;
+        let details = summary
+            .entries
+            .iter()
+            .map(|entry| {
+                let missing_dimensions_detailed = entry
+                    .missing_dimensions
+                    .iter()
+                    .map(|dimension| requirement_dimension_descriptor(dimension))
+                    .collect::<Vec<_>>();
+                let next_actions_detailed = entry
+                    .missing_dimensions
+                    .iter()
+                    .map(|dimension| {
+                        let descriptor = requirement_dimension_descriptor(dimension);
+                        json!({
+                            "dimension": requirement_dimension_canonical_name(dimension),
+                            "legacy_dimension": dimension,
+                            "action": descriptor.get("next_action").cloned().unwrap_or(Value::Null),
+                            "mutation_class": match dimension.as_str() {
+                                "status" | "criteria" => "update_requirement",
+                                "evidence" => "attach_evidence",
+                                "validation" => "link_validation",
+                                "broken_file_evidence" => "repair_evidence",
+                                _ => "inspect_requirement"
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                json!({
+                    "id": entry.id,
+                    "state": entry.state,
+                    "completion_state": entry.state,
+                    "coverage_reason": requirement_state_reason(&entry.state, &entry.missing_dimensions),
+                    "status": entry.status,
+                    "evidence_count": entry.evidence_count,
+                    "validation_count": entry.validation_count,
+                    "has_criteria": entry.has_criteria,
+                    "broken_file_evidence_count": entry.broken_file_evidence_count,
+                    "missing_dimensions": entry.missing_dimensions,
+                    "missing_dimensions_detailed": missing_dimensions_detailed,
+                    "suggested_next_actions": entry.suggested_next_actions,
+                    "next_actions_detailed": next_actions_detailed
+                })
+            })
+            .collect::<Vec<_>>();
+        let completion_model = json!({
+            "required_dimensions": [
+                requirement_dimension_descriptor("status"),
+                requirement_dimension_descriptor("criteria"),
+                requirement_dimension_descriptor("evidence"),
+                requirement_dimension_descriptor("validation")
+            ],
+            "warning_dimensions": [
+                requirement_dimension_descriptor("broken_file_evidence")
+            ],
+            "done_rule": "status is current|accepted, acceptance criteria exist, supporting evidence exists, and a validation node VERIFIES the requirement",
+            "partial_rule": "some required dimensions exist but not all required dimensions are satisfied",
+            "missing_rule": "required dimensions are mostly absent or requirement status is not yet operationally accepted"
+        });
 
         Some(json!({
-            "content": [{"type":"text","text": format!("Requirement verification: done={}, partial={}, missing={}", done, partial, missing)}],
-            "data": {"project_code": project_code, "done": done, "partial": partial, "missing": missing, "details": details}
+            "content": [{"type":"text","text": format!("Requirement verification: done={}, partial={}, missing={}", summary.done, summary.partial, summary.missing)}],
+            "data": {
+                "project_code": project_code,
+                "done": summary.done,
+                "partial": summary.partial,
+                "missing": summary.missing,
+                "summary": {
+                    "done": summary.done,
+                    "partial": summary.partial,
+                    "missing": summary.missing,
+                    "total": summary.entries.len()
+                },
+                "details": details,
+                "requirements": details,
+                "completion_model": completion_model,
+                "completeness_axes": {
+                    "concept_completeness": snapshot.concept_complete(),
+                    "implementation_completeness": snapshot.implementation_complete(),
+                    "evidence_ready": snapshot.evidence_ready()
+                },
+                "guidance_source": "server-side canonical soll completeness evaluator"
+            }
         }))
     }
 
@@ -3530,8 +8277,6 @@ impl McpServer {
                 add_cmd.arg(path_str);
             }
         }
-        add_cmd.arg("docs/vision/");
-
         let add_out = add_cmd.output();
         if let Err(e) = add_out {
             return Some(serde_json::json!({
@@ -3560,7 +8305,7 @@ impl McpServer {
                     )
                 };
                 Some(serde_json::json!({
-                    "content": [{ "type": "text", "text": format!("Validation réussie.\n\n{}\n\nExport Report:\n{}", status, export_report) }]
+                    "content": [{ "type": "text", "text": format!("Validation réussie.\n\n{}\n\nExport Report (not auto-staged):\n{}", status, export_report) }]
                 }))
             }
             Err(e) => Some(serde_json::json!({
@@ -3629,6 +8374,12 @@ impl McpServer {
         ) {
             return Some(serde_json::json!({
                 "content": [{ "type": "text", "text": format!("Erreur lors de l'enregistrement du projet: {}", e) }],
+                "isError": true
+            }));
+        }
+        if let Err(e) = self.ensure_soll_registry_row(&project_code) {
+            return Some(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Erreur lors de l'initialisation SOLL du projet: {}", e) }],
                 "isError": true
             }));
         }
@@ -3786,6 +8537,57 @@ fn summarize_ops(ops: &[Value]) -> (usize, usize) {
         }
     }
     (creates, updates)
+}
+
+fn apply_plan_operation_contract(operations: &[Value]) -> Value {
+    let mut created = Vec::new();
+    let mut updated = Vec::new();
+    let mut linked = Vec::new();
+    let skipped = Vec::<Value>::new();
+    let errors = Vec::<Value>::new();
+
+    for op in operations {
+        let kind = op
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let entity = op
+            .get("entity")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let payload = op.get("payload").cloned().unwrap_or_else(|| json!({}));
+        match kind {
+            "create" | "update" => {
+                let record = json!({
+                    "logical_key": op.get("logical_key").cloned().unwrap_or(Value::Null),
+                    "entity": entity,
+                    "title": payload.get("title").cloned().unwrap_or(Value::Null),
+                    "predicted_id": op.get("entity_id").cloned().unwrap_or(Value::Null),
+                    "status": if kind == "create" { "pending_create" } else { "pending_update" }
+                });
+                if kind == "create" {
+                    created.push(record);
+                } else {
+                    updated.push(record);
+                }
+            }
+            "link" => linked.push(json!({
+                "source_id": payload.get("source_id").cloned().unwrap_or(Value::Null),
+                "target_id": payload.get("target_id").cloned().unwrap_or(Value::Null),
+                "relation_type": payload.get("relation_type").cloned().unwrap_or(Value::Null),
+                "status": "pending_link"
+            })),
+            _ => {}
+        }
+    }
+
+    json!({
+        "created": created,
+        "updated": updated,
+        "linked": linked,
+        "skipped": skipped,
+        "errors": errors
+    })
 }
 
 fn now_unix_ms() -> i64 {

@@ -2,29 +2,8 @@ use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
 use serde_json::{json, Value};
 
-fn is_public_tool(name: &str) -> bool {
-    !matches!(
-        name,
-        "refine_lattice"
-            | "job_status"
-            | "audit"
-            | "health"
-            | "batch"
-            | "cypher"
-            | "debug"
-            | "schema_overview"
-            | "list_labels_tables"
-            | "query_examples"
-            | "truth_check"
-            | "diagnose_indexing"
-            | "diff"
-            | "semantic_clones"
-            | "architectural_drift"
-            | "bidi_trace"
-            | "api_break_check"
-            | "simulate_mutation"
-            | "resume_vectorization"
-    )
+fn is_public_tool(_name: &str) -> bool {
+    true
 }
 
 pub(crate) fn requires_indexed_runtime(name: &str) -> bool {
@@ -76,7 +55,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
         "tools": [
             {
                 "name": "refine_lattice",
-                "description": "[SYSTEM] Lattice Refiner: Analyse le graphe post-ingestion pour lier les frontières inter-langages (ex: Elixir NIF -> Rust natif).",
+                "description": "[SYSTEM] Raffinement avancé du graphe post-ingestion pour lier les frontières inter-langages (ex: Elixir NIF -> Rust natif) et approfondir l'analyse structurelle.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -113,8 +92,38 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "infer_soll_mutation",
+                "description": "[SOLL] Analyse assistive en lecture seule. Propose le type d'entité, les IDs canoniques impactés, l'opération suggérée, le niveau de confiance et les ambiguïtés avant mutation.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique." },
+                        "statement": { "type": "string", "description": "Nuance, contrainte ou clarification à stabiliser." }
+                    },
+                    "required": ["project_code", "statement"]
+                }
+            },
+            {
+                "name": "entrench_nuance",
+                "description": "[SOLL] Workflow haut niveau borné pour stabiliser une nuance sur des entités canoniques existantes. Par défaut propose seulement; nécessite `confirm=true` pour écrire.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique." },
+                        "statement": { "type": "string", "description": "Nuance ou contrainte à entériner." },
+                        "target_ids": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "IDs canoniques ciblés. Si omis, le serveur réutilise les candidats inférés."
+                        },
+                        "confirm": { "type": "boolean", "description": "Doit être `true` pour appliquer les mises à jour en wave 1." }
+                    },
+                    "required": ["project_code", "statement"]
+                }
+            },
+            {
                 "name": "axon_init_project",
-                "description": "[DX/SOLL] Initialise un nouveau projet Axon. Le serveur attribue le `project_code` canonique et le renvoie dans la réponse; le client/LLM ne fabrique pas ce code. Reçoit un Document de Concept optionnel, charge les règles globales et lance le dialogue d'héritage.",
+                "description": "[DX/SOLL] Initialise un nouveau projet Axon. Le serveur attribue le `project_code` canonique et retourne immédiatement `project_code`, `project_name` et `project_path` dans la même réponse.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -282,6 +291,19 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "soll_generate_docs",
+                "description": "[SOLL] Génère une documentation humaine navigable dérivée de SOLL sous forme de site statique HTML+Mermaid. En mode canonique, maintient aussi un root global multi-projets sous docs/derived/soll/index.html. Cette sortie est non canonique: elle sert à la lecture, pas au restore. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Projet canonique à documenter." },
+                        "output_dir": { "type": "string", "description": "Répertoire racine projet optionnel. Si fourni seul, génère uniquement le site projet ciblé." },
+                        "site_root_dir": { "type": "string", "description": "Racine de site optionnelle. Génère <site_root_dir>/index.html et <site_root_dir>/<project_code>/..." }
+                    },
+                    "required": ["project_code"]
+                }
+            },
+            {
                 "name": "restore_soll",
                 "description": "[SOLL] Restaure les entites conceptuelles depuis un export Markdown officiel SOLL. Fonctionne en mode merge, sans purge destructive implicite. Guide opérateur: docs/skills/axon-engineering-protocol/SKILL.md",
                 "inputSchema": {
@@ -305,7 +327,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "job_status",
-                "description": "[SYSTEM/EXPERT] Retourne l'état détaillé d'un job MCP mutateur accepté par le serveur partagé.",
+                "description": "[SYSTEM] Retourne l'état détaillé d'un job MCP mutateur accepté par le serveur partagé. Suivi canonique des mutations asynchrones: lire `data.state`, `data.result`, `data.error_text`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -326,6 +348,17 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                 }
             },
             {
+                "name": "mcp_surface_diagnostics",
+                "description": "[SYSTEM] Diagnostic public de surface MCP: vérité serveur sur les tools exposés, outils critiques, contrat async canonique et guidance explicite si un client semble utiliser un binding stale ou incomplet.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "mode": { "type": "string", "enum": ["brief", "json"] }
+                    },
+                    "required": []
+                }
+            },
+            {
                 "name": "project_status",
                 "description": "[SYSTEM/SOLL] Etat de situation vivant du projet: vision source SOLL, état runtime, surface opérateur, diagnostics structuraux et contexte SOLL récent.",
                 "inputSchema": {
@@ -333,6 +366,33 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
                     "properties": {
                         "project_code": { "type": "string", "description": "Code projet canonique (défaut: AXO)." },
                         "mode": { "type": "string", "enum": ["brief", "verbose"] }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "project_registry_lookup",
+                "description": "[SYSTEM/SOLL] Résout un projet canonique depuis `project_code`, `project_name` ou `project_path`. Retourne l'identité projet stable sans passer par la recherche indirecte.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_code": { "type": "string", "description": "Code projet canonique si connu." },
+                        "project_name": { "type": "string", "description": "Nom projet attendu, généralement la dernière partie du chemin." },
+                        "project_path": { "type": "string", "description": "Chemin absolu canonique du projet." }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "soll_relation_schema",
+                "description": "[SOLL] Expose la politique canonique des relations SOLL pour un couple source/cible ou depuis un type/id source. Sert à découvrir les liaisons valides sans essai-erreur.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source_type": { "type": "string", "description": "Type canonique court ex: VIS, PIL, REQ, DEC." },
+                        "target_type": { "type": "string", "description": "Type canonique court ex: VIS, PIL, REQ, DEC, ART." },
+                        "source_id": { "type": "string", "description": "ID canonique source optionnel." },
+                        "target_id": { "type": "string", "description": "ID canonique cible optionnel." }
                     },
                     "required": []
                 }
@@ -643,7 +703,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             {
                 "name": "cypher",
-                "description": "[SYSTEM] Interface de bas niveau pour requêtes graphe brutes. Reservee au diagnostic et aux usages experts.",
+                "description": "[SYSTEM] Interface avancée pour requêtes graphe brutes et exploration profonde de la structure Axon.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -654,7 +714,7 @@ pub(crate) fn tools_catalog(include_internal: bool) -> Value {
             },
             json!({
                 "name": "debug",
-                "description": "[SYSTEM] Diagnostic système bas niveau : Affiche l'état interne du moteur Axon V2 (RAM, DB, architecture, statut d'indexation) pour éviter les hallucinations sur l'infrastructure.",
+                "description": "[SYSTEM] Diagnostic système avancé : état du moteur Axon V2 (RAM, DB, architecture, indexation) pour compréhension profonde du runtime.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

@@ -418,12 +418,17 @@ impl GraphStore {
         Ok(refreshed)
     }
 
-    pub fn wait_for_reader_refresh_signal(&self, timeout: std::time::Duration) {
+    pub fn wait_for_reader_refresh_signal(&self, timeout: std::time::Duration) -> bool {
         let guard = self
             .reader_refresh_wait
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let _ = self.reader_refresh_notify.wait_timeout(guard, timeout);
+        let observed = *guard;
+        let result = self
+            .reader_refresh_notify
+            .wait_timeout_while(guard, timeout, |target| *target == observed);
+        let (guard, _) = result.unwrap_or_else(|poison| poison.into_inner());
+        *guard != observed
     }
 
     pub(crate) fn reader_snapshot_diagnostics(&self) -> crate::graph::ReaderSnapshotDiagnostics {

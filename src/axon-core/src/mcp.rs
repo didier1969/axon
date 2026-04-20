@@ -29,39 +29,269 @@ pub(crate) use self::guidance::{
     GuidanceCandidates, GuidanceFact, GuidanceOutcome, SollGuidance,
 };
 pub use self::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use self::soll::canonical_soll_site_dir;
 
 pub struct McpServer {
     graph_store: Arc<GraphStore>,
 }
 
+const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
 impl McpServer {
+    pub(crate) const ASYNC_JOB_TOOL_NAMES: &[&str] =
+        &["restore_soll", "soll_apply_plan", "resume_vectorization"];
+    pub(crate) const MONITORED_SYNC_MUTATION_TOOLS: &[&str] = &["soll_commit_revision"];
+    pub(crate) const SOLL_DERIVED_DOCS_REFRESH_TOOLS: &[&str] = &[
+        "restore_soll",
+        "soll_apply_plan",
+        "soll_commit_revision",
+        "soll_attach_evidence",
+        "soll_rollback_revision",
+        "soll_manager",
+        "entrench_nuance",
+        "init_project",
+        "apply_guidelines",
+    ];
+
     pub fn new(graph_store: Arc<GraphStore>) -> Self {
         Self { graph_store }
     }
 
-    fn project_code_from_preview_id(&self, preview_id: &str) -> Result<String> {
-        let escaped_preview = preview_id.replace('\'', "''");
-        let raw = self.graph_store.query_json(&format!(
-            "SELECT payload FROM soll.RevisionPreview WHERE preview_id = '{escaped_preview}'"
-        ))?;
-        let rows: Vec<Vec<String>> = serde_json::from_str(&raw).unwrap_or_default();
-        let payload_raw = rows
-            .into_iter()
-            .next()
-            .and_then(|row| row.into_iter().next())
-            .ok_or_else(|| anyhow::anyhow!("Preview introuvable: {}", preview_id))?;
-        let payload: Value = serde_json::from_str(&payload_raw)
-            .map_err(|error| anyhow::anyhow!("Preview invalide `{}`: {}", preview_id, error))?;
-        payload
-            .get("project_code")
+    fn public_tool_name_for(requested_name: &str, normalized_name: &str) -> String {
+        if requested_name.trim().is_empty() {
+            return normalized_name.to_string();
+        }
+        requested_name.to_string()
+    }
+
+    fn async_known_ids_for(&self, normalized_name: &str, reserved_ids: &Value) -> Value {
+        match normalized_name {
+            "soll_apply_plan" => json!({
+                "project_code": reserved_ids.get("project_code").cloned().unwrap_or(json!(null)),
+                "preview_id": reserved_ids.get("preview_id").cloned().unwrap_or(json!(null))
+            }),
+            _ => reserved_ids.clone(),
+        }
+    }
+
+    fn async_result_contract_for(&self, normalized_name: &str) -> Value {
+        match normalized_name {
+            "restore_soll" => json!({
+                "follow_up_tool": "job_status",
+                "terminal_state_field": "state",
+                "raw_status_field": "status",
+                "terminal_states": ["completed", "failed"],
+                "result_data_fields": ["restored_nodes", "restored_edges", "source_path"],
+                "notes": "Le résultat terminal expose le rapport de restauration SOLL."
+            }),
+            "resume_vectorization" => json!({
+                "follow_up_tool": "job_status",
+                "terminal_state_field": "state",
+                "raw_status_field": "status",
+                "terminal_states": ["completed", "failed"],
+                "result_data_fields": ["queued_files", "runtime_mode", "semantic_workers_enabled"],
+                "notes": "Le résultat terminal expose la taille du backlog re-queue et l'état du runtime."
+            }),
+            "soll_apply_plan" => json!({
+                "follow_up_tool": "job_status",
+                "terminal_state_field": "state",
+                "raw_status_field": "status",
+                "terminal_states": ["completed", "failed"],
+                "result_data_fields": ["preview_id", "created", "updated", "skipped", "errors"],
+                "notes": "Le résultat terminal expose le preview canonique et le rapport d'application."
+            }),
+            _ => json!({
+                "follow_up_tool": "job_status",
+                "terminal_state_field": "state",
+                "raw_status_field": "status",
+                "terminal_states": ["completed", "failed"],
+                "result_data_fields": [],
+                "notes": "Consultez le résultat terminal du job pour la charge utile finale."
+            }),
+        }
+    }
+
+    fn async_recovery_hint_for(&self, normalized_name: &str) -> String {
+        match normalized_name {
+            "restore_soll" => "Relancez `job_status(job_id)` jusqu'à l'état terminal. Si le job échoue, vérifiez le chemin d'export SOLL puis relancez `restore_soll`.".to_string(),
+            "resume_vectorization" => "Relancez `job_status(job_id)` jusqu'à l'état terminal. Si le job échoue, inspectez l'état runtime puis relancez `resume_vectorization`.".to_string(),
+            "soll_apply_plan" => "Relancez `job_status(job_id)` jusqu'à l'état terminal. Si le job échoue, corrigez le plan ou le `project_code`, puis relancez `soll_apply_plan`.".to_string(),
+            _ => "Relancez `job_status(job_id)` jusqu'à l'état terminal. En cas d'échec, corrigez les arguments et relancez la mutation.".to_string(),
+        }
+    }
+
+    fn async_polling_guidance_for(&self, normalized_name: &str) -> Value {
+        let max_wait_seconds = match normalized_name {
+            "soll_apply_plan" => 60,
+            "restore_soll" => 60,
+            "resume_vectorization" => 30,
+            _ => 30,
+        };
+        json!({
+            "when_to_poll": "Call `job_status(job_id=...)` after 2 seconds, then every 2 seconds until a terminal state.",
+            "poll_interval_seconds": 2,
+            "until_states": ["completed", "failed"],
+            "max_wait_hint_seconds": max_wait_seconds,
+            "on_completed": "Read `data.result.data` from the terminal `job_status` response.",
+            "on_failed": "Read `data.error_text`, fix the arguments, then retry the original mutation."
+        })
+    }
+
+    fn job_state(status: &str) -> &'static str {
+        match status {
+            "queued" => "queued",
+            "running" => "running",
+            "succeeded" => "completed",
+            "failed" => "failed",
+            _ => "unknown",
+        }
+    }
+
+    fn terminal_result_data_alias(result: &Option<Value>) -> Value {
+        result
+            .as_ref()
+            .and_then(|value| value.get("data"))
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    fn should_refresh_derived_docs_for_tool(normalized_name: &str) -> bool {
+        Self::SOLL_DERIVED_DOCS_REFRESH_TOOLS.contains(&normalized_name)
+    }
+
+    fn project_code_from_soll_entity_id(entity_id: &str) -> Option<String> {
+        let mut parts = entity_id.split('-');
+        let _prefix = parts.next()?;
+        let project_code = parts.next()?.trim();
+        if project_code.len() == 3
+            && project_code
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() && !ch.is_ascii_lowercase())
+        {
+            Some(project_code.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn derive_docs_refresh_project_code(
+        &self,
+        normalized_name: &str,
+        arguments: &Value,
+        result: &Value,
+    ) -> Option<String> {
+        let candidate = result
+            .get("data")
+            .and_then(|value| value.get("project_code"))
             .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Preview `{}` sans `project_code`: impossible de réserver `revision_id`",
-                    preview_id
-                )
+            .or_else(|| {
+                result
+                    .get("data")
+                    .and_then(|value| value.get("known_ids"))
+                    .and_then(|value| value.get("project_code"))
+                    .and_then(|value| value.as_str())
             })
+            .or_else(|| {
+                arguments
+                    .get("project_code")
+                    .and_then(|value| value.as_str())
+            })
+            .or_else(|| {
+                arguments
+                    .get("data")
+                    .and_then(|value| value.get("project_code"))
+                    .and_then(|value| value.as_str())
+            });
+
+        if let Some(project_code) = candidate {
+            return self.resolve_project_code(project_code).ok();
+        }
+
+        match normalized_name {
+            "soll_attach_evidence" => arguments
+                .get("entity_id")
+                .and_then(|value| value.as_str())
+                .and_then(Self::project_code_from_soll_entity_id)
+                .and_then(|project_code| self.resolve_project_code(&project_code).ok()),
+            _ => None,
+        }
+    }
+
+    fn attach_derived_docs_refresh_metadata(
+        &self,
+        normalized_name: &str,
+        arguments: &Value,
+        result: Value,
+    ) -> Value {
+        if !Self::should_refresh_derived_docs_for_tool(normalized_name)
+            || result
+                .get("isError")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+        {
+            return result;
+        }
+
+        let mut enriched = result;
+        let refresh_payload = if let Some(project_code) =
+            self.derive_docs_refresh_project_code(normalized_name, arguments, &enriched)
+        {
+            if let Some(site_root) = canonical_soll_site_dir() {
+                match self.generate_soll_derived_docs(
+                    &project_code,
+                    Some(&site_root),
+                    &site_root.join(&project_code),
+                ) {
+                    Ok(summary) => json!({
+                        "status": "ok",
+                        "project_code": summary.project_code,
+                        "site_root": if summary.site_root.is_empty() { Value::Null } else { json!(summary.site_root) },
+                        "output_root": summary.project_output_root,
+                        "manifest_path": summary.project_manifest_path,
+                        "root_manifest_path": if summary.root_manifest_path.is_empty() { Value::Null } else { json!(summary.root_manifest_path) },
+                        "root_index_path": if summary.root_index_path.is_empty() { Value::Null } else { json!(summary.root_index_path) },
+                        "refresh_mode": summary.refresh_mode,
+                        "pages_total": summary.pages_total,
+                        "pages_written": summary.pages_written,
+                        "pages_unchanged": summary.pages_unchanged,
+                        "pages_deleted": summary.pages_deleted,
+                        "deleted_paths": summary.deleted_paths,
+                        "root_written": summary.root_written,
+                        "stale_docs": summary.stale_docs,
+                    }),
+                    Err(error) => json!({
+                        "status": "failed",
+                        "project_code": project_code,
+                        "stale_docs": true,
+                        "error_text": error,
+                    }),
+                }
+            } else {
+                json!({
+                    "status": "failed",
+                    "project_code": project_code,
+                    "stale_docs": true,
+                    "error_text": "Impossible de résoudre docs/derived/soll pour le refresh automatique."
+                })
+            }
+        } else {
+            json!({
+                "status": "skipped",
+                "stale_docs": false,
+                "reason": format!("No canonical project scope detected for `{}`.", normalized_name)
+            })
+        };
+
+        if !enriched
+            .get("data")
+            .map(|value| value.is_object())
+            .unwrap_or(false)
+        {
+            enriched["data"] = json!({});
+        }
+        enriched["data"]["derived_docs_refresh"] = refresh_payload;
+        enriched
     }
 
     #[allow(dead_code)]
@@ -303,6 +533,11 @@ impl McpServer {
             .unwrap_or(false)
     }
 
+    pub(crate) fn is_async_job_tool(name: &str) -> bool {
+        Self::ASYNC_JOB_TOOL_NAMES.contains(&name)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn is_mutating_tool(name: &str) -> bool {
         matches!(
             name,
@@ -312,10 +547,12 @@ impl McpServer {
                 | "soll_attach_evidence"
                 | "soll_rollback_revision"
                 | "soll_export"
+                | "soll_generate_docs"
                 | "soll_manager"
-                | "init_project"
+                | "entrench_nuance"
                 | "apply_guidelines"
                 | "commit_work"
+                | "resume_vectorization"
         )
     }
 
@@ -329,6 +566,8 @@ impl McpServer {
             "fs_read" => self.axon_fs_read(arguments),
             "restore_soll" => self.axon_restore_soll(arguments),
             "soll_validate" => self.axon_validate_soll(arguments),
+            "infer_soll_mutation" => self.axon_infer_soll_mutation(arguments),
+            "entrench_nuance" => self.axon_entrench_nuance(arguments),
             "soll_apply_plan" => self.axon_soll_apply_plan(arguments),
             "soll_commit_revision" => self.axon_soll_commit_revision(arguments),
             "soll_query_context" => self.axon_soll_query_context(arguments),
@@ -344,13 +583,17 @@ impl McpServer {
             "commit_work" => self.axon_commit_work(arguments),
             "pre_flight_check" => self.axon_pre_flight_check(arguments),
             "soll_export" => self.axon_export_soll(arguments),
+            "soll_generate_docs" => self.axon_soll_generate_docs(arguments),
             "diagnose_indexing" => self.axon_diagnose_indexing(arguments),
             "inspect" => self.axon_inspect(arguments),
             "audit" => self.axon_audit(arguments),
             "impact" => self.axon_impact(arguments),
             "health" => self.axon_health(arguments),
             "status" => self.axon_status(arguments),
+            "mcp_surface_diagnostics" => self.axon_mcp_surface_diagnostics(arguments),
             "project_status" => self.axon_project_status(arguments),
+            "project_registry_lookup" => self.axon_project_registry_lookup(arguments),
+            "soll_relation_schema" => self.axon_soll_relation_schema(arguments),
             "snapshot_history" => self.axon_snapshot_history(arguments),
             "snapshot_diff" => self.axon_snapshot_diff(arguments),
             "conception_view" => self.axon_conception_view(arguments),
@@ -390,30 +633,6 @@ impl McpServer {
 
     fn reserve_mutation_ids(&self, normalized_name: &str, arguments: &Value) -> Value {
         match normalized_name {
-            "soll_manager" => {
-                if arguments.get("action").and_then(|value| value.as_str()) != Some("create") {
-                    return json!({});
-                }
-                let Some(entity) = arguments.get("entity").and_then(|value| value.as_str()) else {
-                    return json!({});
-                };
-                let Some(project_code) = arguments
-                    .get("data")
-                    .and_then(|value| value.get("project_code"))
-                    .and_then(|value| value.as_str())
-                else {
-                    return json!({
-                        "reservation_error": "`project_code` est obligatoire pour `soll_manager create`. Le serveur attribue ensuite l'ID canonique."
-                    });
-                };
-                match self.next_soll_numeric_id(project_code, entity) {
-                    Ok((canonical_project_code, project_code, prefix, next_num)) => json!({
-                        "project_code": canonical_project_code,
-                        "entity_id": format!("{prefix}-{project_code}-{next_num:03}")
-                    }),
-                    Err(error) => json!({ "reservation_error": error.to_string() }),
-                }
-            }
             "soll_apply_plan" => {
                 let Some(project_code) = arguments
                     .get("project_code")
@@ -431,25 +650,6 @@ impl McpServer {
                     Err(error) => json!({ "reservation_error": error.to_string() }),
                 }
             }
-            "soll_commit_revision" => {
-                let Some(preview_id) = arguments.get("preview_id").and_then(|value| value.as_str())
-                else {
-                    return json!({
-                        "reservation_error": "`preview_id` est obligatoire pour `soll_commit_revision`. Le serveur attribue ensuite `revision_id`."
-                    });
-                };
-                let project_code = match self.project_code_from_preview_id(preview_id) {
-                    Ok(code) => code,
-                    Err(error) => return json!({ "reservation_error": error.to_string() }),
-                };
-                match self.next_server_numeric_id(&project_code, "revision") {
-                    Ok((canonical_project_code, project_code, _, next_num)) => json!({
-                        "project_code": canonical_project_code,
-                        "revision_id": format!("REV-{project_code}-{next_num:03}")
-                    }),
-                    Err(error) => json!({ "reservation_error": error.to_string() }),
-                }
-            }
             _ => json!({}),
         }
     }
@@ -462,28 +662,12 @@ impl McpServer {
     ) -> Value {
         let mut patched = arguments.clone();
         match normalized_name {
-            "soll_manager" => {
-                if let Some(entity_id) = reserved_ids
-                    .get("entity_id")
-                    .and_then(|value| value.as_str())
-                {
-                    patched["reserved_id"] = json!(entity_id);
-                }
-            }
             "soll_apply_plan" => {
                 if let Some(preview_id) = reserved_ids
                     .get("preview_id")
                     .and_then(|value| value.as_str())
                 {
                     patched["reserved_preview_id"] = json!(preview_id);
-                }
-            }
-            "soll_commit_revision" => {
-                if let Some(revision_id) = reserved_ids
-                    .get("revision_id")
-                    .and_then(|value| value.as_str())
-                {
-                    patched["reserved_revision_id"] = json!(revision_id);
                 }
             }
             _ => {}
@@ -513,7 +697,12 @@ impl McpServer {
         )
     }
 
-    fn launch_mutation_job(&self, normalized_name: &str, arguments: &Value) -> Option<Value> {
+    fn launch_mutation_job(
+        &self,
+        requested_tool_name: &str,
+        normalized_name: &str,
+        arguments: &Value,
+    ) -> Option<Value> {
         let reserved_ids = self.reserve_mutation_ids(normalized_name, arguments);
         if let Some(error) = reserved_ids
             .get("reservation_error")
@@ -527,15 +716,17 @@ impl McpServer {
 
         let submitted_at = Self::now_unix_ms();
         let job_id = format!("JOB-{submitted_at}");
+        let public_tool_name = Self::public_tool_name_for(requested_tool_name, normalized_name);
+        let known_ids = self.async_known_ids_for(normalized_name, &reserved_ids);
         let request_json = json!({
-            "tool_name": normalized_name,
+            "tool_name": public_tool_name,
             "arguments": arguments,
         });
 
         if let Err(error) = Self::persist_mcp_job(
             self.graph_store.as_ref(),
             &job_id,
-            normalized_name,
+            &public_tool_name,
             "queued",
             submitted_at,
             &request_json,
@@ -549,19 +740,29 @@ impl McpServer {
 
         let graph_store = self.graph_store.clone();
         let normalized_name = normalized_name.to_string();
-        let accepted_tool_name = normalized_name.clone();
+        let response_contract_name = normalized_name.clone();
+        let accepted_tool_name = public_tool_name.clone();
         let queued_args = self.inject_reserved_ids(&normalized_name, arguments, &reserved_ids);
         let job_id_for_thread = job_id.clone();
         thread::spawn(move || {
             let server = McpServer::new(graph_store.clone());
             let started_at = McpServer::now_unix_ms();
             let _ = graph_store.execute_param(
-                "UPDATE soll.McpJob SET status = ?, started_at = ? WHERE job_id = ?",
-                &json!(["running", started_at, job_id_for_thread]),
+                "UPDATE soll.McpJob SET status = $status, started_at = $started_at WHERE job_id = $job_id",
+                &json!({
+                    "status": "running",
+                    "started_at": started_at,
+                    "job_id": job_id_for_thread
+                }),
             );
 
             match server.execute_tool_direct(&normalized_name, &queued_args) {
                 Some(result) => {
+                    let result = server.attach_derived_docs_refresh_metadata(
+                        &normalized_name,
+                        &queued_args,
+                        result,
+                    );
                     let finished_at = McpServer::now_unix_ms();
                     let is_error = result
                         .get("isError")
@@ -581,15 +782,26 @@ impl McpServer {
                         String::new()
                     };
                     let _ = graph_store.execute_param(
-                        "UPDATE soll.McpJob SET status = ?, finished_at = ?, result_json = ?, error_text = ? WHERE job_id = ?",
-                        &json!([status, finished_at, result.to_string(), error_text, job_id_for_thread]),
+                        "UPDATE soll.McpJob SET status = $status, finished_at = $finished_at, result_json = $result_json, error_text = $error_text WHERE job_id = $job_id",
+                        &json!({
+                            "status": status,
+                            "finished_at": finished_at,
+                            "result_json": result.to_string(),
+                            "error_text": error_text,
+                            "job_id": job_id_for_thread
+                        }),
                     );
                 }
                 None => {
                     let finished_at = McpServer::now_unix_ms();
                     let _ = graph_store.execute_param(
-                        "UPDATE soll.McpJob SET status = ?, finished_at = ?, error_text = ? WHERE job_id = ?",
-                        &json!(["failed", finished_at, format!("Invalid arguments for tool: {normalized_name}"), job_id_for_thread]),
+                        "UPDATE soll.McpJob SET status = $status, finished_at = $finished_at, error_text = $error_text WHERE job_id = $job_id",
+                        &json!({
+                            "status": "failed",
+                            "finished_at": finished_at,
+                            "error_text": format!("Invalid arguments for tool: {normalized_name}"),
+                            "job_id": job_id_for_thread
+                        }),
                     );
                 }
             }
@@ -598,14 +810,27 @@ impl McpServer {
         Some(json!({
             "content": [{
                 "type": "text",
-                "text": format!("Mutation job accepted: {job_id} for tool `{accepted_tool_name}`")
+                "text": format!(
+                    "Mutation job accepted: {job_id} for tool `{accepted_tool_name}`. Call `job_status(job_id=\"{job_id}\")` after 2 seconds, then every 2 seconds until `state=completed` or `state=failed`."
+                )
             }],
             "data": {
                 "accepted": true,
                 "job_id": job_id,
                 "tool_name": accepted_tool_name,
                 "status": "queued",
-                "reserved_ids": reserved_ids
+                "state": "queued",
+                "reserved_ids": reserved_ids,
+                "known_ids": known_ids,
+                "next_action": {
+                    "tool": "job_status",
+                    "arguments": {
+                        "job_id": job_id
+                    }
+                },
+                "result_contract": self.async_result_contract_for(response_contract_name.as_str()),
+                "polling_guidance": self.async_polling_guidance_for(response_contract_name.as_str()),
+                "recovery_hint": self.async_recovery_hint_for(response_contract_name.as_str())
             }
         }))
     }
@@ -622,16 +847,49 @@ impl McpServer {
             .ok()?;
         let parsed: Vec<Vec<Value>> = serde_json::from_str(&rows).ok()?;
         let row = parsed.first()?;
+        let tool_name = row
+            .get(1)
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let raw_status = row
+            .get(2)
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let state = Self::job_state(raw_status);
         let reserved_ids = row
             .get(6)
             .and_then(|value| value.as_str())
             .and_then(|value| serde_json::from_str::<Value>(value).ok())
             .unwrap_or_else(|| json!({}));
+        let known_ids = self.async_known_ids_for(tool_name, &reserved_ids);
+        let result_contract = self.async_result_contract_for(tool_name);
+        let polling_guidance = self.async_polling_guidance_for(tool_name);
+        let recovery_hint = self.async_recovery_hint_for(tool_name);
         let result = row
             .get(7)
             .and_then(|value| value.as_str())
             .and_then(|value| serde_json::from_str::<Value>(value).ok());
+        let result_data = Self::terminal_result_data_alias(&result);
         let error_text = row.get(8).and_then(|value| value.as_str()).unwrap_or("");
+        let next_action = match state {
+            "queued" | "running" => json!({
+                "tool": "job_status",
+                "arguments": {
+                    "job_id": job_id
+                },
+                "when": "continue_polling_until_terminal_state"
+            }),
+            "completed" => json!({
+                "kind": "read_terminal_result",
+                "path": "data.result.data",
+                "when": "now"
+            }),
+            "failed" => json!({
+                "kind": "fix_and_retry_original_mutation",
+                "when": "after_reviewing_error_text"
+            }),
+            _ => Value::Null,
+        };
 
         Some(json!({
             "content": [{
@@ -639,22 +897,57 @@ impl McpServer {
                 "text": format!(
                     "Job {} status={} tool={}",
                     row.first().and_then(|value| value.as_str()).unwrap_or(job_id),
-                    row.get(2).and_then(|value| value.as_str()).unwrap_or("unknown"),
-                    row.get(1).and_then(|value| value.as_str()).unwrap_or("unknown")
+                    raw_status,
+                    tool_name
                 )
             }],
             "data": {
                 "job_id": row.first().and_then(|value| value.as_str()).unwrap_or(job_id),
-                "tool_name": row.get(1).and_then(|value| value.as_str()).unwrap_or("unknown"),
-                "status": row.get(2).and_then(|value| value.as_str()).unwrap_or("unknown"),
+                "tool_name": tool_name,
+                "status": raw_status,
+                "state": state,
                 "submitted_at": row.get(3).cloned().unwrap_or(json!(null)),
                 "started_at": row.get(4).cloned().unwrap_or(json!(null)),
                 "finished_at": row.get(5).cloned().unwrap_or(json!(null)),
                 "reserved_ids": reserved_ids,
+                "known_ids": known_ids,
+                "next_action": next_action,
+                "result_contract": result_contract,
+                "polling_guidance": polling_guidance,
+                "recovery_hint": recovery_hint,
                 "result": result,
+                "result_data": result_data,
                 "error_text": error_text
             }
         }))
+    }
+
+    pub fn handle_notification(&self, request: JsonRpcRequest) -> bool {
+        if request.id.is_some() {
+            return false;
+        }
+
+        matches!(request.method.as_str(), "notifications/initialized")
+    }
+
+    pub fn negotiate_protocol_version(request: &JsonRpcRequest) -> &'static str {
+        let requested = request
+            .params
+            .as_ref()
+            .and_then(|params| params.get("protocolVersion"))
+            .and_then(|value| value.as_str());
+
+        if let Some(version) = requested {
+            if let Some(supported) = SUPPORTED_MCP_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|supported| *supported == version)
+            {
+                return supported;
+            }
+        }
+
+        SUPPORTED_MCP_PROTOCOL_VERSIONS[0]
     }
 
     pub fn handle_request(&self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {
@@ -664,7 +957,7 @@ impl McpServer {
 
         let result = match request.method.as_str() {
             "initialize" => Some(json!({
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": Self::negotiate_protocol_version(&request),
                 "capabilities": {
                     "tools": {}
                 },

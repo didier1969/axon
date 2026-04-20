@@ -238,6 +238,82 @@ fn file_vectorization_queue_upsert_if_needed(file_path: &str, now_ms: i64) -> St
     )
 }
 
+fn orphaned_file_vectorization_candidates_query(
+    limit: Option<usize>,
+    paths: Option<&[String]>,
+) -> String {
+    let path_filter = paths
+        .filter(|paths| !paths.is_empty())
+        .map(|paths| {
+            let escaped = paths
+                .iter()
+                .map(|path| format!("'{}'", GraphStore::escape_sql(path)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(" AND path IN ({escaped})")
+        })
+        .unwrap_or_default();
+    let limit_clause = limit
+        .filter(|value| *value > 0)
+        .map(|value| format!(" LIMIT {value}"))
+        .unwrap_or_default();
+
+    format!(
+        "SELECT path \
+         FROM File \
+         WHERE status IN ('indexed', 'indexed_degraded') \
+           AND file_stage = 'graph_indexed' \
+           AND graph_ready = TRUE \
+           AND vector_ready = FALSE \
+           AND status NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+           AND file_stage NOT IN ('deleted', 'skipped', 'oversized') \
+           AND NOT EXISTS ( \
+               SELECT 1 \
+               FROM FileVectorizationQueue fvq \
+               WHERE fvq.file_path = File.path \
+           ) \
+           AND EXISTS ( \
+               SELECT 1 \
+               FROM Chunk c \
+               LEFT JOIN ChunkEmbedding ce \
+                 ON ce.chunk_id = c.id \
+                AND ce.model_id = '{model_id}' \
+                AND ce.source_hash = c.content_hash \
+               WHERE c.file_path = File.path \
+                 AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
+           ){path_filter} \
+         ORDER BY COALESCE(priority, 0) DESC, \
+                  COALESCE(graph_ready_at_ms, last_state_change_at_ms, mtime, 0) ASC, \
+                  path ASC{limit_clause}",
+        model_id = GraphStore::escape_sql(CHUNK_EMBEDDING_MODEL_ID),
+    )
+}
+
+fn orphaned_file_vectorization_requeue_sql(
+    now_ms: i64,
+    limit: Option<usize>,
+    paths: Option<&[String]>,
+) -> String {
+    let candidates = orphaned_file_vectorization_candidates_query(limit, paths);
+    format!(
+        "INSERT INTO FileVectorizationQueue (file_path, status, status_reason, attempts, queued_at, last_error_reason, last_attempt_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) \
+         SELECT candidate.path, 'queued', 'reconciled_orphan_vectorization_state', 0, {now_ms}, NULL, NULL, NULL, NULL, NULL, NULL, 0 \
+         FROM ({candidates}) candidate \
+         ON CONFLICT(file_path) DO UPDATE \
+         SET status = 'queued', \
+             status_reason = 'reconciled_orphan_vectorization_state', \
+             attempts = 0, \
+             queued_at = {now_ms}, \
+             last_error_reason = NULL, \
+             last_attempt_at = NULL, \
+             claim_token = NULL, \
+             claimed_at_ms = NULL, \
+             lease_heartbeat_at_ms = NULL, \
+             lease_owner = NULL, \
+             lease_epoch = 0"
+    )
+}
+
 fn hourly_bucket_start_ms(at_ms: i64) -> i64 {
     (at_ms / 3_600_000) * 3_600_000
 }
@@ -2221,59 +2297,114 @@ impl GraphStore {
     }
 
     pub fn backfill_file_vectorization_queue(&self) -> Result<usize> {
+        self.reconcile_orphaned_file_vectorization_state(usize::MAX)
+    }
+
+    pub fn count_orphaned_file_vectorization_files(&self) -> Result<usize> {
         let query = format!(
-            "SELECT path \
+            "SELECT count(*) FROM ({}) orphaned",
+            orphaned_file_vectorization_candidates_query(None, None)
+        );
+        Ok(usize::try_from(self.query_count_writer(&query)?).unwrap_or(0))
+    }
+
+    pub fn count_stale_inflight_file_vectorization_files(
+        &self,
+        now_ms: i64,
+        stale_age_ms: i64,
+    ) -> Result<usize> {
+        let cutoff_ms = now_ms.saturating_sub(stale_age_ms.max(0));
+        let query = format!(
+            "SELECT count(*) \
+             FROM FileVectorizationQueue fq \
+             LEFT JOIN File f ON f.path = fq.file_path \
+             WHERE fq.status = 'inflight' \
+               AND fq.claim_token IS NOT NULL \
+               AND COALESCE(f.vector_ready, FALSE) = FALSE \
+               AND COALESCE(f.status, '') NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+               AND COALESCE(f.file_stage, '') NOT IN ('deleted', 'skipped', 'oversized') \
+               AND COALESCE(fq.lease_heartbeat_at_ms, fq.claimed_at_ms, 0) <= {cutoff_ms}"
+        );
+        Ok(usize::try_from(self.query_count_writer(&query)?).unwrap_or(0))
+    }
+
+    pub fn oldest_graph_pending_age_ms(&self, now_ms: i64) -> Result<u64> {
+        let query = "SELECT min(COALESCE(first_seen_at_ms, last_state_change_at_ms, mtime, 0)) \
              FROM File \
-             WHERE status IN ('indexed', 'indexed_degraded') \
-               AND file_stage = 'graph_indexed' \
-               AND graph_ready = TRUE \
-               AND vector_ready = FALSE \
-               AND status NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
-               AND file_stage NOT IN ('deleted', 'skipped', 'oversized') \
-               AND NOT EXISTS ( \
-                   SELECT 1 \
-                   FROM FileVectorizationQueue fvq \
-                   WHERE fvq.file_path = File.path \
-               ) \
+             WHERE status IN ('pending', 'indexing') \
+               AND COALESCE(graph_ready, FALSE) = FALSE \
+               AND COALESCE(status, '') NOT IN ('deleted', 'skipped', 'oversized_for_current_budget', 'ignored_pending_purge')";
+        let oldest_ms = self.query_single_i64_writer(query)?.unwrap_or(0).max(0);
+        Ok(now_ms.saturating_sub(oldest_ms) as u64)
+    }
+
+    pub fn oldest_semantic_pending_age_ms(&self, now_ms: i64) -> Result<u64> {
+        let query = format!(
+            "SELECT min(COALESCE(f.graph_ready_at_ms, f.last_state_change_at_ms, f.mtime, 0)) \
+             FROM File f \
+             WHERE COALESCE(f.graph_ready, FALSE) = TRUE \
+               AND COALESCE(f.vector_ready, FALSE) = FALSE \
+               AND COALESCE(f.status, '') NOT IN ('deleted', 'skipped', 'oversized_for_current_budget', 'ignored_pending_purge') \
                AND EXISTS ( \
                    SELECT 1 \
                    FROM Chunk c \
+                   JOIN CONTAINS co ON co.target_id = c.source_id \
                    LEFT JOIN ChunkEmbedding ce \
                      ON ce.chunk_id = c.id \
                     AND ce.model_id = '{}' \
                     AND ce.source_hash = c.content_hash \
-                   WHERE c.file_path = File.path \
+                   WHERE co.source_id = f.path \
                      AND (ce.chunk_id IS NULL OR ce.source_hash IS DISTINCT FROM c.content_hash) \
                )",
             Self::escape_sql(CHUNK_EMBEDDING_MODEL_ID)
         );
-        let raw = self.query_json_writer(&query)?;
-        if raw == "[]" || raw.is_empty() {
+        let oldest_ms = self.query_single_i64_writer(&query)?.unwrap_or(0).max(0);
+        Ok(now_ms.saturating_sub(oldest_ms) as u64)
+    }
+
+    pub fn reconcile_orphaned_file_vectorization_state(&self, limit: usize) -> Result<usize> {
+        self.reconcile_orphaned_file_vectorization_paths_internal(
+            if limit == usize::MAX {
+                None
+            } else {
+                Some(limit)
+            },
+            None,
+        )
+    }
+
+    pub fn reconcile_orphaned_file_vectorization_paths(&self, paths: &[String]) -> Result<usize> {
+        self.reconcile_orphaned_file_vectorization_paths_internal(None, Some(paths))
+    }
+
+    fn reconcile_orphaned_file_vectorization_paths_internal(
+        &self,
+        limit: Option<usize>,
+        paths: Option<&[String]>,
+    ) -> Result<usize> {
+        if matches!(limit, Some(0)) {
+            return Ok(0);
+        }
+        if paths.is_some_and(|paths| paths.is_empty()) {
             return Ok(0);
         }
 
-        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        if rows.is_empty() {
+        let candidate_count_query = format!(
+            "SELECT count(*) FROM ({}) orphaned",
+            orphaned_file_vectorization_candidates_query(limit, paths)
+        );
+        let candidate_count =
+            usize::try_from(self.query_count_writer(&candidate_count_query)?).unwrap_or(0);
+        if candidate_count == 0 {
             return Ok(0);
         }
 
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let mut queries = Vec::new();
-        for row in rows {
-            let Some(file_path) = row.first().and_then(|value| value.as_str()) else {
-                continue;
-            };
-            queries.push(file_vectorization_queue_upsert_if_needed(file_path, now_ms));
-        }
-
-        let inserted = queries.len();
-        if inserted == 0 {
-            return Ok(0);
-        }
-
-        self.execute_batch(&queries)?;
+        self.execute(&orphaned_file_vectorization_requeue_sql(
+            now_ms, limit, paths,
+        ))?;
         service_guard::notify_vector_backlog_activity();
-        Ok(inserted)
+        Ok(candidate_count)
     }
 
     pub fn fetch_file_vectorization_queue_counts(&self) -> Result<(usize, usize)> {
@@ -2776,7 +2907,18 @@ impl GraphStore {
             }
         }
         self.execute_batch(&queries)?;
-        if enqueued_vectorization {
+        let repaired_orphan_vectorization = if enqueue_vectorization {
+            let graph_ready_paths = indexed_paths_raw
+                .iter()
+                .chain(degraded_paths_raw.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            self.reconcile_orphaned_file_vectorization_paths(&graph_ready_paths)?
+        } else {
+            0
+        };
+
+        if enqueued_vectorization || repaired_orphan_vectorization > 0 {
             service_guard::notify_vector_backlog_activity();
         }
 
@@ -4860,6 +5002,116 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn backfill_file_vectorization_queue_requeues_orphaned_graph_ready_file() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store
+            .execute(
+                "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
+                 VALUES ('/tmp/orphan-vector.rs', 'PRJ', 'indexed', 1, 1, 900, 'graph_indexed', TRUE, FALSE)",
+            )
+            .unwrap();
+        store
+            .execute(
+                "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
+                 VALUES ('chunk-orphan-vector', 'symbol', 'sym-orphan-vector', 'PRJ', '/tmp/orphan-vector.rs', 'function', 'body', 'hash-orphan-vector', 1, 1)",
+            )
+            .unwrap();
+
+        assert_eq!(store.count_orphaned_file_vectorization_files().unwrap(), 1);
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/orphan-vector.rs'"
+                )
+                .unwrap(),
+            0
+        );
+
+        let inserted = store.backfill_file_vectorization_queue().unwrap();
+
+        assert_eq!(inserted, 1);
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue \
+                     WHERE file_path = '/tmp/orphan-vector.rs' \
+                       AND status = 'queued' \
+                       AND status_reason = 'reconciled_orphan_vectorization_state'"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.count_orphaned_file_vectorization_files().unwrap(), 0);
+    }
+
+    #[test]
+    fn backfill_file_vectorization_queue_only_requeues_requested_paths() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        for path in ["/tmp/orphan-a.rs", "/tmp/orphan-b.rs"] {
+            store
+                .execute(&format!(
+                    "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
+                     VALUES ('{}', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
+                    path
+                ))
+                .unwrap();
+            store
+                .execute(&format!(
+                    "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
+                     VALUES ('chunk-{}', 'symbol', 'sym-{}', 'PRJ', '{}', 'function', 'body', 'hash-{}', 1, 1)",
+                    path.replace('/', "_"),
+                    path.replace('/', "_"),
+                    path,
+                    path.replace('/', "_"),
+                ))
+                .unwrap();
+        }
+
+        let repaired = store
+            .reconcile_orphaned_file_vectorization_paths(&["/tmp/orphan-a.rs".to_string()])
+            .unwrap();
+
+        assert_eq!(repaired, 1);
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/orphan-a.rs'"
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/orphan-b.rs'"
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn count_stale_inflight_file_vectorization_files_distinguishes_stale_from_fresh() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        store.execute(
+            "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) VALUES \
+             ('/tmp/stale.rs', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE), \
+             ('/tmp/fresh.rs', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)"
+        ).unwrap();
+        store.execute(
+            "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) VALUES \
+             ('/tmp/stale.rs', 'inflight', 1, 'claim-stale', 1_000, 1_000, 'vector', 1), \
+             ('/tmp/fresh.rs', 'inflight', 1, 'claim-fresh', 9_800, 9_800, 'vector', 1)"
+        ).unwrap();
+
+        let stale = store
+            .count_stale_inflight_file_vectorization_files(10_000, 1_000)
+            .unwrap();
+
+        assert_eq!(stale, 1);
     }
 }
 

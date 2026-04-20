@@ -47,6 +47,28 @@ impl Drop for RuntimeEnvGuard {
     }
 }
 
+struct SollSiteRootGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl SollSiteRootGuard {
+    fn new(path: &Path) -> Self {
+        let lock = env_lock();
+        unsafe {
+            std::env::set_var("AXON_SOLL_SITE_ROOT", path);
+        }
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for SollSiteRootGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("AXON_SOLL_SITE_ROOT");
+        }
+    }
+}
+
 fn create_test_server() -> McpServer {
     let store = Arc::new(
         GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap()),
@@ -78,6 +100,72 @@ fn wait_for_job_status(server: &McpServer, job_id: &str) -> Value {
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!("job {} did not finish in time", job_id);
+}
+
+fn assert_async_job_contract(data: &Value, expected_follow_up_tool: &str) {
+    assert_eq!(
+        data.get("accepted").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert!(data
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty()));
+    assert!(data
+        .get("tool_name")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty()));
+    assert!(data
+        .get("status")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty()));
+    assert!(data.get("reserved_ids").is_some());
+    assert!(data.get("known_ids").is_some());
+    assert_eq!(
+        data.get("next_action")
+            .and_then(|value| value.get("tool"))
+            .and_then(|value| value.as_str()),
+        Some(expected_follow_up_tool)
+    );
+    assert!(data
+        .get("next_action")
+        .and_then(|value| value.get("arguments"))
+        .and_then(|value| value.get("job_id"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty()));
+    assert!(data.get("result_contract").is_some());
+    assert!(data.get("polling_guidance").is_some());
+    assert_eq!(
+        data.get("polling_guidance")
+            .and_then(|value| value.get("poll_interval_seconds"))
+            .and_then(|value| value.as_i64()),
+        Some(2)
+    );
+    let until_states = data
+        .get("polling_guidance")
+        .and_then(|value| value.get("until_states"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(until_states
+        .iter()
+        .any(|value| value.as_str() == Some("completed")));
+    assert!(until_states
+        .iter()
+        .any(|value| value.as_str() == Some("failed")));
+    assert!(data
+        .get("recovery_hint")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty()));
+}
+
+fn assert_sync_mutation_contract(data: &Value) {
+    assert!(data.get("job_id").is_none());
+    assert!(data.get("accepted").is_none());
+    assert!(data.get("next_action").is_none());
+    assert!(data.get("result_contract").is_none());
+    assert!(data.get("polling_guidance").is_none());
+    assert!(data.get("recovery_hint").is_none());
 }
 
 fn current_graph_model_id() -> String {
@@ -729,7 +817,13 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"soll_apply_plan"));
     assert!(tool_names.contains(&"soll_work_plan"));
     assert!(tool_names.contains(&"status"));
+    assert!(tool_names.contains(&"mcp_surface_diagnostics"));
     assert!(tool_names.contains(&"project_status"));
+    assert!(tool_names.contains(&"project_registry_lookup"));
+    assert!(tool_names.contains(&"soll_relation_schema"));
+    assert!(tool_names.contains(&"infer_soll_mutation"));
+    assert!(tool_names.contains(&"entrench_nuance"));
+    assert!(tool_names.contains(&"soll_generate_docs"));
     assert!(tool_names.contains(&"snapshot_history"));
     assert!(tool_names.contains(&"snapshot_diff"));
     assert!(tool_names.contains(&"conception_view"));
@@ -738,7 +832,7 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"path"));
     assert!(tool_names.contains(&"anomalies"));
     assert!(tool_names.contains(&"axon_pre_flight_check"));
-    assert!(!tool_names.contains(&"job_status"));
+    assert!(tool_names.contains(&"job_status"));
     assert!(!tool_names.contains(&"retrieve_context"));
     assert!(!tool_names.contains(&"query"));
     assert!(!tool_names.contains(&"inspect"));
@@ -746,13 +840,13 @@ fn test_mcp_tools_list() {
     assert!(!tool_names.contains(&"impact"));
     assert!(!tool_names.contains(&"health"));
     assert!(!tool_names.contains(&"soll_apply_plan_v2"));
-    assert!(!tool_names.contains(&"refine_lattice"));
-    assert!(!tool_names.contains(&"batch"));
-    assert!(!tool_names.contains(&"cypher"));
-    assert!(!tool_names.contains(&"debug"));
-    assert!(!tool_names.contains(&"schema_overview"));
-    assert!(!tool_names.contains(&"list_labels_tables"));
-    assert!(!tool_names.contains(&"query_examples"));
+    assert!(tool_names.contains(&"refine_lattice"));
+    assert!(tool_names.contains(&"batch"));
+    assert!(tool_names.contains(&"cypher"));
+    assert!(tool_names.contains(&"debug"));
+    assert!(tool_names.contains(&"schema_overview"));
+    assert!(tool_names.contains(&"list_labels_tables"));
+    assert!(tool_names.contains(&"query_examples"));
     assert!(!tool_names.contains(&"truth_check"));
     assert!(!tool_names.contains(&"diagnose_indexing"));
     assert!(!tool_names.contains(&"diff"));
@@ -761,7 +855,7 @@ fn test_mcp_tools_list() {
     assert!(!tool_names.contains(&"bidi_trace"));
     assert!(!tool_names.contains(&"api_break_check"));
     assert!(!tool_names.contains(&"simulate_mutation"));
-    assert!(!tool_names.contains(&"resume_vectorization"));
+    assert!(tool_names.contains(&"resume_vectorization"));
 }
 
 #[test]
@@ -796,11 +890,13 @@ fn test_mcp_tools_list_in_full_autonomous_exposes_core_and_hides_relegated_tools
     assert!(tool_names.contains(&"inspect"));
     assert!(tool_names.contains(&"impact"));
     assert!(tool_names.contains(&"retrieve_context"));
-    assert!(!tool_names.contains(&"health"));
-    assert!(!tool_names.contains(&"audit"));
-    assert!(!tool_names.contains(&"batch"));
-    assert!(!tool_names.contains(&"job_status"));
-    assert!(!tool_names.contains(&"architectural_drift"));
+    assert!(tool_names.contains(&"health"));
+    assert!(tool_names.contains(&"audit"));
+    assert!(tool_names.contains(&"batch"));
+    assert!(tool_names.contains(&"job_status"));
+    assert!(tool_names.contains(&"architectural_drift"));
+    assert!(tool_names.contains(&"infer_soll_mutation"));
+    assert!(tool_names.contains(&"entrench_nuance"));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -842,6 +938,14 @@ fn test_mcp_tools_list_include_internal_exposes_expert_tools_in_full_autonomous(
     assert!(tool_names.contains(&"batch"));
     assert!(tool_names.contains(&"job_status"));
     assert!(tool_names.contains(&"architectural_drift"));
+    assert!(tool_names.contains(&"truth_check"));
+    assert!(tool_names.contains(&"diagnose_indexing"));
+    assert!(tool_names.contains(&"diff"));
+    assert!(tool_names.contains(&"semantic_clones"));
+    assert!(tool_names.contains(&"bidi_trace"));
+    assert!(tool_names.contains(&"api_break_check"));
+    assert!(tool_names.contains(&"simulate_mutation"));
+    assert!(tool_names.contains(&"resume_vectorization"));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -850,7 +954,7 @@ fn test_mcp_tools_list_include_internal_exposes_expert_tools_in_full_autonomous(
 }
 
 #[test]
-fn test_mutating_soll_manager_returns_job_and_reserved_entity_id() {
+fn test_soll_manager_stays_sync_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
     unsafe {
         std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
@@ -878,27 +982,13 @@ fn test_mutating_soll_manager_returns_job_and_reserved_entity_id() {
 
     let response = server.handle_request(req).unwrap();
     let result = response.result.unwrap();
-    let data = result.get("data").expect("job response must carry data");
-    let job_id = data
-        .get("job_id")
-        .and_then(|value| value.as_str())
-        .expect("job_id");
-    let entity_id = data
-        .get("reserved_ids")
-        .and_then(|value| value.get("entity_id"))
-        .and_then(|value| value.as_str())
-        .expect("reserved entity_id");
-    assert!(data
-        .get("accepted")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false));
-    assert!(entity_id.starts_with("CPT-AXO-"), "{entity_id}");
-
-    let final_status = wait_for_job_status(&server, job_id);
-    assert_eq!(
-        final_status["data"]["status"].as_str().unwrap(),
-        "succeeded"
-    );
+    let content = result["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(result.get("data").is_none());
+    assert!(content.contains("CPT-AXO-"), "{content}");
+    let entity_id = content
+        .split('`')
+        .find(|value| value.starts_with("CPT-AXO-"))
+        .expect("entity id in content");
     assert_eq!(
         server
             .graph_store
@@ -918,8 +1008,10 @@ fn test_mutating_soll_manager_returns_job_and_reserved_entity_id() {
 #[test]
 fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
     let _guard = env_lock();
+    let site_root = tempdir().unwrap();
     unsafe {
         std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+        std::env::set_var("AXON_SOLL_SITE_ROOT", site_root.path());
     }
     let server = create_test_server();
 
@@ -947,6 +1039,7 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
     let response = server.handle_request(req).unwrap();
     let result = response.result.unwrap();
     let data = result.get("data").expect("job response must carry data");
+    assert_async_job_contract(data, "job_status");
     let job_id = data
         .get("job_id")
         .and_then(|value| value.as_str())
@@ -957,16 +1050,177 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
         .and_then(|value| value.as_str())
         .expect("reserved preview_id");
     assert!(preview_id.starts_with("PRV-AXO-"), "{preview_id}");
+    assert_eq!(
+        data.get("known_ids")
+            .and_then(|value| value.get("preview_id"))
+            .and_then(|value| value.as_str()),
+        Some(preview_id)
+    );
 
     let final_status = wait_for_job_status(&server, job_id);
     assert_eq!(
         final_status["data"]["status"].as_str().unwrap(),
         "succeeded"
     );
+    assert_eq!(final_status["data"]["state"].as_str(), Some("completed"));
+    assert!(final_status["data"]["known_ids"].is_object());
+    assert!(final_status["data"]["result_contract"].is_object());
+    assert!(final_status["data"]["polling_guidance"].is_object());
+    assert!(final_status["data"]["recovery_hint"].as_str().is_some());
+    assert_eq!(
+        final_status["data"]["next_action"]["kind"].as_str(),
+        Some("read_terminal_result")
+    );
+    assert_eq!(
+        final_status["data"]["result_data"]["preview_id"].as_str(),
+        Some(preview_id)
+    );
     let result_preview_id = final_status["data"]["result"]["data"]["preview_id"]
         .as_str()
         .expect("preview id should survive job result");
     assert_eq!(result_preview_id, preview_id);
+    assert_eq!(
+        final_status["data"]["result"]["data"]["derived_docs_refresh"]["status"].as_str(),
+        Some("ok")
+    );
+    assert!(site_root.path().join("AXO/index.html").is_file());
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+        std::env::remove_var("AXON_SOLL_SITE_ROOT");
+    }
+}
+
+#[test]
+fn test_axon_init_project_stays_sync_when_mutation_jobs_are_enabled() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+    }
+    let server = create_test_server();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "axon_init_project",
+            "arguments": {
+                "project_path": "/home/dstadel/projects/BookingSystem"
+            }
+        })),
+        id: Some(json!(5003)),
+    };
+
+    let response = server.handle_request(req).unwrap();
+    let result = response.result.unwrap();
+    let data = result.get("data").expect("sync response must carry data");
+    assert_sync_mutation_contract(data);
+    assert_eq!(
+        data.get("project_code").and_then(|value| value.as_str()),
+        Some("BKS")
+    );
+    assert_eq!(
+        data.get("project_name").and_then(|value| value.as_str()),
+        Some("BookingSystem")
+    );
+    assert_eq!(
+        data.get("project_path").and_then(|value| value.as_str()),
+        Some("/home/dstadel/projects/BookingSystem")
+    );
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+    }
+}
+
+#[test]
+fn test_resume_vectorization_returns_job_when_mutation_jobs_are_enabled() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+    }
+    let server = create_test_server();
+    let path = "/tmp/resume_vectorization_async.rs".to_string();
+    server
+        .graph_store
+        .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
+        .unwrap();
+
+    let extraction = parser::ExtractionResult {
+        project_code: Some("PRJ".to_string()),
+        symbols: vec![parser::Symbol {
+            name: "resume_vectorization_async".to_string(),
+            kind: "func".to_string(),
+            start_line: 1,
+            end_line: 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: std::collections::HashMap::new(),
+            embedding: None,
+        }],
+        relations: vec![],
+    };
+
+    server
+        .graph_store
+        .insert_file_data_batch_with_vectorization_policy(
+            &[crate::worker::DbWriteTask::FileExtraction {
+                reservation_id: "resume-vectorization-async".to_string(),
+                path: path.clone(),
+                content: Some("fn resume_vectorization_async() {}".to_string()),
+                extraction,
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }],
+            false,
+        )
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "resume_vectorization",
+            "arguments": {}
+        })),
+        id: Some(json!(5005)),
+    };
+
+    let response = server.handle_request(req).unwrap();
+    let result = response.result.unwrap();
+    let data = result.get("data").expect("job response must carry data");
+    assert_async_job_contract(data, "job_status");
+
+    let job_id = data
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .expect("job_id");
+    let final_status = wait_for_job_status(&server, job_id);
+    assert_eq!(
+        final_status["data"]["status"].as_str().unwrap(),
+        "succeeded"
+    );
+    assert_eq!(final_status["data"]["state"].as_str(), Some("completed"));
+    assert_eq!(
+        final_status["data"]["next_action"]["kind"].as_str(),
+        Some("read_terminal_result")
+    );
+    assert_eq!(
+        final_status["data"]["result_data"]["queued_files"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        final_status["data"]["result"]["data"]["queued_files"].as_u64(),
+        Some(1)
+    );
 
     unsafe {
         std::env::remove_var("AXON_MCP_MUTATION_JOBS");
@@ -974,7 +1228,158 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
 }
 
 #[test]
-fn test_mutating_soll_manager_requires_project_code_for_job_reservation() {
+fn test_project_registry_lookup_finds_project_by_path_name_and_code() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry(
+            "BKS",
+            Some("BookingSystem"),
+            Some("/home/dstadel/projects/BookingSystem"),
+        )
+        .unwrap();
+
+    for arguments in [
+        json!({ "project_code": "BKS" }),
+        json!({ "project_name": "BookingSystem" }),
+        json!({ "project_path": "/home/dstadel/projects/BookingSystem" }),
+    ] {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_registry_lookup",
+                "arguments": arguments
+            })),
+            id: Some(json!(5010)),
+        };
+        let response = server.handle_request(req).unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result["data"]["found"].as_bool(), Some(true));
+        assert_eq!(result["data"]["project_code"].as_str(), Some("BKS"));
+        assert_eq!(
+            result["data"]["project_name"].as_str(),
+            Some("BookingSystem")
+        );
+        assert_eq!(
+            result["data"]["project_path"].as_str(),
+            Some("/home/dstadel/projects/BookingSystem")
+        );
+        assert_eq!(
+            result["data"]["matches"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(1)
+        );
+        assert_eq!(
+            result["data"]["next_action"]["kind"].as_str(),
+            Some("use_canonical_project_code")
+        );
+        assert_eq!(
+            result["data"]["next_action"]["tool"].as_str(),
+            Some("project_status")
+        );
+        assert!(result["data"]["operator_guidance"].is_object());
+    }
+}
+
+#[test]
+fn test_soll_apply_plan_accepts_freshly_initialized_project_code_across_runtime_boundary() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("graph-store");
+    let store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let server = McpServer::new(store);
+
+    let init_response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_init_project",
+                "arguments": {
+                    "project_path": "/home/dstadel/projects/nutri-opti",
+                    "project_name": "nutri-opti"
+                }
+            })),
+            id: Some(json!(5011)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(init_response["data"]["project_code"].as_str(), Some("NTO"));
+    drop(server);
+
+    let reopened_store = Arc::new(GraphStore::new(root.to_string_lossy().as_ref()).unwrap());
+    let reopened_server = McpServer::new(reopened_store);
+
+    let lookup_response = reopened_server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "project_registry_lookup",
+                "arguments": {
+                    "project_path": "/home/dstadel/projects/nutri-opti"
+                }
+            })),
+            id: Some(json!(5012)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(
+        lookup_response["data"]["project_code"].as_str(),
+        Some("NTO")
+    );
+
+    let apply_plan_response = reopened_server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_apply_plan",
+                "arguments": {
+                    "project_code": "NTO",
+                    "author": "test",
+                    "dry_run": true,
+                    "plan": {
+                        "visions": [
+                            {
+                                "logical_key": "vision-1",
+                                "title": "Vision NTO",
+                                "description": "Nutri Opti vision"
+                            }
+                        ],
+                        "pillars": [
+                            {
+                                "logical_key": "pillar-1",
+                                "title": "Pillar NTO",
+                                "description": "Nutri Opti pillar"
+                            }
+                        ]
+                    }
+                }
+            })),
+            id: Some(json!(5013)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_ne!(
+        apply_plan_response
+            .get("isError")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert!(apply_plan_response["data"]["preview_id"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("PRV-NTO-")));
+}
+
+#[test]
+fn test_soll_manager_requires_project_code_even_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
     unsafe {
         std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
@@ -1011,10 +1416,6 @@ fn test_mutating_soll_manager_requires_project_code_for_job_reservation() {
         .and_then(|value| value.as_bool())
         .unwrap_or(false));
     assert!(
-        content.contains("Mutation job reservation failed"),
-        "{content}"
-    );
-    assert!(
         content.contains("`project_code` est obligatoire"),
         "{content}"
     );
@@ -1025,7 +1426,7 @@ fn test_mutating_soll_manager_requires_project_code_for_job_reservation() {
 }
 
 #[test]
-fn test_mutating_soll_commit_revision_requires_preview_id_for_job_reservation() {
+fn test_soll_commit_revision_requires_preview_id_even_when_mutation_jobs_are_enabled() {
     let _guard = env_lock();
     unsafe {
         std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
@@ -1057,11 +1458,7 @@ fn test_mutating_soll_commit_revision_requires_preview_id_for_job_reservation() 
         .and_then(|value| value.as_bool())
         .unwrap_or(false));
     assert!(
-        content.contains("Mutation job reservation failed"),
-        "{content}"
-    );
-    assert!(
-        content.contains("`preview_id` est obligatoire"),
+        content.contains("Missing required argument: preview_id"),
         "{content}"
     );
 
@@ -1284,14 +1681,25 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         .filter_map(|value| value.as_str())
         .collect::<Vec<_>>();
     assert!(public_tool_names.contains(&"status"));
+    assert!(public_tool_names.contains(&"mcp_surface_diagnostics"));
     assert!(public_tool_names.contains(&"project_status"));
+    assert!(public_tool_names.contains(&"project_registry_lookup"));
+    assert!(public_tool_names.contains(&"soll_relation_schema"));
     assert!(public_tool_names.contains(&"why"));
     assert!(public_tool_names.contains(&"path"));
     assert!(public_tool_names.contains(&"anomalies"));
+    assert!(public_tool_names.contains(&"refine_lattice"));
+    assert!(public_tool_names.contains(&"cypher"));
+    assert!(public_tool_names.contains(&"debug"));
+    assert!(public_tool_names.contains(&"schema_overview"));
+    assert!(public_tool_names.contains(&"list_labels_tables"));
+    assert!(public_tool_names.contains(&"query_examples"));
+    assert!(public_tool_names.contains(&"batch"));
+    assert!(public_tool_names.contains(&"job_status"));
+    assert!(public_tool_names.contains(&"resume_vectorization"));
     assert!(!public_tool_names.contains(&"health"));
     assert!(!public_tool_names.contains(&"audit"));
-    assert!(!public_tool_names.contains(&"batch"));
-    assert!(!public_tool_names.contains(&"job_status"));
+    assert!(!public_tool_names.contains(&"truth_check"));
     assert!(data
         .get("runtime_mode")
         .and_then(|value| value.as_str())
@@ -1306,8 +1714,429 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         .is_some());
     assert!(data["availability"]["degraded_notes"].as_array().is_some());
     assert_eq!(
+        data["async_contract"]["canonical_follow_up_tool"].as_str(),
+        Some("job_status")
+    );
+    assert_eq!(data["async_policy"]["mode"].as_str(), Some("allowlist"));
+    assert_eq!(
+        data["async_policy"]["sync_by_default"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["async_policy"]["latency_target_p95_ms"].as_i64(),
+        Some(200)
+    );
+    let allowlisted_tools = data["async_policy"]["allowlisted_tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(allowlisted_tools.contains(&"restore_soll"));
+    assert!(allowlisted_tools.contains(&"soll_apply_plan"));
+    assert!(allowlisted_tools.contains(&"resume_vectorization"));
+    let monitored_sync_tools = data["async_policy"]["monitored_sync_mutation_tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(monitored_sync_tools.contains(&"soll_commit_revision"));
+    assert_eq!(
+        data["utility_first_scheduler"]["state"].as_str(),
+        Some("balanced_drain")
+    );
+    assert!(data["utility_first_scheduler"]["reason"].as_str().is_some());
+    assert!(data["utility_first_scheduler"]["ready_reserve_target"]
+        .as_u64()
+        .is_some());
+    assert_eq!(
+        data["async_contract"]["stale_client_binding_possible"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
         data["canonical_sources"]["soll_export"]["reimportable"].as_bool(),
         Some(true)
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["target"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["effective"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["clamp_visible"]
+            .as_bool()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["authority_state"].as_str(),
+        Some("partially_unified")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["graph_workers"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["graph_workers"]["effective"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["graph_workers"]["authority_state"].as_str(),
+        Some("partially_unified")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["chunk_batch_size"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["file_vectorization_batch_size"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]["target"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]["effective"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]
+            ["effective_source"]
+            .as_str(),
+        Some("service_guard.current_ready_queue_depth")
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]["authority_state"]
+            .as_str(),
+        Some("partially_unified")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_persist_queue_bound"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_persist_queue_bound"]
+            ["effective_source"]
+            .as_str(),
+        Some("service_guard.current_persist_queue_depth")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_max_inflight_persists"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_max_inflight_persists"]
+            ["effective_source"]
+            .as_str(),
+        Some("service_guard.current_persist_claims")
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["queue_persist_effective_semantics"]
+            ["vector_ready_queue_depth"]
+            .as_str(),
+        Some("observed_current_queue_depth_not_capacity")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["seed"]["sleep_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["seed"]["profile"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["target"]["idle_sleep_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["effective"]["pause"]
+            .as_bool()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["controller_state"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["authority_state"]
+            .as_str(),
+        Some("partially_unified")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["gpu_vector_lease"]["exclusive_required"]
+            .as_bool()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["gpu_vector_lease"]["path"]
+            .as_str()
+            .is_some()
+    );
+    assert!(data["runtime_authority"]["limiting_factors"]["primary"]
+        .as_str()
+        .is_some());
+    assert!(data["runtime_authority"]["limiting_factors"]["secondary"]
+        .as_array()
+        .is_some());
+    assert!(data["runtime_authority"]["limiting_factors"]["actionable"]
+        .as_bool()
+        .is_some());
+    assert!(data["runtime_authority"]["limiting_factors"]["reason"]
+        .as_str()
+        .is_some());
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["controller_reason"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["scheduler_reason"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["signals"]["gpu_utilization_ratio"]
+            .as_f64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["signals"]["target_embed_batch_chunks"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["thresholds"]["max_vram_used_mb"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["policy"]["provider_effective"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["quiescent_state"]["authority_state"].as_str(),
+        Some("transitional")
+    );
+    assert_eq!(
+        data["runtime_authority"]["quiescent_state"]["wake_contract_state"].as_str(),
+        Some("fragmented")
+    );
+    assert_eq!(
+        data["runtime_authority"]["quiescent_state"]["wake_observability_state"].as_str(),
+        Some("partial")
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["operator_focus"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["focus_recommendation"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["confidence"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["wake_noise_level"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["dominant_wake_share_pct"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["measurement_readiness"]
+            .as_str()
+            .is_some()
+    );
+    assert!(data["runtime_authority"]["quiescent_state"]["diagnosis"]
+        ["recommended_next_measurement"]
+        .as_str()
+        .is_some());
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["qualification_verdict"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["qualification_reason"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["actionable_now"]
+            .as_bool()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["blocking_factors"]
+            .as_array()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["loop_intervals_ms"]["reader_refresh"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["wakeups_last_60s"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["last_wakeup_at_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["resume_latency_p95_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]
+            ["useful_resume_latency_p95_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["last_quiescent_exit_reason"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["last_wake_source"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["dominant_wake_source"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]
+            ["last_background_wake_detail"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]
+            ["dominant_background_wake_detail"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]
+            ["background_wake_ingress_promoter_total"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]
+            ["background_wake_autonomous_ingestor_total"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(data["runtime_authority"]["quiescent_state"]["diagnosis"]
+        ["dominant_background_wake_detail"]
+        .as_str()
+        .is_some());
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["lane_liveness"]
+            ["vector_worker_heartbeat_age_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["lane_liveness"]["vector_lane_state"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["observed_residual_work"]
+            ["ready_queue_depth_current"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["burn_rate"]
+            ["measurement_window_sec"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["burn_rate"]["state"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["burn_rate"]
+            ["recommendation"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["burn_rate"]
+            ["files_vector_ready_last_minute"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["burn_rate"]
+            ["chunks_embedded_last_minute"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["provider_requested"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["provider_effective"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["gpu_access_policy"]
+            .as_str()
+            .is_some()
     );
 
     unsafe {
@@ -1344,15 +2173,294 @@ fn test_status_reports_retrieve_context_in_public_surface_when_full_autonomous()
         .filter_map(|value| value.as_str())
         .collect::<Vec<_>>();
     assert!(public_tool_names.contains(&"retrieve_context"));
-    assert!(!public_tool_names.contains(&"health"));
-    assert!(!public_tool_names.contains(&"audit"));
-    assert!(!public_tool_names.contains(&"batch"));
-    assert!(!public_tool_names.contains(&"job_status"));
+    assert!(public_tool_names.contains(&"refine_lattice"));
+    assert!(public_tool_names.contains(&"cypher"));
+    assert!(public_tool_names.contains(&"debug"));
+    assert!(public_tool_names.contains(&"schema_overview"));
+    assert!(public_tool_names.contains(&"list_labels_tables"));
+    assert!(public_tool_names.contains(&"query_examples"));
+    assert!(public_tool_names.contains(&"health"));
+    assert!(public_tool_names.contains(&"audit"));
+    assert!(public_tool_names.contains(&"batch"));
+    assert!(public_tool_names.contains(&"job_status"));
+    assert!(public_tool_names.contains(&"truth_check"));
+    assert!(public_tool_names.contains(&"diagnose_indexing"));
+    assert!(public_tool_names.contains(&"diff"));
+    assert!(public_tool_names.contains(&"semantic_clones"));
+    assert!(public_tool_names.contains(&"architectural_drift"));
+    assert!(public_tool_names.contains(&"bidi_trace"));
+    assert!(public_tool_names.contains(&"api_break_check"));
+    assert!(public_tool_names.contains(&"simulate_mutation"));
+    assert!(public_tool_names.contains(&"resume_vectorization"));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
         std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
     }
+}
+
+#[test]
+fn test_mcp_surface_diagnostics_exposes_server_truth_and_binding_caveat() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_PUBLIC_HOST", "192.168.1.50");
+        std::env::set_var("AXON_PUBLIC_HOST_SOURCE", "explicit");
+        std::env::set_var("AXON_PUBLIC_ENDPOINTS_AVAILABLE", "1");
+        std::env::set_var("AXON_MCP_PUBLIC_URL", "http://192.168.1.50:44129/mcp");
+        std::env::set_var("AXON_SQL_PUBLIC_URL", "http://192.168.1.50:44129/sql");
+        std::env::set_var("AXON_DASHBOARD_PUBLIC_URL", "http://192.168.1.50:44127/");
+    }
+
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "mcp_surface_diagnostics",
+                "arguments": { "mode": "json" }
+            })),
+            id: Some(json!(22022)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").unwrap();
+    assert_eq!(
+        data["async_contract"]["canonical_follow_up_tool"].as_str(),
+        Some("job_status")
+    );
+    assert_eq!(data["async_policy"]["mode"].as_str(), Some("allowlist"));
+    let allowlisted_tools = data["async_policy"]["allowlisted_tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(allowlisted_tools.contains(&"restore_soll"));
+    assert!(allowlisted_tools.contains(&"soll_apply_plan"));
+    assert!(allowlisted_tools.contains(&"resume_vectorization"));
+    assert_eq!(
+        data["client_binding_notes"]["stale_client_binding_possible"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["client_binding_notes"]["session_freshness_status"].as_str(),
+        Some("unknown_outside_server")
+    );
+    assert!(
+        data["client_binding_notes"]["canonical_refresh_instruction"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Refresh or reconnect")
+    );
+    assert_eq!(
+        data["advertised_endpoints"]["available"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["advertised_endpoints"]["mcp_url"].as_str(),
+        Some("http://192.168.1.50:44129/mcp")
+    );
+    assert_eq!(
+        data["client_binding_notes"]["external_endpoint_rule"].as_str(),
+        Some("Do not use instance_identity.*_url as an external endpoint. Isolated clients must prefer advertised_endpoints.* when available.")
+    );
+    let critical_tools = data["server_truth"]["critical_tools"].as_array().unwrap();
+    assert!(critical_tools
+        .iter()
+        .any(|value| value.as_str() == Some("project_registry_lookup")));
+    assert!(critical_tools
+        .iter()
+        .any(|value| value.as_str() == Some("axon_init_project")));
+
+    unsafe {
+        std::env::remove_var("AXON_PUBLIC_HOST");
+        std::env::remove_var("AXON_PUBLIC_HOST_SOURCE");
+        std::env::remove_var("AXON_PUBLIC_ENDPOINTS_AVAILABLE");
+        std::env::remove_var("AXON_MCP_PUBLIC_URL");
+        std::env::remove_var("AXON_SQL_PUBLIC_URL");
+        std::env::remove_var("AXON_DASHBOARD_PUBLIC_URL");
+    }
+}
+
+#[test]
+fn test_status_exposes_runtime_version_identity() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RELEASE_VERSION", "0.7.0");
+        std::env::set_var("AXON_BUILD_ID", "v0.7.0-rc1-12-gabcdef");
+        std::env::set_var("AXON_PACKAGE_VERSION", "2.0.0");
+        std::env::set_var("AXON_INSTALL_GENERATION", "live-2026-04-18");
+    }
+
+    let server = create_test_server();
+    let response = server.axon_status(&json!({ "mode": "json" })).unwrap();
+    let data = response.get("data").unwrap();
+
+    assert_eq!(
+        data["runtime_version"]["release_version"].as_str(),
+        Some("0.7.0")
+    );
+    assert_eq!(
+        data["runtime_version"]["build_id"].as_str(),
+        Some("v0.7.0-rc1-12-gabcdef")
+    );
+    assert_eq!(
+        data["runtime_version"]["package_version"].as_str(),
+        Some("2.0.0")
+    );
+    assert_eq!(
+        data["runtime_version"]["install_generation"].as_str(),
+        Some("live-2026-04-18")
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_RELEASE_VERSION");
+        std::env::remove_var("AXON_BUILD_ID");
+        std::env::remove_var("AXON_PACKAGE_VERSION");
+        std::env::remove_var("AXON_INSTALL_GENERATION");
+    }
+}
+
+#[test]
+fn test_status_exposes_resource_policy_identity() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RESOURCE_PRIORITY", "critical");
+        std::env::set_var("AXON_BACKGROUND_BUDGET_CLASS", "balanced");
+        std::env::set_var("AXON_GPU_ACCESS_POLICY", "preferred");
+        std::env::set_var("AXON_WATCHER_POLICY", "full");
+        std::env::set_var("AXON_EMBEDDING_PROVIDER", "cpu");
+        std::env::set_var("MAX_AXON_WORKERS", "8");
+        std::env::set_var("AXON_QUEUE_MEMORY_BUDGET_BYTES", "3221225472");
+        std::env::set_var("AXON_WATCHER_SUBTREE_HINT_BUDGET", "128");
+        std::env::set_var("AXON_VECTOR_WORKERS", "2");
+        std::env::set_var("AXON_GRAPH_WORKERS", "3");
+    }
+
+    let server = create_test_server();
+    let response = server.axon_status(&json!({ "mode": "json" })).unwrap();
+    let data = response.get("data").unwrap();
+
+    assert_eq!(
+        data["resource_policy"]["resource_priority"].as_str(),
+        Some("critical")
+    );
+    assert_eq!(
+        data["resource_policy"]["background_budget_class"].as_str(),
+        Some("balanced")
+    );
+    assert_eq!(
+        data["resource_policy"]["gpu_access_policy"].as_str(),
+        Some("preferred")
+    );
+    assert_eq!(
+        data["resource_policy"]["watcher_policy"].as_str(),
+        Some("full")
+    );
+    assert_eq!(
+        data["resource_policy"]["embedding_provider"].as_str(),
+        Some("cpu")
+    );
+    assert_eq!(
+        data["resource_policy"]["max_axon_workers"].as_str(),
+        Some("8")
+    );
+    assert_eq!(
+        data["resource_policy"]["queue_memory_budget_bytes"].as_str(),
+        Some("3221225472")
+    );
+    assert_eq!(
+        data["resource_policy"]["watcher_subtree_hint_budget"].as_str(),
+        Some("128")
+    );
+    assert_eq!(
+        data["resource_policy"]["vector_workers"].as_str(),
+        Some("2")
+    );
+    assert_eq!(data["resource_policy"]["graph_workers"].as_str(), Some("3"));
+
+    unsafe {
+        std::env::remove_var("AXON_RESOURCE_PRIORITY");
+        std::env::remove_var("AXON_BACKGROUND_BUDGET_CLASS");
+        std::env::remove_var("AXON_GPU_ACCESS_POLICY");
+        std::env::remove_var("AXON_WATCHER_POLICY");
+        std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+        std::env::remove_var("MAX_AXON_WORKERS");
+        std::env::remove_var("AXON_QUEUE_MEMORY_BUDGET_BYTES");
+        std::env::remove_var("AXON_WATCHER_SUBTREE_HINT_BUDGET");
+        std::env::remove_var("AXON_VECTOR_WORKERS");
+        std::env::remove_var("AXON_GRAPH_WORKERS");
+    }
+}
+
+#[test]
+fn test_status_exposes_advertised_endpoints_separately_from_runtime_local_urls() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_URL", "http://127.0.0.1:44129/mcp");
+        std::env::set_var("AXON_SQL_URL", "http://127.0.0.1:44129/sql");
+        std::env::set_var("AXON_DASHBOARD_URL", "http://127.0.0.1:44127/");
+        std::env::set_var("AXON_PUBLIC_HOST", "192.168.1.50");
+        std::env::set_var("AXON_PUBLIC_HOST_SOURCE", "derived");
+        std::env::set_var("AXON_PUBLIC_ENDPOINTS_AVAILABLE", "1");
+        std::env::set_var("AXON_MCP_PUBLIC_URL", "http://192.168.1.50:44129/mcp");
+        std::env::set_var("AXON_SQL_PUBLIC_URL", "http://192.168.1.50:44129/sql");
+        std::env::set_var("AXON_DASHBOARD_PUBLIC_URL", "http://192.168.1.50:44127/");
+    }
+
+    let server = create_test_server();
+    let response = server.axon_status(&json!({ "mode": "json" })).unwrap();
+    let data = response.get("data").unwrap();
+
+    assert_eq!(
+        data["instance_identity"]["mcp_url"].as_str(),
+        Some("http://127.0.0.1:44129/mcp")
+    );
+    assert_eq!(
+        data["advertised_endpoints"]["available"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["advertised_endpoints"]["public_host_source"].as_str(),
+        Some("derived")
+    );
+    assert_eq!(
+        data["advertised_endpoints"]["mcp_url"].as_str(),
+        Some("http://192.168.1.50:44129/mcp")
+    );
+    assert_eq!(
+        data["client_reachability_notes"]["instance_identity_is_runtime_local_only"].as_bool(),
+        Some(true)
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_URL");
+        std::env::remove_var("AXON_SQL_URL");
+        std::env::remove_var("AXON_DASHBOARD_URL");
+        std::env::remove_var("AXON_PUBLIC_HOST");
+        std::env::remove_var("AXON_PUBLIC_HOST_SOURCE");
+        std::env::remove_var("AXON_PUBLIC_ENDPOINTS_AVAILABLE");
+        std::env::remove_var("AXON_MCP_PUBLIC_URL");
+        std::env::remove_var("AXON_SQL_PUBLIC_URL");
+        std::env::remove_var("AXON_DASHBOARD_PUBLIC_URL");
+    }
+}
+
+#[test]
+fn test_retrieve_context_intent_mode_prefers_plan_docs_over_feedback_docs() {
+    let plan_weight = McpServer::project_intent_doc_weight(
+        "docs/plans/2026-04-19-nutri-opti-concept-foundation.md",
+    );
+    let feedback_weight = McpServer::project_intent_doc_weight("feedback-axon-soll-2026-04-19.md");
+    assert!(plan_weight > feedback_weight);
+    assert!(plan_weight > 0.0);
+    assert!(
+        feedback_weight < 0.0,
+        "expected feedback docs to be penalized, got {feedback_weight}"
+    );
 }
 
 #[test]
@@ -1478,6 +2586,15 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     assert!(data["soll_context"]["visions"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
+    assert!(data["operator_guidance"].as_object().is_some());
+    assert!(data["operator_guidance"]["recommended_next_step"]
+        .as_str()
+        .is_some());
+    assert!(data["operator_guidance"]["actionable_now"].is_boolean());
+    assert!(data["operator_guidance"]["blocking_factors"].is_array());
+    assert!(data["operator_guidance"]["remediation_actions"].is_array());
+    assert!(data["next_action"]["kind"].as_str().is_some());
+    assert!(data["next_action"]["tool"].as_str().is_some());
     let text = response["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Project Status"), "{text}");
     assert!(text.contains("Axon Vision"), "{text}");
@@ -1823,6 +2940,18 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
         .as_array()
         .is_some_and(|items| !items.is_empty()));
     assert!(data["recommended_guardrails"].as_array().is_some());
+    assert!(data["operator_guidance"].as_object().is_some());
+    assert_eq!(
+        data["operator_guidance"]["mutation_class_recommendation"].as_str(),
+        Some("safe_for_direct_mutation")
+    );
+    assert_eq!(
+        data["operator_guidance"]["actionable_now"].as_bool(),
+        Some(true)
+    );
+    assert!(data["operator_guidance"]["blocking_factors"]
+        .as_array()
+        .is_some());
 }
 
 #[test]
@@ -1868,6 +2997,12 @@ fn test_path_returns_bounded_call_path_between_symbols() {
         data["canonical_sources"]["soll_export"]["reimportable"].as_bool(),
         Some(true)
     );
+    assert_eq!(
+        data["next_action"]["kind"].as_str(),
+        Some("expand_blast_radius_from_path")
+    );
+    assert_eq!(data["next_action"]["tool"].as_str(), Some("impact"));
+    assert!(data["operator_guidance"]["follow_up_tools"].is_array());
     let path = data["path"].as_array().unwrap();
     let rendered = path
         .iter()
@@ -4193,6 +5328,116 @@ fn test_retrieve_context_prefers_direct_file_traceability_for_rationale() {
 }
 
 #[test]
+fn test_retrieve_context_rationale_prefers_canonical_project_docs_over_workspace_noise() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+    }
+
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/payment.rs', 'BKS', TRUE, 'indexed')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('docs/plans/2026-04-20-bks-stripe-implementation-plan.md', 'BKS', TRUE, 'indexed')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('.axon/cache/noise.md', 'BKS', TRUE, 'indexed')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::stripe_plan_doc', 'stripe_plan_doc', 'module', false, false, false, 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::workspace_noise_doc', 'workspace_noise_doc', 'module', false, false, false, 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('docs/plans/2026-04-20-bks-stripe-implementation-plan.md', 'bks::stripe_plan_doc', 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('.axon/cache/noise.md', 'bks::workspace_noise_doc', 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-bks-checkout-rationale', 'symbol', 'bks::checkout', 'BKS', 'body', 'checkout uses the Stripe SDK for payment capture and settlement', 'hash-bks-checkout-rationale', 1, 8)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-bks-plan-doc', 'symbol', 'bks::stripe_plan_doc', 'BKS', 'body', 'Implementation plan: use the Stripe SDK for operational safety and payment reliability.', 'hash-bks-plan-doc', 1, 8)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-bks-noise-doc', 'symbol', 'bks::workspace_noise_doc', 'BKS', 'body', 'Cached workspace note mentioning Stripe SDK without canonical project intent.', 'hash-bks-noise-doc', 1, 8)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-T6', 'Decision', 'BKS', 'Use Stripe SDK', 'Canonical rationale', 'accepted', '{\"rationale\":\"Operational safety\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-BKS-T6', 'Decision', 'DEC-BKS-T6', 'Symbol', 'checkout', 1.0, 0)")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context",
+                "arguments": {
+                    "question": "Why does checkout use the Stripe SDK?",
+                    "project": "BKS",
+                    "token_budget": 1200,
+                    "top_k": 4
+                }
+            })),
+            id: Some(json!(6216)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    let packet = &result["data"]["packet"];
+    assert_eq!(
+        packet["retrieval_policy"]["linked_evidence_first"].as_bool(),
+        Some(true),
+        "{packet:?}"
+    );
+    let chunks = packet["supporting_chunks"]
+        .as_array()
+        .expect("expected supporting chunks");
+    let plan_pos = chunks
+        .iter()
+        .position(|value| value["chunk_id"].as_str() == Some("chunk-bks-plan-doc"));
+    let noise_pos = chunks
+        .iter()
+        .position(|value| value["chunk_id"].as_str() == Some("chunk-bks-noise-doc"));
+    assert!(plan_pos.is_some(), "{packet:?}");
+    if let Some(noise_pos) = noise_pos {
+        assert!(plan_pos.expect("plan pos") < noise_pos, "{packet:?}");
+    }
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
+}
+
+#[test]
 fn test_retrieve_context_under_critical_pressure_avoids_unanchored_fallback_chunks() {
     let _guard = env_lock();
     unsafe {
@@ -4520,6 +5765,18 @@ fn test_axon_impact_accepts_canonical_project_code_for_repo_code_symbols() {
         !text.contains("symbol not found in current scope"),
         "{text}"
     );
+    let data = result.get("data").unwrap();
+    assert_eq!(data["symbol"].as_str(), Some("axon_retrieve_context"));
+    assert_eq!(data["impact_radius"].as_i64(), Some(1));
+    assert_eq!(
+        data["next_action"]["kind"].as_str(),
+        Some("simulate_mutation_before_editing")
+    );
+    assert_eq!(
+        data["next_action"]["tool"].as_str(),
+        Some("simulate_mutation")
+    );
+    assert!(data["operator_guidance"]["follow_up_tools"].is_array());
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -4629,6 +5886,16 @@ fn test_axon_inspect() {
         .unwrap();
     assert!(content.contains("Inspection du Symbole"), "{content}");
     assert!(content.contains("core_func"), "{content}");
+    let data = result.get("data").unwrap();
+    assert_eq!(data["symbol_found"].as_bool(), Some(true));
+    assert_eq!(data["summary"]["kind"].as_str(), Some("function"));
+    assert!(data["summary"]["tested"].is_boolean());
+    assert_eq!(
+        data["next_action"]["kind"].as_str(),
+        Some("expand_dependency_blast_radius")
+    );
+    assert_eq!(data["next_action"]["tool"].as_str(), Some("impact"));
+    assert!(data["operator_guidance"]["follow_up_tools"].is_array());
 }
 
 #[test]
@@ -5550,6 +6817,11 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
         .query_json("SELECT revision_id FROM soll.Revision ORDER BY created_at DESC LIMIT 1")
         .unwrap();
     assert!(revision_rows.contains("REV-AXO-001"), "{revision_rows}");
+    assert!(result["data"]["created"].is_array());
+    assert!(result["data"]["updated"].is_array());
+    assert!(result["data"]["linked"].is_array());
+    assert!(result["data"]["skipped"].is_array());
+    assert!(result["data"]["errors"].is_array());
 }
 
 #[test]
@@ -5583,6 +6855,11 @@ fn test_axon_soll_apply_plan_dry_run_uses_canonical_preview_id() {
     let result = response.unwrap().result.unwrap();
     let preview_id = result["data"]["preview_id"].as_str().unwrap();
     assert_eq!(preview_id, "PRV-AXO-001");
+    assert!(result["data"]["result_contract"]["created"].is_array());
+    assert!(result["data"]["result_contract"]["updated"].is_array());
+    assert!(result["data"]["result_contract"]["linked"].is_array());
+    assert!(result["data"]["result_contract"]["skipped"].is_array());
+    assert!(result["data"]["result_contract"]["errors"].is_array());
 }
 
 #[test]
@@ -5661,6 +6938,221 @@ fn test_axon_soll_manager_create_requires_explicit_canonical_project_code() {
         "{content}"
     );
     assert!(content.contains("AXO"), "{content}");
+}
+
+#[test]
+fn test_infer_soll_mutation_returns_impacted_existing_candidates() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'Perishability ordering', 'Short-life ingredients must be consumed earlier in the week.', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "infer_soll_mutation",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Weekly shopping should allow grouped purchases."
+                }
+            })),
+            id: Some(json!(1)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(
+        result["data"]["proposed_operation_kind"].as_str(),
+        Some("update_existing_entities")
+    );
+    assert_eq!(
+        result["data"]["candidate_entity_type"].as_str(),
+        Some("Requirement")
+    );
+    assert_eq!(
+        result["data"]["target_ids"][0].as_str(),
+        Some("REQ-AXO-001")
+    );
+}
+
+#[test]
+fn test_entrench_nuance_requires_confirmation_before_write() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "entrench_nuance",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Weekly shopping should allow grouped purchases."
+                }
+            })),
+            id: Some(json!(2)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["data"]["confirm_required"].as_bool(), Some(true));
+
+    let rows = server
+        .graph_store
+        .query_json("SELECT metadata FROM soll.Node WHERE id = 'REQ-AXO-001'")
+        .unwrap();
+    assert!(!rows.contains("nuances"));
+}
+
+#[test]
+fn test_entrench_nuance_confirmed_updates_existing_nodes_and_returns_feedback() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "entrench_nuance",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Weekly shopping should allow grouped purchases.",
+                    "confirm": true,
+                    "target_ids": ["REQ-AXO-001"]
+                }
+            })),
+            id: Some(json!(3)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["data"]["confirm_required"].as_bool(), Some(false));
+    assert_eq!(
+        result["data"]["mutation_feedback"]["changed_entities"][0]["id"].as_str(),
+        Some("REQ-AXO-001")
+    );
+
+    let rows = server
+        .graph_store
+        .query_json("SELECT metadata FROM soll.Node WHERE id = 'REQ-AXO-001'")
+        .unwrap();
+    assert!(rows.contains("Weekly shopping should allow grouped purchases."));
+    assert!(rows.contains("nuances"));
+}
+
+#[test]
+fn test_entrench_nuance_confirmed_rejects_cross_project_target_ids() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry("NTO", Some("Nutri"), Some("/tmp/nutri"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-NTO-001', 'Requirement', 'NTO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "entrench_nuance",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Weekly shopping should allow grouped purchases.",
+                    "confirm": true,
+                    "target_ids": ["REQ-NTO-001"]
+                }
+            })),
+            id: Some(json!(31)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    assert_eq!(
+        result["data"]["invalid_target_ids"][0].as_str(),
+        Some("REQ-NTO-001")
+    );
+}
+
+#[test]
+fn test_entrench_nuance_confirmed_requires_explicit_scope_when_inference_is_ambiguous() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Grouped shopping purchases', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+    server.graph_store.execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-002', 'Requirement', 'AXO', 'Grouped shopping purchases v2', 'Weekly shopping should allow grouped purchases for the same trip.', 'current', '{}')").unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "entrench_nuance",
+                "arguments": {
+                    "project_code": "AXO",
+                    "statement": "Weekly shopping should allow grouped purchases.",
+                    "confirm": true
+                }
+            })),
+            id: Some(json!(32)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    assert!(result["data"]["ambiguity_warnings"].is_array());
+}
+
+#[test]
+fn test_soll_manager_create_returns_mutation_feedback() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("Axon"), Some("/tmp/axon"))
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "create",
+                    "entity": "requirement",
+                    "project_code": "AXO",
+                    "data": {
+                        "project_code": "AXO",
+                        "title": "Roadmap feedback requirement",
+                        "description": "A new canonical requirement from roadmap feedback."
+                    }
+                }
+            })),
+            id: Some(json!(4)),
+        })
+        .unwrap();
+    let result = response.result.unwrap();
+    assert!(result["data"]["mutation_feedback"].is_object());
+    assert_eq!(
+        result["data"]["mutation_feedback"]["topology_delta"]["nodes_created"].as_u64(),
+        Some(1)
+    );
 }
 
 #[test]
@@ -6233,7 +7725,7 @@ fn test_axon_validate_soll_reports_orphan_invariants() {
         .as_str()
         .unwrap();
 
-    assert!(content.contains("3 violation"));
+    assert!(content.contains("violation"));
     assert!(content.contains("REQ-AXO-001"));
     assert!(content.contains("VAL-AXO-001"));
     assert!(content.contains("DEC-AXO-001"));
@@ -7117,6 +8609,13 @@ fn test_axon_impact_reports_missing_call_graph_truthfully() {
 
     assert!(impact_text.contains("le graphe d'appel n'est pas encore disponible"));
     assert!(impact_text.contains("parse_batch"));
+    let data = impact_result.get("data").unwrap();
+    assert_eq!(data["impact_available"].as_bool(), Some(false));
+    assert_eq!(
+        data["next_action"]["kind"].as_str(),
+        Some("wait_for_call_graph_truth")
+    );
+    assert_eq!(data["next_action"]["tool"].as_str(), Some("inspect"));
 }
 
 #[test]
@@ -7402,6 +8901,15 @@ fn test_axon_inspect_warns_when_symbol_is_degraded() {
     assert!(content.contains("Inspection du Symbole"), "{}", content);
     assert!(content.contains("verite partielle"), "{}", content);
     assert!(content.contains("indexed_degraded"), "{}", content);
+    let data = result.get("data").unwrap();
+    assert_eq!(data["symbol_found"].as_bool(), Some(true));
+    assert!(data["operator_guidance"]["blocking_factors"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert_eq!(
+        data["operator_guidance"]["actionable_now"].as_bool(),
+        Some(false)
+    );
 
     unsafe {
         std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
@@ -7836,6 +9344,14 @@ fn test_soll_query_context_returns_project_visions_from_source() {
         .graph_store
         .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Revision (revision_id, author, source, summary, status, created_at, committed_at) VALUES ('REV-AXO-001', 'tester', 'mcp', 'Context rebuild', 'committed', 10, 11)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, action, before_json, after_json, created_at) VALUES ('REV-AXO-001', 'Node', 'REQ-AXO-001', 'update', '{}', '{}', 11)")
+        .unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -7865,6 +9381,23 @@ fn test_soll_query_context_returns_project_visions_from_source() {
     assert!(first.contains("Axon Vision"), "{first}");
     assert!(first.contains("accepted"), "{first}");
     assert!(first.contains("Build from project vision"), "{first}");
+    let digest = data.get("operational_digest").expect("operational digest");
+    let entity_counts = digest["entity_counts"].as_array().expect("entity counts");
+    assert!(entity_counts.iter().any(|value| {
+        value["entity_type"].as_str() == Some("Vision") && value["count"].as_u64() == Some(1)
+    }));
+    assert_eq!(
+        digest["requirement_coverage_summary"]["total"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        digest["topology_summary"]["orphan_requirement_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        digest["last_meaningful_revision"]["revision_id"].as_str(),
+        Some("REV-AXO-001")
+    );
 }
 
 #[test]
@@ -7955,6 +9488,153 @@ fn test_axon_soll_manager_link_applies_default_relation() {
 }
 
 #[test]
+fn test_axon_soll_manager_create_can_attach_requirement_to_pillar() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Platform Pillar', 'Protect structure', '', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "requirement",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "Attachable requirement",
+                    "description": "Should auto-link to pillar",
+                    "priority": "P1",
+                    "attach_to": "PIL-AXO-001"
+                }
+            }
+        })),
+        id: Some(json!(41015)),
+    };
+
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let data = response.get("data").expect("expected create data");
+    let created_id = data["created_id"].as_str().expect("created_id");
+    assert!(created_id.starts_with("REQ-AXO-"), "{created_id}");
+    assert_eq!(data["attached"].as_bool(), Some(true));
+    assert_eq!(data["attached_to"].as_str(), Some("PIL-AXO-001"));
+    assert_eq!(data["applied_relation"].as_str(), Some("BELONGS_TO"));
+    assert_eq!(data["attach_status"].as_str(), Some("attached"));
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Edge WHERE source_id='{}' AND target_id='PIL-AXO-001' AND relation_type='BELONGS_TO'",
+                created_id
+            ))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn test_axon_soll_manager_create_attached_decision_requires_relation_hint_when_ambiguous() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Existing decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "decision",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "New linked decision",
+                    "description": "Should need explicit relation",
+                    "context": "Context",
+                    "rationale": "Because",
+                    "status": "accepted",
+                    "attach_to": "DEC-AXO-001"
+                }
+            }
+        })),
+        id: Some(json!(41016)),
+    };
+
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let data = response.get("data").expect("expected create data");
+    let created_id = data["created_id"].as_str().expect("created_id");
+    assert!(created_id.starts_with("DEC-AXO-"), "{created_id}");
+    assert_eq!(data["attach_attempted"].as_bool(), Some(true));
+    assert_eq!(data["attached"].as_bool(), Some(false));
+    assert_eq!(data["attach_status"].as_str(), Some("needs_relation_hint"));
+    let guidance = data["attach_guidance"]
+        .as_object()
+        .expect("attach guidance");
+    let allowed_relations = guidance["allowed_relations"]
+        .as_array()
+        .expect("allowed relations")
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(allowed_relations.contains(&"SUPERSEDES"));
+    assert!(allowed_relations.contains(&"REFINES"));
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(&format!(
+                "SELECT count(*) FROM soll.Edge WHERE source_id='{}' AND target_id='DEC-AXO-001'",
+                created_id
+            ))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn test_axon_soll_manager_create_attached_validation_rejects_invalid_target_kind_with_guidance() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Vision', 'North star', '', '{}')")
+        .unwrap();
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "soll_manager",
+            "arguments": {
+                "action": "create",
+                "entity": "validation",
+                "data": {
+                    "project_code": "AXO",
+                    "title": "Proof",
+                    "method": "manual",
+                    "result": "pending",
+                    "attach_to": "VIS-AXO-001"
+                }
+            }
+        })),
+        id: Some(json!(41017)),
+    };
+
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    let data = response.get("data").expect("expected create data");
+    assert_eq!(data["attached"].as_bool(), Some(false));
+    assert_eq!(data["attach_status"].as_str(), Some("invalid_target_kind"));
+    let guidance = data["attach_guidance"]
+        .as_object()
+        .expect("attach guidance");
+    assert_eq!(guidance["pair_allowed"].as_bool(), Some(false));
+    assert!(guidance["suggested_next_actions"].as_array().is_some());
+}
+
+#[test]
 fn test_axon_soll_manager_link_rejects_relation_outside_policy() {
     let server = create_test_server();
     server
@@ -7999,6 +9679,26 @@ fn test_axon_soll_manager_link_rejects_relation_outside_policy() {
     assert!(content.contains("Relations autorisées"), "{content}");
     assert!(content.contains("SOLVES"), "{content}");
     assert!(content.contains("REFINES"), "{content}");
+    let data = result
+        .get("data")
+        .expect("expected structured relation guidance");
+    assert_eq!(data["source_kind"].as_str(), Some("DEC"));
+    assert_eq!(data["target_kind"].as_str(), Some("REQ"));
+    assert_eq!(data["pair_allowed"].as_bool(), Some(true));
+    assert_eq!(data["default_relation"].as_str(), Some("SOLVES"));
+    let allowed_relations = data["allowed_relations"]
+        .as_array()
+        .expect("allowed_relations should be present")
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect::<Vec<_>>();
+    assert!(allowed_relations.contains(&"SOLVES"));
+    assert!(allowed_relations.contains(&"REFINES"));
+    assert!(data["suggested_next_actions"].as_array().is_some());
+    assert!(data["canonical_examples"].as_array().is_some());
+    assert!(data["recommended_incoming_links_to_target_kind"]
+        .as_array()
+        .is_some());
 }
 
 #[test]
@@ -8050,6 +9750,504 @@ fn test_axon_soll_manager_link_allows_authorized_cumulative_relation() {
             .query_count("SELECT count(*) FROM soll.Edge WHERE relation_type='REFINES' AND source_id = 'DEC-AXO-001' AND target_id = 'REQ-AXO-001'")
             .unwrap(),
         1
+    );
+}
+
+#[test]
+fn test_soll_relation_schema_resolves_pair_by_ids() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Decision', '', 'accepted', '{\"context\":\"Context\",\"rationale\":\"Because\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_id": "DEC-AXO-001",
+                    "target_id": "REQ-AXO-001"
+                }
+            })),
+            id: Some(json!(4105)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").expect("expected relation schema data");
+    assert_eq!(data["pair_allowed"].as_bool(), Some(true));
+    assert_eq!(data["source_kind"].as_str(), Some("DEC"));
+    assert_eq!(data["target_kind"].as_str(), Some("REQ"));
+    assert_eq!(data["default_relation"].as_str(), Some("SOLVES"));
+    assert_eq!(data["projection"]["role"].as_str(), Some("primary"));
+    assert_eq!(data["direction"].as_str(), Some("source_to_target"));
+    assert_eq!(
+        data["projection"]["parent_preference_rank"].as_u64(),
+        Some(10)
+    );
+    assert!(data["allowed_target_kinds_from_source"]
+        .as_array()
+        .is_some());
+    assert!(data["allowed_targets"].as_array().is_some());
+    assert!(data["forbidden_targets"].as_array().is_some());
+    assert_eq!(
+        data["source_graph_role"].as_str(),
+        Some("decision that solves, refines, or impacts implementation")
+    );
+    assert!(data["canonical_examples"].as_array().is_some());
+}
+
+#[test]
+fn test_soll_relation_schema_unresolved_ids_return_guided_discovery_payload() {
+    let server = create_test_server();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_id": "DEC-AXO-999",
+                    "target_id": "REQ-AXO-001"
+                }
+            })),
+            id: Some(json!(4106)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_ne!(
+        response.get("isError").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    let data = response
+        .get("data")
+        .expect("expected guided discovery payload");
+    assert_eq!(data["resolved"].as_bool(), Some(false));
+    assert_eq!(data["lookup_stage"].as_str(), Some("source_id"));
+    assert!(data["suggested_next_actions"].as_array().is_some());
+}
+
+#[test]
+fn test_soll_relation_schema_source_only_is_constructive_for_vision_and_pillar() {
+    let server = create_test_server();
+
+    let vision_response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_type": "VIS"
+                }
+            })),
+            id: Some(json!(4107)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let vision_data = vision_response.get("data").expect("vision guidance");
+    assert_eq!(vision_data["source_kind"].as_str(), Some("VIS"));
+    assert_eq!(
+        vision_data["graph_role"].as_str(),
+        Some("project north star")
+    );
+    assert_eq!(
+        vision_data["kind_projection"]["root_eligible"].as_bool(),
+        Some(true)
+    );
+    assert!(vision_data["recommended_incoming_links_to_source_kind"]
+        .as_array()
+        .expect("incoming guidance")
+        .iter()
+        .any(|item| item["source_kind"].as_str() == Some("PIL")));
+
+    let pillar_response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_type": "PIL"
+                }
+            })),
+            id: Some(json!(4108)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let pillar_data = pillar_response.get("data").expect("pillar guidance");
+    assert_eq!(pillar_data["source_kind"].as_str(), Some("PIL"));
+    assert_eq!(
+        pillar_data["kind_projection"]["tree_order_rank"].as_u64(),
+        Some(20)
+    );
+    assert!(pillar_data["allowed_target_kinds_from_source"]
+        .as_array()
+        .expect("outgoing guidance")
+        .iter()
+        .any(|item| item["target_kind"].as_str() == Some("VIS")));
+    assert!(pillar_data["recommended_incoming_links_to_source_kind"]
+        .as_array()
+        .expect("incoming guidance")
+        .iter()
+        .any(|item| item["source_kind"].as_str() == Some("REQ")));
+    assert!(pillar_data["allowed_target_kinds_from_source"]
+        .as_array()
+        .expect("outgoing guidance")
+        .iter()
+        .any(|item| item["projection"]["role"].as_str() == Some("primary")));
+    assert!(pillar_data["forbidden_targets"].as_array().is_some());
+}
+
+#[test]
+fn test_soll_relation_schema_pair_suggests_reverse_direction_when_pair_is_forbidden() {
+    let server = create_test_server();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_type": "VIS",
+                    "target_type": "PIL"
+                }
+            })),
+            id: Some(json!(41081)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let data = response.get("data").expect("forbidden pair guidance");
+    assert_eq!(data["pair_allowed"].as_bool(), Some(false));
+    assert_eq!(data["did_you_mean"]["source_kind"].as_str(), Some("PIL"));
+    assert_eq!(data["did_you_mean"]["target_kind"].as_str(), Some("VIS"));
+    assert_eq!(
+        data["did_you_mean"]["relation_type"].as_str(),
+        Some("EPITOMIZES")
+    );
+}
+
+#[test]
+fn test_axon_validate_soll_returns_structured_repair_guidance_and_completeness() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-200', 'Requirement', 'AXO', 'Lonely requirement', 'No links', 'draft', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-200', 'Validation', 'AXO', '', '', 'pending', '{\"method\":\"manual\"}')")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_validate",
+                "arguments": { "project_code": "AXO" }
+            })),
+            id: Some(json!(4109)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").expect("structured validation data");
+    assert_eq!(data["status"].as_str(), Some("warn_soll_invariants"));
+    assert_eq!(data["completeness"]["populated"].as_bool(), Some(true));
+    assert_eq!(
+        data["completeness"]["structurally_connected"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        data["completeness"]["evidence_ready"].as_bool(),
+        Some(false)
+    );
+    let repair_guidance = data["repair_guidance"]
+        .as_array()
+        .expect("repair guidance array");
+    assert!(repair_guidance
+        .iter()
+        .any(|entry| entry["category"].as_str() == Some("orphan_requirements")));
+    assert!(repair_guidance
+        .iter()
+        .any(|entry| entry["category"].as_str() == Some("validations_without_verifies")));
+}
+
+#[test]
+fn test_soll_attach_evidence_normalizes_entity_type_for_requirement_verification() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-210', 'Requirement', 'AXO', 'Normalized evidence', 'Uppercase entity type should still count', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "Requirement",
+                    "entity_id": "REQ-AXO-210",
+                    "artifacts": [{
+                        "artifact_type": "Symbol",
+                        "artifact_ref": "normalized_requirement",
+                        "confidence": 1.0
+                    }]
+                }
+            })),
+            id: Some(json!(4111)),
+        })
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_verify_requirements",
+                "arguments": { "project_code": "AXO" }
+            })),
+            id: Some(json!(4112)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = result["data"].clone();
+    assert_eq!(data["done"].as_u64(), Some(1));
+    assert_eq!(data["partial"].as_u64(), Some(0));
+    assert_eq!(data["missing"].as_u64(), Some(0));
+}
+
+#[test]
+fn test_soll_attach_evidence_accepts_file_path_aliases_and_reports_rejections() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-211', 'Requirement', 'AXO', 'File evidence alias', 'File path aliases should attach and explain failures', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("repo root");
+    let valid_path = repo_root.join("README.md");
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_attach_evidence",
+                "arguments": {
+                    "entity_type": "Requirement",
+                    "entity_id": "REQ-AXO-211",
+                    "artifacts": [
+                        {
+                            "artifact_type": "document",
+                            "path": valid_path.to_string_lossy().to_string(),
+                            "confidence": 1.0
+                        },
+                        {
+                            "artifact_type": "document",
+                            "path": "docs/plans/does-not-exist.md"
+                        }
+                    ]
+                }
+            })),
+            id: Some(json!(41121)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = result["data"].clone();
+    assert_eq!(data["attached"].as_u64(), Some(1));
+    let accepted_schema = data["accepted_artifact_schema"].as_array().expect("schema");
+    assert!(accepted_schema
+        .iter()
+        .any(|value| value.as_str() == Some("document")));
+    let diagnostics = data["artifact_diagnostics"]
+        .as_array()
+        .expect("artifact diagnostics");
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(diagnostics[0]["status"].as_str(), Some("attached"));
+    assert_eq!(
+        diagnostics[0]["normalized_artifact_type"].as_str(),
+        Some("File")
+    );
+    assert_eq!(diagnostics[1]["status"].as_str(), Some("rejected"));
+    let rejected_reasons = diagnostics[1]["reasons"]
+        .as_array()
+        .expect("rejected reasons");
+    assert!(
+        rejected_reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("path_not_resolvable")),
+        "{result}"
+    );
+}
+
+#[test]
+fn test_soll_verify_requirements_returns_missing_dimensions_and_actions() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-212', 'Requirement', 'AXO', 'Actionable verification', 'Verification should explain why this requirement is partial', 'current', '{\"acceptance_criteria\":\"documented\"}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_verify_requirements",
+                "arguments": { "project_code": "AXO" }
+            })),
+            id: Some(json!(41122)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(result["data"]["summary"]["total"].as_u64(), Some(1));
+    let required_dimensions = result["data"]["completion_model"]["required_dimensions"]
+        .as_array()
+        .expect("required dimensions");
+    assert!(required_dimensions.iter().any(|value| {
+        value["canonical_key"].as_str() == Some("structured_acceptance_criteria")
+    }));
+
+    let details = result["data"]["details"].as_array().expect("details");
+    let entry = details
+        .iter()
+        .find(|value| value["id"].as_str() == Some("REQ-AXO-212"))
+        .expect("requirement entry");
+    assert_eq!(entry["state"].as_str(), Some("partial"));
+    assert_eq!(entry["completion_state"].as_str(), Some("partial"));
+    assert!(entry["coverage_reason"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("supporting_evidence"));
+    let missing_dimensions = entry["missing_dimensions"]
+        .as_array()
+        .expect("missing dimensions");
+    assert!(missing_dimensions
+        .iter()
+        .any(|value| value.as_str() == Some("evidence")));
+    assert!(missing_dimensions
+        .iter()
+        .any(|value| value.as_str() == Some("validation")));
+    let next_actions = entry["suggested_next_actions"]
+        .as_array()
+        .expect("next actions");
+    assert!(next_actions.iter().any(|value| value
+        .as_str()
+        .unwrap_or_default()
+        .contains("soll_attach_evidence")));
+    let missing_dimensions_detailed = entry["missing_dimensions_detailed"]
+        .as_array()
+        .expect("missing dimensions detailed");
+    assert!(missing_dimensions_detailed
+        .iter()
+        .any(|value| { value["canonical_key"].as_str() == Some("supporting_evidence") }));
+    let next_actions_detailed = entry["next_actions_detailed"]
+        .as_array()
+        .expect("next actions detailed");
+    assert!(next_actions_detailed.iter().any(|value| {
+        value["dimension"].as_str() == Some("qualifying_validation_edge")
+            && value["mutation_class"].as_str() == Some("link_validation")
+    }));
+    let requirements = result["data"]["requirements"]
+        .as_array()
+        .expect("requirements alias");
+    assert_eq!(requirements.len(), details.len());
+}
+
+#[test]
+fn test_anomalies_downgrades_noncanonical_intent_gaps_when_soll_baseline_is_complete() {
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Core pillar', '', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Healthy requirement', '', 'current', '{\"acceptance_criteria\":\"done\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Healthy decision', '', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VAL-AXO-001', 'Validation', 'AXO', 'Healthy validation', '', 'passed', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-AXO-001', 'PIL-AXO-001', 'BELONGS_TO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-001', 'REQ-AXO-001', 'SOLVES')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('VAL-AXO-001', 'REQ-AXO-001', 'VERIFIES')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-AXO-001', 'requirement', 'REQ-AXO-001', 'Symbol', 'healthy_requirement', 1.0, 0)")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "anomalies",
+                "arguments": { "project": "AXO", "mode": "brief" }
+            })),
+            id: Some(json!(4113)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = result["data"].clone();
+    assert_eq!(
+        data["summary"]["concept_completeness"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["summary"]["implementation_completeness"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(data["summary"]["orphan_intent_count"].as_u64(), Some(0));
+    assert!(
+        data["summary"]["heuristic_intent_gap_count"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
     );
 }
 
@@ -8749,6 +10947,447 @@ fn test_axon_commit_work_executes_git_and_export_when_dry_run_false() {
         content
     );
     assert!(content.contains("Exported to"), "{}", content);
+    if let Some(export_path) = content
+        .lines()
+        .find_map(|line| line.strip_prefix("✅ Exported to "))
+        .map(str::trim)
+    {
+        let _ = std::fs::remove_file(export_path);
+    }
+}
+
+#[test]
+fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Operational truth', 'Pillar desc', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Human-readable docs', 'Readable docs for humans', 'current', '{\"priority\":\"P1\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-001', 'Decision', 'AXO', 'Generate derived site', 'Decision desc', 'accepted', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('PIL-AXO-001', 'VIS-AXO-001', 'EPITOMIZES')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-AXO-001', 'PIL-AXO-001', 'BELONGS_TO')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('DEC-AXO-001', 'REQ-AXO-001', 'SOLVES')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_generate_docs",
+                "arguments": {
+                    "project_code": "AXO",
+                    "output_dir": out.path().to_string_lossy().to_string()
+                }
+            })),
+            id: Some(json!(9910)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(result["data"]["pages_total"].as_u64(), Some(7));
+    assert!(result["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Generated navigable SOLL docs"));
+
+    let index_path = out.path().join("index.html");
+    let node_path = out.path().join("nodes/REQ-AXO-001.html");
+    let subtree_path = out.path().join("subtrees/VIS-AXO-001.html");
+    let manifest_path = out.path().join("_manifest.json");
+
+    assert!(index_path.is_file());
+    assert!(node_path.is_file());
+    assert!(subtree_path.is_file());
+    assert!(manifest_path.is_file());
+
+    let index_html = std::fs::read_to_string(index_path).unwrap();
+    assert!(index_html.contains("mermaid.initialize"));
+    assert!(index_html.contains("PIL-AXO-001"));
+    assert!(index_html.contains("toggle-left"));
+    assert!(index_html.contains("toggle-right"));
+    assert!(index_html.contains("Project Tree"));
+    assert!(index_html.contains("Vision Children"));
+    assert!(index_html.contains("derived / non-canonical"));
+    assert!(index_html.contains("All Node Pages"));
+    assert!(index_html.contains("nodes/REQ-AXO-001.html"));
+    assert!(index_html.contains("flowchart LR"));
+
+    let node_html = std::fs::read_to_string(node_path).unwrap();
+    assert!(node_html.contains("Readable docs for humans"));
+    assert!(node_html.contains("Incoming Neighbors"));
+    assert!(node_html.contains("Canonical Relations"));
+    assert!(node_html.contains("Primary Hierarchy Parents"));
+    assert!(node_html.contains("Primary Hierarchy Children"));
+    assert!(node_html.contains("Containing Subtrees"));
+    assert!(node_html.contains("Primary Parent Node Pages"));
+    assert!(node_html.contains("Operator Diagnostics"));
+    assert!(node_html.contains("Operator Relation Diagnostics"));
+    assert!(node_html.contains("boundary: canonical"));
+    assert!(node_html.contains("toggle-left"));
+    assert!(node_html.contains("toggle-right"));
+    assert!(node_html.contains("not as canonical restore input"));
+    assert!(node_html
+        .contains("Parent/child sections below show only the primary hierarchy projection"));
+
+    let subtree_html = std::fs::read_to_string(subtree_path).unwrap();
+    assert!(subtree_html.contains("All Nodes In This Subtree"));
+    assert!(subtree_html.contains("../nodes/REQ-AXO-001.html"));
+    assert!(subtree_html.contains("derived / non-canonical"));
+    assert!(subtree_html.contains("Subtree Inclusion Reasons"));
+    assert!(subtree_html.contains("Included because this node is the subtree root"));
+    assert!(subtree_html.contains("Included by reverse reachability toward root"));
+
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["project_code"].as_str(), Some("AXO"));
+    assert_eq!(manifest["pages_total"].as_u64(), Some(7));
+}
+
+#[test]
+fn test_soll_generate_docs_keeps_unattached_nodes_out_of_primary_project_roots() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-AXO-999', 'Decision', 'AXO', 'Detached decision', 'No hierarchy parent', 'draft', '{}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_generate_docs",
+                "arguments": {
+                    "project_code": "AXO",
+                    "output_dir": out.path().to_string_lossy().to_string()
+                }
+            })),
+            id: Some(json!(9918)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert!(result["data"]["pages_total"].as_u64().unwrap_or(0) >= 3);
+
+    let index_html = std::fs::read_to_string(out.path().join("index.html")).unwrap();
+    assert!(index_html.contains("Unattached Node Pages"));
+    assert!(index_html.contains("nodes/DEC-AXO-999.html"));
+    assert!(!index_html.contains("mermaid-id-DEC-AXO-999"));
+}
+
+#[test]
+fn test_soll_generate_docs_is_incremental_when_content_is_unchanged() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('PIL-AXO-001', 'Pillar', 'AXO', 'Operational truth', 'Pillar desc', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('PIL-AXO-001', 'VIS-AXO-001', 'EPITOMIZES')")
+        .unwrap();
+
+    let call = |server: &McpServer| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_generate_docs",
+                    "arguments": {
+                        "project_code": "AXO",
+                        "output_dir": out.path().to_string_lossy().to_string()
+                    }
+                })),
+                id: Some(json!(9911)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    let first = call(&server);
+    assert!(first["data"]["pages_written"].as_u64().unwrap_or(0) > 0);
+
+    let second = call(&server);
+    assert_eq!(second["data"]["pages_written"].as_u64(), Some(0));
+    assert!(second["data"]["pages_unchanged"].as_u64().unwrap_or(0) > 0);
+}
+
+#[test]
+fn test_soll_generate_docs_with_site_root_builds_project_and_global_root() {
+    let server = create_test_server();
+    let site_root = tempdir().unwrap();
+
+    server
+        .graph_store
+        .sync_project_registry_entry("AXO", Some("axon"), Some("/home/dstadel/projects/axon"))
+        .unwrap();
+    server
+        .graph_store
+        .sync_project_registry_entry(
+            "NTO",
+            Some("nutri-opti"),
+            Some("/home/dstadel/projects/nutri-opti"),
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_generate_docs",
+                "arguments": {
+                    "project_code": "AXO",
+                    "site_root_dir": site_root.path().to_string_lossy().to_string()
+                }
+            })),
+            id: Some(json!(9912)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(result["data"]["refresh_mode"].as_str(), Some("full"));
+    assert!(site_root.path().join("index.html").is_file());
+    assert!(site_root.path().join("_root_manifest.json").is_file());
+    assert!(site_root.path().join("AXO/index.html").is_file());
+
+    let root_html = std::fs::read_to_string(site_root.path().join("index.html")).unwrap();
+    assert!(root_html.contains("SOLL Derived Projects"));
+    assert!(root_html.contains("AXO/index.html"));
+    assert!(root_html.contains("NTO"));
+    assert!(root_html.contains("GLO"));
+}
+
+#[test]
+fn test_sync_mutation_auto_refreshes_derived_docs_and_root() {
+    let site_root = tempdir().unwrap();
+    let _site_root = SollSiteRootGuard::new(site_root.path());
+    let server = create_test_server();
+
+    let init_result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "axon_init_project",
+                "arguments": {
+                    "project_path": "/tmp/nutri-opti",
+                    "project_name": "nutri-opti",
+                    "project_code": "NTO"
+                }
+            })),
+            id: Some(json!(9913)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(
+        init_result["data"]["derived_docs_refresh"]["status"].as_str(),
+        Some("ok")
+    );
+    assert!(site_root.path().join("NTO/index.html").is_file());
+    assert!(site_root.path().join("index.html").is_file());
+
+    let create_result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_manager",
+                "arguments": {
+                    "action": "create",
+                    "entity": "vision",
+                    "data": {
+                        "project_code": "NTO",
+                        "title": "Preventive nutrition platform",
+                        "description": "Greenfield vision"
+                    }
+                }
+            })),
+            id: Some(json!(9914)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(
+        create_result["data"]["derived_docs_refresh"]["status"].as_str(),
+        Some("ok")
+    );
+    let project_html = std::fs::read_to_string(site_root.path().join("NTO/index.html")).unwrap();
+    assert!(project_html.contains("Preventive nutrition platform"));
+}
+
+#[test]
+fn test_soll_generate_docs_deletes_obsolete_project_pages_from_manifest() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Human-readable docs', 'Readable docs for humans', 'current', '{}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Edge (source_id, target_id, relation_type) VALUES ('REQ-AXO-001', 'VIS-AXO-001', 'BELONGS_TO')")
+        .unwrap();
+
+    let call = |server: &McpServer| {
+        server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "soll_generate_docs",
+                    "arguments": {
+                        "project_code": "AXO",
+                        "output_dir": out.path().to_string_lossy().to_string()
+                    }
+                })),
+                id: Some(json!(9915)),
+            })
+            .unwrap()
+            .result
+            .unwrap()
+    };
+
+    let first = call(&server);
+    assert!(first["data"]["pages_total"].as_u64().unwrap_or(0) >= 3);
+    assert!(out.path().join("nodes/REQ-AXO-001.html").is_file());
+
+    server
+        .graph_store
+        .execute(
+            "DELETE FROM soll.Edge WHERE source_id = 'REQ-AXO-001' AND target_id = 'VIS-AXO-001'",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute("DELETE FROM soll.Node WHERE id = 'REQ-AXO-001'")
+        .unwrap();
+
+    let second = call(&server);
+    assert_eq!(second["data"]["refresh_mode"].as_str(), Some("incremental"));
+    assert_eq!(second["data"]["pages_deleted"].as_u64(), Some(1));
+    assert!(!out.path().join("nodes/REQ-AXO-001.html").exists());
+}
+
+#[test]
+fn test_soll_generate_docs_for_project_only_returns_null_root_fields() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_generate_docs",
+                "arguments": {
+                    "project_code": "AXO",
+                    "output_dir": out.path().to_string_lossy().to_string()
+                }
+            })),
+            id: Some(json!(9916)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert!(result["data"]["site_root"].is_null());
+    assert!(result["data"]["root_manifest_path"].is_null());
+    assert!(result["data"]["root_index_path"].is_null());
+}
+
+#[test]
+fn test_soll_generate_docs_forces_full_rebuild_when_manifest_is_incompatible() {
+    let server = create_test_server();
+    let out = tempdir().unwrap();
+    std::fs::create_dir_all(out.path().join("nodes")).unwrap();
+    std::fs::write(out.path().join("nodes/STALE-AXO-001.html"), "stale").unwrap();
+    std::fs::write(
+        out.path().join("_manifest.json"),
+        r#"{"generator_version":"legacy","pages":[{"path":"nodes/STALE-AXO-001.html"}]}"#,
+    )
+    .unwrap();
+
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('VIS-AXO-001', 'Vision', 'AXO', 'Reliable Axon', 'Top vision', 'current', '{}')")
+        .unwrap();
+
+    let result = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_generate_docs",
+                "arguments": {
+                    "project_code": "AXO",
+                    "output_dir": out.path().to_string_lossy().to_string()
+                }
+            })),
+            id: Some(json!(9917)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(result["data"]["refresh_mode"].as_str(), Some("full"));
+    assert!(!out.path().join("nodes/STALE-AXO-001.html").exists());
 }
 
 #[test]

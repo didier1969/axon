@@ -1,5 +1,17 @@
+use crate::embedder::{
+    bootstrap_runtime_tuning_state, current_embedding_provider_diagnostics,
+    current_runtime_tuning_state, embedding_lane_config_from_env,
+};
+use crate::optimizer;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
+use crate::runtime_profile::{recommend_embedding_lane_sizing, RuntimeProfile};
+use crate::service_guard;
+use crate::vector_control::{
+    apply_semantic_policy_runtime_tuning, baseline_semantic_policy,
+    current_gpu_vector_lease_diagnostics, current_utility_first_scheduler_diagnostics,
+    current_vector_batch_controller_diagnostics, target_semantic_policy_with_graph,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -22,10 +34,874 @@ static WHY_CACHE: OnceLock<Mutex<FrameworkCache>> = OnceLock::new();
 const FRAMEWORK_CACHE_TTL_MS: i64 = 5_000;
 const CONCEPTION_CACHE_TTL_MS: i64 = 60_000;
 const STATUS_CACHE_TTL_MS: i64 = 180_000;
+const STATUS_FULL_CACHE_TTL_MS: i64 = 1_000;
 const WHY_CACHE_TTL_MS: i64 = 180_000;
 const ANOMALIES_CACHE_TTL_MS: i64 = 180_000;
 
 impl McpServer {
+    fn lane_parameter_snapshot(
+        seed: usize,
+        target: usize,
+        effective: usize,
+        clamp_reason: Option<&'static str>,
+        authority_state: &'static str,
+        target_source: &'static str,
+        effective_source: &'static str,
+    ) -> Value {
+        json!({
+            "seed": seed,
+            "target": target,
+            "effective": effective,
+            "clamp_visible": clamp_reason.is_some(),
+            "clamp_reason": clamp_reason,
+            "authority_state": authority_state,
+            "target_source": target_source,
+            "effective_source": effective_source
+        })
+    }
+
+    fn runtime_lane_authority_snapshot(
+        graph_queue_depth: usize,
+        file_backlog_depth: usize,
+    ) -> Value {
+        let profile = RuntimeProfile::detect();
+        let provider_requested =
+            std::env::var("AXON_EMBEDDING_PROVIDER").unwrap_or_else(|_| "cpu".to_string());
+        let mut lane_profile = profile.clone();
+        lane_profile.gpu_present =
+            profile.gpu_present && provider_requested.eq_ignore_ascii_case("cuda");
+        let seed = recommend_embedding_lane_sizing(&lane_profile);
+        let runtime_seed = bootstrap_runtime_tuning_state();
+        let target = current_runtime_tuning_state();
+        let effective = embedding_lane_config_from_env();
+        let batch_controller = current_vector_batch_controller_diagnostics(&effective);
+        let gpu_vector_lease = current_gpu_vector_lease_diagnostics();
+        let vector_runtime = service_guard::vector_runtime_metrics();
+        let cadence_seed = baseline_semantic_policy(file_backlog_depth);
+        let cadence_target = target_semantic_policy_with_graph(
+            file_backlog_depth,
+            graph_queue_depth,
+            service_guard::current_pressure(),
+        );
+        let cadence_effective = apply_semantic_policy_runtime_tuning(cadence_target);
+        let oversubscription_allowed = std::env::var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION")
+            .ok()
+            .map(|value| value.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let vector_workers_clamp_reason = if effective.vector_workers != target.vector_workers {
+            if provider_requested.eq_ignore_ascii_case("cuda")
+                && !oversubscription_allowed
+                && target.vector_workers > effective.vector_workers
+            {
+                Some("hard_safety_clamp:gpu_vector_workers_capped_without_oversubscription")
+            } else {
+                Some("clamp_visible:effective_vector_workers_diverge_from_target")
+            }
+        } else {
+            None
+        };
+
+        let graph_workers_clamp_reason = if effective.graph_workers != target.graph_workers {
+            if target.graph_workers > seed.graph_workers {
+                Some("startup_bound:graph_worker_pool_cannot_exceed_bootstrap")
+            } else if seed.graph_workers > 0 && effective.graph_workers == 0 {
+                Some("hard_safety_clamp:graph_embeddings_disabled")
+            } else {
+                Some("runtime_tuning:graph_worker_pool_admission_reduced")
+            }
+        } else {
+            None
+        };
+
+        let chunk_batch_clamp_reason = if effective.chunk_batch_size != target.chunk_batch_size {
+            Some("clamp_visible:effective_chunk_batch_size_diverges_from_target")
+        } else {
+            None
+        };
+
+        let file_batch_clamp_reason =
+            if effective.file_vectorization_batch_size != target.file_vectorization_batch_size {
+                Some("clamp_visible:effective_file_vectorization_batch_size_diverges_from_target")
+            } else {
+                None
+            };
+
+        json!({
+            "vector_workers": Self::lane_parameter_snapshot(
+                seed.vector_workers,
+                target.vector_workers,
+                effective.vector_workers,
+                vector_workers_clamp_reason,
+                "partially_unified",
+                "runtime_tuning_controller",
+                "embedding_lane_config",
+            ),
+            "graph_workers": Self::lane_parameter_snapshot(
+                seed.graph_workers,
+                target.graph_workers,
+                effective.graph_workers,
+                graph_workers_clamp_reason,
+                "partially_unified",
+                "runtime_tuning_controller",
+                "embedding_lane_config",
+            ),
+            "chunk_batch_size": Self::lane_parameter_snapshot(
+                seed.chunk_batch_size,
+                target.chunk_batch_size,
+                effective.chunk_batch_size,
+                chunk_batch_clamp_reason,
+                "partially_unified",
+                "runtime_tuning_controller",
+                "embedding_lane_config",
+            ),
+            "file_vectorization_batch_size": Self::lane_parameter_snapshot(
+                seed.file_vectorization_batch_size,
+                target.file_vectorization_batch_size,
+                effective.file_vectorization_batch_size,
+                file_batch_clamp_reason,
+                "partially_unified",
+                "runtime_tuning_controller",
+                "embedding_lane_config",
+            ),
+            "vector_ready_queue_depth": Self::lane_parameter_snapshot(
+                runtime_seed.vector_ready_queue_depth,
+                target.vector_ready_queue_depth,
+                vector_runtime.ready_queue_depth_current as usize,
+                None,
+                "partially_unified",
+                "runtime_tuning_controller",
+                "service_guard.current_ready_queue_depth",
+            ),
+            "vector_persist_queue_bound": Self::lane_parameter_snapshot(
+                runtime_seed.vector_persist_queue_bound,
+                target.vector_persist_queue_bound,
+                vector_runtime.persist_queue_depth_current as usize,
+                None,
+                "partially_unified",
+                "runtime_tuning_controller",
+                "service_guard.current_persist_queue_depth",
+            ),
+            "vector_max_inflight_persists": Self::lane_parameter_snapshot(
+                runtime_seed.vector_max_inflight_persists,
+                target.vector_max_inflight_persists,
+                vector_runtime.persist_claimed_current as usize,
+                None,
+                "partially_unified",
+                "runtime_tuning_controller",
+                "service_guard.current_persist_claims",
+            ),
+            "queue_persist_effective_semantics": {
+                "vector_ready_queue_depth": "observed_current_queue_depth_not_capacity",
+                "vector_persist_queue_bound": "observed_current_queue_depth_not_capacity",
+                "vector_max_inflight_persists": "observed_current_inflight_not_limit"
+            },
+            "semantic_cadence": {
+                "seed": {
+                    "profile": cadence_seed.profile,
+                    "pause": cadence_seed.pause,
+                    "sleep_ms": cadence_seed.sleep.as_millis() as u64,
+                    "idle_sleep_ms": cadence_seed.idle_sleep.as_millis() as u64,
+                },
+                "target": {
+                    "profile": cadence_target.profile,
+                    "pause": cadence_target.pause,
+                    "sleep_ms": cadence_target.sleep.as_millis() as u64,
+                    "idle_sleep_ms": cadence_target.idle_sleep.as_millis() as u64,
+                },
+                "effective": {
+                    "profile": cadence_effective.profile,
+                    "pause": cadence_effective.pause,
+                    "sleep_ms": cadence_effective.sleep.as_millis() as u64,
+                    "idle_sleep_ms": cadence_effective.idle_sleep.as_millis() as u64,
+                },
+                "clamp_visible": cadence_effective.sleep != cadence_target.sleep
+                    || cadence_effective.idle_sleep != cadence_target.idle_sleep,
+                "clamp_reason": if cadence_effective.sleep != cadence_target.sleep
+                    || cadence_effective.idle_sleep != cadence_target.idle_sleep
+                {
+                    json!("runtime_tuning_scale_pct")
+                } else {
+                    Value::Null
+                },
+                "authority_state": "partially_unified",
+                "target_source": "semantic_policy_controller",
+                "effective_source": "runtime_tuning_scaled_policy",
+                "controller_state": batch_controller.state.as_str(),
+                "controller_reason": batch_controller.reason,
+            },
+            "gpu_vector_lease": {
+                "exclusive_required": gpu_vector_lease.exclusive_required,
+                "path": gpu_vector_lease.path,
+                "owned_by_current_instance": gpu_vector_lease.owned_by_current_instance,
+                "owner_identity": gpu_vector_lease.owner_identity
+            }
+        })
+    }
+
+    fn env_interval_ms(key: &str, default: u64, min: u64) -> u64 {
+        std::env::var(key)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|value| *value >= min)
+            .unwrap_or(default)
+    }
+
+    fn quiescent_runtime_snapshot(
+        runtime_mode: &str,
+        semantic_backlog_responsible: bool,
+        graph_queue_depth: usize,
+        file_backlog_depth: usize,
+        semantic_profile: &'static str,
+        canonical_chunks_embedded_last_minute: u64,
+        canonical_files_embedded_last_minute: u64,
+    ) -> Value {
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let interactive_priority = service_guard::current_interactive_priority();
+        let interactive_requests = service_guard::interactive_requests_in_flight();
+        let pressure = service_guard::current_pressure();
+        let pressure_label = match pressure {
+            service_guard::ServicePressure::Healthy => "healthy",
+            service_guard::ServicePressure::Recovering => "recovering",
+            service_guard::ServicePressure::Degraded => "degraded",
+            service_guard::ServicePressure::Critical => "critical",
+        };
+        let vector_runtime = service_guard::vector_runtime_metrics();
+        let embedding_provider = current_embedding_provider_diagnostics();
+        let gpu_access_policy =
+            std::env::var("AXON_GPU_ACCESS_POLICY").unwrap_or_else(|_| "unknown".to_string());
+        let wake_summary = service_guard::runtime_wake_summary(
+            graph_queue_depth as u64,
+            file_backlog_depth as u64,
+        );
+        let utility_scheduler = current_utility_first_scheduler_diagnostics(
+            graph_queue_depth,
+            file_backlog_depth,
+            pressure,
+        );
+        let dominant_wake_source = [
+            ("background", wake_summary.wake_source_background_total),
+            (
+                "semantic_vector",
+                wake_summary.wake_source_semantic_vector_total,
+            ),
+            ("graph", wake_summary.wake_source_graph_total),
+        ]
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(label, _)| label)
+        .unwrap_or("background");
+        let dominant_wake_total = match dominant_wake_source {
+            "semantic_vector" => wake_summary.wake_source_semantic_vector_total,
+            "graph" => wake_summary.wake_source_graph_total,
+            _ => wake_summary.wake_source_background_total,
+        };
+        let total_wake_sources = wake_summary
+            .wake_source_background_total
+            .saturating_add(wake_summary.wake_source_semantic_vector_total)
+            .saturating_add(wake_summary.wake_source_graph_total);
+        let dominant_wake_share_pct = if total_wake_sources > 0 {
+            dominant_wake_total.saturating_mul(100) / total_wake_sources
+        } else {
+            0
+        };
+        let wake_noise_level = match wake_summary.wakeups_last_60s {
+            0..=2 => "low",
+            3..=10 => "moderate",
+            _ => "high",
+        };
+        let vector_worker_heartbeat_age_ms =
+            now_ms.saturating_sub(vector_runtime.vector_worker_heartbeat_at_ms);
+        let vector_lane_last_success_age_ms =
+            now_ms.saturating_sub(vector_runtime.vector_lane_last_success_at_ms);
+        let vector_lane_last_fault_age_ms =
+            now_ms.saturating_sub(vector_runtime.vector_lane_last_fault_at_ms);
+        let reader_refresh_interval_ms =
+            Self::env_interval_ms("AXON_READER_REFRESH_INTERVAL_MS", 5_000, 250);
+        let optimizer_loop_interval_ms =
+            Self::env_interval_ms("AXON_OPT_LOOP_INTERVAL_MS", 15_000, 1);
+        let runtime_trace_interval_ms =
+            Self::env_interval_ms("AXON_RUNTIME_TRACE_INTERVAL_MS", 5_000, 1_000);
+        let watcher_promoter_poll_interval_ms = 50_u64;
+
+        let (effective_graph_backlog_depth, effective_semantic_backlog_depth, backlog_scope) =
+            match runtime_mode {
+                "graph_only" => (graph_queue_depth, 0_usize, "graph_only"),
+                "read_only" | "mcp_only" => (0_usize, 0_usize, "runtime_processing_disabled"),
+                _ => (
+                    graph_queue_depth,
+                    if semantic_backlog_responsible {
+                        file_backlog_depth
+                    } else {
+                        0_usize
+                    },
+                    if semantic_backlog_responsible {
+                        "graph_and_semantic"
+                    } else {
+                        "graph_only_current_instance_responsibility"
+                    },
+                ),
+            };
+
+        let state = if interactive_requests > 0 {
+            "interactive_guarded"
+        } else if effective_graph_backlog_depth > 0 || effective_semantic_backlog_depth > 0 {
+            "active_backlog"
+        } else if vector_runtime.ready_queue_depth_current > 0
+            || vector_runtime.prepare_queue_depth_current > 0
+            || vector_runtime.persist_queue_depth_current > 0
+            || vector_runtime.active_claimed_current > 0
+        {
+            "draining_residual_work"
+        } else {
+            "quiescent_candidate"
+        };
+        let healthy_semantic_drain_candidate = state == "active_backlog"
+            && effective_semantic_backlog_depth > 0
+            && vector_runtime.vector_lane_state == service_guard::VectorLaneState::Healthy
+            && vector_worker_heartbeat_age_ms <= 5_000
+            && vector_lane_last_success_age_ms <= 15_000
+            && vector_runtime.active_claimed_current > 0;
+        let semantic_progress_measured =
+            canonical_files_embedded_last_minute > 0 || canonical_chunks_embedded_last_minute > 0;
+        let semantic_drain_health = if !semantic_backlog_responsible
+            || effective_semantic_backlog_depth == 0
+        {
+            if embedding_provider.provider_effective == "cuda" && file_backlog_depth > 0 {
+                "gpu_lease_not_owned"
+            } else {
+                "not_applicable"
+            }
+        } else if embedding_provider.provider_effective == "cpu" && gpu_access_policy == "avoid" {
+            "cpu_policy_limited"
+        } else if healthy_semantic_drain_candidate && semantic_progress_measured {
+            "healthy_draining"
+        } else if healthy_semantic_drain_candidate {
+            "warming_or_long_batch"
+        } else if utility_scheduler.semantic_underfeed
+            || (vector_runtime.active_claimed_current == 0
+                && vector_runtime.ready_queue_depth_current == 0
+                && vector_runtime.prepare_queue_depth_current == 0
+                && vector_runtime.persist_queue_depth_current == 0)
+        {
+            "underfed"
+        } else if vector_lane_last_success_age_ms > 30_000
+            && vector_worker_heartbeat_age_ms > 10_000
+        {
+            "stalled"
+        } else {
+            "draining_uncertain"
+        };
+        let semantic_drain_recommendation = match semantic_drain_health {
+            "healthy_draining" => "measure_backlog_burn_rate",
+            "gpu_lease_not_owned" => "qualify_on_gpu_owner_instance_or_release_lease",
+            "cpu_policy_limited" => "use_gpu_qualified_runtime_for_throughput_measurement",
+            "warming_or_long_batch" => "extend_burn_rate_probe_before_calling_stall",
+            "underfed" => "investigate_semantic_feed_path",
+            "stalled" => "investigate_semantic_lane_stall",
+            "draining_uncertain" => "observe_drain_progress_over_time",
+            _ => "not_applicable",
+        };
+        let estimated_semantic_backlog_drain_minutes =
+            if effective_semantic_backlog_depth > 0 && canonical_files_embedded_last_minute > 0 {
+                Some(
+                    ((effective_semantic_backlog_depth as f64)
+                        / (canonical_files_embedded_last_minute as f64))
+                        .ceil(),
+                )
+            } else {
+                None
+            };
+        let burn_rate_state = match semantic_drain_health {
+            "not_applicable" => "not_applicable",
+            "healthy_draining"
+                if canonical_files_embedded_last_minute > 0
+                    || canonical_chunks_embedded_last_minute > 0 =>
+            {
+                "measurable_progress"
+            }
+            "healthy_draining" => "warming_or_long_batch",
+            "underfed" => "not_progressing_underfed",
+            "stalled" => "not_progressing_stalled",
+            _ => "progress_uncertain",
+        };
+        let burn_rate_recommendation = match burn_rate_state {
+            "measurable_progress" => "track_burn_rate_until_backlog_turns_down",
+            "warming_or_long_batch" => "observe_one_more_measurement_window",
+            "not_progressing_underfed" => "repair_semantic_feed_before_idle_tuning",
+            "not_progressing_stalled" => "repair_semantic_lane_before_idle_tuning",
+            "progress_uncertain" => "observe_another_window_before_concluding",
+            _ => "not_applicable",
+        };
+        let healthy_semantic_drain_in_progress = semantic_drain_health == "healthy_draining";
+        let operator_focus = match (
+            dominant_wake_source,
+            wake_summary.dominant_background_wake_detail,
+            wake_summary.last_quiescent_exit_reason,
+            state,
+        ) {
+            _ if semantic_drain_health == "gpu_lease_not_owned" => {
+                "gpu_vector_lease_not_owned_by_current_instance"
+            }
+            _ if semantic_drain_health == "cpu_policy_limited" => {
+                "cpu_vector_lane_policy_limits_throughput"
+            }
+            _ if healthy_semantic_drain_in_progress => "healthy_semantic_drain_in_progress",
+            _ if semantic_drain_health == "warming_or_long_batch" => {
+                "semantic_drain_long_batch_probe_in_progress"
+            }
+            ("background", "federation_orchestrator", _, "active_backlog") => {
+                "project_discovery_is_active_under_backlog"
+            }
+            ("background", "ingress_promoter", _, _) => {
+                "ingress_promoter_dominates_background_wakes"
+            }
+            ("background", "autonomous_ingestor", _, _) => {
+                "autonomous_ingestor_dominates_background_wakes"
+            }
+            ("background", _, _, "quiescent_candidate") => "background_loops_still_dominate_idle",
+            ("semantic_vector", _, _, "quiescent_candidate") => {
+                "semantic_lane_still_wakes_while_idle"
+            }
+            ("graph", _, _, "quiescent_candidate") => "graph_lane_still_wakes_while_idle",
+            (_, _, "interactive_guarded", _) => "interactive_load_breaks_quiescence",
+            (_, _, "draining_residual_work", _) => "residual_work_prevents_full_quiescence",
+            (_, _, "active_backlog", _) => "backlog_prevents_quiescence",
+            _ => "quiescent_state_nominal",
+        };
+        let focus_recommendation = match operator_focus {
+            "gpu_vector_lease_not_owned_by_current_instance" => {
+                "qualify_on_gpu_owner_instance_or_release_lease"
+            }
+            "cpu_vector_lane_policy_limits_throughput" => {
+                "qualify_on_gpu_enabled_runtime_or_override_policy"
+            }
+            "healthy_semantic_drain_in_progress" => "measure_backlog_burn_rate_not_idle_tuning",
+            "semantic_drain_long_batch_probe_in_progress" => {
+                "extend_burn_rate_probe_before_calling_stall"
+            }
+            "project_discovery_is_active_under_backlog" => {
+                "measure_again_after_registry_stabilizes"
+            }
+            "ingress_promoter_dominates_background_wakes" => "tighten_ingress_promoter_first",
+            "autonomous_ingestor_dominates_background_wakes" => "tighten_autonomous_ingestor_first",
+            "background_loops_still_dominate_idle" => "tighten_background_pollers_first",
+            "semantic_lane_still_wakes_while_idle" => "tighten_semantic_lane_idle_first",
+            "graph_lane_still_wakes_while_idle" => "tighten_graph_lane_idle_first",
+            "interactive_load_breaks_quiescence" => "measure_under_lower_interactive_load",
+            "residual_work_prevents_full_quiescence" => "drain_residual_queues_before_idle_tuning",
+            "backlog_prevents_quiescence" => "measure_again_after_backlog_drain",
+            _ => "no_immediate_quiescent_hotspot_detected",
+        };
+        let confidence = if total_wake_sources < 3 {
+            "low"
+        } else if dominant_wake_share_pct >= 70 {
+            "high"
+        } else if dominant_wake_share_pct >= 50 {
+            "medium"
+        } else {
+            "low"
+        };
+        let measurement_readiness = match (state, confidence, wake_noise_level) {
+            ("quiescent_candidate", "high", _) => "actionable",
+            ("quiescent_candidate", "medium", "low" | "moderate") => "actionable_with_caution",
+            ("quiescent_candidate", _, "high") => "observe_longer_before_tuning",
+            ("active_backlog", _, _) => "blocked_by_backlog",
+            ("draining_residual_work", _, _) => "blocked_by_residual_work",
+            ("interactive_guarded", _, _) => "blocked_by_interactive_load",
+            _ => "observe_longer_before_tuning",
+        };
+        let measurement_readiness = if operator_focus == "project_discovery_is_active_under_backlog"
+        {
+            "blocked_by_project_discovery"
+        } else if operator_focus == "gpu_vector_lease_not_owned_by_current_instance" {
+            "blocked_by_gpu_vector_lease"
+        } else if operator_focus == "cpu_vector_lane_policy_limits_throughput" {
+            "blocked_by_cpu_vector_policy"
+        } else if operator_focus == "semantic_drain_long_batch_probe_in_progress" {
+            "blocked_by_long_batch_probe"
+        } else if operator_focus == "healthy_semantic_drain_in_progress" {
+            "blocked_by_healthy_semantic_drain"
+        } else {
+            measurement_readiness
+        };
+        let recommended_next_measurement = match measurement_readiness {
+            "actionable" => "tune_dominant_wake_source_now",
+            "actionable_with_caution" => "tune_gently_and_remeasure",
+            "blocked_by_gpu_vector_lease" => "qualify_on_gpu_owner_instance",
+            "blocked_by_cpu_vector_policy" => "qualify_on_gpu_enabled_runtime",
+            "blocked_by_healthy_semantic_drain" => "measure_semantic_backlog_burn_rate",
+            "blocked_by_long_batch_probe" => "extend_semantic_burn_rate_probe",
+            "blocked_by_project_discovery" => "rerun_after_registry_stabilizes",
+            "blocked_by_backlog" => "rerun_after_backlog_drain",
+            "blocked_by_residual_work" => "rerun_after_residual_drain",
+            "blocked_by_interactive_load" => "rerun_under_lower_interactive_load",
+            _ => "extend_observation_window",
+        };
+        let qualification_verdict = match (state, confidence, wake_noise_level) {
+            ("quiescent_candidate", "high", "low" | "moderate") => "pass",
+            ("quiescent_candidate", "medium", "low" | "moderate") => "watch",
+            ("quiescent_candidate", _, "high") => "watch",
+            ("active_backlog", _, _) => "blocked",
+            ("draining_residual_work", _, _) => "blocked",
+            ("interactive_guarded", _, _) => "blocked",
+            _ => "watch",
+        };
+        let qualification_reason = match qualification_verdict {
+            "pass" => "quiescent_state_is_stable_enough_to_act",
+            "blocked" => measurement_readiness,
+            _ => "signal_exists_but_is_not_yet_strong_enough",
+        };
+        let mut blocking_factors = Vec::new();
+        if operator_focus == "healthy_semantic_drain_in_progress" {
+            blocking_factors.push("healthy_semantic_drain_active");
+        }
+        if operator_focus == "gpu_vector_lease_not_owned_by_current_instance" {
+            blocking_factors.push("gpu_vector_lease_not_owned");
+        }
+        if operator_focus == "cpu_vector_lane_policy_limits_throughput" {
+            blocking_factors.push("cpu_vector_policy_active");
+        }
+        if operator_focus == "semantic_drain_long_batch_probe_in_progress" {
+            blocking_factors.push("long_batch_probe_active");
+        }
+        if operator_focus == "project_discovery_is_active_under_backlog" {
+            blocking_factors.push("project_discovery_active");
+        }
+        if state == "active_backlog" {
+            blocking_factors.push("backlog_active");
+        }
+        if state == "draining_residual_work" {
+            blocking_factors.push("residual_work_active");
+        }
+        if state == "interactive_guarded" {
+            blocking_factors.push("interactive_load_active");
+        }
+        if confidence == "low" {
+            blocking_factors.push("low_confidence_signal");
+        }
+        if wake_noise_level == "high" {
+            blocking_factors.push("high_wake_noise");
+        }
+        let actionable_now = matches!(
+            measurement_readiness,
+            "actionable" | "actionable_with_caution"
+        );
+
+        json!({
+            "state": state,
+            "authority_state": "transitional",
+            "wake_contract_state": "fragmented",
+            "wake_observability_state": "partial",
+            "diagnosis": {
+                "operator_focus": operator_focus,
+                "focus_recommendation": focus_recommendation,
+                "dominant_background_wake_detail": wake_summary.dominant_background_wake_detail,
+                "confidence": confidence,
+                "wake_noise_level": wake_noise_level,
+                "dominant_wake_share_pct": dominant_wake_share_pct,
+                "measurement_readiness": measurement_readiness,
+                "recommended_next_measurement": recommended_next_measurement,
+                "qualification_verdict": qualification_verdict,
+                "qualification_reason": qualification_reason,
+                "actionable_now": actionable_now,
+                "blocking_factors": blocking_factors
+            },
+            "interactive_priority": interactive_priority.as_str(),
+            "interactive_requests_in_flight": interactive_requests,
+            "service_pressure": pressure_label,
+            "backlog_scope": backlog_scope,
+            "semantic_backlog_responsible": semantic_backlog_responsible,
+            "graph_backlog_depth": graph_queue_depth,
+            "semantic_backlog_depth": file_backlog_depth,
+            "effective_graph_backlog_depth": effective_graph_backlog_depth,
+            "effective_semantic_backlog_depth": effective_semantic_backlog_depth,
+            "semantic_policy_profile": semantic_profile,
+            "backlog_drain": {
+                "semantic_health": semantic_drain_health,
+                "recommendation": semantic_drain_recommendation,
+                "utility_scheduler_state": utility_scheduler.state.as_str(),
+                "utility_scheduler_reason": utility_scheduler.reason,
+                "semantic_underfeed": utility_scheduler.semantic_underfeed,
+                "ready_reserve_target": utility_scheduler.ready_reserve_target,
+                "provider_requested": embedding_provider.provider_requested,
+                "provider_effective": embedding_provider.provider_effective,
+                "gpu_access_policy": gpu_access_policy,
+                "vector_lane_state": vector_runtime.vector_lane_state.as_str(),
+                "vector_worker_heartbeat_age_ms": vector_worker_heartbeat_age_ms,
+                "vector_lane_last_success_age_ms": vector_lane_last_success_age_ms,
+                "active_claimed_current": vector_runtime.active_claimed_current,
+                "prepare_queue_depth_current": vector_runtime.prepare_queue_depth_current,
+                "ready_queue_depth_current": vector_runtime.ready_queue_depth_current,
+                "persist_queue_depth_current": vector_runtime.persist_queue_depth_current,
+                "files_completed_total": vector_runtime.files_completed_total,
+                "chunks_embedded_total": vector_runtime.chunks_embedded_total,
+                "burn_rate": {
+                    "measurement_window_sec": 60,
+                    "state": burn_rate_state,
+                    "recommendation": burn_rate_recommendation,
+                    "files_vector_ready_last_minute": canonical_files_embedded_last_minute,
+                    "chunks_embedded_last_minute": canonical_chunks_embedded_last_minute,
+                    "effective_semantic_backlog_depth": effective_semantic_backlog_depth,
+                    "estimated_semantic_backlog_drain_minutes": estimated_semantic_backlog_drain_minutes
+                }
+            },
+            "loop_intervals_ms": {
+                "reader_refresh": reader_refresh_interval_ms,
+                "optimizer_loop": optimizer_loop_interval_ms,
+                "runtime_trace": runtime_trace_interval_ms,
+                "ingress_promoter_poll": watcher_promoter_poll_interval_ms
+            },
+            "wake_activity": {
+                "wakeups_last_60s": wake_summary.wakeups_last_60s,
+                "last_wakeup_at_ms": wake_summary.last_wakeup_at_ms,
+                "quiescent_entered_at_ms": wake_summary.quiescent_entered_at_ms,
+                "last_quiescent_exited_at_ms": wake_summary.last_quiescent_exited_at_ms,
+                "quiescent_dwell_ms_current": wake_summary.quiescent_dwell_ms_current,
+                "resume_latency_samples": wake_summary.resume_latency_samples,
+                "resume_latency_p50_ms": wake_summary.resume_latency_p50_ms,
+                "resume_latency_p95_ms": wake_summary.resume_latency_p95_ms,
+                "resume_latency_max_ms": wake_summary.resume_latency_max_ms,
+                "useful_resume_latency_samples": wake_summary.useful_resume_latency_samples,
+                "useful_resume_latency_p50_ms": wake_summary.useful_resume_latency_p50_ms,
+                "useful_resume_latency_p95_ms": wake_summary.useful_resume_latency_p95_ms,
+                "useful_resume_latency_max_ms": wake_summary.useful_resume_latency_max_ms,
+                "last_useful_resume_at_ms": wake_summary.last_useful_resume_at_ms,
+                "last_quiescent_exit_reason": wake_summary.last_quiescent_exit_reason,
+                "exit_due_to_active_backlog_total": wake_summary.exit_due_to_active_backlog_total,
+                "exit_due_to_draining_residual_total": wake_summary.exit_due_to_draining_residual_total,
+                "exit_due_to_interactive_guarded_total": wake_summary.exit_due_to_interactive_guarded_total,
+                "last_wake_source": wake_summary.last_wake_source,
+                "dominant_wake_source": dominant_wake_source,
+                "last_background_wake_detail": wake_summary.last_background_wake_detail,
+                "dominant_background_wake_detail": wake_summary.dominant_background_wake_detail,
+                "wake_source_background_total": wake_summary.wake_source_background_total,
+                "wake_source_semantic_vector_total": wake_summary.wake_source_semantic_vector_total,
+                "wake_source_graph_total": wake_summary.wake_source_graph_total,
+                "background_wake_memory_reclaimer_total": wake_summary.background_wake_memory_reclaimer_total,
+                "background_wake_shadow_optimizer_total": wake_summary.background_wake_shadow_optimizer_total,
+                "background_wake_runtime_trace_total": wake_summary.background_wake_runtime_trace_total,
+                "background_wake_reader_refresh_total": wake_summary.background_wake_reader_refresh_total,
+                "background_wake_autonomous_ingestor_total": wake_summary.background_wake_autonomous_ingestor_total,
+                "background_wake_ingress_promoter_total": wake_summary.background_wake_ingress_promoter_total,
+                "background_wake_federation_orchestrator_total": wake_summary.background_wake_federation_orchestrator_total
+            },
+            "lane_liveness": {
+                "vector_worker_heartbeat_at_ms": vector_runtime.vector_worker_heartbeat_at_ms,
+                "vector_worker_heartbeat_age_ms": vector_worker_heartbeat_age_ms,
+                "vector_lane_state": vector_runtime.vector_lane_state.as_str(),
+                "vector_lane_last_success_at_ms": vector_runtime.vector_lane_last_success_at_ms,
+                "vector_lane_last_success_age_ms": vector_lane_last_success_age_ms,
+                "vector_lane_last_fault_at_ms": vector_runtime.vector_lane_last_fault_at_ms,
+                "vector_lane_last_fault_age_ms": vector_lane_last_fault_age_ms
+            },
+            "observed_residual_work": {
+                "prepare_queue_depth_current": vector_runtime.prepare_queue_depth_current,
+                "ready_queue_depth_current": vector_runtime.ready_queue_depth_current,
+                "persist_queue_depth_current": vector_runtime.persist_queue_depth_current,
+                "active_claimed_current": vector_runtime.active_claimed_current
+            }
+        })
+    }
+
+    fn runtime_limiting_factors_snapshot(
+        runtime_mode: &str,
+        semantic_backlog_responsible: bool,
+        graph_queue_depth: usize,
+        file_backlog_depth: usize,
+        runtime_signals: &optimizer::RuntimeSignalsWindow,
+    ) -> Value {
+        let host = optimizer::collect_host_snapshot();
+        let policy = optimizer::collect_operator_policy_snapshot(&host);
+        let effective = embedding_lane_config_from_env();
+        let runtime_target = current_runtime_tuning_state();
+        let batch_controller = current_vector_batch_controller_diagnostics(&effective);
+        let utility_scheduler = current_utility_first_scheduler_diagnostics(
+            graph_queue_depth,
+            file_backlog_depth,
+            service_guard::current_pressure(),
+        );
+        let embedding_provider = current_embedding_provider_diagnostics();
+        let gpu_access_policy =
+            std::env::var("AXON_GPU_ACCESS_POLICY").unwrap_or_else(|_| "unknown".to_string());
+        let gpu_vector_lease = current_gpu_vector_lease_diagnostics();
+        let avg_chunk_density_ratio = if batch_controller.target_embed_batch_chunks > 0 {
+            (batch_controller.avg_chunks_per_embed_call
+                / batch_controller.target_embed_batch_chunks as f64)
+                .clamp(0.0, 4.0)
+        } else {
+            0.0
+        };
+        let ready_buffer_thin = runtime_signals.ready_queue_depth_current
+            < utility_scheduler.ready_reserve_target as u64;
+        let prepare_pipeline_shallow = runtime_signals.prepare_inflight_current
+            <= u64::from(runtime_signals.vector_workers_active_current > 0)
+            && runtime_signals.prepare_claimed_current
+                <= batch_controller.target_files_per_cycle as u64;
+        let ram_pressure = runtime_signals.ram_available_ratio > 0.0
+            && runtime_signals.ram_available_ratio < policy.min_ram_available_ratio;
+        let vram_pressure =
+            policy.max_vram_used_mb > 0 && runtime_signals.vram_used_mb >= policy.max_vram_used_mb;
+        let persist_congested = runtime_signals.persist_queue_depth_current
+            >= runtime_target.vector_persist_queue_bound as u64
+            || runtime_signals.persist_claimed_current
+                >= runtime_target.vector_max_inflight_persists as u64;
+        let gpu_effective = embedding_provider
+            .provider_effective
+            .eq_ignore_ascii_case("cuda");
+        let gpu_compute_bound = gpu_effective
+            && file_backlog_depth > 0
+            && runtime_signals.gpu_utilization_ratio >= 0.80
+            && !vram_pressure;
+        let cpu_prepare_underfeed = gpu_effective
+            && file_backlog_depth > 0
+            && runtime_signals.gpu_utilization_ratio <= 0.45
+            && !vram_pressure
+            && runtime_signals.cpu_usage_ratio < policy.max_cpu_ratio * 0.75
+            && runtime_signals.ram_available_ratio > policy.min_ram_available_ratio
+            && (ready_buffer_thin || prepare_pipeline_shallow);
+        let batch_density_collapse = gpu_effective
+            && file_backlog_depth > 0
+            && batch_controller.window_embed_calls > 0
+            && avg_chunk_density_ratio < 0.60;
+
+        let mut secondary = Vec::new();
+        let (primary, reason, actionable) = if runtime_signals.interactive_requests_in_flight > 0 {
+            (
+                "interactive_guarded",
+                "interactive traffic currently suppresses aggressive backlog tuning",
+                false,
+            )
+        } else if ram_pressure {
+            (
+                "ram_bound",
+                "available RAM is below the operator policy floor",
+                true,
+            )
+        } else if vram_pressure {
+            (
+                "vram_bound",
+                "VRAM usage is at or above the operator safety budget",
+                true,
+            )
+        } else if persist_congested {
+            (
+                "persist_congested",
+                "persist queue depth or inflight persists reached the current bound",
+                true,
+            )
+        } else if semantic_backlog_responsible
+            && !gpu_effective
+            && gpu_access_policy.eq_ignore_ascii_case("avoid")
+        {
+            (
+                "cpu_vector_policy_limited",
+                "the current runtime policy keeps semantic vectorization on CPU",
+                true,
+            )
+        } else if semantic_backlog_responsible
+            && !gpu_effective
+            && gpu_vector_lease.exclusive_required
+            && !gpu_vector_lease.owned_by_current_instance
+        {
+            (
+                "gpu_scaling_blocked",
+                "the current instance does not own the exclusive GPU vector lease",
+                true,
+            )
+        } else if batch_density_collapse {
+            (
+                "batch_density_collapse",
+                "GPU batches are materially thinner than the controller target",
+                true,
+            )
+        } else if cpu_prepare_underfeed {
+            (
+                "cpu_prepare_underfeed",
+                "GPU demand is higher than the current CPU-side prepare and ready pipeline feed",
+                true,
+            )
+        } else if gpu_compute_bound {
+            (
+                "gpu_compute_bound",
+                "GPU utilization is already high while backlog remains active",
+                false,
+            )
+        } else if file_backlog_depth == 0 && graph_queue_depth == 0 {
+            (
+                "not_currently_limited",
+                "no active graph or semantic backlog is currently competing for throughput",
+                false,
+            )
+        } else {
+            (
+                "not_currently_limited",
+                "no single hard limiter is currently dominant above the observation threshold",
+                false,
+            )
+        };
+
+        if ram_pressure && primary != "ram_bound" {
+            secondary.push("ram_bound");
+        }
+        if vram_pressure && primary != "vram_bound" {
+            secondary.push("vram_bound");
+        }
+        if persist_congested && primary != "persist_congested" {
+            secondary.push("persist_congested");
+        }
+        if batch_density_collapse && primary != "batch_density_collapse" {
+            secondary.push("batch_density_collapse");
+        }
+        if cpu_prepare_underfeed && primary != "cpu_prepare_underfeed" {
+            secondary.push("cpu_prepare_underfeed");
+        }
+        if gpu_compute_bound && primary != "gpu_compute_bound" {
+            secondary.push("gpu_compute_bound");
+        }
+
+        json!({
+            "primary": primary,
+            "secondary": secondary,
+            "actionable": actionable,
+            "reason": reason,
+            "controller_reason": batch_controller.reason,
+            "scheduler_reason": utility_scheduler.reason,
+            "runtime_mode": runtime_mode,
+            "signals": {
+                "cpu_usage_ratio": runtime_signals.cpu_usage_ratio,
+                "ram_available_ratio": runtime_signals.ram_available_ratio,
+                "gpu_utilization_ratio": runtime_signals.gpu_utilization_ratio,
+                "vram_used_mb": runtime_signals.vram_used_mb,
+                "vram_total_mb": host.vram_total_mb,
+                "ready_queue_depth_current": runtime_signals.ready_queue_depth_current,
+                "prepare_inflight_current": runtime_signals.prepare_inflight_current,
+                "prepare_claimed_current": runtime_signals.prepare_claimed_current,
+                "persist_queue_depth_current": runtime_signals.persist_queue_depth_current,
+                "avg_chunks_per_embed_call": batch_controller.avg_chunks_per_embed_call,
+                "target_embed_batch_chunks": batch_controller.target_embed_batch_chunks,
+                "target_files_per_cycle": batch_controller.target_files_per_cycle,
+                "ready_reserve_target": utility_scheduler.ready_reserve_target,
+                "semantic_backlog_depth": file_backlog_depth,
+                "graph_backlog_depth": graph_queue_depth
+            },
+            "thresholds": {
+                "max_cpu_ratio": policy.max_cpu_ratio,
+                "min_ram_available_ratio": policy.min_ram_available_ratio,
+                "max_vram_used_mb": policy.max_vram_used_mb,
+                "density_collapse_ratio": 0.60,
+                "gpu_underutilized_ratio": 0.45
+            },
+            "policy": {
+                "gpu_access_policy": gpu_access_policy,
+                "provider_requested": embedding_provider.provider_requested,
+                "provider_effective": embedding_provider.provider_effective,
+                "gpu_lease_owned_by_current_instance": gpu_vector_lease.owned_by_current_instance,
+                "semantic_backlog_responsible": semantic_backlog_responsible
+            }
+        })
+    }
+
     fn anomalies_cache() -> &'static Mutex<FrameworkCache> {
         ANOMALIES_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
     }
@@ -40,6 +916,103 @@ impl McpServer {
 
     fn why_cache() -> &'static Mutex<FrameworkCache> {
         WHY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(crate) fn axon_mcp_surface_diagnostics(&self, _args: &Value) -> Option<Value> {
+        let public_tools = tools_catalog(false)
+            .get("tools")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let public_tool_names = public_tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let async_allowlisted_tools = McpServer::ASYNC_JOB_TOOL_NAMES
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let monitored_sync_mutation_tools = McpServer::MONITORED_SYNC_MUTATION_TOOLS
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let public_host = std::env::var("AXON_PUBLIC_HOST").unwrap_or_default();
+        let public_host_source =
+            std::env::var("AXON_PUBLIC_HOST_SOURCE").unwrap_or_else(|_| "unresolved".to_string());
+        let advertised_mcp_url = std::env::var("AXON_MCP_PUBLIC_URL").unwrap_or_default();
+        let advertised_sql_url = std::env::var("AXON_SQL_PUBLIC_URL").unwrap_or_default();
+        let advertised_dashboard_url =
+            std::env::var("AXON_DASHBOARD_PUBLIC_URL").unwrap_or_default();
+        let advertised_available =
+            std::env::var("AXON_PUBLIC_ENDPOINTS_AVAILABLE").unwrap_or_default() == "1"
+                && !advertised_mcp_url.is_empty();
+
+        Some(json!({
+            "content": [{
+                "type": "text",
+                "text": "Surface MCP diagnostics assembled. Server truth is authoritative for catalog and dispatch. Client session freshness is explicit below; refresh the client session when a freshly advertised tool is missing locally."
+            }],
+            "data": {
+                "server_truth": {
+                    "public_tool_count": public_tool_names.len(),
+                    "critical_tools": [
+                        "status",
+                        "job_status",
+                        "project_registry_lookup",
+                        "axon_init_project",
+                        "soll_apply_plan",
+                        "soll_commit_revision"
+                    ],
+                    "public_tools": public_tool_names
+                },
+                "async_policy": {
+                    "mode": "allowlist",
+                    "sync_by_default": true,
+                    "latency_target_p95_ms": 200,
+                    "allowlisted_tools": async_allowlisted_tools,
+                    "monitored_sync_mutation_tools": monitored_sync_mutation_tools,
+                    "semantic_async_triggers": [
+                        "batch",
+                        "restore_import",
+                        "queue_pipeline",
+                        "vectorization_indexation",
+                        "deep_analytics"
+                    ]
+                },
+                "async_contract": {
+                    "canonical_follow_up_tool": "job_status",
+                    "acceptance_fields": ["job_id", "known_ids", "next_action", "result_contract", "polling_guidance", "recovery_hint"],
+                    "preferred_identity_tools": ["project_registry_lookup", "axon_init_project"]
+                },
+                "advertised_endpoints": {
+                    "available": advertised_available,
+                    "public_host": public_host,
+                    "public_host_source": public_host_source,
+                    "mcp_url": advertised_mcp_url,
+                    "sql_url": advertised_sql_url,
+                    "dashboard_url": advertised_dashboard_url
+                },
+                "client_binding_notes": {
+                    "stale_client_binding_possible": true,
+                    "session_freshness_status": "unknown_outside_server",
+                    "operator_action": "If a freshly advertised public tool is not callable in the current client session, refresh or restart the client session and compare again.",
+                    "canonical_refresh_instruction": "Refresh or reconnect the MCP client session, then compare its visible tool surface with `mcp_surface_diagnostics.server_truth.public_tools`.",
+                    "safe_to_rely_on_now": [
+                        "server truth for catalog and dispatch",
+                        "advertised_endpoints for isolated clients",
+                        "existing tools already visible in the active session"
+                    ],
+                    "may_require_client_refresh": [
+                        "newly added public tools",
+                        "freshly promoted endpoint changes",
+                        "session-local tool bindings cached by the client"
+                    ],
+                    "guarantee_boundary": "The server guarantees catalog truth, dispatch truth, and advertised endpoint truth. Client session bindings are outside direct server control.",
+                    "external_endpoint_rule": "Do not use instance_identity.*_url as an external endpoint. Isolated clients must prefer advertised_endpoints.* when available."
+                }
+            }
+        }))
     }
 
     #[cfg(not(test))]
@@ -91,6 +1064,26 @@ impl McpServer {
 
     fn structural_history_path(project_code: &str) -> PathBuf {
         Self::structural_history_dir().join(format!("{project_code}.jsonl"))
+    }
+
+    fn compact_runtime_path(path: String) -> String {
+        let current_dir = std::env::current_dir().ok();
+        let current_dir = current_dir.as_ref().map(|dir| dir.as_path());
+        let as_path = PathBuf::from(&path);
+        if let Some(root) = current_dir {
+            if let Ok(stripped) = as_path.strip_prefix(root) {
+                let display = stripped.display().to_string();
+                return if display.is_empty() {
+                    ".".to_string()
+                } else {
+                    format!("./{}", display)
+                };
+            }
+        }
+        if let Some(name) = as_path.file_name().and_then(|value| value.to_str()) {
+            return format!("<{}>", name);
+        }
+        path
     }
 
     fn load_structural_snapshots(project_code: &str) -> Vec<Value> {
@@ -455,6 +1448,193 @@ impl McpServer {
             "low"
         };
         (safety, reasoning, guardrails, confidence)
+    }
+
+    fn change_safety_operator_guidance(
+        change_safety: &str,
+        coverage_signals: &Value,
+        traceability_signals: &Value,
+        validation_signals: &Value,
+    ) -> Value {
+        let tested = coverage_signals
+            .get("tested")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let traceability_links = traceability_signals
+            .get("traceability_links")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let validation_nodes = validation_signals
+            .get("validation_nodes")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let verifies_edges = validation_signals
+            .get("verifies_edges")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+
+        let mut blocking_factors = Vec::<Value>::new();
+        if !tested {
+            blocking_factors.push(json!({
+                "factor": "missing_direct_test_coverage",
+                "severity": "high",
+                "recommended_action": "add or refresh direct tests before mutation"
+            }));
+        }
+        if traceability_links == 0 {
+            blocking_factors.push(json!({
+                "factor": "missing_traceability_links",
+                "severity": "high",
+                "recommended_action": "link the target to canonical SOLL intent or evidence before mutation"
+            }));
+        }
+        if validation_nodes == 0 && verifies_edges == 0 {
+            blocking_factors.push(json!({
+                "factor": "missing_validation_proof",
+                "severity": "medium",
+                "recommended_action": "create or attach validation proof before high-risk mutation"
+            }));
+        }
+
+        let mutation_class_recommendation = match change_safety {
+            "safe" => "safe_for_direct_mutation",
+            "caution" if traceability_links > 0 => "safe_for_guarded_mutation",
+            "caution" => "prefer_small_guarded_mutation",
+            _ => "defer_or_prepare_evidence_first",
+        };
+        let recommended_next_step = match change_safety {
+            "safe" => "proceed_with_mutation_after_impact_check",
+            "caution" if !tested => "add_targeted_tests_then_reassess",
+            "caution" if traceability_links == 0 => "link_traceability_then_reassess",
+            "caution" => "use_small_guarded_mutation_with_explicit_validation_plan",
+            _ => "stop_and_prepare_traceability_tests_and_validation_first",
+        };
+        let remediation_actions = blocking_factors
+            .iter()
+            .filter_map(|factor| {
+                factor
+                    .get("recommended_action")
+                    .and_then(|value| value.as_str())
+                    .map(|value| Value::from(value.to_string()))
+            })
+            .collect::<Vec<_>>();
+
+        json!({
+            "mutation_class_recommendation": mutation_class_recommendation,
+            "recommended_next_step": recommended_next_step,
+            "actionable_now": change_safety == "safe",
+            "blocking_factors": blocking_factors,
+            "remediation_actions": remediation_actions
+        })
+    }
+
+    fn project_status_operator_guidance(
+        degraded_notes: &[String],
+        snapshot_storage: &Value,
+        vision: &Value,
+    ) -> Value {
+        let mut blocking_factors = Vec::<Value>::new();
+
+        for note in degraded_notes {
+            blocking_factors.push(json!({
+                "factor": "runtime_degraded_note",
+                "severity": "high",
+                "detail": note,
+                "recommended_action": "inspect `status` and clear degraded runtime conditions before relying on project-wide conclusions"
+            }));
+        }
+
+        if snapshot_storage
+            .get("persisted")
+            .and_then(|value| value.as_bool())
+            == Some(false)
+        {
+            blocking_factors.push(json!({
+                "factor": "snapshot_persistence_failed",
+                "severity": "medium",
+                "recommended_action": "repair structural snapshot persistence before depending on historical delta tracking"
+            }));
+        }
+
+        if vision
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unavailable")
+            == "unavailable"
+        {
+            blocking_factors.push(json!({
+                "factor": "vision_unavailable",
+                "severity": "medium",
+                "recommended_action": "refresh SOLL context so project steering is anchored on a canonical vision"
+            }));
+        }
+
+        blocking_factors.push(json!({
+            "factor": "anomalies_decoupled",
+            "severity": "low",
+            "recommended_action": "run `anomalies` explicitly when you need the full structural findings payload"
+        }));
+
+        let remediation_actions = blocking_factors
+            .iter()
+            .filter_map(|factor| {
+                factor
+                    .get("recommended_action")
+                    .and_then(|value| value.as_str())
+                    .map(|value| Value::from(value.to_string()))
+            })
+            .collect::<Vec<_>>();
+
+        let recommended_next_step = if !degraded_notes.is_empty() {
+            "inspect_runtime_status_then_refresh_project_status"
+        } else if snapshot_storage
+            .get("persisted")
+            .and_then(|value| value.as_bool())
+            == Some(false)
+        {
+            "repair_snapshot_storage_then_refresh_project_status"
+        } else if vision
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unavailable")
+            == "unavailable"
+        {
+            "refresh_soll_context_then_reassess_project_status"
+        } else {
+            "run_anomalies_explicitly_then_follow_with_why_or_path"
+        };
+
+        let next_action = match recommended_next_step {
+            "inspect_runtime_status_then_refresh_project_status" => json!({
+                "kind": "inspect_runtime_status",
+                "tool": "status",
+                "when": "now"
+            }),
+            "repair_snapshot_storage_then_refresh_project_status" => json!({
+                "kind": "repair_snapshot_storage",
+                "tool": "project_status",
+                "when": "after_storage_fix"
+            }),
+            "refresh_soll_context_then_reassess_project_status" => json!({
+                "kind": "refresh_soll_context",
+                "tool": "soll_query_context",
+                "when": "now"
+            }),
+            _ => json!({
+                "kind": "expand_structural_findings",
+                "tool": "anomalies",
+                "when": "now"
+            }),
+        };
+
+        json!({
+            "recommended_next_step": recommended_next_step,
+            "actionable_now": degraded_notes.is_empty(),
+            "blocking_factors": blocking_factors,
+            "remediation_actions": remediation_actions,
+            "follow_up_tools": ["anomalies", "why", "path"],
+            "next_action": next_action
+        })
     }
 
     fn summarize_why_response(args: &Value, response: &mut Value) {
@@ -867,16 +2047,22 @@ impl McpServer {
                 .as_deref(),
         );
         let cache_key = format!(
-            "{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             mode.unwrap_or("brief"),
             runtime_mode.as_str(),
-            runtime_profile.as_str()
+            runtime_profile.as_str(),
+            std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string()),
+            std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string())
         );
+        let status_cache_ttl_ms = match mode.unwrap_or("brief") {
+            "full" => STATUS_FULL_CACHE_TTL_MS,
+            _ => STATUS_CACHE_TTL_MS,
+        };
         if let Some(cached) = Self::cache_read(
             Self::status_cache(),
             &cache_key,
             now_ms,
-            STATUS_CACHE_TTL_MS,
+            status_cache_ttl_ms,
         ) {
             return Some(cached);
         }
@@ -919,6 +2105,37 @@ impl McpServer {
             .pointer("/embedding_contract/drain_state")
             .and_then(|value| value.as_str())
             .unwrap_or("unknown");
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let stale_threshold_ms = std::env::var("AXON_VECTOR_LEASE_STALE_MS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(120_000);
+        let graph_queue_depth = debug_data
+            .pointer("/embedding_contract/runtime_telemetry/graph_projection_queue_depth")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let orphan_vectorization_files = self
+            .graph_store
+            .count_orphaned_file_vectorization_files()
+            .unwrap_or(0);
+        let stale_vector_inflight_files = self
+            .graph_store
+            .count_stale_inflight_file_vectorization_files(now_ms, stale_threshold_ms)
+            .unwrap_or(0);
+        let oldest_graph_pending_age_ms = self
+            .graph_store
+            .oldest_graph_pending_age_ms(now_ms)
+            .unwrap_or(0);
+        let oldest_semantic_pending_age_ms = self
+            .graph_store
+            .oldest_semantic_pending_age_ms(now_ms)
+            .unwrap_or(0);
+        let utility_scheduler = current_utility_first_scheduler_diagnostics(
+            graph_queue_depth,
+            queued_files as usize + inflight_files as usize,
+            service_guard::current_pressure(),
+        );
+        let runtime_signals = optimizer::collect_runtime_signals_window(&self.graph_store);
 
         let job_counts_raw = self
             .graph_store
@@ -940,12 +2157,17 @@ impl McpServer {
         let evidence = format!(
             "**Runtime mode:** `{}`\n\
 **Runtime profile:** `{}`\n\
+**Instance kind:** `{}`\n\
+**Runtime identity:** `{}`\n\
 **Advanced indexed surfaces visible:** {}\n\
 **Vector backlog:** queued={} inflight={}\n\
+**Utility-first scheduler:** `{}` ({})\n\
 **Drain state:** `{}`\n\
 **Public tools:** {}\n",
             runtime_mode.as_str(),
             runtime_profile.as_str(),
+            std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string()),
+            std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string()),
             if public_tool_names.iter().any(|name| *name == "impact") {
                 "yes"
             } else {
@@ -953,6 +2175,8 @@ impl McpServer {
             },
             queued_files,
             inflight_files,
+            utility_scheduler.state.as_str(),
+            utility_scheduler.reason,
             drain_state,
             public_tool_names.join(", ")
         );
@@ -975,6 +2199,87 @@ impl McpServer {
                 "high",
             )
         );
+        let instance_kind =
+            std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "unknown".to_string());
+        let runtime_identity =
+            std::env::var("AXON_RUNTIME_IDENTITY").unwrap_or_else(|_| "unknown".to_string());
+        let data_root = Self::compact_runtime_path(
+            std::env::var("AXON_DB_ROOT").unwrap_or_else(|_| "unknown".to_string()),
+        );
+        let run_root = Self::compact_runtime_path(
+            std::env::var("AXON_RUN_ROOT").unwrap_or_else(|_| "unknown".to_string()),
+        );
+        let project_root = Self::compact_runtime_path(
+            std::env::var("AXON_PROJECT_ROOT").unwrap_or_else(|_| "unknown".to_string()),
+        );
+        let mcp_url = std::env::var("AXON_MCP_URL").unwrap_or_else(|_| "unknown".to_string());
+        let sql_url = std::env::var("AXON_SQL_URL").unwrap_or_else(|_| "unknown".to_string());
+        let dashboard_url =
+            std::env::var("AXON_DASHBOARD_URL").unwrap_or_else(|_| "unknown".to_string());
+        let public_host = std::env::var("AXON_PUBLIC_HOST").unwrap_or_default();
+        let public_host_source =
+            std::env::var("AXON_PUBLIC_HOST_SOURCE").unwrap_or_else(|_| "unresolved".to_string());
+        let advertised_mcp_url = std::env::var("AXON_MCP_PUBLIC_URL").unwrap_or_default();
+        let advertised_sql_url = std::env::var("AXON_SQL_PUBLIC_URL").unwrap_or_default();
+        let advertised_dashboard_url =
+            std::env::var("AXON_DASHBOARD_PUBLIC_URL").unwrap_or_default();
+        let advertised_available =
+            std::env::var("AXON_PUBLIC_ENDPOINTS_AVAILABLE").unwrap_or_default() == "1"
+                && !advertised_mcp_url.is_empty();
+        let mutation_policy =
+            std::env::var("AXON_MUTATION_POLICY").unwrap_or_else(|_| "unknown".to_string());
+        let resource_priority =
+            std::env::var("AXON_RESOURCE_PRIORITY").unwrap_or_else(|_| "unknown".to_string());
+        let background_budget_class =
+            std::env::var("AXON_BACKGROUND_BUDGET_CLASS").unwrap_or_else(|_| "unknown".to_string());
+        let gpu_access_policy =
+            std::env::var("AXON_GPU_ACCESS_POLICY").unwrap_or_else(|_| "unknown".to_string());
+        let watcher_policy =
+            std::env::var("AXON_WATCHER_POLICY").unwrap_or_else(|_| "unknown".to_string());
+        let max_axon_workers =
+            std::env::var("MAX_AXON_WORKERS").unwrap_or_else(|_| "unknown".to_string());
+        let queue_memory_budget_bytes = std::env::var("AXON_QUEUE_MEMORY_BUDGET_BYTES")
+            .unwrap_or_else(|_| "unknown".to_string());
+        let watcher_subtree_hint_budget = std::env::var("AXON_WATCHER_SUBTREE_HINT_BUDGET")
+            .unwrap_or_else(|_| "unknown".to_string());
+        let vector_workers =
+            std::env::var("AXON_VECTOR_WORKERS").unwrap_or_else(|_| "unknown".to_string());
+        let graph_workers =
+            std::env::var("AXON_GRAPH_WORKERS").unwrap_or_else(|_| "unknown".to_string());
+        let gpu_vector_lease = current_gpu_vector_lease_diagnostics();
+        let embedding_provider =
+            std::env::var("AXON_EMBEDDING_PROVIDER").unwrap_or_else(|_| "unknown".to_string());
+        let semantic_backlog_responsible = match runtime_mode.as_str() {
+            "full" => {
+                let provider_is_gpu = matches!(
+                    embedding_provider.trim().to_ascii_lowercase().as_str(),
+                    "cuda" | "gpu"
+                );
+                if provider_is_gpu {
+                    !gpu_vector_lease.exclusive_required
+                        || gpu_vector_lease.owned_by_current_instance
+                } else {
+                    true
+                }
+            }
+            "graph_only" | "read_only" | "mcp_only" => false,
+            _ => true,
+        };
+        let package_version = std::env::var("AXON_PACKAGE_VERSION")
+            .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+        let release_version =
+            std::env::var("AXON_RELEASE_VERSION").unwrap_or_else(|_| package_version.clone());
+        let build_id = std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| package_version.clone());
+        let install_generation =
+            std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string());
+        let async_allowlisted_tools = McpServer::ASYNC_JOB_TOOL_NAMES
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let monitored_sync_mutation_tools = McpServer::MONITORED_SYNC_MUTATION_TOOLS
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
         let response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
@@ -995,11 +2300,110 @@ impl McpServer {
                     }
                 },
                 "canonical_sources": Self::canonical_sources_snapshot(),
+                "instance_identity": {
+                    "instance_kind": instance_kind,
+                    "runtime_identity": runtime_identity,
+                    "data_root": data_root,
+                    "run_root": run_root,
+                    "project_root": project_root,
+                    "mcp_url": mcp_url,
+                    "sql_url": sql_url,
+                    "dashboard_url": dashboard_url,
+                    "mutation_policy": mutation_policy
+                },
+                "advertised_endpoints": {
+                    "available": advertised_available,
+                    "public_host": public_host,
+                    "public_host_source": public_host_source,
+                    "mcp_url": advertised_mcp_url,
+                    "sql_url": advertised_sql_url,
+                    "dashboard_url": advertised_dashboard_url
+                },
+                "client_reachability_notes": {
+                    "instance_identity_is_runtime_local_only": true,
+                    "external_endpoint_rule": "Use advertised_endpoints.* for isolated clients when available. instance_identity.*_url is host-local runtime truth.",
+                    "stale_client_binding_possible": true
+                },
+                "resource_policy": {
+                    "resource_priority": resource_priority,
+                    "background_budget_class": background_budget_class,
+                    "gpu_access_policy": gpu_access_policy,
+                    "watcher_policy": watcher_policy,
+                    "embedding_provider": embedding_provider,
+                    "max_axon_workers": max_axon_workers,
+                    "queue_memory_budget_bytes": queue_memory_budget_bytes,
+                    "watcher_subtree_hint_budget": watcher_subtree_hint_budget,
+                    "vector_workers": vector_workers,
+                    "graph_workers": graph_workers
+                },
+                "runtime_authority": {
+                    "lane_parameters": Self::runtime_lane_authority_snapshot(
+                        graph_queue_depth,
+                        queued_files as usize + inflight_files as usize,
+                    ),
+                    "quiescent_state": Self::quiescent_runtime_snapshot(
+                        runtime_mode.as_str(),
+                        semantic_backlog_responsible,
+                        graph_queue_depth,
+                        queued_files as usize + inflight_files as usize,
+                        apply_semantic_policy_runtime_tuning(target_semantic_policy_with_graph(
+                            queued_files as usize + inflight_files as usize,
+                            graph_queue_depth,
+                            service_guard::current_pressure(),
+                        ))
+                        .profile,
+                        runtime_signals.canonical_chunks_embedded_last_minute,
+                        runtime_signals.canonical_files_embedded_last_minute,
+                    ),
+                    "limiting_factors": Self::runtime_limiting_factors_snapshot(
+                        runtime_mode.as_str(),
+                        semantic_backlog_responsible,
+                        graph_queue_depth,
+                        queued_files as usize + inflight_files as usize,
+                        &runtime_signals,
+                    )
+                },
+                "runtime_version": {
+                    "release_version": release_version,
+                    "package_version": package_version,
+                    "build_id": build_id,
+                    "install_generation": install_generation
+                },
                 "file_vectorization_queue": {
                     "queued": queued_files,
                     "inflight": inflight_files
                 },
+                "utility_first_scheduler": {
+                    "state": utility_scheduler.state.as_str(),
+                    "reason": utility_scheduler.reason,
+                    "semantic_underfeed": utility_scheduler.semantic_underfeed,
+                    "ready_reserve_target": utility_scheduler.ready_reserve_target,
+                    "hold_window_ms": utility_scheduler.hold_window_ms,
+                    "orphan_vectorization_files": orphan_vectorization_files,
+                    "stale_vector_inflight_files": stale_vector_inflight_files,
+                    "oldest_graph_pending_age_ms": oldest_graph_pending_age_ms,
+                    "oldest_semantic_pending_age_ms": oldest_semantic_pending_age_ms
+                },
                 "public_tools": public_tool_names,
+                "async_policy": {
+                    "mode": "allowlist",
+                    "sync_by_default": true,
+                    "latency_target_p95_ms": 200,
+                    "allowlisted_tools": async_allowlisted_tools,
+                    "monitored_sync_mutation_tools": monitored_sync_mutation_tools,
+                    "semantic_async_triggers": [
+                        "batch",
+                        "restore_import",
+                        "queue_pipeline",
+                        "vectorization_indexation",
+                        "deep_analytics"
+                    ]
+                },
+                "async_contract": {
+                    "canonical_follow_up_tool": "job_status",
+                    "stale_client_binding_possible": true,
+                    "preferred_identity_tools": ["project_registry_lookup", "axon_init_project"]
+                },
                 "job_counts": job_counts,
                 "debug_snapshot": debug_data,
                 "traceability": debug_data.get("traceability").cloned().unwrap_or_else(|| json!({}))
@@ -1108,6 +2512,8 @@ impl McpServer {
                 })
             }
         };
+        let operator_guidance =
+            Self::project_status_operator_guidance(&degraded_notes, &snapshot_storage, &vision);
         let public_tools = status_data
             .get("public_tools")
             .and_then(|value| value.as_array())
@@ -1209,6 +2615,11 @@ impl McpServer {
                     "recommendations": anomalies_data.get("recommendations").cloned().unwrap_or_else(|| json!([]))
                 },
                 "snapshot_storage": snapshot_storage,
+                "operator_guidance": operator_guidance.clone(),
+                "next_action": operator_guidance
+                    .get("next_action")
+                    .cloned()
+                    .unwrap_or(Value::Null),
                 "soll_context": {
                     "visions": soll_data.get("visions").cloned().unwrap_or_else(|| json!([])),
                     "requirements": soll_data.get("requirements").cloned().unwrap_or_else(|| json!([])),
@@ -1425,6 +2836,28 @@ impl McpServer {
                     "path_type": "bounded_call_path",
                     "detours": [],
                     "bounded_depth_used": depth,
+                    "operator_guidance": {
+                        "actionable_now": false,
+                        "blocking_factors": [{
+                            "factor": "no_path_found_within_depth",
+                            "severity": "medium",
+                            "recommended_action": "increase depth or inspect the endpoints individually before assuming there is no reachable path"
+                        }],
+                        "remediation_actions": [
+                            "increase depth or inspect the endpoints individually before assuming there is no reachable path"
+                        ],
+                        "follow_up_tools": ["inspect", "impact"],
+                        "next_action": {
+                            "kind": "inspect_endpoints_or_increase_depth",
+                            "tool": "inspect",
+                            "when": "now"
+                        }
+                    },
+                    "next_action": {
+                        "kind": "inspect_endpoints_or_increase_depth",
+                        "tool": "inspect",
+                        "when": "now"
+                    },
                     "canonical_sources": Self::canonical_sources_snapshot()
                 }
             }));
@@ -1474,6 +2907,22 @@ impl McpServer {
                 "evidence_sources": ["CALLS", "CALLS_NIF", "CONTAINS"],
                 "safe_to_act": false,
                 "needs_human_confirmation": true,
+                "operator_guidance": {
+                    "actionable_now": true,
+                    "blocking_factors": [],
+                    "remediation_actions": [],
+                    "follow_up_tools": ["impact", "why"],
+                    "next_action": {
+                        "kind": "expand_blast_radius_from_path",
+                        "tool": "impact",
+                        "when": "now"
+                    }
+                },
+                "next_action": {
+                    "kind": "expand_blast_radius_from_path",
+                    "tool": "impact",
+                    "when": "now"
+                },
                 "canonical_sources": Self::canonical_sources_snapshot()
             }
         }))
@@ -1534,6 +2983,13 @@ impl McpServer {
         let orphan_intent = self
             .graph_store
             .get_orphan_intent_nodes(project)
+            .unwrap_or_default();
+        let soll_snapshot = self
+            .soll_completeness_snapshot(if project == "*" { None } else { Some(project) })
+            .ok();
+        let canonical_orphan_intent_ids = soll_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.canonical_orphan_intent_ids())
             .unwrap_or_default();
         let (circular_deps, cycle_count) = if brief_mode {
             (
@@ -1783,27 +3239,41 @@ impl McpServer {
                 "needs_human_confirmation": true
             }));
         }
+        let mut heuristic_intent_gap_count = 0usize;
         for node in &orphan_intent_entities {
             let node_id = node.split(' ').next().unwrap_or(node);
             let validation_signals = intent_validation_map
                 .get(node_id)
                 .cloned()
                 .unwrap_or_else(|| default_intent_validation.clone());
+            let canonical_backed = canonical_orphan_intent_ids.contains(node_id);
+            let anomaly_type = if canonical_backed {
+                "orphan_intent"
+            } else {
+                heuristic_intent_gap_count += 1;
+                "heuristic_intent_gap"
+            };
             let (estimated_effort, estimated_risk) =
                 Self::recommend_effort_and_risk("orphan_intent", &validation_signals);
+            let mut enriched_validation_signals = validation_signals;
+            enriched_validation_signals["canonical_backed"] = json!(canonical_backed);
             findings.push(json!({
-                "type": "orphan_intent",
+                "type": anomaly_type,
                 "entity": node,
                 "scope": project,
-                "severity": "high",
-                "confidence": "medium",
-                "provenance": "missing_traceability_evidence",
+                "severity": if canonical_backed { "high" } else { "low" },
+                "confidence": if canonical_backed { "medium" } else { "low" },
+                "provenance": if canonical_backed { "missing_traceability_evidence" } else { "heuristic_missing_traceability" },
                 "evidence_sources": ["soll.Node", "soll.Traceability", "soll.Edge"],
-                "recommended_action": "attach implementation or validation evidence",
-                "validation_signals": validation_signals,
+                "recommended_action": if canonical_backed {
+                    "attach implementation or validation evidence"
+                } else {
+                    "review only if this node should carry direct proof at the current project stage"
+                },
+                "validation_signals": enriched_validation_signals,
                 "estimated_effort": estimated_effort,
                 "estimated_risk": estimated_risk,
-                "safe_to_act": false,
+                "safe_to_act": !canonical_backed,
                 "needs_human_confirmation": true
             }));
         }
@@ -1892,8 +3362,17 @@ impl McpServer {
         } else {
             100.0
         };
+        let canonical_orphan_intent_count = orphan_intent_entities
+            .iter()
+            .filter(|node| {
+                let node_id = node.split(' ').next().unwrap_or(node);
+                canonical_orphan_intent_ids.contains(node_id)
+            })
+            .count();
         let orphan_intent_rate = if total_intent_nodes > 0 {
-            ((orphan_intent.len() as f64 / total_intent_nodes as f64) * 100.0 * 10.0).round() / 10.0
+            ((canonical_orphan_intent_count as f64 / total_intent_nodes as f64) * 100.0 * 10.0)
+                .round()
+                / 10.0
         } else {
             0.0
         };
@@ -1936,6 +3415,7 @@ impl McpServer {
                     "abstraction_detour" => vec!["confirm abstraction has no second implementation planned", "inspect public API commitments"],
                     "orphan_code" => vec!["search SOLL rationale with `why`", "decide link vs delete"],
                     "orphan_intent" => vec!["inspect `soll_work_plan`", "attach implementation or proof"],
+                    "heuristic_intent_gap" => vec!["compare with `soll_validate` completeness axes", "defer if concept baseline is already complete"],
                     "cycle" => vec!["confirm if cycle is intentional", "review module boundary"],
                     "god_object" => vec!["inspect fan-in consumers", "stage decomposition carefully"],
                     _ => vec!["review manually"],
@@ -1978,7 +3458,8 @@ impl McpServer {
 **Detours:** {}\n\
 **Abstraction detours:** {}\n\
 **Orphan code:** {}\n\
-**Orphan intent:** {}\n\
+**Orphan intent (canonical):** {}\n\
+**Heuristic intent gaps:** {}\n\
 **Cycles:** {}\n\
 **God objects:** {}\n",
             project,
@@ -1987,7 +3468,8 @@ impl McpServer {
             detours.len(),
             abstraction_detours.len(),
             orphan_code.len(),
-            orphan_intent.len(),
+            canonical_orphan_intent_count,
+            heuristic_intent_gap_count,
             cycle_count,
             god_objects.len()
         );
@@ -2021,18 +3503,28 @@ impl McpServer {
                     "cycle_health_score": cycle_health_score,
                     "orphan_code_count": orphan_code.len(),
                     "orphan_code_rate": orphan_code_rate,
-                    "orphan_intent_count": orphan_intent.len(),
+                    "orphan_intent_count": canonical_orphan_intent_count,
                     "orphan_intent_rate": orphan_intent_rate,
+                    "heuristic_intent_gap_count": heuristic_intent_gap_count,
                     "cycle_count": cycle_count,
                     "god_object_count": god_objects.len(),
                     "validation_coverage_score": validation_coverage_score,
                     "total_symbols": total_symbols,
-                    "total_intent_nodes": total_intent_nodes
+                    "total_intent_nodes": total_intent_nodes,
+                    "concept_completeness": soll_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.concept_complete())
+                        .unwrap_or(false),
+                    "implementation_completeness": soll_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.implementation_complete())
+                        .unwrap_or(false)
                 },
                 "snapshot": {
                     "generated_at": Self::now_unix_ms(),
                     "provenance": "aggregated_graph_analytics",
-                    "confidence": "medium"
+                    "confidence": "medium",
+                    "semantic_boundary": "heuristic anomaly overlays must not silently override canonical SOLL completeness"
                 },
                 "findings": findings,
                 "recommendations": recommendations
@@ -2302,6 +3794,12 @@ impl McpServer {
                 &traceability_signals,
                 &validation_signals,
             );
+        let operator_guidance = Self::change_safety_operator_guidance(
+            change_safety,
+            &coverage_signals,
+            &traceability_signals,
+            &validation_signals,
+        );
         let (safe_to_act, needs_human_confirmation) =
             (change_safety == "safe", change_safety != "safe");
 
@@ -2348,6 +3846,7 @@ impl McpServer {
                 "change_safety": change_safety,
                 "reasoning": reasoning,
                 "recommended_guardrails": recommended_guardrails,
+                "operator_guidance": operator_guidance,
                 "provenance": "aggregated",
                 "confidence": confidence,
                 "evidence_sources": ["Symbol", "soll.Traceability", "soll.Node", "soll.Edge"],

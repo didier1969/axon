@@ -1065,7 +1065,43 @@ impl McpServer {
                     "low",
                 )
             );
-            let response = json!({ "content": [{ "type": "text", "text": report }] });
+            let suggestions = suggestion_rows
+                .iter()
+                .filter_map(|row| row.first().and_then(Value::as_str))
+                .map(|value| Value::from(value.to_string()))
+                .collect::<Vec<_>>();
+            let blocking_factors = vec![json!({
+                "factor": "symbol_not_found_in_scope",
+                "severity": "high",
+                "recommended_action": "pick one suggested canonical symbol or retry with the exact canonical symbol id"
+            })];
+            let response = json!({
+                "content": [{ "type": "text", "text": report }],
+                "data": {
+                    "symbol": symbol,
+                    "project": project,
+                    "symbol_found": false,
+                    "suggestions": suggestions,
+                    "operator_guidance": {
+                        "actionable_now": false,
+                        "blocking_factors": blocking_factors,
+                        "remediation_actions": [
+                            "pick one suggested canonical symbol or retry with the exact canonical symbol id"
+                        ],
+                        "follow_up_tools": ["query", "inspect"],
+                        "next_action": {
+                            "kind": "pick_canonical_symbol",
+                            "tool": "inspect",
+                            "when": "after_selecting_a_suggestion"
+                        }
+                    },
+                    "next_action": {
+                        "kind": "pick_canonical_symbol",
+                        "tool": "inspect",
+                        "when": "after_selecting_a_suggestion"
+                    }
+                }
+            });
             return Some(if Self::mcp_guidance_authoritative_enabled() {
                 crate::mcp::attach_guidance_authoritative(response, guidance)
             } else if Self::mcp_guidance_shadow_enabled() {
@@ -1132,10 +1168,54 @@ impl McpServer {
                 let evidence = format!(
                     "{}{}{}",
                     project_note.unwrap_or_default(),
-                    degraded_note.unwrap_or_default(),
+                    degraded_note.clone().unwrap_or_default(),
                     table
                 );
                 let evidence = evidence_by_mode(&evidence, mode);
+                let tested = rows
+                    .first()
+                    .and_then(|row| row.get(2))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let callers = rows
+                    .first()
+                    .and_then(|row| row.get(3))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let callees = rows
+                    .first()
+                    .and_then(|row| row.get(4))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let kind = rows
+                    .first()
+                    .and_then(|row| row.get(1))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let mut blocking_factors = Vec::<Value>::new();
+                if degraded_note.is_some() {
+                    blocking_factors.push(json!({
+                        "factor": "partial_runtime_truth",
+                        "severity": "medium",
+                        "recommended_action": "treat the inspection as partial truth and validate scope before mutation"
+                    }));
+                }
+                if backend_pressure {
+                    blocking_factors.push(json!({
+                        "factor": "backend_pressure_active",
+                        "severity": "medium",
+                        "recommended_action": "re-run inspect after backend pressure subsides if you need stable exhaustive truth"
+                    }));
+                }
+                let remediation_actions = blocking_factors
+                    .iter()
+                    .filter_map(|factor| {
+                        factor
+                            .get("recommended_action")
+                            .and_then(|value| value.as_str())
+                            .map(|value| Value::from(value.to_string()))
+                    })
+                    .collect::<Vec<_>>();
                 let report = format!(
                     "### 🔍 Inspection du Symbole : {}\n\n{}",
                     symbol,
@@ -1151,7 +1231,35 @@ impl McpServer {
                         "high",
                     )
                 );
-                let response = json!({ "content": [{ "type": "text", "text": report }] });
+                let next_action = json!({
+                    "kind": "expand_dependency_blast_radius",
+                    "tool": "impact",
+                    "when": "now"
+                });
+                let response = json!({
+                    "content": [{ "type": "text", "text": report }],
+                    "data": {
+                        "symbol": symbol,
+                        "project": project,
+                        "symbol_id": symbol_id,
+                        "symbol_found": true,
+                        "summary": {
+                            "kind": kind,
+                            "tested": tested,
+                            "callers": callers,
+                            "callees": callees
+                        },
+                        "operator_guidance": {
+                            "actionable_now": degraded_note.is_none() && !backend_pressure,
+                            "blocking_factors": blocking_factors,
+                            "remediation_actions": remediation_actions,
+                            "follow_up_tools": ["impact", "bidi_trace"],
+                            "next_action": next_action
+                        },
+                        "next_action": next_action,
+                        "canonical_sources": canonical_sources
+                    }
+                });
                 Some(if Self::mcp_guidance_authoritative_enabled() {
                     crate::mcp::attach_guidance_authoritative(response, guidance)
                 } else if Self::mcp_guidance_shadow_enabled() {

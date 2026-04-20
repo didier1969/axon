@@ -7,6 +7,7 @@ ALLOW_MUTATIONS=0
 WITH_REGRESSION=1
 WARM_CACHE=1
 BASELINE_SUMMARY=""
+MCP_URL="${AXON_MCP_URL:-http://127.0.0.1:44129/mcp}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -48,6 +49,7 @@ cmd=(
   --checks quality,latency
   --project AXO
   --strict
+  --url "$MCP_URL"
 )
 if [[ "$WARM_CACHE" -eq 1 ]]; then
   cmd+=(--mode steady-state)

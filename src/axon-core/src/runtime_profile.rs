@@ -140,9 +140,18 @@ pub fn recommend_embedding_lane_sizing(profile: &RuntimeProfile) -> EmbeddingLan
     let available_background_workers = profile.recommended_workers.saturating_sub(query_workers);
 
     let (mut vector_workers, mut graph_workers) = if profile.gpu_present {
+        let gpu_vector_workers = if available_background_workers >= 8 {
+            3usize
+        } else if available_background_workers >= 4 {
+            2usize
+        } else {
+            1usize
+        };
         (
-            1usize,
-            available_background_workers.saturating_sub(1).max(1),
+            gpu_vector_workers,
+            available_background_workers
+                .saturating_sub(gpu_vector_workers)
+                .max(1),
         )
     } else {
         let vw = (available_background_workers / 2).max(1);
@@ -163,9 +172,8 @@ pub fn recommend_embedding_lane_sizing(profile: &RuntimeProfile) -> EmbeddingLan
 
     let (chunk_batch_size, file_vectorization_batch_size, graph_batch_size) = if profile.gpu_present
     {
-        // Keep a single GPU vector worker to avoid duplicate model residency,
-        // but feed that worker more aggressively now that query embeddings live on CPU
-        // and the CUDA controller can clamp under live memory pressure.
+        // Keep GPU vector fan-out bounded by default so model residency stays safe,
+        // while still allowing enough concurrency to drain real backlogs.
         (96, 24, 8)
     } else {
         // CPU-only hosts should stay conservative by default.
@@ -289,8 +297,8 @@ mod tests {
         };
         let sizing = recommend_embedding_lane_sizing(&profile);
         assert_eq!(sizing.query_workers, 1);
-        assert_eq!(sizing.vector_workers, 1);
-        assert_eq!(sizing.graph_workers, 12);
+        assert_eq!(sizing.vector_workers, 3);
+        assert_eq!(sizing.graph_workers, 10);
         assert_eq!(sizing.chunk_batch_size, 96);
         assert_eq!(sizing.file_vectorization_batch_size, 24);
         assert_eq!(sizing.graph_batch_size, 8);
@@ -312,8 +320,8 @@ mod tests {
         };
         let sizing = recommend_embedding_lane_sizing(&profile);
         assert_eq!(sizing.query_workers, 1);
-        assert_eq!(sizing.vector_workers, 1);
-        assert_eq!(sizing.graph_workers, 18);
+        assert_eq!(sizing.vector_workers, 3);
+        assert_eq!(sizing.graph_workers, 16);
         assert_eq!(sizing.chunk_batch_size, 96);
         assert_eq!(sizing.file_vectorization_batch_size, 24);
         std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");

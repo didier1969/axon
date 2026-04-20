@@ -50,6 +50,10 @@ class InvocationPlan:
     symbol: str | None
     url: str
     skip_regression: bool
+    parallel_pressure_url: str | None
+    parallel_pressure_checks: tuple[str, ...]
+    parallel_pressure_mode: str
+    parallel_pressure_max_live_latency_ms: int
 
 
 def csv_values(raw: str | None) -> tuple[str, ...]:
@@ -109,6 +113,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--name-pattern", default="", help="Guidance case filter")
     parser.add_argument("--skip-regression", action="store_true", help="Skip run-to-run latency comparison")
     parser.add_argument("--url", default=DEFAULT_MCP_URL, help=f"MCP endpoint (default: {DEFAULT_MCP_URL})")
+    parser.add_argument(
+        "--parallel-pressure-url",
+        default="",
+        help="Optional second MCP endpoint to run as background pressure during qualification (typically dev while qualifying live).",
+    )
+    parser.add_argument(
+        "--parallel-pressure-checks",
+        default="quality",
+        help="Comma-separated checks for the background pressure run (default: quality).",
+    )
+    parser.add_argument(
+        "--parallel-pressure-mode",
+        choices=MODE_CHOICES,
+        default="steady-state",
+        help="Mode for the background pressure run.",
+    )
+    parser.add_argument(
+        "--parallel-pressure-max-live-latency-ms",
+        type=int,
+        default=1500,
+        help="Warn when the observed live max tool latency exceeds this threshold during a parallel-pressure run.",
+    )
     return parser
 
 
@@ -149,6 +175,7 @@ def normalize_plan(args: argparse.Namespace) -> InvocationPlan:
         raise SystemExit("--baseline requires --checks including latency.")
     if args.skip_regression and "latency" not in checks:
         raise SystemExit("--skip-regression requires --checks including latency.")
+    parallel_pressure_checks = canonical_checks(args.parallel_pressure_checks) if args.parallel_pressure_url else ()
 
     return InvocationPlan(
         surface=args.surface,
@@ -172,6 +199,10 @@ def normalize_plan(args: argparse.Namespace) -> InvocationPlan:
         symbol=args.symbol or None,
         url=args.url,
         skip_regression=bool(args.skip_regression),
+        parallel_pressure_url=args.parallel_pressure_url or None,
+        parallel_pressure_checks=parallel_pressure_checks,
+        parallel_pressure_mode=args.parallel_pressure_mode,
+        parallel_pressure_max_live_latency_ms=args.parallel_pressure_max_live_latency_ms,
     )
 
 
@@ -198,6 +229,10 @@ def plan_payload(plan: InvocationPlan) -> dict[str, Any]:
         "symbol": plan.symbol,
         "url": plan.url,
         "skip_regression": plan.skip_regression,
+        "parallel_pressure_url": plan.parallel_pressure_url,
+        "parallel_pressure_checks": list(plan.parallel_pressure_checks),
+        "parallel_pressure_mode": plan.parallel_pressure_mode,
+        "parallel_pressure_max_live_latency_ms": plan.parallel_pressure_max_live_latency_ms,
     }
 
 
@@ -478,6 +513,116 @@ def run_guidance(plan: InvocationPlan, *, run_dir: Path) -> dict[str, Any]:
         "payload": payload,
         "verdict": verdict_from_guidance(payload),
         "command": ["python3", "scripts/qualify_mcp_guidance.py", *args],
+    }
+
+
+def start_parallel_pressure(plan: InvocationPlan, *, run_dir: Path) -> tuple[subprocess.Popen[str], Path, list[str]] | None:
+    if not plan.parallel_pressure_url:
+        return None
+
+    summary_path = run_dir / "parallel-pressure-summary.json"
+    log_base = run_dir / "parallel-pressure"
+    args = [
+        sys.executable,
+        str(SCRIPT_ROOT / "qualify_mcp.py"),
+        "--surface",
+        "core",
+        "--checks",
+        ",".join(plan.parallel_pressure_checks or ("quality",)),
+        "--mode",
+        plan.parallel_pressure_mode,
+        "--mutations",
+        "off",
+        "--project",
+        plan.project,
+        "--url",
+        plan.parallel_pressure_url,
+        "--json-out",
+        str(summary_path),
+        "--label",
+        f"{plan.label or 'qualify'}-parallel-pressure",
+        "--skip-regression",
+    ]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(SCRIPT_ROOT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    stdout_path = log_base.with_suffix(".stdout.log")
+    stderr_path = log_base.with_suffix(".stderr.log")
+    stdout_handle = stdout_path.open("w", encoding="utf-8")
+    stderr_handle = stderr_path.open("w", encoding="utf-8")
+    proc = subprocess.Popen(
+        args,
+        cwd=PROJECT_ROOT,
+        text=True,
+        stdout=stdout_handle,
+        stderr=stderr_handle,
+        env=env,
+    )
+    return proc, summary_path, args
+
+
+def finalize_parallel_pressure(
+    proc_info: tuple[subprocess.Popen[str], Path, list[str]] | None,
+    payload: dict[str, Any],
+    plan: InvocationPlan,
+) -> dict[str, Any] | None:
+    if proc_info is None:
+        return None
+
+    proc, summary_path, args = proc_info
+    exit_code = proc.wait(timeout=max(plan.timeout, 30))
+    pressure_payload = parse_json_file(summary_path)
+    live_quality_verdict = payload.get("subverdicts", {}).get("quality", "skip")
+    live_latency_verdict = payload.get("subverdicts", {}).get("latency", "skip")
+    slowest_tools = payload.get("highlights", {}).get("slowest_tools", [])
+    max_live_latency_ms = max(
+        (
+            int(item.get("latency_ms", item.get("duration_ms", 0)) or 0)
+            for item in slowest_tools
+            if isinstance(item, dict)
+        ),
+        default=0,
+    )
+    pressure_verdict = (pressure_payload or {}).get("verdict", "fail")
+    acceptance_verdict = "ok"
+    reasons: list[str] = []
+
+    if live_quality_verdict != "ok":
+        acceptance_verdict = "fail"
+        reasons.append(f"live quality verdict is {live_quality_verdict}")
+    if live_latency_verdict == "fail":
+        acceptance_verdict = "fail"
+        reasons.append("live latency verdict failed under parallel pressure")
+    if max_live_latency_ms > plan.parallel_pressure_max_live_latency_ms and acceptance_verdict != "fail":
+        acceptance_verdict = "warn"
+        reasons.append(
+            f"live max tool latency {max_live_latency_ms}ms exceeds threshold {plan.parallel_pressure_max_live_latency_ms}ms"
+        )
+    if pressure_verdict == "fail" and acceptance_verdict == "ok":
+        acceptance_verdict = "warn"
+        reasons.append("background pressure run failed while live remained protected")
+    elif pressure_verdict == "warn" and acceptance_verdict == "ok":
+        reasons.append("background pressure run warned while live remained protected")
+
+    return {
+        "verdict": acceptance_verdict,
+        "pressure_run": {
+            "url": plan.parallel_pressure_url,
+            "checks": list(plan.parallel_pressure_checks),
+            "mode": plan.parallel_pressure_mode,
+            "command": args,
+            "artifact": str(summary_path),
+            "exit_code": exit_code,
+            "payload": pressure_payload,
+            "verdict": pressure_verdict,
+        },
+        "acceptance": {
+            "live_quality_verdict": live_quality_verdict,
+            "live_latency_verdict": live_latency_verdict,
+            "max_live_latency_ms": max_live_latency_ms,
+            "max_live_latency_threshold_ms": plan.parallel_pressure_max_live_latency_ms,
+            "background_pressure_verdict": pressure_verdict,
+            "reasons": reasons,
+        },
     }
 
 

@@ -281,6 +281,7 @@ impl McpServer {
         }
 
         let mode = args.get("mode").and_then(|value| value.as_str());
+        let prefer_project_intent = Self::prefer_project_intent(question, mode);
         let project = args.get("project").and_then(|value| value.as_str());
         let project_scope_variants = Self::project_scope_variants(project);
         let token_budget = args
@@ -336,6 +337,7 @@ impl McpServer {
         if terms.is_empty() {
             excluded_because.push("planner_terms_empty_fell_back_to_full_question".to_string());
         }
+        let rationale_requested = Self::has_rationale_language(question);
 
         let mut diagnostics = RetrievalDiagnostics::default();
         let stage_started_at = Instant::now();
@@ -352,6 +354,7 @@ impl McpServer {
             &terms_for_reasoning,
             &path_hints,
             &project_scope_variants,
+            prefer_project_intent,
         );
         let entry_candidates = self.select_entry_candidates(&entry_candidates, top_k);
         timings.entry_lookup_ms = stage_started_at.elapsed().as_millis() as u64;
@@ -393,12 +396,17 @@ impl McpServer {
             Vec::new()
         };
         diagnostics.chunk_candidates_considered = chunk_candidates.len();
+        let has_direct_soll_traceability =
+            self.has_direct_soll_traceability(&entry_candidates, project);
+        let linked_evidence_first = rationale_requested && has_direct_soll_traceability;
         self.rerank_chunk_candidates(
             &mut chunk_candidates,
             route,
             &terms_for_reasoning,
             &entry_candidates,
             &project_scope_variants,
+            prefer_project_intent,
+            linked_evidence_first,
         );
         timings.chunk_lookup_ms = stage_started_at.elapsed().as_millis() as u64;
 
@@ -434,17 +442,15 @@ impl McpServer {
         };
         timings.graph_expansion_ms = stage_started_at.elapsed().as_millis() as u64;
 
-        let rationale_requested = Self::has_rationale_language(question);
         let should_join_soll = include_soll.unwrap_or_else(|| {
-            let has_direct_traceability =
-                self.has_direct_soll_traceability(&entry_candidates, project);
-            has_direct_traceability
+            has_direct_soll_traceability
                 || (allow_unanchored_fallback
                     && (matches!(route, RetrievalRoute::SollHybrid) || rationale_requested))
         });
         let stage_started_at = Instant::now();
         let relevant_soll_entities = if should_join_soll && !runtime.should_skip_soll_join() {
-            let entities = self.collect_soll_entities(&entry_candidates, project, top_k);
+            let entities =
+                self.collect_soll_entities(&entry_candidates, project, &terms_for_reasoning, top_k);
             diagnostics.soll_entities_selected = entities.len();
             entities
         } else if should_join_soll && runtime.should_skip_soll_join() {
@@ -479,7 +485,7 @@ impl McpServer {
             &supporting_chunks,
             &relevant_soll_entities,
             rationale_requested,
-            self.has_direct_soll_traceability(&entry_candidates, project),
+            has_direct_soll_traceability,
             runtime.semantic_search_used,
             runtime.degraded_reason.as_deref(),
         );
@@ -502,6 +508,13 @@ impl McpServer {
             "confidence": confidence,
             "missing_evidence": missing_evidence,
             "why_these_items": why_these_items,
+            "retrieval_policy": {
+                "rationale_requested": rationale_requested,
+                "has_direct_soll_traceability": has_direct_soll_traceability,
+                "linked_evidence_first": linked_evidence_first,
+                "canonical_project_docs_second": linked_evidence_first,
+                "broader_workspace_material_last": linked_evidence_first
+            },
             "excluded_because": excluded_because,
             "token_budget_estimate": {
                 "requested_budget": token_budget,
@@ -796,6 +809,92 @@ impl McpServer {
             route,
             RetrievalRoute::ExactLookup | RetrievalRoute::Wiring | RetrievalRoute::Impact
         )
+    }
+
+    fn prefer_project_intent(question: &str, mode: Option<&str>) -> bool {
+        if mode.is_some_and(|value| value.eq_ignore_ascii_case("intent")) {
+            return true;
+        }
+        let lower = question.to_ascii_lowercase();
+        [
+            "soll mutation",
+            "what soll mutation",
+            "implementation plan",
+            "concept foundation",
+            "must support",
+            "weekly plan",
+            "project intent",
+            "entrench",
+            "recipe creation",
+            "normalization",
+            "attachment",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    }
+
+    pub(crate) fn project_intent_doc_weight(uri: &str) -> f64 {
+        let lower = uri.to_ascii_lowercase();
+        let mut score = 0.0;
+        if lower.contains("/docs/plans/") || lower.starts_with("docs/plans/") {
+            score += 4.0;
+        }
+        if lower.contains("concept-foundation") {
+            score += 3.0;
+        }
+        if lower.contains("implementation-plan") {
+            score += 3.0;
+        }
+        if lower.contains("feedback-axon") {
+            score -= 6.0;
+        }
+        if lower.contains("operator") || lower.contains("retrospective") {
+            score -= 2.0;
+        }
+        score
+    }
+
+    fn canonical_project_doc_weight(uri: &str, project_scope_variants: &[String]) -> f64 {
+        let lower = uri.to_ascii_lowercase();
+        let mut score = 0.0;
+        if lower.contains("/docs/plans/") || lower.starts_with("docs/plans/") {
+            score += 4.5;
+        }
+        if lower.contains("/docs/vision/") || lower.starts_with("docs/vision/") {
+            score += 4.0;
+        }
+        if lower.contains("/docs/derived/soll/") || lower.starts_with("docs/derived/soll/") {
+            score += 3.0;
+        }
+        if lower.ends_with("readme.md") || lower == "readme.md" {
+            score += 1.5;
+        }
+        if project_scope_variants.iter().any(|variant| {
+            let variant = variant.to_ascii_lowercase();
+            lower.contains(&format!("/{variant}/")) || lower.contains(&format!("-{variant}-"))
+        }) {
+            score += 1.0;
+        }
+        score
+    }
+
+    fn workspace_noise_penalty(uri: &str) -> f64 {
+        let lower = uri.to_ascii_lowercase();
+        if lower.contains("/.axon/")
+            || lower.starts_with(".axon/")
+            || lower.contains("/target/")
+            || lower.starts_with("target/")
+            || lower.contains("/tmp/")
+            || lower.starts_with("/tmp/")
+            || lower.contains("/scripts/")
+            || lower.starts_with("scripts/")
+        {
+            -3.0
+        } else if lower.contains("feedback-") || lower.contains("/feedback/") {
+            -2.5
+        } else {
+            0.0
+        }
     }
 
     fn uri_penalty_reason(uri: &str) -> Option<&'static str> {
@@ -1302,6 +1401,7 @@ impl McpServer {
         terms: &[String],
         path_hints: &[String],
         project_scope_variants: &[String],
+        prefer_project_intent: bool,
     ) {
         let scope_lc = project_scope_variants
             .iter()
@@ -1332,6 +1432,20 @@ impl McpServer {
             if candidate.kind == "file" {
                 score += 1.0;
                 candidate.reasons.push("file_entrypoint".to_string());
+            }
+            if prefer_project_intent {
+                let intent_weight = Self::project_intent_doc_weight(&candidate.uri);
+                if intent_weight > 0.0 {
+                    score += intent_weight;
+                    candidate
+                        .reasons
+                        .push("intent_canonical_plan_bonus".to_string());
+                } else if intent_weight < 0.0 {
+                    score += intent_weight;
+                    candidate
+                        .reasons
+                        .push("intent_feedback_penalty".to_string());
+                }
             }
             if path_hints
                 .iter()
@@ -1669,6 +1783,8 @@ impl McpServer {
         terms: &[String],
         entry_candidates: &[EntryCandidate],
         project_scope_variants: &[String],
+        prefer_project_intent: bool,
+        linked_evidence_first: bool,
     ) {
         let entry_uris = entry_candidates
             .iter()
@@ -1707,6 +1823,40 @@ impl McpServer {
             }
             if entry_uris.contains(&candidate.uri.to_ascii_lowercase()) {
                 score += 1.0;
+            }
+            if prefer_project_intent {
+                let intent_weight = Self::project_intent_doc_weight(&candidate.uri);
+                if intent_weight > 0.0 {
+                    score += intent_weight;
+                    candidate
+                        .reasons
+                        .push("intent_canonical_plan_bonus".to_string());
+                } else if intent_weight < 0.0 {
+                    score += intent_weight;
+                    candidate
+                        .reasons
+                        .push("intent_feedback_penalty".to_string());
+                }
+            }
+            if linked_evidence_first
+                && !candidate.anchored_to_entry
+                && !candidate.same_file_as_entry
+            {
+                let canonical_doc_weight =
+                    Self::canonical_project_doc_weight(&candidate.uri, project_scope_variants);
+                if canonical_doc_weight > 0.0 {
+                    score += canonical_doc_weight;
+                    candidate
+                        .reasons
+                        .push("canonical_project_doc_bonus".to_string());
+                }
+                let workspace_noise_penalty = Self::workspace_noise_penalty(&candidate.uri);
+                if workspace_noise_penalty < 0.0 {
+                    score += workspace_noise_penalty;
+                    candidate
+                        .reasons
+                        .push("workspace_noise_penalty".to_string());
+                }
             }
             if Self::route_prefers_operational_code(route) {
                 if let Some(reason) = Self::chunk_penalty_reason(candidate) {
@@ -2016,6 +2166,7 @@ impl McpServer {
         &self,
         entry_candidates: &[EntryCandidate],
         project: Option<&str>,
+        terms: &[String],
         top_k: usize,
     ) -> Vec<Value> {
         let symbol_names = entry_candidates
@@ -2095,7 +2246,8 @@ impl McpServer {
             .query_json(&query)
             .unwrap_or_else(|_| "[]".to_string());
         let rows: Vec<Vec<Value>> = serde_json::from_str(&raw).unwrap_or_default();
-        rows.into_iter()
+        let mut selected = rows
+            .into_iter()
             .filter_map(|row| {
                 Some(json!({
                     "id": row.first()?.as_str()?.to_string(),
@@ -2109,7 +2261,85 @@ impl McpServer {
                     "evidence_class": "soll_traceability",
                 }))
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        if !selected.is_empty() {
+            return selected;
+        }
+
+        let filtered_terms = terms
+            .iter()
+            .filter(|term| term.len() >= 4)
+            .cloned()
+            .collect::<Vec<_>>();
+        if filtered_terms.is_empty() {
+            return Vec::new();
+        }
+
+        let project_filter = project
+            .map(|value| {
+                format!(
+                    " AND lower(n.project_code) IN ({})",
+                    Self::project_scope_variants(Some(value))
+                        .iter()
+                        .map(|variant| format!(
+                            "'{}'",
+                            Self::escape_sql(&variant.to_ascii_lowercase())
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .unwrap_or_default();
+        let lexical_predicate = filtered_terms
+            .iter()
+            .map(|term| {
+                format!(
+                    "(lower(n.title) LIKE '%{t}%' OR lower(COALESCE(n.description, '')) LIKE '%{t}%')",
+                    t = Self::escape_sql(term)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let fallback_query = format!(
+            "SELECT n.id, n.type, COALESCE(n.title, ''), \
+                    CASE \
+                        WHEN n.type = 'Requirement' THEN 'direct_requirement_match' \
+                        WHEN n.type = 'Decision' THEN 'direct_decision_match' \
+                        ELSE 'direct_intent_match' \
+                    END AS ranking_reason, \
+                    CASE \
+                        WHEN n.type = 'Requirement' THEN 95 \
+                        WHEN n.type = 'Decision' THEN 90 \
+                        WHEN n.type = 'Concept' THEN 80 \
+                        ELSE 70 \
+                    END AS ranking_score
+             FROM soll.Node n
+             WHERE ({lexical_predicate}){project_filter}
+             ORDER BY ranking_score DESC, n.id ASC
+             LIMIT {limit}",
+            limit = top_k.min(4),
+        );
+        let fallback_raw = self
+            .graph_store
+            .query_json(&fallback_query)
+            .unwrap_or_else(|_| "[]".to_string());
+        let fallback_rows: Vec<Vec<Value>> =
+            serde_json::from_str(&fallback_raw).unwrap_or_default();
+        selected.extend(fallback_rows.into_iter().filter_map(|row| {
+            Some(json!({
+                "id": row.first()?.as_str()?.to_string(),
+                "type": row.get(1)?.as_str()?.to_string(),
+                "title": row.get(2)?.as_str().unwrap_or_default().to_string(),
+                "relation_type": "",
+                "source_symbol": "",
+                "artifact_type": "",
+                "ranking_reasons": [row.get(3)?.as_str().unwrap_or_default().to_string()],
+                "ranking_score": row.get(4)?.as_i64().unwrap_or_default(),
+                "evidence_class": "soll_lexical_fallback",
+            }))
+        }));
+        selected
     }
 
     fn build_answer_sketch(
@@ -2156,6 +2386,32 @@ impl McpServer {
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("Relevant SOLL intent joined: {}.", ids));
+            let requirement_ids = relevant_soll_entities
+                .iter()
+                .filter(|row| {
+                    row.get("type").and_then(|value| value.as_str()) == Some("Requirement")
+                })
+                .filter_map(|row| row.get("id").and_then(|value| value.as_str()))
+                .take(2)
+                .collect::<Vec<_>>();
+            let decision_ids = relevant_soll_entities
+                .iter()
+                .filter(|row| row.get("type").and_then(|value| value.as_str()) == Some("Decision"))
+                .filter_map(|row| row.get("id").and_then(|value| value.as_str()))
+                .take(2)
+                .collect::<Vec<_>>();
+            if !requirement_ids.is_empty() {
+                lines.push(format!(
+                    "Likely governing requirement(s): {}.",
+                    requirement_ids.join(", ")
+                ));
+            }
+            if !decision_ids.is_empty() {
+                lines.push(format!(
+                    "Likely governing decision(s): {}.",
+                    decision_ids.join(", ")
+                ));
+            }
         }
         lines.join(" ")
     }

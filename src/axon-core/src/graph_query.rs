@@ -24,6 +24,44 @@ enum ReadRoute {
 }
 
 impl GraphStore {
+    fn reader_refresh_request_debounce_ms() -> u64 {
+        std::env::var("AXON_READER_REFRESH_REQUEST_DEBOUNCE_MS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(1_000)
+            .clamp(50, 60_000)
+    }
+
+    fn reader_refresh_small_lag_epochs() -> u64 {
+        std::env::var("AXON_READER_REFRESH_SMALL_LAG_EPOCHS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(32)
+            .max(1)
+    }
+
+    fn should_request_reader_refresh_for_read(&self, freshness: ReadFreshness, lag: u64) -> bool {
+        if lag == 0 {
+            return false;
+        }
+        if freshness == ReadFreshness::FreshRequired {
+            return true;
+        }
+        let now_ms = Self::current_epoch_ms();
+        let last_refresh_started_ms = self
+            .reader_state
+            .last_refresh_started_ms
+            .load(Ordering::Acquire);
+        let last_refresh_completed_ms = self
+            .reader_state
+            .last_refresh_completed_ms
+            .load(Ordering::Acquire);
+        let last_refresh_ms = last_refresh_started_ms.max(last_refresh_completed_ms);
+        let refresh_age_ms = now_ms.saturating_sub(last_refresh_ms);
+        lag > Self::reader_refresh_small_lag_epochs()
+            || refresh_age_ms >= Self::reader_refresh_request_debounce_ms()
+    }
+
     pub(crate) fn current_epoch_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -102,7 +140,9 @@ impl GraphStore {
             return ReadRoute::Reader;
         }
 
-        self.request_reader_refresh_up_to(commit_epoch);
+        if self.should_request_reader_refresh_for_read(freshness, lag) {
+            self.request_reader_refresh_up_to(commit_epoch);
+        }
         match freshness {
             ReadFreshness::StaleOk => {
                 self.record_reader_read();
@@ -531,6 +571,24 @@ impl GraphStore {
         self.query_count_on_writer(query)
     }
 
+    pub(crate) fn query_single_i64_writer(&self, query: &str) -> Result<Option<i64>> {
+        let raw = self.query_json_on_writer(query)?;
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let Some(val) = row.first() else {
+            return Ok(None);
+        };
+        if let Some(number) = val.as_i64() {
+            return Ok(Some(number));
+        }
+        if let Some(text) = val.as_str() {
+            return Ok(text.parse::<i64>().ok());
+        }
+        Ok(None)
+    }
+
     pub fn query_count(&self, query: &str) -> Result<i64> {
         self.query_count_on_reader(query)
     }
@@ -705,6 +763,14 @@ mod tests {
             .reader_state
             .refresh_inflight
             .store(false, Ordering::Relaxed);
+        store
+            .reader_state
+            .last_refresh_started_ms
+            .store(0, Ordering::Relaxed);
+        store
+            .reader_state
+            .last_refresh_completed_ms
+            .store(0, Ordering::Relaxed);
 
         let _ = store
             .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::StaleOk)
@@ -775,6 +841,14 @@ mod tests {
             .refresh_inflight
             .store(false, Ordering::Relaxed);
         store.recent_write_epoch_ms.store(0, Ordering::Relaxed);
+        store
+            .reader_state
+            .last_refresh_started_ms
+            .store(0, Ordering::Relaxed);
+        store
+            .reader_state
+            .last_refresh_completed_ms
+            .store(0, Ordering::Relaxed);
 
         let _ = store
             .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::FreshPreferred)
@@ -790,6 +864,47 @@ mod tests {
             0
         );
         assert_eq!(snapshot.refresh_requested_epoch, 15);
+    }
+
+    #[test]
+    fn fresh_preferred_small_recent_lag_does_not_request_refresh() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let now_ms = crate::graph::GraphStore::current_epoch_ms();
+        let before = store.reader_snapshot_diagnostics();
+        store.reader_state.commit_epoch.store(15, Ordering::Relaxed);
+        store.reader_state.reader_epoch.store(14, Ordering::Relaxed);
+        store
+            .reader_state
+            .refresh_requested_epoch
+            .store(14, Ordering::Relaxed);
+        store
+            .reader_state
+            .refresh_inflight
+            .store(false, Ordering::Relaxed);
+        store
+            .reader_state
+            .last_refresh_started_ms
+            .store(now_ms, Ordering::Relaxed);
+        store
+            .reader_state
+            .last_refresh_completed_ms
+            .store(now_ms, Ordering::Relaxed);
+
+        let _ = store
+            .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::FreshPreferred)
+            .unwrap();
+
+        let snapshot = store.reader_snapshot_diagnostics();
+        assert_eq!(
+            snapshot.reads_on_reader_total - before.reads_on_reader_total,
+            1
+        );
+        assert_eq!(
+            snapshot.reads_on_writer_total - before.reads_on_writer_total,
+            0
+        );
+        assert!(!snapshot.refresh_inflight);
+        assert_eq!(snapshot.refresh_requested_epoch, 14);
     }
 
     #[test]

@@ -1,5 +1,8 @@
-use crate::embedder::EmbeddingLaneConfig;
+use crate::embedder::{current_runtime_tuning_state, EmbeddingLaneConfig};
 use crate::service_guard::{self, ServicePressure};
+use std::fs::{File, OpenOptions};
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -14,6 +17,10 @@ pub const AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD: usize = 128;
 pub const SYMBOL_BACKLOG_RESIDUAL_THRESHOLD: usize = 64;
 pub const CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD: usize = 512;
 pub const GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD: usize = 2048;
+pub const SEMANTIC_REFILL_BACKLOG_THRESHOLD: usize = 16;
+pub const SEMANTIC_REFILL_READY_LOW_WATERMARK: u64 = 1;
+pub const SEMANTIC_REFILL_PREPARE_LOW_WATERMARK: u64 = 1;
+pub const UTILITY_FIRST_SCHEDULER_HOLD_WINDOW_MS: u64 = 2_000;
 const MAX_CHUNKS_PER_FILE: usize = 64;
 const MAX_EMBED_BATCH_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_GPU_WARMUP_EMBED_BATCH_CHUNKS: usize = 64;
@@ -51,6 +58,25 @@ pub enum VectorDrainState {
     GpuScalingBlocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UtilityFirstSchedulerState {
+    GraphPriority,
+    SemanticRefillProtection,
+    BalancedDrain,
+    RecoveryOverride,
+}
+
+impl UtilityFirstSchedulerState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GraphPriority => "graph_priority",
+            Self::SemanticRefillProtection => "semantic_refill_protection",
+            Self::BalancedDrain => "balanced_drain",
+            Self::RecoveryOverride => "recovery_override",
+        }
+    }
+}
+
 impl VectorDrainState {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -77,6 +103,15 @@ pub struct VectorBatchControllerDiagnostics {
     pub avg_chunks_per_embed_call: f64,
     pub avg_files_per_embed_call: f64,
     pub embed_ms_per_chunk: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UtilityFirstSchedulerDiagnostics {
+    pub state: UtilityFirstSchedulerState,
+    pub reason: &'static str,
+    pub semantic_underfeed: bool,
+    pub ready_reserve_target: usize,
+    pub hold_window_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,17 +154,159 @@ pub struct VectorBatchController {
     baseline_metrics: service_guard::VectorRuntimeMetrics,
     last_window_started_ms: u64,
     last_best_embed_ms_per_chunk: Option<f64>,
+    consecutive_embed_regressions: u8,
+    consecutive_underfed_windows: u8,
     last_window: VectorBatchControllerWindow,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct SemanticPolicy {
+    pub profile: &'static str,
     pub pause: bool,
     pub sleep: Duration,
     pub idle_sleep: Duration,
 }
 
+fn semantic_policy_profile(
+    profile: &'static str,
+    pause: bool,
+    sleep_ms: u64,
+    idle_sleep_ms: u64,
+) -> SemanticPolicy {
+    SemanticPolicy {
+        profile,
+        pause,
+        sleep: Duration::from_millis(sleep_ms),
+        idle_sleep: Duration::from_millis(idle_sleep_ms),
+    }
+}
+
 static VECTOR_BATCH_CONTROLLER: OnceLock<Mutex<VectorBatchController>> = OnceLock::new();
+static UTILITY_FIRST_SCHEDULER: OnceLock<Mutex<UtilityFirstScheduler>> = OnceLock::new();
+static GPU_VECTOR_LEASE: OnceLock<Mutex<Option<GpuVectorLease>>> = OnceLock::new();
+
+struct GpuVectorLease {
+    _file: File,
+    path: PathBuf,
+    owner_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuVectorLeaseDiagnostics {
+    pub exclusive_required: bool,
+    pub path: String,
+    pub owned_by_current_instance: bool,
+    pub owner_identity: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UtilityFirstScheduler {
+    state: UtilityFirstSchedulerState,
+    entered_at_ms: u64,
+}
+
+impl Default for UtilityFirstScheduler {
+    fn default() -> Self {
+        Self {
+            state: UtilityFirstSchedulerState::BalancedDrain,
+            entered_at_ms: 0,
+        }
+    }
+}
+
+fn utility_first_scheduler() -> &'static Mutex<UtilityFirstScheduler> {
+    UTILITY_FIRST_SCHEDULER.get_or_init(|| Mutex::new(UtilityFirstScheduler::default()))
+}
+
+fn gpu_vector_lease_slot() -> &'static Mutex<Option<GpuVectorLease>> {
+    GPU_VECTOR_LEASE.get_or_init(|| Mutex::new(None))
+}
+
+fn gpu_vector_lease_required() -> bool {
+    std::env::var("AXON_GPU_VECTOR_EXCLUSIVE_LEASE")
+        .ok()
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn gpu_vector_lease_owner_identity() -> String {
+    std::env::var("AXON_RUNTIME_IDENTITY")
+        .or_else(|_| std::env::var("AXON_INSTANCE_KIND"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn gpu_vector_lease_path() -> PathBuf {
+    std::env::var("AXON_GPU_VECTOR_LEASE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp/axon-gpu-vectorization.lock"))
+}
+
+fn try_claim_gpu_vector_lease() -> bool {
+    if !gpu_vector_lease_required() {
+        return true;
+    }
+    let path = gpu_vector_lease_path();
+    let mut guard = gpu_vector_lease_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if guard.is_some() {
+        return true;
+    }
+    let Ok(file) = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+    else {
+        return false;
+    };
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        *guard = Some(GpuVectorLease {
+            _file: file,
+            path,
+            owner_identity: gpu_vector_lease_owner_identity(),
+        });
+        true
+    } else {
+        false
+    }
+}
+
+pub fn current_gpu_vector_lease_diagnostics() -> GpuVectorLeaseDiagnostics {
+    let path = gpu_vector_lease_path();
+    let guard = gpu_vector_lease_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(lease) = guard.as_ref() {
+        GpuVectorLeaseDiagnostics {
+            exclusive_required: gpu_vector_lease_required(),
+            path: lease.path.to_string_lossy().to_string(),
+            owned_by_current_instance: true,
+            owner_identity: Some(lease.owner_identity.clone()),
+        }
+    } else {
+        GpuVectorLeaseDiagnostics {
+            exclusive_required: gpu_vector_lease_required(),
+            path: path.to_string_lossy().to_string(),
+            owned_by_current_instance: false,
+            owner_identity: None,
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn reset_gpu_vector_lease_for_tests() {
+    let mut guard = gpu_vector_lease_slot()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    *guard = None;
+}
 
 impl VectorBatchController {
     pub fn new(lane_config: &EmbeddingLaneConfig) -> Self {
@@ -167,6 +344,8 @@ impl VectorBatchController {
             baseline_metrics: service_guard::VectorRuntimeMetrics::default(),
             last_window_started_ms: 0,
             last_best_embed_ms_per_chunk: None,
+            consecutive_embed_regressions: 0,
+            consecutive_underfed_windows: 0,
             last_window: VectorBatchControllerWindow::default(),
         }
     }
@@ -342,6 +521,9 @@ impl VectorBatchController {
             self.target_files_per_cycle,
             self.target_embed_batch_chunks,
             observation.metrics.ready_queue_depth_current as usize,
+            observation.metrics.prepare_inflight_current as usize,
+            avg_chunks_per_embed_call,
+            observation.metrics.oldest_ready_batch_age_ms_current,
         );
         let ready_queue_starved = observation.metrics.ready_queue_depth_current == 0;
         let ready_queue_under_floor =
@@ -351,6 +533,7 @@ impl VectorBatchController {
             .metrics
             .gpu_idle_wait_ms_total
             .saturating_sub(self.baseline_metrics.gpu_idle_wait_ms_total);
+        let gpu_single_worker_cruise = gpu_single_worker_cruise_mode(observation);
         let mut desired_embed_chunks = self.target_embed_batch_chunks;
         let mut desired_files_per_cycle = self.target_files_per_cycle;
         let mut reason = "holding_density".to_string();
@@ -363,11 +546,43 @@ impl VectorBatchController {
         } else {
             VectorBatchControllerState::Holding
         };
-        let embed_regressed = self
-            .last_best_embed_ms_per_chunk
-            .is_some_and(|best| embed_ms_per_chunk > best * 1.20);
+        let underfed_chunks =
+            avg_chunks_per_embed_call < (self.target_embed_batch_chunks as f64 * 0.75);
+        let underfed_files = underfed_chunks && avg_files_per_embed_call < 1.5;
+        let low_density_collapse = underfed_chunks
+            && avg_files_per_embed_call >= 1.5
+            && avg_chunks_per_embed_call < (self.target_embed_batch_chunks as f64 * 0.60);
+        let meaningful_density_window =
+            avg_chunks_per_embed_call >= (self.target_embed_batch_chunks as f64 * 0.50);
+        let embed_regressed = !ready_queue_under_floor
+            && !ready_queue_starved
+            && meaningful_density_window
+            && self.last_best_embed_ms_per_chunk.is_some_and(|best| {
+                embed_ms_per_chunk > best * if gpu_single_worker_cruise { 1.35 } else { 1.20 }
+            });
 
         if embed_regressed {
+            self.consecutive_embed_regressions =
+                self.consecutive_embed_regressions.saturating_add(1);
+        } else {
+            self.consecutive_embed_regressions = 0;
+        }
+
+        let underfed_window = low_density_collapse
+            || ((!observation.interactive_active && backlog_meaningful)
+                && (ready_queue_under_floor
+                    || gpu_idle_wait_delta > GPU_IDLE_WAIT_ESCALATION_MS
+                    || underfed_chunks
+                    || underfed_files));
+        if underfed_window {
+            self.consecutive_underfed_windows = self.consecutive_underfed_windows.saturating_add(1);
+        } else {
+            self.consecutive_underfed_windows = 0;
+        }
+
+        if embed_regressed
+            && self.consecutive_embed_regressions >= if gpu_single_worker_cruise { 2 } else { 1 }
+        {
             reason = "embed_efficiency_regressed".to_string();
             if desired_embed_chunks > self.bounds.default_embed_batch_chunks {
                 desired_embed_chunks = desired_embed_chunks
@@ -378,15 +593,47 @@ impl VectorBatchController {
                     .saturating_sub(VECTOR_BATCH_CONTROLLER_FILES_STEP)
                     .max(self.bounds.default_files_per_cycle);
             }
+            self.consecutive_embed_regressions = 0;
         } else if !observation.interactive_active && backlog_meaningful {
-            let underfed_chunks =
-                avg_chunks_per_embed_call < (self.target_embed_batch_chunks as f64 * 0.75);
-            let underfed_files = underfed_chunks && avg_files_per_embed_call < 1.5;
-            if ready_queue_under_floor
+            if low_density_collapse && (ready_queue_under_floor || ready_queue_starved) {
+                reason = "ready_queue_starved_low_density".to_string();
+                let persistent_underfeed = self.consecutive_underfed_windows >= 2;
+                let embed_step = VECTOR_BATCH_CONTROLLER_EMBED_STEP
+                    * if gpu_single_worker_cruise {
+                        if persistent_underfeed {
+                            3
+                        } else {
+                            2
+                        }
+                    } else if persistent_underfeed {
+                        2
+                    } else {
+                        1
+                    };
+                desired_embed_chunks = desired_embed_chunks
+                    .saturating_sub(embed_step)
+                    .max(self.bounds.default_embed_batch_chunks);
+                let files_step = VECTOR_BATCH_CONTROLLER_FILES_STEP
+                    * if gpu_single_worker_cruise {
+                        if persistent_underfeed {
+                            3
+                        } else {
+                            2
+                        }
+                    } else if persistent_underfeed {
+                        2
+                    } else {
+                        1
+                    };
+                desired_files_per_cycle = desired_files_per_cycle
+                    .saturating_add(files_step)
+                    .min(self.bounds.max_files_per_cycle);
+            } else if ready_queue_under_floor
                 || gpu_idle_wait_delta > GPU_IDLE_WAIT_ESCALATION_MS
                 || underfed_chunks
                 || underfed_files
             {
+                let persistent_underfeed = self.consecutive_underfed_windows >= 2;
                 reason = if ready_queue_under_floor
                     || gpu_idle_wait_delta > GPU_IDLE_WAIT_ESCALATION_MS
                 {
@@ -395,19 +642,57 @@ impl VectorBatchController {
                     "idle_underfed".to_string()
                 };
                 if underfed_chunks || ready_queue_under_floor {
+                    let embed_step = VECTOR_BATCH_CONTROLLER_EMBED_STEP
+                        * if gpu_single_worker_cruise {
+                            if ready_queue_under_floor {
+                                if persistent_underfeed {
+                                    4
+                                } else {
+                                    3
+                                }
+                            } else {
+                                if persistent_underfeed {
+                                    3
+                                } else {
+                                    2
+                                }
+                            }
+                        } else if ready_queue_under_floor {
+                            if persistent_underfeed {
+                                3
+                            } else {
+                                2
+                            }
+                        } else if persistent_underfeed {
+                            2
+                        } else {
+                            1
+                        };
                     desired_embed_chunks = desired_embed_chunks
-                        .saturating_add(
-                            VECTOR_BATCH_CONTROLLER_EMBED_STEP
-                                * if ready_queue_under_floor { 2 } else { 1 },
-                        )
+                        .saturating_add(embed_step)
                         .min(self.bounds.max_embed_batch_chunks);
                 }
                 if underfed_files || ready_queue_under_floor || ready_queue_starved {
+                    let files_step = VECTOR_BATCH_CONTROLLER_FILES_STEP
+                        * if gpu_single_worker_cruise {
+                            if persistent_underfeed {
+                                3
+                            } else {
+                                2
+                            }
+                        } else if ready_queue_under_floor {
+                            if persistent_underfeed {
+                                3
+                            } else {
+                                2
+                            }
+                        } else if persistent_underfeed {
+                            2
+                        } else {
+                            1
+                        };
                     desired_files_per_cycle = desired_files_per_cycle
-                        .saturating_add(
-                            VECTOR_BATCH_CONTROLLER_FILES_STEP
-                                * if ready_queue_under_floor { 2 } else { 1 },
-                        )
+                        .saturating_add(files_step)
                         .min(self.bounds.max_files_per_cycle);
                 }
             } else if persist_congested {
@@ -445,6 +730,19 @@ impl VectorBatchController {
         self.last_window_started_ms = now_ms;
         self.diagnostics()
     }
+}
+
+fn gpu_single_worker_cruise_mode(observation: VectorBatchControllerObservation) -> bool {
+    if observation.interactive_active
+        || observation.gpu_memory_pressure
+        || !embedding_provider_requested_is_gpu()
+    {
+        return false;
+    }
+
+    let tuning = current_runtime_tuning_state();
+    tuning.vector_workers <= 1
+        && observation.queue_pending >= VECTOR_BATCH_CONTROLLER_IDLE_BACKLOG_THRESHOLD * 8
 }
 
 fn vector_batch_controller_slot(
@@ -584,6 +882,9 @@ pub fn vector_ready_reserve_target(
     target_files_per_cycle: usize,
     target_embed_batch_chunks: usize,
     current_ready_depth: usize,
+    prepare_inflight_depth: usize,
+    avg_chunks_per_embed_call: f64,
+    oldest_ready_batch_age_ms: u64,
 ) -> usize {
     let mut reserve = configured_ready_depth.max(READY_RESERVE_FLOOR);
     if queue_pending >= 4_096 {
@@ -595,6 +896,35 @@ pub fn vector_ready_reserve_target(
     reserve = reserve.max((target_files_per_cycle / 2).clamp(4, READY_RESERVE_EXTREME_BACKLOG));
     if current_ready_depth == 0 && queue_pending >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
         reserve = reserve.max(READY_RESERVE_HEAVY_BACKLOG);
+    }
+    if queue_pending > 0 {
+        let mut safety_stock = 0usize;
+        let effective_density_ratio = if target_embed_batch_chunks > 0
+            && avg_chunks_per_embed_call.is_finite()
+            && avg_chunks_per_embed_call > 0.0
+        {
+            (avg_chunks_per_embed_call / target_embed_batch_chunks as f64).clamp(0.0, 2.0)
+        } else {
+            1.0
+        };
+        let supply_in_flight = current_ready_depth.saturating_add(prepare_inflight_depth);
+        if supply_in_flight < reserve {
+            safety_stock = safety_stock.saturating_add((reserve - supply_in_flight).min(4));
+        }
+        if prepare_inflight_depth == 0 {
+            safety_stock = safety_stock.saturating_add(2);
+        } else if prepare_inflight_depth == 1 && current_ready_depth <= configured_ready_depth / 2 {
+            safety_stock = safety_stock.saturating_add(1);
+        }
+        if effective_density_ratio < 0.60 {
+            safety_stock = safety_stock.saturating_add(4);
+        } else if effective_density_ratio < 0.80 {
+            safety_stock = safety_stock.saturating_add(2);
+        }
+        if oldest_ready_batch_age_ms >= 1_500 && supply_in_flight <= configured_ready_depth / 2 {
+            safety_stock = safety_stock.saturating_add(2);
+        }
+        reserve = reserve.saturating_add(safety_stock);
     }
     reserve.clamp(1, READY_RESERVE_EXTREME_BACKLOG)
 }
@@ -621,6 +951,79 @@ pub fn current_vector_drain_state(
         return VectorDrainState::GpuScalingBlocked;
     }
     VectorDrainState::AggressiveDrain
+}
+
+pub fn current_utility_first_scheduler_diagnostics(
+    graph_queue_depth: usize,
+    file_backlog_depth: usize,
+    service_pressure: ServicePressure,
+) -> UtilityFirstSchedulerDiagnostics {
+    let metrics = service_guard::vector_runtime_metrics();
+    let interactive_active = service_guard::interactive_priority_active()
+        || service_guard::interactive_requests_in_flight() > 0;
+    let ready_reserve_target = vector_ready_reserve_target(
+        READY_RESERVE_FLOOR,
+        file_backlog_depth,
+        (metrics.prepare_claimed_current as usize).max(READY_RESERVE_FLOOR / 2),
+        (metrics.ready_claimed_current as usize).max(READY_RESERVE_FLOOR),
+        metrics.ready_queue_depth_current as usize,
+        metrics.prepare_inflight_current as usize,
+        0.0,
+        metrics.oldest_ready_batch_age_ms_current,
+    );
+    let semantic_underfeed = file_backlog_depth >= SEMANTIC_REFILL_BACKLOG_THRESHOLD
+        && metrics.ready_queue_depth_current <= SEMANTIC_REFILL_READY_LOW_WATERMARK
+        && metrics.prepare_inflight_current <= SEMANTIC_REFILL_PREPARE_LOW_WATERMARK;
+    let persist_congested = metrics.persist_queue_depth_current > 0;
+    let desired_state =
+        if interactive_active || matches!(service_pressure, ServicePressure::Critical) {
+            UtilityFirstSchedulerState::RecoveryOverride
+        } else if semantic_underfeed && !persist_congested {
+            UtilityFirstSchedulerState::SemanticRefillProtection
+        } else if graph_queue_depth > 0 {
+            UtilityFirstSchedulerState::GraphPriority
+        } else {
+            UtilityFirstSchedulerState::BalancedDrain
+        };
+    let reason = if interactive_active {
+        "interactive_priority"
+    } else if matches!(service_pressure, ServicePressure::Critical) {
+        "service_pressure_critical"
+    } else if semantic_underfeed && !persist_congested {
+        "semantic_underfed"
+    } else if persist_congested {
+        "persist_congested"
+    } else if graph_queue_depth > 0 {
+        "graph_backlog_present"
+    } else {
+        "steady_balanced"
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let mut guard = utility_first_scheduler()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let hold_active = guard.entered_at_ms > 0
+        && now_ms.saturating_sub(guard.entered_at_ms) < UTILITY_FIRST_SCHEDULER_HOLD_WINDOW_MS;
+    if desired_state != guard.state
+        && (!hold_active
+            || matches!(
+                desired_state,
+                UtilityFirstSchedulerState::RecoveryOverride
+                    | UtilityFirstSchedulerState::SemanticRefillProtection
+            ))
+    {
+        guard.state = desired_state;
+        guard.entered_at_ms = now_ms;
+    } else if guard.entered_at_ms == 0 {
+        guard.entered_at_ms = now_ms;
+    }
+    UtilityFirstSchedulerDiagnostics {
+        state: guard.state,
+        reason,
+        semantic_underfeed,
+        ready_reserve_target,
+        hold_window_ms: UTILITY_FIRST_SCHEDULER_HOLD_WINDOW_MS,
+    }
 }
 
 pub fn allowed_gpu_vector_workers(
@@ -660,6 +1063,10 @@ pub fn vector_worker_admitted(
     if !gpu_available {
         return true;
     }
+    if !try_claim_gpu_vector_lease() {
+        service_guard::record_vectorization_suppressed();
+        return false;
+    }
     let allowed_gpu_workers = allowed_gpu_vector_workers(file_backlog_depth, service_pressure);
     if worker_idx >= allowed_gpu_workers {
         service_guard::record_vectorization_suppressed();
@@ -669,57 +1076,90 @@ pub fn vector_worker_admitted(
 }
 
 pub fn semantic_policy(queue_len: usize, service_pressure: ServicePressure) -> SemanticPolicy {
-    if service_guard::interactive_priority_active() {
-        service_guard::record_vectorization_suppressed();
-        return SemanticPolicy {
-            pause: false,
-            sleep: Duration::from_millis(750),
-            idle_sleep: Duration::from_millis(1500),
-        };
-    }
+    semantic_policy_with_graph(queue_len, 0, service_pressure)
+}
+
+pub fn baseline_semantic_policy(queue_len: usize) -> SemanticPolicy {
     if queue_len == 0 {
-        return SemanticPolicy {
-            pause: false,
-            sleep: Duration::from_millis(250),
-            idle_sleep: Duration::from_secs(20),
-        };
-    }
-    if service_pressure == ServicePressure::Critical {
-        return SemanticPolicy {
-            pause: true,
-            sleep: Duration::from_secs(2),
-            idle_sleep: Duration::from_secs(2),
-        };
-    }
-    if service_guard::interactive_requests_in_flight() > 0 {
-        return SemanticPolicy {
-            pause: false,
-            sleep: Duration::from_millis(500),
-            idle_sleep: Duration::from_secs(1),
-        };
+        return semantic_policy_profile("quiescent_idle", false, 250, 20_000);
     }
     if queue_len >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
-        return SemanticPolicy {
-            pause: false,
-            sleep: Duration::from_millis(100),
-            idle_sleep: Duration::from_millis(250),
-        };
+        return semantic_policy_profile("aggressive_drain", false, 100, 250);
+    }
+    semantic_policy_profile("balanced_drain", false, 250, 750)
+}
+
+pub fn target_semantic_policy_with_graph(
+    queue_len: usize,
+    graph_queue_depth: usize,
+    service_pressure: ServicePressure,
+) -> SemanticPolicy {
+    if service_guard::interactive_priority_active() {
+        service_guard::record_vectorization_suppressed();
+        return semantic_policy_profile("interactive_guarded", false, 750, 1_500);
+    }
+    if queue_len == 0 {
+        return semantic_policy_profile("quiescent_idle", false, 250, 20_000);
+    }
+    if service_pressure == ServicePressure::Critical {
+        return semantic_policy_profile("critical_pause", true, 2_000, 2_000);
+    }
+    let scheduler =
+        current_utility_first_scheduler_diagnostics(graph_queue_depth, queue_len, service_pressure);
+    if scheduler.state == UtilityFirstSchedulerState::GraphPriority {
+        return semantic_policy_profile("graph_priority", false, 400, 1_000);
+    }
+    if scheduler.state == UtilityFirstSchedulerState::SemanticRefillProtection {
+        return semantic_policy_profile("semantic_refill_protection", false, 100, 250);
+    }
+    if service_guard::interactive_requests_in_flight() > 0 {
+        return semantic_policy_profile("interactive_soft_guard", false, 500, 1_000);
+    }
+    if queue_len >= AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD {
+        return semantic_policy_profile("aggressive_drain", false, 100, 250);
     }
     if matches!(
         service_pressure,
         ServicePressure::Degraded | ServicePressure::Recovering
     ) {
-        return SemanticPolicy {
-            pause: false,
-            sleep: Duration::from_millis(350),
-            idle_sleep: Duration::from_millis(750),
-        };
+        return semantic_policy_profile("recovery_guarded", false, 350, 750);
     }
+    semantic_policy_profile("balanced_drain", false, 250, 750)
+}
+
+fn scale_duration(duration: Duration, scale_pct: usize, min_ms: u64, max_ms: u64) -> Duration {
+    let scaled_ms = (duration.as_millis() as u128)
+        .saturating_mul(scale_pct as u128)
+        .saturating_div(100)
+        .clamp(min_ms as u128, max_ms as u128) as u64;
+    Duration::from_millis(scaled_ms)
+}
+
+pub fn apply_semantic_policy_runtime_tuning(target: SemanticPolicy) -> SemanticPolicy {
+    let tuning = current_runtime_tuning_state();
     SemanticPolicy {
-        pause: false,
-        sleep: Duration::from_millis(250),
-        idle_sleep: Duration::from_millis(750),
+        profile: target.profile,
+        pause: target.pause,
+        sleep: scale_duration(target.sleep, tuning.semantic_sleep_scale_pct, 50, 10_000),
+        idle_sleep: scale_duration(
+            target.idle_sleep,
+            tuning.semantic_idle_sleep_scale_pct,
+            100,
+            60_000,
+        ),
     }
+}
+
+pub fn semantic_policy_with_graph(
+    queue_len: usize,
+    graph_queue_depth: usize,
+    service_pressure: ServicePressure,
+) -> SemanticPolicy {
+    apply_semantic_policy_runtime_tuning(target_semantic_policy_with_graph(
+        queue_len,
+        graph_queue_depth,
+        service_pressure,
+    ))
 }
 
 pub fn symbol_embedding_allowed(
@@ -742,7 +1182,7 @@ pub fn symbol_embedding_allowed(
 }
 
 pub fn graph_projection_allowed(
-    _queue_len: usize,
+    queue_len: usize,
     service_pressure: ServicePressure,
     vector_backlog_depth: usize,
     gpu_available: bool,
@@ -759,15 +1199,28 @@ pub fn graph_projection_allowed(
         service_guard::record_projection_suppressed();
         return false;
     }
-    if !gpu_available && vector_backlog_depth >= CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD {
+    let scheduler = current_utility_first_scheduler_diagnostics(
+        queue_len,
+        vector_backlog_depth,
+        service_pressure,
+    );
+    if scheduler.state == UtilityFirstSchedulerState::SemanticRefillProtection {
         service_guard::record_projection_suppressed();
-        return false;
-    }
-    if gpu_available && vector_backlog_depth >= GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD {
-        service_guard::record_projection_suppressed();
-        return false;
+        return if gpu_available {
+            vector_backlog_depth < GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD
+        } else {
+            vector_backlog_depth < CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD
+        };
     }
     true
+}
+
+#[cfg(test)]
+pub fn reset_utility_first_scheduler_for_tests() {
+    let mut guard = utility_first_scheduler()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    *guard = UtilityFirstScheduler::default();
 }
 
 fn embedding_provider_requested_is_gpu() -> bool {
@@ -802,10 +1255,43 @@ fn gpu_warmup_files_per_cycle(default_files_per_cycle: usize) -> usize {
 mod tests {
     use super::*;
     use crate::service_guard::ServicePressure;
+    use tempfile::tempdir;
 
     #[test]
     fn test_allowed_gpu_vector_workers_returns_4_on_high_backlog() {
         let allowed = allowed_gpu_vector_workers(2000, ServicePressure::Healthy);
-        assert_eq!(allowed, 4);
+        assert_eq!(allowed, 6);
+    }
+
+    #[test]
+    fn test_gpu_vector_lease_is_claimed_by_current_instance() {
+        let dir = tempdir().expect("tempdir");
+        let lease_path = dir.path().join("gpu-vector.lock");
+        unsafe {
+            std::env::set_var("AXON_GPU_VECTOR_LEASE_PATH", &lease_path);
+            std::env::set_var("AXON_RUNTIME_IDENTITY", "test-dev");
+            std::env::set_var("AXON_GPU_VECTOR_EXCLUSIVE_LEASE", "true");
+        }
+        reset_gpu_vector_lease_for_tests();
+
+        assert!(vector_worker_admitted(
+            0,
+            ServicePressure::Healthy,
+            true,
+            256
+        ));
+
+        let diagnostics = current_gpu_vector_lease_diagnostics();
+        assert!(diagnostics.exclusive_required);
+        assert!(diagnostics.owned_by_current_instance);
+        assert_eq!(diagnostics.owner_identity.as_deref(), Some("test-dev"));
+        assert_eq!(diagnostics.path, lease_path.to_string_lossy().to_string());
+
+        unsafe {
+            std::env::remove_var("AXON_GPU_VECTOR_LEASE_PATH");
+            std::env::remove_var("AXON_RUNTIME_IDENTITY");
+            std::env::remove_var("AXON_GPU_VECTOR_EXCLUSIVE_LEASE");
+        }
+        reset_gpu_vector_lease_for_tests();
     }
 }

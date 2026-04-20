@@ -4,17 +4,68 @@ set -euo pipefail
 # Axon v2 - Daily Start Script
 # Canonical daily workflow entrypoint for running Axon in TMUX.
 
-PROJECT_ROOT="$(pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_PROJECTS_ROOT="/home/dstadel/projects"
+# shellcheck source=scripts/lib/axon-instance.sh
+source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
+# shellcheck source=scripts/lib/axon-resource-policy.sh
+source "$PROJECT_ROOT/scripts/lib/axon-resource-policy.sh"
+# shellcheck source=scripts/lib/axon-version.sh
+source "$PROJECT_ROOT/scripts/lib/axon-version.sh"
 cd "$PROJECT_ROOT"
 
-if [ -f "$PROJECT_ROOT/.env.worktree" ]; then
-    echo "🔧 Loading .env.worktree configuration..."
-    source "$PROJECT_ROOT/.env.worktree"
-fi
+axon_load_worktree_env "$PROJECT_ROOT"
+axon_resolve_instance "$PROJECT_ROOT" "$(basename "$PROJECT_ROOT")"
+axon_resolve_resource_policy "$AXON_INSTANCE_KIND"
+axon_resolve_version "$PROJECT_ROOT"
 
-AXON_ENV="${AXON_ENV:-prod}"
-TMUX_SESSION="${TMUX_SESSION:-axon}"
+LIVE_RELEASE_CURRENT_MANIFEST="$PROJECT_ROOT/.axon/live-release/current.json"
+LIVE_RELEASE_MANIFEST_SOURCE="${AXON_LIVE_RELEASE_MANIFEST:-$LIVE_RELEASE_CURRENT_MANIFEST}"
+LIVE_RELEASE_ACTIVE=0
+LIVE_RELEASE_ARTIFACT=""
+LIVE_RELEASE_BUILD_INFO=""
+
+load_live_release_current() {
+    [[ "$AXON_INSTANCE_KIND" == "live" && -f "$LIVE_RELEASE_MANIFEST_SOURCE" ]] || return 1
+
+    local payload=""
+    payload="$(python3 - "$LIVE_RELEASE_MANIFEST_SOURCE" <<'PY'
+import json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+runtime = manifest.get("runtime_version") or {}
+artifact = manifest.get("artifact") or {}
+fields = [
+    artifact.get("path", ""),
+    artifact.get("build_info_path", "") or "",
+    runtime.get("release_version", ""),
+    runtime.get("package_version", ""),
+    runtime.get("build_id", ""),
+    runtime.get("install_generation", ""),
+]
+print("\n".join(fields))
+PY
+)"
+
+    mapfile -t live_release_fields <<<"$payload"
+    LIVE_RELEASE_ARTIFACT="${live_release_fields[0]:-}"
+    LIVE_RELEASE_BUILD_INFO="${live_release_fields[1]:-}"
+
+    [[ -n "$LIVE_RELEASE_ARTIFACT" && -f "$LIVE_RELEASE_ARTIFACT" ]] || {
+        echo "❌ Live current manifest points to a missing artifact: ${LIVE_RELEASE_ARTIFACT:-<empty>}"
+        exit 1
+    }
+
+    AXON_RELEASE_VERSION="${live_release_fields[2]:-$AXON_RELEASE_VERSION}"
+    AXON_PACKAGE_VERSION="${live_release_fields[3]:-$AXON_PACKAGE_VERSION}"
+    AXON_BUILD_ID="${live_release_fields[4]:-$AXON_BUILD_ID}"
+    AXON_INSTALL_GENERATION="${live_release_fields[5]:-$AXON_INSTALL_GENERATION}"
+    export AXON_RELEASE_VERSION AXON_PACKAGE_VERSION AXON_BUILD_ID AXON_INSTALL_GENERATION
+    LIVE_RELEASE_ACTIVE=1
+    return 0
+}
+
+load_live_release_current || true
 
 WATCH_ROOT="${AXON_WATCH_DIR:-$DEFAULT_PROJECTS_ROOT}"
 PROJECTS_ROOT="${AXON_PROJECTS_ROOT:-$WATCH_ROOT}"
@@ -35,6 +86,56 @@ detect_accessible_gpu() {
     if [ -x /usr/lib/wsl/lib/nvidia-smi ] && /usr/lib/wsl/lib/nvidia-smi -L >/dev/null 2>&1; then
         return 0
     fi
+    return 1
+}
+
+instance_runtime_pids() {
+    local pids=""
+    local pid=""
+    local port_pid=""
+
+    if [[ -f "$AXON_PID_FILE" ]]; then
+        pid="$(cat "$AXON_PID_FILE" 2>/dev/null || true)"
+        if [[ -n "$pid" ]]; then
+            pids="$pids $pid"
+        fi
+    fi
+
+    port_pid="$(ss -ltnp 2>/dev/null | awk -v p="$HYDRA_HTTP_PORT" '
+        $1 == "LISTEN" {
+            split($4, addr_parts, ":")
+            if (addr_parts[length(addr_parts)] != p) {
+                next
+            }
+            match($0, /pid=([0-9]+)/, m)
+            if (m[1] != "") {
+                print m[1]
+                exit
+            }
+        }' || true)"
+    if [[ -n "$port_pid" ]]; then
+        pids="$pids $port_pid"
+    fi
+
+    echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -u
+}
+
+cleanup_stale_runtime_state() {
+    rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK" "$AXON_PID_FILE" "$AXON_RUNTIME_STATE_FILE"
+}
+
+has_live_runtime_dataplane() {
+    local pid
+    for pid in $(instance_runtime_pids); do
+        if [[ -n "$pid" && -e "/proc/$pid" ]]; then
+            return 0
+        fi
+    done
+
+    if nc -z localhost "$HYDRA_HTTP_PORT" 2>/dev/null; then
+        return 0
+    fi
+
     return 1
 }
 
@@ -147,8 +248,8 @@ if [ ! -x "bin/axon-core" ]; then
     exit 1
 fi
 
-if tmux has-session -t axon 2>/dev/null; then
-    DELETED_EXE_PIDS=$(for pid in $(pgrep -f "$PROJECT_ROOT/bin/axon-core" || true); do
+if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+    DELETED_EXE_PIDS=$(for pid in $(instance_runtime_pids); do
         exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
         if [[ "$exe" == *"(deleted)"* ]]; then
             echo "$pid"
@@ -161,14 +262,18 @@ if tmux has-session -t axon 2>/dev/null; then
         bash "$PROJECT_ROOT/scripts/stop.sh"
     fi
 
-    if nc -z localhost 44129 2>/dev/null || [ -S "/tmp/axon-telemetry.sock" ]; then
-        echo "ℹ️ Axon is already running in TMUX session 'axon'."
-        echo "   Attach with: tmux attach -t axon"
+    if has_live_runtime_dataplane; then
+        echo "ℹ️ Axon is already running in TMUX session '$TMUX_SESSION'."
+        echo "   Attach with: tmux attach -t $TMUX_SESSION"
         exit 0
     fi
 
-    echo "⚠️ Found stale TMUX session 'axon' without a healthy data plane. Resetting local runtime state..."
-    tmux kill-session -t axon 2>/dev/null || true
+    echo "⚠️ Found stale TMUX session '$TMUX_SESSION' without a healthy data plane. Resetting local runtime state..."
+    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+    cleanup_stale_runtime_state
+elif [[ -S "$AXON_TELEMETRY_SOCK" || -S "$AXON_MCP_SOCK" || -f "$AXON_PID_FILE" ]]; then
+    echo "⚠️ Found stale local runtime state without a TMUX session. Cleaning sockets/pid and continuing..."
+    cleanup_stale_runtime_state
 fi
 
 # 1. Verify nix-daemon is running (WSL2 specific mitigation)
@@ -284,12 +389,33 @@ if [ -f "$DEVENV_TUNNEL_BIN" ] && find "$PROJECT_ROOT/src/axon-mcp-tunnel/src" \
     rebuild_tunnel_release || exit 1
 fi
 
-if [ -f "$DEVENV_RELEASE_BIN" ]; then
-    echo "🔄 Updating bin/axon-core safely..."
-    mkdir -p bin && install -m 755 "$DEVENV_RELEASE_BIN" bin/axon-core
+if [[ "${AXON_SKIP_BIN_SYNC:-0}" != "1" ]]; then
+    if [[ "$LIVE_RELEASE_ACTIVE" -eq 1 ]]; then
+        echo "🔄 Updating live bin/axon-core from promoted artifact..."
+        mkdir -p bin && install -m 755 "$LIVE_RELEASE_ARTIFACT" bin/axon-core
+        if [[ -n "$LIVE_RELEASE_BUILD_INFO" && -f "$LIVE_RELEASE_BUILD_INFO" ]]; then
+            install -m 644 "$LIVE_RELEASE_BUILD_INFO" "$AXON_BUILD_INFO_FILE"
+        else
+            axon_write_export_file "$AXON_BUILD_INFO_FILE" \
+                AXON_RELEASE_VERSION "$AXON_RELEASE_VERSION" \
+                AXON_BUILD_ID "$AXON_BUILD_ID" \
+                AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
+                AXON_INSTALL_GENERATION "$AXON_INSTALL_GENERATION"
+        fi
+    elif [[ -f "$DEVENV_RELEASE_BIN" ]]; then
+        echo "🔄 Updating bin/axon-core safely..."
+        mkdir -p bin && install -m 755 "$DEVENV_RELEASE_BIN" bin/axon-core
+        AXON_BUILD_ID="$(axon_workspace_build_id "$PROJECT_ROOT")"
+        export AXON_BUILD_ID
+        axon_write_export_file "$AXON_BUILD_INFO_FILE" \
+            AXON_RELEASE_VERSION "$AXON_RELEASE_VERSION" \
+            AXON_BUILD_ID "$AXON_BUILD_ID" \
+            AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
+            AXON_INSTALL_GENERATION "$AXON_INSTALL_GENERATION"
+    fi
 fi
 
-if [ -f "$DEVENV_TUNNEL_BIN" ]; then
+if [[ "${AXON_SKIP_BIN_SYNC:-0}" != "1" && -f "$DEVENV_TUNNEL_BIN" ]]; then
     echo "🔄 Updating bin/axon-mcp-tunnel safely..."
     mkdir -p bin && install -m 755 "$DEVENV_TUNNEL_BIN" bin/axon-mcp-tunnel
 fi
@@ -298,43 +424,53 @@ echo "🚀 Starting Axon in TMUX session '$TMUX_SESSION'..."
 echo "📂 Watch root: $WATCH_ROOT"
 echo "🗂️ Projects root: $PROJECTS_ROOT"
 echo "🧭 Runtime mode: $RUNTIME_MODE"
-
-# Configuration
-if [ "$AXON_ENV" = "dev" ]; then
-    export PHX_PORT=44137
-    export HYDRA_TCP_PORT=44138
-    export HYDRA_HTTP_PORT=44139
-    export HYDRA_ODATA_PORT=44140
-    export HYDRA_HTTP2_PORT=44141
-    export HYDRA_MCP_PORT=44142
-    TMUX_SESSION="axon-dev"
-    ELIXIR_NODE_NAME="axon_dev_nexus"
+echo "🧩 Instance kind: $AXON_INSTANCE_KIND"
+echo "📊 Resource policy: priority=$AXON_RESOURCE_PRIORITY budget=$AXON_BACKGROUND_BUDGET_CLASS gpu=$AXON_GPU_ACCESS_POLICY watcher=$AXON_WATCHER_POLICY"
+echo "🛠️ Worker cap: ${MAX_AXON_WORKERS:-auto} / Queue budget bytes: ${AXON_QUEUE_MEMORY_BUDGET_BYTES:-auto}"
+echo "🏷️ Release version: $AXON_RELEASE_VERSION"
+echo "🧱 Build id: $AXON_BUILD_ID"
+if [[ "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" == "1" ]]; then
+    echo "🌐 Advertised host: $AXON_PUBLIC_HOST ($AXON_PUBLIC_HOST_SOURCE)"
 else
-    export PHX_PORT=44127
-    export HYDRA_TCP_PORT=44128
-    export HYDRA_HTTP_PORT=44129
-    export HYDRA_ODATA_PORT=44130
-    export HYDRA_HTTP2_PORT=44131
-    export HYDRA_MCP_PORT=44132
-    ELIXIR_NODE_NAME="axon_nexus"
+    echo "🌐 Advertised host: unresolved"
 fi
-export WSL_IP
-WSL_IP=$(ip addr show eth0 | grep "inet " | awk '{print $2}' | cut -d/ -f1)
-if [ -z "$WSL_IP" ]; then
-    WSL_IP="127.0.0.1"
-fi
-export AXON_SQL_URL="http://$WSL_IP:$HYDRA_HTTP_PORT/sql"
 export SQL_URL="$AXON_SQL_URL"
 
-# Clean only the sockets used by the active runtime path
-rm -f /tmp/axon-telemetry.sock /tmp/axon-mcp.sock
-rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.lock 2>/dev/null || true
+mkdir -p "$AXON_DB_ROOT" "$AXON_RUN_ROOT"
+axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
+  AXON_RUNTIME_MODE "$RUNTIME_MODE" \
+  AXON_DASHBOARD_ENABLED "$START_DASHBOARD" \
+  AXON_INSTANCE_KIND "$AXON_INSTANCE_KIND" \
+  AXON_RUNTIME_IDENTITY "$AXON_RUNTIME_IDENTITY" \
+  AXON_RESOURCE_PRIORITY "$AXON_RESOURCE_PRIORITY" \
+  AXON_BACKGROUND_BUDGET_CLASS "$AXON_BACKGROUND_BUDGET_CLASS" \
+  AXON_GPU_ACCESS_POLICY "$AXON_GPU_ACCESS_POLICY" \
+  AXON_WATCHER_POLICY "$AXON_WATCHER_POLICY" \
+  MAX_AXON_WORKERS "${MAX_AXON_WORKERS:-}" \
+  AXON_QUEUE_MEMORY_BUDGET_BYTES "${AXON_QUEUE_MEMORY_BUDGET_BYTES:-}" \
+  AXON_WATCHER_SUBTREE_HINT_BUDGET "${AXON_WATCHER_SUBTREE_HINT_BUDGET:-}" \
+  AXON_EMBEDDING_PROVIDER "${AXON_EMBEDDING_PROVIDER:-}" \
+  AXON_RELEASE_VERSION "$AXON_RELEASE_VERSION" \
+  AXON_BUILD_ID "$AXON_BUILD_ID" \
+  AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
+  AXON_INSTALL_GENERATION "$AXON_INSTALL_GENERATION" \
+  AXON_PUBLIC_HOST "${AXON_PUBLIC_HOST:-}" \
+  AXON_PUBLIC_HOST_SOURCE "${AXON_PUBLIC_HOST_SOURCE:-unresolved}" \
+  AXON_PUBLIC_ENDPOINTS_AVAILABLE "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" \
+  AXON_MCP_PUBLIC_URL "${AXON_MCP_PUBLIC_URL:-}" \
+  AXON_SQL_PUBLIC_URL "${AXON_SQL_PUBLIC_URL:-}" \
+  AXON_DASHBOARD_PUBLIC_URL "${AXON_DASHBOARD_PUBLIC_URL:-}"
+
+# Clean only the sockets and locks used by the selected runtime
+rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK"
+rm -f "$AXON_PID_FILE"
+rm -f "$AXON_DB_ROOT/"*.lock 2>/dev/null || true
 
 # Never discard DuckDB WAL during a normal restart. WAL replay is required to recover
 # recent committed work when the main database file has not been checkpointed yet.
 if [[ "${AXON_DROP_WAL_ON_START:-0}" == "1" ]]; then
   echo "⚠️ AXON_DROP_WAL_ON_START=1 set: deleting DuckDB WAL files before start."
-  rm -f "$PROJECT_ROOT/.axon/graph_v2/"*.wal 2>/dev/null || true
+  rm -f "$AXON_DB_ROOT/"*.wal 2>/dev/null || true
 fi
 
 # Create TMUX session
@@ -362,7 +498,13 @@ append_pass_through_export() {
     fi
 }
 for pass_through_var in \
+    AXON_RESOURCE_PRIORITY \
+    AXON_BACKGROUND_BUDGET_CLASS \
+    AXON_GPU_ACCESS_POLICY \
+    AXON_WATCHER_POLICY \
     AXON_ENABLE_FEDERATION_ORCHESTRATOR \
+    AXON_QUEUE_MEMORY_BUDGET_BYTES \
+    AXON_WATCHER_SUBTREE_HINT_BUDGET \
     AXON_VECTOR_WORKERS \
     AXON_GRAPH_WORKERS \
     AXON_CHUNK_BATCH_SIZE \
@@ -376,6 +518,16 @@ for pass_through_var in \
     AXON_EMBED_MICRO_BATCH_MAX_ITEMS \
     AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS \
     AXON_MAX_EMBED_BATCH_BYTES \
+    AXON_RELEASE_VERSION \
+    AXON_BUILD_ID \
+    AXON_PACKAGE_VERSION \
+    AXON_INSTALL_GENERATION \
+    AXON_PUBLIC_HOST \
+    AXON_PUBLIC_HOST_SOURCE \
+    AXON_PUBLIC_ENDPOINTS_AVAILABLE \
+    AXON_MCP_PUBLIC_URL \
+    AXON_SQL_PUBLIC_URL \
+    AXON_DASHBOARD_PUBLIC_URL \
     OMP_NUM_THREADS \
     OMP_WAIT_POLICY
 do
@@ -458,15 +610,15 @@ if [[ "$EMBEDDING_PROVIDER_REQUEST" == "cuda" && ! -f "$ORT_OUT_PATH/lib/libonnx
     echo "⚠️ The selected ONNX Runtime package does not include libonnxruntime_providers_cuda.so."
     echo "   CUDA embedding cannot activate with this system ORT package; Axon will fall back to CPU diagnostics."
 fi
-tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_WATCH_DIR=\"$WATCH_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_MCP_MUTATION_JOBS=1; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\"$ORT_DYLIB_PATH\"; echo \"🚀 Starting Axon Core...\"; RUST_LOG=info bin/axon-core'" C-m
+tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'mkdir -p \"$AXON_RUN_ROOT\"; export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_WATCH_DIR=\"$WATCH_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_MCP_MUTATION_JOBS=1; export AXON_INSTANCE_KIND=\"$AXON_INSTANCE_KIND\"; export AXON_RUNTIME_IDENTITY=\"$AXON_RUNTIME_IDENTITY\"; export AXON_DB_ROOT=\"$AXON_DB_ROOT\"; export AXON_RUN_ROOT=\"$AXON_RUN_ROOT\"; export AXON_PID_FILE=\"$AXON_PID_FILE\"; export AXON_TELEMETRY_SOCK=\"$AXON_TELEMETRY_SOCK\"; export AXON_MCP_SOCK=\"$AXON_MCP_SOCK\"; export PHX_PORT=\"$PHX_PORT\"; export HYDRA_TCP_PORT=\"$HYDRA_TCP_PORT\"; export HYDRA_HTTP_PORT=\"$HYDRA_HTTP_PORT\"; export HYDRA_ODATA_PORT=\"$HYDRA_ODATA_PORT\"; export HYDRA_HTTP2_PORT=\"$HYDRA_HTTP2_PORT\"; export HYDRA_MCP_PORT=\"$HYDRA_MCP_PORT\"; export AXON_SQL_URL=\"$AXON_SQL_URL\"; export AXON_MCP_URL=\"$AXON_MCP_URL\"; export AXON_DASHBOARD_URL=\"$AXON_DASHBOARD_URL\"; export AXON_MUTATION_POLICY=\"$AXON_MUTATION_POLICY\"; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\"$ORT_DYLIB_PATH\"; echo \"🚀 Starting Axon Core...\"; bin/axon-core & core_pid=\$!; echo \$core_pid > \"$AXON_PID_FILE\"; wait \$core_pid; core_status=\$?; rm -f \"$AXON_PID_FILE\"; exit \$core_status'" C-m
 
 if [ "$START_DASHBOARD" = "1" ]; then
     # Start Visualization Plane
     tmux new-window -t "$TMUX_SESSION" -n "nexus"
     if [[ "$SKIP_ELIXIR_PREWARM" == "1" ]]; then
-        tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_PROJECT_CODE=$PROJECT_CODE AXON_WATCH_DIR=$WATCH_ROOT elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+        tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_PROJECT_CODE=$PROJECT_CODE AXON_WATCH_DIR=$WATCH_ROOT AXON_INSTANCE_KIND=$AXON_INSTANCE_KIND AXON_RUNTIME_IDENTITY=$AXON_RUNTIME_IDENTITY AXON_MUTATION_POLICY=$AXON_MUTATION_POLICY elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
     else
-        tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_PROJECT_CODE=$PROJECT_CODE AXON_WATCH_DIR=$WATCH_ROOT elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
+        tmux send-keys -t "$TMUX_SESSION:nexus" "cd \"$PROJECT_ROOT\" && devenv shell -- bash -lc \"cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && PHX_PORT=$PHX_PORT HYDRA_TCP_PORT=$HYDRA_TCP_PORT AXON_SQL_URL=$AXON_SQL_URL AXON_PROJECT_CODE=$PROJECT_CODE AXON_WATCH_DIR=$WATCH_ROOT AXON_INSTANCE_KIND=$AXON_INSTANCE_KIND AXON_RUNTIME_IDENTITY=$AXON_RUNTIME_IDENTITY AXON_MUTATION_POLICY=$AXON_MUTATION_POLICY elixir --name ${ELIXIR_NODE_NAME}@127.0.0.1 --cookie axon_secret -S mix phx.server\"" C-m
     fi
 fi
 
@@ -509,7 +661,7 @@ if [ "$START_DASHBOARD" = "1" ] && [ "$DASHBOARD_READY" = false ]; then echo "�
 
 if [ "$CORE_READY" = false ] || [ "$DASHBOARD_READY" = false ]; then
     echo "❌ Axon did not reach a fully ready state within the startup budget."
-    echo "   Inspect TMUX with: tmux attach -t axon"
+    echo "   Inspect TMUX with: tmux attach -t $TMUX_SESSION"
     exit 1
 fi
 
@@ -518,7 +670,7 @@ if [ "$CORE_READY" = true ]; then
     echo "🧪 Verifying live SQL schema..."
     if ! verify_sql_gateway; then
         echo "❌ Axon Core exposed its port but failed the live schema check."
-        echo "   Inspect TMUX with: tmux attach -t axon"
+        echo "   Inspect TMUX with: tmux attach -t $TMUX_SESSION"
         exit 1
     fi
     echo "✅ Live SQL schema check succeeded."
@@ -553,7 +705,7 @@ if [ "$RUN_MCP_TESTS" = "1" ]; then
     done
 
     echo "🧪 Running MCP Quality Gate Validation..."
-    if devenv shell -- bash -lc './scripts/mcp_quality_gate.sh'; then
+    if devenv shell -- bash -lc "./scripts/axon --instance $AXON_INSTANCE_KIND quality-mcp"; then
         echo "✅ MCP Quality Gate passed."
     else
         echo "❌ MCP Quality Gate failed."
@@ -565,10 +717,19 @@ fi
 echo ""
 echo "🛡️ Axon is rising in TMUX session '$TMUX_SESSION'."
 echo "To view processes: 'tmux attach -t $TMUX_SESSION'"
-if [ "$START_DASHBOARD" = "1" ]; then
-    echo "Dashboard: http://$WSL_IP:44127/cockpit"
+if [[ "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" == "1" ]]; then
+    if [ "$START_DASHBOARD" = "1" ]; then
+        echo "Dashboard: ${AXON_DASHBOARD_PUBLIC_URL}cockpit"
+    fi
+    echo "SQL Gateway: $AXON_SQL_PUBLIC_URL"
+    echo "MCP Server: $AXON_MCP_PUBLIC_URL"
+else
+    if [ "$START_DASHBOARD" = "1" ]; then
+        echo "Dashboard (host-local): ${AXON_DASHBOARD_URL}cockpit"
+    fi
+    echo "SQL Gateway (host-local): $AXON_SQL_URL"
+    echo "MCP Server (host-local): $AXON_MCP_URL"
+    echo "Advertised endpoints unresolved. Set AXON_PUBLIC_HOST for isolated clients."
 fi
-echo "SQL Gateway: http://$WSL_IP:44129/sql"
-echo "MCP Server: http://$WSL_IP:44129/mcp"
-echo "Stop services with: ./scripts/stop.sh"
+echo "Stop services with: ./scripts/axon --instance $AXON_INSTANCE_KIND stop"
 echo ""

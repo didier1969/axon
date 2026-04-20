@@ -127,6 +127,16 @@ pub(crate) fn canonical_soll_export_dir() -> Option<PathBuf> {
     resolve_repo_root().map(|root| root.join("docs/vision"))
 }
 
+pub(crate) fn canonical_soll_site_dir() -> Option<PathBuf> {
+    if let Some(override_path) = std::env::var_os("AXON_SOLL_SITE_ROOT") {
+        let path = PathBuf::from(override_path);
+        if !path.as_os_str().is_empty() {
+            return Some(path);
+        }
+    }
+    resolve_repo_root().map(|root| root.join("docs/derived/soll"))
+}
+
 pub(crate) fn find_latest_soll_export() -> Option<String> {
     let export_dir = canonical_soll_export_dir()?;
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(export_dir)

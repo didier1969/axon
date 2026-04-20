@@ -1,11 +1,16 @@
-use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpServer};
+use crate::mcp::{JsonRpcRequest, McpServer};
 use crate::service_guard::{
     mcp_request_finished_with_class, mcp_request_started_with_class, record_latency,
     McpRequestClass, ServiceKind,
 };
 use axum::{
     extract::Extension,
+    http::{
+        header::{HeaderName, HeaderValue},
+        HeaderMap, StatusCode,
+    },
     response::sse::{Event, Sse},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -59,31 +64,65 @@ async fn handle_sql_post(
 
 async fn handle_mcp_post(
     Extension(server): Extension<Arc<McpServer>>,
+    headers: HeaderMap,
     Json(payload): Json<JsonRpcRequest>,
-) -> Json<Option<JsonRpcResponse>> {
+) -> Response {
     let span = tracing::info_span!("mcp_request", method = %payload.method);
 
     async move {
         let t0 = Instant::now();
         let request_class = classify_mcp_request(&payload);
         mcp_request_started_with_class(request_class);
-        // Offload C-FFI / DB work to a blocking thread pool safely
-        // No more mcp_active_flag: Zero-Sleep MVCC architecture handles concurrency.
-        let response =
-            match tokio::task::spawn_blocking(move || server.handle_request(payload)).await {
-                Ok(res) => {
+        let protocol_version = resolve_response_protocol_version(&headers, &payload);
+
+        let response = if payload.id.is_none() {
+            match tokio::task::spawn_blocking(move || server.handle_notification(payload)).await {
+                Ok(true) => {
                     record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
-                    res
+                    StatusCode::ACCEPTED.into_response()
+                }
+                Ok(false) => {
+                    record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "error": {
+                                "code": -32601,
+                                "message": "Unsupported notification"
+                            }
+                        })),
+                    )
+                        .into_response()
                 }
                 Err(e) => {
                     record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
                     tracing::error!("MCP Blocking Task Panicked: {:?}", e);
-                    None
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
                 }
-            };
+            }
+        } else {
+            // Offload C-FFI / DB work to a blocking thread pool safely
+            // No more mcp_active_flag: Zero-Sleep MVCC architecture handles concurrency.
+            match tokio::task::spawn_blocking(move || server.handle_request(payload)).await {
+                Ok(Some(response)) => {
+                    record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
+                    Json(response).into_response()
+                }
+                Ok(None) => {
+                    record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
+                    StatusCode::BAD_REQUEST.into_response()
+                }
+                Err(e) => {
+                    record_latency(ServiceKind::Mcp, t0.elapsed().as_millis() as u64);
+                    tracing::error!("MCP Blocking Task Panicked: {:?}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                }
+            }
+        };
         mcp_request_finished_with_class(request_class);
 
-        Json(response)
+        with_protocol_version_header(response, protocol_version)
     }
     .instrument(span)
     .await
@@ -91,7 +130,7 @@ async fn handle_mcp_post(
 
 fn classify_mcp_request(request: &JsonRpcRequest) -> McpRequestClass {
     match request.method.as_str() {
-        "initialize" | "tools/list" => McpRequestClass::Observer,
+        "initialize" | "tools/list" | "notifications/initialized" => McpRequestClass::Observer,
         "tools/call" => {
             let tool_name = request
                 .params
@@ -111,6 +150,38 @@ fn classify_mcp_request(request: &JsonRpcRequest) -> McpRequestClass {
         }
         _ => McpRequestClass::Control,
     }
+}
+
+fn resolve_response_protocol_version(
+    headers: &HeaderMap,
+    request: &JsonRpcRequest,
+) -> Option<&'static str> {
+    if request.method == "initialize" {
+        return Some(McpServer::negotiate_protocol_version(request));
+    }
+
+    headers
+        .get("MCP-Protocol-Version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
+                .into_iter()
+                .find(|supported| *supported == value)
+        })
+}
+
+fn with_protocol_version_header(
+    mut response: Response,
+    protocol_version: Option<&'static str>,
+) -> Response {
+    if let Some(protocol_version) = protocol_version {
+        let header_name = HeaderName::from_static("mcp-protocol-version");
+        if let Ok(header_value) = HeaderValue::from_str(protocol_version) {
+            response.headers_mut().insert(header_name, header_value);
+        }
+    }
+
+    response
 }
 
 fn is_observer_tool_name(name: &str) -> bool {
@@ -152,14 +223,14 @@ async fn handle_mcp_sse() -> Sse<impl Stream<Item = Result<Event, Infallible>>> 
 mod tests {
     use crate::graph::GraphStore;
     use crate::mcp::{JsonRpcRequest, McpServer};
-    use crate::mcp_http::{app_router, classify_mcp_request};
+    use crate::mcp_http::{app_router, classify_mcp_request, resolve_response_protocol_version};
     use crate::service_guard;
     use crate::service_guard::{
         mcp_request_finished_with_class, mcp_request_started_with_class, McpRequestClass,
     };
     use axum::{
         body::Body,
-        http::{Request, StatusCode},
+        http::{HeaderMap, Request, StatusCode},
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -204,6 +275,90 @@ mod tests {
         assert!(!body_json["result"]["tools"].as_array().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn test_mcp_http_initialize_negotiates_protocol_version_and_sets_header() {
+        let store = Arc::new(
+            crate::tests::test_helpers::create_test_db()
+                .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_http_initialize").unwrap()),
+        );
+        let mcp_server = Arc::new(McpServer::new(store));
+        let app = app_router(mcp_server);
+
+        let request_body = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "codex-test", "version": "0.0.0" }
+            }
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .body(Body::from(serde_json::to_string(&request_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("mcp-protocol-version")
+                .and_then(|value| value.to_str().ok()),
+            Some("2025-11-25")
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["result"]["protocolVersion"], "2025-11-25");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_http_initialized_notification_returns_accepted_without_body() {
+        let store = Arc::new(
+            crate::tests::test_helpers::create_test_db()
+                .unwrap_or_else(|_| GraphStore::new("/tmp/test_db_http_initialized").unwrap()),
+        );
+        let mcp_server = Arc::new(McpServer::new(store));
+        let app = app_router(mcp_server);
+
+        let request_body = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .body(Body::from(serde_json::to_string(&request_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(body.is_empty());
+    }
+
     #[test]
     fn test_classify_mcp_request_marks_status_as_observer() {
         let req = JsonRpcRequest {
@@ -220,6 +375,38 @@ mod tests {
             classify_mcp_request(&req),
             McpRequestClass::Observer
         ));
+    }
+
+    #[test]
+    fn test_classify_mcp_request_marks_initialized_notification_as_observer() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "notifications/initialized".to_string(),
+            params: None,
+            id: None,
+        };
+
+        assert!(matches!(
+            classify_mcp_request(&req),
+            McpRequestClass::Observer
+        ));
+    }
+
+    #[test]
+    fn test_resolve_response_protocol_version_uses_header_for_non_initialize_request() {
+        let mut headers = HeaderMap::new();
+        headers.insert("MCP-Protocol-Version", "2025-03-26".parse().unwrap());
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "notifications/initialized".to_string(),
+            params: None,
+            id: None,
+        };
+
+        assert_eq!(
+            resolve_response_protocol_version(&headers, &req),
+            Some("2025-03-26")
+        );
     }
 
     #[test]
