@@ -1,6 +1,6 @@
 use crate::embedder::{
     current_embedding_provider_diagnostics, current_gpu_memory_snapshot,
-    current_gpu_utilization_snapshot, current_runtime_tuning_state,
+    current_gpu_utilization_snapshot, current_runtime_tuning_state, embedding_lane_config_from_env,
 };
 use crate::embedding_contract::CHUNK_MODEL_ID;
 use crate::graph::GraphStore;
@@ -8,8 +8,9 @@ use crate::runtime_observability::{
     duckdb_memory_snapshot, process_memory_snapshot, DuckDbMemorySnapshot, ProcessMemorySnapshot,
 };
 use crate::runtime_profile::RuntimeProfile;
-use crate::runtime_tuning::RuntimeTuningState;
+use crate::runtime_tuning::{normalize_runtime_tuning_state, RuntimeTuningState};
 use crate::service_guard;
+use crate::vector_control::current_vector_batch_controller_diagnostics;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -242,6 +243,9 @@ impl PolicyEngine for HeuristicPolicyEngine {
             now_ms.saturating_add(i64::try_from(policy.evaluation_window_ms).unwrap_or(i64::MAX));
         let mut best: Option<(ActionProfile, f64, String)> = None;
         let current_state = current_runtime_tuning_state();
+        let lane_config = embedding_lane_config_from_env();
+        let controller = current_vector_batch_controller_diagnostics(&lane_config);
+        let controller_reason = controller.reason.as_str();
 
         for profile in action_profiles {
             let score_embed_throughput_weight =
@@ -301,6 +305,44 @@ impl PolicyEngine for HeuristicPolicyEngine {
                 env_f64("AXON_OPT_SCORE_BOTTLENECK_BACKLOG_OPEN_TOKENS_BONUS", 1.5);
             let score_bottleneck_gpu_busy_bonus =
                 env_f64("AXON_OPT_SCORE_BOTTLENECK_GPU_BUSY_BONUS", 2.0);
+            let score_cpu_prepare_underfeed_file_batch_bonus =
+                env_f64("AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_FILE_BATCH_BONUS", 3.0);
+            let score_cpu_prepare_underfeed_ready_depth_bonus = env_f64(
+                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_READY_DEPTH_BONUS",
+                3.0,
+            );
+            let score_cpu_prepare_underfeed_micro_items_bonus = env_f64(
+                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_MICRO_ITEMS_BONUS",
+                1.5,
+            );
+            let score_cpu_prepare_underfeed_micro_tokens_bonus = env_f64(
+                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_MICRO_TOKENS_BONUS",
+                1.5,
+            );
+            let score_cpu_prepare_underfeed_chunk_growth_penalty = env_f64(
+                "AXON_OPT_SCORE_CPU_PREPARE_UNDERFEED_CHUNK_GROWTH_PENALTY",
+                2.5,
+            );
+            let score_controller_low_density_file_batch_bonus = env_f64(
+                "AXON_OPT_SCORE_CONTROLLER_LOW_DENSITY_FILE_BATCH_BONUS",
+                6.0,
+            );
+            let score_controller_low_density_ready_depth_bonus = env_f64(
+                "AXON_OPT_SCORE_CONTROLLER_LOW_DENSITY_READY_DEPTH_BONUS",
+                6.0,
+            );
+            let score_controller_low_density_micro_items_bonus = env_f64(
+                "AXON_OPT_SCORE_CONTROLLER_LOW_DENSITY_MICRO_ITEMS_BONUS",
+                3.0,
+            );
+            let score_controller_low_density_micro_tokens_bonus = env_f64(
+                "AXON_OPT_SCORE_CONTROLLER_LOW_DENSITY_MICRO_TOKENS_BONUS",
+                3.0,
+            );
+            let score_controller_low_density_chunk_growth_penalty = env_f64(
+                "AXON_OPT_SCORE_CONTROLLER_LOW_DENSITY_CHUNK_GROWTH_PENALTY",
+                8.0,
+            );
             let gpu_underutilized = host.gpu_present
                 && backlog_depth >= profile.target_chunk_batch_size.max(16)
                 && signals.gpu_utilization_ratio < gpu_underutilized_ratio
@@ -308,6 +350,14 @@ impl PolicyEngine for HeuristicPolicyEngine {
                     < policy
                         .max_vram_used_mb
                         .saturating_sub(gpu_headroom_margin_mb);
+            let cpu_prepare_underfeed = host.gpu_present
+                && backlog_depth >= 32
+                && signals.gpu_utilization_ratio < gpu_underutilized_ratio
+                && signals.cpu_usage_ratio < policy.max_cpu_ratio * 0.75
+                && signals.ram_available_ratio >= policy.min_ram_available_ratio
+                && signals.ready_queue_depth_current
+                    < current_state.vector_ready_queue_depth as u64
+                && signals.prepare_inflight_current <= signals.vector_workers_active_current.max(1);
             let warmup_active = host.gpu_present
                 && backlog_depth >= warmup_backlog_threshold
                 && analytics.chunks_embedded_current_hour == 0
@@ -364,6 +414,64 @@ impl PolicyEngine for HeuristicPolicyEngine {
                 if profile.target_vector_workers > 1 {
                     score -= score_warmup_avoids_worker_fanout_penalty;
                     reasons.push("warmup_avoids_worker_fanout");
+                }
+            }
+            if cpu_prepare_underfeed {
+                if profile.target_file_vectorization_batch_size
+                    > current_state.file_vectorization_batch_size
+                {
+                    score += score_cpu_prepare_underfeed_file_batch_bonus;
+                    reasons.push("cpu_prepare_underfeed_open_file_batch");
+                }
+                if profile.target_ready_queue_depth > current_state.vector_ready_queue_depth {
+                    score += score_cpu_prepare_underfeed_ready_depth_bonus;
+                    reasons.push("cpu_prepare_underfeed_open_ready_depth");
+                }
+                if profile.target_embed_micro_batch_max_items
+                    > current_state.embed_micro_batch_max_items
+                {
+                    score += score_cpu_prepare_underfeed_micro_items_bonus;
+                    reasons.push("cpu_prepare_underfeed_open_micro_items");
+                }
+                if profile.target_embed_micro_batch_max_total_tokens
+                    > current_state.embed_micro_batch_max_total_tokens
+                {
+                    score += score_cpu_prepare_underfeed_micro_tokens_bonus;
+                    reasons.push("cpu_prepare_underfeed_open_micro_tokens");
+                }
+                if current_state.chunk_batch_size >= 64
+                    && profile.target_chunk_batch_size > current_state.chunk_batch_size
+                {
+                    score -= score_cpu_prepare_underfeed_chunk_growth_penalty;
+                    reasons.push("cpu_prepare_underfeed_avoid_chunk_growth");
+                }
+            }
+            if controller_reason == "ready_queue_starved_low_density" {
+                if profile.target_file_vectorization_batch_size
+                    > current_state.file_vectorization_batch_size
+                {
+                    score += score_controller_low_density_file_batch_bonus;
+                    reasons.push("controller_low_density_open_file_batch");
+                }
+                if profile.target_ready_queue_depth > current_state.vector_ready_queue_depth {
+                    score += score_controller_low_density_ready_depth_bonus;
+                    reasons.push("controller_low_density_open_ready_depth");
+                }
+                if profile.target_embed_micro_batch_max_items
+                    > current_state.embed_micro_batch_max_items
+                {
+                    score += score_controller_low_density_micro_items_bonus;
+                    reasons.push("controller_low_density_open_micro_items");
+                }
+                if profile.target_embed_micro_batch_max_total_tokens
+                    > current_state.embed_micro_batch_max_total_tokens
+                {
+                    score += score_controller_low_density_micro_tokens_bonus;
+                    reasons.push("controller_low_density_open_micro_tokens");
+                }
+                if profile.target_chunk_batch_size > current_state.chunk_batch_size {
+                    score -= score_controller_low_density_chunk_growth_penalty;
+                    reasons.push("controller_low_density_avoid_chunk_growth");
                 }
             }
             if signals.io_wait_ratio > policy.max_io_wait_ratio {
@@ -1157,31 +1265,19 @@ pub fn observe_reward(
 
 fn runtime_tuning_profile_id(state: &RuntimeTuningState) -> String {
     format!(
-        "vw{}-cb{}-fb{}-rq{}-pq{}-ip{}-mi{}-mt{}",
+        "vw{}-gw{}-cb{}-fb{}-rq{}-pq{}-ip{}-mi{}-mt{}-ss{}-si{}",
         state.vector_workers,
+        state.graph_workers,
         state.chunk_batch_size,
         state.file_vectorization_batch_size,
         state.vector_ready_queue_depth,
         state.vector_persist_queue_bound,
         state.vector_max_inflight_persists,
         state.embed_micro_batch_max_items,
-        state.embed_micro_batch_max_total_tokens
+        state.embed_micro_batch_max_total_tokens,
+        state.semantic_sleep_scale_pct,
+        state.semantic_idle_sleep_scale_pct
     )
-}
-
-fn normalize_runtime_tuning_state(mut state: RuntimeTuningState) -> RuntimeTuningState {
-    state.vector_workers = state.vector_workers.max(1);
-    state.chunk_batch_size = state.chunk_batch_size.clamp(16, 256);
-    state.file_vectorization_batch_size = state.file_vectorization_batch_size.clamp(4, 64);
-    state.vector_ready_queue_depth = state.vector_ready_queue_depth.clamp(1, 32);
-    state.vector_persist_queue_bound = state.vector_persist_queue_bound.clamp(1, 12);
-    state.vector_max_inflight_persists = state
-        .vector_max_inflight_persists
-        .clamp(1, state.vector_persist_queue_bound);
-    state.embed_micro_batch_max_items = state.embed_micro_batch_max_items.clamp(8, 256);
-    state.embed_micro_batch_max_total_tokens =
-        state.embed_micro_batch_max_total_tokens.clamp(512, 65_536);
-    state
 }
 
 fn mutate_step(value: usize, increase: bool) -> usize {
@@ -1881,6 +1977,60 @@ mod tests {
     }
 
     #[test]
+    fn heuristic_policy_prefers_cpu_prepare_opening_over_chunk_growth_when_gpu_is_underfed() {
+        let mut current_signals = signals();
+        current_signals.file_vectorization_queue_depth = 2_048;
+        current_signals.gpu_utilization_ratio = 0.12;
+        current_signals.ready_queue_depth_current = 0;
+        current_signals.prepare_inflight_current = 1;
+        current_signals.vector_workers_active_current = 1;
+        current_signals.cpu_usage_ratio = 0.24;
+        current_signals.ram_available_ratio = 0.55;
+
+        let action_profiles = vec![
+            ActionProfile {
+                id: "grow-chunk".to_string(),
+                label: "neighbor".to_string(),
+                target_vector_workers: 1,
+                target_chunk_batch_size: 72,
+                target_file_vectorization_batch_size: 8,
+                target_ready_queue_depth: 6,
+                target_persist_queue_bound: 1,
+                target_max_inflight_persists: 1,
+                target_embed_micro_batch_max_items: 32,
+                target_embed_micro_batch_max_total_tokens: 8_192,
+            },
+            ActionProfile {
+                id: "open-prepare".to_string(),
+                label: "neighbor".to_string(),
+                target_vector_workers: 1,
+                target_chunk_batch_size: 64,
+                target_file_vectorization_batch_size: 12,
+                target_ready_queue_depth: 8,
+                target_persist_queue_bound: 1,
+                target_max_inflight_persists: 1,
+                target_embed_micro_batch_max_items: 48,
+                target_embed_micro_batch_max_total_tokens: 12_288,
+            },
+        ];
+
+        let decision = HeuristicPolicyEngine
+            .choose(
+                &host(),
+                &current_signals,
+                &policy(),
+                &RecentAnalyticsWindow {
+                    chunks_embedded_current_hour: 100,
+                    ..Default::default()
+                },
+                &action_profiles,
+            )
+            .unwrap();
+
+        assert_eq!(decision.action_profile_id, "open-prepare");
+    }
+
+    #[test]
     fn admissible_action_profiles_always_include_hold() {
         let profiles = build_admissible_action_profiles(&host(), &signals(), &policy());
         assert!(profiles.iter().any(|profile| profile.label == "hold"));
@@ -1927,6 +2077,7 @@ mod tests {
                 && super::profile_increases_runtime_pressure(
                     RuntimeTuningState {
                         vector_workers: hold.target_vector_workers,
+                        graph_workers: 0,
                         chunk_batch_size: hold.target_chunk_batch_size,
                         file_vectorization_batch_size: hold.target_file_vectorization_batch_size,
                         vector_ready_queue_depth: hold.target_ready_queue_depth,
@@ -1935,9 +2086,12 @@ mod tests {
                         embed_micro_batch_max_items: hold.target_embed_micro_batch_max_items,
                         embed_micro_batch_max_total_tokens: hold
                             .target_embed_micro_batch_max_total_tokens,
+                        semantic_sleep_scale_pct: 100,
+                        semantic_idle_sleep_scale_pct: 100,
                     },
                     RuntimeTuningState {
                         vector_workers: profile.target_vector_workers,
+                        graph_workers: 0,
                         chunk_batch_size: profile.target_chunk_batch_size,
                         file_vectorization_batch_size: profile.target_file_vectorization_batch_size,
                         vector_ready_queue_depth: profile.target_ready_queue_depth,
@@ -1946,6 +2100,8 @@ mod tests {
                         embed_micro_batch_max_items: profile.target_embed_micro_batch_max_items,
                         embed_micro_batch_max_total_tokens: profile
                             .target_embed_micro_batch_max_total_tokens,
+                        semantic_sleep_scale_pct: 100,
+                        semantic_idle_sleep_scale_pct: 100,
                     },
                 )
         }));
@@ -1955,6 +2111,7 @@ mod tests {
     fn runtime_tuning_neighbors_move_by_at_most_ten_percent_one_actuator_at_a_time() {
         let current = RuntimeTuningState {
             vector_workers: 1,
+            graph_workers: 0,
             chunk_batch_size: 64,
             file_vectorization_batch_size: 20,
             vector_ready_queue_depth: 6,
@@ -1962,6 +2119,8 @@ mod tests {
             vector_max_inflight_persists: 2,
             embed_micro_batch_max_items: 80,
             embed_micro_batch_max_total_tokens: 8_192,
+            semantic_sleep_scale_pct: 100,
+            semantic_idle_sleep_scale_pct: 100,
         };
         let allowed = vec![
             "chunk_batch_size".to_string(),

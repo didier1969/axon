@@ -79,6 +79,26 @@ Stop:
 
 ## Qualification
 
+Unified runtime qualification:
+
+```bash
+./scripts/axon qualify --profile smoke --mode graph_only
+./scripts/axon --instance live qualify --profile smoke --mode graph_only
+```
+
+Rules:
+
+- `./scripts/axon qualify ...` now defaults to `dev`
+- use `--instance live` only when you intentionally want to qualify the promoted live runtime
+- the run summary now also exposes `runtime_quiescent`
+- `runtime_quiescent=blocked` or `watch` degrades `runtime_smoke` to `warn`
+- this is intentional: a runtime may be reachable while still not being ready for quiescent qualification
+
+Artifacts written by `qualify` now include:
+
+- `runtime-status.json`
+- `runtime-quiescent-summary.json`
+
 Core:
 
 ```bash

@@ -588,26 +588,35 @@ fn discovery_policy(
         .map(|rss| rss as f64 / memory_limit.max(1) as f64)
         .unwrap_or(0.0);
 
-    if recent_service_latency_ms >= 1_500 || rss_ratio >= 0.90 || pending_backlog >= 20_000 {
-        return DiscoveryPolicy {
-            sleep: std::time::Duration::from_secs(2),
+    let base_sleep_ms =
+        if recent_service_latency_ms >= 1_500 || rss_ratio >= 0.90 || pending_backlog >= 20_000 {
+            2_000
+        } else if recent_service_latency_ms >= 500 || rss_ratio >= 0.80 || pending_backlog >= 10_000
+        {
+            500
+        } else if pending_backlog >= 5_000 {
+            150
+        } else {
+            50
         };
-    }
 
-    if recent_service_latency_ms >= 500 || rss_ratio >= 0.80 || pending_backlog >= 10_000 {
-        return DiscoveryPolicy {
-            sleep: std::time::Duration::from_millis(500),
-        };
-    }
-
-    if pending_backlog >= 5_000 {
-        return DiscoveryPolicy {
-            sleep: std::time::Duration::from_millis(150),
-        };
-    }
+    let quiescent_state =
+        service_guard::current_runtime_quiescent_state(0, pending_backlog.max(0) as u64);
+    let quiescent_scale_pct = std::env::var("AXON_QUIESCENT_INTERVAL_SCALE_PCT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(400)
+        .clamp(100, 2000);
+    let sleep_ms = service_guard::scale_interval_for_quiescent(
+        base_sleep_ms,
+        quiescent_state,
+        quiescent_scale_pct,
+        50,
+        5_000,
+    );
 
     DiscoveryPolicy {
-        sleep: std::time::Duration::from_millis(50),
+        sleep: std::time::Duration::from_millis(sleep_ms),
     }
 }
 
@@ -620,6 +629,7 @@ fn extract_toml_dependencies(_content: &str) -> Vec<ProjectDependency> {
 mod tests {
     use super::{discovery_policy, Scanner};
     use crate::config::IndexingConfig;
+    use crate::service_guard;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -682,6 +692,13 @@ mod tests {
     fn test_discovery_policy_pauses_harder_when_pressure_is_critical() {
         let policy = discovery_policy(2_000, Some(95 * 1024 * 1024), 100 * 1024 * 1024, 0);
         assert_eq!(policy.sleep, std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_discovery_policy_scales_up_when_runtime_is_quiescent() {
+        service_guard::reset_for_tests();
+        let policy = discovery_policy(0, Some(2 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024, 0);
+        assert!(policy.sleep >= std::time::Duration::from_millis(200));
     }
 
     #[test]

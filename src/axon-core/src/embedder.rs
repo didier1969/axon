@@ -23,7 +23,7 @@ use crate::vector_control::{
     graph_projection_allowed, observe_vector_batch_controller,
     reset_vector_batch_controller_for_tests, semantic_policy_with_graph, symbol_embedding_allowed,
     vector_claim_target, vector_ready_reserve_target, vector_worker_admitted,
-    VectorBatchControllerObservation,
+    VectorBatchControllerDiagnostics, VectorBatchControllerObservation,
 };
 use crate::vector_pipeline::{
     ClaimedLeaseSet, FinalizeEnvelope, InflightPersistRequest, InflightPrepareRequest,
@@ -59,6 +59,7 @@ const MAX_CHUNKS_PER_FILE: usize = 64;
 const MAX_EMBED_BATCH_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_VECTOR_STALE_INFLIGHT_CLAIM_AGE_MS: u64 = 30_000;
 const DEFAULT_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS: u64 = 10_000;
+const DEFAULT_VECTOR_FINALIZE_IDLE_POLL_INTERVAL_MS: u64 = 250;
 const DEFAULT_VECTOR_PREPARE_PIPELINE_DEPTH: usize = 3;
 const DEFAULT_VECTOR_PREPARE_QUEUE_BOUND: usize = 4;
 const DEFAULT_VECTOR_PREPARE_WORKERS_PER_VECTOR: usize = 2;
@@ -373,6 +374,33 @@ fn configured_embedding_token_bucket_size() -> usize {
         .min(configured_embedding_max_length().max(8))
 }
 
+fn gpu_total_vram_hint_mb() -> Option<u64> {
+    std::env::var("AXON_GPU_TOTAL_VRAM_MB_HINT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 1024)
+        .or_else(|| {
+            if cfg!(test) {
+                None
+            } else {
+                current_gpu_memory_snapshot().map(|snapshot| snapshot.total_mb)
+            }
+        })
+}
+
+fn gpu_bootstrap_vector_worker_cap(
+    requested_vector_workers: usize,
+    total_vram_mb: Option<u64>,
+) -> usize {
+    let requested_vector_workers = requested_vector_workers.max(1);
+    let cap = match total_vram_mb {
+        Some(total_mb) if total_mb <= 8_192 => 1,
+        Some(total_mb) if total_mb <= 12_288 => 2,
+        _ => 3,
+    };
+    requested_vector_workers.min(cap)
+}
+
 fn bootstrap_embedding_lane_config_from_env() -> EmbeddingLaneConfig {
     let query_workers = env_usize("AXON_QUERY_EMBED_WORKERS", 1);
     let requested_vector_workers = env_usize("AXON_VECTOR_WORKERS", 1);
@@ -380,13 +408,10 @@ fn bootstrap_embedding_lane_config_from_env() -> EmbeddingLaneConfig {
         .ok()
         .map(|value| value.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let vector_workers = if embedding_provider_requested_is_gpu()
-        && requested_vector_workers > 1
-        && !oversubscription_allowed
-    {
-        1
+    let vector_workers = if embedding_provider_requested_is_gpu() && !oversubscription_allowed {
+        gpu_bootstrap_vector_worker_cap(requested_vector_workers, gpu_total_vram_hint_mb())
     } else {
-        requested_vector_workers
+        requested_vector_workers.max(1)
     };
 
     EmbeddingLaneConfig {
@@ -442,8 +467,19 @@ fn bootstrap_runtime_tuning_state_from_env() -> RuntimeTuningState {
         .filter(|value| *value > 0)
         .unwrap_or(vector_persist_queue_bound.max(1).min(8))
         .max(1);
+    let semantic_sleep_scale_pct = std::env::var("AXON_SEMANTIC_SLEEP_SCALE_PCT")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(100);
+    let semantic_idle_sleep_scale_pct = std::env::var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(100);
     RuntimeTuningState {
         vector_workers: lane_config.vector_workers,
+        graph_workers: lane_config.graph_workers,
         chunk_batch_size: lane_config.chunk_batch_size,
         file_vectorization_batch_size: lane_config.file_vectorization_batch_size,
         vector_ready_queue_depth,
@@ -451,7 +487,13 @@ fn bootstrap_runtime_tuning_state_from_env() -> RuntimeTuningState {
         vector_max_inflight_persists,
         embed_micro_batch_max_items,
         embed_micro_batch_max_total_tokens,
+        semantic_sleep_scale_pct,
+        semantic_idle_sleep_scale_pct,
     }
+}
+
+pub fn bootstrap_runtime_tuning_state() -> RuntimeTuningState {
+    bootstrap_runtime_tuning_state_from_env()
 }
 
 fn configured_vector_prepare_queue_bound() -> usize {
@@ -460,14 +502,6 @@ fn configured_vector_prepare_queue_bound() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_VECTOR_PREPARE_QUEUE_BOUND)
-}
-
-fn configured_vector_prepare_workers_per_vector() -> usize {
-    std::env::var("AXON_VECTOR_PREPARE_WORKERS_PER_VECTOR")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_VECTOR_PREPARE_WORKERS_PER_VECTOR)
 }
 
 pub fn current_runtime_tuning_snapshot() -> RuntimeTuningSnapshot {
@@ -507,7 +541,95 @@ fn configured_vector_prepare_pipeline_depth() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_VECTOR_PREPARE_PIPELINE_DEPTH)
-        .clamp(2, 4)
+        .clamp(2, 6)
+}
+
+fn configured_vector_prepare_workers_per_vector() -> usize {
+    std::env::var("AXON_VECTOR_PREPARE_WORKERS_PER_VECTOR")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_VECTOR_PREPARE_WORKERS_PER_VECTOR)
+        .clamp(1, 4)
+}
+
+fn single_worker_gpu_prepare_burst_allowed_with_state(
+    vector_workers: usize,
+    provider_is_gpu: bool,
+    gpu_memory_pressure: bool,
+    service_pressure: ServicePressure,
+    lane_config: &EmbeddingLaneConfig,
+    controller: &VectorBatchControllerDiagnostics,
+    estimated_queue_pending: usize,
+) -> bool {
+    provider_is_gpu
+        && vector_workers <= 1
+        && !gpu_memory_pressure
+        && service_pressure == ServicePressure::Healthy
+        && controller.target_embed_batch_chunks >= lane_config.chunk_batch_size.saturating_mul(2)
+        && estimated_queue_pending >= controller.target_files_per_cycle.max(32)
+}
+
+fn single_worker_gpu_prepare_burst_allowed(
+    lane_config: &EmbeddingLaneConfig,
+    controller: &VectorBatchControllerDiagnostics,
+    estimated_queue_pending: usize,
+) -> bool {
+    single_worker_gpu_prepare_burst_allowed_with_state(
+        current_runtime_tuning_state().vector_workers,
+        embedding_provider_requested_is_gpu(),
+        current_gpu_memory_pressure_active(),
+        service_guard::current_pressure(),
+        lane_config,
+        controller,
+        estimated_queue_pending,
+    )
+}
+
+fn single_worker_gpu_prepare_prefetch_limits(
+    aggressive_prepare_prefetch: bool,
+    configured_max_inflight_prepares: usize,
+    controller: &VectorBatchControllerDiagnostics,
+    estimated_queue_pending: usize,
+) -> (usize, usize) {
+    if !aggressive_prepare_prefetch {
+        return (configured_max_inflight_prepares, 2);
+    }
+
+    if controller.reason == "ready_queue_starved_low_density" {
+        let max_inflight_prepares = configured_max_inflight_prepares.max(8);
+        let request_ready_depth_ceiling = if estimated_queue_pending
+            >= controller.target_files_per_cycle.max(96)
+            || controller.target_files_per_cycle >= 64
+        {
+            8
+        } else {
+            6
+        };
+        return (max_inflight_prepares, request_ready_depth_ceiling);
+    }
+
+    let max_inflight_prepares = configured_max_inflight_prepares.max(6);
+    let request_ready_depth_ceiling = if controller.target_embed_batch_chunks >= 160
+        && estimated_queue_pending >= controller.target_files_per_cycle.max(64)
+    {
+        6
+    } else {
+        4
+    };
+    (max_inflight_prepares, request_ready_depth_ceiling)
+}
+
+fn single_worker_gpu_prepare_worker_count(
+    provider_is_gpu: bool,
+    vector_workers: usize,
+    configured_workers_per_vector: usize,
+) -> usize {
+    if provider_is_gpu && vector_workers <= 1 {
+        configured_workers_per_vector.max(4)
+    } else {
+        configured_workers_per_vector
+    }
 }
 
 fn configured_vector_persist_queue_bound() -> usize {
@@ -524,8 +646,8 @@ fn configured_vector_max_inflight_persists() -> usize {
         .max(1)
 }
 
-fn wait_for_vector_backlog_or_timeout(timeout: Duration) {
-    service_guard::wait_for_vector_backlog_signal(timeout);
+fn wait_for_vector_backlog_or_timeout(timeout: Duration) -> bool {
+    service_guard::wait_for_vector_backlog_signal(timeout)
 }
 
 fn vector_worker_restart_window_ms() -> i64 {
@@ -1140,6 +1262,11 @@ impl SemanticWorkerPool {
                 Self::vector_maintenance_worker_loop(maintenance_graph_store);
             }));
         }
+        let bootstrap_prepare_workers_per_vector = single_worker_gpu_prepare_worker_count(
+            embedding_provider_requested_is_gpu(),
+            config.vector_workers,
+            configured_vector_prepare_workers_per_vector(),
+        );
         for worker_idx in 0..config.vector_workers {
             let graph_store = Arc::clone(&graph_store);
             let (prepare_tx, prepare_rx) =
@@ -1148,7 +1275,7 @@ impl SemanticWorkerPool {
                 bounded::<VectorPersistRequest>(configured_vector_persist_queue_bound());
             let (finalize_tx, finalize_rx) =
                 bounded::<VectorFinalizeRequest>(VECTOR_FINALIZE_QUEUE_BOUND);
-            for _ in 0..configured_vector_prepare_workers_per_vector() {
+            for _ in 0..bootstrap_prepare_workers_per_vector {
                 let prepare_graph_store = Arc::clone(&graph_store);
                 let prepare_rx = prepare_rx.clone();
                 vector_prepare_workers.push(thread::spawn(move || {
@@ -1200,14 +1327,15 @@ impl SemanticWorkerPool {
                 vector_stale_inflight_recovery_interval_ms(),
             ));
             let now_ms = chrono::Utc::now().timestamp_millis();
-            match recover_stale_vector_inflight_now(
-                &graph_store,
-                now_ms,
-            ) {
-                Ok(recovered) if recovered > 0 => info!(
-                    "Semantic Vector Maintenance Worker: recovered {} stale inflight vectorization jobs",
-                    recovered
-                ),
+            let mut woke = false;
+            match recover_stale_vector_inflight_now(&graph_store, now_ms) {
+                Ok(recovered) if recovered > 0 => {
+                    woke = true;
+                    info!(
+                        "Semantic Vector Maintenance Worker: recovered {} stale inflight vectorization jobs",
+                        recovered
+                    )
+                }
                 Ok(_) => {}
                 Err(err) => error!(
                     "Semantic Vector Maintenance Worker: failed to recover stale inflight vectorization jobs: {:?}",
@@ -1215,15 +1343,25 @@ impl SemanticWorkerPool {
                 ),
             }
             match recover_stale_vector_outbox_now(&graph_store, now_ms) {
-                Ok(recovered) if recovered > 0 => info!(
-                    "Semantic Vector Maintenance Worker: recovered {} stale inflight outbox jobs",
-                    recovered
-                ),
+                Ok(recovered) if recovered > 0 => {
+                    woke = true;
+                    info!(
+                        "Semantic Vector Maintenance Worker: recovered {} stale inflight outbox jobs",
+                        recovered
+                    )
+                }
                 Ok(_) => {}
                 Err(err) => error!(
                     "Semantic Vector Maintenance Worker: failed to recover stale inflight outbox jobs: {:?}",
                     err
                 ),
+            }
+            if woke {
+                service_guard::record_runtime_wakeup(
+                    service_guard::RuntimeWakeSource::SemanticVector,
+                    0,
+                    0,
+                );
             }
         }
     }
@@ -1255,9 +1393,9 @@ impl SemanticWorkerPool {
     ) {
         let _liveness = VectorWorkerLivenessGuard::new();
         let lane_config = embedding_lane_config_from_env();
-        let gpu_available = effective_embedding_provider_is_gpu();
         let mut restart_window: VecDeque<i64> = VecDeque::new();
         let mut restart_attempt = 0_u64;
+        let mut wake_idle = true;
 
         if let Err(e) = graph_store.ensure_embedding_model(
             SYMBOL_MODEL_ID,
@@ -1343,6 +1481,21 @@ impl SemanticWorkerPool {
                 + file_vectorization_queue_inflight
                 + outbox_queued
                 + outbox_inflight;
+            let (graph_projection_queue_queued, graph_projection_queue_inflight) = graph_store
+                .fetch_graph_projection_queue_counts()
+                .unwrap_or((0, 0));
+            let graph_backlog_depth =
+                graph_projection_queue_queued + graph_projection_queue_inflight;
+            let gpu_available = effective_embedding_provider_is_gpu();
+            if gpu_available
+                && !gpu_secondary_worker_allowed(worker_idx, current_gpu_memory_snapshot())
+            {
+                service_guard::record_vectorization_suppressed();
+                thread::sleep(Duration::from_millis(
+                    vector_worker_non_admitted_backlog_wait_ms(file_backlog_depth),
+                ));
+                continue;
+            }
             if !vector_worker_admitted(
                 worker_idx,
                 current_pressure,
@@ -1350,17 +1503,23 @@ impl SemanticWorkerPool {
                 file_backlog_depth,
             ) {
                 if file_backlog_depth == 0 {
-                    wait_for_vector_backlog_or_timeout(Duration::from_secs(20));
+                    let signaled = wait_for_vector_backlog_or_timeout(Duration::from_millis(
+                        vector_worker_non_admitted_idle_wait_ms(file_backlog_depth),
+                    ));
+                    if signaled {
+                        service_guard::record_runtime_wakeup(
+                            service_guard::RuntimeWakeSource::SemanticVector,
+                            graph_backlog_depth as u64,
+                            file_backlog_depth as u64,
+                        );
+                    }
                 } else {
-                    thread::sleep(Duration::from_millis(500));
+                    thread::sleep(Duration::from_millis(
+                        vector_worker_non_admitted_backlog_wait_ms(file_backlog_depth),
+                    ));
                 }
                 continue;
             }
-            let (graph_projection_queue_queued, graph_projection_queue_inflight) = graph_store
-                .fetch_graph_projection_queue_counts()
-                .unwrap_or((0, 0));
-            let graph_backlog_depth =
-                graph_projection_queue_queued + graph_projection_queue_inflight;
             let policy = semantic_policy_with_graph(
                 file_backlog_depth,
                 graph_backlog_depth,
@@ -1368,7 +1527,14 @@ impl SemanticWorkerPool {
             );
             if policy.pause {
                 if file_backlog_depth == 0 {
-                    wait_for_vector_backlog_or_timeout(policy.idle_sleep);
+                    let signaled = wait_for_vector_backlog_or_timeout(policy.idle_sleep);
+                    if signaled {
+                        service_guard::record_runtime_wakeup(
+                            service_guard::RuntimeWakeSource::SemanticVector,
+                            graph_backlog_depth as u64,
+                            file_backlog_depth as u64,
+                        );
+                    }
                 } else {
                     thread::sleep(policy.sleep);
                 }
@@ -1392,6 +1558,9 @@ impl SemanticWorkerPool {
                 controller.target_files_per_cycle,
                 controller.target_embed_batch_chunks,
                 0,
+                0,
+                controller.avg_chunks_per_embed_call,
+                0,
             );
             match graph_store.fetch_pending_file_vectorization_work(vector_claim_target(
                 controller.target_files_per_cycle,
@@ -1404,6 +1573,14 @@ impl SemanticWorkerPool {
             )) {
                 Ok(pending) if !pending.is_empty() => {
                     backlog_active = true;
+                    if wake_idle {
+                        service_guard::record_runtime_wakeup(
+                            service_guard::RuntimeWakeSource::SemanticVector,
+                            graph_backlog_depth as u64,
+                            file_backlog_depth as u64,
+                        );
+                        wake_idle = false;
+                    }
                     debug!(
                         "Semantic Vector Worker [{}]: Embedding {} file vectorization jobs...",
                         worker_idx,
@@ -1421,7 +1598,8 @@ impl SemanticWorkerPool {
                     let mut ready_batches: VecDeque<PreparedBatchEnvelope> = VecDeque::new();
                     let mut inflight_prepares: VecDeque<InflightPrepareRequest> = VecDeque::new();
                     let mut inflight_persists: VecDeque<InflightPersistRequest> = VecDeque::new();
-                    let max_inflight_prepares = configured_vector_prepare_pipeline_depth();
+                    let configured_max_inflight_prepares =
+                        configured_vector_prepare_pipeline_depth();
                     let max_inflight_persists = configured_vector_max_inflight_persists();
                     while !active_works.is_empty()
                         || !inflight_prepares.is_empty()
@@ -1508,8 +1686,31 @@ impl SemanticWorkerPool {
                                 + inflight_persists.len(),
                             controller.target_files_per_cycle,
                             controller.target_embed_batch_chunks,
-                            ready_batches.len() + inflight_prepares.len(),
+                            ready_batches.len(),
+                            inflight_prepares.len(),
+                            controller.avg_chunks_per_embed_call,
+                            ready_batches
+                                .iter()
+                                .map(|batch| {
+                                    chrono::Utc::now()
+                                        .timestamp_millis()
+                                        .saturating_sub(batch.prepared_at_ms)
+                                })
+                                .max()
+                                .unwrap_or(0) as u64,
                         );
+                        let aggressive_prepare_prefetch = single_worker_gpu_prepare_burst_allowed(
+                            &lane_config,
+                            &controller,
+                            estimated_queue_pending + active_works.len(),
+                        );
+                        let (max_inflight_prepares, request_ready_depth_ceiling) =
+                            single_worker_gpu_prepare_prefetch_limits(
+                                aggressive_prepare_prefetch,
+                                configured_max_inflight_prepares,
+                                &controller,
+                                estimated_queue_pending + active_works.len(),
+                            );
                         let locally_buffered_works = merge_unique_vectorization_work_sets([
                             active_works.clone(),
                             owned_prepare_works.clone(),
@@ -1581,7 +1782,7 @@ impl SemanticWorkerPool {
                         {
                             let request_target_ready_depth = target_ready_depth
                                 .saturating_sub(ready_batches.len() + inflight_prepares.len())
-                                .clamp(1, 2);
+                                .clamp(1, request_ready_depth_ceiling);
                             let request_claim_target = vector_claim_target(
                                 controller.target_files_per_cycle,
                                 controller.avg_files_per_embed_call,
@@ -2053,6 +2254,14 @@ impl SemanticWorkerPool {
             match graph_store.fetch_unembedded_symbols(SYMBOL_BATCH_SIZE) {
                 Ok(symbols) if !symbols.is_empty() => {
                     backlog_active = true;
+                    if wake_idle {
+                        service_guard::record_runtime_wakeup(
+                            service_guard::RuntimeWakeSource::SemanticVector,
+                            graph_backlog_depth as u64,
+                            file_backlog_depth as u64,
+                        );
+                        wake_idle = false;
+                    }
                     debug!(
                         "Semantic Vector Worker [{}]: Embedding {} symbols...",
                         worker_idx,
@@ -2115,7 +2324,14 @@ impl SemanticWorkerPool {
                         worker_idx, e
                     );
                     if file_backlog_depth == 0 {
-                        wait_for_vector_backlog_or_timeout(policy.idle_sleep);
+                        let signaled = wait_for_vector_backlog_or_timeout(policy.idle_sleep);
+                        if signaled {
+                            service_guard::record_runtime_wakeup(
+                                service_guard::RuntimeWakeSource::SemanticVector,
+                                graph_backlog_depth as u64,
+                                file_backlog_depth as u64,
+                            );
+                        }
                     } else {
                         thread::sleep(policy.idle_sleep);
                     }
@@ -2123,8 +2339,16 @@ impl SemanticWorkerPool {
             }
 
             if !backlog_active {
+                wake_idle = true;
                 if file_backlog_depth == 0 {
-                    wait_for_vector_backlog_or_timeout(policy.idle_sleep);
+                    let signaled = wait_for_vector_backlog_or_timeout(policy.idle_sleep);
+                    if signaled {
+                        service_guard::record_runtime_wakeup(
+                            service_guard::RuntimeWakeSource::SemanticVector,
+                            graph_backlog_depth as u64,
+                            file_backlog_depth as u64,
+                        );
+                    }
                 } else {
                     thread::sleep(policy.idle_sleep);
                 }
@@ -2141,17 +2365,42 @@ impl SemanticWorkerPool {
             "Semantic Vector Finalize Worker [{}]: ready with bounded queue {}",
             worker_idx, VECTOR_FINALIZE_QUEUE_BOUND
         );
+        let mut wake_idle = true;
         loop {
             service_guard::record_vector_finalize_queue_depth(finalize_rx.len() as u64);
-            match finalize_rx.recv_timeout(Duration::from_millis(250)) {
+            match finalize_rx.recv_timeout(Duration::from_millis(
+                vector_finalize_idle_poll_interval_ms(),
+            )) {
                 Ok(request) => {
+                    if wake_idle {
+                        service_guard::record_runtime_wakeup(
+                            service_guard::RuntimeWakeSource::SemanticVector,
+                            0,
+                            1,
+                        );
+                        wake_idle = false;
+                    }
                     service_guard::record_vector_finalize_queue_wait_ms(
                         request.enqueued_at.elapsed().as_millis() as u64,
                     );
                     process_finalize_request(worker_idx, &graph_store, request);
+                    if finalize_rx.is_empty() {
+                        wake_idle = true;
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    Self::process_vector_persist_outbox(worker_idx, &graph_store);
+                    if Self::process_vector_persist_outbox(worker_idx, &graph_store) > 0 {
+                        if wake_idle {
+                            service_guard::record_runtime_wakeup(
+                                service_guard::RuntimeWakeSource::SemanticVector,
+                                0,
+                                1,
+                            );
+                            wake_idle = false;
+                        }
+                    } else {
+                        wake_idle = true;
+                    }
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -2169,7 +2418,16 @@ impl SemanticWorkerPool {
             configured_vector_prepare_queue_bound()
         );
         let mut tokenizer = load_runtime_embedding_tokenizer().ok();
+        let mut wake_idle = true;
         while let Ok(request) = prepare_rx.recv() {
+            if wake_idle {
+                service_guard::record_runtime_wakeup(
+                    service_guard::RuntimeWakeSource::SemanticVector,
+                    0,
+                    1,
+                );
+                wake_idle = false;
+            }
             service_guard::record_vector_prepare_queue_depth(prepare_rx.len() as u64);
             service_guard::record_vector_prepare_queue_wait_ms(
                 request.enqueued_at.elapsed().as_millis() as u64,
@@ -2233,10 +2491,13 @@ impl SemanticWorkerPool {
                     worker_idx
                 );
             }
+            if prepare_rx.is_empty() {
+                wake_idle = true;
+            }
         }
     }
 
-    fn process_vector_persist_outbox(worker_idx: usize, graph_store: &Arc<GraphStore>) {
+    fn process_vector_persist_outbox(worker_idx: usize, graph_store: &Arc<GraphStore>) -> usize {
         let pending = match graph_store
             .fetch_pending_vector_persist_outbox_work(VECTOR_OUTBOX_FETCH_BATCH_SIZE)
         {
@@ -2246,9 +2507,10 @@ impl SemanticWorkerPool {
                     "Semantic Vector Finalize Worker [{}]: failed to fetch outbox work: {:?}",
                     worker_idx, err
                 );
-                return;
+                return 0;
             }
         };
+        let processed = pending.len();
         for work in pending {
             if let Err(err) = process_vector_persist_outbox_work(worker_idx, graph_store, work) {
                 error!(
@@ -2257,6 +2519,7 @@ impl SemanticWorkerPool {
                 );
             }
         }
+        processed
     }
 
     fn vector_persist_worker_loop(
@@ -2269,7 +2532,16 @@ impl SemanticWorkerPool {
             worker_idx,
             configured_vector_persist_queue_bound()
         );
+        let mut wake_idle = true;
         while let Ok(request) = persist_rx.recv() {
+            if wake_idle {
+                service_guard::record_runtime_wakeup(
+                    service_guard::RuntimeWakeSource::SemanticVector,
+                    0,
+                    1,
+                );
+                wake_idle = false;
+            }
             service_guard::record_vector_persist_queue_depth(persist_rx.len() as u64);
             service_guard::record_vector_persist_queue_wait_ms(
                 request.enqueued_at.elapsed().as_millis() as u64,
@@ -2339,6 +2611,9 @@ impl SemanticWorkerPool {
                     worker_idx
                 );
             }
+            if persist_rx.is_empty() {
+                wake_idle = true;
+            }
         }
     }
 
@@ -2354,11 +2629,11 @@ impl SemanticWorkerPool {
             );
             return;
         }
-        let lane_config = embedding_lane_config_from_env();
         let mut model: Option<TextEmbedding> = None;
         let mut graph_model_registered = false;
 
         loop {
+            let lane_config = embedding_lane_config_from_env();
             let (graph_projection_queue_queued, graph_projection_queue_inflight) = graph_store
                 .fetch_graph_projection_queue_counts()
                 .unwrap_or((0, 0));
@@ -2378,7 +2653,16 @@ impl SemanticWorkerPool {
                 .unwrap_or((0, 0));
             let vector_backlog_depth =
                 vector_queue_queued + vector_queue_inflight + outbox_queued + outbox_inflight;
+            service_guard::record_runtime_wakeup(
+                service_guard::RuntimeWakeSource::Graph,
+                graph_backlog_depth as u64,
+                vector_backlog_depth as u64,
+            );
             let gpu_available = effective_embedding_provider_is_gpu();
+            if worker_idx >= lane_config.graph_workers {
+                thread::sleep(policy.idle_sleep);
+                continue;
+            }
             if !graph_projection_allowed(
                 queue_store.common_len(),
                 service_pressure,
@@ -4242,11 +4526,65 @@ pub fn vector_stale_inflight_claim_age_ms() -> u64 {
 }
 
 pub fn vector_stale_inflight_recovery_interval_ms() -> u64 {
-    std::env::var("AXON_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS")
+    let base_ms = std::env::var("AXON_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|value| *value >= 1_000)
-        .unwrap_or(DEFAULT_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS)
+        .unwrap_or(DEFAULT_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS);
+    scale_vector_maintenance_interval_for_quiescent(base_ms, 1_000, 300_000)
+}
+
+fn vector_finalize_idle_poll_interval_ms() -> u64 {
+    scale_vector_maintenance_interval_for_quiescent(
+        std::env::var("AXON_VECTOR_FINALIZE_IDLE_POLL_INTERVAL_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value >= 50)
+            .unwrap_or(DEFAULT_VECTOR_FINALIZE_IDLE_POLL_INTERVAL_MS),
+        50,
+        5_000,
+    )
+}
+
+fn vector_worker_non_admitted_idle_wait_ms(file_backlog_depth: usize) -> u64 {
+    scale_vector_maintenance_interval_for_quiescent(
+        std::env::var("AXON_VECTOR_NON_ADMITTED_IDLE_WAIT_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value >= 1_000)
+            .unwrap_or(20_000),
+        1_000,
+        120_000,
+    )
+    .max(if file_backlog_depth == 0 { 1_000 } else { 250 })
+}
+
+fn vector_worker_non_admitted_backlog_wait_ms(file_backlog_depth: usize) -> u64 {
+    scale_vector_maintenance_interval_for_quiescent(
+        std::env::var("AXON_VECTOR_NON_ADMITTED_BACKLOG_WAIT_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value >= 50)
+            .unwrap_or(500),
+        50,
+        10_000,
+    )
+    .max(if file_backlog_depth == 0 { 50 } else { 250 })
+}
+
+fn scale_vector_maintenance_interval_for_quiescent(base_ms: u64, min_ms: u64, max_ms: u64) -> u64 {
+    let scale_pct = std::env::var("AXON_QUIESCENT_INTERVAL_SCALE_PCT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(400)
+        .clamp(100, 2_000);
+    service_guard::scale_interval_for_quiescent(
+        base_ms,
+        service_guard::current_runtime_quiescent_state(0, 0),
+        scale_pct,
+        min_ms,
+        max_ms,
+    )
 }
 
 fn recover_stale_vector_inflight_now(
@@ -4267,6 +4605,23 @@ fn recover_stale_vector_outbox_now(graph_store: &GraphStore, now_ms: i64) -> any
 
 fn gpu_memory_pressure_active(snapshot: GpuMemorySnapshot) -> bool {
     snapshot.used_mb >= gpu_memory_soft_limit_mb()
+}
+
+fn gpu_multiworker_min_free_mb() -> u64 {
+    std::env::var("AXON_GPU_MULTIWORKER_MIN_FREE_MB")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value >= 128)
+        .unwrap_or(768)
+}
+
+fn gpu_secondary_worker_allowed(worker_idx: usize, snapshot: Option<GpuMemorySnapshot>) -> bool {
+    if worker_idx == 0 {
+        return true;
+    }
+    snapshot
+        .map(|snapshot| snapshot.free_mb >= gpu_multiworker_min_free_mb())
+        .unwrap_or(true)
 }
 
 pub fn current_gpu_memory_snapshot() -> Option<GpuMemorySnapshot> {
@@ -4353,7 +4708,7 @@ pub fn embedding_lane_config_from_env() -> EmbeddingLaneConfig {
     EmbeddingLaneConfig {
         query_workers: bootstrap.query_workers,
         vector_workers: tuning.vector_workers.max(1),
-        graph_workers: bootstrap.graph_workers,
+        graph_workers: tuning.graph_workers.min(bootstrap.graph_workers),
         chunk_batch_size: tuning.chunk_batch_size.max(1),
         file_vectorization_batch_size: tuning.file_vectorization_batch_size.max(1),
         graph_batch_size: bootstrap.graph_batch_size,
@@ -4364,6 +4719,7 @@ pub fn embedding_lane_config_from_env() -> EmbeddingLaneConfig {
 
 pub fn apply_runtime_embedding_lane_adjustment(
     vector_workers: Option<usize>,
+    graph_workers: Option<usize>,
     chunk_batch_size: Option<usize>,
     file_vectorization_batch_size: Option<usize>,
     vector_ready_queue_depth: Option<usize>,
@@ -4371,10 +4727,13 @@ pub fn apply_runtime_embedding_lane_adjustment(
     vector_max_inflight_persists: Option<usize>,
     embed_micro_batch_max_items: Option<usize>,
     embed_micro_batch_max_total_tokens: Option<usize>,
+    semantic_sleep_scale_pct: Option<usize>,
+    semantic_idle_sleep_scale_pct: Option<usize>,
 ) {
     let _snapshot = update_shared_runtime_tuning_state(
         bootstrap_runtime_tuning_state_from_env(),
         vector_workers,
+        graph_workers,
         chunk_batch_size,
         file_vectorization_batch_size,
         vector_ready_queue_depth,
@@ -4382,10 +4741,16 @@ pub fn apply_runtime_embedding_lane_adjustment(
         vector_max_inflight_persists,
         embed_micro_batch_max_items,
         embed_micro_batch_max_total_tokens,
+        semantic_sleep_scale_pct,
+        semantic_idle_sleep_scale_pct,
     );
     if let Some(vector_workers) = vector_workers {
         std::env::set_var("AXON_VECTOR_WORKERS", vector_workers.max(1).to_string());
         std::env::set_var("AXON_VECTOR_WORKERS_AUTOCONFIGURED", "false");
+    }
+    if let Some(graph_workers) = graph_workers {
+        std::env::set_var("AXON_GRAPH_WORKERS", graph_workers.to_string());
+        std::env::set_var("AXON_GRAPH_WORKERS_AUTOCONFIGURED", "false");
     }
     if let Some(chunk_batch_size) = chunk_batch_size {
         std::env::set_var("AXON_CHUNK_BATCH_SIZE", chunk_batch_size.max(1).to_string());
@@ -4435,6 +4800,20 @@ pub fn apply_runtime_embedding_lane_adjustment(
             "AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS_AUTOCONFIGURED",
             "false",
         );
+    }
+    if let Some(semantic_sleep_scale_pct) = semantic_sleep_scale_pct {
+        std::env::set_var(
+            "AXON_SEMANTIC_SLEEP_SCALE_PCT",
+            semantic_sleep_scale_pct.max(1).to_string(),
+        );
+        std::env::set_var("AXON_SEMANTIC_SLEEP_SCALE_PCT_AUTOCONFIGURED", "false");
+    }
+    if let Some(semantic_idle_sleep_scale_pct) = semantic_idle_sleep_scale_pct {
+        std::env::set_var(
+            "AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT",
+            semantic_idle_sleep_scale_pct.max(1).to_string(),
+        );
+        std::env::set_var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT_AUTOCONFIGURED", "false");
     }
     refresh_vector_batch_controller_from_env();
 }
@@ -4825,12 +5204,14 @@ mod tests {
         embedding_download_progress_enabled, embedding_lane_config_from_env,
         embedding_model_cache_dir, embedding_provider_diagnostics,
         finalize_completed_vectorization_works, flush_completed_vectorization_works,
-        gpu_memory_soft_limit_mb, is_fatal_embedding_error, is_irrecoverable_outbox_finalize_error,
-        merge_vectorization_work, query_embedding_allowed, reconcile_outbox_finalize_failure,
-        request_prepared_vector_embed_sequence, request_query_embedding, ClaimedLeaseSet,
-        EmbeddingLaneConfig, PreparedBatchEnvelope, PreparedVectorEmbedBatch,
-        PreparedVectorEmbedSequence, QueryEmbeddingRequest, VectorBatchPlan, VectorChunkWorkItem,
-        VectorFinalizeRequest, VectorPrepareRequest,
+        gpu_memory_soft_limit_mb, gpu_secondary_worker_allowed, is_fatal_embedding_error,
+        is_irrecoverable_outbox_finalize_error, merge_vectorization_work, query_embedding_allowed,
+        reconcile_outbox_finalize_failure, request_prepared_vector_embed_sequence,
+        request_query_embedding, single_worker_gpu_prepare_burst_allowed_with_state,
+        single_worker_gpu_prepare_prefetch_limits, single_worker_gpu_prepare_worker_count,
+        ClaimedLeaseSet, EmbeddingLaneConfig, GpuMemorySnapshot, PreparedBatchEnvelope,
+        PreparedVectorEmbedBatch, PreparedVectorEmbedSequence, QueryEmbeddingRequest,
+        VectorBatchPlan, VectorChunkWorkItem, VectorFinalizeRequest, VectorPrepareRequest,
     };
     use crate::embedding_contract::{fastembed_model, CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH};
     use crate::graph_ingestion::{
@@ -4843,11 +5224,12 @@ mod tests {
         current_vector_batch_controller_diagnostics, current_vector_drain_state,
         graph_projection_allowed, reset_utility_first_scheduler_for_tests, semantic_policy,
         semantic_policy_with_graph, symbol_embedding_allowed, vector_claim_target,
-        vector_embed_target_chunks, vector_worker_admitted, UtilityFirstSchedulerState,
-        VectorBatchController, VectorBatchControllerObservation, VectorBatchControllerState,
-        VectorDrainState, AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD,
-        CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD, GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD,
-        QUIET_CRUISE_FILE_BACKLOG_THRESHOLD, SYMBOL_BACKLOG_RESIDUAL_THRESHOLD,
+        vector_embed_target_chunks, vector_ready_reserve_target, vector_worker_admitted,
+        UtilityFirstSchedulerState, VectorBatchController, VectorBatchControllerDiagnostics,
+        VectorBatchControllerObservation, VectorBatchControllerState, VectorDrainState,
+        AGGRESSIVE_DRAIN_FILE_BACKLOG_THRESHOLD, CPU_ONLY_VECTOR_BACKLOG_YIELD_THRESHOLD,
+        GPU_VECTOR_BACKLOG_GRAPH_YIELD_THRESHOLD, QUIET_CRUISE_FILE_BACKLOG_THRESHOLD,
+        SYMBOL_BACKLOG_RESIDUAL_THRESHOLD,
     };
     use crossbeam_channel::{bounded, unbounded};
     use fastembed::{InitOptions, TextEmbedding};
@@ -4876,6 +5258,7 @@ mod tests {
         crate::service_guard::record_vector_prepare_inflight_depth(2);
         let policy = semantic_policy(100, ServicePressure::Healthy);
         assert!(!policy.pause);
+        assert_eq!(policy.profile, "balanced_drain");
         assert_eq!(policy.idle_sleep, Duration::from_millis(750));
     }
 
@@ -4888,6 +5271,7 @@ mod tests {
         crate::service_guard::record_vector_prepare_inflight_depth(2);
         let policy = semantic_policy(2_000, ServicePressure::Healthy);
         assert!(!policy.pause);
+        assert_eq!(policy.profile, "aggressive_drain");
         assert_eq!(policy.idle_sleep, Duration::from_millis(250));
     }
 
@@ -5132,7 +5516,64 @@ mod tests {
         let policy = semantic_policy(100, ServicePressure::Healthy);
         crate::service_guard::mcp_request_finished();
         assert!(!policy.pause);
+        assert_eq!(policy.profile, "interactive_guarded");
         assert_eq!(policy.sleep, Duration::from_millis(750));
+    }
+
+    #[test]
+    fn test_semantic_policy_respects_runtime_tuning_scale_pct() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        crate::service_guard::reset_for_tests();
+        reset_utility_first_scheduler_for_tests();
+        unsafe {
+            std::env::set_var("AXON_SEMANTIC_SLEEP_SCALE_PCT", "200");
+            std::env::set_var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT", "200");
+        }
+        super::refresh_runtime_tuning_snapshot_from_env();
+        crate::service_guard::record_vector_ready_queue_depth(8);
+        crate::service_guard::record_vector_prepare_inflight_depth(2);
+        let policy = semantic_policy(100, ServicePressure::Healthy);
+        assert_eq!(policy.profile, "balanced_drain");
+        assert_eq!(policy.sleep, Duration::from_millis(500));
+        assert_eq!(policy.idle_sleep, Duration::from_millis(1_500));
+
+        unsafe {
+            std::env::remove_var("AXON_SEMANTIC_SLEEP_SCALE_PCT");
+            std::env::remove_var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT");
+        }
+        super::refresh_runtime_tuning_snapshot_from_env();
+    }
+
+    #[test]
+    fn test_runtime_tuning_normalizes_queue_and_persist_bounds() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        super::apply_runtime_embedding_lane_adjustment(
+            None,
+            None,
+            None,
+            None,
+            Some(128),
+            Some(24),
+            Some(32),
+            None,
+            None,
+            None,
+            None,
+        );
+        let runtime_tuning = current_runtime_tuning_state();
+        assert_eq!(runtime_tuning.vector_ready_queue_depth, 32);
+        assert_eq!(runtime_tuning.vector_persist_queue_bound, 12);
+        assert_eq!(runtime_tuning.vector_max_inflight_persists, 12);
+
+        unsafe {
+            std::env::remove_var("AXON_VECTOR_READY_QUEUE_DEPTH");
+            std::env::remove_var("AXON_VECTOR_PERSIST_QUEUE_BOUND");
+            std::env::remove_var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS");
+            std::env::remove_var("AXON_VECTOR_READY_QUEUE_DEPTH_AUTOCONFIGURED");
+            std::env::remove_var("AXON_VECTOR_PERSIST_QUEUE_BOUND_AUTOCONFIGURED");
+            std::env::remove_var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS_AUTOCONFIGURED");
+        }
+        super::refresh_runtime_tuning_snapshot_from_env();
     }
 
     #[test]
@@ -5252,6 +5693,34 @@ mod tests {
     }
 
     #[test]
+    fn test_gpu_secondary_worker_allowed_requires_free_vram_headroom() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        unsafe {
+            std::env::set_var("AXON_GPU_MULTIWORKER_MIN_FREE_MB", "768");
+        }
+        assert!(gpu_secondary_worker_allowed(0, None));
+        assert!(gpu_secondary_worker_allowed(
+            1,
+            Some(GpuMemorySnapshot {
+                total_mb: 8_192,
+                used_mb: 7_000,
+                free_mb: 900,
+            })
+        ));
+        assert!(!gpu_secondary_worker_allowed(
+            1,
+            Some(GpuMemorySnapshot {
+                total_mb: 8_192,
+                used_mb: 7_500,
+                free_mb: 256,
+            })
+        ));
+        unsafe {
+            std::env::remove_var("AXON_GPU_MULTIWORKER_MIN_FREE_MB");
+        }
+    }
+
+    #[test]
     fn test_allowed_gpu_vector_workers_scales_only_for_meaningful_backlog() {
         assert_eq!(allowed_gpu_vector_workers(8, ServicePressure::Healthy), 1);
         assert_eq!(
@@ -5331,6 +5800,7 @@ mod tests {
         unsafe {
             std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
             std::env::set_var("AXON_VECTOR_WORKERS", "5");
+            std::env::set_var("AXON_GPU_TOTAL_VRAM_MB_HINT", "24576");
             std::env::remove_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
         }
         super::refresh_runtime_tuning_snapshot_from_env();
@@ -5338,6 +5808,27 @@ mod tests {
         unsafe {
             std::env::remove_var("AXON_EMBEDDING_PROVIDER");
             std::env::remove_var("AXON_VECTOR_WORKERS");
+            std::env::remove_var("AXON_GPU_TOTAL_VRAM_MB_HINT");
+        }
+
+        assert_eq!(config.vector_workers, 3);
+    }
+
+    #[test]
+    fn test_embedding_lane_config_caps_gpu_vector_workers_to_one_on_8gb_vram() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        unsafe {
+            std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
+            std::env::set_var("AXON_VECTOR_WORKERS", "5");
+            std::env::set_var("AXON_GPU_TOTAL_VRAM_MB_HINT", "8192");
+            std::env::remove_var("AXON_ALLOW_GPU_EMBED_OVERSUBSCRIPTION");
+        }
+        super::refresh_runtime_tuning_snapshot_from_env();
+        let config = embedding_lane_config_from_env();
+        unsafe {
+            std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+            std::env::remove_var("AXON_VECTOR_WORKERS");
+            std::env::remove_var("AXON_GPU_TOTAL_VRAM_MB_HINT");
         }
 
         assert_eq!(config.vector_workers, 1);
@@ -5364,15 +5855,19 @@ mod tests {
     fn test_apply_runtime_embedding_lane_adjustment_updates_live_batch_env_and_controller() {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         unsafe {
+            std::env::set_var("AXON_GRAPH_EMBEDDINGS_ENABLED", "true");
             std::env::set_var("AXON_CHUNK_BATCH_SIZE", "48");
             std::env::set_var("AXON_FILE_VECTORIZATION_BATCH_SIZE", "12");
+            std::env::set_var("AXON_GRAPH_WORKERS", "5");
             std::env::remove_var("AXON_CHUNK_BATCH_SIZE_AUTOCONFIGURED");
             std::env::remove_var("AXON_FILE_VECTORIZATION_BATCH_SIZE_AUTOCONFIGURED");
+            std::env::remove_var("AXON_GRAPH_WORKERS_AUTOCONFIGURED");
         }
         super::refresh_vector_batch_controller_from_env();
 
         super::apply_runtime_embedding_lane_adjustment(
             None,
+            Some(2),
             Some(64),
             Some(16),
             Some(7),
@@ -5380,19 +5875,25 @@ mod tests {
             Some(2),
             Some(72),
             Some(8_192),
+            Some(80),
+            Some(150),
         );
 
         let config = embedding_lane_config_from_env();
         let diagnostics = current_vector_batch_controller_diagnostics(&config);
         assert_eq!(config.chunk_batch_size, 64);
         assert_eq!(config.file_vectorization_batch_size, 16);
+        assert_eq!(config.graph_workers, 2);
         let runtime_tuning = current_runtime_tuning_state();
         let runtime_snapshot = current_runtime_tuning_snapshot();
+        assert_eq!(runtime_tuning.graph_workers, 2);
         assert_eq!(runtime_tuning.vector_ready_queue_depth, 7);
         assert_eq!(runtime_tuning.vector_persist_queue_bound, 3);
         assert_eq!(runtime_tuning.vector_max_inflight_persists, 2);
         assert_eq!(runtime_tuning.embed_micro_batch_max_items, 72);
         assert_eq!(runtime_tuning.embed_micro_batch_max_total_tokens, 8_192);
+        assert_eq!(runtime_tuning.semantic_sleep_scale_pct, 80);
+        assert_eq!(runtime_tuning.semantic_idle_sleep_scale_pct, 150);
         assert!(runtime_snapshot.version >= 2);
         assert_eq!(diagnostics.target_embed_batch_chunks, 64);
         assert_eq!(diagnostics.target_files_per_cycle, 16);
@@ -5402,6 +5903,10 @@ mod tests {
         );
         assert_eq!(
             std::env::var("AXON_FILE_VECTORIZATION_BATCH_SIZE_AUTOCONFIGURED").unwrap(),
+            "false"
+        );
+        assert_eq!(
+            std::env::var("AXON_GRAPH_WORKERS_AUTOCONFIGURED").unwrap(),
             "false"
         );
         assert_eq!(
@@ -5416,6 +5921,14 @@ mod tests {
             std::env::var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS_AUTOCONFIGURED").unwrap(),
             "false"
         );
+        assert_eq!(
+            std::env::var("AXON_SEMANTIC_SLEEP_SCALE_PCT_AUTOCONFIGURED").unwrap(),
+            "false"
+        );
+        assert_eq!(
+            std::env::var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT_AUTOCONFIGURED").unwrap(),
+            "false"
+        );
 
         unsafe {
             std::env::set_var("AXON_CHUNK_BATCH_SIZE", "96");
@@ -5426,20 +5939,27 @@ mod tests {
         assert_eq!(runtime_tuning_after_env_override.chunk_batch_size, 64);
 
         unsafe {
+            std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
             std::env::remove_var("AXON_CHUNK_BATCH_SIZE");
             std::env::remove_var("AXON_FILE_VECTORIZATION_BATCH_SIZE");
+            std::env::remove_var("AXON_GRAPH_WORKERS");
             std::env::remove_var("AXON_VECTOR_READY_QUEUE_DEPTH");
             std::env::remove_var("AXON_VECTOR_PERSIST_QUEUE_BOUND");
             std::env::remove_var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS");
             std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_ITEMS");
             std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS");
+            std::env::remove_var("AXON_SEMANTIC_SLEEP_SCALE_PCT");
+            std::env::remove_var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT");
             std::env::remove_var("AXON_CHUNK_BATCH_SIZE_AUTOCONFIGURED");
             std::env::remove_var("AXON_FILE_VECTORIZATION_BATCH_SIZE_AUTOCONFIGURED");
+            std::env::remove_var("AXON_GRAPH_WORKERS_AUTOCONFIGURED");
             std::env::remove_var("AXON_VECTOR_READY_QUEUE_DEPTH_AUTOCONFIGURED");
             std::env::remove_var("AXON_VECTOR_PERSIST_QUEUE_BOUND_AUTOCONFIGURED");
             std::env::remove_var("AXON_VECTOR_MAX_INFLIGHT_PERSISTS_AUTOCONFIGURED");
             std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_ITEMS_AUTOCONFIGURED");
             std::env::remove_var("AXON_EMBED_MICRO_BATCH_MAX_TOTAL_TOKENS_AUTOCONFIGURED");
+            std::env::remove_var("AXON_SEMANTIC_SLEEP_SCALE_PCT_AUTOCONFIGURED");
+            std::env::remove_var("AXON_SEMANTIC_IDLE_SLEEP_SCALE_PCT_AUTOCONFIGURED");
         }
     }
 
@@ -5656,12 +6176,100 @@ mod tests {
         let _guard = ENV_TEST_GUARD.lock().unwrap();
         unsafe {
             std::env::set_var("AXON_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS", "15000");
+            std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "100");
         }
 
         assert_eq!(super::vector_stale_inflight_recovery_interval_ms(), 15_000);
 
         unsafe {
             std::env::remove_var("AXON_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS");
+            std::env::remove_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT");
+        }
+    }
+
+    #[test]
+    fn test_vector_stale_inflight_recovery_interval_ms_scales_in_quiescent_mode() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        unsafe {
+            std::env::set_var("AXON_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS", "15000");
+            std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "400");
+        }
+
+        assert!(
+            super::vector_stale_inflight_recovery_interval_ms() >= 15_000,
+            "quiescent scaling should not reduce the maintenance interval"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_VECTOR_STALE_INFLIGHT_RECOVERY_INTERVAL_MS");
+            std::env::remove_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT");
+        }
+    }
+
+    #[test]
+    fn test_vector_finalize_idle_poll_interval_ms_uses_env_override() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        unsafe {
+            std::env::set_var("AXON_VECTOR_FINALIZE_IDLE_POLL_INTERVAL_MS", "500");
+            std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "100");
+        }
+
+        assert_eq!(super::vector_finalize_idle_poll_interval_ms(), 500);
+
+        unsafe {
+            std::env::remove_var("AXON_VECTOR_FINALIZE_IDLE_POLL_INTERVAL_MS");
+            std::env::remove_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT");
+        }
+    }
+
+    #[test]
+    fn test_vector_finalize_idle_poll_interval_ms_scales_in_quiescent_mode() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        unsafe {
+            std::env::set_var("AXON_VECTOR_FINALIZE_IDLE_POLL_INTERVAL_MS", "250");
+            std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "400");
+        }
+
+        assert!(
+            super::vector_finalize_idle_poll_interval_ms() >= 250,
+            "quiescent scaling should not reduce finalize idle polling"
+        );
+
+        unsafe {
+            std::env::remove_var("AXON_VECTOR_FINALIZE_IDLE_POLL_INTERVAL_MS");
+            std::env::remove_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT");
+        }
+    }
+
+    #[test]
+    fn test_vector_worker_non_admitted_idle_wait_ms_uses_env_override() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        unsafe {
+            std::env::set_var("AXON_VECTOR_NON_ADMITTED_IDLE_WAIT_MS", "30000");
+            std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "100");
+        }
+
+        assert_eq!(super::vector_worker_non_admitted_idle_wait_ms(0), 30_000);
+
+        unsafe {
+            std::env::remove_var("AXON_VECTOR_NON_ADMITTED_IDLE_WAIT_MS");
+            std::env::remove_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT");
+        }
+    }
+
+    #[test]
+    fn test_vector_worker_non_admitted_backlog_wait_ms_uses_env_override() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        unsafe {
+            std::env::set_var("AXON_VECTOR_NON_ADMITTED_BACKLOG_WAIT_MS", "750");
+            std::env::set_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT", "100");
+        }
+
+        assert_eq!(super::vector_worker_non_admitted_backlog_wait_ms(5), 750);
+
+        unsafe {
+            std::env::remove_var("AXON_VECTOR_NON_ADMITTED_BACKLOG_WAIT_MS");
+            std::env::remove_var("AXON_QUIESCENT_INTERVAL_SCALE_PCT");
         }
     }
 
@@ -6919,6 +7527,18 @@ mod tests {
     }
 
     #[test]
+    fn test_vector_ready_reserve_target_adds_safety_stock_when_supply_is_thin_and_low_density() {
+        let reserve = vector_ready_reserve_target(16, 2_048, 24, 128, 2, 0, 36.0, 2_000);
+        assert_eq!(reserve, 32);
+    }
+
+    #[test]
+    fn test_vector_ready_reserve_target_stays_close_to_floor_when_supply_is_healthy() {
+        let reserve = vector_ready_reserve_target(16, 256, 24, 96, 18, 4, 92.0, 300);
+        assert_eq!(reserve, 16);
+    }
+
+    #[test]
     fn test_dispatch_prepared_vector_embed_sequence_returns_reply_channel() {
         let (prepare_tx, prepare_rx) = bounded::<VectorPrepareRequest>(1);
         std::thread::spawn(move || {
@@ -7291,6 +7911,222 @@ mod tests {
         assert_eq!(diagnostics.target_embed_batch_chunks, 104);
         assert_eq!(diagnostics.target_files_per_cycle, 32);
         assert_eq!(diagnostics.adjustments_total, 3);
+    }
+
+    #[test]
+    fn test_single_gpu_worker_cruise_mode_waits_for_second_regression_before_step_down() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
+        std::env::set_var("AXON_VECTOR_WORKERS", "1");
+
+        let mut controller = VectorBatchController::new(&controller_test_config());
+        controller.observe(
+            10_000,
+            controller_observation_with_runtime(4_096, false, false, 4, 64, 4, 20_480, 32, 0),
+        );
+        controller.observe(
+            21_000,
+            controller_observation_with_runtime(4_096, false, false, 8, 512, 16, 61_440, 32, 0),
+        );
+
+        let first_regression = controller.observe(
+            32_000,
+            controller_observation_with_runtime(4_096, false, false, 12, 896, 24, 138_240, 32, 0),
+        );
+        let second_regression = controller.observe(
+            43_000,
+            controller_observation_with_runtime(4_096, false, false, 16, 1_280, 32, 215_040, 32, 0),
+        );
+
+        assert_ne!(first_regression.reason, "embed_efficiency_regressed");
+        assert_eq!(first_regression.target_embed_batch_chunks, 80);
+        assert_eq!(first_regression.target_files_per_cycle, 24);
+        assert_eq!(second_regression.reason, "embed_efficiency_regressed");
+        assert_eq!(second_regression.target_embed_batch_chunks, 56);
+        assert_eq!(second_regression.target_files_per_cycle, 24);
+
+        std::env::remove_var("AXON_VECTOR_WORKERS");
+        std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+    }
+
+    #[test]
+    fn test_single_gpu_worker_cruise_mode_grows_more_aggressively_when_ready_queue_starves() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
+        std::env::set_var("AXON_VECTOR_WORKERS", "1");
+
+        let mut controller = VectorBatchController::new(&controller_test_config());
+        let diagnostics = controller.observe(
+            10_000,
+            controller_observation_with_runtime(4_096, false, false, 4, 64, 4, 20_480, 0, 0),
+        );
+
+        assert_eq!(diagnostics.state, VectorBatchControllerState::IdleDrain);
+        assert_eq!(diagnostics.reason, "ready_queue_starved");
+        assert_eq!(diagnostics.target_embed_batch_chunks, 104);
+        assert_eq!(diagnostics.target_files_per_cycle, 24);
+
+        std::env::remove_var("AXON_VECTOR_WORKERS");
+        std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+    }
+
+    #[test]
+    fn test_single_gpu_worker_cruise_mode_reduces_chunk_target_when_ready_queue_starves_with_low_density(
+    ) {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
+        std::env::set_var("AXON_VECTOR_WORKERS", "1");
+
+        let mut controller = VectorBatchController::new(&controller_test_config());
+        controller.observe(
+            10_000,
+            controller_observation_with_runtime(4_096, false, false, 4, 64, 4, 20_480, 0, 0),
+        );
+        let diagnostics = controller.observe(
+            21_000,
+            controller_observation_with_runtime(4_096, false, false, 8, 136, 16, 56_000, 0, 0),
+        );
+
+        assert_eq!(diagnostics.state, VectorBatchControllerState::IdleDrain);
+        assert_eq!(diagnostics.reason, "ready_queue_starved_low_density");
+        assert_eq!(diagnostics.target_embed_batch_chunks, 32);
+        assert_eq!(diagnostics.target_files_per_cycle, 32);
+
+        std::env::remove_var("AXON_VECTOR_WORKERS");
+        std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+    }
+
+    #[test]
+    fn test_persistent_low_density_underfeed_opens_file_window_more_aggressively() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::set_var("AXON_EMBEDDING_PROVIDER", "cuda");
+        std::env::set_var("AXON_VECTOR_WORKERS", "1");
+
+        let lane_config = EmbeddingLaneConfig {
+            chunk_batch_size: 48,
+            file_vectorization_batch_size: 16,
+            ..controller_test_config()
+        };
+        let mut controller = VectorBatchController::new(&lane_config);
+        let first = controller.observe(
+            10_000,
+            controller_observation_with_runtime(4_096, false, false, 4, 64, 4, 20_480, 0, 0),
+        );
+        let second = controller.observe(
+            21_000,
+            controller_observation_with_runtime(4_096, false, false, 8, 156, 16, 56_000, 0, 0),
+        );
+        let third = controller.observe(
+            32_000,
+            controller_observation_with_runtime(4_096, false, false, 12, 228, 28, 84_000, 0, 0),
+        );
+
+        assert_eq!(first.reason, "ready_queue_starved");
+        assert_eq!(second.reason, "ready_queue_starved_low_density");
+        assert_eq!(third.reason, "ready_queue_starved_low_density");
+        assert_eq!(second.target_embed_batch_chunks, 48);
+        assert_eq!(third.target_embed_batch_chunks, 48);
+        assert!(third.target_files_per_cycle > second.target_files_per_cycle);
+        assert_eq!(second.target_files_per_cycle, 56);
+        assert_eq!(third.target_files_per_cycle, 64);
+
+        std::env::remove_var("AXON_VECTOR_WORKERS");
+        std::env::remove_var("AXON_EMBEDDING_PROVIDER");
+    }
+
+    #[test]
+    fn test_single_worker_gpu_prepare_burst_allowed_when_gpu_is_healthy_and_backlogged() {
+        let lane_config = EmbeddingLaneConfig {
+            chunk_batch_size: 96,
+            file_vectorization_batch_size: 24,
+            ..controller_test_config()
+        };
+        let controller = VectorBatchControllerDiagnostics {
+            state: VectorBatchControllerState::IdleDrain,
+            reason: "ready_queue_starved".to_string(),
+            adjustments_total: 1,
+            last_adjustment_ms: 10_000,
+            target_embed_batch_chunks: 192,
+            target_files_per_cycle: 64,
+            window_embed_calls: 2,
+            window_chunks: 96,
+            window_files_touched: 13,
+            avg_chunks_per_embed_call: 48.0,
+            avg_files_per_embed_call: 6.5,
+            embed_ms_per_chunk: 15.3,
+        };
+
+        assert!(single_worker_gpu_prepare_burst_allowed_with_state(
+            1,
+            true,
+            false,
+            ServicePressure::Healthy,
+            &lane_config,
+            &controller,
+            6_000
+        ));
+    }
+
+    #[test]
+    fn test_single_worker_gpu_prepare_prefetch_limits_expand_for_large_gpu_targets() {
+        let controller = VectorBatchControllerDiagnostics {
+            state: VectorBatchControllerState::IdleDrain,
+            reason: "ready_queue_starved".to_string(),
+            adjustments_total: 1,
+            last_adjustment_ms: 10_000,
+            target_embed_batch_chunks: 192,
+            target_files_per_cycle: 64,
+            window_embed_calls: 2,
+            window_chunks: 96,
+            window_files_touched: 13,
+            avg_chunks_per_embed_call: 48.0,
+            avg_files_per_embed_call: 6.5,
+            embed_ms_per_chunk: 15.3,
+        };
+
+        assert_eq!(
+            single_worker_gpu_prepare_prefetch_limits(true, 3, &controller, 6_000),
+            (6, 6)
+        );
+        assert_eq!(
+            single_worker_gpu_prepare_prefetch_limits(false, 3, &controller, 6_000),
+            (3, 2)
+        );
+    }
+
+    #[test]
+    fn test_single_worker_gpu_prepare_prefetch_limits_expand_more_for_low_density_underfeed() {
+        let controller = VectorBatchControllerDiagnostics {
+            state: VectorBatchControllerState::IdleDrain,
+            reason: "ready_queue_starved_low_density".to_string(),
+            adjustments_total: 1,
+            last_adjustment_ms: 10_000,
+            target_embed_batch_chunks: 192,
+            target_files_per_cycle: 64,
+            window_embed_calls: 2,
+            window_chunks: 32,
+            window_files_touched: 8,
+            avg_chunks_per_embed_call: 16.0,
+            avg_files_per_embed_call: 4.0,
+            embed_ms_per_chunk: 15.3,
+        };
+
+        assert_eq!(
+            single_worker_gpu_prepare_prefetch_limits(true, 3, &controller, 6_000),
+            (8, 8)
+        );
+    }
+
+    #[test]
+    fn test_single_worker_gpu_prepare_worker_count_expands_when_gpu_is_safely_underfed() {
+        let _guard = ENV_TEST_GUARD.lock().unwrap();
+        std::env::set_var("AXON_VECTOR_PREPARE_WORKERS_PER_VECTOR", "2");
+
+        assert_eq!(single_worker_gpu_prepare_worker_count(true, 1, 2), 4);
+        assert_eq!(single_worker_gpu_prepare_worker_count(true, 2, 2), 2);
+        assert_eq!(single_worker_gpu_prepare_worker_count(false, 1, 2), 2);
+
+        std::env::remove_var("AXON_VECTOR_PREPARE_WORKERS_PER_VECTOR");
     }
 
     #[test]

@@ -482,10 +482,10 @@ mod tests {
         }
 
         let config = canonical_effective_embedding_lane_config();
-        assert_eq!(config.vector_workers, 1);
+        assert_eq!(config.vector_workers, 2);
         assert_eq!(
             std::env::var("AXON_VECTOR_WORKERS").unwrap(),
-            "1",
+            "2",
             "L'environnement doit exposer le sizing effectif et non le sizing recommande"
         );
 

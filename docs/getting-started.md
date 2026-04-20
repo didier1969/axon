@@ -111,11 +111,19 @@ Vérification opératoire rapide:
 ```bash
 ./scripts/status-live.sh
 ./scripts/status-dev.sh
+./scripts/axon qualify --profile smoke --mode graph_only
 ./scripts/axon-live qualify-mcp --surface core --checks quality --project AXO
 ./scripts/axon-dev qualify-mcp --surface core --checks quality --project AXO
 ```
 
-La qualification et le `status` doivent toujours cibler explicitement l’instance voulue.
+Règles:
+
+- `./scripts/axon qualify ...` cible `dev` par défaut
+- pour qualifier explicitement `live`, utiliser `./scripts/axon --instance live qualify ...`
+- la qualification runtime archive maintenant aussi:
+  - `runtime-status.json`
+  - `runtime-quiescent-summary.json`
+- si le runtime est joignable mais que `runtime_quiescent` est encore `watch` ou `blocked`, le `runtime_smoke` remonte en `warn`
 
 ## 5. Contrat MCP `0.1`
 

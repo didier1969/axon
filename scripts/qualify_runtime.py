@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -19,7 +20,8 @@ from typing import Any
 
 PROJECT_ROOT = Path("/home/dstadel/projects/axon")
 RUNS_ROOT = PROJECT_ROOT / ".axon" / "qualification-suite-runs"
-MCP_URL = os.environ.get("AXON_MCP_URL", "http://127.0.0.1:44129/mcp")
+NVIDIA_SMI = "/usr/lib/wsl/lib/nvidia-smi"
+MIN_RUNTIME_OBSERVATION_SEC = 8
 
 
 def utc_now_iso() -> str:
@@ -33,6 +35,12 @@ def sanitize_label(value: str) -> str:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Unified Axon qualification orchestrator.")
+    parser.add_argument(
+        "--instance",
+        choices=["live", "dev"],
+        default=os.environ.get("AXON_INSTANCE_KIND", ""),
+        help="Target Axon instance. Default: env AXON_INSTANCE_KIND, otherwise dev.",
+    )
     parser.add_argument(
         "--profile",
         choices=["smoke", "demo", "full", "ingestion", "retrieval"],
@@ -59,6 +67,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=2, help="Parallel workers for robustness profile")
     parser.add_argument("--timeout", type=int, default=20, help="Timeout in seconds for sub-commands")
     parser.add_argument("--interval", type=int, default=5, help="Sampling interval for ingestion qualification")
+    parser.add_argument(
+        "--resource-sample-interval-ms",
+        type=int,
+        default=200,
+        help="Host resource sampling cadence in milliseconds during runtime_smoke. Default: 200",
+    )
     parser.add_argument("--label", default="qualify-suite", help="Short label for output artifacts")
     parser.add_argument(
         "--output-root",
@@ -67,6 +81,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--reset-ist", action="store_true", help="Reset IST before robustness/ingestion sub-runs")
     parser.add_argument("--keep-running", action="store_true", help="Leave the last runtime running after completion")
+    parser.add_argument(
+        "--gpu-qualified-runtime",
+        action="store_true",
+        help="Override dev/shared runtime policy to request CUDA for throughput qualification runs.",
+    )
     parser.add_argument(
         "--allow-mutations",
         action="store_true",
@@ -83,6 +102,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Deterministic retrieve_context corpus JSON path",
     )
     return parser.parse_args(argv)
+
+
+def normalize_instance(instance: str) -> str:
+    normalized = (instance or "").strip().lower()
+    if normalized in {"live", "dev"}:
+        return normalized
+    return "dev"
+
+
+def default_mcp_url_for_instance(instance: str) -> str:
+    if instance == "live":
+        return "http://127.0.0.1:44129/mcp"
+    return "http://127.0.0.1:44139/mcp"
 
 
 def profile_steps(profile: str) -> list[str]:
@@ -169,11 +201,53 @@ def build_mode_comparison(mode_reports: list[dict[str, Any]]) -> dict[str, Any]:
     return {"baseline": baseline["mode"], "comparisons": comparisons}
 
 
-def command_env(mode: str) -> dict[str, str]:
+def summarize_runtime_quiescent(mode_reports: list[dict[str, Any]]) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    statuses: list[str] = []
+    for report in mode_reports:
+        runtime_quiescent = report.get("runtime_quiescent", {})
+        if not isinstance(runtime_quiescent, dict) or not runtime_quiescent:
+            continue
+        verdict = runtime_quiescent.get("qualification_verdict")
+        available = runtime_quiescent.get("available")
+        status = quiescent_step_status(runtime_quiescent)
+        rows.append(
+            {
+                "mode": report.get("mode"),
+                "instance": report.get("instance"),
+                "status": status,
+                "qualification_verdict": verdict,
+                "available": available,
+                "reason": runtime_quiescent.get("qualification_reason") or runtime_quiescent.get("reason"),
+                "blocking_factors": runtime_quiescent.get("blocking_factors", []),
+                "operator_focus": runtime_quiescent.get("operator_focus"),
+                "recommended_next_measurement": runtime_quiescent.get("recommended_next_measurement"),
+                "throughput_observed": runtime_quiescent.get("throughput_observed"),
+                "throughput_recommendation": runtime_quiescent.get("throughput_recommendation"),
+            }
+        )
+        statuses.append(status)
+    if not rows:
+        return {}
+    overall = combine_step_statuses([{"status": status} for status in statuses])
+    return {
+        "overall_status": overall,
+        "modes": rows,
+    }
+
+
+def command_env(
+    mode: str, instance: str, mcp_url: str, gpu_qualified_runtime: bool = False
+) -> dict[str, str]:
     env = os.environ.copy()
+    env["AXON_INSTANCE_KIND"] = instance
+    env["AXON_MCP_URL"] = mcp_url
     if mode == "full":
         env["AXON_ENABLE_AUTONOMOUS_INGESTOR"] = "true"
         env["AXON_RUNTIME_PROFILE"] = "full_autonomous"
+    if gpu_qualified_runtime:
+        env["AXON_GPU_ACCESS_POLICY"] = "shared"
+        env["AXON_EMBEDDING_PROVIDER"] = "cuda"
     return env
 
 
@@ -215,6 +289,19 @@ def rpc_call(url: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def call_tool(url: str, timeout: int, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+        },
+    }
+    return rpc_call(url, payload, timeout)
+
+
 def wait_for_mcp_ready(url: str, timeout_s: int) -> None:
     deadline = time.time() + timeout_s
     initialize = {
@@ -243,6 +330,237 @@ def wait_for_mcp_ready(url: str, timeout_s: int) -> None:
     raise RuntimeError(f"MCP runtime not ready after {timeout_s}s")
 
 
+def fetch_status_snapshot(url: str, timeout: int = 20) -> dict[str, Any]:
+    response = call_tool(url, timeout, "status", {"mode": "full"})
+    result = response.get("result", {})
+    if not isinstance(result, dict):
+        raise RuntimeError("status returned invalid result payload")
+    data = result.get("data")
+    if not isinstance(data, dict):
+        raise RuntimeError("status missing data payload")
+    return data
+
+
+def resolve_effective_mcp_url(start_log: str, fallback_url: str) -> str:
+    for line in start_log.splitlines():
+        line = line.strip()
+        if line.startswith("MCP Server: "):
+            candidate = line.removeprefix("MCP Server: ").strip()
+            if candidate:
+                return candidate
+    return fallback_url
+
+
+def summarize_quiescent_status(status_data: dict[str, Any]) -> dict[str, Any]:
+    runtime_authority = status_data.get("runtime_authority", {})
+    if not isinstance(runtime_authority, dict):
+        return {"available": False, "reason": "missing_runtime_authority"}
+    quiescent = runtime_authority.get("quiescent_state", {})
+    if not isinstance(quiescent, dict):
+        return {"available": False, "reason": "missing_quiescent_state"}
+    diagnosis = quiescent.get("diagnosis", {})
+    wake_activity = quiescent.get("wake_activity", {})
+    lane_liveness = quiescent.get("lane_liveness", {})
+    backlog_drain = quiescent.get("backlog_drain", {})
+    if not isinstance(diagnosis, dict):
+        diagnosis = {}
+    if not isinstance(wake_activity, dict):
+        wake_activity = {}
+    if not isinstance(lane_liveness, dict):
+        lane_liveness = {}
+    if not isinstance(backlog_drain, dict):
+        backlog_drain = {}
+    summary = {
+        "available": True,
+        "state": quiescent.get("state"),
+        "authority_state": quiescent.get("authority_state"),
+        "wake_contract_state": quiescent.get("wake_contract_state"),
+        "qualification_verdict": diagnosis.get("qualification_verdict"),
+        "qualification_reason": diagnosis.get("qualification_reason"),
+        "measurement_readiness": diagnosis.get("measurement_readiness"),
+        "actionable_now": diagnosis.get("actionable_now"),
+        "blocking_factors": diagnosis.get("blocking_factors", []),
+        "operator_focus": diagnosis.get("operator_focus"),
+        "focus_recommendation": diagnosis.get("focus_recommendation"),
+        "recommended_next_measurement": diagnosis.get("recommended_next_measurement"),
+        "wake_noise_level": diagnosis.get("wake_noise_level"),
+        "confidence": diagnosis.get("confidence"),
+        "dominant_wake_source": wake_activity.get("dominant_wake_source"),
+        "last_wake_source": wake_activity.get("last_wake_source"),
+        "last_background_wake_detail": wake_activity.get("last_background_wake_detail"),
+        "dominant_background_wake_detail": wake_activity.get("dominant_background_wake_detail"),
+        "wakeups_last_60s": wake_activity.get("wakeups_last_60s"),
+        "resume_latency_p95_ms": wake_activity.get("resume_latency_p95_ms"),
+        "useful_resume_latency_p95_ms": wake_activity.get("useful_resume_latency_p95_ms"),
+        "last_quiescent_exit_reason": wake_activity.get("last_quiescent_exit_reason"),
+        "background_wake_memory_reclaimer_total": wake_activity.get(
+            "background_wake_memory_reclaimer_total"
+        ),
+        "background_wake_shadow_optimizer_total": wake_activity.get(
+            "background_wake_shadow_optimizer_total"
+        ),
+        "background_wake_runtime_trace_total": wake_activity.get(
+            "background_wake_runtime_trace_total"
+        ),
+        "background_wake_reader_refresh_total": wake_activity.get(
+            "background_wake_reader_refresh_total"
+        ),
+        "background_wake_autonomous_ingestor_total": wake_activity.get(
+            "background_wake_autonomous_ingestor_total"
+        ),
+        "background_wake_ingress_promoter_total": wake_activity.get(
+            "background_wake_ingress_promoter_total"
+        ),
+        "background_wake_federation_orchestrator_total": wake_activity.get(
+            "background_wake_federation_orchestrator_total"
+        ),
+        "vector_lane_state": lane_liveness.get("vector_lane_state"),
+        "vector_lane_last_success_age_ms": lane_liveness.get("vector_lane_last_success_age_ms"),
+        "backlog_drain": backlog_drain,
+    }
+    if all(value is None for key, value in summary.items() if key not in {"available", "blocking_factors"}):
+        summary["available"] = False
+        summary["reason"] = "quiescent_surface_empty"
+    return summary
+
+
+def quiescent_backlog_drain(status_data: dict[str, Any]) -> dict[str, Any]:
+    runtime_authority = status_data.get("runtime_authority", {})
+    if not isinstance(runtime_authority, dict):
+        return {}
+    quiescent = runtime_authority.get("quiescent_state", {})
+    if not isinstance(quiescent, dict):
+        return {}
+    backlog_drain = quiescent.get("backlog_drain", {})
+    if not isinstance(backlog_drain, dict):
+        return {}
+    return backlog_drain
+
+
+def gpu_vector_lease_diagnostics(status_data: dict[str, Any]) -> dict[str, Any]:
+    runtime_authority = status_data.get("runtime_authority", {})
+    if not isinstance(runtime_authority, dict):
+        return {}
+    lane_parameters = runtime_authority.get("lane_parameters", {})
+    if not isinstance(lane_parameters, dict):
+        return {}
+    lease = lane_parameters.get("gpu_vector_lease", {})
+    if not isinstance(lease, dict):
+        return {}
+    return lease
+
+
+def should_probe_semantic_burn_rate(status_data: dict[str, Any], quiescent_summary: dict[str, Any]) -> bool:
+    if quiescent_summary.get("recommended_next_measurement") in {
+        "measure_semantic_backlog_burn_rate",
+        "extend_semantic_burn_rate_probe",
+    }:
+        return True
+    backlog_drain = quiescent_backlog_drain(status_data)
+    burn_rate = backlog_drain.get("burn_rate", {}) if isinstance(backlog_drain.get("burn_rate"), dict) else {}
+    lease = gpu_vector_lease_diagnostics(status_data)
+    effective_backlog = int(burn_rate.get("effective_semantic_backlog_depth", 0) or 0)
+    return (
+        backlog_drain.get("provider_effective") == "cuda"
+        and lease.get("owned_by_current_instance") is True
+        and effective_backlog > 0
+        and burn_rate.get("state") != "measurable_progress"
+    )
+
+
+def measure_semantic_backlog_burn_rate(
+    url: str, initial_status: dict[str, Any], probe_window_sec: int = 20, timeout: int = 20
+) -> dict[str, Any]:
+    before = quiescent_backlog_drain(initial_status)
+    before_burn_rate = before.get("burn_rate", {}) if isinstance(before.get("burn_rate"), dict) else {}
+    time.sleep(probe_window_sec)
+    after_status = fetch_status_snapshot(url, timeout=timeout)
+    after = quiescent_backlog_drain(after_status)
+    after_burn_rate = after.get("burn_rate", {}) if isinstance(after.get("burn_rate"), dict) else {}
+
+    before_chunks_total = int(before.get("chunks_embedded_total", 0) or 0)
+    after_chunks_total = int(after.get("chunks_embedded_total", 0) or 0)
+    before_files_total = int(before.get("files_completed_total", 0) or 0)
+    after_files_total = int(after.get("files_completed_total", 0) or 0)
+    before_backlog = int(before_burn_rate.get("effective_semantic_backlog_depth", 0) or 0)
+    after_backlog = int(after_burn_rate.get("effective_semantic_backlog_depth", 0) or 0)
+
+    delta_chunks_total = max(0, after_chunks_total - before_chunks_total)
+    delta_files_total = max(0, after_files_total - before_files_total)
+    delta_backlog_depth = after_backlog - before_backlog
+    measured_chunks_per_minute = (delta_chunks_total * 60.0) / probe_window_sec
+    measured_files_per_minute = (delta_files_total * 60.0) / probe_window_sec
+
+    after_semantic_health = after.get("semantic_health")
+    after_lane_state = after.get("vector_lane_state")
+    after_burn_state = after_burn_rate.get("state")
+    if delta_chunks_total > 0 or delta_files_total > 0 or after_backlog < before_backlog:
+        probe_state = "measurable_progress"
+        recommendation = "track_burn_rate_until_backlog_turns_down"
+    elif after_semantic_health == "healthy_draining" and after_lane_state == "healthy":
+        probe_state = "still_warming_or_long_batch"
+        recommendation = "extend_probe_window_before_calling_stall"
+    elif after_semantic_health == "underfed":
+        probe_state = "underfed"
+        recommendation = "repair_semantic_feed_before_idle_tuning"
+    elif after_semantic_health == "stalled":
+        probe_state = "stalled"
+        recommendation = "repair_semantic_lane_before_idle_tuning"
+    else:
+        probe_state = after_burn_state or "uncertain"
+        recommendation = "observe_another_probe_window"
+
+    return {
+        "probe_window_sec": probe_window_sec,
+        "state": probe_state,
+        "recommendation": recommendation,
+        "before": {
+            "chunks_embedded_total": before_chunks_total,
+            "files_completed_total": before_files_total,
+            "effective_semantic_backlog_depth": before_backlog,
+            "burn_rate_state": before_burn_rate.get("state"),
+        },
+        "after": {
+            "chunks_embedded_total": after_chunks_total,
+            "files_completed_total": after_files_total,
+            "effective_semantic_backlog_depth": after_backlog,
+            "burn_rate_state": after_burn_rate.get("state"),
+            "semantic_health": after_semantic_health,
+            "vector_lane_state": after_lane_state,
+        },
+        "delta": {
+            "chunks_embedded_total": delta_chunks_total,
+            "files_completed_total": delta_files_total,
+            "effective_semantic_backlog_depth": delta_backlog_depth,
+            "measured_chunks_per_minute": measured_chunks_per_minute,
+            "measured_files_per_minute": measured_files_per_minute,
+        },
+        "status_after_probe": after_status,
+    }
+
+
+def quiescent_step_status(quiescent_summary: dict[str, Any]) -> str:
+    if not isinstance(quiescent_summary, dict):
+        return "warn"
+    if quiescent_summary.get("available") is False:
+        return "warn"
+    throughput_probe = quiescent_summary.get("throughput_probe", {})
+    if not isinstance(throughput_probe, dict):
+        throughput_probe = {}
+    if (
+        quiescent_summary.get("qualification_reason") == "blocked_by_healthy_semantic_drain"
+        and quiescent_summary.get("throughput_observed") is True
+        and throughput_probe.get("state") in {"measurable_progress", "measurable_progress_after_extended_probe"}
+    ):
+        return "pass"
+    verdict = quiescent_summary.get("qualification_verdict")
+    if verdict == "pass":
+        return "pass"
+    if verdict in {"watch", "blocked"}:
+        return "warn"
+    return "pass"
+
+
 def mode_flag(mode: str) -> str:
     return {
         "full": "--full",
@@ -254,6 +572,468 @@ def mode_flag(mode: str) -> str:
 
 def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def read_proc_stat() -> tuple[int, int] | None:
+    try:
+        first_line = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0]
+    except Exception:
+        return None
+    parts = first_line.split()
+    if not parts or parts[0] != "cpu" or len(parts) < 5:
+        return None
+    values = [int(value) for value in parts[1:]]
+    idle = values[3] + (values[4] if len(values) > 4 else 0)
+    total = sum(values)
+    return total, idle
+
+
+def read_meminfo() -> dict[str, int]:
+    result: dict[str, int] = {}
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if ":" not in line:
+                continue
+            key, raw_value = line.split(":", 1)
+            value = raw_value.strip().split()[0]
+            result[key] = int(value) * 1024
+    except Exception:
+        return {}
+    return result
+
+
+def read_gpu_sample() -> dict[str, Any]:
+    if not Path(NVIDIA_SMI).exists():
+        return {"available": False, "reason": "nvidia_smi_missing"}
+    try:
+        proc = subprocess.run(
+            [
+                NVIDIA_SMI,
+                "--query-gpu=utilization.gpu,memory.used,memory.free,memory.total,temperature.gpu,power.draw,power.limit",
+                "--format=csv,noheader,nounits",
+            ],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=True,
+        )
+    except Exception as exc:
+        return {"available": False, "reason": f"nvidia_smi_error:{type(exc).__name__}"}
+    line = (proc.stdout or "").strip().splitlines()
+    if not line:
+        return {"available": False, "reason": "nvidia_smi_empty"}
+    parts = [part.strip() for part in line[0].split(",")]
+    if len(parts) < 7:
+        return {"available": False, "reason": "nvidia_smi_parse"}
+    return {
+        "available": True,
+        "gpu_util_pct": parse_optional_float(parts[0]),
+        "gpu_mem_used_mb": parse_optional_float(parts[1]),
+        "gpu_mem_free_mb": parse_optional_float(parts[2]),
+        "gpu_mem_total_mb": parse_optional_float(parts[3]),
+        "gpu_temp_c": parse_optional_float(parts[4]),
+        "gpu_power_w": parse_optional_float(parts[5]),
+        "gpu_power_limit_w": parse_optional_float(parts[6]),
+    }
+
+
+def percentile(values: list[float], pct: float) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    ordered = sorted(values)
+    index = (len(ordered) - 1) * pct
+    lower = int(index)
+    upper = min(lower + 1, len(ordered) - 1)
+    if lower == upper:
+        return ordered[lower]
+    fraction = index - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
+def parse_optional_float(raw: str) -> float | None:
+    cleaned = raw.strip()
+    if not cleaned or cleaned.upper() in {"N/A", "[N/A]"}:
+        return None
+    return float(cleaned)
+
+
+def summarize_numeric_series(samples: list[dict[str, Any]], key: str) -> dict[str, Any]:
+    values = [float(sample[key]) for sample in samples if isinstance(sample.get(key), (int, float))]
+    if not values:
+        return {}
+    return {
+        "min": min(values),
+        "p50": percentile(values, 0.50),
+        "p95": percentile(values, 0.95),
+        "max": max(values),
+        "avg": sum(values) / len(values),
+        "samples": len(values),
+    }
+
+
+def gpu_sawtooth_summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    values = [float(sample["gpu_util_pct"]) for sample in samples if isinstance(sample.get("gpu_util_pct"), (int, float))]
+    if len(values) < 3:
+        return {"samples": len(values)}
+    deltas = [values[idx] - values[idx - 1] for idx in range(1, len(values))]
+    sign_changes = 0
+    previous_sign = 0
+    for delta in deltas:
+        sign = 1 if delta > 0 else -1 if delta < 0 else 0
+        if sign != 0 and previous_sign != 0 and sign != previous_sign:
+            sign_changes += 1
+        if sign != 0:
+            previous_sign = sign
+    amplitudes = [abs(delta) for delta in deltas]
+    return {
+        "samples": len(values),
+        "sign_changes": sign_changes,
+        "avg_step_abs_pct": sum(amplitudes) / len(amplitudes) if amplitudes else 0.0,
+        "max_step_abs_pct": max(amplitudes) if amplitudes else 0.0,
+    }
+
+
+def summarize_controller_modes(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    for sample in samples:
+        value = sample.get("controller_state")
+        if not value:
+            continue
+        key = str(value)
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return {}
+    dominant = max(counts.items(), key=lambda item: item[1])[0]
+    return {"counts": counts, "dominant": dominant}
+
+
+def diagnose_resource_balance(summary: dict[str, Any]) -> dict[str, Any]:
+    sample_count = int(summary.get("sample_count") or 0)
+    pipeline_sample_count = int(summary.get("pipeline_buffer", {}).get("sample_count") or 0)
+    cpu_avg = float(summary.get("cpu_usage_pct", {}).get("avg") or 0.0)
+    ram_available_p50 = float(summary.get("ram_available_gb", {}).get("p50") or 0.0)
+    gpu_avg = float(summary.get("gpu_util_pct", {}).get("avg") or 0.0)
+    gpu_p95 = float(summary.get("gpu_util_pct", {}).get("p95") or 0.0)
+    gpu_mem_used_p95 = float(summary.get("gpu_mem_used_mb", {}).get("p95") or 0.0)
+    gpu_mem_total = float(summary.get("gpu_mem_used_mb", {}).get("max") or 0.0) + float(
+        summary.get("gpu_mem_free_mb", {}).get("min") or 0.0
+    )
+    pipeline = summary.get("pipeline_buffer", {})
+    ready_avg = float(pipeline.get("ready_queue_depth_current", {}).get("avg") or 0.0)
+    prepare_avg = float(pipeline.get("prepare_inflight_current", {}).get("avg") or 0.0)
+    target_chunks_p50 = float(pipeline.get("target_embed_batch_chunks", {}).get("p50") or 0.0)
+    actual_chunks_avg = float(pipeline.get("avg_chunks_per_embed_call", {}).get("avg") or 0.0)
+    sawtooth = summary.get("gpu_util_sawtooth", {})
+    sign_changes = int(sawtooth.get("sign_changes") or 0)
+    max_step = float(sawtooth.get("max_step_abs_pct") or 0.0)
+
+    verdict = "balanced"
+    reason = "resource_balance_looks_reasonable"
+    signals: list[str] = []
+
+    if sample_count < 3 or pipeline_sample_count < 2:
+        verdict = "insufficient_observation_window"
+        reason = "resource_sampling_window_is_too_short_to_classify_runtime_balance"
+        signals.extend(["sample_count_too_low", "extend_runtime_observation"])
+    elif gpu_mem_total > 0 and gpu_mem_used_p95 / gpu_mem_total >= 0.90:
+        verdict = "vram_limited"
+        reason = "gpu_memory_runs_close_to_capacity"
+        signals.extend(["high_vram_p95", "prefer_single_gpu_worker_or_smaller_batches"])
+    elif (
+        gpu_avg < 35.0
+        and cpu_avg < 50.0
+        and ram_available_p50 > 8.0
+        and ready_avg < 12.0
+        and prepare_avg < 3.0
+        and target_chunks_p50 > 0.0
+        and actual_chunks_avg < target_chunks_p50 * 0.55
+    ):
+        verdict = "likely_underfed_by_cpu_prepare"
+        reason = "gpu_oscillates_while_cpu_and_ram_have_headroom_and_pre_gpu_stock_stays_thin"
+        signals.extend(
+            [
+                "gpu_avg_low",
+                "cpu_headroom_available",
+                "ram_headroom_available",
+                "ready_buffer_thin",
+                "prepare_pipeline_shallow",
+                "actual_batch_density_below_target",
+            ]
+        )
+        if sign_changes >= 40 or max_step >= 50.0:
+            signals.append("gpu_util_sawtooth_high")
+    elif gpu_p95 >= 80.0 and ready_avg >= 8.0:
+        verdict = "gpu_compute_engaged"
+        reason = "gpu_receives_enough_work_and_spends_time_at_high_utilization"
+        signals.extend(["gpu_p95_high", "ready_buffer_present"])
+
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "signals": signals,
+    }
+
+
+def summarize_resource_samples(samples: list[dict[str, Any]], interval_ms: int) -> dict[str, Any]:
+    gpu_samples = [sample for sample in samples if sample.get("gpu_available") is True]
+    pipeline_samples = [sample for sample in samples if sample.get("pipeline_available") is True]
+    summary = {
+        "interval_ms": interval_ms,
+        "sample_count": len(samples),
+        "duration_ms": len(samples) * interval_ms,
+        "cpu_usage_pct": summarize_numeric_series(samples, "cpu_usage_pct"),
+        "ram_used_gb": summarize_numeric_series(samples, "ram_used_gb"),
+        "ram_available_gb": summarize_numeric_series(samples, "ram_available_gb"),
+        "gpu_util_pct": summarize_numeric_series(gpu_samples, "gpu_util_pct"),
+        "gpu_mem_used_mb": summarize_numeric_series(gpu_samples, "gpu_mem_used_mb"),
+        "gpu_mem_free_mb": summarize_numeric_series(gpu_samples, "gpu_mem_free_mb"),
+        "gpu_temp_c": summarize_numeric_series(gpu_samples, "gpu_temp_c"),
+        "gpu_power_w": summarize_numeric_series(gpu_samples, "gpu_power_w"),
+        "gpu_util_sawtooth": gpu_sawtooth_summary(gpu_samples),
+        "pipeline_buffer": {
+            "sample_count": len(pipeline_samples),
+            "ready_queue_depth_current": summarize_numeric_series(
+                pipeline_samples, "ready_queue_depth_current"
+            ),
+            "prepare_inflight_current": summarize_numeric_series(
+                pipeline_samples, "prepare_inflight_current"
+            ),
+            "prepare_claimed_current": summarize_numeric_series(
+                pipeline_samples, "prepare_claimed_current"
+            ),
+            "active_claimed_current": summarize_numeric_series(
+                pipeline_samples, "active_claimed_current"
+            ),
+            "oldest_ready_batch_age_ms_current": summarize_numeric_series(
+                pipeline_samples, "oldest_ready_batch_age_ms_current"
+            ),
+            "target_embed_batch_chunks": summarize_numeric_series(
+                pipeline_samples, "target_embed_batch_chunks"
+            ),
+            "target_files_per_cycle": summarize_numeric_series(
+                pipeline_samples, "target_files_per_cycle"
+            ),
+            "avg_chunks_per_embed_call": summarize_numeric_series(
+                pipeline_samples, "avg_chunks_per_embed_call"
+            ),
+            "avg_files_per_embed_call": summarize_numeric_series(
+                pipeline_samples, "avg_files_per_embed_call"
+            ),
+            "controller_state": summarize_controller_modes(pipeline_samples),
+        },
+    }
+    summary["diagnosis"] = diagnose_resource_balance(summary)
+    return summary
+
+
+class ResourceSampler:
+    def __init__(self, run_dir: Path, interval_ms: int, mcp_url: str, mcp_timeout: int) -> None:
+        self.run_dir = run_dir
+        self.interval_ms = max(100, interval_ms)
+        self.mcp_url = mcp_url
+        self.mcp_timeout = mcp_timeout
+        self.samples_path = run_dir / "runtime-resource-samples.jsonl"
+        self.summary_path = run_dir / "runtime-resource-summary.json"
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._samples: list[dict[str, Any]] = []
+        self._prev_cpu: tuple[int, int] | None = None
+        self._last_pipeline_sample_at = 0.0
+
+    def _capture_pipeline_sample(self) -> dict[str, Any]:
+        try:
+            status_data = fetch_status_snapshot(self.mcp_url, timeout=self.mcp_timeout)
+        except Exception:
+            return {"pipeline_available": False}
+        runtime_authority = status_data.get("runtime_authority", {})
+        lane_parameters = (
+            runtime_authority.get("lane_parameters", {})
+            if isinstance(runtime_authority, dict)
+            else {}
+        )
+        quiescent_state = (
+            runtime_authority.get("quiescent_state", {})
+            if isinstance(runtime_authority, dict)
+            else {}
+        )
+        observed_residual_work = (
+            quiescent_state.get("observed_residual_work", {})
+            if isinstance(quiescent_state, dict)
+            else {}
+        )
+        backlog_drain = (
+            quiescent_state.get("backlog_drain", {})
+            if isinstance(quiescent_state, dict)
+            else {}
+        )
+        if not isinstance(lane_parameters, dict):
+            lane_parameters = {}
+        if not isinstance(observed_residual_work, dict):
+            observed_residual_work = {}
+        if not isinstance(backlog_drain, dict):
+            backlog_drain = {}
+
+        vector_runtime = observed_residual_work
+        vector_controller = {}
+        semantic_cadence = lane_parameters.get("semantic_cadence", {})
+        if isinstance(semantic_cadence, dict):
+            vector_controller = {
+                "state": semantic_cadence.get("controller_state"),
+                "reason": semantic_cadence.get("controller_reason"),
+            }
+
+        # Compatibility fallback for older runtimes that still expose the richer
+        # controller snapshot only under debug_snapshot.embedding_contract.
+        if not vector_runtime or not vector_controller.get("state"):
+            debug_snapshot = status_data.get("debug_snapshot", {})
+            embedding_contract = (
+                debug_snapshot.get("embedding_contract", {})
+                if isinstance(debug_snapshot, dict)
+                else {}
+            )
+            legacy_runtime = (
+                embedding_contract.get("vector_runtime", {})
+                if isinstance(embedding_contract, dict)
+                else {}
+            )
+            legacy_controller = (
+                embedding_contract.get("vector_batch_controller", {})
+                if isinstance(embedding_contract, dict)
+                else {}
+            )
+            if isinstance(legacy_runtime, dict) and legacy_runtime:
+                vector_runtime = legacy_runtime
+            if isinstance(legacy_controller, dict) and legacy_controller:
+                vector_controller = legacy_controller
+        else:
+            debug_snapshot = status_data.get("debug_snapshot", {})
+            embedding_contract = (
+                debug_snapshot.get("embedding_contract", {})
+                if isinstance(debug_snapshot, dict)
+                else {}
+            )
+            legacy_runtime = (
+                embedding_contract.get("vector_runtime", {})
+                if isinstance(embedding_contract, dict)
+                else {}
+            )
+            legacy_controller = (
+                embedding_contract.get("vector_batch_controller", {})
+                if isinstance(embedding_contract, dict)
+                else {}
+            )
+            if isinstance(legacy_runtime, dict):
+                for key in (
+                    "prepare_inflight_current",
+                    "prepare_claimed_current",
+                    "active_claimed_current",
+                    "oldest_ready_batch_age_ms_current",
+                    "ready_queue_depth_current",
+                ):
+                    if vector_runtime.get(key) is None and legacy_runtime.get(key) is not None:
+                        vector_runtime[key] = legacy_runtime.get(key)
+            if isinstance(legacy_controller, dict):
+                for key in (
+                    "target_embed_batch_chunks",
+                    "target_files_per_cycle",
+                    "avg_chunks_per_embed_call",
+                    "avg_files_per_embed_call",
+                    "reason",
+                    "state",
+                ):
+                    if vector_controller.get(key) is None and legacy_controller.get(key) is not None:
+                        vector_controller[key] = legacy_controller.get(key)
+
+        ready_lane = lane_parameters.get("vector_ready_queue_depth", {})
+        if not isinstance(ready_lane, dict):
+            ready_lane = {}
+        return {
+            "pipeline_available": bool(vector_runtime) or bool(vector_controller),
+            "ready_queue_depth_current": vector_runtime.get("ready_queue_depth_current"),
+            "prepare_inflight_current": vector_runtime.get("prepare_inflight_current"),
+            "prepare_claimed_current": vector_runtime.get("prepare_claimed_current"),
+            "active_claimed_current": vector_runtime.get("active_claimed_current"),
+            "oldest_ready_batch_age_ms_current": vector_runtime.get("oldest_ready_batch_age_ms_current"),
+            "target_embed_batch_chunks": vector_controller.get("target_embed_batch_chunks"),
+            "target_files_per_cycle": vector_controller.get("target_files_per_cycle"),
+            "avg_chunks_per_embed_call": vector_controller.get("avg_chunks_per_embed_call"),
+            "avg_files_per_embed_call": vector_controller.get("avg_files_per_embed_call"),
+            "controller_reason": vector_controller.get("reason"),
+            "controller_state": vector_controller.get("state"),
+            "ready_queue_target": ready_lane.get("target"),
+            "ready_queue_effective": ready_lane.get("effective"),
+            "semantic_health": backlog_drain.get("semantic_health"),
+            "provider_effective": backlog_drain.get("provider_effective"),
+        }
+
+    def _capture_sample(self) -> dict[str, Any]:
+        sample: dict[str, Any] = {
+            "ts": time.time(),
+            "ts_iso": utc_now_iso(),
+        }
+        current_cpu = read_proc_stat()
+        if current_cpu is not None and self._prev_cpu is not None:
+            total_delta = current_cpu[0] - self._prev_cpu[0]
+            idle_delta = current_cpu[1] - self._prev_cpu[1]
+            if total_delta > 0:
+                sample["cpu_usage_pct"] = max(0.0, min(100.0, 100.0 * (1.0 - idle_delta / total_delta)))
+        self._prev_cpu = current_cpu
+
+        meminfo = read_meminfo()
+        if meminfo:
+            total = float(meminfo.get("MemTotal", 0))
+            available = float(meminfo.get("MemAvailable", 0))
+            used = max(0.0, total - available)
+            sample["ram_total_gb"] = total / (1024**3)
+            sample["ram_available_gb"] = available / (1024**3)
+            sample["ram_used_gb"] = used / (1024**3)
+
+        gpu = read_gpu_sample()
+        sample["gpu_available"] = gpu.get("available", False)
+        if sample["gpu_available"]:
+            sample.update(
+                {
+                    "gpu_util_pct": gpu["gpu_util_pct"],
+                    "gpu_mem_used_mb": gpu["gpu_mem_used_mb"],
+                    "gpu_mem_free_mb": gpu["gpu_mem_free_mb"],
+                    "gpu_mem_total_mb": gpu["gpu_mem_total_mb"],
+                    "gpu_temp_c": gpu["gpu_temp_c"],
+                    "gpu_power_w": gpu["gpu_power_w"],
+                    "gpu_power_limit_w": gpu["gpu_power_limit_w"],
+                }
+            )
+        else:
+            sample["gpu_reason"] = gpu.get("reason")
+
+        now = sample["ts"]
+        if now - self._last_pipeline_sample_at >= 1.0:
+            sample.update(self._capture_pipeline_sample())
+            self._last_pipeline_sample_at = now
+        return sample
+
+    def _run(self) -> None:
+        with self.samples_path.open("w", encoding="utf-8") as handle:
+            while not self._stop.is_set():
+                sample = self._capture_sample()
+                self._samples.append(sample)
+                handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                handle.flush()
+                self._stop.wait(self.interval_ms / 1000.0)
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="qualify-resource-sampler", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> dict[str, Any]:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        summary = summarize_resource_samples(self._samples, self.interval_ms)
+        write_json(self.summary_path, summary)
+        return summary
 
 
 def discover_summary_file(root: Path) -> Path | None:
@@ -280,44 +1060,191 @@ def step_result(name: str, status: str, duration_ms: int, note: str, summary: An
     return payload
 
 
-def run_runtime_smoke(mode: str, run_dir: Path, url: str) -> dict[str, Any]:
+def run_runtime_smoke(
+    mode: str,
+    run_dir: Path,
+    url: str,
+    instance: str,
+    resource_sample_interval_ms: int,
+    gpu_qualified_runtime: bool = False,
+) -> dict[str, Any]:
     t0 = time.time()
-    env = command_env(mode)
+    resource_sampler: ResourceSampler | None = None
+    env = command_env(mode, instance, url, gpu_qualified_runtime=gpu_qualified_runtime)
     smoke_budget_s = 180
 
     try:
-        stop_proc = shell(["bash", "scripts/stop.sh"], timeout=30)
-        stop_log = completed_output(stop_proc.stdout) + completed_output(stop_proc.stderr)
-    except subprocess.TimeoutExpired as exc:
-        stop_log = completed_output(exc.stdout) + completed_output(exc.stderr)
-        stop_log += f"\n[qualify] stop.sh timeout after {exc.timeout}s\n"
-    (run_dir / "runtime-stop.log").write_text(stop_log, encoding="utf-8")
+        try:
+            stop_proc = shell(["bash", "scripts/stop.sh"], timeout=30)
+            stop_log = completed_output(stop_proc.stdout) + completed_output(stop_proc.stderr)
+        except subprocess.TimeoutExpired as exc:
+            stop_log = completed_output(exc.stdout) + completed_output(exc.stderr)
+            stop_log += f"\n[qualify] stop.sh timeout after {exc.timeout}s\n"
+        (run_dir / "runtime-stop.log").write_text(stop_log, encoding="utf-8")
 
-    start_timed_out = False
-    try:
-        start_proc = shell(
-            ["bash", "scripts/start.sh", mode_flag(mode), "--skip-mcp-tests"],
-            env=env,
-            timeout=smoke_budget_s,
+        start_timed_out = False
+        try:
+            start_proc = shell(
+                ["bash", "scripts/start.sh", mode_flag(mode), "--skip-mcp-tests"],
+                env=env,
+                timeout=smoke_budget_s,
+            )
+            start_log = completed_output(start_proc.stdout) + completed_output(start_proc.stderr)
+        except subprocess.TimeoutExpired as exc:
+            start_timed_out = True
+            start_log = completed_output(exc.stdout) + completed_output(exc.stderr)
+            start_log += f"\n[qualify] start.sh timeout after {exc.timeout}s; checking runtime readiness anyway\n"
+        (run_dir / "runtime-start.log").write_text(start_log, encoding="utf-8")
+
+        effective_url = resolve_effective_mcp_url(start_log, url)
+        resource_sampler = ResourceSampler(
+            run_dir,
+            interval_ms=resource_sample_interval_ms,
+            mcp_url=effective_url,
+            mcp_timeout=10,
         )
-        start_log = completed_output(start_proc.stdout) + completed_output(start_proc.stderr)
-    except subprocess.TimeoutExpired as exc:
-        start_timed_out = True
-        start_log = completed_output(exc.stdout) + completed_output(exc.stderr)
-        start_log += f"\n[qualify] start.sh timeout after {exc.timeout}s; checking runtime readiness anyway\n"
-    (run_dir / "runtime-start.log").write_text(start_log, encoding="utf-8")
+        resource_sampler.start()
 
-    try:
-        wait_for_mcp_ready(url, 120)
+        wait_for_mcp_ready(effective_url, 120)
         note = "runtime ready"
         if start_timed_out:
             note = f"{note}; start.sh exceeded {smoke_budget_s}s budget"
-        return step_result("runtime_smoke", "pass", int((time.time() - t0) * 1000), note)
+        status_data = fetch_status_snapshot(effective_url)
+        quiescent_summary = summarize_quiescent_status(status_data)
+        burn_rate_probe = None
+        if should_probe_semantic_burn_rate(status_data, quiescent_summary):
+            burn_rate_probe = measure_semantic_backlog_burn_rate(effective_url, status_data)
+            if (
+                burn_rate_probe.get("state") == "still_warming_or_long_batch"
+                and isinstance(burn_rate_probe.get("after"), dict)
+                and burn_rate_probe["after"].get("semantic_health") == "healthy_draining"
+                and burn_rate_probe["after"].get("vector_lane_state") == "healthy"
+            ):
+                extended_probe = measure_semantic_backlog_burn_rate(
+                    effective_url,
+                    burn_rate_probe.get("status_after_probe", status_data),
+                    probe_window_sec=45,
+                )
+                burn_rate_probe["extended_probe"] = {
+                    key: value
+                    for key, value in extended_probe.items()
+                    if key != "status_after_probe"
+                }
+                burn_rate_probe["status_after_probe"] = extended_probe.get(
+                    "status_after_probe", burn_rate_probe.get("status_after_probe", status_data)
+                )
+                if extended_probe.get("state") == "measurable_progress":
+                    burn_rate_probe["state"] = "measurable_progress_after_extended_probe"
+                    burn_rate_probe["recommendation"] = extended_probe.get(
+                        "recommendation", "track_burn_rate_until_backlog_turns_down"
+                    )
+            elif (
+                burn_rate_probe.get("state") == "progress_uncertain"
+                and isinstance(burn_rate_probe.get("after"), dict)
+                and burn_rate_probe["after"].get("vector_lane_state") == "healthy"
+                and burn_rate_probe["after"].get("effective_semantic_backlog_depth", 0) > 0
+                and gpu_vector_lease_diagnostics(
+                    burn_rate_probe.get("status_after_probe", status_data)
+                ).get("owned_by_current_instance")
+                is True
+            ):
+                extended_probe = measure_semantic_backlog_burn_rate(
+                    effective_url,
+                    burn_rate_probe.get("status_after_probe", status_data),
+                    probe_window_sec=45,
+                )
+                burn_rate_probe["extended_probe"] = {
+                    key: value
+                    for key, value in extended_probe.items()
+                    if key != "status_after_probe"
+                }
+                burn_rate_probe["status_after_probe"] = extended_probe.get(
+                    "status_after_probe", burn_rate_probe.get("status_after_probe", status_data)
+                )
+                if extended_probe.get("state") == "measurable_progress":
+                    burn_rate_probe["state"] = "measurable_progress_after_extended_probe"
+                    burn_rate_probe["recommendation"] = extended_probe.get(
+                        "recommendation", "track_burn_rate_until_backlog_turns_down"
+                    )
+            if burn_rate_probe.get("state") in {"measurable_progress", "measurable_progress_after_extended_probe"}:
+                after_status = burn_rate_probe.get("status_after_probe", status_data)
+                quiescent_summary = summarize_quiescent_status(after_status)
+                quiescent_summary["throughput_observed"] = True
+                quiescent_summary["throughput_recommendation"] = burn_rate_probe.get(
+                    "recommendation", "track_burn_rate_until_backlog_turns_down"
+                )
+                quiescent_summary["throughput_probe"] = {
+                    "state": burn_rate_probe.get("state"),
+                    "measured_chunks_per_minute": burn_rate_probe.get("delta", {}).get(
+                        "measured_chunks_per_minute"
+                    ),
+                    "measured_files_per_minute": burn_rate_probe.get("delta", {}).get(
+                        "measured_files_per_minute"
+                    ),
+                    "effective_semantic_backlog_delta": burn_rate_probe.get("delta", {}).get(
+                        "effective_semantic_backlog_depth"
+                    ),
+                }
+            quiescent_summary["burn_rate_probe"] = {
+                key: value
+                for key, value in burn_rate_probe.items()
+                if key != "status_after_probe"
+            }
+            status_data = burn_rate_probe.get("status_after_probe", status_data)
+        else:
+            time.sleep(MIN_RUNTIME_OBSERVATION_SEC)
+            status_data = fetch_status_snapshot(effective_url)
+            quiescent_summary = summarize_quiescent_status(status_data)
+        (run_dir / "runtime-status.json").write_text(
+            json.dumps(status_data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        (run_dir / "runtime-quiescent-summary.json").write_text(
+            json.dumps(quiescent_summary, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        if burn_rate_probe is not None:
+            (run_dir / "runtime-burn-rate-probe.json").write_text(
+                json.dumps(burn_rate_probe, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        quiescent_verdict = quiescent_summary.get("qualification_verdict")
+        step_status = quiescent_step_status(quiescent_summary)
+        if quiescent_verdict:
+            note = f"{note}; quiescent={quiescent_verdict}"
+        elif quiescent_summary.get("available") is False:
+            note = f"{note}; quiescent_unavailable={quiescent_summary.get('reason', 'unknown')}"
+        if isinstance(quiescent_summary.get("burn_rate_probe"), dict):
+            note = (
+                f"{note}; burn_rate_probe="
+                f"{quiescent_summary['burn_rate_probe'].get('state', 'unknown')}"
+            )
+        resource_summary = resource_sampler.stop() if resource_sampler is not None else {}
+        return step_result(
+            "runtime_smoke",
+            step_status,
+            int((time.time() - t0) * 1000),
+            note,
+            {
+                "status": status_data,
+                "quiescent": quiescent_summary,
+                "resources": resource_summary,
+            },
+        )
     except Exception as exc:
-        return step_result("runtime_smoke", "fail", int((time.time() - t0) * 1000), f"{type(exc).__name__}: {exc}")
+        resource_summary = resource_sampler.stop() if resource_sampler is not None else {}
+        return step_result(
+            "runtime_smoke",
+            "fail",
+            int((time.time() - t0) * 1000),
+            f"{type(exc).__name__}: {exc}",
+            {"resources": resource_summary},
+        )
 
 
-def run_mcp_validate(args: argparse.Namespace, mode: str, run_dir: Path) -> dict[str, Any]:
+def run_mcp_validate(
+    args: argparse.Namespace, mode: str, run_dir: Path, instance: str, url: str
+) -> dict[str, Any]:
     t0 = time.time()
     json_out = run_dir / "mcp_validate.json"
     cmd = [
@@ -336,7 +1263,15 @@ def run_mcp_validate(args: argparse.Namespace, mode: str, run_dir: Path) -> dict
         cmd.append("--allow-mutations")
     if args.symbol:
         cmd.extend(["--symbol", args.symbol])
-    proc = shell(cmd, env=command_env(mode))
+    proc = shell(
+        cmd,
+        env=command_env(
+            mode,
+            instance,
+            url,
+            gpu_qualified_runtime=args.gpu_qualified_runtime,
+        ),
+    )
     (run_dir / "mcp_validate.stdout.log").write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
     summary = {}
     if json_out.exists():
@@ -360,7 +1295,7 @@ def run_mcp_validate(args: argparse.Namespace, mode: str, run_dir: Path) -> dict
     return step_result("mcp_validate", step_status, int((time.time() - t0) * 1000), note, summary)
 
 
-def run_mcp_robustness(args: argparse.Namespace, mode: str, run_dir: Path) -> dict[str, Any]:
+def run_mcp_robustness(args: argparse.Namespace, mode: str, run_dir: Path, instance: str, url: str) -> dict[str, Any]:
     t0 = time.time()
     output_root = run_dir / "robustness"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -393,7 +1328,15 @@ def run_mcp_robustness(args: argparse.Namespace, mode: str, run_dir: Path) -> di
         cmd.extend(["--symbol", args.symbol])
     if args.reset_ist:
         cmd.append("--reset-ist")
-    proc = shell(cmd, env=command_env(mode))
+    proc = shell(
+        cmd,
+        env=command_env(
+            mode,
+            instance,
+            url,
+            gpu_qualified_runtime=args.gpu_qualified_runtime,
+        ),
+    )
     (run_dir / "mcp_robustness.stdout.log").write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
     summary_path = discover_summary_file(output_root)
     summary = {}
@@ -409,7 +1352,7 @@ def run_mcp_robustness(args: argparse.Namespace, mode: str, run_dir: Path) -> di
     return step_result("mcp_robustness", step_status, int((time.time() - t0) * 1000), note, summary)
 
 
-def run_retrieval_qualify(args: argparse.Namespace, mode: str, run_dir: Path) -> dict[str, Any]:
+def run_retrieval_qualify(args: argparse.Namespace, mode: str, run_dir: Path, instance: str, url: str) -> dict[str, Any]:
     if mode != "full":
         return step_result(
             "retrieval_qualify",
@@ -431,7 +1374,15 @@ def run_retrieval_qualify(args: argparse.Namespace, mode: str, run_dir: Path) ->
         "--json-out",
         str(json_out),
     ]
-    proc = shell(cmd, env=command_env(mode))
+    proc = shell(
+        cmd,
+        env=command_env(
+            mode,
+            instance,
+            url,
+            gpu_qualified_runtime=args.gpu_qualified_runtime,
+        ),
+    )
     (run_dir / "retrieval_qualify.stdout.log").write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
     summary = {}
     if json_out.exists():
@@ -447,7 +1398,7 @@ def run_retrieval_qualify(args: argparse.Namespace, mode: str, run_dir: Path) ->
     return step_result("retrieval_qualify", step_status, int((time.time() - t0) * 1000), note, summary)
 
 
-def run_ingestion_qualify(args: argparse.Namespace, mode: str, run_dir: Path) -> dict[str, Any]:
+def run_ingestion_qualify(args: argparse.Namespace, mode: str, run_dir: Path, instance: str, url: str) -> dict[str, Any]:
     t0 = time.time()
     output_root = run_dir / "ingestion"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -471,7 +1422,15 @@ def run_ingestion_qualify(args: argparse.Namespace, mode: str, run_dir: Path) ->
         cmd.append("--stop-after")
     if args.enforce_gate:
         cmd.append("--enforce-gate")
-    proc = shell(cmd, env=command_env(mode))
+    proc = shell(
+        cmd,
+        env=command_env(
+            mode,
+            instance,
+            url,
+            gpu_qualified_runtime=args.gpu_qualified_runtime,
+        ),
+    )
     (run_dir / "ingestion_qualify.stdout.log").write_text((proc.stdout or "") + (proc.stderr or ""), encoding="utf-8")
     summary_path = discover_summary_file(output_root)
     summary = {}
@@ -490,44 +1449,61 @@ def run_mode_profile(args: argparse.Namespace, mode: str, suite_run_dir: Path) -
     mode_run_dir.mkdir(parents=True, exist_ok=True)
     steps: dict[str, dict[str, Any]] = {}
     ordered_steps: list[dict[str, Any]] = []
+    instance = normalize_instance(getattr(args, "instance", ""))
+    mcp_url = os.environ.get("AXON_MCP_URL", "").strip() or default_mcp_url_for_instance(instance)
 
     for step_name in profile_steps(args.profile):
         if step_name == "runtime_smoke":
-            result = run_runtime_smoke(mode, mode_run_dir, MCP_URL)
+            result = run_runtime_smoke(
+                mode,
+                mode_run_dir,
+                mcp_url,
+                instance,
+                args.resource_sample_interval_ms,
+                gpu_qualified_runtime=args.gpu_qualified_runtime,
+            )
         elif step_name == "mcp_validate":
             if steps.get("runtime_smoke", {}).get("status") == "fail":
                 result = step_result("mcp_validate", "fail", 0, "skipped because runtime_smoke failed")
             else:
-                result = run_mcp_validate(args, mode, mode_run_dir)
+                result = run_mcp_validate(args, mode, mode_run_dir, instance, mcp_url)
         elif step_name == "mcp_robustness":
             if steps.get("runtime_smoke", {}).get("status") == "fail":
                 result = step_result("mcp_robustness", "fail", 0, "skipped because runtime_smoke failed")
             else:
-                result = run_mcp_robustness(args, mode, mode_run_dir)
+                result = run_mcp_robustness(args, mode, mode_run_dir, instance, mcp_url)
         elif step_name == "retrieval_qualify":
             if steps.get("runtime_smoke", {}).get("status") == "fail":
                 result = step_result("retrieval_qualify", "fail", 0, "skipped because runtime_smoke failed")
             else:
-                result = run_retrieval_qualify(args, mode, mode_run_dir)
+                result = run_retrieval_qualify(args, mode, mode_run_dir, instance, mcp_url)
         elif step_name == "ingestion_qualify":
-            result = run_ingestion_qualify(args, mode, mode_run_dir)
+            result = run_ingestion_qualify(args, mode, mode_run_dir, instance, mcp_url)
         else:
             result = step_result(step_name, "fail", 0, "unsupported step")
         steps[step_name] = result
         ordered_steps.append(result)
 
     verdict = combine_step_statuses(ordered_steps)
+    runtime_smoke_summary = steps.get("runtime_smoke", {}).get("summary", {})
+    runtime_quiescent = {}
+    if isinstance(runtime_smoke_summary, dict):
+        runtime_quiescent = runtime_smoke_summary.get("quiescent", {})
     return {
         "mode": mode,
+        "instance": instance,
+        "mcp_url": mcp_url,
         "profile": args.profile,
         "verdict": verdict,
         "steps": steps,
         "step_order": [step["name"] for step in ordered_steps],
+        "runtime_quiescent": runtime_quiescent,
     }
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    args.instance = normalize_instance(args.instance)
     modes = normalize_modes(args.mode, args.compare)
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -541,6 +1517,8 @@ def main(argv: list[str]) -> int:
         "schema_version": 1,
         "created_at": utc_now_iso(),
         "profile": args.profile,
+        "instance": args.instance,
+        "mcp_url": os.environ.get("AXON_MCP_URL", "").strip() or default_mcp_url_for_instance(args.instance),
         "mode": args.mode,
         "compare": args.compare,
         "modes": modes,
@@ -555,6 +1533,7 @@ def main(argv: list[str]) -> int:
         "interval_seconds": args.interval,
         "reset_ist": args.reset_ist,
         "keep_running": args.keep_running,
+        "gpu_qualified_runtime": args.gpu_qualified_runtime,
         "paths": {
             "project_root": str(PROJECT_ROOT),
             "run_dir": str(run_dir),
@@ -571,6 +1550,7 @@ def main(argv: list[str]) -> int:
         [{"status": report["verdict"]} for report in mode_reports]
     )
     comparison = build_mode_comparison(mode_reports)
+    runtime_quiescent_summary = summarize_runtime_quiescent(mode_reports)
     summary = {
         "created_at": utc_now_iso(),
         "run_dir": str(run_dir),
@@ -578,6 +1558,7 @@ def main(argv: list[str]) -> int:
         "modes": modes,
         "mode_reports": mode_reports,
         "comparison": comparison,
+        "runtime_quiescent": runtime_quiescent_summary,
         "overall_verdict": overall_verdict,
     }
     write_json(run_dir / "summary.json", summary)
@@ -586,6 +1567,14 @@ def main(argv: list[str]) -> int:
     print(f"[qualify] overall_verdict={overall_verdict}")
     for report in mode_reports:
         print(f"- mode={report['mode']} verdict={report['verdict']}")
+        print(f"  - instance={report['instance']} mcp_url={report['mcp_url']}")
+        mode_runtime_quiescent = report.get("runtime_quiescent", {})
+        if isinstance(mode_runtime_quiescent, dict) and mode_runtime_quiescent:
+            quiescent_note = mode_runtime_quiescent.get("qualification_verdict")
+            if quiescent_note is None and mode_runtime_quiescent.get("available") is False:
+                quiescent_note = f"unavailable:{mode_runtime_quiescent.get('reason', 'unknown')}"
+            if quiescent_note is not None:
+                print(f"  - runtime_quiescent: {quiescent_note}")
         for step_name in report["step_order"]:
             step = report["steps"][step_name]
             print(f"  - {step_name}: {step['status']} ({step['duration_ms']} ms) :: {step['note']}")
@@ -599,6 +1588,10 @@ def main(argv: list[str]) -> int:
                 f"timeout_delta={item['timeout_delta']} "
                 f"backend_unavailable_delta={item['backend_unavailable_delta']}"
             )
+    if runtime_quiescent_summary:
+        print(
+            f"[qualify] runtime_quiescent_status={runtime_quiescent_summary.get('overall_status', 'unknown')}"
+        )
 
     return exit_code_for_verdict(overall_verdict)
 

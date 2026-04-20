@@ -16,7 +16,7 @@ Commands:
   stop [options]           Stop runtime (supports --hard|--verify)
   restart [mode options]   Stop then start
   status                   Runtime health/status check
-  qualify [args...]        Run unified qualification pipeline
+  qualify [args...]        Run unified qualification pipeline (defaults to dev instance)
   qualify-mcp [args...]    Unified MCP qualification for core/SOLL surfaces
   validate-mcp [args...]   Expert validator for MCP tools
   robustness-mcp [args...] Expert MCP responsiveness and recovery probe
@@ -53,6 +53,7 @@ Examples:
   ./scripts/axon qualify --profile demo --mode graph_only
   ./scripts/axon qualify --profile full --mode full --duration 120 --interval 5 --enforce-gate
   ./scripts/axon qualify --profile smoke --compare mcp_only,graph_only
+  ./scripts/axon --instance live qualify --profile smoke --mode graph_only
   ./scripts/axon qualify-mcp --surface core --checks quality,latency --mode steady-state --project AXO
   ./scripts/axon validate-mcp --project BookingSystem --strict
   ./scripts/axon robustness-mcp --modes mcp_only,full --duration 60 --concurrency 4
@@ -81,6 +82,7 @@ USAGE
 }
 
 instance_kind=""
+explicit_instance=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --instance)
@@ -89,10 +91,12 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       instance_kind="$2"
+      explicit_instance=1
       shift 2
       ;;
     --instance=*)
       instance_kind="${1#*=}"
+      explicit_instance=1
       shift
       ;;
     *)
@@ -112,6 +116,11 @@ if [[ -z "$cmd" ]]; then
   exit 1
 fi
 shift || true
+
+if [[ "$cmd" == "qualify" && "$explicit_instance" -eq 0 ]]; then
+  export AXON_INSTANCE_KIND="dev"
+  axon_resolve_instance "$ROOT_DIR" "$(basename "$ROOT_DIR")"
+fi
 
 maybe_with_url() {
   local url="$1"

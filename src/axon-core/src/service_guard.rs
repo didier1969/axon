@@ -84,6 +84,32 @@ static VECTOR_LANE_LAST_SUCCESS_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_LANE_LAST_FAULT_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_STAGE_LATENCY_WINDOWS: OnceLock<Mutex<VectorStageLatencyWindows>> = OnceLock::new();
 static VECTOR_BACKLOG_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
+static RUNTIME_WORK_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
+static LAST_RUNTIME_WAKEUP_AT_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_QUIESCENT_ENTERED_AT_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_QUIESCENT_EXITED_AT_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_QUIESCENT_EXIT_REASON_CODE: AtomicU64 = AtomicU64::new(0);
+static QUIESCENT_EXIT_ACTIVE_BACKLOG_TOTAL: AtomicU64 = AtomicU64::new(0);
+static QUIESCENT_EXIT_DRAINING_RESIDUAL_TOTAL: AtomicU64 = AtomicU64::new(0);
+static QUIESCENT_EXIT_INTERACTIVE_GUARDED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LAST_RUNTIME_WAKE_SOURCE_CODE: AtomicU64 = AtomicU64::new(0);
+static WAKE_SOURCE_BACKGROUND_TOTAL: AtomicU64 = AtomicU64::new(0);
+static WAKE_SOURCE_SEMANTIC_VECTOR_TOTAL: AtomicU64 = AtomicU64::new(0);
+static WAKE_SOURCE_GRAPH_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LAST_BACKGROUND_WAKE_DETAIL_CODE: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_WAKE_MEMORY_RECLAIMER_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_WAKE_SHADOW_OPTIMIZER_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_WAKE_RUNTIME_TRACE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_WAKE_READER_REFRESH_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_WAKE_AUTONOMOUS_INGESTOR_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_WAKE_INGRESS_PROMOTER_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BACKGROUND_WAKE_FEDERATION_ORCHESTRATOR_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LAST_USEFUL_RESUME_AT_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_USEFUL_RESUME_FOR_EXIT_AT_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_OBSERVED_QUIESCENT_STATE_CODE: AtomicU64 = AtomicU64::new(0);
+static RUNTIME_WAKE_TIMESTAMPS: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
+static QUIESCENT_RESUME_LATENCIES_MS: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
+static QUIESCENT_USEFUL_RESUME_LATENCIES_MS: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
 
 const SERVICE_SAMPLE_TTL_MS: u64 = 5_000;
 const SERVICE_RECOVERY_WINDOW_MS: u64 = 15_000;
@@ -110,6 +136,68 @@ pub enum InteractivePriority {
     BackgroundNormal,
     InteractivePriority,
     InteractiveCritical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeQuiescentState {
+    ActiveBacklog,
+    DrainingResidualWork,
+    InteractiveGuarded,
+    QuiescentCandidate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RuntimeWakeSummary {
+    pub wakeups_last_60s: u64,
+    pub last_wakeup_at_ms: u64,
+    pub quiescent_entered_at_ms: u64,
+    pub last_quiescent_exited_at_ms: u64,
+    pub quiescent_dwell_ms_current: u64,
+    pub resume_latency_samples: u64,
+    pub resume_latency_p50_ms: u64,
+    pub resume_latency_p95_ms: u64,
+    pub resume_latency_max_ms: u64,
+    pub useful_resume_latency_samples: u64,
+    pub useful_resume_latency_p50_ms: u64,
+    pub useful_resume_latency_p95_ms: u64,
+    pub useful_resume_latency_max_ms: u64,
+    pub last_useful_resume_at_ms: u64,
+    pub last_quiescent_exit_reason: &'static str,
+    pub exit_due_to_active_backlog_total: u64,
+    pub exit_due_to_draining_residual_total: u64,
+    pub exit_due_to_interactive_guarded_total: u64,
+    pub last_wake_source: &'static str,
+    pub wake_source_background_total: u64,
+    pub wake_source_semantic_vector_total: u64,
+    pub wake_source_graph_total: u64,
+    pub last_background_wake_detail: &'static str,
+    pub dominant_background_wake_detail: &'static str,
+    pub background_wake_memory_reclaimer_total: u64,
+    pub background_wake_shadow_optimizer_total: u64,
+    pub background_wake_runtime_trace_total: u64,
+    pub background_wake_reader_refresh_total: u64,
+    pub background_wake_autonomous_ingestor_total: u64,
+    pub background_wake_ingress_promoter_total: u64,
+    pub background_wake_federation_orchestrator_total: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeWakeSource {
+    Background,
+    SemanticVector,
+    Graph,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundWakeDetail {
+    Unknown,
+    MemoryReclaimer,
+    ShadowOptimizer,
+    RuntimeTrace,
+    ReaderRefresh,
+    AutonomousIngestor,
+    IngressPromoter,
+    FederationOrchestrator,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +357,102 @@ impl InteractivePriority {
     }
 }
 
+impl RuntimeQuiescentState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveBacklog => "active_backlog",
+            Self::DrainingResidualWork => "draining_residual_work",
+            Self::InteractiveGuarded => "interactive_guarded",
+            Self::QuiescentCandidate => "quiescent_candidate",
+        }
+    }
+
+    fn code(self) -> u64 {
+        match self {
+            Self::ActiveBacklog => 0,
+            Self::DrainingResidualWork => 1,
+            Self::InteractiveGuarded => 2,
+            Self::QuiescentCandidate => 3,
+        }
+    }
+
+    fn from_code(code: u64) -> Self {
+        match code {
+            1 => Self::DrainingResidualWork,
+            2 => Self::InteractiveGuarded,
+            3 => Self::QuiescentCandidate,
+            _ => Self::ActiveBacklog,
+        }
+    }
+}
+
+impl RuntimeWakeSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::SemanticVector => "semantic_vector",
+            Self::Graph => "graph",
+        }
+    }
+
+    fn code(self) -> u64 {
+        match self {
+            Self::Background => 0,
+            Self::SemanticVector => 1,
+            Self::Graph => 2,
+        }
+    }
+
+    fn from_code(code: u64) -> Self {
+        match code {
+            1 => Self::SemanticVector,
+            2 => Self::Graph,
+            _ => Self::Background,
+        }
+    }
+}
+
+impl BackgroundWakeDetail {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::MemoryReclaimer => "memory_reclaimer",
+            Self::ShadowOptimizer => "shadow_optimizer",
+            Self::RuntimeTrace => "runtime_trace",
+            Self::ReaderRefresh => "reader_refresh",
+            Self::AutonomousIngestor => "autonomous_ingestor",
+            Self::IngressPromoter => "ingress_promoter",
+            Self::FederationOrchestrator => "federation_orchestrator",
+        }
+    }
+
+    fn code(self) -> u64 {
+        match self {
+            Self::Unknown => 0,
+            Self::MemoryReclaimer => 1,
+            Self::ShadowOptimizer => 2,
+            Self::RuntimeTrace => 3,
+            Self::ReaderRefresh => 4,
+            Self::AutonomousIngestor => 5,
+            Self::IngressPromoter => 6,
+            Self::FederationOrchestrator => 7,
+        }
+    }
+
+    fn from_code(code: u64) -> Self {
+        match code {
+            1 => Self::MemoryReclaimer,
+            2 => Self::ShadowOptimizer,
+            3 => Self::RuntimeTrace,
+            4 => Self::ReaderRefresh,
+            5 => Self::AutonomousIngestor,
+            6 => Self::IngressPromoter,
+            7 => Self::FederationOrchestrator,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpRequestClass {
     Control,
@@ -340,6 +524,237 @@ pub fn interactive_priority_active() -> bool {
 
 pub fn current_interactive_priority() -> InteractivePriority {
     current_interactive_priority_at(now_ms())
+}
+
+pub fn current_runtime_quiescent_state(
+    graph_backlog_depth: u64,
+    semantic_backlog_depth: u64,
+) -> RuntimeQuiescentState {
+    if interactive_requests_in_flight() > 0 {
+        return RuntimeQuiescentState::InteractiveGuarded;
+    }
+
+    let metrics = vector_runtime_metrics();
+    if graph_backlog_depth > 0 || semantic_backlog_depth > 0 {
+        return RuntimeQuiescentState::ActiveBacklog;
+    }
+
+    if metrics.ready_queue_depth_current > 0
+        || metrics.prepare_queue_depth_current > 0
+        || metrics.persist_queue_depth_current > 0
+        || metrics.active_claimed_current > 0
+        || metrics.prepare_claimed_current > 0
+        || metrics.persist_claimed_current > 0
+    {
+        return RuntimeQuiescentState::DrainingResidualWork;
+    }
+
+    RuntimeQuiescentState::QuiescentCandidate
+}
+
+pub fn record_runtime_wakeup(
+    source: RuntimeWakeSource,
+    graph_backlog_depth: u64,
+    semantic_backlog_depth: u64,
+) {
+    let now = now_ms();
+    LAST_RUNTIME_WAKEUP_AT_MS.store(now, Ordering::Relaxed);
+    LAST_RUNTIME_WAKE_SOURCE_CODE.store(source.code(), Ordering::Relaxed);
+    match source {
+        RuntimeWakeSource::Background => {
+            WAKE_SOURCE_BACKGROUND_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        RuntimeWakeSource::SemanticVector => {
+            WAKE_SOURCE_SEMANTIC_VECTOR_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        RuntimeWakeSource::Graph => {
+            WAKE_SOURCE_GRAPH_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    {
+        let mut wakes = runtime_wake_timestamps()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        wakes.push_back(now);
+        let cutoff = now.saturating_sub(60_000);
+        while wakes.front().copied().is_some_and(|ts| ts < cutoff) {
+            wakes.pop_front();
+        }
+    }
+    observe_quiescent_transition(current_runtime_quiescent_state(
+        graph_backlog_depth,
+        semantic_backlog_depth,
+    ));
+}
+
+pub fn record_background_runtime_wakeup(
+    detail: BackgroundWakeDetail,
+    graph_backlog_depth: u64,
+    semantic_backlog_depth: u64,
+) {
+    LAST_BACKGROUND_WAKE_DETAIL_CODE.store(detail.code(), Ordering::Relaxed);
+    match detail {
+        BackgroundWakeDetail::Unknown => {}
+        BackgroundWakeDetail::MemoryReclaimer => {
+            BACKGROUND_WAKE_MEMORY_RECLAIMER_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        BackgroundWakeDetail::ShadowOptimizer => {
+            BACKGROUND_WAKE_SHADOW_OPTIMIZER_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        BackgroundWakeDetail::RuntimeTrace => {
+            BACKGROUND_WAKE_RUNTIME_TRACE_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        BackgroundWakeDetail::ReaderRefresh => {
+            BACKGROUND_WAKE_READER_REFRESH_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        BackgroundWakeDetail::AutonomousIngestor => {
+            BACKGROUND_WAKE_AUTONOMOUS_INGESTOR_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        BackgroundWakeDetail::IngressPromoter => {
+            BACKGROUND_WAKE_INGRESS_PROMOTER_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        BackgroundWakeDetail::FederationOrchestrator => {
+            BACKGROUND_WAKE_FEDERATION_ORCHESTRATOR_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    record_runtime_wakeup(
+        RuntimeWakeSource::Background,
+        graph_backlog_depth,
+        semantic_backlog_depth,
+    );
+}
+
+pub fn runtime_wake_summary(
+    graph_backlog_depth: u64,
+    semantic_backlog_depth: u64,
+) -> RuntimeWakeSummary {
+    let now = now_ms();
+    let state = current_runtime_quiescent_state(graph_backlog_depth, semantic_backlog_depth);
+    let resume_latency = summarize_runtime_window(&quiescent_resume_latencies_ms());
+    let useful_resume_latency = summarize_runtime_window(&quiescent_useful_resume_latencies_ms());
+    let wakeups_last_60s = {
+        let mut wakes = runtime_wake_timestamps()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let cutoff = now.saturating_sub(60_000);
+        while wakes.front().copied().is_some_and(|ts| ts < cutoff) {
+            wakes.pop_front();
+        }
+        wakes.len() as u64
+    };
+    let quiescent_entered_at_ms = LAST_QUIESCENT_ENTERED_AT_MS.load(Ordering::Relaxed);
+    let background_totals = [
+        (
+            BackgroundWakeDetail::MemoryReclaimer,
+            BACKGROUND_WAKE_MEMORY_RECLAIMER_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            BackgroundWakeDetail::ShadowOptimizer,
+            BACKGROUND_WAKE_SHADOW_OPTIMIZER_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            BackgroundWakeDetail::RuntimeTrace,
+            BACKGROUND_WAKE_RUNTIME_TRACE_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            BackgroundWakeDetail::ReaderRefresh,
+            BACKGROUND_WAKE_READER_REFRESH_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            BackgroundWakeDetail::AutonomousIngestor,
+            BACKGROUND_WAKE_AUTONOMOUS_INGESTOR_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            BackgroundWakeDetail::IngressPromoter,
+            BACKGROUND_WAKE_INGRESS_PROMOTER_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            BackgroundWakeDetail::FederationOrchestrator,
+            BACKGROUND_WAKE_FEDERATION_ORCHESTRATOR_TOTAL.load(Ordering::Relaxed),
+        ),
+    ];
+    let dominant_background_wake_detail = background_totals
+        .into_iter()
+        .max_by_key(|(_, total)| *total)
+        .filter(|(_, total)| *total > 0)
+        .map(|(detail, _)| detail.as_str())
+        .unwrap_or("unknown");
+    RuntimeWakeSummary {
+        wakeups_last_60s,
+        last_wakeup_at_ms: LAST_RUNTIME_WAKEUP_AT_MS.load(Ordering::Relaxed),
+        quiescent_entered_at_ms,
+        last_quiescent_exited_at_ms: LAST_QUIESCENT_EXITED_AT_MS.load(Ordering::Relaxed),
+        quiescent_dwell_ms_current: if state == RuntimeQuiescentState::QuiescentCandidate
+            && quiescent_entered_at_ms > 0
+        {
+            now.saturating_sub(quiescent_entered_at_ms)
+        } else {
+            0
+        },
+        resume_latency_samples: resume_latency.samples,
+        resume_latency_p50_ms: resume_latency.p50_ms,
+        resume_latency_p95_ms: resume_latency.p95_ms,
+        resume_latency_max_ms: resume_latency.max_ms,
+        useful_resume_latency_samples: useful_resume_latency.samples,
+        useful_resume_latency_p50_ms: useful_resume_latency.p50_ms,
+        useful_resume_latency_p95_ms: useful_resume_latency.p95_ms,
+        useful_resume_latency_max_ms: useful_resume_latency.max_ms,
+        last_useful_resume_at_ms: LAST_USEFUL_RESUME_AT_MS.load(Ordering::Relaxed),
+        last_quiescent_exit_reason: RuntimeQuiescentState::from_code(
+            LAST_QUIESCENT_EXIT_REASON_CODE.load(Ordering::Relaxed),
+        )
+        .as_str(),
+        exit_due_to_active_backlog_total: QUIESCENT_EXIT_ACTIVE_BACKLOG_TOTAL
+            .load(Ordering::Relaxed),
+        exit_due_to_draining_residual_total: QUIESCENT_EXIT_DRAINING_RESIDUAL_TOTAL
+            .load(Ordering::Relaxed),
+        exit_due_to_interactive_guarded_total: QUIESCENT_EXIT_INTERACTIVE_GUARDED_TOTAL
+            .load(Ordering::Relaxed),
+        last_wake_source: RuntimeWakeSource::from_code(
+            LAST_RUNTIME_WAKE_SOURCE_CODE.load(Ordering::Relaxed),
+        )
+        .as_str(),
+        wake_source_background_total: WAKE_SOURCE_BACKGROUND_TOTAL.load(Ordering::Relaxed),
+        wake_source_semantic_vector_total: WAKE_SOURCE_SEMANTIC_VECTOR_TOTAL
+            .load(Ordering::Relaxed),
+        wake_source_graph_total: WAKE_SOURCE_GRAPH_TOTAL.load(Ordering::Relaxed),
+        last_background_wake_detail: BackgroundWakeDetail::from_code(
+            LAST_BACKGROUND_WAKE_DETAIL_CODE.load(Ordering::Relaxed),
+        )
+        .as_str(),
+        dominant_background_wake_detail,
+        background_wake_memory_reclaimer_total: BACKGROUND_WAKE_MEMORY_RECLAIMER_TOTAL
+            .load(Ordering::Relaxed),
+        background_wake_shadow_optimizer_total: BACKGROUND_WAKE_SHADOW_OPTIMIZER_TOTAL
+            .load(Ordering::Relaxed),
+        background_wake_runtime_trace_total: BACKGROUND_WAKE_RUNTIME_TRACE_TOTAL
+            .load(Ordering::Relaxed),
+        background_wake_reader_refresh_total: BACKGROUND_WAKE_READER_REFRESH_TOTAL
+            .load(Ordering::Relaxed),
+        background_wake_autonomous_ingestor_total: BACKGROUND_WAKE_AUTONOMOUS_INGESTOR_TOTAL
+            .load(Ordering::Relaxed),
+        background_wake_ingress_promoter_total: BACKGROUND_WAKE_INGRESS_PROMOTER_TOTAL
+            .load(Ordering::Relaxed),
+        background_wake_federation_orchestrator_total:
+            BACKGROUND_WAKE_FEDERATION_ORCHESTRATOR_TOTAL.load(Ordering::Relaxed),
+    }
+}
+
+pub fn scale_interval_for_quiescent(
+    base_ms: u64,
+    state: RuntimeQuiescentState,
+    scale_pct: usize,
+    min_ms: u64,
+    max_ms: u64,
+) -> u64 {
+    if state != RuntimeQuiescentState::QuiescentCandidate {
+        return base_ms.clamp(min_ms, max_ms);
+    }
+
+    ((base_ms as u128)
+        .saturating_mul(scale_pct as u128)
+        .saturating_div(100) as u64)
+        .clamp(min_ms, max_ms)
 }
 
 pub fn record_background_launch_suppressed() {
@@ -473,15 +888,36 @@ pub fn notify_vector_backlog_activity() {
     cvar.notify_all();
 }
 
-pub fn wait_for_vector_backlog_signal(timeout: Duration) {
+pub fn wait_for_vector_backlog_signal(timeout: Duration) -> bool {
     let (lock, cvar) = VECTOR_BACKLOG_SIGNAL.get_or_init(|| (Mutex::new(0), Condvar::new()));
     let generation = lock.lock().unwrap_or_else(|poison| poison.into_inner());
     let observed = *generation;
-    let _ = cvar.wait_timeout_while(generation, timeout, |current| *current == observed);
+    let result = cvar.wait_timeout_while(generation, timeout, |current| *current == observed);
+    let (guard, _) = result.unwrap_or_else(|poison| poison.into_inner());
+    *guard != observed
+}
+
+pub fn notify_runtime_work_activity() {
+    let (lock, cvar) = RUNTIME_WORK_SIGNAL.get_or_init(|| (Mutex::new(0), Condvar::new()));
+    let mut generation = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    *generation = generation.saturating_add(1);
+    cvar.notify_all();
+}
+
+pub fn wait_for_runtime_work_activity_or_timeout(timeout: Duration) -> bool {
+    let (lock, cvar) = RUNTIME_WORK_SIGNAL.get_or_init(|| (Mutex::new(0), Condvar::new()));
+    let generation = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    let observed = *generation;
+    let result = cvar.wait_timeout_while(generation, timeout, |current| *current == observed);
+    let (guard, _) = result.unwrap_or_else(|poison| poison.into_inner());
+    *guard != observed
 }
 
 pub fn record_vector_files_completed(count: u64) {
     VECTOR_FILES_COMPLETED_TOTAL.fetch_add(count, Ordering::Relaxed);
+    if count > 0 {
+        observe_useful_resume_after_quiescent();
+    }
 }
 
 pub fn record_vector_claimed_work_items(count: u64) {
@@ -807,13 +1243,116 @@ pub fn reset_for_tests() {
     VECTOR_LANE_LAST_TRANSITION_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_LANE_LAST_SUCCESS_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_LANE_LAST_FAULT_AT_MS.store(0, Ordering::Relaxed);
+    LAST_RUNTIME_WAKEUP_AT_MS.store(0, Ordering::Relaxed);
+    LAST_QUIESCENT_ENTERED_AT_MS.store(0, Ordering::Relaxed);
+    LAST_QUIESCENT_EXITED_AT_MS.store(0, Ordering::Relaxed);
+    LAST_QUIESCENT_EXIT_REASON_CODE.store(0, Ordering::Relaxed);
+    QUIESCENT_EXIT_ACTIVE_BACKLOG_TOTAL.store(0, Ordering::Relaxed);
+    QUIESCENT_EXIT_DRAINING_RESIDUAL_TOTAL.store(0, Ordering::Relaxed);
+    QUIESCENT_EXIT_INTERACTIVE_GUARDED_TOTAL.store(0, Ordering::Relaxed);
+    LAST_RUNTIME_WAKE_SOURCE_CODE.store(0, Ordering::Relaxed);
+    WAKE_SOURCE_BACKGROUND_TOTAL.store(0, Ordering::Relaxed);
+    WAKE_SOURCE_SEMANTIC_VECTOR_TOTAL.store(0, Ordering::Relaxed);
+    WAKE_SOURCE_GRAPH_TOTAL.store(0, Ordering::Relaxed);
+    LAST_USEFUL_RESUME_AT_MS.store(0, Ordering::Relaxed);
+    LAST_USEFUL_RESUME_FOR_EXIT_AT_MS.store(0, Ordering::Relaxed);
+    LAST_OBSERVED_QUIESCENT_STATE_CODE.store(0, Ordering::Relaxed);
     *vector_stage_latency_windows()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = VectorStageLatencyWindows::default();
+    runtime_wake_timestamps()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clear();
+    quiescent_resume_latencies_ms()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clear();
+    quiescent_useful_resume_latencies_ms()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clear();
 }
 
 fn vector_stage_latency_windows() -> &'static Mutex<VectorStageLatencyWindows> {
     VECTOR_STAGE_LATENCY_WINDOWS.get_or_init(|| Mutex::new(VectorStageLatencyWindows::default()))
+}
+
+fn runtime_wake_timestamps() -> &'static Mutex<VecDeque<u64>> {
+    RUNTIME_WAKE_TIMESTAMPS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn quiescent_resume_latencies_ms() -> &'static Mutex<VecDeque<u64>> {
+    QUIESCENT_RESUME_LATENCIES_MS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn quiescent_useful_resume_latencies_ms() -> &'static Mutex<VecDeque<u64>> {
+    QUIESCENT_USEFUL_RESUME_LATENCIES_MS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn observe_quiescent_transition(state: RuntimeQuiescentState) {
+    let now = now_ms();
+    let code = state.code();
+    let previous = LAST_OBSERVED_QUIESCENT_STATE_CODE.swap(code, Ordering::Relaxed);
+    if previous == code {
+        return;
+    }
+    if code == RuntimeQuiescentState::QuiescentCandidate.code() {
+        LAST_QUIESCENT_ENTERED_AT_MS.store(now, Ordering::Relaxed);
+    } else if previous == RuntimeQuiescentState::QuiescentCandidate.code() {
+        let entered_at = LAST_QUIESCENT_ENTERED_AT_MS.load(Ordering::Relaxed);
+        if entered_at > 0 {
+            let latency_ms = now.saturating_sub(entered_at);
+            let mut window = quiescent_resume_latencies_ms()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if window.len() >= VECTOR_STAGE_WINDOW_CAPACITY {
+                window.pop_front();
+            }
+            window.push_back(latency_ms);
+        }
+        LAST_QUIESCENT_EXIT_REASON_CODE.store(code, Ordering::Relaxed);
+        match state {
+            RuntimeQuiescentState::ActiveBacklog => {
+                QUIESCENT_EXIT_ACTIVE_BACKLOG_TOTAL.fetch_add(1, Ordering::Relaxed);
+            }
+            RuntimeQuiescentState::DrainingResidualWork => {
+                QUIESCENT_EXIT_DRAINING_RESIDUAL_TOTAL.fetch_add(1, Ordering::Relaxed);
+            }
+            RuntimeQuiescentState::InteractiveGuarded => {
+                QUIESCENT_EXIT_INTERACTIVE_GUARDED_TOTAL.fetch_add(1, Ordering::Relaxed);
+            }
+            RuntimeQuiescentState::QuiescentCandidate => {}
+        }
+        LAST_QUIESCENT_EXITED_AT_MS.store(now, Ordering::Relaxed);
+    }
+}
+
+fn observe_useful_resume_after_quiescent() {
+    let now = now_ms();
+    let exited_at = LAST_QUIESCENT_EXITED_AT_MS.load(Ordering::Relaxed);
+    if exited_at == 0 {
+        return;
+    }
+    let already_recorded_for_exit = LAST_USEFUL_RESUME_FOR_EXIT_AT_MS.load(Ordering::Relaxed);
+    if already_recorded_for_exit >= exited_at {
+        return;
+    }
+    let latency_ms = now.saturating_sub(exited_at);
+    let mut window = quiescent_useful_resume_latencies_ms()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if window.len() >= VECTOR_STAGE_WINDOW_CAPACITY {
+        window.pop_front();
+    }
+    window.push_back(latency_ms);
+    LAST_USEFUL_RESUME_AT_MS.store(now, Ordering::Relaxed);
+    LAST_USEFUL_RESUME_FOR_EXIT_AT_MS.store(exited_at, Ordering::Relaxed);
+}
+
+fn summarize_runtime_window(window: &Mutex<VecDeque<u64>>) -> VectorStageLatencySummary {
+    let guard = window.lock().unwrap_or_else(|poison| poison.into_inner());
+    summarize_window(&guard)
 }
 
 fn summarize_window(window: &VecDeque<u64>) -> VectorStageLatencySummary {
@@ -1026,6 +1565,101 @@ mod tests {
             current_interactive_priority_at(50_500),
             InteractivePriority::BackgroundNormal
         );
+    }
+
+    #[test]
+    fn test_quiescent_state_detects_idle_candidate_without_backlog_or_claims() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+        assert_eq!(
+            current_runtime_quiescent_state(0, 0),
+            RuntimeQuiescentState::QuiescentCandidate
+        );
+    }
+
+    #[test]
+    fn test_quiescent_scale_only_applies_in_idle_candidate_state() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        assert_eq!(
+            scale_interval_for_quiescent(
+                1_000,
+                RuntimeQuiescentState::QuiescentCandidate,
+                400,
+                250,
+                60_000
+            ),
+            4_000
+        );
+        assert_eq!(
+            scale_interval_for_quiescent(
+                1_000,
+                RuntimeQuiescentState::ActiveBacklog,
+                400,
+                250,
+                60_000
+            ),
+            1_000
+        );
+    }
+
+    #[test]
+    fn test_runtime_wake_summary_tracks_quiescent_entry_and_exit() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+
+        record_runtime_wakeup(RuntimeWakeSource::Background, 0, 0);
+        let idle = runtime_wake_summary(0, 0);
+        assert!(idle.wakeups_last_60s >= 1);
+        assert!(idle.last_wakeup_at_ms > 0);
+        assert!(idle.quiescent_entered_at_ms > 0);
+
+        record_runtime_wakeup(RuntimeWakeSource::Background, 1, 0);
+        let active = runtime_wake_summary(1, 0);
+        assert!(active.wakeups_last_60s >= 2);
+        assert!(active.last_quiescent_exited_at_ms > 0);
+        assert!(active.resume_latency_samples >= 1);
+        assert!(active.resume_latency_max_ms <= active.last_quiescent_exited_at_ms);
+    }
+
+    #[test]
+    fn test_runtime_wake_summary_tracks_useful_resume_after_completion() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+
+        record_runtime_wakeup(RuntimeWakeSource::Background, 0, 0);
+        record_runtime_wakeup(RuntimeWakeSource::Background, 1, 0);
+        record_vector_files_completed(1);
+
+        let active = runtime_wake_summary(1, 0);
+        assert!(active.useful_resume_latency_samples >= 1);
+        assert!(active.last_useful_resume_at_ms > 0);
+    }
+
+    #[test]
+    fn test_runtime_wake_summary_tracks_quiescent_exit_reason() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+
+        record_runtime_wakeup(RuntimeWakeSource::Background, 0, 0);
+        record_runtime_wakeup(RuntimeWakeSource::Background, 0, 1);
+
+        let active = runtime_wake_summary(0, 1);
+        assert_eq!(active.last_quiescent_exit_reason, "active_backlog");
+        assert!(active.exit_due_to_active_backlog_total >= 1);
+    }
+
+    #[test]
+    fn test_runtime_wake_summary_tracks_last_wake_source() {
+        let _guard = TEST_GUARD.lock().unwrap();
+        reset_for_tests();
+
+        record_runtime_wakeup(RuntimeWakeSource::Background, 0, 0);
+        record_runtime_wakeup(RuntimeWakeSource::SemanticVector, 0, 1);
+
+        let summary = runtime_wake_summary(0, 1);
+        assert_eq!(summary.last_wake_source, "semantic_vector");
+        assert!(summary.wake_source_background_total >= 1);
+        assert!(summary.wake_source_semantic_vector_total >= 1);
     }
 
     #[test]

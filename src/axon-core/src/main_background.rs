@@ -16,7 +16,8 @@ use axon_core::fs_watcher::{self, HOT_PRIORITY};
 use axon_core::graph::GraphStore;
 use axon_core::graph::PendingFile;
 use axon_core::ingress_buffer::{
-    record_ingress_flush, IngressMetricsSnapshot, SharedIngressBuffer,
+    record_ingress_flush, wait_for_ingress_activity_or_timeout, IngressMetricsSnapshot,
+    SharedIngressBuffer,
 };
 use axon_core::optimizer::{
     build_admissible_action_profiles, collect_host_snapshot, collect_operator_policy_snapshot,
@@ -29,7 +30,7 @@ use axon_core::runtime_observability::{
 };
 use axon_core::scanner::Scanner;
 use axon_core::service_guard;
-use axon_core::service_guard::{InteractivePriority, ServicePressure};
+use axon_core::service_guard::{InteractivePriority, RuntimeQuiescentState, ServicePressure};
 use axon_core::vector_control::{
     current_utility_first_scheduler_diagnostics, current_vector_batch_controller_diagnostics,
     current_vector_drain_state,
@@ -98,13 +99,16 @@ struct AdmissionSelection {
 const CLAIM_MODE_SENTINEL: u8 = u8::MAX;
 const FAIRNESS_PROMOTION_DEFER_THRESHOLD: u32 = 3;
 const OVERSIZED_PROBATION_DEFER_THRESHOLD: u32 = 3;
+const AUTONOMOUS_INGESTOR_IDLE_WAIT_MS: u64 = 2_000;
 const INGRESS_PROMOTER_POLL_INTERVAL_MS: u64 = 50;
+const INGRESS_PROMOTER_IDLE_WAIT_MS: u64 = 2_000;
 const INGRESS_HOT_FLUSH_WINDOW_MS: u64 = 100;
 const INGRESS_BULK_FLUSH_WINDOW_MS: u64 = 400;
 const INGRESS_HINT_FLUSH_WINDOW_MS: u64 = 150;
 const INGRESS_MAX_BATCH_SIZE: usize = 512;
 const INGRESS_FORCE_BATCH_SIZE: usize = 1_024;
 const MEMORY_RECLAIMER_POLL_INTERVAL_SECS: u64 = 15;
+const QUIESCENT_INTERVAL_SCALE_PCT_DEFAULT: usize = 400;
 
 static OVERSIZED_REFUSALS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static DEGRADED_MODE_ENTRIES_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -234,14 +238,21 @@ pub(crate) fn start_memory_watchdog() {
                     }
                 }
             }
-            std::thread::sleep(std::time::Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(quiescent_scaled_interval_ms(
+                10_000, 10_000, 120_000,
+            )));
         }
     });
 }
 
 pub(crate) fn spawn_memory_reclaimer(queue: Arc<QueueStore>, ingress_buffer: SharedIngressBuffer) {
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(MEMORY_RECLAIMER_POLL_INTERVAL_SECS));
+        std::thread::sleep(Duration::from_millis(memory_reclaimer_poll_interval_ms()));
+        service_guard::record_background_runtime_wakeup(
+            service_guard::BackgroundWakeDetail::MemoryReclaimer,
+            0,
+            0,
+        );
 
         if !memory_reclaimer_enabled() {
             continue;
@@ -298,6 +309,11 @@ pub(crate) fn spawn_shadow_optimizer(store: Arc<GraphStore>) {
         )> = None;
 
         loop {
+            service_guard::record_background_runtime_wakeup(
+                service_guard::BackgroundWakeDetail::ShadowOptimizer,
+                0,
+                0,
+            );
             let host = collect_host_snapshot();
             let policy = collect_operator_policy_snapshot(&host);
             let signals = collect_runtime_signals_window(&store);
@@ -503,6 +519,11 @@ pub(crate) fn spawn_runtime_trace_logger(
 
         loop {
             let telemetry = runtime_telemetry_snapshot(&store, &queue, &ingress_buffer);
+            service_guard::record_background_runtime_wakeup(
+                service_guard::BackgroundWakeDetail::RuntimeTrace,
+                telemetry.graph_projection_queue_depth as u64,
+                telemetry.file_vectorization_queue_depth as u64,
+            );
             let signals = collect_runtime_signals_window(&store);
             let gpu_memory = current_gpu_memory_snapshot();
             let gpu_utilization = current_gpu_utilization_snapshot();
@@ -634,6 +655,7 @@ fn apply_live_optimizer_profile(
         } else {
             None
         },
+        None,
         if allow_chunk_batch_size {
             Some(profile.target_chunk_batch_size)
         } else {
@@ -644,6 +666,8 @@ fn apply_live_optimizer_profile(
         } else {
             None
         },
+        None,
+        None,
         None,
         None,
         None,
@@ -1007,18 +1031,28 @@ mod governor_tests {
 }
 
 fn reader_refresh_interval_ms() -> u64 {
-    std::env::var("AXON_READER_REFRESH_INTERVAL_MS")
+    let base_ms = std::env::var("AXON_READER_REFRESH_INTERVAL_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|v| *v >= 250)
-        .unwrap_or(5_000)
+        .unwrap_or(5_000);
+    quiescent_scaled_interval_ms(base_ms, 250, 60_000)
 }
 
 fn optimizer_loop_interval_ms() -> u64 {
-    std::env::var("AXON_OPT_LOOP_INTERVAL_MS")
+    let base_ms = std::env::var("AXON_OPT_LOOP_INTERVAL_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(15_000)
+        .unwrap_or(15_000);
+    quiescent_scaled_interval_ms(base_ms, 1_000, 120_000)
+}
+
+fn memory_reclaimer_poll_interval_ms() -> u64 {
+    quiescent_scaled_interval_ms(
+        MEMORY_RECLAIMER_POLL_INTERVAL_SECS.saturating_mul(1_000),
+        5_000,
+        120_000,
+    )
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {
@@ -1039,11 +1073,57 @@ fn runtime_trace_enabled() -> bool {
 }
 
 fn runtime_trace_interval_ms() -> u64 {
-    std::env::var("AXON_RUNTIME_TRACE_INTERVAL_MS")
+    let base_ms = std::env::var("AXON_RUNTIME_TRACE_INTERVAL_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|value| *value >= 1_000)
-        .unwrap_or(5_000)
+        .unwrap_or(5_000);
+    quiescent_scaled_interval_ms(base_ms, 1_000, 120_000)
+}
+
+fn quiescent_interval_scale_pct() -> usize {
+    std::env::var("AXON_QUIESCENT_INTERVAL_SCALE_PCT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(QUIESCENT_INTERVAL_SCALE_PCT_DEFAULT)
+        .clamp(100, 2000)
+}
+
+fn current_quiescent_state_without_backlog_visibility() -> RuntimeQuiescentState {
+    service_guard::current_runtime_quiescent_state(0, 0)
+}
+
+fn quiescent_scaled_interval_ms(base_ms: u64, min_ms: u64, max_ms: u64) -> u64 {
+    service_guard::scale_interval_for_quiescent(
+        base_ms,
+        current_quiescent_state_without_backlog_visibility(),
+        quiescent_interval_scale_pct(),
+        min_ms,
+        max_ms,
+    )
+}
+
+fn ingress_promoter_poll_interval_ms() -> u64 {
+    quiescent_scaled_interval_ms(INGRESS_PROMOTER_POLL_INTERVAL_MS, 50, 2_000)
+}
+
+fn autonomous_ingestor_idle_wait(
+    timeout: std::time::Duration,
+    queue_len: usize,
+) -> std::time::Duration {
+    std::time::Duration::from_millis(
+        quiescent_scaled_interval_ms(AUTONOMOUS_INGESTOR_IDLE_WAIT_MS, 250, 30_000)
+            .max(timeout.as_millis().min(u128::from(u64::MAX)) as u64)
+            .max(
+                quiescent_scaled_claim_sleep(1_000, queue_len)
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            ),
+    )
+}
+
+fn ingress_promoter_idle_wait_ms() -> u64 {
+    quiescent_scaled_interval_ms(INGRESS_PROMOTER_IDLE_WAIT_MS, 250, 30_000)
 }
 
 fn runtime_trace_path() -> PathBuf {
@@ -1102,9 +1182,20 @@ pub(crate) fn spawn_reader_snapshot_refresher(store: Arc<GraphStore>) {
             sleep_ms
         );
         loop {
-            store.wait_for_reader_refresh_signal(Duration::from_millis(sleep_ms));
-            if let Err(err) = store.refresh_reader_snapshot_if_needed() {
-                warn!("Reader snapshot refresh failed: {}", err);
+            let signaled = store.wait_for_reader_refresh_signal(Duration::from_millis(sleep_ms));
+            match store.refresh_reader_snapshot_if_needed() {
+                Ok(refreshed) => {
+                    if signaled || refreshed {
+                        service_guard::record_background_runtime_wakeup(
+                            service_guard::BackgroundWakeDetail::ReaderRefresh,
+                            0,
+                            0,
+                        );
+                    }
+                }
+                Err(err) => {
+                    warn!("Reader snapshot refresh failed: {}", err);
+                }
             }
         }
     });
@@ -1115,6 +1206,7 @@ pub(crate) fn spawn_autonomous_ingestor(store: Arc<GraphStore>, queue: Arc<Queue
         info!("Autonomous Ingestor: Ignition. Monitoring DuckDB for work...");
         let memory_limit = memory_limit_bytes();
         let mut last_mode: Option<ClaimMode> = None;
+        let mut idle = true;
         loop {
             let policy = claim_policy(
                 queue.common_len(),
@@ -1140,6 +1232,7 @@ pub(crate) fn spawn_autonomous_ingestor(store: Arc<GraphStore>, queue: Arc<Queue
                     policy.claim_count.saturating_mul(4).max(policy.claim_count),
                 ) {
                     let plan = plan_admissions(&queue, candidates, policy.claim_count);
+                    let mut made_progress = false;
 
                     if !plan.deferred.is_empty() {
                         let deferred_paths = plan
@@ -1152,6 +1245,8 @@ pub(crate) fn spawn_autonomous_ingestor(store: Arc<GraphStore>, queue: Arc<Queue
                                 "Autonomous Ingestor failed to record deferred fairness debt: {}",
                                 err
                             );
+                        } else {
+                            made_progress = true;
                         }
                     }
 
@@ -1164,6 +1259,8 @@ pub(crate) fn spawn_autonomous_ingestor(store: Arc<GraphStore>, queue: Arc<Queue
                                 "Autonomous Ingestor failed to mark {} as oversized: {}",
                                 oversized.path, err
                             );
+                        } else {
+                            made_progress = true;
                         }
                     }
 
@@ -1186,15 +1283,62 @@ pub(crate) fn spawn_autonomous_ingestor(store: Arc<GraphStore>, queue: Arc<Queue
                                 files.len()
                             );
                             enqueue_claimed_files(&store, &queue, files, &selected_modes);
+                            made_progress = true;
                         }
                     } else if !plan.selected.is_empty() {
                         warn!("Autonomous Ingestor failed to claim selected pending files.");
                     }
+
+                    if made_progress {
+                        idle = false;
+                        tokio::task::yield_now().await;
+                    } else {
+                        let signaled = wait_for_runtime_work_activity_or_timeout_async(
+                            autonomous_ingestor_idle_wait(policy.sleep, queue.common_len()),
+                        )
+                        .await;
+                        if signaled {
+                            if idle {
+                                service_guard::record_background_runtime_wakeup(
+                                    service_guard::BackgroundWakeDetail::AutonomousIngestor,
+                                    0,
+                                    0,
+                                );
+                            }
+                            idle = false;
+                        } else {
+                            idle = true;
+                        }
+                    }
+                    continue;
                 }
             }
-            tokio::time::sleep(policy.sleep).await;
+            let signaled = wait_for_runtime_work_activity_or_timeout_async(
+                autonomous_ingestor_idle_wait(policy.sleep, queue.common_len()),
+            )
+            .await;
+            if signaled {
+                if idle {
+                    service_guard::record_background_runtime_wakeup(
+                        service_guard::BackgroundWakeDetail::AutonomousIngestor,
+                        0,
+                        0,
+                    );
+                }
+                idle = false;
+            } else {
+                idle = true;
+            }
         }
     });
+}
+
+async fn wait_for_runtime_work_activity_or_timeout_async(timeout: std::time::Duration) -> bool {
+    tokio::task::spawn_blocking(move || {
+        service_guard::wait_for_runtime_work_activity_or_timeout(timeout)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 pub(crate) fn runtime_telemetry_snapshot(
@@ -1348,6 +1492,35 @@ fn should_flush_ingress_buffer(metrics: &IngressMetricsSnapshot, elapsed: Durati
     }
 
     metrics.scan_entries > 0 && elapsed >= Duration::from_millis(INGRESS_BULK_FLUSH_WINDOW_MS)
+}
+
+fn ingress_promoter_sleep_ms(metrics: &IngressMetricsSnapshot, elapsed: Duration) -> u64 {
+    if !metrics.enabled || (metrics.buffered_entries == 0 && metrics.subtree_hints == 0) {
+        return ingress_promoter_idle_wait_ms();
+    }
+    let base_poll_ms = ingress_promoter_poll_interval_ms();
+    if metrics.buffered_entries >= INGRESS_FORCE_BATCH_SIZE {
+        return base_poll_ms;
+    }
+
+    let elapsed_ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+    let target_window_ms = if metrics.hot_entries > 0 {
+        INGRESS_HOT_FLUSH_WINDOW_MS
+    } else if metrics.subtree_hints > 0 {
+        INGRESS_HINT_FLUSH_WINDOW_MS
+    } else if metrics.scan_entries > 0 {
+        INGRESS_BULK_FLUSH_WINDOW_MS
+    } else {
+        base_poll_ms
+    };
+
+    if elapsed_ms >= target_window_ms {
+        return base_poll_ms;
+    }
+
+    target_window_ms
+        .saturating_sub(elapsed_ms)
+        .clamp(base_poll_ms, target_window_ms)
 }
 
 fn flush_ingress_buffer_once(
@@ -1950,14 +2123,38 @@ pub(crate) fn spawn_ingress_promoter(
                 .metrics_snapshot();
 
             if !metrics.enabled {
-                std::thread::sleep(Duration::from_millis(INGRESS_PROMOTER_POLL_INTERVAL_MS));
+                let signaled = wait_for_ingress_activity_or_timeout(Duration::from_millis(
+                    ingress_promoter_sleep_ms(&metrics, last_flush.elapsed()),
+                ));
+                if signaled {
+                    service_guard::record_background_runtime_wakeup(
+                        service_guard::BackgroundWakeDetail::IngressPromoter,
+                        0,
+                        0,
+                    );
+                }
                 continue;
             }
 
             if !should_flush_ingress_buffer(&metrics, last_flush.elapsed()) {
-                std::thread::sleep(Duration::from_millis(INGRESS_PROMOTER_POLL_INTERVAL_MS));
+                let signaled = wait_for_ingress_activity_or_timeout(Duration::from_millis(
+                    ingress_promoter_sleep_ms(&metrics, last_flush.elapsed()),
+                ));
+                if signaled {
+                    service_guard::record_background_runtime_wakeup(
+                        service_guard::BackgroundWakeDetail::IngressPromoter,
+                        0,
+                        0,
+                    );
+                }
                 continue;
             }
+
+            service_guard::record_background_runtime_wakeup(
+                service_guard::BackgroundWakeDetail::IngressPromoter,
+                0,
+                0,
+            );
 
             match flush_ingress_buffer_once(
                 store.clone(),
@@ -1969,7 +2166,16 @@ pub(crate) fn spawn_ingress_promoter(
                     last_flush = Instant::now();
                 }
                 Ok(_) => {
-                    std::thread::sleep(Duration::from_millis(INGRESS_PROMOTER_POLL_INTERVAL_MS));
+                    let signaled = wait_for_ingress_activity_or_timeout(Duration::from_millis(
+                        ingress_promoter_sleep_ms(&metrics, last_flush.elapsed()),
+                    ));
+                    if signaled {
+                        service_guard::record_background_runtime_wakeup(
+                            service_guard::BackgroundWakeDetail::IngressPromoter,
+                            0,
+                            0,
+                        );
+                    }
                 }
                 Err(err) => {
                     warn!("Ingress promoter flush failed: {}", err);
@@ -2134,7 +2340,7 @@ fn claim_policy(
             return ClaimPolicy {
                 mode: ClaimMode::Paused,
                 claim_count: 0,
-                sleep: std::time::Duration::from_millis(1_000),
+                sleep: quiescent_scaled_claim_sleep(1_000, queue_len),
             };
         }
         InteractivePriority::InteractivePriority => {
@@ -2142,7 +2348,7 @@ fn claim_policy(
             return ClaimPolicy {
                 mode: ClaimMode::Guarded,
                 claim_count: 50,
-                sleep: std::time::Duration::from_millis(750),
+                sleep: quiescent_scaled_claim_sleep(750, queue_len),
             };
         }
         InteractivePriority::BackgroundNormal => {}
@@ -2172,7 +2378,7 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Paused,
             claim_count: 0,
-            sleep: std::time::Duration::from_millis(1_000),
+            sleep: quiescent_scaled_claim_sleep(1_000, queue_len),
         };
     }
 
@@ -2184,7 +2390,7 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Guarded,
             claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Guarded),
-            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Guarded),
+            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Guarded, queue_len),
         };
     }
 
@@ -2192,7 +2398,7 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Slow,
             claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Slow),
-            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Slow),
+            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Slow, queue_len),
         };
     }
 
@@ -2200,14 +2406,14 @@ fn claim_policy(
         return ClaimPolicy {
             mode: ClaimMode::Slow,
             claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Slow),
-            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Slow),
+            sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Slow, queue_len),
         };
     }
 
     ClaimPolicy {
         mode: ClaimMode::Fast,
         claim_count: dynamic_claim_count(dynamic_pressure, ClaimMode::Fast),
-        sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Fast),
+        sleep: dynamic_claim_sleep(dynamic_pressure, ClaimMode::Fast, queue_len),
     }
 }
 
@@ -2290,15 +2496,32 @@ fn fairness_bucket(candidate: &PendingFile) -> u8 {
     }
 }
 
-fn dynamic_claim_sleep(pressure: f64, mode: ClaimMode) -> std::time::Duration {
+fn dynamic_claim_sleep(
+    pressure: f64,
+    mode: ClaimMode,
+    graph_backlog_depth: usize,
+) -> std::time::Duration {
     let pressure = pressure.clamp(0.0, 1.0);
-    let sleep_ms = match mode {
+    let base_sleep_ms = match mode {
         ClaimMode::Fast => 100 + (pressure * 200.0).round() as u64,
         ClaimMode::Slow => 250 + (pressure * 300.0).round() as u64,
         ClaimMode::Guarded => 500 + (pressure * 400.0).round() as u64,
         ClaimMode::Paused => 1_000,
     };
-    std::time::Duration::from_millis(sleep_ms)
+    quiescent_scaled_claim_sleep(base_sleep_ms, graph_backlog_depth)
+}
+
+fn quiescent_scaled_claim_sleep(
+    base_sleep_ms: u64,
+    graph_backlog_depth: usize,
+) -> std::time::Duration {
+    std::time::Duration::from_millis(service_guard::scale_interval_for_quiescent(
+        base_sleep_ms,
+        service_guard::current_runtime_quiescent_state(graph_backlog_depth as u64, 0),
+        quiescent_interval_scale_pct(),
+        50,
+        4_000,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2533,37 +2756,70 @@ pub(crate) fn spawn_federation_orchestrator(
     }
     std::thread::spawn(move || {
         let mut known_projects = std::collections::HashSet::new();
+        let mut stable_sweeps_without_new_projects: u32 = 0;
         info!("Fédération : Démarrage de l'orchestrateur de projets SOLL.");
         loop {
-            std::thread::sleep(Duration::from_millis(1000));
+            let base_interval_ms = if stable_sweeps_without_new_projects >= 8 {
+                30_000
+            } else if stable_sweeps_without_new_projects >= 3 {
+                10_000
+            } else {
+                1_000
+            };
+            std::thread::sleep(Duration::from_millis(quiescent_scaled_interval_ms(
+                base_interval_ms,
+                1_000,
+                60_000,
+            )));
             if let Ok(json_str) = store.query_json("SELECT project_code, project_path FROM soll.ProjectCodeRegistry WHERE project_code NOT IN ('PRO')") {
                 if let Ok(rows) = serde_json::from_str::<Vec<Vec<String>>>(&json_str) {
+                    let mut newly_discovered = Vec::new();
                     for row in rows {
                         if row.len() == 2 {
                             let project_code = &row[0];
                             let path = &row[1];
                             if !path.is_empty() && !known_projects.contains(project_code) {
                                 known_projects.insert(project_code.clone());
-                                info!(
-                                    "Fédération : Nouveau projet détecté et orchestré: {} ({})",
-                                    project_code, path
-                                );
-                                spawn_hot_delta_watcher(
-                                    store.clone(),
-                                    path.clone(),
-                                    project_code.clone(),
-                                    file_ingress_guard.clone(),
-                                    ingress_buffer.clone(),
-                                );
-                                spawn_initial_scan(
-                                    store.clone(),
-                                    path.clone(),
-                                    project_code.clone(),
-                                    file_ingress_guard.clone(),
-                                    ingress_buffer.clone(),
-                                );
+                                newly_discovered.push((project_code.clone(), path.clone()));
                             }
                         }
+                    }
+
+                    if newly_discovered.is_empty() {
+                        stable_sweeps_without_new_projects =
+                            stable_sweeps_without_new_projects.saturating_add(1);
+                        continue;
+                    }
+
+                    stable_sweeps_without_new_projects = 0;
+                    service_guard::record_background_runtime_wakeup(
+                        service_guard::BackgroundWakeDetail::FederationOrchestrator,
+                        0,
+                        0,
+                    );
+                    info!(
+                        "Fédération : {} nouveau(x) projet(s) détecté(s) et orchestré(s).",
+                        newly_discovered.len()
+                    );
+                    for (project_code, path) in newly_discovered {
+                        info!(
+                            "Fédération : Nouveau projet détecté et orchestré: {} ({})",
+                            project_code, path
+                        );
+                        spawn_hot_delta_watcher(
+                            store.clone(),
+                            path.clone(),
+                            project_code.clone(),
+                            file_ingress_guard.clone(),
+                            ingress_buffer.clone(),
+                        );
+                        spawn_initial_scan(
+                            store.clone(),
+                            path.clone(),
+                            project_code.clone(),
+                            file_ingress_guard.clone(),
+                            ingress_buffer.clone(),
+                        );
                     }
                 }
             }

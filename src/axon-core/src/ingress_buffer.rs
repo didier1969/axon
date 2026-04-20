@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Duration;
+
+use crate::service_guard;
 
 pub const AXON_ENABLE_INGRESS_BUFFER: &str = "AXON_ENABLE_INGRESS_BUFFER";
 pub type SharedIngressBuffer = Arc<Mutex<IngressBuffer>>;
@@ -18,6 +21,7 @@ static INGRESS_COLLAPSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
 static INGRESS_LAST_FLUSH_DURATION_MS: AtomicU64 = AtomicU64::new(0);
 static INGRESS_LAST_PROMOTED_COUNT: AtomicU64 = AtomicU64::new(0);
+static INGRESS_ACTIVITY_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IngressSource {
@@ -163,6 +167,7 @@ impl IngressBuffer {
             }
         }
         self.sync_metrics();
+        notify_ingress_activity();
     }
 
     pub fn record_tombstone(&mut self, path: impl Into<String>, source: IngressSource) {
@@ -182,6 +187,7 @@ impl IngressBuffer {
             INGRESS_COLLAPSED_TOTAL.fetch_add(1, Ordering::Relaxed);
         }
         self.sync_metrics();
+        notify_ingress_activity();
     }
 
     pub fn record_subtree_hint(
@@ -260,6 +266,7 @@ impl IngressBuffer {
             }
         }
         self.sync_metrics();
+        notify_ingress_activity();
     }
 
     pub fn buffered_entries(&self) -> usize {
@@ -444,6 +451,29 @@ impl IngressBuffer {
             Ordering::Relaxed,
         );
     }
+}
+
+fn ingress_activity_signal() -> &'static (Mutex<u64>, Condvar) {
+    INGRESS_ACTIVITY_SIGNAL.get_or_init(|| (Mutex::new(0), Condvar::new()))
+}
+
+pub fn notify_ingress_activity() {
+    let (lock, cvar) = ingress_activity_signal();
+    let mut generation = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    *generation = generation.saturating_add(1);
+    cvar.notify_all();
+    service_guard::notify_runtime_work_activity();
+}
+
+pub fn wait_for_ingress_activity_or_timeout(timeout: Duration) -> bool {
+    let (lock, cvar) = ingress_activity_signal();
+    let generation = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    let current = *generation;
+    let result = cvar
+        .wait_timeout_while(generation, timeout, |observed| *observed == current)
+        .unwrap_or_else(|poison| poison.into_inner());
+    let (guard, _) = result;
+    *guard != current
 }
 
 fn merge_file_event(existing: &mut IngressFileEvent, incoming: IngressFileEvent) {
