@@ -618,6 +618,57 @@ fn relation_policy_payload(source_type: &str, target_type: &str) -> Value {
     }
 }
 
+fn relation_schema_summary_for_kind(kind: &str) -> Value {
+    let allowed_targets = allowed_relation_targets_from_source(kind);
+    let forbidden_targets = SOLL_RELATION_ENDPOINT_KINDS
+        .iter()
+        .filter(|target_kind| **target_kind != kind)
+        .filter(|target_kind| relation_policy_for_pair(kind, target_kind).is_none())
+        .map(|target_kind| {
+            let reverse_exists = relation_policy_for_pair(target_kind, kind).is_some();
+            let reason = if reverse_exists {
+                "canonical direction exists in the reverse direction"
+            } else if *target_kind == "MIL" || kind == "MIL" {
+                "milestones are not part of this canonical edge family"
+            } else {
+                "no canonical relation policy exists for this pair"
+            };
+            json!({
+                "target_kind": target_kind,
+                "reason": reason
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "source_kind": kind,
+        "allowed_targets": allowed_targets,
+        "forbidden_targets": forbidden_targets,
+        "incoming_from_source_kinds": incoming_relation_sources_for_target(kind),
+        "graph_role": graph_role_for_kind(kind),
+        "kind_projection": kind_projection_policy(kind).map(|policy| json!({
+            "breadcrumb_eligible": policy.breadcrumb_eligible,
+            "root_eligible": policy.root_eligible,
+            "tree_order_rank": policy.tree_order_rank
+        })),
+        "guidance_source": "derived_from_relation_policy"
+    })
+}
+
+fn reverse_relation_hint_payload(source_kind: &str, target_kind: &str) -> Value {
+    relation_policy_for_pair(target_kind, source_kind)
+        .map(|reverse_policy| {
+            let relation = reverse_policy.default.unwrap_or(reverse_policy.allowed[0]);
+            json!({
+                "source_kind": target_kind,
+                "target_kind": source_kind,
+                "relation_type": relation,
+                "projection": projection_metadata_payload(target_kind, source_kind, reverse_policy),
+                "example": relation_example_sentence(target_kind, source_kind, relation)
+            })
+        })
+        .unwrap_or(Value::Null)
+}
+
 fn graph_role_for_kind(kind: &str) -> &'static str {
     match kind {
         "VIS" => "project north star",
@@ -796,6 +847,70 @@ fn requirement_missing_dimensions(
     missing
 }
 
+fn requirement_dimension_canonical_name(dimension: &str) -> &str {
+    match dimension {
+        "status" => "accepted_runtime_status",
+        "criteria" => "structured_acceptance_criteria",
+        "evidence" => "supporting_evidence",
+        "validation" => "qualifying_validation_edge",
+        "broken_file_evidence" => "resolvable_file_evidence",
+        _ => dimension,
+    }
+}
+
+fn requirement_dimension_descriptor(dimension: &str) -> Value {
+    match dimension {
+        "status" => json!({
+            "legacy_key": "status",
+            "canonical_key": "accepted_runtime_status",
+            "label": "Accepted runtime status",
+            "severity": "blocking",
+            "meaning": "Requirement status should be `current` or `accepted` before it is treated as complete.",
+            "next_action": "set requirement status to `current` or `accepted`"
+        }),
+        "criteria" => json!({
+            "legacy_key": "criteria",
+            "canonical_key": "structured_acceptance_criteria",
+            "label": "Structured acceptance criteria",
+            "severity": "blocking",
+            "meaning": "Requirement metadata must include explicit acceptance criteria.",
+            "next_action": "add acceptance criteria in requirement metadata"
+        }),
+        "evidence" => json!({
+            "legacy_key": "evidence",
+            "canonical_key": "supporting_evidence",
+            "label": "Supporting evidence",
+            "severity": "blocking",
+            "meaning": "At least one traceability or proof artifact should support this requirement.",
+            "next_action": "attach proof with `soll_attach_evidence`"
+        }),
+        "validation" => json!({
+            "legacy_key": "validation",
+            "canonical_key": "qualifying_validation_edge",
+            "label": "Qualifying validation edge",
+            "severity": "blocking",
+            "meaning": "A validation node should `VERIFIES` this requirement before it is considered done.",
+            "next_action": "create or link a validation node that `VERIFIES` the requirement"
+        }),
+        "broken_file_evidence" => json!({
+            "legacy_key": "broken_file_evidence",
+            "canonical_key": "resolvable_file_evidence",
+            "label": "Resolvable file evidence",
+            "severity": "warning",
+            "meaning": "Some attached file evidence is no longer reachable on disk and weakens proof quality.",
+            "next_action": "repair or replace broken file evidence paths before relying on coverage"
+        }),
+        _ => json!({
+            "legacy_key": dimension,
+            "canonical_key": dimension,
+            "label": dimension,
+            "severity": "warning",
+            "meaning": "Additional requirement coverage dimension",
+            "next_action": Value::Null
+        }),
+    }
+}
+
 fn requirement_next_actions(missing_dimensions: &[String]) -> Vec<String> {
     let mut actions = Vec::new();
     for dimension in missing_dimensions {
@@ -817,6 +932,27 @@ fn requirement_next_actions(missing_dimensions: &[String]) -> Vec<String> {
         }
     }
     actions
+}
+
+fn requirement_state_reason(state: &str, missing_dimensions: &[String]) -> String {
+    if missing_dimensions.is_empty() {
+        return "Requirement is complete across status, criteria, evidence, and validation coverage."
+            .to_string();
+    }
+    let canonical = missing_dimensions
+        .iter()
+        .map(|dimension| requirement_dimension_canonical_name(dimension))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match state {
+        "done" => format!(
+            "Requirement is complete, but operator attention is still required for: {canonical}."
+        ),
+        "partial" => format!(
+            "Requirement is partially complete because coverage is still missing for: {canonical}."
+        ),
+        _ => format!("Requirement is missing required coverage dimensions: {canonical}."),
+    }
 }
 
 fn normalize_traceability_entity_type(entity_type: &str) -> String {
@@ -1770,8 +1906,10 @@ impl McpServer {
             "needs_relation_hint"
         } else if error_text.contains("introuvable") {
             "invalid_target_id"
-        } else if error_text.contains("Aucune relation canonique autorisee") {
-            "invalid_target_kind"
+        } else if error_text.contains("\"error\":\"forbidden_relation\"")
+            || error_text.contains("Aucune relation canonique autorisee")
+        {
+            "forbidden_relation"
         } else {
             "attach_failed"
         }
@@ -2510,6 +2648,21 @@ impl McpServer {
                 .iter()
                 .map(|node| node.id.clone())
                 .collect::<Vec<_>>();
+            let subtree_inclusion_reason_items = subtree_nodes
+                .iter()
+                .map(|member| {
+                    format!(
+                        "<li><a href=\"../nodes/{}\">{}</a><div class=\"muted\">{}</div></li>",
+                        html_escape(&node_file_name(&member.id)),
+                        html_escape(&format!(
+                            "{} · {}",
+                            entity_type_short_label(&member.entity_type),
+                            member.title
+                        )),
+                        subtree_membership_reason_html(&root, &member.id, &outgoing, &nodes_by_id)
+                    )
+                })
+                .collect::<String>();
             let left_tree_html = render_project_tree_html(
                 project_code,
                 &hierarchy_root_ids,
@@ -2522,7 +2675,7 @@ impl McpServer {
                 &ancestor_chain_ids(&root.id, &preferred_parent_map),
             );
             let right_html = format!(
-                "{}{}{}{}<section class=\"card\"><h3>Relations</h3>{}</section>",
+                "{}{}{}{}<section class=\"card\"><h3>Subtree Inclusion Reasons</h3><ul class=\"node-list\">{}</ul></section><section class=\"card\"><h3>Relations</h3>{}</section>{}",
                 linked_page_list_html("Related Subtrees", &related_subtree_items),
                 linked_node_list_html(
                     "Feeds Into This Root",
@@ -2542,13 +2695,16 @@ impl McpServer {
                     &nodes_by_id,
                     "../nodes/"
                 ),
-                relation_line_html(&subtree_edges, &nodes_by_id)
+                subtree_inclusion_reason_items,
+                relation_line_html(&subtree_edges, &nodes_by_id),
+                relation_diagnostic_table_html(&subtree_edges, &nodes_by_id)
             );
             let summary_html = format!(
                 "<div class=\"cell\"><strong>Root</strong><div>{}</div></div>\
                  <div class=\"cell\"><strong>Nodes</strong><div>{}</div></div>\
                  <div class=\"cell\"><strong>Edges</strong><div>{}</div></div>\
-                 <div class=\"cell\"><strong>Boundary</strong><div>derived / non-canonical</div></div>",
+                 <div class=\"cell\"><strong>Boundary</strong><div>derived / non-canonical</div></div>\
+                 <div class=\"cell\"><strong>Diagnostics</strong><div>subtree inclusion reasons + relation tagging</div></div>",
                 html_escape(&root.id),
                 subtree_nodes.len(),
                 subtree_edges.len()
@@ -2669,7 +2825,16 @@ impl McpServer {
                             entity_type_short_label(&root_node.entity_type),
                             root_node.title
                         ),
-                        root_node.id,
+                        format!(
+                            "{} · {}",
+                            root_node.id,
+                            subtree_membership_reason_html(
+                                &root_node,
+                                &node.id,
+                                &outgoing,
+                                &nodes_by_id
+                            )
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -2733,8 +2898,9 @@ impl McpServer {
                 "<section class=\"card\"><h3>Description</h3><p>{}</p></section>\
                  <section class=\"card\"><h3>Metadata</h3><pre>{}</pre></section>\
                  <section class=\"card\"><h3>Projection Boundary</h3><p class=\"muted\">Parent/child sections below show only the primary hierarchy projection. Supporting or lateral relations remain visible under neighbor and relation sections.</p></section>\
+                 <section class=\"card\"><h3>Operator Diagnostics</h3><p class=\"muted\">Derived page; relation diagnostics below distinguish canonical vs derived, primary vs supporting/lateral, and score-bearing vs non-score-bearing.</p></section>\
                  {}{}{}{}{}{}{}\
-                 <section class=\"card\"><h3>Canonical Relations</h3>{}</section>",
+                 <section class=\"card\"><h3>Canonical Relations</h3>{}</section>{}",
                 html_escape(if node.description.is_empty() {
                     "No description."
                 } else {
@@ -2749,6 +2915,14 @@ impl McpServer {
                 linked_node_list_html("Incoming Neighbors", &incoming_ids, &nodes_by_id, ""),
                 linked_node_list_html("Outgoing Neighbors", &outgoing_ids, &nodes_by_id, ""),
                 relation_line_html(
+                    &incoming_edges
+                        .iter()
+                        .chain(outgoing_edges.iter())
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    &nodes_by_id
+                ),
+                relation_diagnostic_table_html(
                     &incoming_edges
                         .iter()
                         .chain(outgoing_edges.iter())
@@ -4193,9 +4367,18 @@ graph TD;
         let policy = relation_policy_for_pair(source_kind.label(), target_kind.label())
             .ok_or_else(|| {
                 anyhow!(
-                    "Aucune relation canonique autorisee pour {} -> {}",
-                    source_kind.label(),
-                    target_kind.label()
+                    "{}",
+                    json!({
+                        "error": "forbidden_relation",
+                        "attempted": format!("{} -> {}", source_kind.label(), target_kind.label()),
+                        "reason": if relation_policy_for_pair(target_kind.label(), source_kind.label()).is_some() {
+                            "canonical direction exists in the reverse direction"
+                        } else {
+                            "no canonical relation policy exists for this pair"
+                        },
+                        "did_you_mean": reverse_relation_hint_payload(source_kind.label(), target_kind.label())
+                    })
+                    .to_string()
                 )
             })?;
 
@@ -4903,7 +5086,63 @@ graph TD;
                 "project_code": first.get("project_code").cloned().unwrap_or(serde_json::json!(null)),
                 "project_name": first.get("project_name").cloned().unwrap_or(serde_json::json!(null)),
                 "project_path": first.get("project_path").cloned().unwrap_or(serde_json::json!(null)),
-                "matches": matches
+                "matches": matches,
+                "operator_guidance": if found {
+                    serde_json::json!({
+                        "actionable_now": true,
+                        "blocking_factors": if matches.len() > 1 {
+                            vec![serde_json::json!({
+                                "factor": "registry_match_ambiguous",
+                                "severity": "medium",
+                                "recommended_action": "prefer the exact canonical project_code from the returned matches before mutating"
+                            })]
+                        } else {
+                            Vec::<serde_json::Value>::new()
+                        },
+                        "remediation_actions": if matches.len() > 1 {
+                            vec!["prefer the exact canonical project_code from the returned matches before mutating"]
+                        } else {
+                            Vec::<&str>::new()
+                        },
+                        "follow_up_tools": ["project_status", "soll_query_context"],
+                        "next_action": {
+                            "kind": "use_canonical_project_code",
+                            "tool": "project_status",
+                            "when": "now"
+                        }
+                    })
+                } else {
+                    serde_json::json!({
+                        "actionable_now": false,
+                        "blocking_factors": [{
+                            "factor": "project_not_found_in_registry",
+                            "severity": "high",
+                            "recommended_action": "use axon_init_project or retry with the exact canonical code, name, or path"
+                        }],
+                        "remediation_actions": [
+                            "use axon_init_project or retry with the exact canonical code, name, or path"
+                        ],
+                        "follow_up_tools": ["axon_init_project", "project_registry_lookup"],
+                        "next_action": {
+                            "kind": "initialize_or_retry_project_identity",
+                            "tool": "axon_init_project",
+                            "when": "after_identity_confirmation"
+                        }
+                    })
+                },
+                "next_action": if found {
+                    serde_json::json!({
+                        "kind": "use_canonical_project_code",
+                        "tool": "project_status",
+                        "when": "now"
+                    })
+                } else {
+                    serde_json::json!({
+                        "kind": "initialize_or_retry_project_identity",
+                        "tool": "axon_init_project",
+                        "when": "after_identity_confirmation"
+                    })
+                }
             }
         }))
     }
@@ -4997,14 +5236,24 @@ graph TD;
         ) {
             (Some(source_kind), Some(target_kind)) => {
                 let mut payload = relation_policy_payload(source_kind, target_kind);
+                let reverse_hint = reverse_relation_hint_payload(source_kind, target_kind);
                 payload["allowed_target_kinds_from_source"] =
                     Value::Array(allowed_relation_targets_from_source(source_kind));
+                payload["allowed_targets"] =
+                    Value::Array(allowed_relation_targets_from_source(source_kind));
+                payload["forbidden_targets"] = relation_schema_summary_for_kind(source_kind)
+                    .get("forbidden_targets")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(vec![]));
                 payload["recommended_incoming_links_to_source_kind"] =
                     Value::Array(incoming_relation_sources_for_target(source_kind));
                 payload["recommended_incoming_links_to_target_kind"] =
                     Value::Array(incoming_relation_sources_for_target(target_kind));
                 payload["source_graph_role"] = Value::from(graph_role_for_kind(source_kind));
                 payload["target_graph_role"] = Value::from(graph_role_for_kind(target_kind));
+                payload["source_type"] = Value::from(source_kind);
+                payload["target_type"] = Value::from(target_kind);
+                payload["direction"] = Value::from("source_to_target");
                 payload["canonical_examples"] = Value::Array(
                     relation_policy_for_pair(source_kind, target_kind)
                         .map(|policy| {
@@ -5023,21 +5272,12 @@ graph TD;
                 );
                 payload["source_id"] = source_id.map(Value::from).unwrap_or(Value::Null);
                 payload["target_id"] = target_id.map(Value::from).unwrap_or(Value::Null);
+                if !payload["pair_allowed"].as_bool().unwrap_or(false) && !reverse_hint.is_null() {
+                    payload["did_you_mean"] = reverse_hint;
+                }
                 payload
             }
-            (Some(source_kind), None) => json!({
-                "resolved": true,
-                "source_kind": source_kind,
-                "graph_role": graph_role_for_kind(source_kind),
-                "kind_projection": kind_projection_policy(source_kind).map(|policy| json!({
-                    "breadcrumb_eligible": policy.breadcrumb_eligible,
-                    "root_eligible": policy.root_eligible,
-                    "tree_order_rank": policy.tree_order_rank
-                })),
-                "allowed_target_kinds_from_source": allowed_relation_targets_from_source(source_kind),
-                "recommended_incoming_links_to_source_kind": incoming_relation_sources_for_target(source_kind),
-                "guidance_source": "derived_from_relation_policy"
-            }),
+            (Some(source_kind), None) => relation_schema_summary_for_kind(source_kind),
             (None, Some(target_kind)) => json!({
                 "resolved": true,
                 "target_kind": target_kind,
@@ -5054,7 +5294,7 @@ graph TD;
         };
 
         Some(json!({
-            "content": [{ "type": "text", "text": "Canonical SOLL relation policy resolved." }],
+            "content": [{ "type": "text", "text": "Canonical SOLL relation policy resolved with explicit directional guidance." }],
             "data": data
         }))
     }
@@ -5223,10 +5463,16 @@ impl McpServer {
         }
 
         let counts = summarize_ops(&operations);
+        let result_contract = apply_plan_operation_contract(&operations);
         if dry_run {
             return Some(json!({
                 "content": [{"type":"text","text": format!("SOLL apply_plan DRY-RUN ready. preview_id={} (create={}, update={})", preview_id, counts.0, counts.1)}],
-                "data": { "preview_id": preview_id, "counts": {"create": counts.0, "update": counts.1}, "operations": operations }
+                "data": {
+                    "preview_id": preview_id,
+                    "counts": {"create": counts.0, "update": counts.1},
+                    "operations": operations,
+                    "result_contract": result_contract
+                }
             }));
         }
 
@@ -5691,6 +5937,158 @@ fn subtree_anchor_type(entity_type: &str) -> bool {
         }
         _ => false,
     }
+}
+
+fn relation_diagnostic_row(
+    edge: &SollDocEdge,
+    nodes_by_id: &HashMap<String, SollDocNode>,
+) -> Value {
+    let relation_type = edge.relation_type.as_str();
+    let source_kind = nodes_by_id
+        .get(&edge.source_id)
+        .and_then(|node| entity_type_to_kind(&node.entity_type));
+    let target_kind = nodes_by_id
+        .get(&edge.target_id)
+        .and_then(|node| entity_type_to_kind(&node.entity_type));
+    let policy = source_kind
+        .zip(target_kind)
+        .and_then(|(source_kind, target_kind)| relation_policy_for_pair(source_kind, target_kind));
+    let projection_role = policy
+        .map(|policy| policy.projection.role.as_str())
+        .unwrap_or("derived");
+    let is_primary = projection_role == "primary";
+    let score_bearing = matches!(
+        relation_type,
+        "EPITOMIZES" | "BELONGS_TO" | "SOLVES" | "VERIFIES" | "IMPACTS"
+    );
+    json!({
+        "relation_type": relation_type,
+        "source_id": edge.source_id,
+        "target_id": edge.target_id,
+        "boundary": if policy.is_some() { "canonical" } else { "derived" },
+        "projection_role": projection_role,
+        "score_class": if score_bearing { "score_bearing" } else { "non_score_bearing" },
+        "primary_class": if is_primary { "primary" } else { "supporting_or_lateral" }
+    })
+}
+
+fn relation_diagnostic_table_html(
+    edges: &[SollDocEdge],
+    nodes_by_id: &HashMap<String, SollDocNode>,
+) -> String {
+    if edges.is_empty() {
+        return "<p class=\"muted\">No relation diagnostics in this scope.</p>".to_string();
+    }
+    let mut items = edges
+        .iter()
+        .map(|edge| relation_diagnostic_row(edge, nodes_by_id))
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        (
+            left["relation_type"].as_str().unwrap_or_default(),
+            left["source_id"].as_str().unwrap_or_default(),
+            left["target_id"].as_str().unwrap_or_default(),
+        )
+            .cmp(&(
+                right["relation_type"].as_str().unwrap_or_default(),
+                right["source_id"].as_str().unwrap_or_default(),
+                right["target_id"].as_str().unwrap_or_default(),
+            ))
+    });
+
+    let mut html = String::from(
+        "<section class=\"card\"><h3>Operator Relation Diagnostics</h3><ul class=\"relation-list\">",
+    );
+    for item in items {
+        html.push_str(&format!(
+            "<li><code>{}</code> <span class=\"rel\">{}</span> <code>{}</code>\
+             <div class=\"muted\">boundary: {} · projection: {} · scoring: {}</div></li>",
+            html_escape(item["source_id"].as_str().unwrap_or_default()),
+            html_escape(item["relation_type"].as_str().unwrap_or_default()),
+            html_escape(item["target_id"].as_str().unwrap_or_default()),
+            html_escape(item["boundary"].as_str().unwrap_or_default()),
+            html_escape(item["projection_role"].as_str().unwrap_or_default()),
+            html_escape(item["score_class"].as_str().unwrap_or_default())
+        ));
+    }
+    html.push_str("</ul></section>");
+    html
+}
+
+fn find_path_to_root_via_outgoing(
+    start_id: &str,
+    root_id: &str,
+    outgoing: &HashMap<String, Vec<SollDocEdge>>,
+) -> Option<Vec<SollDocEdge>> {
+    if start_id == root_id {
+        return Some(Vec::new());
+    }
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back((start_id.to_string(), Vec::<SollDocEdge>::new()));
+    while let Some((current, path)) = queue.pop_front() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        if let Some(edges) = outgoing.get(&current) {
+            for edge in edges {
+                let mut next_path = path.clone();
+                next_path.push(edge.clone());
+                if edge.target_id == root_id {
+                    return Some(next_path);
+                }
+                queue.push_back((edge.target_id.clone(), next_path));
+            }
+        }
+    }
+    None
+}
+
+fn subtree_membership_reason_html(
+    root: &SollDocNode,
+    member_id: &str,
+    outgoing: &HashMap<String, Vec<SollDocEdge>>,
+    nodes_by_id: &HashMap<String, SollDocNode>,
+) -> String {
+    if member_id == root.id {
+        return format!(
+            "Included because this node is the subtree root <code>{}</code>.",
+            html_escape(&root.id)
+        );
+    }
+    if let Some(edges) = outgoing.get(&root.id) {
+        if let Some(edge) = edges.iter().find(|edge| edge.target_id == member_id) {
+            return format!(
+                "Included by direct root context edge <code>{}</code> <span class=\"rel\">{}</span> <code>{}</code>.",
+                html_escape(&edge.source_id),
+                html_escape(&edge.relation_type),
+                html_escape(&edge.target_id)
+            );
+        }
+    }
+    if let Some(path) = find_path_to_root_via_outgoing(member_id, &root.id, outgoing) {
+        if let Some(first_edge) = path.first() {
+            let target_label = nodes_by_id
+                .get(&first_edge.target_id)
+                .map(|node| {
+                    format!(
+                        "{} · {}",
+                        entity_type_short_label(&node.entity_type),
+                        node.title
+                    )
+                })
+                .unwrap_or_else(|| first_edge.target_id.clone());
+            return format!(
+                "Included by reverse reachability toward root <code>{}</code>; canonical chain starts with <code>{}</code> <span class=\"rel\">{}</span> <code>{}</code> ({}) .",
+                html_escape(&root.id),
+                html_escape(&first_edge.source_id),
+                html_escape(&first_edge.relation_type),
+                html_escape(&first_edge.target_id),
+                html_escape(&target_label)
+            );
+        }
+    }
+    "Included by subtree derivation logic, but no explicit canonical path explanation is currently available.".to_string()
 }
 
 fn render_tree_node_html(
@@ -6538,10 +6936,23 @@ impl McpServer {
         }
 
         let mut identity_mapping = std::collections::HashMap::new();
+        let mut linked_results = Vec::new();
         for op in &operations {
             match self.apply_operation_with_audit(&revision_id, op, &mut identity_mapping) {
                 Ok(generated_id) => {
-                    if !generated_id.is_empty() {
+                    let kind = op
+                        .get("kind")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if kind == "link" {
+                        let payload = op.get("payload").cloned().unwrap_or_else(|| json!({}));
+                        linked_results.push(json!({
+                            "source_id": payload.get("source_id").cloned().unwrap_or(Value::Null),
+                            "target_id": payload.get("target_id").cloned().unwrap_or(Value::Null),
+                            "relation_type": payload.get("relation_type").cloned().unwrap_or(Value::Null),
+                            "status": "linked"
+                        }));
+                    } else if !generated_id.is_empty() {
                         if let Some(lk) = op.get("logical_key").and_then(|v| v.as_str()) {
                             identity_mapping.insert(lk.to_string(), generated_id);
                         }
@@ -6562,12 +6973,48 @@ impl McpServer {
             escape_sql(preview_id)
         ));
 
+        let mut result_contract = apply_plan_operation_contract(&operations);
+        if let Some(items) = result_contract
+            .get_mut("created")
+            .and_then(|value| value.as_array_mut())
+        {
+            for item in items.iter_mut() {
+                if let Some(logical_key) = item.get("logical_key").and_then(|value| value.as_str())
+                {
+                    if let Some(actual_id) = identity_mapping.get(logical_key) {
+                        item["id"] = Value::from(actual_id.clone());
+                        item["status"] = Value::from("created");
+                    }
+                }
+            }
+        }
+        if let Some(items) = result_contract
+            .get_mut("updated")
+            .and_then(|value| value.as_array_mut())
+        {
+            for item in items.iter_mut() {
+                if let Some(logical_key) = item.get("logical_key").and_then(|value| value.as_str())
+                {
+                    if let Some(actual_id) = identity_mapping.get(logical_key) {
+                        item["id"] = Value::from(actual_id.clone());
+                    }
+                }
+                item["status"] = Value::from("updated");
+            }
+        }
+        result_contract["linked"] = Value::Array(linked_results);
+
         Some(json!({
             "content": [{"type":"text","text": format!("SOLL revision committed: {} ({} operations)", revision_id, operations.len())}],
             "data": {
                 "revision_id": revision_id,
                 "operations": operations.len(),
-                "identity_mapping": identity_mapping
+                "identity_mapping": identity_mapping,
+                "created": result_contract.get("created").cloned().unwrap_or_else(|| Value::Array(vec![])),
+                "updated": result_contract.get("updated").cloned().unwrap_or_else(|| Value::Array(vec![])),
+                "linked": result_contract.get("linked").cloned().unwrap_or_else(|| Value::Array(vec![])),
+                "skipped": result_contract.get("skipped").cloned().unwrap_or_else(|| Value::Array(vec![])),
+                "errors": result_contract.get("errors").cloned().unwrap_or_else(|| Value::Array(vec![]))
             }
         }))
     }
@@ -6630,10 +7077,106 @@ impl McpServer {
                 limit = limit
             ))
             .unwrap_or_default();
-        let revisions = self.query_single_column(&format!(
-            "SELECT revision_id || '|' || COALESCE(summary,'') || '|' || COALESCE(author,'') FROM soll.Revision ORDER BY committed_at DESC LIMIT {}",
-            limit
-        )).unwrap_or_default();
+        let revisions = self
+            .query_single_column(&format!(
+                "SELECT revision_id || '|' || COALESCE(summary,'') || '|' || COALESCE(author,'')
+             FROM soll.Revision
+             ORDER BY committed_at DESC
+             LIMIT {}",
+                limit
+            ))
+            .unwrap_or_default();
+        let completeness_snapshot = self.soll_completeness_snapshot(Some(&project_code)).ok();
+        let entity_counts_raw = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT type, count(*)
+                 FROM soll.Node
+                 WHERE project_code = '{}'
+                 GROUP BY type
+                 ORDER BY type",
+                escaped_project
+            ))
+            .ok()?;
+        let entity_count_rows: Vec<Vec<String>> =
+            serde_json::from_str(&entity_counts_raw).unwrap_or_default();
+        let entity_counts = entity_count_rows
+            .into_iter()
+            .filter_map(|row| {
+                let entity_type = row.first()?.clone();
+                let count = row.get(1)?.parse::<usize>().ok()?;
+                Some(json!({
+                    "entity_type": entity_type,
+                    "count": count
+                }))
+            })
+            .collect::<Vec<_>>();
+        let last_revision_metadata = self
+            .graph_store
+            .query_json(&format!(
+                "SELECT r.revision_id,
+                        COALESCE(r.summary,''),
+                        COALESCE(r.author,''),
+                        COALESCE(r.status,''),
+                        COALESCE(r.committed_at, r.created_at)
+                 FROM soll.Revision r
+                 JOIN soll.RevisionChange c
+                   ON c.revision_id = r.revision_id
+                 WHERE c.entity_id LIKE '%-{}-%'
+                 GROUP BY r.revision_id, r.summary, r.author, r.status, r.committed_at, r.created_at
+                 ORDER BY COALESCE(r.committed_at, r.created_at) DESC
+                 LIMIT 1",
+                escaped_project
+            ))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Vec<Vec<String>>>(&raw).ok())
+            .and_then(|rows| rows.into_iter().next())
+            .map(|row| {
+                json!({
+                    "revision_id": row.first().cloned().unwrap_or_default(),
+                    "summary": row.get(1).cloned().unwrap_or_default(),
+                    "author": row.get(2).cloned().unwrap_or_default(),
+                    "status": row.get(3).cloned().unwrap_or_default(),
+                    "committed_at": row.get(4).cloned().unwrap_or_default()
+                })
+            })
+            .unwrap_or(json!({
+                "available": false
+            }));
+        let operational_digest = completeness_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                json!({
+                    "project_scope": snapshot.project_scope,
+                    "entity_counts": entity_counts,
+                    "topology_summary": {
+                        "total_nodes": snapshot.total_nodes,
+                        "structurally_connected": snapshot.structurally_connected(),
+                        "orphan_requirement_count": snapshot.orphan_requirements.len(),
+                        "orphan_requirements": snapshot.orphan_requirements,
+                        "validations_without_verifies_count": snapshot.validations_without_verifies.len(),
+                        "validations_without_verifies": snapshot.validations_without_verifies,
+                        "decisions_without_links_count": snapshot.decisions_without_links.len(),
+                        "decisions_without_links": snapshot.decisions_without_links,
+                        "relation_policy_violation_count": snapshot.relation_policy_violations.len(),
+                        "relation_policy_violations": snapshot.relation_policy_violations
+                    },
+                    "requirement_coverage_summary": {
+                        "done": snapshot.requirement_coverage.done,
+                        "partial": snapshot.requirement_coverage.partial,
+                        "missing": snapshot.requirement_coverage.missing,
+                        "total": snapshot.requirement_coverage.entries.len(),
+                        "uncovered_requirements": snapshot.uncovered_requirements
+                    },
+                    "last_meaningful_revision": last_revision_metadata
+                })
+            })
+            .unwrap_or(json!({
+                "entity_counts": entity_counts,
+                "topology_summary": Value::Null,
+                "requirement_coverage_summary": Value::Null,
+                "last_meaningful_revision": last_revision_metadata
+            }));
 
         let response = json!({
             "content": [{"type":"text","text": format!("SOLL context for {} loaded.", project_code)}],
@@ -6642,7 +7185,8 @@ impl McpServer {
                 "visions": visions,
                 "requirements": reqs,
                 "decisions": decisions,
-                "revisions": revisions
+                "revisions": revisions,
+                "operational_digest": operational_digest
             }
         });
         Self::write_soll_context_cache(cache_key, now_ms, &response);
@@ -7238,19 +7782,61 @@ impl McpServer {
             .entries
             .iter()
             .map(|entry| {
+                let missing_dimensions_detailed = entry
+                    .missing_dimensions
+                    .iter()
+                    .map(|dimension| requirement_dimension_descriptor(dimension))
+                    .collect::<Vec<_>>();
+                let next_actions_detailed = entry
+                    .missing_dimensions
+                    .iter()
+                    .map(|dimension| {
+                        let descriptor = requirement_dimension_descriptor(dimension);
+                        json!({
+                            "dimension": requirement_dimension_canonical_name(dimension),
+                            "legacy_dimension": dimension,
+                            "action": descriptor.get("next_action").cloned().unwrap_or(Value::Null),
+                            "mutation_class": match dimension.as_str() {
+                                "status" | "criteria" => "update_requirement",
+                                "evidence" => "attach_evidence",
+                                "validation" => "link_validation",
+                                "broken_file_evidence" => "repair_evidence",
+                                _ => "inspect_requirement"
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 json!({
                     "id": entry.id,
                     "state": entry.state,
+                    "completion_state": entry.state,
+                    "coverage_reason": requirement_state_reason(&entry.state, &entry.missing_dimensions),
                     "status": entry.status,
                     "evidence_count": entry.evidence_count,
                     "validation_count": entry.validation_count,
                     "has_criteria": entry.has_criteria,
                     "broken_file_evidence_count": entry.broken_file_evidence_count,
                     "missing_dimensions": entry.missing_dimensions,
-                    "suggested_next_actions": entry.suggested_next_actions
+                    "missing_dimensions_detailed": missing_dimensions_detailed,
+                    "suggested_next_actions": entry.suggested_next_actions,
+                    "next_actions_detailed": next_actions_detailed
                 })
             })
             .collect::<Vec<_>>();
+        let completion_model = json!({
+            "required_dimensions": [
+                requirement_dimension_descriptor("status"),
+                requirement_dimension_descriptor("criteria"),
+                requirement_dimension_descriptor("evidence"),
+                requirement_dimension_descriptor("validation")
+            ],
+            "warning_dimensions": [
+                requirement_dimension_descriptor("broken_file_evidence")
+            ],
+            "done_rule": "status is current|accepted, acceptance criteria exist, supporting evidence exists, and a validation node VERIFIES the requirement",
+            "partial_rule": "some required dimensions exist but not all required dimensions are satisfied",
+            "missing_rule": "required dimensions are mostly absent or requirement status is not yet operationally accepted"
+        });
 
         Some(json!({
             "content": [{"type":"text","text": format!("Requirement verification: done={}, partial={}, missing={}", summary.done, summary.partial, summary.missing)}],
@@ -7259,7 +7845,15 @@ impl McpServer {
                 "done": summary.done,
                 "partial": summary.partial,
                 "missing": summary.missing,
+                "summary": {
+                    "done": summary.done,
+                    "partial": summary.partial,
+                    "missing": summary.missing,
+                    "total": summary.entries.len()
+                },
                 "details": details,
+                "requirements": details,
+                "completion_model": completion_model,
                 "completeness_axes": {
                     "concept_completeness": snapshot.concept_complete(),
                     "implementation_completeness": snapshot.implementation_complete(),
@@ -7943,6 +8537,57 @@ fn summarize_ops(ops: &[Value]) -> (usize, usize) {
         }
     }
     (creates, updates)
+}
+
+fn apply_plan_operation_contract(operations: &[Value]) -> Value {
+    let mut created = Vec::new();
+    let mut updated = Vec::new();
+    let mut linked = Vec::new();
+    let skipped = Vec::<Value>::new();
+    let errors = Vec::<Value>::new();
+
+    for op in operations {
+        let kind = op
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let entity = op
+            .get("entity")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let payload = op.get("payload").cloned().unwrap_or_else(|| json!({}));
+        match kind {
+            "create" | "update" => {
+                let record = json!({
+                    "logical_key": op.get("logical_key").cloned().unwrap_or(Value::Null),
+                    "entity": entity,
+                    "title": payload.get("title").cloned().unwrap_or(Value::Null),
+                    "predicted_id": op.get("entity_id").cloned().unwrap_or(Value::Null),
+                    "status": if kind == "create" { "pending_create" } else { "pending_update" }
+                });
+                if kind == "create" {
+                    created.push(record);
+                } else {
+                    updated.push(record);
+                }
+            }
+            "link" => linked.push(json!({
+                "source_id": payload.get("source_id").cloned().unwrap_or(Value::Null),
+                "target_id": payload.get("target_id").cloned().unwrap_or(Value::Null),
+                "relation_type": payload.get("relation_type").cloned().unwrap_or(Value::Null),
+                "status": "pending_link"
+            })),
+            _ => {}
+        }
+    }
+
+    json!({
+        "created": created,
+        "updated": updated,
+        "linked": linked,
+        "skipped": skipped,
+        "errors": errors
+    })
 }
 
 fn now_unix_ms() -> i64 {

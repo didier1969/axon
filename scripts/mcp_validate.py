@@ -201,7 +201,7 @@ def build_args(
         "conception_view": {"project_code": "AXO", "mode": "brief"},
         "change_safety": {"project_code": "AXO", "target": symbol_probe, "target_type": "symbol", "mode": "brief"},
         "why": {"symbol": symbol_probe, "project": project, "mode": "brief"},
-        "path": {"source": symbol_probe, "project": project, "depth": 2},
+        "path": {"source": symbol_probe, "sink": symbol_probe, "project": project, "depth": 2},
         "anomalies": {"project": project, "mode": "brief"},
         "query": {"query": query, "project": project},
         "inspect": {"symbol": symbol_probe, "project": project},
@@ -379,6 +379,17 @@ def evaluate_response(
             return "fail", "project_status missing anomalies"
         if not isinstance(data.get("soll_context"), dict):
             return "fail", "project_status missing soll_context"
+        if not isinstance(data.get("operator_guidance"), dict):
+            return "fail", "project_status missing operator_guidance"
+        operator_guidance = data.get("operator_guidance", {})
+        if not isinstance(operator_guidance.get("recommended_next_step"), str):
+            return "fail", "project_status missing recommended_next_step"
+        if not isinstance(operator_guidance.get("blocking_factors"), list):
+            return "fail", "project_status missing blocking_factors"
+        if not isinstance(operator_guidance.get("remediation_actions"), list):
+            return "fail", "project_status missing remediation_actions"
+        if not isinstance(data.get("next_action"), dict):
+            return "fail", "project_status missing next_action"
     if tool_name == "snapshot_history":
         data = extract_result_data(resp)
         if not isinstance(data.get("snapshots"), list):
@@ -415,6 +426,47 @@ def evaluate_response(
             return "fail", "change_safety missing traceability_signals"
         if not isinstance(data.get("validation_signals"), dict):
             return "fail", "change_safety missing validation_signals"
+        if not isinstance(data.get("operator_guidance"), dict):
+            return "fail", "change_safety missing operator_guidance"
+        operator_guidance = data.get("operator_guidance", {})
+        if not isinstance(operator_guidance.get("mutation_class_recommendation"), str):
+            return "fail", "change_safety missing mutation_class_recommendation"
+        if not isinstance(operator_guidance.get("recommended_next_step"), str):
+            return "fail", "change_safety missing recommended_next_step"
+        if not isinstance(operator_guidance.get("blocking_factors"), list):
+            return "fail", "change_safety missing blocking_factors"
+    if tool_name == "inspect":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("symbol"), str):
+            return "fail", "inspect missing symbol"
+        if not isinstance(data.get("symbol_found"), bool):
+            return "fail", "inspect missing symbol_found"
+        if not isinstance(data.get("operator_guidance"), dict):
+            return "fail", "inspect missing operator_guidance"
+        if not isinstance(data.get("next_action"), dict):
+            return "fail", "inspect missing next_action"
+        if data.get("symbol_found") is True:
+            if not isinstance(data.get("summary"), dict):
+                return "fail", "inspect missing summary"
+        else:
+            if not isinstance(data.get("suggestions"), list):
+                return "fail", "inspect missing suggestions"
+    if tool_name == "impact":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("symbol"), str):
+            return "fail", "impact missing symbol"
+        if not isinstance(data.get("operator_guidance"), dict):
+            return "fail", "impact missing operator_guidance"
+        if not isinstance(data.get("next_action"), dict):
+            return "fail", "impact missing next_action"
+        if data.get("impact_available") is False:
+            if "impact_radius" in data:
+                return "fail", "impact unavailable should not expose impact_radius"
+        else:
+            if not isinstance(data.get("impact_radius"), int):
+                return "fail", "impact missing impact_radius"
+            if not isinstance(data.get("summary"), dict):
+                return "fail", "impact missing summary"
     if tool_name == "why":
         data = extract_result_data(resp)
         why_data = data.get("why")
@@ -434,6 +486,10 @@ def evaluate_response(
                 return "fail", "path missing path array"
             if not isinstance(data.get("path_type"), str):
                 return "fail", "path missing path_type"
+        if not isinstance(data.get("operator_guidance"), dict):
+            return "fail", "path missing operator_guidance"
+        if not isinstance(data.get("next_action"), dict):
+            return "fail", "path missing next_action"
         if not isinstance(data.get("canonical_sources"), dict):
             return "fail", "path missing canonical_sources"
     if tool_name == "anomalies":
@@ -450,6 +506,13 @@ def evaluate_response(
             return "fail", "soll_query_context missing project_code"
         if not isinstance(data.get("visions"), list):
             return "fail", "soll_query_context missing visions"
+        if not isinstance(data.get("operational_digest"), dict):
+            return "fail", "soll_query_context missing operational_digest"
+        digest = data.get("operational_digest", {})
+        if not isinstance(digest.get("entity_counts"), list):
+            return "fail", "soll_query_context missing digest entity_counts"
+        if not isinstance(digest.get("last_meaningful_revision"), dict):
+            return "fail", "soll_query_context missing digest last_meaningful_revision"
     if tool_name == "soll_validate":
         if "status:** warn_soll_invariants" in text or "status: warn_soll_invariants" in text:
             return "warn", "soll_validate reported warn_soll_invariants"
@@ -457,6 +520,32 @@ def evaluate_response(
         match = re.search(r"missing\\s*=\\s*(\\d+)", text)
         if match and int(match.group(1)) > 0:
             return "warn", f"soll_verify_requirements reports missing={match.group(1)}"
+        data = extract_result_data(resp)
+        if not isinstance(data.get("summary"), dict):
+            return "fail", "soll_verify_requirements missing summary"
+        if not isinstance(data.get("requirements"), list):
+            return "fail", "soll_verify_requirements missing requirements"
+        if not isinstance(data.get("completion_model"), dict):
+            return "fail", "soll_verify_requirements missing completion_model"
+        requirements = data.get("requirements") or []
+        if requirements:
+            first = requirements[0]
+            if not isinstance(first.get("coverage_reason"), str):
+                return "fail", "soll_verify_requirements missing coverage_reason"
+            if not isinstance(first.get("missing_dimensions_detailed"), list):
+                return "fail", "soll_verify_requirements missing missing_dimensions_detailed"
+            if not isinstance(first.get("next_actions_detailed"), list):
+                return "fail", "soll_verify_requirements missing next_actions_detailed"
+    if tool_name == "project_registry_lookup":
+        data = extract_result_data(resp)
+        if not isinstance(data.get("found"), bool):
+            return "fail", "project_registry_lookup missing found"
+        if not isinstance(data.get("matches"), list):
+            return "fail", "project_registry_lookup missing matches"
+        if not isinstance(data.get("operator_guidance"), dict):
+            return "fail", "project_registry_lookup missing operator_guidance"
+        if not isinstance(data.get("next_action"), dict):
+            return "fail", "project_registry_lookup missing next_action"
     if tool_name == "status":
         data = extract_result_data(resp)
         async_contract = data.get("async_contract") if isinstance(data, dict) else None
@@ -530,9 +619,28 @@ def poll_job_status(url: str, job_id: str, timeout: int) -> tuple[str, str]:
         data = extract_result_data(resp)
         status = str(data.get("status", "unknown") or "unknown")
         error_text = str(data.get("error_text", "") or "")
+        state = str(data.get("state", "unknown") or "unknown")
         last_status = status
         last_error = error_text
+        if not isinstance(data.get("known_ids"), dict):
+            return "failed", "job_status missing known_ids"
+        if not isinstance(data.get("result_contract"), dict):
+            return "failed", "job_status missing result_contract"
+        if not isinstance(data.get("polling_guidance"), dict):
+            return "failed", "job_status missing polling_guidance"
+        if not isinstance(data.get("recovery_hint"), str):
+            return "failed", "job_status missing recovery_hint"
+        next_action = data.get("next_action")
+        if not isinstance(next_action, dict):
+            return "failed", "job_status missing next_action"
         if status in {"succeeded", "failed"}:
+            if status == "succeeded":
+                if state != "completed":
+                    return "failed", "job_status terminal success missing completed state"
+                if "result_data" not in data:
+                    return "failed", "job_status terminal success missing result_data"
+            if status == "failed" and next_action.get("kind") != "fix_and_retry_original_mutation":
+                return "failed", "job_status terminal failure missing retry guidance"
             return status, error_text
         time.sleep(0.1)
     return last_status, last_error

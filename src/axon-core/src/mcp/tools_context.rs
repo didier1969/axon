@@ -337,6 +337,7 @@ impl McpServer {
         if terms.is_empty() {
             excluded_because.push("planner_terms_empty_fell_back_to_full_question".to_string());
         }
+        let rationale_requested = Self::has_rationale_language(question);
 
         let mut diagnostics = RetrievalDiagnostics::default();
         let stage_started_at = Instant::now();
@@ -395,6 +396,9 @@ impl McpServer {
             Vec::new()
         };
         diagnostics.chunk_candidates_considered = chunk_candidates.len();
+        let has_direct_soll_traceability =
+            self.has_direct_soll_traceability(&entry_candidates, project);
+        let linked_evidence_first = rationale_requested && has_direct_soll_traceability;
         self.rerank_chunk_candidates(
             &mut chunk_candidates,
             route,
@@ -402,6 +406,7 @@ impl McpServer {
             &entry_candidates,
             &project_scope_variants,
             prefer_project_intent,
+            linked_evidence_first,
         );
         timings.chunk_lookup_ms = stage_started_at.elapsed().as_millis() as u64;
 
@@ -437,11 +442,8 @@ impl McpServer {
         };
         timings.graph_expansion_ms = stage_started_at.elapsed().as_millis() as u64;
 
-        let rationale_requested = Self::has_rationale_language(question);
         let should_join_soll = include_soll.unwrap_or_else(|| {
-            let has_direct_traceability =
-                self.has_direct_soll_traceability(&entry_candidates, project);
-            has_direct_traceability
+            has_direct_soll_traceability
                 || (allow_unanchored_fallback
                     && (matches!(route, RetrievalRoute::SollHybrid) || rationale_requested))
         });
@@ -483,7 +485,7 @@ impl McpServer {
             &supporting_chunks,
             &relevant_soll_entities,
             rationale_requested,
-            self.has_direct_soll_traceability(&entry_candidates, project),
+            has_direct_soll_traceability,
             runtime.semantic_search_used,
             runtime.degraded_reason.as_deref(),
         );
@@ -506,6 +508,13 @@ impl McpServer {
             "confidence": confidence,
             "missing_evidence": missing_evidence,
             "why_these_items": why_these_items,
+            "retrieval_policy": {
+                "rationale_requested": rationale_requested,
+                "has_direct_soll_traceability": has_direct_soll_traceability,
+                "linked_evidence_first": linked_evidence_first,
+                "canonical_project_docs_second": linked_evidence_first,
+                "broader_workspace_material_last": linked_evidence_first
+            },
             "excluded_because": excluded_because,
             "token_budget_estimate": {
                 "requested_budget": token_budget,
@@ -843,6 +852,49 @@ impl McpServer {
             score -= 2.0;
         }
         score
+    }
+
+    fn canonical_project_doc_weight(uri: &str, project_scope_variants: &[String]) -> f64 {
+        let lower = uri.to_ascii_lowercase();
+        let mut score = 0.0;
+        if lower.contains("/docs/plans/") || lower.starts_with("docs/plans/") {
+            score += 4.5;
+        }
+        if lower.contains("/docs/vision/") || lower.starts_with("docs/vision/") {
+            score += 4.0;
+        }
+        if lower.contains("/docs/derived/soll/") || lower.starts_with("docs/derived/soll/") {
+            score += 3.0;
+        }
+        if lower.ends_with("readme.md") || lower == "readme.md" {
+            score += 1.5;
+        }
+        if project_scope_variants.iter().any(|variant| {
+            let variant = variant.to_ascii_lowercase();
+            lower.contains(&format!("/{variant}/")) || lower.contains(&format!("-{variant}-"))
+        }) {
+            score += 1.0;
+        }
+        score
+    }
+
+    fn workspace_noise_penalty(uri: &str) -> f64 {
+        let lower = uri.to_ascii_lowercase();
+        if lower.contains("/.axon/")
+            || lower.starts_with(".axon/")
+            || lower.contains("/target/")
+            || lower.starts_with("target/")
+            || lower.contains("/tmp/")
+            || lower.starts_with("/tmp/")
+            || lower.contains("/scripts/")
+            || lower.starts_with("scripts/")
+        {
+            -3.0
+        } else if lower.contains("feedback-") || lower.contains("/feedback/") {
+            -2.5
+        } else {
+            0.0
+        }
     }
 
     fn uri_penalty_reason(uri: &str) -> Option<&'static str> {
@@ -1732,6 +1784,7 @@ impl McpServer {
         entry_candidates: &[EntryCandidate],
         project_scope_variants: &[String],
         prefer_project_intent: bool,
+        linked_evidence_first: bool,
     ) {
         let entry_uris = entry_candidates
             .iter()
@@ -1783,6 +1836,26 @@ impl McpServer {
                     candidate
                         .reasons
                         .push("intent_feedback_penalty".to_string());
+                }
+            }
+            if linked_evidence_first
+                && !candidate.anchored_to_entry
+                && !candidate.same_file_as_entry
+            {
+                let canonical_doc_weight =
+                    Self::canonical_project_doc_weight(&candidate.uri, project_scope_variants);
+                if canonical_doc_weight > 0.0 {
+                    score += canonical_doc_weight;
+                    candidate
+                        .reasons
+                        .push("canonical_project_doc_bonus".to_string());
+                }
+                let workspace_noise_penalty = Self::workspace_noise_penalty(&candidate.uri);
+                if workspace_noise_penalty < 0.0 {
+                    score += workspace_noise_penalty;
+                    candidate
+                        .reasons
+                        .push("workspace_noise_penalty".to_string());
                 }
             }
             if Self::route_prefers_operational_code(route) {

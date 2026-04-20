@@ -148,6 +148,14 @@ impl McpServer {
         }
     }
 
+    fn terminal_result_data_alias(result: &Option<Value>) -> Value {
+        result
+            .as_ref()
+            .and_then(|value| value.get("data"))
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
     fn should_refresh_derived_docs_for_tool(normalized_name: &str) -> bool {
         Self::SOLL_DERIVED_DOCS_REFRESH_TOOLS.contains(&normalized_name)
     }
@@ -839,16 +847,49 @@ impl McpServer {
             .ok()?;
         let parsed: Vec<Vec<Value>> = serde_json::from_str(&rows).ok()?;
         let row = parsed.first()?;
+        let tool_name = row
+            .get(1)
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let raw_status = row
+            .get(2)
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let state = Self::job_state(raw_status);
         let reserved_ids = row
             .get(6)
             .and_then(|value| value.as_str())
             .and_then(|value| serde_json::from_str::<Value>(value).ok())
             .unwrap_or_else(|| json!({}));
+        let known_ids = self.async_known_ids_for(tool_name, &reserved_ids);
+        let result_contract = self.async_result_contract_for(tool_name);
+        let polling_guidance = self.async_polling_guidance_for(tool_name);
+        let recovery_hint = self.async_recovery_hint_for(tool_name);
         let result = row
             .get(7)
             .and_then(|value| value.as_str())
             .and_then(|value| serde_json::from_str::<Value>(value).ok());
+        let result_data = Self::terminal_result_data_alias(&result);
         let error_text = row.get(8).and_then(|value| value.as_str()).unwrap_or("");
+        let next_action = match state {
+            "queued" | "running" => json!({
+                "tool": "job_status",
+                "arguments": {
+                    "job_id": job_id
+                },
+                "when": "continue_polling_until_terminal_state"
+            }),
+            "completed" => json!({
+                "kind": "read_terminal_result",
+                "path": "data.result.data",
+                "when": "now"
+            }),
+            "failed" => json!({
+                "kind": "fix_and_retry_original_mutation",
+                "when": "after_reviewing_error_text"
+            }),
+            _ => Value::Null,
+        };
 
         Some(json!({
             "content": [{
@@ -856,20 +897,26 @@ impl McpServer {
                 "text": format!(
                     "Job {} status={} tool={}",
                     row.first().and_then(|value| value.as_str()).unwrap_or(job_id),
-                    row.get(2).and_then(|value| value.as_str()).unwrap_or("unknown"),
-                    row.get(1).and_then(|value| value.as_str()).unwrap_or("unknown")
+                    raw_status,
+                    tool_name
                 )
             }],
             "data": {
                 "job_id": row.first().and_then(|value| value.as_str()).unwrap_or(job_id),
-                "tool_name": row.get(1).and_then(|value| value.as_str()).unwrap_or("unknown"),
-                "status": row.get(2).and_then(|value| value.as_str()).unwrap_or("unknown"),
-                "state": Self::job_state(row.get(2).and_then(|value| value.as_str()).unwrap_or("unknown")),
+                "tool_name": tool_name,
+                "status": raw_status,
+                "state": state,
                 "submitted_at": row.get(3).cloned().unwrap_or(json!(null)),
                 "started_at": row.get(4).cloned().unwrap_or(json!(null)),
                 "finished_at": row.get(5).cloned().unwrap_or(json!(null)),
                 "reserved_ids": reserved_ids,
+                "known_ids": known_ids,
+                "next_action": next_action,
+                "result_contract": result_contract,
+                "polling_guidance": polling_guidance,
+                "recovery_hint": recovery_hint,
                 "result": result,
+                "result_data": result_data,
                 "error_text": error_text
             }
         }))

@@ -6,6 +6,23 @@ Date: 2026-04-18
 Status: draft-for-review
 Scope: Public Axon MCP product experience for external LLM clients on `axon-live` and `axon-dev`
 
+## Progress Note
+
+Part of this plan has since been closed through the TE2 operator delta implementation:
+
+- [2026-04-20-te2-operator-feedback-delta.md](/home/dstadel/projects/axon/docs/plans/2026-04-20-te2-operator-feedback-delta.md)
+
+Delivered from that stream:
+
+- explicit `soll_relation_schema`
+- stronger grouped mutation result envelopes
+- requirement-level completeness diagnostics
+- active reconstruction digest in `soll_query_context`
+- operator diagnostics in derived SOLL docs
+- `linked_evidence_first` retrieval behavior for rationale-heavy SOLL questions
+
+This plan remains relevant for the broader MCP product contract outside that SOLL-focused operator wave.
+
 ## Goal
 
 Make the public Axon MCP surface sufficiently truthful, self-guiding, and enforceable that a general-purpose LLM can complete normal developer workflows without:

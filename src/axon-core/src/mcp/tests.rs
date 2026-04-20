@@ -1062,6 +1062,19 @@ fn test_mutating_soll_apply_plan_returns_job_and_reserved_preview_id() {
         final_status["data"]["status"].as_str().unwrap(),
         "succeeded"
     );
+    assert_eq!(final_status["data"]["state"].as_str(), Some("completed"));
+    assert!(final_status["data"]["known_ids"].is_object());
+    assert!(final_status["data"]["result_contract"].is_object());
+    assert!(final_status["data"]["polling_guidance"].is_object());
+    assert!(final_status["data"]["recovery_hint"].as_str().is_some());
+    assert_eq!(
+        final_status["data"]["next_action"]["kind"].as_str(),
+        Some("read_terminal_result")
+    );
+    assert_eq!(
+        final_status["data"]["result_data"]["preview_id"].as_str(),
+        Some(preview_id)
+    );
     let result_preview_id = final_status["data"]["result"]["data"]["preview_id"]
         .as_str()
         .expect("preview id should survive job result");
@@ -1195,6 +1208,15 @@ fn test_resume_vectorization_returns_job_when_mutation_jobs_are_enabled() {
         final_status["data"]["status"].as_str().unwrap(),
         "succeeded"
     );
+    assert_eq!(final_status["data"]["state"].as_str(), Some("completed"));
+    assert_eq!(
+        final_status["data"]["next_action"]["kind"].as_str(),
+        Some("read_terminal_result")
+    );
+    assert_eq!(
+        final_status["data"]["result_data"]["queued_files"].as_u64(),
+        Some(1)
+    );
     assert_eq!(
         final_status["data"]["result"]["data"]["queued_files"].as_u64(),
         Some(1)
@@ -1249,6 +1271,15 @@ fn test_project_registry_lookup_finds_project_by_path_name_and_code() {
                 .map(|items| items.len()),
             Some(1)
         );
+        assert_eq!(
+            result["data"]["next_action"]["kind"].as_str(),
+            Some("use_canonical_project_code")
+        );
+        assert_eq!(
+            result["data"]["next_action"]["tool"].as_str(),
+            Some("project_status")
+        );
+        assert!(result["data"]["operator_guidance"].is_object());
     }
 }
 
@@ -1727,6 +1758,386 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         data["canonical_sources"]["soll_export"]["reimportable"].as_bool(),
         Some(true)
     );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["target"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["effective"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["clamp_visible"]
+            .as_bool()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_workers"]["authority_state"].as_str(),
+        Some("partially_unified")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["graph_workers"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["graph_workers"]["effective"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["graph_workers"]["authority_state"].as_str(),
+        Some("partially_unified")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["chunk_batch_size"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["file_vectorization_batch_size"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]["target"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]["effective"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]
+            ["effective_source"]
+            .as_str(),
+        Some("service_guard.current_ready_queue_depth")
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_ready_queue_depth"]["authority_state"]
+            .as_str(),
+        Some("partially_unified")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_persist_queue_bound"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_persist_queue_bound"]
+            ["effective_source"]
+            .as_str(),
+        Some("service_guard.current_persist_queue_depth")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["vector_max_inflight_persists"]["seed"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["vector_max_inflight_persists"]
+            ["effective_source"]
+            .as_str(),
+        Some("service_guard.current_persist_claims")
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["queue_persist_effective_semantics"]
+            ["vector_ready_queue_depth"]
+            .as_str(),
+        Some("observed_current_queue_depth_not_capacity")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["seed"]["sleep_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["seed"]["profile"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["target"]["idle_sleep_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["effective"]["pause"]
+            .as_bool()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["controller_state"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["lane_parameters"]["semantic_cadence"]["authority_state"]
+            .as_str(),
+        Some("partially_unified")
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["gpu_vector_lease"]["exclusive_required"]
+            .as_bool()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["lane_parameters"]["gpu_vector_lease"]["path"]
+            .as_str()
+            .is_some()
+    );
+    assert!(data["runtime_authority"]["limiting_factors"]["primary"]
+        .as_str()
+        .is_some());
+    assert!(data["runtime_authority"]["limiting_factors"]["secondary"]
+        .as_array()
+        .is_some());
+    assert!(data["runtime_authority"]["limiting_factors"]["actionable"]
+        .as_bool()
+        .is_some());
+    assert!(data["runtime_authority"]["limiting_factors"]["reason"]
+        .as_str()
+        .is_some());
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["controller_reason"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["scheduler_reason"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["signals"]["gpu_utilization_ratio"]
+            .as_f64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["signals"]["target_embed_batch_chunks"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["thresholds"]["max_vram_used_mb"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["limiting_factors"]["policy"]["provider_effective"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(
+        data["runtime_authority"]["quiescent_state"]["authority_state"].as_str(),
+        Some("transitional")
+    );
+    assert_eq!(
+        data["runtime_authority"]["quiescent_state"]["wake_contract_state"].as_str(),
+        Some("fragmented")
+    );
+    assert_eq!(
+        data["runtime_authority"]["quiescent_state"]["wake_observability_state"].as_str(),
+        Some("partial")
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["operator_focus"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["focus_recommendation"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["confidence"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["wake_noise_level"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["dominant_wake_share_pct"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["measurement_readiness"]
+            .as_str()
+            .is_some()
+    );
+    assert!(data["runtime_authority"]["quiescent_state"]["diagnosis"]
+        ["recommended_next_measurement"]
+        .as_str()
+        .is_some());
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["qualification_verdict"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["qualification_reason"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["actionable_now"]
+            .as_bool()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["diagnosis"]["blocking_factors"]
+            .as_array()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["loop_intervals_ms"]["reader_refresh"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["wakeups_last_60s"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["last_wakeup_at_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["resume_latency_p95_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]
+            ["useful_resume_latency_p95_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["last_quiescent_exit_reason"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["last_wake_source"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]["dominant_wake_source"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]
+            ["last_background_wake_detail"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]
+            ["dominant_background_wake_detail"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]
+            ["background_wake_ingress_promoter_total"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["wake_activity"]
+            ["background_wake_autonomous_ingestor_total"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(data["runtime_authority"]["quiescent_state"]["diagnosis"]
+        ["dominant_background_wake_detail"]
+        .as_str()
+        .is_some());
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["lane_liveness"]
+            ["vector_worker_heartbeat_age_ms"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["lane_liveness"]["vector_lane_state"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["observed_residual_work"]
+            ["ready_queue_depth_current"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["burn_rate"]
+            ["measurement_window_sec"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["burn_rate"]["state"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["burn_rate"]
+            ["recommendation"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["burn_rate"]
+            ["files_vector_ready_last_minute"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["burn_rate"]
+            ["chunks_embedded_last_minute"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["provider_requested"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["provider_effective"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["backlog_drain"]["gpu_access_policy"]
+            .as_str()
+            .is_some()
+    );
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -2175,6 +2586,15 @@ fn test_project_status_assembles_live_project_situation_from_read_surfaces() {
     assert!(data["soll_context"]["visions"]
         .as_array()
         .is_some_and(|items| !items.is_empty()));
+    assert!(data["operator_guidance"].as_object().is_some());
+    assert!(data["operator_guidance"]["recommended_next_step"]
+        .as_str()
+        .is_some());
+    assert!(data["operator_guidance"]["actionable_now"].is_boolean());
+    assert!(data["operator_guidance"]["blocking_factors"].is_array());
+    assert!(data["operator_guidance"]["remediation_actions"].is_array());
+    assert!(data["next_action"]["kind"].as_str().is_some());
+    assert!(data["next_action"]["tool"].as_str().is_some());
     let text = response["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("Project Status"), "{text}");
     assert!(text.contains("Axon Vision"), "{text}");
@@ -2520,6 +2940,18 @@ fn test_conception_view_and_change_safety_are_exposed_as_read_only_derivations()
         .as_array()
         .is_some_and(|items| !items.is_empty()));
     assert!(data["recommended_guardrails"].as_array().is_some());
+    assert!(data["operator_guidance"].as_object().is_some());
+    assert_eq!(
+        data["operator_guidance"]["mutation_class_recommendation"].as_str(),
+        Some("safe_for_direct_mutation")
+    );
+    assert_eq!(
+        data["operator_guidance"]["actionable_now"].as_bool(),
+        Some(true)
+    );
+    assert!(data["operator_guidance"]["blocking_factors"]
+        .as_array()
+        .is_some());
 }
 
 #[test]
@@ -2565,6 +2997,12 @@ fn test_path_returns_bounded_call_path_between_symbols() {
         data["canonical_sources"]["soll_export"]["reimportable"].as_bool(),
         Some(true)
     );
+    assert_eq!(
+        data["next_action"]["kind"].as_str(),
+        Some("expand_blast_radius_from_path")
+    );
+    assert_eq!(data["next_action"]["tool"].as_str(), Some("impact"));
+    assert!(data["operator_guidance"]["follow_up_tools"].is_array());
     let path = data["path"].as_array().unwrap();
     let rendered = path
         .iter()
@@ -4890,6 +5328,116 @@ fn test_retrieve_context_prefers_direct_file_traceability_for_rationale() {
 }
 
 #[test]
+fn test_retrieve_context_rationale_prefers_canonical_project_docs_over_workspace_noise() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var("AXON_ENABLE_AUTONOMOUS_INGESTOR", "true");
+    }
+
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('src/payment.rs', 'BKS', TRUE, 'indexed')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('docs/plans/2026-04-20-bks-stripe-implementation-plan.md', 'BKS', TRUE, 'indexed')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO File (path, project_code, graph_ready, status) VALUES ('.axon/cache/noise.md', 'BKS', TRUE, 'indexed')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::checkout', 'checkout', 'function', true, true, false, 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::stripe_plan_doc', 'stripe_plan_doc', 'module', false, false, false, 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Symbol (id, name, kind, tested, is_public, is_nif, project_code) VALUES ('bks::workspace_noise_doc', 'workspace_noise_doc', 'module', false, false, false, 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('src/payment.rs', 'bks::checkout', 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('docs/plans/2026-04-20-bks-stripe-implementation-plan.md', 'bks::stripe_plan_doc', 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES ('.axon/cache/noise.md', 'bks::workspace_noise_doc', 'BKS')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-bks-checkout-rationale', 'symbol', 'bks::checkout', 'BKS', 'body', 'checkout uses the Stripe SDK for payment capture and settlement', 'hash-bks-checkout-rationale', 1, 8)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-bks-plan-doc', 'symbol', 'bks::stripe_plan_doc', 'BKS', 'body', 'Implementation plan: use the Stripe SDK for operational safety and payment reliability.', 'hash-bks-plan-doc', 1, 8)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO Chunk (id, source_type, source_id, project_code, kind, content, content_hash, start_line, end_line) VALUES ('chunk-bks-noise-doc', 'symbol', 'bks::workspace_noise_doc', 'BKS', 'body', 'Cached workspace note mentioning Stripe SDK without canonical project intent.', 'hash-bks-noise-doc', 1, 8)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('DEC-BKS-T6', 'Decision', 'BKS', 'Use Stripe SDK', 'Canonical rationale', 'accepted', '{\"rationale\":\"Operational safety\"}')")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Traceability (id, soll_entity_type, soll_entity_id, artifact_type, artifact_ref, confidence, created_at) VALUES ('TRC-BKS-T6', 'Decision', 'DEC-BKS-T6', 'Symbol', 'checkout', 1.0, 0)")
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "retrieve_context",
+                "arguments": {
+                    "question": "Why does checkout use the Stripe SDK?",
+                    "project": "BKS",
+                    "token_budget": 1200,
+                    "top_k": 4
+                }
+            })),
+            id: Some(json!(6216)),
+        })
+        .unwrap();
+
+    let result = response.result.expect("Expected result");
+    let packet = &result["data"]["packet"];
+    assert_eq!(
+        packet["retrieval_policy"]["linked_evidence_first"].as_bool(),
+        Some(true),
+        "{packet:?}"
+    );
+    let chunks = packet["supporting_chunks"]
+        .as_array()
+        .expect("expected supporting chunks");
+    let plan_pos = chunks
+        .iter()
+        .position(|value| value["chunk_id"].as_str() == Some("chunk-bks-plan-doc"));
+    let noise_pos = chunks
+        .iter()
+        .position(|value| value["chunk_id"].as_str() == Some("chunk-bks-noise-doc"));
+    assert!(plan_pos.is_some(), "{packet:?}");
+    if let Some(noise_pos) = noise_pos {
+        assert!(plan_pos.expect("plan pos") < noise_pos, "{packet:?}");
+    }
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
+}
+
+#[test]
 fn test_retrieve_context_under_critical_pressure_avoids_unanchored_fallback_chunks() {
     let _guard = env_lock();
     unsafe {
@@ -5217,6 +5765,18 @@ fn test_axon_impact_accepts_canonical_project_code_for_repo_code_symbols() {
         !text.contains("symbol not found in current scope"),
         "{text}"
     );
+    let data = result.get("data").unwrap();
+    assert_eq!(data["symbol"].as_str(), Some("axon_retrieve_context"));
+    assert_eq!(data["impact_radius"].as_i64(), Some(1));
+    assert_eq!(
+        data["next_action"]["kind"].as_str(),
+        Some("simulate_mutation_before_editing")
+    );
+    assert_eq!(
+        data["next_action"]["tool"].as_str(),
+        Some("simulate_mutation")
+    );
+    assert!(data["operator_guidance"]["follow_up_tools"].is_array());
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -5326,6 +5886,16 @@ fn test_axon_inspect() {
         .unwrap();
     assert!(content.contains("Inspection du Symbole"), "{content}");
     assert!(content.contains("core_func"), "{content}");
+    let data = result.get("data").unwrap();
+    assert_eq!(data["symbol_found"].as_bool(), Some(true));
+    assert_eq!(data["summary"]["kind"].as_str(), Some("function"));
+    assert!(data["summary"]["tested"].is_boolean());
+    assert_eq!(
+        data["next_action"]["kind"].as_str(),
+        Some("expand_dependency_blast_radius")
+    );
+    assert_eq!(data["next_action"]["tool"].as_str(), Some("impact"));
+    assert!(data["operator_guidance"]["follow_up_tools"].is_array());
 }
 
 #[test]
@@ -6247,6 +6817,11 @@ fn test_axon_soll_apply_plan_commit_finds_persisted_preview() {
         .query_json("SELECT revision_id FROM soll.Revision ORDER BY created_at DESC LIMIT 1")
         .unwrap();
     assert!(revision_rows.contains("REV-AXO-001"), "{revision_rows}");
+    assert!(result["data"]["created"].is_array());
+    assert!(result["data"]["updated"].is_array());
+    assert!(result["data"]["linked"].is_array());
+    assert!(result["data"]["skipped"].is_array());
+    assert!(result["data"]["errors"].is_array());
 }
 
 #[test]
@@ -6280,6 +6855,11 @@ fn test_axon_soll_apply_plan_dry_run_uses_canonical_preview_id() {
     let result = response.unwrap().result.unwrap();
     let preview_id = result["data"]["preview_id"].as_str().unwrap();
     assert_eq!(preview_id, "PRV-AXO-001");
+    assert!(result["data"]["result_contract"]["created"].is_array());
+    assert!(result["data"]["result_contract"]["updated"].is_array());
+    assert!(result["data"]["result_contract"]["linked"].is_array());
+    assert!(result["data"]["result_contract"]["skipped"].is_array());
+    assert!(result["data"]["result_contract"]["errors"].is_array());
 }
 
 #[test]
@@ -8029,6 +8609,13 @@ fn test_axon_impact_reports_missing_call_graph_truthfully() {
 
     assert!(impact_text.contains("le graphe d'appel n'est pas encore disponible"));
     assert!(impact_text.contains("parse_batch"));
+    let data = impact_result.get("data").unwrap();
+    assert_eq!(data["impact_available"].as_bool(), Some(false));
+    assert_eq!(
+        data["next_action"]["kind"].as_str(),
+        Some("wait_for_call_graph_truth")
+    );
+    assert_eq!(data["next_action"]["tool"].as_str(), Some("inspect"));
 }
 
 #[test]
@@ -8314,6 +8901,15 @@ fn test_axon_inspect_warns_when_symbol_is_degraded() {
     assert!(content.contains("Inspection du Symbole"), "{}", content);
     assert!(content.contains("verite partielle"), "{}", content);
     assert!(content.contains("indexed_degraded"), "{}", content);
+    let data = result.get("data").unwrap();
+    assert_eq!(data["symbol_found"].as_bool(), Some(true));
+    assert!(data["operator_guidance"]["blocking_factors"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert_eq!(
+        data["operator_guidance"]["actionable_now"].as_bool(),
+        Some(false)
+    );
 
     unsafe {
         std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
@@ -8748,6 +9344,14 @@ fn test_soll_query_context_returns_project_visions_from_source() {
         .graph_store
         .execute("INSERT INTO soll.Node (id, type, project_code, title, description, status, metadata) VALUES ('REQ-AXO-001', 'Requirement', 'AXO', 'Req', 'Desc', 'draft', '{\"priority\":\"P1\"}')")
         .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.Revision (revision_id, author, source, summary, status, created_at, committed_at) VALUES ('REV-AXO-001', 'tester', 'mcp', 'Context rebuild', 'committed', 10, 11)")
+        .unwrap();
+    server
+        .graph_store
+        .execute("INSERT INTO soll.RevisionChange (revision_id, entity_type, entity_id, action, before_json, after_json, created_at) VALUES ('REV-AXO-001', 'Node', 'REQ-AXO-001', 'update', '{}', '{}', 11)")
+        .unwrap();
 
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -8777,6 +9381,23 @@ fn test_soll_query_context_returns_project_visions_from_source() {
     assert!(first.contains("Axon Vision"), "{first}");
     assert!(first.contains("accepted"), "{first}");
     assert!(first.contains("Build from project vision"), "{first}");
+    let digest = data.get("operational_digest").expect("operational digest");
+    let entity_counts = digest["entity_counts"].as_array().expect("entity counts");
+    assert!(entity_counts.iter().any(|value| {
+        value["entity_type"].as_str() == Some("Vision") && value["count"].as_u64() == Some(1)
+    }));
+    assert_eq!(
+        digest["requirement_coverage_summary"]["total"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        digest["topology_summary"]["orphan_requirement_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        digest["last_meaningful_revision"]["revision_id"].as_str(),
+        Some("REV-AXO-001")
+    );
 }
 
 #[test]
@@ -9167,6 +9788,7 @@ fn test_soll_relation_schema_resolves_pair_by_ids() {
     assert_eq!(data["target_kind"].as_str(), Some("REQ"));
     assert_eq!(data["default_relation"].as_str(), Some("SOLVES"));
     assert_eq!(data["projection"]["role"].as_str(), Some("primary"));
+    assert_eq!(data["direction"].as_str(), Some("source_to_target"));
     assert_eq!(
         data["projection"]["parent_preference_rank"].as_u64(),
         Some(10)
@@ -9174,6 +9796,8 @@ fn test_soll_relation_schema_resolves_pair_by_ids() {
     assert!(data["allowed_target_kinds_from_source"]
         .as_array()
         .is_some());
+    assert!(data["allowed_targets"].as_array().is_some());
+    assert!(data["forbidden_targets"].as_array().is_some());
     assert_eq!(
         data["source_graph_role"].as_str(),
         Some("decision that solves, refines, or impacts implementation")
@@ -9285,6 +9909,37 @@ fn test_soll_relation_schema_source_only_is_constructive_for_vision_and_pillar()
         .expect("outgoing guidance")
         .iter()
         .any(|item| item["projection"]["role"].as_str() == Some("primary")));
+    assert!(pillar_data["forbidden_targets"].as_array().is_some());
+}
+
+#[test]
+fn test_soll_relation_schema_pair_suggests_reverse_direction_when_pair_is_forbidden() {
+    let server = create_test_server();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "soll_relation_schema",
+                "arguments": {
+                    "source_type": "VIS",
+                    "target_type": "PIL"
+                }
+            })),
+            id: Some(json!(41081)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let data = response.get("data").expect("forbidden pair guidance");
+    assert_eq!(data["pair_allowed"].as_bool(), Some(false));
+    assert_eq!(data["did_you_mean"]["source_kind"].as_str(), Some("PIL"));
+    assert_eq!(data["did_you_mean"]["target_kind"].as_str(), Some("VIS"));
+    assert_eq!(
+        data["did_you_mean"]["relation_type"].as_str(),
+        Some("EPITOMIZES")
+    );
 }
 
 #[test]
@@ -9474,12 +10129,25 @@ fn test_soll_verify_requirements_returns_missing_dimensions_and_actions() {
         .result
         .unwrap();
 
+    assert_eq!(result["data"]["summary"]["total"].as_u64(), Some(1));
+    let required_dimensions = result["data"]["completion_model"]["required_dimensions"]
+        .as_array()
+        .expect("required dimensions");
+    assert!(required_dimensions.iter().any(|value| {
+        value["canonical_key"].as_str() == Some("structured_acceptance_criteria")
+    }));
+
     let details = result["data"]["details"].as_array().expect("details");
     let entry = details
         .iter()
         .find(|value| value["id"].as_str() == Some("REQ-AXO-212"))
         .expect("requirement entry");
     assert_eq!(entry["state"].as_str(), Some("partial"));
+    assert_eq!(entry["completion_state"].as_str(), Some("partial"));
+    assert!(entry["coverage_reason"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("supporting_evidence"));
     let missing_dimensions = entry["missing_dimensions"]
         .as_array()
         .expect("missing dimensions");
@@ -9496,6 +10164,23 @@ fn test_soll_verify_requirements_returns_missing_dimensions_and_actions() {
         .as_str()
         .unwrap_or_default()
         .contains("soll_attach_evidence")));
+    let missing_dimensions_detailed = entry["missing_dimensions_detailed"]
+        .as_array()
+        .expect("missing dimensions detailed");
+    assert!(missing_dimensions_detailed
+        .iter()
+        .any(|value| { value["canonical_key"].as_str() == Some("supporting_evidence") }));
+    let next_actions_detailed = entry["next_actions_detailed"]
+        .as_array()
+        .expect("next actions detailed");
+    assert!(next_actions_detailed.iter().any(|value| {
+        value["dimension"].as_str() == Some("qualifying_validation_edge")
+            && value["mutation_class"].as_str() == Some("link_validation")
+    }));
+    let requirements = result["data"]["requirements"]
+        .as_array()
+        .expect("requirements alias");
+    assert_eq!(requirements.len(), details.len());
 }
 
 #[test]
@@ -10358,6 +11043,9 @@ fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
     assert!(node_html.contains("Primary Hierarchy Children"));
     assert!(node_html.contains("Containing Subtrees"));
     assert!(node_html.contains("Primary Parent Node Pages"));
+    assert!(node_html.contains("Operator Diagnostics"));
+    assert!(node_html.contains("Operator Relation Diagnostics"));
+    assert!(node_html.contains("boundary: canonical"));
     assert!(node_html.contains("toggle-left"));
     assert!(node_html.contains("toggle-right"));
     assert!(node_html.contains("not as canonical restore input"));
@@ -10368,6 +11056,9 @@ fn test_soll_generate_docs_creates_navigable_site_and_manifest() {
     assert!(subtree_html.contains("All Nodes In This Subtree"));
     assert!(subtree_html.contains("../nodes/REQ-AXO-001.html"));
     assert!(subtree_html.contains("derived / non-canonical"));
+    assert!(subtree_html.contains("Subtree Inclusion Reasons"));
+    assert!(subtree_html.contains("Included because this node is the subtree root"));
+    assert!(subtree_html.contains("Included by reverse reachability toward root"));
 
     let manifest: Value =
         serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();

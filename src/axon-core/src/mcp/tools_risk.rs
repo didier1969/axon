@@ -348,7 +348,51 @@ impl McpServer {
                     )
                 );
 
-                let response = json!({ "content": [{ "type": "text", "text": report }] });
+                let mut blocking_factors = Vec::<Value>::new();
+                if direct_edges + nif_edges == 0 && inferred_edges > 0 {
+                    blocking_factors.push(json!({
+                        "factor": "impact_inferred_from_bridge_edges",
+                        "severity": "medium",
+                        "recommended_action": "treat the impact graph as partially inferred and confirm critical hops with inspect/path before mutation"
+                    }));
+                }
+                let remediation_actions = blocking_factors
+                    .iter()
+                    .filter_map(|factor| {
+                        factor
+                            .get("recommended_action")
+                            .and_then(|value| value.as_str())
+                            .map(|value| Value::from(value.to_string()))
+                    })
+                    .collect::<Vec<_>>();
+                let next_action = json!({
+                    "kind": "simulate_mutation_before_editing",
+                    "tool": "simulate_mutation",
+                    "when": "now"
+                });
+                let response = json!({
+                    "content": [{ "type": "text", "text": report }],
+                    "data": {
+                        "symbol": symbol,
+                        "project": project,
+                        "depth": depth,
+                        "impact_radius": impact_radius,
+                        "summary": {
+                            "confidence": confidence_label,
+                            "direct_edges": direct_edges,
+                            "calls_nif_edges": nif_edges,
+                            "inferred_bridge_edges": inferred_edges
+                        },
+                        "operator_guidance": {
+                            "actionable_now": blocking_factors.is_empty(),
+                            "blocking_factors": blocking_factors,
+                            "remediation_actions": remediation_actions,
+                            "follow_up_tools": ["simulate_mutation", "path", "why"],
+                            "next_action": next_action
+                        },
+                        "next_action": next_action
+                    }
+                });
                 Self::write_impact_cache(cache_key, now_ms, &response);
                 Some(response)
             }
@@ -390,6 +434,13 @@ impl McpServer {
             let suggestions = self.suggest_scoped_symbols(symbol, project, 8);
             let suggestions_table =
                 format_table_from_json(&suggestions, &["Symbole suggéré", "Type", "Projet"]);
+            let suggestions_rows: Vec<Vec<Value>> =
+                serde_json::from_str(&suggestions).unwrap_or_default();
+            let suggestions = suggestions_rows
+                .iter()
+                .filter_map(|row| row.first().and_then(Value::as_str))
+                .map(|value| Value::from(value.to_string()))
+                .collect::<Vec<_>>();
             return Some(json!({
                 "content": [{
                     "type": "text",
@@ -405,7 +456,35 @@ impl McpServer {
                             "medium",
                         )
                     )
-                }]
+                }],
+                "data": {
+                    "symbol": symbol,
+                    "project": project,
+                    "impact_available": false,
+                    "suggestions": suggestions,
+                    "operator_guidance": {
+                        "actionable_now": false,
+                        "blocking_factors": [{
+                            "factor": "symbol_not_found_in_scope",
+                            "severity": "high",
+                            "recommended_action": "retry with one suggested symbol or validate the target with query/inspect first"
+                        }],
+                        "remediation_actions": [
+                            "retry with one suggested symbol or validate the target with query/inspect first"
+                        ],
+                        "follow_up_tools": ["query", "inspect"],
+                        "next_action": {
+                            "kind": "select_valid_symbol_then_retry_impact",
+                            "tool": "inspect",
+                            "when": "after_symbol_selection"
+                        }
+                    },
+                    "next_action": {
+                        "kind": "select_valid_symbol_then_retry_impact",
+                        "tool": "inspect",
+                        "when": "after_symbol_selection"
+                    }
+                }
             }));
         }
         let degraded_note = self.degraded_truth_note(self.degraded_symbol_count(symbol, project));
@@ -426,7 +505,35 @@ impl McpServer {
                         degraded_note.clone().unwrap_or_default(),
                         depth
                     )
-                }]
+                }],
+                "data": {
+                    "symbol": symbol,
+                    "project": project,
+                    "depth": depth,
+                    "impact_available": false,
+                    "operator_guidance": {
+                        "actionable_now": false,
+                        "blocking_factors": [{
+                            "factor": "no_impact_resolved_at_requested_depth",
+                            "severity": "medium",
+                            "recommended_action": "increase depth or inspect local topology before assuming there is no impact"
+                        }],
+                        "remediation_actions": [
+                            "increase depth or inspect local topology before assuming there is no impact"
+                        ],
+                        "follow_up_tools": ["path", "inspect"],
+                        "next_action": {
+                            "kind": "inspect_local_topology",
+                            "tool": "path",
+                            "when": "now"
+                        }
+                    },
+                    "next_action": {
+                        "kind": "inspect_local_topology",
+                        "tool": "path",
+                        "when": "now"
+                    }
+                }
             }));
         }
 
@@ -440,7 +547,35 @@ impl McpServer {
                     degraded_note.unwrap_or_default(),
                     format_table_from_json(&symbol_res, &["Nom", "Type", "Projet"])
                 )
-            }]
+            }],
+            "data": {
+                "symbol": symbol,
+                "project": project,
+                "depth": depth,
+                "impact_available": false,
+                "operator_guidance": {
+                    "actionable_now": false,
+                    "blocking_factors": [{
+                        "factor": "call_graph_not_available",
+                        "severity": "high",
+                        "recommended_action": "wait for live call-graph truth before relying on impact for risky mutation"
+                    }],
+                    "remediation_actions": [
+                        "wait for live call-graph truth before relying on impact for risky mutation"
+                    ],
+                    "follow_up_tools": ["inspect", "query"],
+                    "next_action": {
+                        "kind": "wait_for_call_graph_truth",
+                        "tool": "inspect",
+                        "when": "after_indexing_progress"
+                    }
+                },
+                "next_action": {
+                    "kind": "wait_for_call_graph_truth",
+                    "tool": "inspect",
+                    "when": "after_indexing_progress"
+                }
+            }
         }))
     }
 

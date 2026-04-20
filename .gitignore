@@ -36,9 +36,13 @@ bin/
 
 # Misplaced generated SOLL exports
 src/axon-core/docs/vision/SOLL_EXPORT_*.md
+docs/vision/SOLL_EXPORT_*.md
+docs/derived/
 
 # Local Codex state
 .codex
+.env.worktree
+.axon-dev/
 
 # Devenv transient state
 .devenv/bash-bash

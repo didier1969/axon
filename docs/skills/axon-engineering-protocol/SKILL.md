@@ -1,6 +1,6 @@
 ---
 name: axon-engineering-protocol
-description: Use in the Axon repository before coding, structural diagnostics, or SOLL mutation. Defines the canonical operator flow, identity rules, and MCP tool routing.
+description: Use in the Axon repository when selecting MCP tools, runtime entrypoints, SOLL mutation flow, or qualification paths. Covers canonical operator routing, identity rules, async follow-up, and client-facing endpoint truth.
 ---
 
 # Axon Engineering Protocol
@@ -27,6 +27,15 @@ description: Use in the Axon repository before coding, structural diagnostics, o
   - `advertised_endpoints.*` = client-facing endpoint truth for isolated clients/subagents
 - Isolated clients must prefer `advertised_endpoints` when available; do not treat loopback runtime URLs as externally reachable by default.
 - For MCP surface qualification, prefer `./scripts/axon qualify-mcp`; treat older entrypoints such as `quality-mcp`, `validate-mcp`, `measure-mcp`, `compare-mcp`, `robustness-mcp`, and `qualify-guidance` as expert or compatibility flows.
+- For unified runtime qualification, prefer `./scripts/axon qualify ...` on `dev` by default.
+- Use `./scripts/axon --instance live qualify ...` only when you explicitly want to assess the promoted live runtime.
+- `qualify` now captures runtime truth from `status(mode="full")` and archives:
+  - `runtime-status.json`
+  - `runtime-quiescent-summary.json`
+- `runtime_quiescent` is part of qualification truth:
+  - `pass` keeps `runtime_smoke` green
+  - `watch` or `blocked` degrades `runtime_smoke` to `warn`
+  - missing quiescent surface also degrades to `warn`
 - Do not mutate `live` implicitly from development workflows.
 - For release work on `live`, use the topological checklist:
   1. prefer `./scripts/axon promote-live-safe --project AXO`
@@ -73,6 +82,25 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - the current async allowlist is published by `status` and `mcp_surface_diagnostics`; treat server truth as canonical
 - classify a tool as `async` only if it is semantically heavy or repeatedly fails the `p95 < 200 ms` interaction budget
 
+## Contract Families
+- richer operator-facing public tools now tend to expose:
+  - `operator_guidance`
+  - `next_action`
+- the strongest diagnostic/actionable public surfaces currently include:
+  - `project_status`
+  - `project_registry_lookup`
+  - `inspect`
+  - `path`
+  - `impact`
+  - `change_safety`
+- async follow-up is canonicalized around:
+  - `job_status`
+  - `known_ids`
+  - `result_contract`
+  - `polling_guidance`
+  - `recovery_hint`
+  - `result_data`
+
 ## Core/Public Tools
 - `status`: runtime truth, availability, degradation, public surface.
 - `mcp_surface_diagnostics`: compact diagnostics for server truth vs possible stale client binding.
@@ -91,7 +119,6 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - `why`: rationale view.
 - `path`: topology / flow view.
 - `impact`: blast radius for change.
-- `anomalies`: structural findings.
 - `anomalies`: structural findings; for SOLL/greenfield intent, treat it as heuristic unless it explicitly aligns with canonical completeness.
 - `change_safety`: practical mutation safety.
 - `conception_view`: derived module/interface/contract/flow map.
@@ -142,6 +169,13 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - `soll_manager` for immediate unit mutations.
 - `soll_manager action=create` may optionally use `attach_to` and `relation_hint` for canonical graph attachment in the same operation.
 - `soll_relation_schema` before retrying an invalid SOLL link or when canonical outgoing or incoming graph edges are unclear.
+- `soll_relation_schema` is now the canonical topology explainer for SOLL links:
+  - `allowed_targets`
+  - `forbidden_targets`
+  - `direction`
+  - `projection`
+  - `canonical_examples`
+  - `did_you_mean` when the reverse direction is canonical
 - `infer_soll_mutation` for read-only assistive capture before a higher-level SOLL mutation; it may suggest scope, entity type, and target IDs, but it does not reserve IDs or mutate the graph.
 - `entrench_nuance` is a bounded high-level workflow for wave 1:
   - it only updates existing canonical entities
@@ -160,6 +194,11 @@ description: Use in the Axon repository before coding, structural diagnostics, o
   - right = structured details
 - human navigation must not depend only on clickable Mermaid nodes; tree links and surrounding HTML links are the canonical path.
 - side panes may be resized or collapsed completely; the center pane must expand accordingly.
+- derived node and subtree pages now expose operator-facing diagnostics:
+  - canonical vs derived relation boundary
+  - primary vs supporting/lateral projection role
+  - score-bearing vs non-score-bearing relation class
+  - subtree inclusion reasons
 - `soll_validate` now returns structured `repair_guidance` and `completeness`; use it to repair graph structure, not only to detect warnings.
 - `soll_attach_evidence` should be read as an operational proof tool, not a blind append:
   - it accepts `artifact_ref`, `path`, `file_path`, or `uri`
@@ -167,9 +206,13 @@ description: Use in the Axon repository before coding, structural diagnostics, o
   - it returns per-artifact diagnostics, accepted artifact schema, and fallback guidance on rejection
 - `soll_verify_requirements` now returns richer requirement-level proof diagnostics:
   - `missing_dimensions`
+  - `missing_dimensions_detailed`
   - `suggested_next_actions`
+  - `next_actions_detailed`
   - `validation_count`
   - `broken_file_evidence_count`
+  - `coverage_reason`
+  - `completion_model`
 - successful bounded SOLL mutations should return machine-readable `mutation_feedback`:
   - `changed_entities`
   - `topology_delta`
@@ -184,6 +227,24 @@ description: Use in the Axon repository before coding, structural diagnostics, o
   - `implementation_completeness` = evidence/proof readiness
   - `heuristic anomalies` must not silently override the first two
 - `soll_apply_plan` for transactional batch mutations.
+- `soll_apply_plan` now returns a stronger machine contract:
+  - dry-run `result_contract`
+  - commit-time `created`
+  - `updated`
+  - `linked`
+  - `skipped`
+  - `errors`
+  - `identity_mapping`
+- `soll_query_context` should now be read as both a lightweight browse surface and an active reconstruction digest:
+  - `visions`
+  - `requirements`
+  - `decisions`
+  - `revisions`
+  - `operational_digest`
+- for rationale-heavy SOLL work, prefer retrieval surfaces that now follow:
+  1. linked evidence first
+  2. canonical project docs second
+  3. broader workspace material last
 - `soll_commit_revision` to commit a preview synchronously unless future qualification forces review.
 - `soll_rollback_revision` to revert a revision.
 - Re-run is expected to be idempotent.
@@ -209,6 +270,10 @@ description: Use in the Axon repository before coding, structural diagnostics, o
 - Prefer `retrieve_context` when an LLM needs a compact packet, not raw recall.
 - Prefer `mode=brief` by default; only expand when the first answer is insufficient.
 - Keep expert tools out of first-choice routing unless the task is truly diagnostic.
+- prefer the contract families above over re-deriving follow-up logic from prose:
+  - `operator_guidance`
+  - `next_action`
+  - `job_status` terminal fields
 - When `anomalies`, `soll_validate`, `soll_verify_requirements`, and `soll_work_plan` differ on a greenfield project, prefer the canonical completeness axes exposed by SOLL surfaces and treat anomaly-only intent gaps as heuristic until proven canonical.
 
 ## Maintenance Rule
