@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "axon-core"
-version = "2.0.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
