@@ -1249,6 +1249,45 @@ mod tests {
     }
 
     #[test]
+    fn test_maillon_2g2_rust_watcher_deduplicates_lexical_path_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("PRJ");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("burst_alias.ex");
+        let lexical_alias = project.join(".").join("burst_alias.ex");
+        std::fs::write(&file_path, "defmodule BurstAlias do\nend\n").unwrap();
+
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+
+        let staged = crate::fs_watcher::stage_hot_deltas(
+            &store,
+            root,
+            "PRJ",
+            vec![file_path.clone(), lexical_alias],
+            crate::fs_watcher::HOT_PRIORITY,
+        )
+        .unwrap();
+
+        assert_eq!(
+            staged, 1,
+            "Des alias lexicaux du meme chemin ne doivent stager qu'une fois"
+        );
+
+        let count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM File WHERE path = '{}'",
+                file_path
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\'', "''")
+            ))
+            .unwrap();
+        assert_eq!(count, 1, "Le fichier ne doit pas etre duplique dans IST");
+    }
+
+    #[test]
     fn test_maillon_2h_rust_watcher_directory_event_stages_nested_file() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();

@@ -9,6 +9,8 @@ pub const AXON_ENABLE_INGRESS_BUFFER: &str = "AXON_ENABLE_INGRESS_BUFFER";
 pub type SharedIngressBuffer = Arc<Mutex<IngressBuffer>>;
 
 static INGRESS_BUFFERED_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+static INGRESS_HOT_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+static INGRESS_SCAN_ENTRIES: AtomicUsize = AtomicUsize::new(0);
 static INGRESS_SUBTREE_HINTS: AtomicUsize = AtomicUsize::new(0);
 static INGRESS_SUBTREE_HINT_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -21,6 +23,11 @@ static INGRESS_COLLAPSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
 static INGRESS_LAST_FLUSH_DURATION_MS: AtomicU64 = AtomicU64::new(0);
 static INGRESS_LAST_PROMOTED_COUNT: AtomicU64 = AtomicU64::new(0);
+static INGRESS_PROMOTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_LAST_DURABLY_PERSISTED_COUNT: AtomicU64 = AtomicU64::new(0);
+static INGRESS_DURABLY_PERSISTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INGRESS_LAST_EXCLUDED_FROM_PENDING_COUNT: AtomicU64 = AtomicU64::new(0);
+static INGRESS_EXCLUDED_FROM_PENDING_TOTAL: AtomicU64 = AtomicU64::new(0);
 static INGRESS_ACTIVITY_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -126,6 +133,11 @@ pub struct IngressMetricsSnapshot {
     pub flush_count: u64,
     pub last_flush_duration_ms: u64,
     pub last_promoted_count: u64,
+    pub promoted_total: u64,
+    pub last_durably_persisted_count: u64,
+    pub durably_persisted_total: u64,
+    pub last_excluded_from_pending_count: u64,
+    pub excluded_from_pending_total: u64,
 }
 
 #[derive(Debug)]
@@ -320,6 +332,14 @@ impl IngressBuffer {
             flush_count: INGRESS_FLUSH_COUNT.load(Ordering::Relaxed),
             last_flush_duration_ms: INGRESS_LAST_FLUSH_DURATION_MS.load(Ordering::Relaxed),
             last_promoted_count: INGRESS_LAST_PROMOTED_COUNT.load(Ordering::Relaxed),
+            promoted_total: INGRESS_PROMOTED_TOTAL.load(Ordering::Relaxed),
+            last_durably_persisted_count: INGRESS_LAST_DURABLY_PERSISTED_COUNT
+                .load(Ordering::Relaxed),
+            durably_persisted_total: INGRESS_DURABLY_PERSISTED_TOTAL.load(Ordering::Relaxed),
+            last_excluded_from_pending_count: INGRESS_LAST_EXCLUDED_FROM_PENDING_COUNT
+                .load(Ordering::Relaxed),
+            excluded_from_pending_total: INGRESS_EXCLUDED_FROM_PENDING_TOTAL
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -441,7 +461,23 @@ impl IngressBuffer {
     }
 
     fn sync_metrics(&self) {
+        let mut hot_entries = 0usize;
+        let mut scan_entries = 0usize;
+        for entry in self.by_path.values() {
+            match entry {
+                BufferedIngress::File(file) => match file.source {
+                    IngressSource::Watcher => hot_entries += 1,
+                    IngressSource::Scan => scan_entries += 1,
+                },
+                BufferedIngress::Tombstone { source, .. } => match source {
+                    IngressSource::Watcher => hot_entries += 1,
+                    IngressSource::Scan => scan_entries += 1,
+                },
+            }
+        }
         INGRESS_BUFFERED_ENTRIES.store(self.by_path.len(), Ordering::Relaxed);
+        INGRESS_HOT_ENTRIES.store(hot_entries, Ordering::Relaxed);
+        INGRESS_SCAN_ENTRIES.store(scan_entries, Ordering::Relaxed);
         INGRESS_SUBTREE_HINTS.store(self.subtree_hints.len(), Ordering::Relaxed);
         INGRESS_SUBTREE_HINT_IN_FLIGHT.store(
             self.subtree_hints
@@ -536,19 +572,60 @@ pub fn ingress_metrics_snapshot() -> IngressMetricsSnapshot {
         subtree_hint_unproductive_total: INGRESS_SUBTREE_HINT_UNPRODUCTIVE_TOTAL
             .load(Ordering::Relaxed),
         subtree_hint_dropped_total: INGRESS_SUBTREE_HINT_DROPPED_TOTAL.load(Ordering::Relaxed),
-        hot_entries: 0,
-        scan_entries: 0,
+        hot_entries: INGRESS_HOT_ENTRIES.load(Ordering::Relaxed),
+        scan_entries: INGRESS_SCAN_ENTRIES.load(Ordering::Relaxed),
         collapsed_total: INGRESS_COLLAPSED_TOTAL.load(Ordering::Relaxed),
         flush_count: INGRESS_FLUSH_COUNT.load(Ordering::Relaxed),
         last_flush_duration_ms: INGRESS_LAST_FLUSH_DURATION_MS.load(Ordering::Relaxed),
         last_promoted_count: INGRESS_LAST_PROMOTED_COUNT.load(Ordering::Relaxed),
+        promoted_total: INGRESS_PROMOTED_TOTAL.load(Ordering::Relaxed),
+        last_durably_persisted_count: INGRESS_LAST_DURABLY_PERSISTED_COUNT.load(Ordering::Relaxed),
+        durably_persisted_total: INGRESS_DURABLY_PERSISTED_TOTAL.load(Ordering::Relaxed),
+        last_excluded_from_pending_count: INGRESS_LAST_EXCLUDED_FROM_PENDING_COUNT
+            .load(Ordering::Relaxed),
+        excluded_from_pending_total: INGRESS_EXCLUDED_FROM_PENDING_TOTAL.load(Ordering::Relaxed),
     }
 }
 
-pub fn record_ingress_flush(duration_ms: u64, promoted_count: usize) {
+pub fn reset_ingress_metrics_for_tests() {
+    INGRESS_BUFFERED_ENTRIES.store(0, Ordering::Relaxed);
+    INGRESS_HOT_ENTRIES.store(0, Ordering::Relaxed);
+    INGRESS_SCAN_ENTRIES.store(0, Ordering::Relaxed);
+    INGRESS_SUBTREE_HINTS.store(0, Ordering::Relaxed);
+    INGRESS_SUBTREE_HINT_IN_FLIGHT.store(0, Ordering::Relaxed);
+    INGRESS_SUBTREE_HINT_ACCEPTED_TOTAL.store(0, Ordering::Relaxed);
+    INGRESS_SUBTREE_HINT_BLOCKED_TOTAL.store(0, Ordering::Relaxed);
+    INGRESS_SUBTREE_HINT_SUPPRESSED_TOTAL.store(0, Ordering::Relaxed);
+    INGRESS_SUBTREE_HINT_PRODUCTIVE_TOTAL.store(0, Ordering::Relaxed);
+    INGRESS_SUBTREE_HINT_UNPRODUCTIVE_TOTAL.store(0, Ordering::Relaxed);
+    INGRESS_SUBTREE_HINT_DROPPED_TOTAL.store(0, Ordering::Relaxed);
+    INGRESS_COLLAPSED_TOTAL.store(0, Ordering::Relaxed);
+    INGRESS_FLUSH_COUNT.store(0, Ordering::Relaxed);
+    INGRESS_LAST_FLUSH_DURATION_MS.store(0, Ordering::Relaxed);
+    INGRESS_LAST_PROMOTED_COUNT.store(0, Ordering::Relaxed);
+    INGRESS_PROMOTED_TOTAL.store(0, Ordering::Relaxed);
+    INGRESS_LAST_DURABLY_PERSISTED_COUNT.store(0, Ordering::Relaxed);
+    INGRESS_DURABLY_PERSISTED_TOTAL.store(0, Ordering::Relaxed);
+    INGRESS_LAST_EXCLUDED_FROM_PENDING_COUNT.store(0, Ordering::Relaxed);
+    INGRESS_EXCLUDED_FROM_PENDING_TOTAL.store(0, Ordering::Relaxed);
+}
+
+pub fn record_ingress_flush(
+    duration_ms: u64,
+    promoted_count: usize,
+    durably_persisted_count: usize,
+    excluded_from_pending_count: usize,
+) {
     INGRESS_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
     INGRESS_LAST_FLUSH_DURATION_MS.store(duration_ms, Ordering::Relaxed);
     INGRESS_LAST_PROMOTED_COUNT.store(promoted_count as u64, Ordering::Relaxed);
+    INGRESS_PROMOTED_TOTAL.fetch_add(promoted_count as u64, Ordering::Relaxed);
+    INGRESS_LAST_DURABLY_PERSISTED_COUNT.store(durably_persisted_count as u64, Ordering::Relaxed);
+    INGRESS_DURABLY_PERSISTED_TOTAL.fetch_add(durably_persisted_count as u64, Ordering::Relaxed);
+    INGRESS_LAST_EXCLUDED_FROM_PENDING_COUNT
+        .store(excluded_from_pending_count as u64, Ordering::Relaxed);
+    INGRESS_EXCLUDED_FROM_PENDING_TOTAL
+        .fetch_add(excluded_from_pending_count as u64, Ordering::Relaxed);
 }
 
 pub fn record_blocked_subtree_hint() {

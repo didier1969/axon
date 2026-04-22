@@ -9,6 +9,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_PROJECTS_ROOT="/home/dstadel/projects"
 # shellcheck source=scripts/lib/axon-instance.sh
 source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
+# shellcheck source=scripts/lib/axon-role-layout.sh
+source "$PROJECT_ROOT/scripts/lib/axon-role-layout.sh"
 # shellcheck source=scripts/lib/axon-resource-policy.sh
 source "$PROJECT_ROOT/scripts/lib/axon-resource-policy.sh"
 # shellcheck source=scripts/lib/axon-version.sh
@@ -23,8 +25,13 @@ axon_resolve_version "$PROJECT_ROOT"
 LIVE_RELEASE_CURRENT_MANIFEST="$PROJECT_ROOT/.axon/live-release/current.json"
 LIVE_RELEASE_MANIFEST_SOURCE="${AXON_LIVE_RELEASE_MANIFEST:-$LIVE_RELEASE_CURRENT_MANIFEST}"
 LIVE_RELEASE_ACTIVE=0
+LIVE_RELEASE_TOPOLOGY="monolith"
 LIVE_RELEASE_ARTIFACT=""
 LIVE_RELEASE_BUILD_INFO=""
+LIVE_RELEASE_BRAIN_ARTIFACT=""
+LIVE_RELEASE_BRAIN_BUILD_INFO=""
+LIVE_RELEASE_INDEXER_ARTIFACT=""
+LIVE_RELEASE_INDEXER_BUILD_INFO=""
 
 load_live_release_current() {
     [[ "$AXON_INSTANCE_KIND" == "live" && -f "$LIVE_RELEASE_MANIFEST_SOURCE" ]] || return 1
@@ -35,9 +42,17 @@ import json, pathlib, sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
 runtime = manifest.get("runtime_version") or {}
 artifact = manifest.get("artifact") or {}
+artifacts = manifest.get("artifacts") or {}
+brain = artifacts.get("axon-brain") or {}
+indexer = artifacts.get("axon-indexer") or {}
 fields = [
+    manifest.get("topology", "monolith"),
     artifact.get("path", ""),
     artifact.get("build_info_path", "") or "",
+    brain.get("path", ""),
+    brain.get("build_info_path", "") or "",
+    indexer.get("path", ""),
+    indexer.get("build_info_path", "") or "",
     runtime.get("release_version", ""),
     runtime.get("package_version", ""),
     runtime.get("build_id", ""),
@@ -48,18 +63,34 @@ PY
 )"
 
     mapfile -t live_release_fields <<<"$payload"
-    LIVE_RELEASE_ARTIFACT="${live_release_fields[0]:-}"
-    LIVE_RELEASE_BUILD_INFO="${live_release_fields[1]:-}"
+    LIVE_RELEASE_TOPOLOGY="${live_release_fields[0]:-monolith}"
+    LIVE_RELEASE_ARTIFACT="${live_release_fields[1]:-}"
+    LIVE_RELEASE_BUILD_INFO="${live_release_fields[2]:-}"
+    LIVE_RELEASE_BRAIN_ARTIFACT="${live_release_fields[3]:-}"
+    LIVE_RELEASE_BRAIN_BUILD_INFO="${live_release_fields[4]:-}"
+    LIVE_RELEASE_INDEXER_ARTIFACT="${live_release_fields[5]:-}"
+    LIVE_RELEASE_INDEXER_BUILD_INFO="${live_release_fields[6]:-}"
 
-    [[ -n "$LIVE_RELEASE_ARTIFACT" && -f "$LIVE_RELEASE_ARTIFACT" ]] || {
-        echo "❌ Live current manifest points to a missing artifact: ${LIVE_RELEASE_ARTIFACT:-<empty>}"
-        exit 1
-    }
+    if [[ "$LIVE_RELEASE_TOPOLOGY" == "split" ]]; then
+        [[ -n "$LIVE_RELEASE_BRAIN_ARTIFACT" && -f "$LIVE_RELEASE_BRAIN_ARTIFACT" ]] || {
+            echo "❌ Live current split manifest points to a missing brain artifact: ${LIVE_RELEASE_BRAIN_ARTIFACT:-<empty>}"
+            exit 1
+        }
+        [[ -n "$LIVE_RELEASE_INDEXER_ARTIFACT" && -f "$LIVE_RELEASE_INDEXER_ARTIFACT" ]] || {
+            echo "❌ Live current split manifest points to a missing indexer artifact: ${LIVE_RELEASE_INDEXER_ARTIFACT:-<empty>}"
+            exit 1
+        }
+    else
+        [[ -n "$LIVE_RELEASE_ARTIFACT" && -f "$LIVE_RELEASE_ARTIFACT" ]] || {
+            echo "❌ Live current manifest points to a missing artifact: ${LIVE_RELEASE_ARTIFACT:-<empty>}"
+            exit 1
+        }
+    fi
 
-    AXON_RELEASE_VERSION="${live_release_fields[2]:-$AXON_RELEASE_VERSION}"
-    AXON_PACKAGE_VERSION="${live_release_fields[3]:-$AXON_PACKAGE_VERSION}"
-    AXON_BUILD_ID="${live_release_fields[4]:-$AXON_BUILD_ID}"
-    AXON_INSTALL_GENERATION="${live_release_fields[5]:-$AXON_INSTALL_GENERATION}"
+    AXON_RELEASE_VERSION="${live_release_fields[7]:-$AXON_RELEASE_VERSION}"
+    AXON_PACKAGE_VERSION="${live_release_fields[8]:-$AXON_PACKAGE_VERSION}"
+    AXON_BUILD_ID="${live_release_fields[9]:-$AXON_BUILD_ID}"
+    AXON_INSTALL_GENERATION="${live_release_fields[10]:-$AXON_INSTALL_GENERATION}"
     export AXON_RELEASE_VERSION AXON_PACKAGE_VERSION AXON_BUILD_ID AXON_INSTALL_GENERATION
     LIVE_RELEASE_ACTIVE=1
     return 0
@@ -75,9 +106,27 @@ if [[ -z "$PROJECT_CODE" && -f "$PROJECT_ROOT/.axon/meta.json" ]]; then
 fi
 PROJECT_CODE="${PROJECT_CODE:-$(basename "$PROJECT_ROOT")}"
 RUNTIME_MODE="${AXON_RUNTIME_MODE:-full}"
+RUNTIME_SHADOW_ROLE="${AXON_RUNTIME_SHADOW_ROLE:-legacy_monolith}"
+RUNTIME_SHADOW_ONLY="${AXON_SPLIT_SHADOW_ONLY:-0}"
+ROLLBACK_TO_MONOLITH=0
+RUNTIME_EXECUTABLE="bin/axon-core"
+RUNTIME_EXECUTABLE_NAME="axon-core"
+SELECTED_DEBUG_RUNTIME_BIN=""
 START_DASHBOARD=1
 RUN_MCP_TESTS=1
 SKIP_ELIXIR_PREWARM="${AXON_SKIP_ELIXIR_PREWARM:-0}"
+
+is_brain_role() {
+    [[ "$RUNTIME_SHADOW_ROLE" == "brain" || "$RUNTIME_SHADOW_ROLE" == "brain_shadow" ]]
+}
+
+is_indexer_role() {
+    [[ "$RUNTIME_SHADOW_ROLE" == "indexer" || "$RUNTIME_SHADOW_ROLE" == "indexer_shadow" ]]
+}
+
+is_split_role() {
+    is_brain_role || is_indexer_role
+}
 
 detect_accessible_gpu() {
     if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
@@ -101,20 +150,22 @@ instance_runtime_pids() {
         fi
     fi
 
-    port_pid="$(ss -ltnp 2>/dev/null | awk -v p="$HYDRA_HTTP_PORT" '
-        $1 == "LISTEN" {
-            split($4, addr_parts, ":")
-            if (addr_parts[length(addr_parts)] != p) {
-                next
-            }
-            match($0, /pid=([0-9]+)/, m)
-            if (m[1] != "") {
-                print m[1]
-                exit
-            }
-        }' || true)"
-    if [[ -n "$port_pid" ]]; then
-        pids="$pids $port_pid"
+    if ! is_indexer_role; then
+        port_pid="$(ss -ltnp 2>/dev/null | awk -v p="$HYDRA_HTTP_PORT" '
+            $1 == "LISTEN" {
+                split($4, addr_parts, ":")
+                if (addr_parts[length(addr_parts)] != p) {
+                    next
+                }
+                match($0, /pid=([0-9]+)/, m)
+                if (m[1] != "") {
+                    print m[1]
+                    exit
+                }
+            }' || true)"
+        if [[ -n "$port_pid" ]]; then
+            pids="$pids $port_pid"
+        fi
     fi
 
     echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -u
@@ -132,11 +183,91 @@ has_live_runtime_dataplane() {
         fi
     done
 
+    if is_indexer_role; then
+        if [[ -S "$AXON_TELEMETRY_SOCK" ]]; then
+            return 0
+        fi
+        return 1
+    fi
+
     if nc -z localhost "$HYDRA_HTTP_PORT" 2>/dev/null; then
         return 0
     fi
 
     return 1
+}
+
+probe_writer_guard() {
+    local label="$1"
+    local lock_path="$2"
+    local owner=""
+
+    command -v flock >/dev/null 2>&1 || return 0
+    [[ -f "$lock_path" ]] || return 0
+
+    # Advisory preflight only. Rust startup enforcement remains authoritative.
+    # Do not create lockfiles here, otherwise a refused or aborted shell launch
+    # would leave stale-looking scaffolding before the runtime even starts.
+    exec {guard_fd}<>"$lock_path"
+    if ! flock -n "$guard_fd"; then
+        owner="$(tr '\n' ';' < "$lock_path" 2>/dev/null || true)"
+        echo "❌ Preflight: $label writer guard is already held."
+        echo "   Lock: $lock_path"
+        if [[ -n "$owner" ]]; then
+            echo "   Recorded owner: $owner"
+        fi
+        echo "   Startup aborted before runtime launch. Rust writer enforcement remains authoritative."
+        exit 1
+    fi
+    flock -u "$guard_fd" || true
+    exec {guard_fd}>&-
+}
+
+selected_writer_guards() {
+    case "$RUNTIME_SHADOW_ROLE" in
+        brain|brain_shadow)
+            printf 'SOLL %s\n' "$AXON_DB_ROOT/.axon-soll.writer.lock"
+            ;;
+        indexer|indexer_shadow)
+            printf 'IST %s\n' "$AXON_DB_ROOT/.axon-ist.writer.lock"
+            ;;
+        *)
+            printf 'SOLL %s\n' "$AXON_DB_ROOT/.axon-soll.writer.lock"
+            printf 'IST %s\n' "$AXON_DB_ROOT/.axon-ist.writer.lock"
+            ;;
+    esac
+}
+
+require_writer_guard_probe() {
+    local label="$1"
+    local lock_path="$2"
+    local owner=""
+
+    command -v flock >/dev/null 2>&1 || {
+        echo "❌ Strict preflight requires flock for $label writer guard verification."
+        exit 1
+    }
+
+    if [[ ! -f "$lock_path" ]]; then
+        echo "❌ Strict preflight: $label writer guard lockfile is missing."
+        echo "   Lock: $lock_path"
+        echo "   Rollback-to-monolith requires an explicit proof that the prior runtime released writer ownership."
+        exit 1
+    fi
+
+    exec {guard_fd}<>"$lock_path"
+    if ! flock -n "$guard_fd"; then
+        owner="$(tr '\n' ';' < "$lock_path" 2>/dev/null || true)"
+        echo "❌ Strict preflight: $label writer guard is still held."
+        echo "   Lock: $lock_path"
+        if [[ -n "$owner" ]]; then
+            echo "   Recorded owner: $owner"
+        fi
+        echo "   Rollback-to-monolith aborted until writer ownership is provably released."
+        exit 1
+    fi
+    flock -u "$guard_fd" || true
+    exec {guard_fd}>&-
 }
 
 while [[ $# -gt 0 ]]; do
@@ -154,6 +285,9 @@ while [[ $# -gt 0 ]]; do
             RUNTIME_MODE="mcp_only"
             START_DASHBOARD=0
             ;;
+        --rollback-monolith|--rollback)
+            ROLLBACK_TO_MONOLITH=1
+            ;;
         --no-dashboard)
             START_DASHBOARD=0
             ;;
@@ -165,13 +299,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             cat <<'EOF'
-Usage: ./scripts/start.sh [--full|--read-only|--mcp-only] [--no-dashboard] [--skip-mcp-tests] [--skip-elixir-prewarm]
+Usage: ./scripts/start.sh [--full|--read-only|--mcp-only] [--rollback-monolith] [--no-dashboard] [--skip-mcp-tests] [--skip-elixir-prewarm]
 
 Modes:
   --full           Full runtime: scan + watcher + ingestion + SQL/MCP + dashboard
   --graph-only     Scan + watcher + graph indexing + SQL/MCP + dashboard, without semantic/vector workers
   --read-only      SQL/MCP + dashboard only, without scan/watcher/ingestion workers
   --mcp-only       SQL/MCP only, without dashboard and without scan/watcher/ingestion workers
+  --rollback-monolith  Explicit rollback from split shadow mode back to the legacy monolith runtime
 
 Options:
   --no-dashboard   Disable Elixir LiveView dashboard
@@ -188,6 +323,50 @@ EOF
     esac
     shift
 done
+
+if [[ "$ROLLBACK_TO_MONOLITH" == "1" ]]; then
+    RUNTIME_MODE="full"
+    RUNTIME_SHADOW_ROLE="legacy_monolith"
+    RUNTIME_SHADOW_ONLY="0"
+    START_DASHBOARD=1
+    RUN_MCP_TESTS=1
+fi
+
+RUNTIME_REACTIVATION_PATH="default"
+if [[ "$ROLLBACK_TO_MONOLITH" == "1" ]]; then
+    RUNTIME_REACTIVATION_PATH="rollback_monolith"
+fi
+
+CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
+DEVENV_DEBUG_BIN_ROOT="$CARGO_TARGET_ROOT/debug"
+
+case "$RUNTIME_SHADOW_ROLE" in
+    brain|brain_shadow)
+        if [[ "$AXON_INSTANCE_KIND" == "live" && -x "$PROJECT_ROOT/bin/axon-brain" ]]; then
+            RUNTIME_EXECUTABLE="bin/axon-brain"
+        else
+            RUNTIME_EXECUTABLE="${DEVENV_DEBUG_BIN_ROOT#$PROJECT_ROOT/}/axon-brain"
+        fi
+        RUNTIME_EXECUTABLE_NAME="axon-brain"
+        SELECTED_DEBUG_RUNTIME_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
+        ;;
+    indexer|indexer_shadow)
+        if [[ "$AXON_INSTANCE_KIND" == "live" && -x "$PROJECT_ROOT/bin/axon-indexer" ]]; then
+            RUNTIME_EXECUTABLE="bin/axon-indexer"
+        else
+            RUNTIME_EXECUTABLE="${DEVENV_DEBUG_BIN_ROOT#$PROJECT_ROOT/}/axon-indexer"
+        fi
+        RUNTIME_EXECUTABLE_NAME="axon-indexer"
+        SELECTED_DEBUG_RUNTIME_BIN="$PROJECT_ROOT/$RUNTIME_EXECUTABLE"
+        ;;
+esac
+
+if [[ "$ROLLBACK_TO_MONOLITH" == "1" ]]; then
+    RUNTIME_EXECUTABLE="bin/axon-core"
+    RUNTIME_EXECUTABLE_NAME="axon-core"
+fi
+
+axon_apply_runtime_role_layout "$PROJECT_ROOT" "$RUNTIME_SHADOW_ROLE" "$RUNTIME_EXECUTABLE_NAME"
 
 export AXON_SKIP_ELIXIR_PREWARM="$SKIP_ELIXIR_PREWARM"
 
@@ -242,10 +421,26 @@ else
     devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/dashboard' && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null"
 fi
 
-if [ ! -x "bin/axon-core" ]; then
-    echo "❌ Missing bin/axon-core"
-    echo "   Run ./scripts/setup.sh first."
+if [ ! -x "$RUNTIME_EXECUTABLE" ]; then
+    echo "❌ Missing $RUNTIME_EXECUTABLE_NAME"
+    echo "   Expected executable: $RUNTIME_EXECUTABLE"
+    if [[ "$RUNTIME_EXECUTABLE_NAME" == "axon-core" ]]; then
+        echo "   Run ./scripts/setup.sh first."
+    else
+        echo "   Run cargo build --manifest-path src/axon-core/Cargo.toml --bin $RUNTIME_EXECUTABLE_NAME first."
+    fi
     exit 1
+fi
+
+if [[ -n "$SELECTED_DEBUG_RUNTIME_BIN" ]] && find "$PROJECT_ROOT/src/axon-core/src" \
+    -type f \( -name '*.rs' -o -name 'Cargo.toml' \) \
+    -newer "$SELECTED_DEBUG_RUNTIME_BIN" -print -quit | grep -q .; then
+    echo "⚠️ Detected newer axon-core sources than $SELECTED_DEBUG_RUNTIME_BIN"
+    echo "   Rebuilding selected split runtime binary..."
+    if ! devenv shell -- bash -lc "cd '$PROJECT_ROOT/src/axon-core' && cargo build --bin $RUNTIME_EXECUTABLE_NAME"; then
+        echo "❌ Failed to rebuild $RUNTIME_EXECUTABLE_NAME"
+        exit 1
+    fi
 fi
 
 if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
@@ -288,7 +483,6 @@ if ! nix store info >/dev/null 2>&1; then
 fi
 
 # 2. Synchronize binaries (handle 'Text file busy' via install)
-CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
 LEGACY_RELEASE_BIN="$PROJECT_ROOT/src/axon-core/target/release/axon-core"
 DEVENV_RELEASE_BIN="$CARGO_TARGET_ROOT/release/axon-core"
 DEVENV_TUNNEL_BIN="$CARGO_TARGET_ROOT/release/axon-mcp-tunnel"
@@ -348,6 +542,18 @@ verify_mcp_http() {
     [[ "$response" == *"axon_query"* ]]
 }
 
+verify_role_ready() {
+    case "$RUNTIME_SHADOW_ROLE" in
+        indexer|indexer_shadow)
+            [[ -S "$AXON_TELEMETRY_SOCK" ]] || return 1
+            instance_runtime_pids | awk 'NF { found=1; exit } END { exit(found ? 0 : 1) }'
+            ;;
+        *)
+            probe_sql_gateway && verify_mcp_http
+            ;;
+    esac
+}
+
 if [ -f "$LEGACY_RELEASE_BIN" ] && [ ! -f "$DEVENV_RELEASE_BIN" ]; then
     echo "⚠️ Found a release build outside Devenv at $LEGACY_RELEASE_BIN"
     echo "   Axon starts from $DEVENV_RELEASE_BIN. Attempting automatic rebuild..."
@@ -391,18 +597,31 @@ fi
 
 if [[ "${AXON_SKIP_BIN_SYNC:-0}" != "1" ]]; then
     if [[ "$LIVE_RELEASE_ACTIVE" -eq 1 ]]; then
-        echo "🔄 Updating live bin/axon-core from promoted artifact..."
-        mkdir -p bin && install -m 755 "$LIVE_RELEASE_ARTIFACT" bin/axon-core
-        if [[ -n "$LIVE_RELEASE_BUILD_INFO" && -f "$LIVE_RELEASE_BUILD_INFO" ]]; then
-            install -m 644 "$LIVE_RELEASE_BUILD_INFO" "$AXON_BUILD_INFO_FILE"
+        if [[ "$LIVE_RELEASE_TOPOLOGY" == "split" ]]; then
+            echo "🔄 Updating live split binaries from promoted artifacts..."
+            mkdir -p bin
+            install -m 755 "$LIVE_RELEASE_BRAIN_ARTIFACT" bin/axon-brain
+            install -m 755 "$LIVE_RELEASE_INDEXER_ARTIFACT" bin/axon-indexer
+            if [[ -n "$LIVE_RELEASE_BRAIN_BUILD_INFO" && -f "$LIVE_RELEASE_BRAIN_BUILD_INFO" ]]; then
+                install -m 644 "$LIVE_RELEASE_BRAIN_BUILD_INFO" "$(axon_build_info_path_for "$PROJECT_ROOT" "axon-brain")"
+            fi
+            if [[ -n "$LIVE_RELEASE_INDEXER_BUILD_INFO" && -f "$LIVE_RELEASE_INDEXER_BUILD_INFO" ]]; then
+                install -m 644 "$LIVE_RELEASE_INDEXER_BUILD_INFO" "$(axon_build_info_path_for "$PROJECT_ROOT" "axon-indexer")"
+            fi
         else
-            axon_write_export_file "$AXON_BUILD_INFO_FILE" \
-                AXON_RELEASE_VERSION "$AXON_RELEASE_VERSION" \
-                AXON_BUILD_ID "$AXON_BUILD_ID" \
-                AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
-                AXON_INSTALL_GENERATION "$AXON_INSTALL_GENERATION"
+            echo "🔄 Updating live bin/axon-core from promoted artifact..."
+            mkdir -p bin && install -m 755 "$LIVE_RELEASE_ARTIFACT" bin/axon-core
+            if [[ -n "$LIVE_RELEASE_BUILD_INFO" && -f "$LIVE_RELEASE_BUILD_INFO" ]]; then
+                install -m 644 "$LIVE_RELEASE_BUILD_INFO" "$AXON_BUILD_INFO_FILE"
+            else
+                axon_write_export_file "$AXON_BUILD_INFO_FILE" \
+                    AXON_RELEASE_VERSION "$AXON_RELEASE_VERSION" \
+                    AXON_BUILD_ID "$AXON_BUILD_ID" \
+                    AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
+                    AXON_INSTALL_GENERATION "$AXON_INSTALL_GENERATION"
+            fi
         fi
-    elif [[ -f "$DEVENV_RELEASE_BIN" ]]; then
+    elif ! is_split_role && [[ -f "$DEVENV_RELEASE_BIN" ]]; then
         echo "🔄 Updating bin/axon-core safely..."
         mkdir -p bin && install -m 755 "$DEVENV_RELEASE_BIN" bin/axon-core
         AXON_BUILD_ID="$(axon_workspace_build_id "$PROJECT_ROOT")"
@@ -415,7 +634,7 @@ if [[ "${AXON_SKIP_BIN_SYNC:-0}" != "1" ]]; then
     fi
 fi
 
-if [[ "${AXON_SKIP_BIN_SYNC:-0}" != "1" && -f "$DEVENV_TUNNEL_BIN" ]]; then
+if [[ "${AXON_SKIP_BIN_SYNC:-0}" != "1" && ! is_indexer_role && -f "$DEVENV_TUNNEL_BIN" ]]; then
     echo "🔄 Updating bin/axon-mcp-tunnel safely..."
     mkdir -p bin && install -m 755 "$DEVENV_TUNNEL_BIN" bin/axon-mcp-tunnel
 fi
@@ -424,6 +643,14 @@ echo "🚀 Starting Axon in TMUX session '$TMUX_SESSION'..."
 echo "📂 Watch root: $WATCH_ROOT"
 echo "🗂️ Projects root: $PROJECTS_ROOT"
 echo "🧭 Runtime mode: $RUNTIME_MODE"
+echo "🎭 Shadow role: $RUNTIME_SHADOW_ROLE"
+echo "⚙️ Runtime binary: $RUNTIME_EXECUTABLE_NAME ($RUNTIME_EXECUTABLE)"
+if [[ "$ROLLBACK_TO_MONOLITH" == "1" ]]; then
+    echo "↩️ Rollback path: split shadow mode -> legacy monolith"
+fi
+if [[ "$RUNTIME_SHADOW_ONLY" == "1" ]]; then
+    echo "🧪 Split path: shadow-only / non-promotable until gates are green"
+fi
 echo "🧩 Instance kind: $AXON_INSTANCE_KIND"
 echo "📊 Resource policy: priority=$AXON_RESOURCE_PRIORITY budget=$AXON_BACKGROUND_BUDGET_CLASS gpu=$AXON_GPU_ACCESS_POLICY watcher=$AXON_WATCHER_POLICY"
 echo "🛠️ Worker cap: ${MAX_AXON_WORKERS:-auto} / Queue budget bytes: ${AXON_QUEUE_MEMORY_BUDGET_BYTES:-auto}"
@@ -437,8 +664,25 @@ fi
 export SQL_URL="$AXON_SQL_URL"
 
 mkdir -p "$AXON_DB_ROOT" "$AXON_RUN_ROOT"
+# Clean only the sockets used by the selected runtime
+rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK"
+rm -f "$AXON_PID_FILE"
+
+while read -r guard_label guard_path; do
+    [[ -n "${guard_label:-}" ]] || continue
+    probe_writer_guard "$guard_label" "$guard_path"
+done < <(selected_writer_guards)
+
+if [[ "$ROLLBACK_TO_MONOLITH" == "1" ]]; then
+    require_writer_guard_probe "SOLL" "$AXON_DB_ROOT/.axon-soll.writer.lock"
+    require_writer_guard_probe "IST" "$AXON_DB_ROOT/.axon-ist.writer.lock"
+fi
+
 axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
   AXON_RUNTIME_MODE "$RUNTIME_MODE" \
+  AXON_RUNTIME_SHADOW_ROLE "$RUNTIME_SHADOW_ROLE" \
+  AXON_SPLIT_SHADOW_ONLY "$RUNTIME_SHADOW_ONLY" \
+  AXON_RUNTIME_REACTIVATION_PATH "$RUNTIME_REACTIVATION_PATH" \
   AXON_DASHBOARD_ENABLED "$START_DASHBOARD" \
   AXON_INSTANCE_KIND "$AXON_INSTANCE_KIND" \
   AXON_RUNTIME_IDENTITY "$AXON_RUNTIME_IDENTITY" \
@@ -449,6 +693,8 @@ axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
   MAX_AXON_WORKERS "${MAX_AXON_WORKERS:-}" \
   AXON_QUEUE_MEMORY_BUDGET_BYTES "${AXON_QUEUE_MEMORY_BUDGET_BYTES:-}" \
   AXON_WATCHER_SUBTREE_HINT_BUDGET "${AXON_WATCHER_SUBTREE_HINT_BUDGET:-}" \
+  AXON_SPLIT_BRAIN_IST_READER_ONLY "${AXON_SPLIT_BRAIN_IST_READER_ONLY:-}" \
+  AXON_DUCKDB_MEMORY_LIMIT_GB "${AXON_DUCKDB_MEMORY_LIMIT_GB:-}" \
   AXON_EMBEDDING_PROVIDER "${AXON_EMBEDDING_PROVIDER:-}" \
   AXON_RELEASE_VERSION "$AXON_RELEASE_VERSION" \
   AXON_BUILD_ID "$AXON_BUILD_ID" \
@@ -460,11 +706,6 @@ axon_write_export_file "$AXON_RUNTIME_STATE_FILE" \
   AXON_MCP_PUBLIC_URL "${AXON_MCP_PUBLIC_URL:-}" \
   AXON_SQL_PUBLIC_URL "${AXON_SQL_PUBLIC_URL:-}" \
   AXON_DASHBOARD_PUBLIC_URL "${AXON_DASHBOARD_PUBLIC_URL:-}"
-
-# Clean only the sockets and locks used by the selected runtime
-rm -f "$AXON_TELEMETRY_SOCK" "$AXON_MCP_SOCK"
-rm -f "$AXON_PID_FILE"
-rm -f "$AXON_DB_ROOT/"*.lock 2>/dev/null || true
 
 # Never discard DuckDB WAL during a normal restart. WAL replay is required to recover
 # recent committed work when the main database file has not been checkpointed yet.
@@ -505,6 +746,8 @@ for pass_through_var in \
     AXON_ENABLE_FEDERATION_ORCHESTRATOR \
     AXON_QUEUE_MEMORY_BUDGET_BYTES \
     AXON_WATCHER_SUBTREE_HINT_BUDGET \
+    AXON_SPLIT_BRAIN_IST_READER_ONLY \
+    AXON_DUCKDB_MEMORY_LIMIT_GB \
     AXON_VECTOR_WORKERS \
     AXON_GRAPH_WORKERS \
     AXON_CHUNK_BATCH_SIZE \
@@ -610,7 +853,7 @@ if [[ "$EMBEDDING_PROVIDER_REQUEST" == "cuda" && ! -f "$ORT_OUT_PATH/lib/libonnx
     echo "⚠️ The selected ONNX Runtime package does not include libonnxruntime_providers_cuda.so."
     echo "   CUDA embedding cannot activate with this system ORT package; Axon will fall back to CPU diagnostics."
 fi
-tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'mkdir -p \"$AXON_RUN_ROOT\"; export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_WATCH_DIR=\"$WATCH_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_MCP_MUTATION_JOBS=1; export AXON_INSTANCE_KIND=\"$AXON_INSTANCE_KIND\"; export AXON_RUNTIME_IDENTITY=\"$AXON_RUNTIME_IDENTITY\"; export AXON_DB_ROOT=\"$AXON_DB_ROOT\"; export AXON_RUN_ROOT=\"$AXON_RUN_ROOT\"; export AXON_PID_FILE=\"$AXON_PID_FILE\"; export AXON_TELEMETRY_SOCK=\"$AXON_TELEMETRY_SOCK\"; export AXON_MCP_SOCK=\"$AXON_MCP_SOCK\"; export PHX_PORT=\"$PHX_PORT\"; export HYDRA_TCP_PORT=\"$HYDRA_TCP_PORT\"; export HYDRA_HTTP_PORT=\"$HYDRA_HTTP_PORT\"; export HYDRA_ODATA_PORT=\"$HYDRA_ODATA_PORT\"; export HYDRA_HTTP2_PORT=\"$HYDRA_HTTP2_PORT\"; export HYDRA_MCP_PORT=\"$HYDRA_MCP_PORT\"; export AXON_SQL_URL=\"$AXON_SQL_URL\"; export AXON_MCP_URL=\"$AXON_MCP_URL\"; export AXON_DASHBOARD_URL=\"$AXON_DASHBOARD_URL\"; export AXON_MUTATION_POLICY=\"$AXON_MUTATION_POLICY\"; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\"$ORT_DYLIB_PATH\"; echo \"🚀 Starting Axon Core...\"; bin/axon-core & core_pid=\$!; echo \$core_pid > \"$AXON_PID_FILE\"; wait \$core_pid; core_status=\$?; rm -f \"$AXON_PID_FILE\"; exit \$core_status'" C-m
+tmux send-keys -t "$TMUX_SESSION:core" "devenv shell -- bash -lc 'mkdir -p \"$AXON_RUN_ROOT\"; export AXON_PROJECTS_ROOT=\"$PROJECTS_ROOT\"; export AXON_WATCH_DIR=\"$WATCH_ROOT\"; export AXON_PROJECT_ROOT=\"$PROJECT_ROOT\"; export AXON_RUNTIME_MODE=\"$RUNTIME_MODE\"; export AXON_RUNTIME_SHADOW_ROLE=\"$RUNTIME_SHADOW_ROLE\"; export AXON_SPLIT_SHADOW_ONLY=\"$RUNTIME_SHADOW_ONLY\"; export AXON_MCP_MUTATION_JOBS=1; export AXON_INSTANCE_KIND=\"$AXON_INSTANCE_KIND\"; export AXON_RUNTIME_IDENTITY=\"$AXON_RUNTIME_IDENTITY\"; export AXON_DB_ROOT=\"$AXON_DB_ROOT\"; export AXON_RUN_ROOT=\"$AXON_RUN_ROOT\"; export AXON_PID_FILE=\"$AXON_PID_FILE\"; export AXON_TELEMETRY_SOCK=\"$AXON_TELEMETRY_SOCK\"; export AXON_MCP_SOCK=\"$AXON_MCP_SOCK\"; export PHX_PORT=\"$PHX_PORT\"; export HYDRA_TCP_PORT=\"$HYDRA_TCP_PORT\"; export HYDRA_HTTP_PORT=\"$HYDRA_HTTP_PORT\"; export HYDRA_ODATA_PORT=\"$HYDRA_ODATA_PORT\"; export HYDRA_HTTP2_PORT=\"$HYDRA_HTTP2_PORT\"; export HYDRA_MCP_PORT=\"$HYDRA_MCP_PORT\"; export AXON_SQL_URL=\"$AXON_SQL_URL\"; export AXON_MCP_URL=\"$AXON_MCP_URL\"; export AXON_DASHBOARD_URL=\"$AXON_DASHBOARD_URL\"; export AXON_MUTATION_POLICY=\"$AXON_MUTATION_POLICY\"; ${PROFILE_EXPORT}${WORKER_CAP_EXPORT}${EMBEDDING_PROVIDER_EXPORT}${PASS_THROUGH_EXPORTS}${PRELAUNCH_LD_LIBRARY_PATH_EXPORT}export ORT_STRATEGY=system; export ORT_DYLIB_PATH=\"$ORT_DYLIB_PATH\"; echo \"🚀 Starting $RUNTIME_EXECUTABLE_NAME...\"; \"$RUNTIME_EXECUTABLE\" & core_pid=\$!; echo \$core_pid > \"$AXON_PID_FILE\"; wait \$core_pid; core_status=\$?; rm -f \"$AXON_PID_FILE\"; exit \$core_status'" C-m
 
 if [ "$START_DASHBOARD" = "1" ]; then
     # Start Visualization Plane
@@ -631,8 +874,12 @@ DASHBOARD_READY=false
 # Wait up to STARTUP_TIMEOUT_S * 1s
 for ((i=1; i<=STARTUP_TIMEOUT_S; i++)); do
     if [ "$CORE_READY" = false ]; then
-        if probe_sql_gateway && verify_mcp_http; then
-            echo "✅ Axon Data Plane and MCP Gateway are Ready."
+        if verify_role_ready; then
+            if [[ "$RUNTIME_SHADOW_ROLE" == "indexer" || "$RUNTIME_SHADOW_ROLE" == "indexer_shadow" ]]; then
+                echo "✅ Axon Indexer runtime is Ready."
+            else
+                echo "✅ Axon Data Plane and MCP Gateway are Ready."
+            fi
             CORE_READY=true
         fi
     fi
@@ -665,33 +912,43 @@ if [ "$CORE_READY" = false ] || [ "$DASHBOARD_READY" = false ]; then
     exit 1
 fi
 
-if [ "$CORE_READY" = true ]; then
+if [ "$CORE_READY" = true ] && ! is_indexer_role; then
     echo ""
     echo "🧪 Verifying live SQL schema..."
     if ! verify_sql_gateway; then
-        echo "❌ Axon Core exposed its port but failed the live schema check."
-        echo "   Inspect TMUX with: tmux attach -t $TMUX_SESSION"
+        if is_brain_role \
+            && [[ "${AXON_SPLIT_BRAIN_IST_READER_ONLY:-0}" =~ ^(1|true|yes|on)$ ]]; then
+            echo "⚠️ Brain started before a materialized IST reader replica was available."
+            echo "   Continuing in degraded read mode until indexer publishes ist-reader.db."
+        else
+            echo "❌ Axon Core exposed its port but failed the live schema check."
+            echo "   Inspect TMUX with: tmux attach -t $TMUX_SESSION"
+            exit 1
+        fi
+    fi
+    if verify_sql_gateway >/dev/null 2>&1; then
+        echo "✅ Live SQL schema check succeeded."
+    fi
+fi
+
+if ! is_indexer_role; then
+    echo ""
+    echo "⚙️ Running MCP End-to-End Verification..."
+    if [ -x "bin/axon-mcp-tunnel" ] && ! echo '{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}' | bin/axon-mcp-tunnel | grep -q "axon_query"; then
+        echo "❌ MCP tunnel verification failed."
+        echo "   Inspect the TMUX session ($TMUX_SESSION) to debug."
+    elif [ -x "bin/axon-mcp-tunnel" ]; then
+        echo "✅ MCP tunnel verification succeeded."
+    elif verify_mcp_http; then
+        echo "✅ MCP HTTP verification succeeded."
+    else
+        echo "❌ MCP HTTP verification failed."
+        echo "   Inspect the TMUX session ($TMUX_SESSION) to debug."
         exit 1
     fi
-    echo "✅ Live SQL schema check succeeded."
 fi
 
-echo ""
-echo "⚙️ Running MCP End-to-End Verification..."
-if [ -x "bin/axon-mcp-tunnel" ] && ! echo '{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 1}' | bin/axon-mcp-tunnel | grep -q "axon_query"; then
-    echo "❌ MCP tunnel verification failed."
-    echo "   Inspect the TMUX session ($TMUX_SESSION) to debug."
-elif [ -x "bin/axon-mcp-tunnel" ]; then
-    echo "✅ MCP tunnel verification succeeded."
-elif verify_mcp_http; then
-    echo "✅ MCP HTTP verification succeeded."
-else
-    echo "❌ MCP HTTP verification failed."
-    echo "   Inspect the TMUX session ($TMUX_SESSION) to debug."
-    exit 1
-fi
-
-if [ "$RUN_MCP_TESTS" = "1" ]; then
+if [ "$RUN_MCP_TESTS" = "1" ] && ! is_indexer_role; then
     echo ""
     echo "⏳ Waiting for initial ingestion to stabilize..."
     for i in {1..30}; do
@@ -717,7 +974,11 @@ fi
 echo ""
 echo "🛡️ Axon is rising in TMUX session '$TMUX_SESSION'."
 echo "To view processes: 'tmux attach -t $TMUX_SESSION'"
-if [[ "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" == "1" ]]; then
+if is_indexer_role; then
+    echo "Telemetry socket: $AXON_TELEMETRY_SOCK"
+    echo "IST writer: $AXON_DB_ROOT/ist.db"
+    echo "IST reader replica: $AXON_DB_ROOT/ist-reader.db"
+elif [[ "${AXON_PUBLIC_ENDPOINTS_AVAILABLE:-0}" == "1" ]]; then
     if [ "$START_DASHBOARD" = "1" ]; then
         echo "Dashboard: ${AXON_DASHBOARD_PUBLIC_URL}cockpit"
     fi

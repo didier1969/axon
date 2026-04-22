@@ -1,5 +1,7 @@
 #![recursion_limit = "512"]
 
+extern crate self as axon_core;
+
 pub mod bridge;
 pub mod config;
 pub mod embedder;
@@ -13,17 +15,25 @@ pub mod graph_ingestion;
 pub mod graph_query;
 pub mod indexing_policy;
 pub mod ingress_buffer;
+mod main_background;
+mod main_services;
+mod main_telemetry;
 pub mod mcp;
 pub mod mcp_http;
 pub mod optimizer;
 pub mod parser;
 pub mod project_meta;
 pub mod queue;
+pub mod runtime_boot;
+pub mod runtime_command_proxy;
 pub mod runtime_mode;
 pub mod runtime_observability;
 pub mod runtime_operational_profile;
 pub mod runtime_profile;
+pub mod runtime_topology;
+pub mod runtime_truth_contract;
 pub mod runtime_tuning;
+pub mod runtime_writer_guard;
 pub mod scanner;
 pub mod service_guard;
 pub mod vector_control;

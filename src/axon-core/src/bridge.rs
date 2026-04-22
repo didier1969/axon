@@ -2,6 +2,62 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeTruthFeed {
+    pub stale: bool,
+    pub observed_age_ms: Option<u64>,
+    pub stale_after_ms: u64,
+    pub last_heartbeat_at_ms: Option<u64>,
+    pub last_good_payload_at_ms: Option<u64>,
+    pub degraded_reason: Option<String>,
+}
+
+impl RuntimeTruthFeed {
+    pub const DEFAULT_STALE_AFTER_MS: u64 = 5_000;
+
+    pub fn from_last_heartbeat_ms(now_ms: u64, last_heartbeat_at_ms: u64) -> Self {
+        Self::from_observed_times(
+            now_ms,
+            Some(last_heartbeat_at_ms),
+            Some(last_heartbeat_at_ms),
+            Self::DEFAULT_STALE_AFTER_MS,
+            None::<String>,
+        )
+    }
+
+    pub fn from_observed_times(
+        now_ms: u64,
+        last_heartbeat_at_ms: Option<u64>,
+        last_good_payload_at_ms: Option<u64>,
+        stale_after_ms: u64,
+        degraded_reason: Option<impl Into<String>>,
+    ) -> Self {
+        let observed_age_ms = last_heartbeat_at_ms.map(|at| now_ms.saturating_sub(at));
+        let stale = match observed_age_ms {
+            Some(age) => age > stale_after_ms,
+            None => true,
+        };
+        let degraded_reason = if stale {
+            Some(
+                degraded_reason
+                    .map(Into::into)
+                    .unwrap_or_else(|| "missing_runtime_truth_heartbeat".to_string()),
+            )
+        } else {
+            degraded_reason.map(Into::into)
+        };
+
+        Self {
+            stale,
+            observed_age_ms,
+            stale_after_ms,
+            last_heartbeat_at_ms,
+            last_good_payload_at_ms,
+            degraded_reason,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum BridgeEvent {
@@ -97,6 +153,7 @@ pub enum BridgeEvent {
         file_vectorization_queue_queued: usize,
         file_vectorization_queue_inflight: usize,
         file_vectorization_queue_depth: usize,
+        runtime_truth_feed: RuntimeTruthFeed,
     },
     ScanComplete {
         total_files: usize,
@@ -107,7 +164,13 @@ pub enum BridgeEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::BridgeEvent;
+    use super::{BridgeEvent, RuntimeTruthFeed};
+
+    #[test]
+    fn runtime_truth_feed_marks_missing_heartbeat_stale() {
+        let feed = RuntimeTruthFeed::from_last_heartbeat_ms(10_000, 2_000);
+        assert!(feed.stale);
+    }
 
     #[test]
     fn runtime_telemetry_bridge_event_serializes_with_expected_shape() {
@@ -174,6 +237,13 @@ mod tests {
             file_vectorization_queue_queued: 7,
             file_vectorization_queue_inflight: 2,
             file_vectorization_queue_depth: 9,
+            runtime_truth_feed: RuntimeTruthFeed::from_observed_times(
+                10_000,
+                Some(9_500),
+                Some(9_400),
+                RuntimeTruthFeed::DEFAULT_STALE_AFTER_MS,
+                Some("indexer_feed_degraded"),
+            ),
         };
 
         let json = serde_json::to_string(&payload).expect("bridge event serializes");
@@ -241,5 +311,7 @@ mod tests {
         assert!(json.contains("\"file_vectorization_queue_queued\":7"));
         assert!(json.contains("\"file_vectorization_queue_inflight\":2"));
         assert!(json.contains("\"file_vectorization_queue_depth\":9"));
+        assert!(json.contains("\"runtime_truth_feed\""));
+        assert!(json.contains("\"last_good_payload_at_ms\":9400"));
     }
 }

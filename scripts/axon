@@ -16,6 +16,10 @@ Commands:
   stop [options]           Stop runtime (supports --hard|--verify)
   restart [mode options]   Stop then start
   status                   Runtime health/status check
+  reset-dev-baseline       Reset the dev split runtime into a stable measurable baseline
+  reset-dev-indexer-baseline Reset the dev runtime into an indexer-only measurable baseline
+  qualify-dev-cold [args...] Reset dev and run a cold split qualification
+  qualify-dev-indexer-cold [args...] Reset dev and run a cold indexer-only qualification
   qualify [args...]        Run unified qualification pipeline (defaults to dev instance)
   qualify-mcp [args...]    Unified MCP qualification for core/SOLL surfaces
   validate-mcp [args...]   Expert validator for MCP tools
@@ -50,6 +54,10 @@ Examples:
   ./scripts/axon stop --hard
   ./scripts/axon restart --read-only
   ./scripts/axon status
+  ./scripts/axon reset-dev-baseline
+  ./scripts/axon reset-dev-indexer-baseline
+  ./scripts/axon qualify-dev-cold --duration 20 --interval 5 --label first-cold
+  ./scripts/axon qualify-dev-indexer-cold --duration 20 --interval 5 --label first-indexer-cold
   ./scripts/axon qualify --profile demo --mode graph_only
   ./scripts/axon qualify --profile full --mode full --duration 120 --interval 5 --enforce-gate
   ./scripts/axon qualify --profile smoke --compare mcp_only,graph_only
@@ -63,7 +71,7 @@ Examples:
   ./scripts/axon release-preflight
   ./scripts/axon create-release-manifest --state qualified
   ./scripts/axon promote-live-safe --project AXO
-  ./scripts/axon promote-live --manifest .axon/releases/candidates/v0.7.0-abc.json
+  ./scripts/axon promote-live --manifest .axon/releases/candidates/v0.8.0-abc.json
   ./scripts/axon rollback-live --manifest .axon/live-release/history/live-20260418T120000Z.json
   ./scripts/axon seed-dev-from-live
   ./scripts/axon sync-codex-mcp-config
@@ -197,6 +205,18 @@ EOF
   status)
     exec bash "$SCRIPT_DIR/status.sh" "$@"
     ;;
+  reset-dev-baseline)
+    exec bash "$SCRIPT_DIR/reset-dev-baseline.sh" "$@"
+    ;;
+  reset-dev-indexer-baseline)
+    exec bash "$SCRIPT_DIR/reset-dev-indexer-baseline.sh" "$@"
+    ;;
+  qualify-dev-cold)
+    exec bash "$SCRIPT_DIR/qualify-dev-cold.sh" "$@"
+    ;;
+  qualify-dev-indexer-cold)
+    exec bash "$SCRIPT_DIR/qualify-dev-indexer-cold.sh" "$@"
+    ;;
   qualify)
     exec python3 "$SCRIPT_DIR/qualify_runtime.py" "$@"
     ;;
@@ -244,7 +264,7 @@ EOF
     exec bash "$SCRIPT_DIR/sync-codex-mcp-config.sh" "$@"
     ;;
   check-project-identity)
-    exec python3 "$SCRIPT_DIR/check_no_project_slug.py"
+    exec python3 "$SCRIPT_DIR/check_no_legacy_project_field.py"
     ;;
   qualify-guidance)
     mapfile -d '' forwarded < <(maybe_with_url "$AXON_MCP_URL" "$@")

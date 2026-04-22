@@ -122,6 +122,20 @@ fn parse_scalar_count_row(raw: &str) -> Option<i64> {
 impl McpServer {
     pub(crate) fn axon_resume_vectorization(&self, _args: &Value) -> Option<Value> {
         let runtime_mode = AxonRuntimeMode::from_env();
+        let process_role = std::env::var("AXON_RUNTIME_SHADOW_ROLE")
+            .ok()
+            .unwrap_or_else(|| "legacy_monolith".to_string());
+        if matches!(runtime_mode, AxonRuntimeMode::McpOnly)
+            || matches!(process_role.trim(), "brain" | "brain_shadow")
+        {
+            return Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "resume_vectorization is unavailable on axon-brain. axon-indexer is autonomous and drains its own pipeline before going idle."
+                }],
+                "isError": true
+            }));
+        }
         match self.graph_store.backfill_file_vectorization_queue() {
             Ok(count) => {
                 let mut evidence = format!(

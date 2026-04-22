@@ -41,6 +41,18 @@ impl AxonRuntimeMode {
     pub fn background_vectorization_enabled(self) -> bool {
         matches!(self, Self::Full)
     }
+
+    pub fn control_plane_enabled(self) -> bool {
+        true
+    }
+
+    pub fn is_legacy_compatibility_shim(self) -> bool {
+        true
+    }
+
+    pub fn target_topology(self) -> &'static str {
+        "brain_indexer_split"
+    }
 }
 
 pub fn graph_embeddings_enabled() -> bool {
@@ -91,5 +103,13 @@ mod tests {
         unsafe {
             std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
         }
+    }
+
+    #[test]
+    fn test_runtime_modes_are_explicit_compatibility_shims_for_split_topology() {
+        let mode = AxonRuntimeMode::from_str("mcp_only");
+        assert!(mode.control_plane_enabled());
+        assert!(mode.is_legacy_compatibility_shim());
+        assert_eq!(mode.target_topology(), "brain_indexer_split");
     }
 }

@@ -8,6 +8,7 @@ use libloading::Symbol as LibSymbol;
 use serde_json::Value;
 
 use crate::graph::{ExecFunc, FreeStrFunc, GraphStore, QueryCountFunc, QueryJsonFunc};
+use crate::runtime_truth_contract::RuntimeFreshnessState;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,18 @@ enum ReadRoute {
 }
 
 impl GraphStore {
+    fn reader_only_ist_unavailable_error(&self) -> anyhow::Error {
+        let contract = self.reader_snapshot_freshness_contract();
+        let reason = contract
+            .degraded_reason
+            .as_deref()
+            .unwrap_or("ist_reader_unavailable");
+        anyhow!(
+            "IST reader-only access unavailable in split brain mode: {}",
+            reason
+        )
+    }
+
     fn reader_refresh_request_debounce_ms() -> u64 {
         std::env::var("AXON_READER_REFRESH_REQUEST_DEBOUNCE_MS")
             .ok()
@@ -117,19 +130,24 @@ impl GraphStore {
             return ReadRoute::Writer;
         }
 
+        if self.db_path.is_none() {
+            self.record_writer_read(freshness);
+            return ReadRoute::Writer;
+        }
+
+        if self.reader_only_ist_mode {
+            self.record_reader_read();
+            return ReadRoute::Reader;
+        }
+
         let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Acquire);
         let reader_epoch = self.reader_state.reader_epoch.load(Ordering::Acquire);
         let lag = commit_epoch.saturating_sub(reader_epoch);
-        let reader_available = {
-            let guard = self
-                .pool
-                .reader_ctx
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            !(*guard).is_null()
-        };
+        let reader_available = self.reader_snapshot_reader_available();
+        let ist_snapshot_contract = self.reader_snapshot_freshness_contract();
 
-        if !reader_available {
+        if !reader_available || !matches!(ist_snapshot_contract.state, RuntimeFreshnessState::Fresh)
+        {
             self.request_reader_refresh_up_to(commit_epoch.max(1));
             self.record_writer_read(freshness);
             return ReadRoute::Writer;
@@ -174,6 +192,9 @@ impl GraphStore {
                     .unwrap_or_else(|p| p.into_inner());
                 if (*guard).is_null() {
                     drop(guard);
+                    if self.reader_only_ist_mode {
+                        return Err(self.reader_only_ist_unavailable_error());
+                    }
                     self.record_writer_read(freshness);
                     return self.query_json_on_writer(query);
                 }
@@ -203,6 +224,9 @@ impl GraphStore {
                     .unwrap_or_else(|p| p.into_inner());
                 if (*guard).is_null() {
                     drop(guard);
+                    if self.reader_only_ist_mode {
+                        return Err(self.reader_only_ist_unavailable_error());
+                    }
                     self.record_writer_read(freshness);
                     let writer = self
                         .pool
@@ -232,6 +256,9 @@ impl GraphStore {
 
     pub fn execute_raw_sql_gateway(&self, query: &str) -> Result<String> {
         if is_read_only_sql(query) {
+            if self.reader_only_ist_mode && !Self::query_targets_attached_soll(query) {
+                return self.query_json_on_reader_with_freshness(query, ReadFreshness::StaleOk);
+            }
             // SQL gateway is the dashboard's canonical truth surface.
             // Force read-only SQL through writer ctx to avoid reader/writer snapshot oscillation.
             self.record_writer_read(ReadFreshness::FreshRequired);
@@ -727,7 +754,58 @@ fn is_read_only_sql(query: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::ReadFreshness;
+    use crate::graph::{ExecFunc, GraphStore, InitDbFunc};
+    use libloading::Symbol as LibSymbol;
+    use std::ffi::CString;
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
+    use tempfile::tempdir;
+
+    fn create_test_db_with_distinct_reader() -> (tempfile::TempDir, GraphStore) {
+        let tempdir = tempdir().unwrap();
+        let store = GraphStore::new(tempdir.path().to_str().unwrap()).unwrap();
+        attach_distinct_reader_snapshot(&store);
+        (tempdir, store)
+    }
+
+    fn attach_distinct_reader_snapshot(store: &GraphStore) {
+        let db_path = store
+            .db_path
+            .as_ref()
+            .expect("disk-backed test store required for distinct reader");
+        let reader_c_path = CString::new(db_path.to_string_lossy().to_string()).unwrap();
+        let soll_path = {
+            let mut path = PathBuf::from(db_path);
+            path.set_file_name("soll.db");
+            path
+        };
+        let attach_q = format!(
+            "INSTALL json; LOAD json; SET checkpoint_threshold = '1GB'; ATTACH '{}' AS soll;",
+            soll_path.to_string_lossy().replace("'", "''")
+        );
+
+        unsafe {
+            let init_fn: LibSymbol<InitDbFunc> = store.pool.lib.get(b"duckdb_init_db\0").unwrap();
+            let exec_fn: LibSymbol<ExecFunc> = store.pool.lib.get(b"duckdb_execute\0").unwrap();
+            let reader_ptr = init_fn(reader_c_path.as_ptr(), true);
+            assert!(
+                !reader_ptr.is_null(),
+                "failed to initialize distinct reader"
+            );
+            assert!(exec_fn(
+                reader_ptr,
+                CString::new(attach_q).unwrap().as_ptr()
+            ));
+
+            let mut reader_guard = store
+                .pool
+                .reader_ctx
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            *reader_guard = reader_ptr;
+        }
+        store.refresh_reader_snapshot().unwrap();
+    }
 
     #[test]
     fn execute_raw_sql_gateway_supports_read_only_and_mutating_queries() {
@@ -751,7 +829,7 @@ mod tests {
 
     #[test]
     fn stale_ok_reader_requests_refresh_without_writer_fallback() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let (_tempdir, store) = create_test_db_with_distinct_reader();
         let before = store.reader_snapshot_diagnostics();
         store.reader_state.commit_epoch.store(7, Ordering::Relaxed);
         store.reader_state.reader_epoch.store(5, Ordering::Relaxed);
@@ -791,7 +869,7 @@ mod tests {
 
     #[test]
     fn fresh_required_routes_stale_reads_to_writer() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let (_tempdir, store) = create_test_db_with_distinct_reader();
         let before = store.reader_snapshot_diagnostics();
         store.reader_state.commit_epoch.store(9, Ordering::Relaxed);
         store.reader_state.reader_epoch.store(3, Ordering::Relaxed);
@@ -828,7 +906,7 @@ mod tests {
 
     #[test]
     fn fresh_preferred_stays_on_reader_and_requests_refresh() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let (_tempdir, store) = create_test_db_with_distinct_reader();
         let before = store.reader_snapshot_diagnostics();
         store.reader_state.commit_epoch.store(15, Ordering::Relaxed);
         store.reader_state.reader_epoch.store(3, Ordering::Relaxed);
@@ -868,7 +946,7 @@ mod tests {
 
     #[test]
     fn fresh_preferred_small_recent_lag_does_not_request_refresh() {
-        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        let (_tempdir, store) = create_test_db_with_distinct_reader();
         let now_ms = crate::graph::GraphStore::current_epoch_ms();
         let before = store.reader_snapshot_diagnostics();
         store.reader_state.commit_epoch.store(15, Ordering::Relaxed);
@@ -920,5 +998,72 @@ mod tests {
         assert_eq!(snapshot.reader_epoch, 12);
         assert_eq!(snapshot.reader_epoch_lag, 0);
         assert!(!snapshot.refresh_inflight);
+    }
+
+    #[test]
+    fn reader_only_mode_never_falls_back_to_writer_when_reader_is_unavailable() {
+        let tempdir = tempdir().unwrap();
+        let db_root = tempdir.path().to_str().unwrap();
+        drop(GraphStore::new(db_root).unwrap());
+
+        let store = GraphStore::new_brain_reader_soll_writer(db_root).unwrap();
+        let before = store.reader_snapshot_diagnostics();
+
+        let reader_ptr = {
+            let mut reader_guard = store
+                .pool
+                .reader_ctx
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let ptr = *reader_guard;
+            *reader_guard = std::ptr::null_mut();
+            ptr
+        };
+        assert!(!reader_ptr.is_null());
+
+        let err = store
+            .query_json_on_reader_with_freshness("SELECT 1", ReadFreshness::StaleOk)
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("IST reader-only access unavailable in split brain mode"));
+
+        let after = store.reader_snapshot_diagnostics();
+        assert_eq!(
+            after.reads_on_writer_total - before.reads_on_writer_total,
+            0
+        );
+        assert_eq!(
+            after.fresh_required_fallback_writer_total
+                - before.fresh_required_fallback_writer_total,
+            0
+        );
+    }
+
+    #[test]
+    fn in_memory_store_reads_route_to_writer_without_reader_refresh() {
+        let store = GraphStore::new(":memory:").unwrap();
+        store.execute("CREATE TABLE Demo (value INTEGER)").unwrap();
+        store
+            .execute("INSERT INTO Demo (value) VALUES (1)")
+            .unwrap();
+        let before = store.reader_snapshot_diagnostics();
+
+        let raw = store.query_json("SELECT value FROM Demo").unwrap();
+
+        assert!(raw.contains('1'));
+        let after = store.reader_snapshot_diagnostics();
+        assert_eq!(
+            after.reads_on_writer_total - before.reads_on_writer_total,
+            1
+        );
+        assert_eq!(
+            after.reads_on_reader_total - before.reads_on_reader_total,
+            0
+        );
+        assert_eq!(
+            after.refresh_requested_epoch - before.refresh_requested_epoch,
+            0
+        );
     }
 }

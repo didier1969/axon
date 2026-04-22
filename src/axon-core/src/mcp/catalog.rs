@@ -2,8 +2,24 @@ use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
 use serde_json::{json, Value};
 
-fn is_public_tool(_name: &str) -> bool {
-    true
+fn is_public_tool(name: &str) -> bool {
+    !matches!(
+        name,
+        "refine_lattice"
+            | "diagnose_indexing"
+            | "diff"
+            | "semantic_clones"
+            | "bidi_trace"
+            | "api_break_check"
+            | "simulate_mutation"
+            | "schema_overview"
+            | "list_labels_tables"
+            | "query_examples"
+            | "cypher"
+            | "debug"
+            | "truth_check"
+            | "resume_vectorization"
+    )
 }
 
 pub(crate) fn requires_indexed_runtime(name: &str) -> bool {
@@ -28,6 +44,9 @@ pub(crate) fn requires_indexed_runtime(name: &str) -> bool {
 
 fn tool_available_in_runtime(name: &str) -> bool {
     let runtime_mode = AxonRuntimeMode::from_env();
+    if name == "resume_vectorization" && matches!(runtime_mode, AxonRuntimeMode::McpOnly) {
+        return false;
+    }
     let runtime_profile = AxonRuntimeOperationalProfile::from_mode_and_strings(
         runtime_mode.as_str(),
         std::env::var("AXON_ENABLE_AUTONOMOUS_INGESTOR")

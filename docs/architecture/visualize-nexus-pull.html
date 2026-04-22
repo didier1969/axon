@@ -1,1068 +1,727 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Axon Blueprint v0.1 : Runtime MCP Publie</title>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --primary: #0284c7;
-            --primary-dark: #0369a1;
-            --secondary: #64748b;
-            --success: #059669;
-            --warning: #d97706;
-            --error: #dc2626;
-            --bg: #f8fafc;
-            --card-bg: #ffffff;
-            --text: #0f172a;
-            --text-dim: #475569;
-            --border: #e2e8f0;
-            --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-        }
-        
-        body { 
-            font-family: 'Inter', system-ui, sans-serif; 
-            background-color: var(--bg); 
-            color: var(--text); 
-            margin: 0;
-            padding: 0;
-            line-height: 1.6;
-        }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Axon Architecture: Brain / Indexer Split</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f4efe3;
+      --panel: #fbf8f0;
+      --panel-strong: #fffdf7;
+      --ink: #1b1b18;
+      --muted: #625d55;
+      --line: #d9cfbc;
+      --red: #aa3a1c;
+      --red-soft: #f4d8cf;
+      --blue: #245f73;
+      --blue-soft: #d7eaee;
+      --green: #45653a;
+      --green-soft: #dfe8d7;
+      --amber: #8f6717;
+      --amber-soft: #f0e4c1;
+      --shadow: 0 18px 50px rgba(41, 29, 7, 0.08);
+      --radius: 22px;
+      --mono: "IBM Plex Mono", monospace;
+      --sans: "Space Grotesk", sans-serif;
+    }
 
-        .container { 
-            max-width: 1200px; 
-            margin: auto; 
-            padding: 40px 20px;
-        }
+    * {
+      box-sizing: border-box;
+      min-width: 0;
+    }
 
-        header {
-            background: var(--card-bg);
-            border-bottom: 1px solid var(--border);
-            padding: 60px 20px;
-            text-align: center;
-            margin-bottom: 40px;
-        }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      background:
+        radial-gradient(circle at top left, rgba(36, 95, 115, 0.08), transparent 28%),
+        radial-gradient(circle at top right, rgba(170, 58, 28, 0.08), transparent 22%),
+        linear-gradient(180deg, #f6f1e7 0%, #f2ecdf 100%);
+      color: var(--ink);
+      line-height: 1.45;
+    }
 
-        .hero-title {
-            font-size: 2.75rem;
-            font-weight: 800;
-            color: #0f172a;
-            margin: 0;
-            letter-spacing: -0.05em;
-        }
+    .shell {
+      width: min(1380px, calc(100vw - 40px));
+      margin: 28px auto 72px;
+    }
 
-        .version-badge {
-            display: inline-block;
-            padding: 6px 16px;
-            background: #e0f2fe;
-            color: var(--primary-dark);
-            border-radius: 9999px;
-            font-size: 0.875rem;
-            font-weight: 700;
-            margin-bottom: 20px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
+    .hero,
+    .section,
+    .strip,
+    .footer-note {
+      background: rgba(255, 253, 247, 0.8);
+      border: 1px solid rgba(217, 207, 188, 0.9);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+    }
 
-        section {
-            background: var(--card-bg);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 40px;
-            margin-bottom: 40px;
-            box-shadow: var(--shadow);
-        }
+    .hero {
+      padding: 34px 36px 30px;
+      display: grid;
+      grid-template-columns: 1.45fr 0.95fr;
+      gap: 26px;
+      margin-bottom: 24px;
+    }
 
-        h2 {
-            font-size: 1.75rem;
-            font-weight: 700;
-            margin-top: 0;
-            margin-bottom: 30px;
-            color: #1e293b;
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
+    .eyebrow,
+    .chip,
+    .label,
+    .code,
+    .legend-tag {
+      font-family: var(--mono);
+      letter-spacing: 0.02em;
+    }
 
-        h2::before {
-            content: "";
-            width: 6px;
-            height: 32px;
-            background: var(--primary);
-            border-radius: 3px;
-        }
+    .eyebrow {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid var(--line);
+      background: #fffaf0;
+      border-radius: 999px;
+      padding: 7px 12px;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 16px;
+      text-transform: uppercase;
+    }
 
-        .mermaid {
-            background: #fff;
-            padding: 30px;
-            border-radius: 12px;
-            margin: 20px 0;
-            border: 1px solid #f1f5f9;
-        }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--red);
+      box-shadow: 0 0 0 6px rgba(170, 58, 28, 0.12);
+    }
 
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-            gap: 25px;
-            margin-top: 30px;
-        }
+    h1, h2, h3 {
+      margin: 0;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
 
-        .info-card {
-            padding: 25px;
-            border-radius: 12px;
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            transition: transform 0.2s;
-        }
+    h1 {
+      font-size: clamp(2.3rem, 4vw, 4rem);
+      line-height: 0.95;
+      margin-bottom: 18px;
+      max-width: 10ch;
+    }
 
-        .info-card:hover {
-            transform: translateY(-4px);
-        }
+    h2 {
+      font-size: 1.4rem;
+    }
 
-        .info-card h3 {
-            margin-top: 0;
-            font-size: 1.25rem;
-            color: var(--primary-dark);
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
+    p {
+      margin: 0;
+      color: var(--muted);
+    }
 
-        .info-card p {
-            font-size: 0.95rem;
-            color: var(--text-dim);
-            margin-bottom: 0;
-        }
+    .hero-copy p {
+      font-size: 1.02rem;
+      max-width: 72ch;
+    }
 
-        .tech-tag {
-            font-family: 'Fira Code', monospace;
-            background: #f1f5f9;
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 0.85em;
-            font-weight: 500;
-            color: #475569;
-        }
+    .hero-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 24px;
+    }
 
-        footer {
-            text-align: center;
-            padding: 60px 20px;
-            color: var(--text-dim);
-            font-size: 0.9rem;
-            border-top: 1px solid var(--border);
-        }
+    .hero-stat {
+      padding: 14px 15px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: var(--panel-strong);
+    }
 
-        .llm-bubble {
-            background: #f0f9ff;
-            border: 1px solid #bae6fd;
-            border-radius: 12px;
-            padding: 15px;
-            margin: 10px 0;
-            font-style: italic;
-        }
-    </style>
+    .hero-stat strong {
+      display: block;
+      font-size: 1.12rem;
+      color: var(--ink);
+      margin-top: 4px;
+    }
+
+    .hero-aside {
+      display: grid;
+      gap: 12px;
+    }
+
+    .callout {
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255, 253, 247, 0.9), rgba(250, 245, 234, 0.95));
+      border: 1px solid var(--line);
+    }
+
+    .callout strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--ink);
+    }
+
+    .callout.red { border-color: rgba(170, 58, 28, 0.22); background: linear-gradient(180deg, rgba(244, 216, 207, 0.58), rgba(255, 252, 247, 0.92)); }
+    .callout.blue { border-color: rgba(36, 95, 115, 0.24); background: linear-gradient(180deg, rgba(215, 234, 238, 0.65), rgba(255, 252, 247, 0.92)); }
+    .callout.green { border-color: rgba(69, 101, 58, 0.25); background: linear-gradient(180deg, rgba(223, 232, 215, 0.68), rgba(255, 252, 247, 0.92)); }
+
+    .section {
+      padding: 26px;
+      margin-bottom: 24px;
+    }
+
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-end;
+      margin-bottom: 18px;
+    }
+
+    .section-head p {
+      max-width: 70ch;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1.18fr 0.82fr;
+      gap: 18px;
+    }
+
+    .architect-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      border-radius: 18px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      background: var(--panel-strong);
+    }
+
+    .card.blue { background: linear-gradient(180deg, rgba(215, 234, 238, 0.7), rgba(255, 253, 247, 0.95)); }
+    .card.red { background: linear-gradient(180deg, rgba(244, 216, 207, 0.7), rgba(255, 253, 247, 0.95)); }
+    .card.green { background: linear-gradient(180deg, rgba(223, 232, 215, 0.72), rgba(255, 253, 247, 0.95)); }
+    .card.amber { background: linear-gradient(180deg, rgba(240, 228, 193, 0.72), rgba(255, 253, 247, 0.95)); }
+
+    .label {
+      display: inline-block;
+      padding: 5px 9px;
+      font-size: 11px;
+      border-radius: 999px;
+      margin-bottom: 10px;
+      border: 1px solid rgba(27, 27, 24, 0.12);
+      background: rgba(255, 255, 255, 0.6);
+      text-transform: uppercase;
+    }
+
+    .card h3 {
+      margin-bottom: 8px;
+      font-size: 1.08rem;
+    }
+
+    .stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    .pipeline {
+      display: grid;
+      gap: 18px;
+      grid-template-columns: 1fr;
+    }
+
+    .lane-title {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .lane-title strong {
+      font-size: 1.12rem;
+    }
+
+    .rail {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .rail.long {
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+
+    .node {
+      position: relative;
+      padding: 16px 14px 14px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: var(--panel-strong);
+      min-height: 130px;
+    }
+
+    .node:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -12px;
+      width: 24px;
+      height: 2px;
+      background: linear-gradient(90deg, rgba(27,27,24,0.22), rgba(27,27,24,0.55));
+      transform: translateY(-50%);
+    }
+
+    .node:not(:last-child)::before {
+      content: "";
+      position: absolute;
+      top: calc(50% - 5px);
+      right: -12px;
+      border-left: 8px solid rgba(27,27,24,0.55);
+      border-top: 6px solid transparent;
+      border-bottom: 6px solid transparent;
+    }
+
+    .node strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 1rem;
+      color: var(--ink);
+    }
+
+    .node p {
+      font-size: 0.95rem;
+    }
+
+    .node.blue { background: linear-gradient(180deg, rgba(215, 234, 238, 0.9), rgba(255, 253, 247, 0.96)); }
+    .node.red { background: linear-gradient(180deg, rgba(244, 216, 207, 0.88), rgba(255, 253, 247, 0.96)); }
+    .node.green { background: linear-gradient(180deg, rgba(223, 232, 215, 0.9), rgba(255, 253, 247, 0.96)); }
+    .node.amber { background: linear-gradient(180deg, rgba(240, 228, 193, 0.9), rgba(255, 253, 247, 0.96)); }
+
+    .bridge {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 16px;
+      align-items: center;
+      margin-top: 18px;
+    }
+
+    .bridge-line {
+      height: 2px;
+      background: linear-gradient(90deg, rgba(36, 95, 115, 0.25), rgba(36, 95, 115, 0.85));
+      border-radius: 999px;
+    }
+
+    .stock-chip {
+      padding: 9px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(36, 95, 115, 0.25);
+      background: rgba(215, 234, 238, 0.8);
+      color: var(--blue);
+      font-size: 12px;
+      font-family: var(--mono);
+    }
+
+    .matrix {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: var(--panel-strong);
+    }
+
+    .matrix th,
+    .matrix td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .matrix th {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      background: rgba(255, 250, 240, 0.9);
+      font-family: var(--mono);
+    }
+
+    .matrix tr:last-child td {
+      border-bottom: none;
+    }
+
+    .matrix td strong {
+      display: block;
+      color: var(--ink);
+      margin-bottom: 6px;
+    }
+
+    .strip {
+      padding: 22px 24px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .strip-block {
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px dashed rgba(27, 27, 24, 0.18);
+      background: rgba(255, 255, 255, 0.46);
+    }
+
+    .footer-note {
+      padding: 22px 24px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .code {
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: rgba(27, 27, 24, 0.06);
+      color: var(--ink);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .legend-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.66);
+    }
+
+    .legend-color {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+    }
+
+    @media (max-width: 1080px) {
+      .hero,
+      .two-col,
+      .strip {
+        grid-template-columns: 1fr;
+      }
+
+      .architect-grid,
+      .hero-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .rail,
+      .rail.long {
+        grid-template-columns: 1fr;
+      }
+
+      .node:not(:last-child)::after,
+      .node:not(:last-child)::before {
+        display: none;
+      }
+
+      .bridge {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
 </head>
 <body>
-    <header>
-        <span class="version-badge">Blueprint v0.1 • Runtime MCP publiable</span>
-        <h1 class="hero-title">Axon Intelligence Engine</h1>
-        <p style="font-size: 1.25rem; color: var(--text-dim); max-width: 800px; margin: 20px auto;">
-            Vue d'architecture <strong>publiante et exécutable</strong> : séparation SOLL / IST, runtime Rust canonique, contrat MCP explicite, et pipeline utile à deux vitesses pour servir vite puis enrichir ensuite.
+  <main class="shell">
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="dot"></span> Axon Architecture · Canonical Runtime View</div>
+        <h1>Brain / Indexer split with push, pull, and async boundaries.</h1>
+        <p>
+          Cette vue remplace l’ancien schéma monolithique. Elle montre la séparation opératoire réelle
+          voulue pour Axon: <strong>control plane</strong> côté <span class="code">axon-brain</span>,
+          <strong>data plane</strong> côté <span class="code">axon-indexer</span>, avec un modèle
+          d’inventaire intermédiaire explicite entre les deux boucles du système.
         </p>
-    </header>
+        <div class="hero-grid">
+          <div class="hero-stat">
+            <span class="label">Processus</span>
+            <strong>2 runtimes séparés</strong>
+            <p>Start, stop, status, pid, sockets et run roots distincts.</p>
+          </div>
+          <div class="hero-stat">
+            <span class="label">Writer ownership</span>
+            <strong>Brain = SOLL · Indexer = IST</strong>
+            <p>Single-writer enforcement par rôle, lecture IST côté brain.</p>
+          </div>
+          <div class="hero-stat">
+            <span class="label">Flow semantics</span>
+            <strong>Push · Pull · Async</strong>
+            <p>Boucle amont en push, aval GPU en pull, finalize hors hot path.</p>
+          </div>
+        </div>
+      </div>
+      <aside class="hero-aside">
+        <div class="callout red">
+          <strong>Ce que le schéma veut empêcher</strong>
+          <p>Un runtime unique qui mélange MCP public, dashboard, ingestion, graph, vectorisation et ownership d’écriture sans frontières claires.</p>
+        </div>
+        <div class="callout blue">
+          <strong>Ce que le schéma veut rendre trivial</strong>
+          <p>Déployer <span class="code">brain</span> sans casser l’indexation, redémarrer <span class="code">indexer</span> sans couper le MCP, et raisonner avec une vérité runtime unique.</p>
+        </div>
+        <div class="callout green">
+          <strong>Stocks critiques</strong>
+          <p><span class="code">persisted_file_pending</span> pilote le throughput global. <span class="code">graph_ready</span> pilote l’alimentation GPU aval.</p>
+        </div>
+      </aside>
+    </section>
 
-    <div class="container">
-        <section id="release-0-1">
-            <h2>Objectif de la Publication 0.1</h2>
-            <p>La priorité n'est plus la grande transformation interne d'Axon, mais la publication d'un système <strong>stable, lisible et exécutable</strong> par d'autres LLM via MCP. La version <strong>0.1</strong> doit rendre visible la vérité runtime, rendre les modes explicites et fournir une base opératoire propre avant la suite des refontes.</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Surface à publier</h3>
-                    <p>Un runtime Rust canonique, un manifest de vérité, une surface SQL/MCP claire, un contrat embeddings visible et une qualification smoke réaliste.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Règle de base</h3>
-                    <p><strong>Manifest-first</strong> : le runtime publie son mode, son profil, son boot et ses endpoints. Les wrappers et les autres LLM lisent cette vérité au lieu de la recalculer.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Ce qui vient après</h3>
-                    <p>La transformation plus profonde d'Axon : simplification radicale du pipeline, incrémentalité de révision, et réduction supplémentaire de la dette structurelle.</p>
-                </div>
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <h2>Topologie canonique</h2>
+          <p>Le cerveau et l’indexeur partagent la vérité durable, mais ne portent plus les mêmes responsabilités ni le même budget opératoire.</p>
+        </div>
+      </div>
+      <div class="architect-grid">
+        <article class="card blue">
+          <span class="label">axon-brain</span>
+          <h3>Control plane public</h3>
+          <p>MCP public, dashboard unique, lecture <span class="code">IST</span>, écriture <span class="code">SOLL</span>, surfaces de status, diagnostics et orchestration.</p>
+        </article>
+        <article class="card red">
+          <span class="label">axon-indexer</span>
+          <h3>Data plane d’indexation</h3>
+          <p>Watcher, ingress, graph production, préparation sémantique, GPU et finalisation, avec ownership exclusif du writer <span class="code">IST</span>.</p>
+        </article>
+        <article class="card amber">
+          <span class="label">SOLL</span>
+          <h3>Intentional graph</h3>
+          <p>Vision, requirements, decisions, milestones, validation et mutation de projet. Single writer: <span class="code">brain</span>.</p>
+        </article>
+        <article class="card green">
+          <span class="label">IST</span>
+          <h3>Indexed structural truth</h3>
+          <p>Fichiers, graphe structurel, états de production, ready queues, lecture snapshotée côté brain, écriture singleton côté indexer.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <h2>Les deux boucles du système</h2>
+          <p>Le système n’est plus présenté comme une chaîne uniforme. Il est découpé en une boucle amont qui pousse la matière, puis une boucle aval cadencée par la ressource GPU.</p>
+        </div>
+      </div>
+      <div class="pipeline">
+        <div class="card blue">
+          <div class="lane-title">
+            <span class="label">Boucle 1</span>
+            <strong>Push: supply / discovery / production</strong>
+          </div>
+          <div class="rail">
+            <div class="node blue">
+              <span class="label">watcher + scan</span>
+              <strong>buffered_discovery</strong>
+              <p>Événements chauds et détection bulk. Le système pousse la matière dès qu’elle existe.</p>
             </div>
-        </section>
-
-        <!-- 0. GOUVERNANCE INTENTIONNELLE & REGISTRE DES DÉCISIONS (MBSE) -->
-        <section id="soll-governance">
-            <h2>Gouvernance Intentionnelle & Registre des Décisions (MBSE)</h2>
-            <p>Axon implémente l'ingénierie basée sur les modèles (<strong>Model-Based Systems Engineering</strong>). Le graphe n'est pas un simple index, c'est le <strong>Modèle Central</strong> assurant un "Digital Thread" entre l'intention et le code.</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Strate Stratégique (Milestones)</h3>
-                    <p>Les <code>Milestones</code> (Jalons) regroupent les objectifs par phase (ex: Phase Apollo). Ils pilotent la roadmap en ciblant des exigences spécifiques.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Simulation de Rayon d'Impact</h3>
-                    <p>Grâce à la vue <code>ImpactRadius</code>, Axon calcule le <strong>Blast Radius</strong> physique de chaque exigence. On sait exactement combien de symboles de code sont affectés par un changement d'intention.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Flexibilité "Notion-Like"</h3>
-                    <p>Chaque entité SOLL dispose d'un champ <code>metadata JSON</code>. Cela permet d'ajouter des propriétés dynamiques (coûts, risques, tags) sans altérer le schéma physique de la base.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Calcul d'Avancement Réel</h3>
-                    <p>L'état "Terminé" est une preuve physique. Un <code>Requirement</code> n'est validé que s'il est couvert par une <code>Decision</code> dont l'impact est vérifié dans le code (IST).</p>
-                </div>
+            <div class="node blue">
+              <span class="label">admission</span>
+              <strong>persisted_file_pending</strong>
+              <p>Stock critique du throughput global. Travail canonique durable avant graphing.</p>
             </div>
-            <div class="mermaid">
-            graph TD
-                subgraph SOLL [Couche Intentionnelle : soll.db]
-                    V[Vision]
-                    M[Milestone]
-                    P[Pillar]
-                    R[Requirement]
-                    D[Decision ADR]
-                    C[Concept]
-                    H[Stakeholder]
-                    Val[Validation / Proof]
-                    
-                    V -- "CONTRIBUTES_TO" --> V
-                    H -- "ORIGINATES" --> R
-                    M -- "TARGETS" --> R
-                    P -- "EPITOMIZES" --> V
-                    R -- "BELONGS_TO" --> P
-                    R -- "REFINES" --> R
-                    D -- "SOLVES" --> R
-                    Val -- "VERIFIES" --> R
-                    C -- "EXPLAINS" --> R
-                    C2[New Concept] -- "SUPERSEDES" --> C
-                end
-
-                subgraph IST [Couche Technique : ist.db]
-                    S[Symbol / Code]
-                    Proj[Project]
-                    Proj -- "HAS_SUBPROJECT" --> Proj
-                end
-
-                D -- "IMPACTS" --> S
-                S -- "SUBSTANTIATES" --> C
-                S -- "BELONGS_TO" --> Proj
-                
-                style V fill:#f1f5f9,stroke:#475569,stroke-width:4px
-                style M,P,R,D,C,C2,H,Val fill:#f1f5f9,stroke:#475569
-                style S,Proj fill:#eff6ff,stroke:#0284c7
+            <div class="node blue">
+              <span class="label">graph production</span>
+              <strong>graph_wip</strong>
+              <p>Zone de production structurelle, limitée par admission et WIP explicite.</p>
             </div>
-        </section>
-
-        <!-- 1. CONTEXTE SYSTÈME (C4 LEVEL 1) -->
-        <section id="c4-level-1">
-            <h2>Vision Holistique (C4 Level 1)</h2>
-            <p>Axon agit comme un cerveau structurel entre l'Agent IA (LLM) et la base de code physique. Il sépare physiquement l'intention (SOLL) de la réalité technique (IST).</p>
-            <div class="mermaid">
-            graph TD
-                User((Agent IA / LLM)) -- "Requêtes Sémantiques (MCP)" --> Axon[Axon Engine]
-                Axon -- "Scan & Map" --> FS[(Filesystem)]
-                
-                subgraph "Stockage Unifié (Multi-DB)"
-                    SOLL[(soll.db)]
-                    IST[(ist.db)]
-                end
-                
-                Axon -- "Souveraineté" --> SOLL
-                Axon -- "Ingestion" --> IST
-                
-                subgraph "Cycle de Vie"
-                    FS -- "Discovery" --> Axon
-                    Axon -- "Enrichment" --> IST
-                end
-
-                style Axon fill:#0ea5e9,color:#fff,stroke:#0284c7,stroke-width:4px
-                style SOLL fill:#fef3c7,stroke:#d97706,stroke-width:2px
-                style IST fill:#eff6ff,stroke:#0284c7,stroke-width:2px
+            <div class="node green">
+              <span class="label">output</span>
+              <strong>graph_ready</strong>
+              <p>Stock central de la boucle GPU aval. Ce n’est pas le centre de tout le système, mais le pont critique vers l’aval.</p>
             </div>
-            <div class="llm-bubble">
-                "Axon est ma mémoire structurelle. Mes intentions sont isolées dans soll.db tandis que la couche technique travaille dans ist.db."
+          </div>
+        </div>
+
+        <div class="bridge">
+          <div class="bridge-line"></div>
+          <div class="stock-chip">graph_ready = inventaire intermédiaire central pour nourrir le GPU</div>
+          <div class="bridge-line"></div>
+        </div>
+
+        <div class="card red">
+          <div class="lane-title">
+            <span class="label">Boucle 2</span>
+            <strong>Pull: GPU-paced downstream</strong>
+          </div>
+          <div class="rail long">
+            <div class="node green">
+              <span class="label">input stock</span>
+              <strong>graph_ready</strong>
+              <p>Si ce stock est vide, la boucle 2 peut dormir. S’il est sain, le GPU doit rester nourri.</p>
             </div>
-        </section>
-
-        <!-- 1.5. LES TROIS SYSTÈMES (DUAL-TRACK & OMNISCIENCE) -->
-        <section id="c4-systems">
-            <h2>Topologie d'Exécution : Production, Runtime Isolé, Publication MCP</h2>
-            <p>La version 0.1 cherche la <strong>clarté opératoire</strong>. On garde la séparation entre production durable et worktrees isolés, mais on remplace la logique implicite par un contrat simple : <code>runtime_mode</code>, <code>runtime_profile</code>, <code>boot_phase</code>, <code>boot_status</code>.</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>1. Production</h3>
-                    <p><strong>Rôle :</strong> surface MCP/SQL de référence pour les autres LLM.<br/>
-                    <strong>Exigence :</strong> mode visible, endpoints stables, état de boot explicite, comportement prévisible.</p>
-                </div>
-                <div class="info-card">
-                    <h3>2. Runtime Isolé</h3>
-                    <p><strong>Rôle :</strong> laboratoire de développement et de qualification.<br/>
-                    <strong>Exigence :</strong> sockets courts, ports réservés, manifest local, et refus explicite de recycler une session vivante dans un mode incompatible.</p>
-                </div>
-                <div class="info-card">
-                    <h3>3. Profils Runtime</h3>
-                    <p><strong>Profils publiés :</strong> <code>graph_only</code>, <code>full_isolated</code>, <code>full_autonomous</code>, <code>read_only</code>, <code>mcp_only</code>.<br/>
-                    <strong>Exigence :</strong> les opérateurs et les autres LLM ne doivent plus deviner ce que fait le runtime.</p>
-                </div>
+            <div class="node amber">
+              <span class="label">prepare</span>
+              <strong>chunk extraction</strong>
+              <p>Préparation CPU, découpage, tokenisation, pré-batchs et réserve courte.</p>
             </div>
-            <div class="mermaid">
-            graph TD
-                subgraph "Machine Hôte"
-                    Runtime[Rust Runtime Canonique<br/>Manifest + SQL + MCP]
-                    
-                    subgraph "Production"
-                        Prod[Serveur MCP / SQL<br/>Surface de référence]
-                    end
-                    
-                    subgraph "Worktree Isolé"
-                        Dev[Runtime Dev<br/>Manifest local + endpoints réservés]
-                    end
-                    
-                    Runtime -- "même contrat publié" --> Prod
-                    Runtime -- "même contrat publié" --> Dev
-                    
-                    Agent((Autres LLM / Agents)) -- "Lecture / opération MCP" --> Prod
-                    DevAgent((Codex / Dev)) -- "TDD / qualif / refactor" --> Dev
-                    Dev -- "promotion après qualification" --> Prod
-                end
-                
-                style Runtime fill:#0ea5e9,color:#fff,stroke:#0284c7,stroke-width:3px
-                style Prod fill:#dcfce7,stroke:#16a34a,stroke-width:2px
-                style Dev fill:#fef3c7,stroke:#d97706,stroke-width:2px
+            <div class="node amber">
+              <span class="label">ready reserve</span>
+              <strong>ready_batches</strong>
+              <p>Quelques batchs d’avance, dimensionnés selon VRAM, densité et cadence effective.</p>
             </div>
-            <div class="llm-bubble">
-                "En tant qu'agent, je dois voir immédiatement si le runtime en face de moi est `graph_only`, `full_isolated` ou `full_autonomous`, et s'il est encore en boot, prêt, dégradé ou cassé."
+            <div class="node red">
+              <span class="label">hot path</span>
+              <strong>GPU execution</strong>
+              <p>Point de cadence de l’aval. Le GPU pilote la consommation, pas l’amont produit.</p>
             </div>
-        </section>
-
-        <!-- 2. ARCHITECTURE DES CONTENEURS (C4 LEVEL 2) -->
-        <section id="c4-level-2">
-            <h2>Architecture des Conteneurs (C4 Level 2)</h2>
-            <p>L'architecture 0.1 garde la séparation SOLL / IST, mais simplifie l'opérationnel : <strong>Rust</strong> est le runtime canonique, publie son manifest très tôt, exécute le bootstrap par phases explicites, puis démarre les services selon un profil opérationnel lisible.</p>
-            <div class="mermaid">
-            graph LR
-                subgraph Elixir_Plane [Visualization Plane : Elixir/Phoenix]
-                    Cockpit[Cockpit / LiveView]
-                    Telemetry[Read Models + Telemetry]
-                end
-
-                subgraph Rust_Plane [Canonical Runtime : Rust/Tokio]
-                    subgraph Bootstrap [BootstrapCoordinator]
-                        Open[Open]
-                        Inspect[Inspect]
-                        Repair[Repair]
-                        Recover[Recover]
-                        Ready[Ready]
-                    end
-                    subgraph Arena [Runtime CPU Arena]
-                        Worker1[Worker 1]
-                        WorkerN[Worker N]
-                    end
-                    Scanner[Scanner Engine + Axon Ignore]
-                    Watcher[Native FS Watcher]
-                    Guard[FileIngressGuard]
-                    Buffer[IngressBuffer RAM]
-                    Promoter[IngressPromoter]
-                    Planner[Adaptive Claimer]
-                    MCP[Serveur MCP / SQL]
-                    Channel(((QueueStore + Memory Budget)))
-                    Writer[DB Writer Actor]
-                    Manifest[Runtime Manifest]
-                end
-
-                subgraph Unified_Storage [Architecture SOLL]
-                    IST[(ist.db)]
-                    SOLL[(soll.db)]
-                    IST -- "ATTACH" --> SOLL
-                end
-
-                Open --> Inspect --> Repair --> Recover --> Ready
-                Ready --> Manifest
-                Ready --> Scanner
-                Ready --> Watcher
-                Scanner -- "1. useful events" --> Guard
-                Watcher -- "2. useful deltas" --> Guard
-                Guard -- "3. dedupe / scope" --> Buffer
-                Buffer -- "4. batch flush" --> Promoter
-                Promoter -- "5. UPSERT File -> pending" --> IST
-                IST -- "6. durable backlog" --> Planner
-                Planner -- "7. claim / priority" --> Channel
-                Channel -- "8. dispatch" --> Worker1
-                Worker1 -- "9. Results" --> Writer
-                Writer -- "10. Commit IST" --> IST
-                Writer -- "11. Intent links" --> SOLL
-                MCP -- "Read-only queries" --> IST
-                MCP -- "SOLL Commands / Links / Restore" --> SOLL
-                Cockpit -- "Read only / telemetry" --> MCP
-                Telemetry -- "Projections operateur" --> MCP
-                
-                User((Agent IA)) -- "Query / inspect / operate" --> MCP
-                MCP -- "Reader_ctx + manifest truth" --> IST
-
-                style IST fill:#eff6ff,stroke:#0284c7,stroke-width:3px
-                style SOLL fill:#fef3c7,stroke:#d97706,stroke-width:3px
-                style MCP fill:#ecfdf5,stroke:#059669,stroke-width:2px
-                style Writer fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-                style Channel fill:#fee2e2,stroke:#b91c1c,stroke-width:2px,stroke-dasharray: 5 5
-                style Manifest fill:#ecfeff,stroke:#0891b2,stroke-width:2px
+            <div class="node green">
+              <span class="label">output</span>
+              <strong>vector_ready</strong>
+              <p>Résultat indexé et exploitable. La persistance finale reste découplée de cette étape.</p>
             </div>
-        </section>
+          </div>
+        </div>
 
-        <!-- 3. ARCHITECTURE SOLL (V3.3) -->
-        <section id="soll-v3-3">
-            <h2>Architecture SOLL (v3.3)</h2>
-            <p>Isolation physique des intentions humaines pour garantir l'immunité face aux réinitialisations techniques. <code>SOLL</code> est un actif conceptuel à conserver; <code>IST</code> est reconstructible depuis le code.</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>La Base SOLL (soll.db)</h3>
-                    <p>Contient la Vision, les Piliers, les Requirements et le Registre d'IDs. Ce fichier est <strong>protégée</strong> et ne subit jamais de purge automatique.</p>
-                </div>
-                <div class="info-card">
-                    <h3>La Base IST (ist.db)</h3>
-                    <p>Contient les données volatiles : fichiers indexés, symboles AST et dépendances physiques. C'est la cible exclusive de la commande <code>reset</code>.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Mécanisme ATTACH</h3>
-                    <p>Au démarrage, Axon ouvre <code>ist.db</code> et attache <code>soll.db</code> sous un namespace dédié. Les lectures MCP et les écritures du writer peuvent traverser les deux mondes sans les confondre.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Exports SOLL Horodates</h3>
-                    <p>Les fichiers <code>SOLL_EXPORT_*.md</code> servent de snapshots conceptuels versionnables. Ils protègent la mémoire de projet et servent désormais de base à la restauration <code>axon_restore_soll</code>.</p>
-                </div>
-            </div>
-            <div class="llm-bubble">
-                "Grâce à la Couche SOLL, même si nous reconstruisons toute la couche technique (IST), je n'oublie jamais vos exigences stratégiques (SOLL)."
-            </div>
-        </section>
+        <div class="card amber">
+          <div class="lane-title">
+            <span class="label">Sortie</span>
+            <strong>Finalize async</strong>
+          </div>
+          <p>La finalisation ne doit pas ralentir le hot path GPU. Elle vit derrière la boucle 2 comme une sortie asynchrone robuste, pas comme un verrou de fin de calcul.</p>
+        </div>
+      </div>
+    </section>
 
-        <!-- 4. DÉTAIL DES ÉCHANGES & SYNCHRONISATION -->
-        <section id="sync-details">
-            <h2>Dynamique des Échanges (Chaîne Réelle Simplifiée)</h2>
-            <p>La chaîne utile doit servir vite. Le graphe et les chunks deviennent rapidement disponibles; les embeddings arrivent ensuite en fond. Le point de vérité reste Rust + DuckDB, avec publication d'état via le manifest runtime.</p>
-            <div class="mermaid">
-            sequenceDiagram
-                autonumber
-                participant F as Watcher / Scanner (Rust)
-                participant G as FileIngressGuard
-                participant B as IngressBuffer
-                participant PM as IngressPromoter
-                participant PL as Planner / Claimer (Rust)
-                participant Q as QueueStore
-                participant W as Worker Core X (Rust)
-                participant E as Slow Lane Embeddings
-                participant WR as Writer Actor (Rust)
-                participant K as DuckDB
-                participant UI as Cockpit (Elixir)
-                participant M as Runtime Manifest
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <h2>Ownership et contrats de lecture / écriture</h2>
+          <p>Le modèle ne repose pas sur “qui touche la base”, mais sur des frontières simples: un writer singleton par vérité, et des readers séparés pour servir sans casser le plan de données.</p>
+        </div>
+      </div>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>Surface</th>
+            <th>Writer autorisé</th>
+            <th>Readers autorisés</th>
+            <th>Pourquoi</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>SOLL</strong>Intentional graph, mutations produit, guidelines, décisions.</td>
+            <td><strong>axon-brain</strong>Single writer public et opératoire.</td>
+            <td><strong>axon-brain</strong> et lecteurs dérivés si besoin.</td>
+            <td>Les mutations produit et l’interface publique doivent rester côté control plane.</td>
+          </tr>
+          <tr>
+            <td><strong>IST</strong>Fichiers connus, graph structurel, queues, états de production.</td>
+            <td><strong>axon-indexer</strong>Writer singleton d’indexation.</td>
+            <td><strong>axon-brain</strong> en lecture, <strong>axon-indexer</strong> en lecture/écriture.</td>
+            <td>Le service MCP doit continuer à lire même si l’indexeur est arrêté; l’indexeur doit reprendre l’écriture dès son redémarrage.</td>
+          </tr>
+          <tr>
+            <td><strong>MCP public</strong>Surface client-facing, outils publics, dashboard.</td>
+            <td><strong>axon-brain</strong></td>
+            <td>Clients externes, dashboard, opérateurs.</td>
+            <td>On évite que la vie interne de l’indexation dégrade directement la stabilité du plan public.</td>
+          </tr>
+          <tr>
+            <td><strong>MCP internal / commands</strong>Diagnostics, actions internes, surface non publique.</td>
+            <td><strong>axon-brain</strong> ou bridge interne</td>
+            <td>Outils d’exploitation et qualification.</td>
+            <td>Le brain reste la porte d’entrée de contrôle, même quand l’indexer fait le travail lourd.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
 
-                Note over M, K: PHASE 0 : BOOTSTRAP PUBLIE
-                M->>UI: boot_phase / boot_status / runtime_profile
+    <section class="strip">
+      <div class="strip-block">
+        <span class="label">Règle 1</span>
+        <h3>Le GPU ne commande pas l’amont.</h3>
+        <p>Le GPU cadence la consommation de <span class="code">graph_ready</span>. Il ne doit pas redéfinir la priorité produit de <span class="code">watcher → admission → graph</span>.</p>
+      </div>
+      <div class="strip-block">
+        <span class="label">Règle 2</span>
+        <h3>Brain doit survivre à l’arrêt de l’indexer.</h3>
+        <p>Le MCP public et le dashboard restent en lecture. L’absence de writer IST ne doit pas couper la surface publique.</p>
+      </div>
+      <div class="strip-block">
+        <span class="label">Règle 3</span>
+        <h3>Indexer doit repartir sans reprendre SOLL.</h3>
+        <p>Le data plane n’a pas à porter les mutations d’intention. Il doit se contenter d’écrire sa vérité technique.</p>
+      </div>
+    </section>
 
-                Note over F, K: PHASE 1 : FAST LANE
-                F->>G: event {path, mtime, size, source}
-                G->>B: keep only useful delta
-                B->>PM: batch ready
-                PM->>K: UPSERT File {status:'pending', status_reason}
-                K-->>PM: OK
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <h2>Statut runtime visé</h2>
+          <p>La surface de statut doit pouvoir dire sans ambiguïté quel process détient quoi, qui sert quoi, et si le split est réellement convergé ou seulement en mode shadow.</p>
+        </div>
+      </div>
+      <div class="two-col">
+        <div class="stack">
+          <div class="card green">
+            <span class="label">Runtime truth</span>
+            <h3>Ce que l’on veut exposer</h3>
+            <p><span class="code">topology = brain_indexer_split</span>, <span class="code">process_role</span>, <span class="code">public_mcp_authority</span>, <span class="code">soll_writer_authority</span>, <span class="code">ist_writer_authority</span>, états de feed et fraîcheur snapshot.</p>
+          </div>
+          <div class="card amber">
+            <span class="label">Shadow mode</span>
+            <h3>Ce que shadow veut dire</h3>
+            <p>Le split existe, mais n’est pas encore promotable automatiquement. Tant que rollback, version identity et vérité runtime ne sont pas verts, on bloque le cutover.</p>
+          </div>
+        </div>
+        <div class="card red">
+          <span class="label">Operational note</span>
+          <h3>Ce que le document remplace</h3>
+          <p>L’ancien fichier mélangeait encore hypothèses monolithiques, “runtime MCP publiable” et pipeline unique. Cette version assume la séparation des responsabilités et les deux boucles indépendantes.</p>
+          <div class="legend">
+            <span class="legend-tag"><span class="legend-color" style="background: var(--blue);"></span>control plane</span>
+            <span class="legend-tag"><span class="legend-color" style="background: var(--red);"></span>GPU-paced downstream</span>
+            <span class="legend-tag"><span class="legend-color" style="background: var(--green);"></span>canonical stock / truth</span>
+            <span class="legend-tag"><span class="legend-color" style="background: var(--amber);"></span>buffer / async / reserve</span>
+          </div>
+        </div>
+      </div>
+    </section>
 
-                Note over PL, K: PHASE 2 : CLAIM ADAPTATIF
-                PL->>K: CLAIM pending -> indexing (atomique)
-                K-->>PL: batch hot / bulk / titan
-                PL->>Q: reserve memory per task
-                Q->>W: dispatch files
-
-                W->>W: parse + graph + chunks
-                W->>WR: PUSH_DATA {path, extraction_results}
-                WR->>K: COMMIT Transaction
-                K-->>WR: OK
-                WR-->>Q: release reservation
-                WR-->>W: DB_SYNC_COMPLETE / useful truth ready
-
-                Note over E, K: PHASE 3 : SLOW LANE
-                K->>E: enqueue chunks needing embeddings
-                E->>K: publish embeddings progressively
-
-                Note over UI, K: LE RETOUR D'INFORMATION
-                UI->>K: lecture operateur via surfaces Rust
-                K-->>UI: boot / sante / backlog / enrichissement
-            </div>
-        </section>
-
-        <section id="ingestion-reality">
-            <h2>Pipeline d'Ingestion Reel (Version 0.1)</h2>
-            <p>Le pipeline utile suit maintenant trois principes simples : <strong>éviter le travail inutile</strong>, <strong>rendre le travail incrémental</strong>, puis <strong>paralleliser proprement ce qui reste</strong>. Le graphe est déjà un produit utile; les embeddings sont un enrichissement asynchrone.</p>
-            <div class="mermaid">
-            flowchart LR
-                FS[Filesystem] --> SC[Scanner]
-                FS --> WT[Watcher]
-
-                SC --> FG[FileIngressGuard]
-                WT --> FG
-
-                FG -->|metadata changed / new path| IB[IngressBuffer RAM]
-                FG -.->|unchanged| DROP[Ignore]
-
-                IB --> IP[IngressPromoter]
-                IP -->|batch UPSERT| FILE[(DuckDB File)]
-
-                FILE -->|status = pending| CP[Claim Scheduler]
-                CP -->|claim_count / claim_mode| QS[QueueStore]
-                QS -->|reservation_id| WK[Fast Lane Workers]
-                WK --> WR[Writer Actor]
-                WR -->|commit graph / chunks / status| IST[(DuckDB IST)]
-                IST -->|embeddings_pending| SEM[Slow Lane Embeddings]
-                SEM -->|publish enrichment| IST
-
-                IST --> RC[reader_ctx]
-                WR --> WC[writer_ctx]
-                RC --> MCP[SQL / MCP Read-only]
-                IST --> TV[Runtime Telemetry]
-                TV --> PX[Phoenix Cockpit]
-
-                IST --> WAL[(WAL)]
-                WAL -. replay / checkpoint .-> IST
-
-                style IB fill:#ecfeff,stroke:#0891b2,stroke-width:2px
-                style IP fill:#cffafe,stroke:#0e7490,stroke-width:2px
-                style FILE fill:#eff6ff,stroke:#2563eb,stroke-width:3px
-                style QS fill:#fee2e2,stroke:#b91c1c,stroke-width:2px
-                style WAL fill:#fef3c7,stroke:#d97706,stroke-width:2px
-                style SEM fill:#ede9fe,stroke:#7c3aed,stroke-width:2px
-            </div>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>1. Éviter le Travail Inutile</h3>
-                    <p>Le garde d'ingress, le buffer et le scoping par projet servent d'abord à empêcher le retraitement d'un fichier inchangé ou hors périmètre actif.</p>
-                </div>
-                <div class="info-card">
-                    <h3>2. Incrémentalité</h3>
-                    <p>Le but n'est plus de tout refaire plus vite, mais de recalculer seulement le sous-graphe et les chunks réellement affectés par une révision utile.</p>
-                </div>
-                <div class="info-card">
-                    <h3>3. Fast Lane</h3>
-                    <p>Le service minimal utile au LLM est : fichier détecté, parsing, graphe prêt, chunks prêts, publication immédiate. Cette voie ne doit pas attendre les embeddings.</p>
-                </div>
-                <div class="info-card">
-                    <h3>4. Slow Lane</h3>
-                    <p>Les embeddings arrivent ensuite en fond, par priorité. Ils enrichissent la recherche sémantique sans bloquer la disponibilité structurelle du système.</p>
-                </div>
-                <div class="info-card">
-                    <h3>5. Parallélisme CPU Borné</h3>
-                    <p>Le vrai levier n'est pas le GPU pour le graphe. Le bon levier est un parallélisme CPU propre sur la fast lane, avec publication contrôlée et sans amplifier du travail déjà inutile.</p>
-                </div>
-                <div class="info-card">
-                    <h3>6. Writer + WAL</h3>
-                    <p>Toutes les écritures critiques passent par le writer et DuckDB reste la vérité durable. Le <code>WAL</code> fait partie du système normal ; il ne faut pas l'effacer pour "nettoyer" un runtime vivant.</p>
-                </div>
-            </div>
-            <table style="width:100%; border-collapse: collapse; margin-top: 18px;">
-                <tr style="background: #f1f5f9; text-align: left;">
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Variable / Surface</th>
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Role operatoire</th>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>File.status</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Etat canonique du fichier : <code>pending</code>, <code>indexing</code>, <code>indexed</code>, <code>indexed_degraded</code>, <code>skipped</code>, <code>oversized</code>, <code>deleted</code>.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>File.status_reason</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Cause dominante visible : <code>discovered_new</code>, <code>metadata_changed_scan</code>, <code>metadata_changed_hot_delta</code>, <code>claimed_for_indexing</code>, <code>indexed_success_full</code>, <code>recovered_interrupted_indexing</code>, etc.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>claim_mode</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Mode du scheduler : <code>fast</code>, <code>slow</code>, <code>guarded</code>, <code>paused</code>. Derive de la file, du budget memoire et de la pression service.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>queue_depth</code> / <code>reserved_bytes</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Profondeur de file et budget memoire actuellement reserve pour des taches en vol.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>reservation_id</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Identifiant unique par tache en queue. Sert a reserver puis relacher la memoire sans fuite comptable.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>trace_id</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Champ de tracabilite logique. Il ne doit plus piloter la reservation memoire, car plusieurs fichiers peuvent partager la meme trace.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>RssAnon</code> / <code>RssFile</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Distingue le heap/runtime anonyme du cache fichier. C'est crucial pour savoir si le probleme memoire vient du runtime ou du working set DuckDB.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>ist.db</code> / <code>ist.db.wal</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Mesurent la consolidation DuckDB. Une base petite avec un WAL gros n'implique pas une absence d'ecritures ; cela peut simplement signifier qu'un checkpoint n'a pas encore eu lieu.</td>
-                </tr>
-            </table>
-            <div class="llm-bubble">
-                "La decouverte n'est pas la verite. Le watcher et le scanner produisent des signaux bruts; seul le promoteur decide quand ils deviennent du backlog canonique dans DuckDB."
-            </div>
-        </section>
-
-        <section id="file-traceability">
-            <h2>Flux Reel d'un Fichier : Disque → Graphe → Vectoriel</h2>
-            <p>Le flux reel doit etre lu en <strong>trois branches</strong> : le chemin normal d'un fichier, le chemin special des <code>directory events</code> qui deviennent des <code>subtree_hints</code>, puis la couche vectorielle qui part apres confirmation structurelle. Aujourd'hui, Axon sait bien suivre un fichier jusqu'a la confirmation structurelle dans <code>File</code>, mais il ne dispose pas encore d'un <strong>indicateur canonique unique par fichier</strong> pour toute la chaine vectorielle.</p>
-            <div class="mermaid">
-            flowchart TD
-                A[Le fichier existe sur disque] --> B{Watcher ou Scanner}
-                B -->|fichier ignore / non processable| Z[Sortie precoce<br/>watcher_probe / scan only]
-                B -->|file delta| C[FileIngressGuard<br/>path + mtime + size]
-                B -->|directory event| D{directory eligible<br/>for subtree hint}
-
-                C -->|unchanged| Z
-                C -->|new / changed| E[IngressBuffer RAM<br/>file event]
-                E --> F[IngressPromoter]
-                F --> G[UPSERT DuckDB File]
-                G --> H[File.status = pending<br/>status_reason = discovered_new / metadata_changed_*]
-                H --> I[Claim Scheduler]
-                I --> J[QueueStore + reservation_id]
-                J --> K[Worker]
-                K --> L[read_to_string + parser]
-                L --> M[Writer queue]
-                M --> N[status_reason = writer_pending_commit]
-                N --> O[Writer Actor commit]
-                O --> P[File.status = indexed / indexed_degraded / skipped / deleted]
-
-                D -->|no| Z
-                D -->|yes| Q[IngressBuffer RAM<br/>subtree hint]
-                Q --> F
-                F --> R[scan_subtree_with_guard_and_ingress]
-                R --> C
-
-                P --> S[VERITE GRAPHE CONFIRMEE]
-                S --> S1[Symbol]
-                S --> S2[Chunk]
-                S --> S3[CONTAINS / CALLS / CALLS_NIF]
-
-                S --> T[Semantic Worker]
-                T --> T1[ChunkEmbedding]
-                T --> T2[Symbol.embedding]
-                T --> T3[GraphProjection + GraphEmbedding]
-                T1 --> U[VERITE VECTORIELLE DISPONIBLE]
-                T2 --> U
-                T3 --> U
-
-                style E fill:#ecfeff,stroke:#0891b2,stroke-width:2px
-                style Q fill:#e0f2fe,stroke:#0284c7,stroke-width:2px
-                style G fill:#eff6ff,stroke:#2563eb,stroke-width:2px
-                style P fill:#dcfce7,stroke:#16a34a,stroke-width:2px
-                style U fill:#fef3c7,stroke:#d97706,stroke-width:2px
-                style Z fill:#f8fafc,stroke:#94a3b8,stroke-dasharray: 5 5
-            </div>
-
-            <table style="width:100%; border-collapse: collapse; margin-top: 18px;">
-                <tr style="background: #f1f5f9; text-align: left;">
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Etape</th>
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Indicateur individuel par fichier</th>
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Etat reel</th>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Fichier detecte sur disque</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Non durable</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Seulement via logs <code>watcher_probe</code> ou scan. Pas de ligne canonique garantie tant que le promoteur n'a pas ecrit <code>File</code>.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Dans l'IngressBuffer</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Partiel</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Il existe bien une entree RAM par path, mais elle n'est pas exposee aujourd'hui comme surface canonique interrogeable par fichier.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Backlog canonique</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Oui</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>File.status = pending</code> + <code>status_reason</code>.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Claim et execution worker</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Oui</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>File.status = indexing</code>, <code>worker_id</code>, puis <code>status_reason = writer_pending_commit</code>.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Confirmation graphe</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Oui</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>indexed</code>, <code>indexed_degraded</code>, <code>skipped</code>, <code>deleted</code>, avec les tables <code>Symbol</code>, <code>Chunk</code> et relations materialisees.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Confirmation vectorielle</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Non, pas en un seul indicateur fichier</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Il faut inferrer via <code>ChunkEmbedding</code>, <code>Symbol.embedding</code> et <code>GraphEmbedding</code>. Il manque un flag simple du type <code>file_vectorized = true</code>.</td>
-                </tr>
-            </table>
-
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Ce qui est bien trace aujourd'hui</h3>
-                    <p>La chaine canonique jusqu'a la confirmation <strong>structurelle</strong> est visible par fichier dans <code>File</code> : <code>pending → indexing → indexed/indexed_degraded/skipped/deleted</code>, avec <code>status_reason</code>, <code>worker_id</code>, <code>defer_count</code> et <code>last_deferred_at_ms</code>.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Ce qui manque encore</h3>
-                    <p>Il n'existe pas encore un indicateur individuel couvrant toute la chaine : <code>buffered</code>, <code>subtree-hinted</code>, <code>writer queued</code>, <code>graph confirmed</code>, <code>vector confirmed</code>. La branche <code>subtree_hint</code> reste aussi une branche speciale de rescan, pas un etat canonique expose par fichier.</p>
-                </div>
-            </div>
-        </section>
-
-        <section id="promotion-starvation">
-            <h2>Hypothese d'Affamement de Promotion</h2>
-            <p>Oui, le soupcon est techniquement plausible et les signes runtime actuels vont dans ce sens. Le probleme n'est pas seulement "des dossiers ignores existent". Le vrai risque est plutot : <strong>des directories events encore autorises creent des <code>subtree_hints</code> repetes, qui relancent des scans recursifs et consomment CPU + RAM avant que la promotion canonique vers <code>File</code> ne rattrape</strong>.</p>
-            <div class="mermaid">
-            flowchart LR
-                A[Directory event autorise] --> B[watcher.buffered_subtree_hint]
-                B --> C[flush_ingress_buffer_once]
-                C --> D[scan_subtree_with_guard_and_ingress]
-                D --> E[Nouveaux deltas bufferises]
-                E --> F[Encore des subtree_hints]
-                F --> C
-                C -. temps CPU / memoire .-> G[Promoteur en retard]
-                G --> H[File connu trop bas / backlog canonique en retard]
-
-                style B fill:#dbeafe,stroke:#2563eb,stroke-width:2px
-                style D fill:#fef3c7,stroke:#d97706,stroke-width:2px
-                style G fill:#fee2e2,stroke:#b91c1c,stroke-width:2px
-            </div>
-            <table style="width:100%; border-collapse: collapse; margin-top: 18px;">
-                <tr style="background: #f1f5f9; text-align: left;">
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Signal observe</th>
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Lecture</th>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>Buffered Entries ~ 35k</code> et <code>Subtree Hints ~ 11k</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Le buffer est rempli de travail transitoire avant d'etre converti en verite canonique.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>File = 0</code> alors que le runtime tourne fort</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Le promoteur ou son effet visible est en retard par rapport au volume de bruit amont.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Repetition de <code>Hot subtree scan complete</code> sur <code>metaclaw_audit/MetaClaw/benchmark/...</code></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Ce n'est pas du bruit filtre tot. C'est un sous-arbre encore autorise qui recycle la chaine.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>Last Flush ~ 128s</code> avec WAL qui grossit</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">La promotion n'est pas au rythme du bruit genere.</td>
-                </tr>
-            </table>
-            <div class="llm-bubble">
-                "Le point critique n'est donc pas seulement le filtre de fichiers. Il faut aussi maitriser quels evenements de repertoire ont le droit de devenir des rescans recursifs."
-            </div>
-        </section>
-
-        <!-- 4. ANALYSE DE LA CONCURRENCE -->
-        <section id="concurrency">
-            <h2>Gestion de la Concurrence (MVCC vs Guardian)</h2>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Pourquoi le LLM accède en direct ?</h3>
-                    <p>Le serveur MCP interroge DuckDB via une connexion <strong>read-only</strong> dédiée. Grâce au <strong>MVCC</strong>, il lit un instantané cohérent sans dépendre du dashboard. Cela préserve la latence des lectures sous charge d'ingestion.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Le rôle MCP sur SOLL</h3>
-                    <p>Le LLM n'accède pas seulement au graphe technique. Via MCP, il peut aussi <strong>créer, relier, exporter et restaurer</strong> des entités <code>SOLL</code>. Cette écriture conceptuelle reste distincte de l'ingestion technique.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Le rôle d'Elixir</h3>
-                    <p>La couche Phoenix ne doit plus porter l'autorité d'ingestion. Elle affiche l'état, la télémétrie et les projections opérateur construites à partir des surfaces Rust.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Le Writer Actor</h3>
-                    <p>En Rust, les écritures critiques passent par un <strong>writer actor</strong> dédié. Cela réduit fortement les conflits et sert de point de vérité pour les commits IST/SOLL.</p>
-                </div>
-            </div>
-        </section>
-
-        <section id="reality-check">
-            <h2>Etat Reel au 30 Mars 2026</h2>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Ce qui est branche</h3>
-                    <p>Claiming atomique des fichiers <code>pending -&gt; indexing</code>, lecture live alignée sur le writer, <code>Axon Ignore</code> hiérarchique, scheduler adaptatif, profil runtime matériel-aware, delta staging Rust natif, et voie MCP explicite vers <code>SOLL</code> pour créer/relier/exporter/restaurer la couche conceptuelle.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Ce qui reste cible</h3>
-                    <p>Watcher OS Rust complet avec gestion native des suppressions, lanes <code>hot / bulk / titan</code> entièrement assumées, vectorisation graphe dérivée, et retrait progressif des derniers chemins d'ingestion encore présents côté Elixir.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Principe de verite</h3>
-                    <p>Cette page sert de blueprint guide. Elle ne doit plus etre lue comme un as-built parfait. Toute reprise doit croiser ce document avec le handoff et les tests verts du depot.</p>
-                </div>
-            </div>
-        </section>
-
-        <!-- NEW: SCALABILITÉ DES LECTURES -->
-        <section id="read-scalability">
-            <h2>Scalabilité et Multi-Agents</h2>
-            <p>Axon est conçu pour servir simultanément plusieurs instances d'agents IA (Claude, Gemini, etc.) sans dégradation de performance.</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Multiplexage Tokio</h3>
-                    <p>Le serveur MCP utilise le runtime asynchrone <strong>Tokio</strong>. Il peut gérer des centaines de connexions concurrentes sur un pool de threads réduit, évitant ainsi le blocage I/O classique.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Multi-Reader MVCC</h3>
-                    <p>DuckDB permet des lectures parallèles illimitées. Chaque agent IA dispose de sa propre vue cohérente du graphe, isolée des écritures massives de l'ingestion.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Réserve de Cycles MCP</h3>
-                    <p>Une portion des ressources CPU (Core Reserve) est isolée pour le serveur MCP. Même sous une charge d'indexation de 100%, l'intelligence reste réactive.</p>
-                </div>
-            </div>
-            <div class="mermaid">
-            graph TD
-                A1((Agent IA 1)) -- "JSON-RPC" --> S[Serveur MCP Tokio]
-                A2((Agent IA 2)) -- "JSON-RPC" --> S
-                AN((Agent IA N)) -- "JSON-RPC" --> S
-                
-                S -- "Async Task 1" --> R1[Reader Handle 1]
-                S -- "Async Task 2" --> R2[Reader Handle 2]
-                S -- "Async Task N" --> RN[Reader Handle N]
-                
-                R1 -- "Snapshot" --> K[(DuckDB)]
-                R2 -- "Snapshot" --> K
-                RN -- "Snapshot" --> K
-                
-                style S fill:#ecfdf5,stroke:#059669
-                style K fill:#eff6ff,stroke:#0284c7
-            </div>
-        </section>
-
-
-
-
-
-        <!-- 7. ÉCOSYSTÈME TECHNIQUE -->
-        <section id="tech-ecosystem">
-            <h2>Écosystème Technologique</h2>
-            <p>Un socle polyglotte haute performance, hermétique et reproductible.</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Plan Operateur <span class="tech-tag">Elixir / Phoenix</span></h3>
-                    <p>Visualisation, télémétrie, projections opérateur et interfaces temps réel. Cette couche ne doit plus être l'autorité d'ingestion.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Runtime Canonique <span class="tech-tag">Rust / Tokio</span></h3>
-                    <p>Scan, delta watcher, backlog IST, claiming adaptatif, parsing AST, writer actor, MCP/SQL, et enrichissements dérivés. La couche vectorielle reste secondaire par rapport à la vérité structurelle.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Couche SOLL Storage <span class="tech-tag">DuckDB (Dual-DB)</span></h3>
-                    <p>Isolation physique SOLL/IST via <code>ATTACH DATABASE</code>. DuckDB a remplace Kuzu pour permettre un meilleur controle operatoire, au prix de quelques contraintes de plugin et de modelisation encore en cours de durcissement.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Environment <span class="tech-tag">Nix / Devenv</span></h3>
-                    <p>Isolation hermétique de la chaîne de compilation et des dépendances. Reproductibilité 100% garantie.</p>
-                </div>
-            </div>
-        </section>
-
-        <!-- 6. GESTION DES PRIORITÉS & GROS FICHIERS -->
-        <section id="priority-titan">
-            <h2>Traffic Shaping & Protocole Titan</h2>
-            <p>Axon utilise les métadonnées du graphe pour arbitrer l'accès aux ressources CPU.</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Priorisation Dynamique</h3>
-                    <p>Chaque nœud <code>File</code> porte une <code>priority</code>. Les deltas chauds remontent immédiatement, les scans de fond restent en bulk, et les gros fichiers peuvent basculer en lane <code>titan</code>.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Le Protocole Titan</h3>
-                    <p>Les fichiers <strong>> 1MB</strong> sont marqués dès le scan. Ils sont soit traités en mode "structure seule" (sans embeddings), soit isolés pour éviter de saturer la RAM des autres workers.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Zéro Oubli Sémantique</h3>
-                    <p>Même un fichier rejeté reste présent dans DuckDB avec le statut <code>titan_ignored</code>. Le LLM peut ainsi justifier ses lacunes d'analyse auprès de l'utilisateur.</p>
-                </div>
-            </div>
-            <div class="mermaid">
-            graph LR
-                Scan[Scanner Rust] -- "Detect Size/Ext" --> DuckDB
-                DuckDB -- "File {size: 5MB, priority: titan}" --> Planner[Adaptive Planner Rust]
-                Planner -- "Decision: Titan Lane" --> Worker
-                Worker -- "INDEX_STRUCT_ONLY" --> Writer
-                Worker -- "status: titan_ignored" --> DuckDB
-                
-                style Worker fill:#fef3c7,stroke:#d97706
-            </div>
-        </section>
-
-        <!-- 7. OPTIMISATION DU DÉBIT : PIPELINING -->
-        <section id="pipelining">
-            <h2>Utilisation Optimale des Cœurs (Pipelining)</h2>
-            <p>Pour saturer utilement les cœurs sans faire tomber SQL/MCP, Axon s'appuie désormais sur un pipeline Rust avec backlog DB durable, queue mémoire et throttling adaptatif.</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Backlog Durable</h3>
-                    <p><code>IST</code> reste la source de vérité du travail à faire. La RAM accelere avec <code>IngressBuffer</code> et <code>QueueStore</code>, mais ne decide jamais seule du backlog canonique.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Service Guard</h3>
-                    <p>Les latences récentes de <code>/sql</code> et <code>/mcp</code> sont intégrées dans le throttling. Si la vérité live se dégrade, le bulk ralentit avant que le service ne devienne muet.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Découverte et Semantique Suspendables</h3>
-                    <p>La découverte et les embeddings ralentissent ou se mettent en pause sous pression mémoire, backlog ou latence. La vérité structurelle passe avant l'enrichissement sémantique.</p>
-                </div>
-            </div>
-            <div class="mermaid">
-            sequenceDiagram
-                participant DB as IST backlog
-                participant P as Adaptive Planner
-                participant Q as RAM Queues
-                participant W as Worker Core X
-                
-                DB->>P: pending ordered by priority
-                P->>Q: hot / bulk / titan claim
-                Q->>W: dispatch when slot available
-                W-->>P: commit / latency / pressure feedback
-                P->>DB: shrink or pause bulk when service degrades
-            </div>
-        </section>
-
-        <!-- 8. RÉGULATION DE FLUX ADAPTATIVE -->
-        <section id="adaptive-flow">
-            <h2>Régulation de Flux Adaptative (v3.2)</h2>
-            <p>Axon ajuste dynamiquement sa matière première selon la mémoire, la profondeur des queues, la latence SQL/MCP et la santé globale du runtime.</p>
-            <div class="grid">
-                <div class="info-card">
-                    <h3>Profil Runtime</h3>
-                    <p>Le boot détecte les cœurs, la RAM disponible et un budget mémoire. Le nombre de workers, la taille des queues et les threads bloquants s'adaptent à la machine.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Seuils de Service</h3>
-                    <p>Si <code>/sql</code> ou <code>/mcp</code> montent en latence, le claim bulk se rétrécit, puis se met en pause. Les embeddings sont coupés avant la vérité structurelle.</p>
-                </div>
-                <div class="info-card">
-                    <h3>Delta Hot vs Univers Froid</h3>
-                    <p>Les modifications récentes passent en priorité chaude. Le scan de tout l'univers projet continue en arrière-plan, aussi vite que possible, mais aussi lentement que nécessaire.</p>
-                </div>
-            </div>
-            <div class="mermaid">
-            graph TD
-                H[Runtime Profile] --> P[Adaptive Planner]
-                L[SQL/MCP Latency] --> P
-                M[Memory Pressure] --> P
-                B[Pending Backlog] --> P
-                
-                subgraph "Actions"
-                    P -- "Healthy" --> F[Fast bulk claim]
-                    P -- "Service degraded" --> S[Slow bulk / keep hot lane]
-                    P -- "Critical" --> X[Pause bulk + semantics]
-                end
-            </div>
-        </section>
-
-        <!-- 9. PRINCIPES D'INGÉNIERIE -->
-        <section id="principles">
-            <h2>Principes d'Ingénierie Nexus</h2>
-            <div class="grid">
-                <div class="info-card">
-                    <h3><span class="tech-tag">Zero-Sleep</span></h3>
-                    <p>Aucune attente arbitraire. Le système est auto-régulé par la disponibilité physique des cœurs CPU.</p>
-                </div>
-                <div class="info-card">
-                    <h3><span class="tech-tag">Backpressure Physique</span></h3>
-                    <p>Le flux est tiré (Pull). On n'insère un nouveau fichier que si un slot est libre en base et sur le CPU.</p>
-                </div>
-                <div class="info-card">
-                    <h3><span class="tech-tag">Atomicité</span></h3>
-                    <p>Chaque fichier est traité comme une transaction atomique. Pas d'état "partiellement indexé".</p>
-                </div>
-            </div>
-        </section>
-
-        <!-- ANNEXE TECHNIQUE : SCHÉMA DUCKDB -->
-        <section id="technical-appendix">
-            <h2>Annexe Technique : Schéma du Treillis (DuckDB)</h2>
-            <p>Spécification des tables et types pour la Base Intentionnelle (SOLL) et la Base Technique (IST).</p>
-            
-            <h3>Couche SOLL (soll.db)</h3>
-            <table style="width:100%; border-collapse: collapse; margin-bottom: 30px;">
-                <tr style="background: #f1f5f9; text-align: left;">
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Table / Vue</th>
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Colonnes (Primary Key soulignée)</th>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Vision</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>title</u> VARCHAR, description VARCHAR, goal VARCHAR, metadata JSON</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Pillar</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, description VARCHAR, metadata JSON</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Milestone</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, status VARCHAR, deadline VARCHAR, metadata JSON</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Requirement</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, description VARCHAR, justification VARCHAR, priority VARCHAR, metadata JSON</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Decision</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, title VARCHAR, context VARCHAR, alternative VARCHAR, rationale VARCHAR, status VARCHAR, metadata JSON</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Stakeholder</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>name</u> VARCHAR, role VARCHAR, metadata JSON</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Validation</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, method VARCHAR, result VARCHAR, timestamp BIGINT, metadata JSON</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Registry</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>project_slug</u> VARCHAR, last_req BIGINT, last_cpt BIGINT, last_dec BIGINT, last_mil BIGINT, last_val BIGINT</td>
-                </tr>
-                <tr style="background: #fdf2f2;">
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><strong>ImpactRadius (Vue)</strong></td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">requirement_id, symbols_count (Calculé via récursion IST)</td>
-                </tr>
-            </table>
-
-            <h3>Couche IST (ist.db)</h3>
-            <table style="width:100%; border-collapse: collapse;">
-                <tr style="background: #f1f5f9; text-align: left;">
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Table</th>
-                    <th style="padding: 12px; border: 1px solid #e2e8f0;">Colonnes</th>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">File</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>path</u> VARCHAR, project_slug VARCHAR, status VARCHAR, status_reason VARCHAR, size BIGINT, priority BIGINT, mtime BIGINT, worker_id BIGINT, trace_id VARCHAR, needs_reindex BOOLEAN, defer_count BIGINT, last_error_reason VARCHAR</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Symbol</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, name VARCHAR, kind VARCHAR, tested BOOLEAN, is_public BOOLEAN, is_nif BOOLEAN, is_unsafe BOOLEAN, project_slug VARCHAR, embedding FLOAT[384]</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Chunk</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>id</u> VARCHAR, source_type VARCHAR, source_id VARCHAR, project_slug VARCHAR, content VARCHAR, content_hash VARCHAR, start_line BIGINT, end_line BIGINT</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">EmbeddingModel / ChunkEmbedding</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Modèles d'embedding versionnés et couche dérivée de chunk embeddings, recalculable et suspendable sous pression.</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Relations AST</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">CALLS, IMPORTS, IMPLEMENTS, EXTENDS, TESTS, USES, CALLS_NIF (source_id, target_id)</td>
-                </tr>
-                <tr>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Project</td>
-                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><u>name</u> VARCHAR</td>
-                </tr>
-            </table>
-        </section>
-
-        <footer>
-            &copy; 2026 Didier Stadelmann - Nexus Lead Architect<br>
-            Axon Intelligence Engine • Excellence Architecturale
-        </footer>
-    </div>
-    <script>
-        mermaid.initialize({ 
-            startOnLoad: true, 
-            theme: 'default',
-            fontFamily: 'Inter',
-            sequence: { showSequenceNumbers: true }
-        });
-    </script>
+    <section class="footer-note">
+      <h2>Résumé exécutable</h2>
+      <p>
+        <strong>Axon Brain</strong> sert le monde extérieur et écrit <span class="code">SOLL</span>.
+        <strong>Axon Indexer</strong> produit la vérité technique et écrit <span class="code">IST</span>.
+        Le système s’organise autour de deux boucles parallèles:
+        <span class="code">push</span> jusqu’à <span class="code">graph_ready</span>,
+        puis <span class="code">pull</span> cadencé par le GPU jusqu’à <span class="code">vector_ready</span>,
+        avec <span class="code">finalize</span> hors hot path.
+      </p>
+      <p>
+        Fichier régénéré pour refléter l’état d’architecture actuel du dépôt Axon en date du <span class="code">2026-04-21</span>.
+      </p>
+    </section>
+  </main>
 </body>
 </html>

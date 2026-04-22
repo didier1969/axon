@@ -535,6 +535,12 @@ fn configured_vector_ready_queue_depth() -> usize {
         .max(1)
 }
 
+fn vector_queue_refill_target() -> usize {
+    configured_vector_ready_queue_depth()
+        .saturating_mul(4)
+        .max(256)
+}
+
 fn configured_vector_prepare_pipeline_depth() -> usize {
     std::env::var("AXON_VECTOR_PREPARE_PIPELINE_DEPTH")
         .ok()
@@ -1355,6 +1361,35 @@ impl SemanticWorkerPool {
                     "Semantic Vector Maintenance Worker: failed to recover stale inflight outbox jobs: {:?}",
                     err
                 ),
+            }
+            let queued_depth = graph_store
+                .query_count("SELECT count(*) FROM FileVectorizationQueue WHERE status IN ('queued', 'paused_for_interactive_priority')")
+                .unwrap_or(0)
+                .max(0) as usize;
+            let inflight_depth = graph_store
+                .query_count(
+                    "SELECT count(*) FROM FileVectorizationQueue WHERE status = 'inflight'",
+                )
+                .unwrap_or(0)
+                .max(0) as usize;
+            let current_depth = queued_depth.saturating_add(inflight_depth);
+            let refill_target = vector_queue_refill_target();
+            if current_depth < refill_target {
+                let refill_limit = refill_target.saturating_sub(current_depth);
+                match graph_store.backfill_file_vectorization_queue_with_limit(refill_limit) {
+                    Ok(added) if added > 0 => {
+                        woke = true;
+                        info!(
+                            "Semantic Vector Maintenance Worker: backfilled {} queued vectorization jobs (queue_depth={} refill_target={})",
+                            added, current_depth, refill_target
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => error!(
+                        "Semantic Vector Maintenance Worker: failed to backfill queued vectorization jobs: {:?}",
+                        err
+                    ),
+                }
             }
             if woke {
                 service_guard::record_runtime_wakeup(

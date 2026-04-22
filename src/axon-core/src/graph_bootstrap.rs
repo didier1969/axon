@@ -12,12 +12,112 @@ use crate::embedding_contract::{DIMENSION, GRAPH_MODEL_ID};
 use crate::graph::{CloseDbFunc, ExecFunc, GraphStore, InitDbFunc, LatticePool};
 use crate::runtime_mode::graph_embeddings_enabled;
 use crate::runtime_mode::AxonRuntimeMode;
+use crate::runtime_truth_contract::RuntimeFreshnessContract;
 
 const IST_SCHEMA_VERSION: &str = "3";
 const IST_INGESTION_VERSION: &str = "4";
 // Bump to force a one-time rebuild of derived embedding storage after the
 // crash-safe table reconstruction path was introduced.
 const IST_EMBEDDING_VERSION: &str = "2";
+const STARTUP_SEMANTIC_BACKFILL_FLOOR: usize = 64;
+
+pub fn canonical_soll_db_path(db_root: &str) -> Option<PathBuf> {
+    if db_root == ":memory:" {
+        return None;
+    }
+
+    let mut path = PathBuf::from(db_root);
+    path.push("soll.db");
+    Some(path)
+}
+
+pub fn canonical_ist_db_path(db_root: &str) -> Option<PathBuf> {
+    if db_root == ":memory:" {
+        return None;
+    }
+
+    let mut path = PathBuf::from(db_root);
+    path.push("ist.db");
+    Some(path)
+}
+
+pub fn canonical_ist_reader_db_path(db_root: &str) -> Option<PathBuf> {
+    if db_root == ":memory:" {
+        return None;
+    }
+
+    let mut path = PathBuf::from(db_root);
+    path.push("ist-reader.db");
+    Some(path)
+}
+
+fn reader_db_exists(db_path: &Option<PathBuf>) -> bool {
+    db_path.as_ref().is_some_and(|path| path.exists())
+}
+
+fn startup_vector_backfill_limit(
+    _structural_graph_backlog_depth: usize,
+    graph_ready_depth: usize,
+) -> usize {
+    if graph_ready_depth == 0 {
+        return 0;
+    }
+    let startup_budget = STARTUP_SEMANTIC_BACKFILL_FLOOR;
+    startup_budget.min(graph_ready_depth)
+}
+
+fn remove_path_if_exists(path: &std::path::Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(path)?;
+    } else {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn build_soll_attach_query(path: &std::path::Path, mode: SollAccessMode) -> String {
+    match mode {
+        SollAccessMode::ReadWrite => format!(
+            "ATTACH '{}' AS soll;",
+            path.to_string_lossy().replace('\'', "''")
+        ),
+        SollAccessMode::ReadOnlyOrEmptySchema => {
+            if path.exists() {
+                format!(
+                    "ATTACH '{}' AS soll (READ_ONLY);",
+                    path.to_string_lossy().replace('\'', "''")
+                )
+            } else {
+                "CREATE SCHEMA IF NOT EXISTS soll;".to_string()
+            }
+        }
+        SollAccessMode::Detached => String::new(),
+    }
+}
+
+fn split_brain_ist_reader_soll_writer_mode() -> bool {
+    if matches!(
+        std::env::var("AXON_SPLIT_BRAIN_IST_READER_ONLY")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    ) {
+        return true;
+    }
+    matches!(
+        std::env::var("AXON_RUNTIME_SHADOW_ROLE")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("brain") | Some("brain_shadow")
+    ) && matches!(AxonRuntimeMode::from_env(), AxonRuntimeMode::McpOnly)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IstCompatibilityAction {
     Noop,
@@ -27,21 +127,61 @@ enum IstCompatibilityAction {
     HardRebuild,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SollAccessMode {
+    ReadWrite,
+    ReadOnlyOrEmptySchema,
+    Detached,
+}
+
 #[allow(dead_code)]
 impl GraphStore {
     pub fn new(db_root: &str) -> Result<Self> {
+        Self::new_with_modes(
+            db_root,
+            !db_root.eq(":memory:") && split_brain_ist_reader_soll_writer_mode(),
+            SollAccessMode::ReadWrite,
+        )
+    }
+
+    pub fn new_brain_reader_soll_writer(db_root: &str) -> Result<Self> {
+        Self::new_with_modes(db_root, db_root != ":memory:", SollAccessMode::ReadWrite)
+    }
+
+    pub fn new_indexer_ist_writer_soll_reader(db_root: &str) -> Result<Self> {
+        Self::new_with_modes(db_root, false, SollAccessMode::ReadOnlyOrEmptySchema)
+    }
+
+    pub fn new_indexer_ist_writer_without_soll(db_root: &str) -> Result<Self> {
+        Self::new_with_modes(db_root, false, SollAccessMode::Detached)
+    }
+
+    pub fn new_indexer_ist_writer_split(db_root: &str) -> Result<Self> {
+        Self::new_indexer_ist_writer_without_soll(db_root)
+    }
+
+    fn new_with_modes(
+        db_root: &str,
+        split_brain_mode: bool,
+        soll_access_mode: SollAccessMode,
+    ) -> Result<Self> {
         let plugin_path = Self::find_plugin_path()?;
         let lib = Arc::new(unsafe { Library::new(&plugin_path)? });
         let init_fn: LibSymbol<InitDbFunc> = unsafe { lib.get(b"duckdb_init_db\0")? };
         let close_fn: LibSymbol<CloseDbFunc> = unsafe { lib.get(b"duckdb_close_db\0")? };
         let is_memory = db_root == ":memory:";
+        let split_brain_mode = !is_memory && split_brain_mode;
+        info!(
+            "GraphStore init modes: db_root={}, split_brain_mode={}, soll_access_mode={:?}",
+            db_root, split_brain_mode, soll_access_mode
+        );
 
-        if !is_memory {
+        if !is_memory && matches!(soll_access_mode, SollAccessMode::ReadWrite) {
             let soll_dir = PathBuf::from(db_root);
             std::fs::create_dir_all(&soll_dir)?;
 
-            let mut soll_path = soll_dir.clone();
-            soll_path.push("soll.db");
+            let soll_path = canonical_soll_db_path(db_root)
+                .ok_or_else(|| anyhow!("Failed to derive SOLL database path"))?;
             let soll_c_path = CString::new(soll_path.to_string_lossy().to_string())?;
 
             unsafe {
@@ -53,23 +193,40 @@ impl GraphStore {
             }
         }
 
-        let db_path_str = if is_memory {
-            ":memory:".to_string()
-        } else {
-            let mut p = PathBuf::from(db_root);
-            std::fs::create_dir_all(&p)?;
-            p.push("ist.db");
-            p.to_string_lossy().to_string()
-        };
-        let db_path = if is_memory {
+        let live_ist_path = if is_memory {
             None
         } else {
-            Some(PathBuf::from(&db_path_str))
+            let ist_path = canonical_ist_db_path(db_root)
+                .ok_or_else(|| anyhow!("Failed to derive IST database path"))?;
+            std::fs::create_dir_all(
+                ist_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            )?;
+            Some(ist_path)
         };
-        let c_path = CString::new(db_path_str)?;
+        let reader_db_path = if split_brain_mode {
+            canonical_ist_reader_db_path(db_root)
+        } else {
+            live_ist_path.clone()
+        };
+        let db_path_str = reader_db_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| ":memory:".to_string());
+        let db_path = reader_db_path.clone();
+        let writer_db_path = if split_brain_mode {
+            ":memory:".to_string()
+        } else if let Some(path) = live_ist_path.as_ref() {
+            path.to_string_lossy().to_string()
+        } else {
+            ":memory:".to_string()
+        };
+        let writer_c_path = CString::new(writer_db_path)?;
+        let reader_c_path = CString::new(db_path_str.clone())?;
 
         unsafe {
-            let writer_ptr = init_fn(c_path.as_ptr(), false);
+            let writer_ptr = init_fn(writer_c_path.as_ptr(), false);
             if writer_ptr.is_null() {
                 return Err(anyhow!("Failed to init DuckDB Writer"));
             }
@@ -82,6 +239,12 @@ impl GraphStore {
             let store = Self {
                 pool: pool.clone(),
                 db_path,
+                reader_only_ist_mode: split_brain_mode,
+                soll_attached: !matches!(soll_access_mode, SollAccessMode::Detached),
+                soll_read_only_mode: matches!(
+                    soll_access_mode,
+                    SollAccessMode::ReadOnlyOrEmptySchema
+                ),
                 recent_write_epoch_ms: AtomicU64::new(0),
                 last_reader_refresh_epoch_ms: AtomicU64::new(Self::current_epoch_ms()),
                 reader_refresh_failures_total: AtomicU64::new(0),
@@ -90,13 +253,10 @@ impl GraphStore {
                 reader_refresh_notify: std::sync::Condvar::new(),
             };
 
-            if !is_memory {
-                let mut soll_path = PathBuf::from(db_root);
-                soll_path.push("soll.db");
-                let attach_q = format!(
-                    "ATTACH '{}' AS soll;",
-                    soll_path.to_string_lossy().replace("'", "''")
-                );
+            if !is_memory && store.soll_attached {
+                let soll_path = canonical_soll_db_path(db_root)
+                    .ok_or_else(|| anyhow!("Failed to derive SOLL database path"))?;
+                let attach_q = build_soll_attach_query(&soll_path, soll_access_mode);
                 {
                     let w_guard = store
                         .pool
@@ -109,69 +269,96 @@ impl GraphStore {
                 let _ = store.execute("CREATE SCHEMA IF NOT EXISTS soll;");
             }
 
-            store.init_schema(is_memory)?;
-            store.ensure_additive_schema()?;
-            store.ensure_additive_soll_schema()?;
-            store.ensure_runtime_compatibility()?;
-            info!("GraphStore startup: runtime compatibility checks complete.");
-            store.recover_interrupted_indexing()?;
-            info!("GraphStore startup: interrupted indexing recovery complete.");
-            let _ = store.clear_stale_inflight_graph_projection_work();
-            info!("GraphStore startup: stale graph projection inflight cleanup complete.");
-            let _ = store.clear_stale_inflight_file_vectorization_work();
-            info!("GraphStore startup: stale file vectorization inflight cleanup complete.");
-            if graph_embeddings_enabled() {
-                match store.backfill_graph_projection_queue_for_model(GRAPH_MODEL_ID) {
-                    Ok(count) if count > 0 => {
-                        info!(
-                            "Backfilled {} graph projection queue entries for graph embeddings",
-                            count
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        warn!(
-                            "Unable to backfill graph projection queue at startup: {:?}",
-                            err
-                        );
-                    }
-                }
-            } else {
+            if split_brain_mode {
+                store.ensure_additive_soll_schema()?;
                 info!(
-                    "Skipping graph embedding queue backfill at startup because graph embeddings are disabled."
+                    "GraphStore startup: split brain mode active; IST writer bootstrap skipped and SOLL writer attached separately."
                 );
-            }
-            info!("GraphStore startup: graph projection backfill complete.");
-            if AxonRuntimeMode::from_env().background_vectorization_enabled() {
-                match store.backfill_file_vectorization_queue() {
-                    Ok(count) if count > 0 => {
-                        info!(
-                            "Backfilled {} file vectorization queue entries for chunk embeddings",
-                            count
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        warn!(
-                            "Unable to backfill file vectorization queue at startup: {:?}",
-                            err
-                        );
-                    }
-                }
             } else {
-                info!(
-                    "Skipping file vectorization queue backfill at startup because runtime mode is {}.",
-                    AxonRuntimeMode::from_env().as_str()
-                );
+                store.init_schema(is_memory)?;
+                store.ensure_additive_schema()?;
+                store.ensure_additive_soll_schema()?;
+                store.ensure_runtime_compatibility()?;
+                info!("GraphStore startup: runtime compatibility checks complete.");
+                store.recover_interrupted_indexing()?;
+                info!("GraphStore startup: interrupted indexing recovery complete.");
+                let _ = store.clear_stale_inflight_graph_projection_work();
+                info!("GraphStore startup: stale graph projection inflight cleanup complete.");
+                let _ = store.clear_stale_inflight_file_vectorization_work();
+                info!("GraphStore startup: stale file vectorization inflight cleanup complete.");
+                if graph_embeddings_enabled() {
+                    match store.backfill_graph_projection_queue_for_model(GRAPH_MODEL_ID) {
+                        Ok(count) if count > 0 => {
+                            info!(
+                                "Backfilled {} graph projection queue entries for graph embeddings",
+                                count
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            warn!(
+                                "Unable to backfill graph projection queue at startup: {:?}",
+                                err
+                            );
+                        }
+                    }
+                } else {
+                    info!(
+                        "Skipping graph embedding queue backfill at startup because graph embeddings are disabled."
+                    );
+                }
+                info!("GraphStore startup: graph projection backfill complete.");
+                if AxonRuntimeMode::from_env().background_vectorization_enabled() {
+                    let structural_graph_backlog_depth =
+                        store.count_persisted_file_pending().unwrap_or(0)
+                            + store.count_graph_wip_files().unwrap_or(0);
+                    let graph_ready_depth = store
+                        .query_count("SELECT count(*) FROM File WHERE graph_ready = TRUE AND vector_ready = FALSE")
+                        .unwrap_or(0) as usize;
+                    let vector_backfill_limit = startup_vector_backfill_limit(
+                        structural_graph_backlog_depth,
+                        graph_ready_depth,
+                    );
+                    match store.rebuild_file_vectorization_queue_with_limit(vector_backfill_limit) {
+                        Ok(count) if count > 0 => {
+                            info!(
+                                "Backfilled {} file vectorization queue entries for chunk embeddings with startup floor {} while structural graph backlog remained {} and graph_ready stock was {}",
+                                count, vector_backfill_limit, structural_graph_backlog_depth, graph_ready_depth
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            warn!(
+                                "Unable to backfill file vectorization queue at startup: {:?}",
+                                err
+                            );
+                        }
+                    }
+                } else {
+                    info!(
+                        "Skipping file vectorization queue backfill at startup because runtime mode is {}.",
+                        AxonRuntimeMode::from_env().as_str()
+                    );
+                }
+                info!("GraphStore startup: file vectorization backfill complete.");
+                store.execute("CHECKPOINT;")?;
+                info!("GraphStore startup: writer checkpoint complete.");
             }
-            info!("GraphStore startup: file vectorization backfill complete.");
-            store.execute("CHECKPOINT;")?;
-            info!("GraphStore startup: writer checkpoint complete.");
 
-            let _reader_ptr = if is_memory {
-                writer_ptr
+            let reader_db_available = reader_db_exists(&store.db_path);
+            let _reader_ptr = if is_memory || !reader_db_available {
+                if !is_memory && !reader_db_available {
+                    warn!(
+                        "GraphStore startup: reader database is not materialized yet; using writer as temporary reader until the first successful reader refresh."
+                    );
+                }
+                if split_brain_mode {
+                    std::ptr::null_mut()
+                } else {
+                    writer_ptr
+                }
             } else {
-                let ptr = init_fn(c_path.as_ptr(), true);
+                let ptr = init_fn(reader_c_path.as_ptr(), true);
                 if ptr.is_null() {
                     return Err(anyhow!("Failed to init DuckDB Reader"));
                 }
@@ -186,7 +373,11 @@ impl GraphStore {
                     .reader_ctx
                     .lock()
                     .unwrap_or_else(|p| p.into_inner());
-                *reader_guard = writer_ptr;
+                *reader_guard = if store.reader_only_ist_mode {
+                    _reader_ptr
+                } else {
+                    writer_ptr
+                };
             }
             #[cfg(not(test))]
             {
@@ -198,13 +389,15 @@ impl GraphStore {
                 *reader_guard = _reader_ptr;
             }
 
-            if !is_memory && !cfg!(test) {
-                let mut soll_path = PathBuf::from(db_root);
-                soll_path.push("soll.db");
-                let attach_q = format!(
-                    "ATTACH '{}' AS soll;",
-                    soll_path.to_string_lossy().replace("'", "''")
-                );
+            if !is_memory
+                && store.soll_attached
+                && !cfg!(test)
+                && !_reader_ptr.is_null()
+                && _reader_ptr != writer_ptr
+            {
+                let soll_path = canonical_soll_db_path(db_root)
+                    .ok_or_else(|| anyhow!("Failed to derive SOLL database path"))?;
+                let attach_q = build_soll_attach_query(&soll_path, soll_access_mode);
                 let r_guard = store
                     .pool
                     .reader_ctx
@@ -214,13 +407,28 @@ impl GraphStore {
             }
             info!("GraphStore startup: reader session setup complete.");
             store.sync_reader_epoch_to_commit();
+            if !split_brain_mode && !is_memory {
+                store.refresh_reader_snapshot()?;
+                info!("GraphStore startup: initial IST reader replica published.");
+            }
 
             Ok(store)
         }
     }
 
     pub fn refresh_reader_snapshot(&self) -> Result<()> {
+        if self.db_path.is_none() {
+            self.sync_reader_epoch_to_commit();
+            self.reader_state
+                .refresh_inflight
+                .store(false, Ordering::Release);
+            return Ok(());
+        }
+
         if cfg!(test) {
+            if !self.reader_only_ist_mode {
+                self.publish_ist_reader_replica()?;
+            }
             self.sync_reader_epoch_to_commit();
             self.reader_state
                 .refresh_inflight
@@ -229,12 +437,16 @@ impl GraphStore {
         }
 
         let Some(db_path) = self.db_path.as_ref() else {
+            unreachable!("db_path checked above")
+        };
+
+        if !db_path.exists() {
             self.sync_reader_epoch_to_commit();
             self.reader_state
                 .refresh_inflight
                 .store(false, Ordering::Release);
             return Ok(());
-        };
+        }
 
         let requested_epoch = self
             .reader_state
@@ -248,20 +460,30 @@ impl GraphStore {
             let init_fn: LibSymbol<InitDbFunc> = self.pool.lib.get(b"duckdb_init_db\0")?;
             let close_fn: LibSymbol<CloseDbFunc> = self.pool.lib.get(b"duckdb_close_db\0")?;
 
+            if !self.reader_only_ist_mode {
+                self.publish_ist_reader_replica()?;
+            }
+
             let new_reader = init_fn(c_path.as_ptr(), true);
             if new_reader.is_null() {
                 Err(anyhow!("Failed to init refreshed DuckDB Reader"))
             } else {
-                let mut soll_path = db_path
-                    .parent()
-                    .ok_or_else(|| anyhow!("DB parent path unavailable for reader refresh"))?
-                    .to_path_buf();
-                soll_path.push("soll.db");
-                let attach_q = format!(
-                    "ATTACH '{}' AS soll;",
-                    soll_path.to_string_lossy().replace('\'', "''")
-                );
-                self.setup_session(new_reader, &attach_q)?;
+                if self.soll_attached {
+                    let mut soll_path = db_path
+                        .parent()
+                        .ok_or_else(|| anyhow!("DB parent path unavailable for reader refresh"))?
+                        .to_path_buf();
+                    soll_path.push("soll.db");
+                    let attach_q = build_soll_attach_query(
+                        &soll_path,
+                        if self.soll_read_only_mode {
+                            SollAccessMode::ReadOnlyOrEmptySchema
+                        } else {
+                            SollAccessMode::ReadWrite
+                        },
+                    );
+                    self.setup_session(new_reader, &attach_q)?;
+                }
 
                 let writer_ctx = *self
                     .pool
@@ -323,6 +545,22 @@ impl GraphStore {
     }
 
     pub fn reader_snapshot_age_ms(&self) -> u64 {
+        if self.reader_only_ist_mode {
+            let Some(db_path) = self.db_path.as_ref() else {
+                return u64::MAX;
+            };
+            let Ok(metadata) = std::fs::metadata(db_path) else {
+                return u64::MAX;
+            };
+            let Ok(modified) = metadata.modified() else {
+                return u64::MAX;
+            };
+            let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
+                return u64::MAX;
+            };
+            return age.as_millis() as u64;
+        }
+
         let ts = self.last_reader_refresh_epoch_ms.load(Ordering::Relaxed);
         if ts == 0 {
             return u64::MAX;
@@ -471,6 +709,138 @@ impl GraphStore {
         }
     }
 
+    pub(crate) fn reader_snapshot_reader_available(&self) -> bool {
+        let guard = self
+            .pool
+            .reader_ctx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        !(*guard).is_null()
+    }
+
+    pub(crate) fn reader_snapshot_is_writer_alias(&self) -> bool {
+        let reader_guard = self
+            .pool
+            .reader_ctx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let writer_guard = self
+            .pool
+            .writer_ctx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        !(*reader_guard).is_null() && *reader_guard == *writer_guard
+    }
+
+    pub(crate) fn reader_snapshot_freshness_contract(&self) -> RuntimeFreshnessContract {
+        let diagnostics = self.reader_snapshot_diagnostics();
+        let stale_after_ms = std::env::var("AXON_IST_SNAPSHOT_STALE_AFTER_MS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .unwrap_or(30_000)
+            .max(1);
+        let observed_age_ms = match self.reader_snapshot_age_ms() {
+            u64::MAX => None,
+            age => Some(age),
+        };
+
+        if !self.reader_snapshot_reader_available() {
+            return RuntimeFreshnessContract::degraded(
+                observed_age_ms,
+                stale_after_ms,
+                "ist_reader_unavailable",
+            );
+        }
+
+        if self.reader_snapshot_is_writer_alias() {
+            return RuntimeFreshnessContract::degraded(
+                observed_age_ms,
+                stale_after_ms,
+                "ist_reader_aliases_writer_direct_path",
+            );
+        }
+
+        if diagnostics.refresh_inflight {
+            return RuntimeFreshnessContract::degraded(
+                observed_age_ms,
+                stale_after_ms,
+                "ist_reader_refresh_inflight",
+            );
+        }
+
+        if diagnostics.reader_refresh_failures_total > 0 {
+            return RuntimeFreshnessContract::degraded(
+                observed_age_ms,
+                stale_after_ms,
+                "ist_reader_refresh_failures_observed",
+            );
+        }
+
+        match observed_age_ms {
+            None => RuntimeFreshnessContract::unknown(
+                stale_after_ms,
+                "ist_snapshot_missing_refresh_timestamp",
+            ),
+            Some(age) if age > stale_after_ms => RuntimeFreshnessContract::stale(
+                age,
+                stale_after_ms,
+                "ist_snapshot_age_exceeded_threshold",
+            ),
+            Some(_) => RuntimeFreshnessContract::fresh(stale_after_ms),
+        }
+    }
+
+    fn publish_ist_reader_replica(&self) -> Result<()> {
+        let Some(live_db_path) = self
+            .db_path
+            .as_ref()
+            .and_then(|path| path.parent().map(|parent| parent.join("ist.db")))
+        else {
+            return Ok(());
+        };
+        if !live_db_path.exists() {
+            return Ok(());
+        }
+        let Some(replica_path) = live_db_path
+            .parent()
+            .map(|parent| parent.join("ist-reader.db"))
+        else {
+            return Ok(());
+        };
+        let temp_path = replica_path
+            .parent()
+            .map(|parent| parent.join("ist-reader.publish.tmp.db"))
+            .ok_or_else(|| anyhow!("Failed to derive IST reader temp replica path"))?;
+        let temp_wal_path = temp_path.with_extension("db.wal");
+        let temp_shm_path = temp_path.with_extension("db.shm");
+        let replica_wal_path = replica_path.with_extension("db.wal");
+        let replica_shm_path = replica_path.with_extension("db.shm");
+
+        unsafe {
+            let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
+            let writer_guard = self
+                .pool
+                .writer_ctx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if !exec_fn(*writer_guard, CString::new("CHECKPOINT;")?.as_ptr()) {
+                return Err(anyhow!(
+                    "Failed to checkpoint IST before publishing reader replica"
+                ));
+            }
+        }
+
+        let _ = remove_path_if_exists(&temp_path);
+        let _ = remove_path_if_exists(&temp_wal_path);
+        let _ = remove_path_if_exists(&temp_shm_path);
+        std::fs::copy(&live_db_path, &temp_path)?;
+        let _ = remove_path_if_exists(&replica_path);
+        let _ = remove_path_if_exists(&replica_wal_path);
+        let _ = remove_path_if_exists(&replica_shm_path);
+        std::fs::rename(&temp_path, &replica_path)?;
+        Ok(())
+    }
+
     pub(crate) fn sync_reader_epoch_to_commit(&self) {
         let commit_epoch = self.reader_state.commit_epoch.load(Ordering::Acquire);
         let now_ms = Self::current_epoch_ms();
@@ -488,6 +858,11 @@ impl GraphStore {
     }
 
     fn setup_session(&self, ctx: *mut c_void, attach_query: &str) -> Result<()> {
+        let duckdb_memory_limit_gb = std::env::var("AXON_DUCKDB_MEMORY_LIMIT_GB")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(0);
         unsafe {
             let exec_fn: LibSymbol<ExecFunc> = self.pool.lib.get(b"duckdb_execute\0")?;
             exec_fn(ctx, CString::new("INSTALL json; LOAD json;")?.as_ptr());
@@ -495,6 +870,16 @@ impl GraphStore {
                 ctx,
                 CString::new("SET checkpoint_threshold = '1GB';")?.as_ptr(),
             );
+            if duckdb_memory_limit_gb > 0 {
+                exec_fn(
+                    ctx,
+                    CString::new(format!(
+                        "SET memory_limit = '{}GB';",
+                        duckdb_memory_limit_gb
+                    ))?
+                    .as_ptr(),
+                );
+            }
             if !attach_query.is_empty() {
                 exec_fn(ctx, CString::new(attach_query)?.as_ptr());
             }
@@ -549,16 +934,18 @@ impl GraphStore {
         self.execute(
             "CREATE TABLE IF NOT EXISTS SUBSTANTIATES (source_id VARCHAR, target_id VARCHAR, project_code VARCHAR, PRIMARY KEY (source_id, target_id, project_code))",
         )?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_code VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_gui BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
-        let _ = self.execute(
-            "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0",
-        );
-        self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_code VARCHAR PRIMARY KEY, project_name VARCHAR, project_path VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_code VARCHAR, payload VARCHAR, created_at BIGINT)")?;
-        self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
+        if self.soll_attached && !self.soll_read_only_mode {
+            self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_code VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_gui BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
+            let _ = self.execute(
+                "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0",
+            );
+            self.execute("CREATE TABLE IF NOT EXISTS soll.ProjectCodeRegistry (project_code VARCHAR PRIMARY KEY, project_name VARCHAR, project_path VARCHAR)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.Revision (revision_id VARCHAR PRIMARY KEY, author VARCHAR, source VARCHAR, summary VARCHAR, status VARCHAR, created_at BIGINT, committed_at BIGINT)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionChange (revision_id VARCHAR, entity_type VARCHAR, entity_id VARCHAR, action VARCHAR, before_json VARCHAR, after_json VARCHAR, created_at BIGINT)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.RevisionPreview (preview_id VARCHAR PRIMARY KEY, author VARCHAR, project_code VARCHAR, payload VARCHAR, created_at BIGINT)")?;
+            self.execute("CREATE TABLE IF NOT EXISTS soll.Traceability (id VARCHAR PRIMARY KEY, soll_entity_type VARCHAR, soll_entity_id VARCHAR, artifact_type VARCHAR, artifact_ref VARCHAR, confidence DOUBLE, metadata VARCHAR, created_at BIGINT)")?;
+        }
         self.execute("CREATE TABLE IF NOT EXISTS FileLifecycleEvent (file_path VARCHAR, project_code VARCHAR, stage VARCHAR, status VARCHAR, reason VARCHAR, at_ms BIGINT, worker_id BIGINT, trace_id VARCHAR, run_id VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorBatchRun (run_id VARCHAR PRIMARY KEY, started_at_ms BIGINT, finished_at_ms BIGINT, provider VARCHAR, model_id VARCHAR, chunk_count BIGINT, file_count BIGINT, input_bytes BIGINT, fetch_ms BIGINT, embed_ms BIGINT, db_write_ms BIGINT, mark_done_ms BIGINT, success BOOLEAN, error_reason VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS VectorWorkerFault (fault_id VARCHAR PRIMARY KEY, lane VARCHAR, worker_id BIGINT, fatal_stage VARCHAR, fatal_reason_raw VARCHAR, fatal_class VARCHAR, provider VARCHAR, batch_id VARCHAR, texts_count BIGINT DEFAULT 0, input_bytes BIGINT DEFAULT 0, vram_used_mb BIGINT DEFAULT 0, occurred_at_ms BIGINT, restart_attempt BIGINT DEFAULT 0)")?;
@@ -770,7 +1157,11 @@ impl GraphStore {
     }
 
     fn ensure_additive_soll_schema(&self) -> Result<()> {
-        self.normalize_project_code_registry_schema()?;
+        if !self.soll_attached || self.soll_read_only_mode {
+            return Ok(());
+        }
+
+        self.execute("CREATE TABLE IF NOT EXISTS soll.Registry (project_code VARCHAR PRIMARY KEY DEFAULT 'AXON_GLOBAL', id VARCHAR DEFAULT 'AXON_GLOBAL', last_vis BIGINT DEFAULT 0, last_pil BIGINT DEFAULT 0, last_req BIGINT DEFAULT 0, last_cpt BIGINT DEFAULT 0, last_dec BIGINT DEFAULT 0, last_mil BIGINT DEFAULT 0, last_val BIGINT DEFAULT 0, last_stk BIGINT DEFAULT 0, last_gui BIGINT DEFAULT 0, last_prv BIGINT DEFAULT 0, last_rev BIGINT DEFAULT 0)")?;
         let _ = self.execute(
             "ALTER TABLE soll.Registry ADD COLUMN IF NOT EXISTS last_gui BIGINT DEFAULT 0",
         );
@@ -781,6 +1172,7 @@ impl GraphStore {
         self.execute(
             "ALTER TABLE soll.ProjectCodeRegistry ADD COLUMN IF NOT EXISTS project_path VARCHAR",
         )?;
+        self.normalize_project_code_registry_schema()?;
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS soll_project_code_registry_code_idx ON soll.ProjectCodeRegistry(project_code)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Node (id VARCHAR PRIMARY KEY, type VARCHAR, project_code VARCHAR, title VARCHAR, description VARCHAR, status VARCHAR, metadata VARCHAR)")?;
         self.execute("CREATE TABLE IF NOT EXISTS soll.Edge (source_id VARCHAR, target_id VARCHAR, relation_type VARCHAR, metadata VARCHAR, PRIMARY KEY (source_id, target_id, relation_type))")?;
@@ -1951,10 +2343,16 @@ impl GraphStore {
 
 #[cfg(test)]
 mod graph_bootstrap_tests {
+    use super::{
+        canonical_ist_reader_db_path, reader_db_exists, startup_vector_backfill_limit, GraphStore,
+        STARTUP_SEMANTIC_BACKFILL_FLOOR,
+    };
     use crate::embedding_contract::{
         CHUNK_MODEL_ID, DIMENSION, GRAPH_MODEL_ID, MODEL_NAME, MODEL_VERSION,
     };
     use crate::tests::test_helpers::create_test_db;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
 
     #[test]
     fn test_normalize_project_code_registry_mirrors_code_and_derives_name_from_path() {
@@ -2030,6 +2428,96 @@ mod graph_bootstrap_tests {
     fn test_normalize_project_code_registry_schema_accepts_canonical_schema() {
         let store = create_test_db().unwrap();
         store.normalize_project_code_registry_schema().unwrap();
+    }
+
+    #[test]
+    fn test_indexer_store_can_boot_while_brain_holds_soll_writer() {
+        let temp = tempdir().unwrap();
+        let db_root = temp.path().join("graph_v2");
+        std::fs::create_dir_all(&db_root).unwrap();
+        let db_root_str = db_root.to_string_lossy().to_string();
+
+        let brain = GraphStore::new_brain_reader_soll_writer(&db_root_str).unwrap();
+        brain
+            .execute(
+                "INSERT INTO soll.ProjectCodeRegistry (project_code, project_name, project_path)
+                 VALUES ('AXO', 'Axon', '/home/dstadel/projects/axon')
+                 ON CONFLICT (project_code) DO NOTHING",
+            )
+            .unwrap();
+
+        let indexer = GraphStore::new_indexer_ist_writer_without_soll(&db_root_str).unwrap();
+        assert!(!indexer.soll_attached);
+        indexer
+            .execute(
+                "INSERT INTO File (path, project_code, status, size, priority, mtime)
+                 VALUES ('/tmp/indexer.txt', 'AXO', 'pending', 1, 1, 1)",
+            )
+            .unwrap();
+        indexer.refresh_reader_snapshot().unwrap();
+        let reader_db = canonical_ist_reader_db_path(&db_root_str).unwrap();
+        assert!(
+            reader_db.exists(),
+            "reader replica should exist without SOLL"
+        );
+    }
+
+    #[test]
+    fn test_indexer_publishes_ist_reader_replica_for_brain_reads() {
+        let temp = tempdir().unwrap();
+        let db_root = temp.path().join("graph_v2");
+        std::fs::create_dir_all(&db_root).unwrap();
+        let db_root_str = db_root.to_string_lossy().to_string();
+
+        let indexer = GraphStore::new(&db_root_str).unwrap();
+        indexer
+            .execute(
+                "INSERT INTO File (path, project_code, status, size, priority, mtime)
+                 VALUES ('/tmp/demo.txt', 'AXO', 'pending', 1, 1, 1)",
+            )
+            .unwrap();
+        indexer.mark_writer_commit_visible();
+        indexer.refresh_reader_snapshot().unwrap();
+
+        let reader_db = canonical_ist_reader_db_path(&db_root_str).unwrap();
+        assert!(reader_db.exists(), "reader replica should exist");
+
+        let brain = GraphStore::new_brain_reader_soll_writer(&db_root_str).unwrap();
+        let raw = brain
+            .query_json_on_reader("SELECT count(*) FROM File")
+            .unwrap();
+        assert!(raw.contains("1"), "{raw}");
+        assert!(matches!(
+            brain.reader_snapshot_freshness_contract().state,
+            crate::runtime_truth_contract::RuntimeFreshnessState::Fresh
+        ));
+    }
+
+    #[test]
+    fn test_reader_replica_publish_reuses_path_when_duckdb_temp_dir_exists() {
+        let temp = tempdir().unwrap();
+        let db_root = temp.path().join("graph_v2");
+        std::fs::create_dir_all(&db_root).unwrap();
+        let db_root_str = db_root.to_string_lossy().to_string();
+
+        let indexer = GraphStore::new_indexer_ist_writer_without_soll(&db_root_str).unwrap();
+        indexer
+            .execute(
+                "INSERT INTO File (path, project_code, status, size, priority, mtime)
+                 VALUES ('/tmp/demo.txt', 'AXO', 'pending', 1, 1, 1)",
+            )
+            .unwrap();
+        let conflicting_temp_dir = db_root.join("ist-reader.db.tmp");
+        std::fs::create_dir_all(&conflicting_temp_dir).unwrap();
+
+        indexer.refresh_reader_snapshot().unwrap();
+
+        let reader_db = canonical_ist_reader_db_path(&db_root_str).unwrap();
+        assert!(reader_db.exists(), "reader replica should exist");
+        assert!(
+            conflicting_temp_dir.is_dir(),
+            "legacy duckdb temp directory should not block replica publication"
+        );
     }
 
     #[test]
@@ -2137,6 +2625,29 @@ mod graph_bootstrap_tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn startup_vector_backfill_limit_keeps_vector_startup_bounded_by_graph_ready_stock() {
+        assert_eq!(startup_vector_backfill_limit(0, 0), 0);
+        assert_eq!(startup_vector_backfill_limit(0, 1), 1);
+        assert_eq!(startup_vector_backfill_limit(1, 1), 1);
+        assert_eq!(
+            startup_vector_backfill_limit(0, 512),
+            STARTUP_SEMANTIC_BACKFILL_FLOOR
+        );
+        assert_eq!(
+            startup_vector_backfill_limit(512, 512),
+            STARTUP_SEMANTIC_BACKFILL_FLOOR
+        );
+    }
+
+    #[test]
+    fn reader_db_exists_only_when_physical_db_path_is_present() {
+        assert!(!reader_db_exists(&None));
+        assert!(!reader_db_exists(&Some(PathBuf::from(
+            "/tmp/axon-missing-reader-db-test.db"
+        ))));
     }
 }
 

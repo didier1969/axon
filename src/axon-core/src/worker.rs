@@ -54,7 +54,7 @@ pub enum TaskDispatchOutcome {
 
 impl WorkerPool {
     fn infer_project_code(graph_store: &GraphStore, path: &str) -> Option<String> {
-        crate::project_meta::resolve_registered_project_identity_for_path(
+        crate::project_meta::resolve_project_identity_for_path(
             graph_store,
             std::path::Path::new(path),
         )
@@ -73,7 +73,7 @@ impl WorkerPool {
             .filter(|value| !value.is_empty())
             .and_then(|value| {
                 if crate::project_meta::is_valid_project_code(value) {
-                    crate::project_meta::resolve_registered_project_identity(graph_store, value)
+                    crate::project_meta::resolve_project_identity(graph_store, value)
                         .ok()
                         .map(|identity| identity.code)
                 } else {
@@ -93,7 +93,7 @@ impl WorkerPool {
             Self::normalize_project_code(graph_store, extraction.project_code.clone(), path);
         extraction.project_code.as_ref().map(|_| ()).ok_or_else(|| {
             anyhow::anyhow!(
-                "Chemin `{}` rejeté: aucun projet canonique enregistré ne correspond",
+                "Chemin `{}` rejeté: aucun projet canonique local ou enregistré ne correspond",
                 path
             )
         })

@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
 use walkdir::WalkDir;
@@ -274,7 +274,7 @@ where
     let mut staged = 0usize;
 
     for path in paths {
-        let dedup_key = std::fs::canonicalize(&path).unwrap_or(path.clone());
+        let dedup_key = lexical_dedup_key(&path);
         if !unique.insert(dedup_key) {
             continue;
         }
@@ -301,7 +301,7 @@ where
     let mut staged = 0usize;
 
     for path in paths {
-        let dedup_key = std::fs::canonicalize(&path).unwrap_or(path.clone());
+        let dedup_key = lexical_dedup_key(&path);
         if !unique.insert(dedup_key) {
             continue;
         }
@@ -317,6 +317,29 @@ where
     }
 
     Ok(staged)
+}
+
+fn lexical_dedup_key(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
 }
 
 fn stage_single_file_delta(

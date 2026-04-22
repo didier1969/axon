@@ -8,9 +8,10 @@ use crate::parser::supported_parser_ecosystems;
 use crate::service_guard;
 use anyhow::Result;
 use ignore::{gitignore::Gitignore, WalkBuilder};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{error, info};
 
 struct ProjectDependency {
@@ -20,19 +21,38 @@ struct ProjectDependency {
 
 pub struct Scanner {
     root: PathBuf,
+    root_canonical: PathBuf,
     pub project_code: String,
+    gitignore_cache: MatcherCache,
+    git_exclude_cache: MatcherCache,
+    axoninclude_cache: MatcherCache,
+    axonignore_cache: MatcherCache,
+    axonignore_local_cache: MatcherCache,
 }
+
+type MatcherCache = Mutex<HashMap<PathBuf, Option<Arc<Gitignore>>>>;
 
 #[derive(Debug, Clone, Copy)]
 struct DiscoveryPolicy {
     sleep: std::time::Duration,
 }
 
+const SCANNER_BATCH_SIZE: usize = 512;
+
 impl Scanner {
     pub fn new(root: &str, project_code: &str) -> Self {
+        let root_path = PathBuf::from(root);
+        let root_canonical =
+            std::fs::canonicalize(&root_path).unwrap_or_else(|_| root_path.clone());
         Self {
-            root: PathBuf::from(root),
+            root: root_path,
+            root_canonical,
             project_code: project_code.to_string(),
+            gitignore_cache: Mutex::new(HashMap::new()),
+            git_exclude_cache: Mutex::new(HashMap::new()),
+            axoninclude_cache: Mutex::new(HashMap::new()),
+            axonignore_cache: Mutex::new(HashMap::new()),
+            axonignore_local_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -187,7 +207,8 @@ impl Scanner {
             return Ok(explicit.to_string());
         }
 
-        crate::project_meta::resolve_registered_project_identity_for_path(graph, path)
+        let candidate = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        crate::project_meta::resolve_project_identity_for_path(graph, &candidate)
             .map(|identity| identity.code)
     }
 
@@ -205,20 +226,17 @@ impl Scanner {
             Ok(path) => path,
             Err(_) => path.to_path_buf(),
         };
-        let root = match std::fs::canonicalize(&self.root) {
-            Ok(root) => root,
-            Err(_) => self.root.clone(),
-        };
+        let root = &self.root_canonical;
 
-        if !absolute.starts_with(&root) {
+        if !absolute.starts_with(root) {
             return true;
         }
 
         let mut decision: Option<bool> = None;
-        for dir in ancestor_chain(&root, &absolute) {
-            let ignore_path = dir.join(".gitignore");
-            if ignore_path.exists() {
-                let (matcher, _err) = Gitignore::new(&ignore_path);
+        for dir in ancestor_chain(root, &absolute) {
+            if let Some(matcher) =
+                self.cached_matcher_for(&self.gitignore_cache, &dir.join(".gitignore"))
+            {
                 let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
                 if matched.is_ignore() {
                     decision = Some(true);
@@ -226,9 +244,9 @@ impl Scanner {
                     decision = Some(false);
                 }
             }
-            let exclude_path = dir.join(".git").join("info").join("exclude");
-            if exclude_path.exists() {
-                let (matcher, _err) = Gitignore::new(&exclude_path);
+            if let Some(matcher) =
+                self.cached_matcher_for(&self.git_exclude_cache, &dir.join(".git/info/exclude"))
+            {
                 let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
                 if matched.is_ignore() {
                     decision = Some(true);
@@ -246,20 +264,17 @@ impl Scanner {
             Ok(path) => path,
             Err(_) => path.to_path_buf(),
         };
-        let root = match std::fs::canonicalize(&self.root) {
-            Ok(root) => root,
-            Err(_) => self.root.clone(),
-        };
+        let root = &self.root_canonical;
 
-        if !absolute.starts_with(&root) {
+        if !absolute.starts_with(root) {
             return false;
         }
 
         let mut included = false;
-        for dir in ancestor_chain(&root, &absolute) {
-            let include_path = dir.join(".axoninclude");
-            if include_path.exists() {
-                let (matcher, _err) = Gitignore::new(&include_path);
+        for dir in ancestor_chain(root, &absolute) {
+            if let Some(matcher) =
+                self.cached_matcher_for(&self.axoninclude_cache, &dir.join(".axoninclude"))
+            {
                 let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
                 if matched.is_ignore() || matched.is_whitelist() {
                     included = true;
@@ -279,21 +294,19 @@ impl Scanner {
             Ok(path) => path,
             Err(_) => path.to_path_buf(),
         };
-        let root = match std::fs::canonicalize(&self.root) {
-            Ok(root) => root,
-            Err(_) => self.root.clone(),
-        };
+        let root = &self.root_canonical;
 
-        if !absolute.starts_with(&root) {
+        if !absolute.starts_with(root) {
             return false;
         }
 
         let mut decision: Option<bool> = None;
-        for dir in ancestor_chain(&root, &absolute) {
-            for ignore_name in [".axonignore", ".axonignore.local"] {
-                let ignore_path = dir.join(ignore_name);
-                if ignore_path.exists() {
-                    let (matcher, _err) = Gitignore::new(&ignore_path);
+        for dir in ancestor_chain(root, &absolute) {
+            for (cache, ignore_name) in [
+                (&self.axonignore_cache, ".axonignore"),
+                (&self.axonignore_local_cache, ".axonignore.local"),
+            ] {
+                if let Some(matcher) = self.cached_matcher_for(cache, &dir.join(ignore_name)) {
                     let matched = matcher.matched_path_or_any_parents(&absolute, is_dir);
                     if matched.is_ignore() {
                         decision = Some(true);
@@ -457,18 +470,15 @@ impl Scanner {
 
                 batch.push((path_str, project_name, size, mtime));
 
-                if batch.len() >= 100 {
+                if batch.len() >= SCANNER_BATCH_SIZE {
                     total_files += batch.len();
                     if !dispatch_scanner_batch(&graph, &batch, guard, ingress) {
                         error!("Scanner batch dispatch failed");
                     }
                     batch.clear();
                     info!("... {} files mapped", total_files);
-                    let pending = graph
-                        .query_count("SELECT count(*) FROM File WHERE status = 'pending'")
-                        .unwrap_or(0);
                     let policy = discovery_policy(
-                        pending,
+                        0,
                         current_rss_bytes(),
                         memory_limit_bytes(),
                         service_guard::recent_peak_latency_ms(),
@@ -484,6 +494,26 @@ impl Scanner {
         }
 
         total_files
+    }
+
+    fn cached_matcher_for(
+        &self,
+        cache: &MatcherCache,
+        matcher_path: &Path,
+    ) -> Option<Arc<Gitignore>> {
+        let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(existing) = cache.get(matcher_path) {
+            return existing.clone();
+        }
+
+        let matcher = if matcher_path.exists() {
+            let (matcher, _err) = Gitignore::new(matcher_path);
+            Some(Arc::new(matcher))
+        } else {
+            None
+        };
+        cache.insert(matcher_path.to_path_buf(), matcher.clone());
+        matcher
     }
 }
 
@@ -579,7 +609,7 @@ fn memory_limit_bytes() -> u64 {
 }
 
 fn discovery_policy(
-    pending_backlog: i64,
+    _pending_backlog: i64,
     rss_bytes: Option<u64>,
     memory_limit: u64,
     recent_service_latency_ms: u64,
@@ -588,32 +618,13 @@ fn discovery_policy(
         .map(|rss| rss as f64 / memory_limit.max(1) as f64)
         .unwrap_or(0.0);
 
-    let base_sleep_ms =
-        if recent_service_latency_ms >= 1_500 || rss_ratio >= 0.90 || pending_backlog >= 20_000 {
-            2_000
-        } else if recent_service_latency_ms >= 500 || rss_ratio >= 0.80 || pending_backlog >= 10_000
-        {
-            500
-        } else if pending_backlog >= 5_000 {
-            150
-        } else {
-            50
-        };
-
-    let quiescent_state =
-        service_guard::current_runtime_quiescent_state(0, pending_backlog.max(0) as u64);
-    let quiescent_scale_pct = std::env::var("AXON_QUIESCENT_INTERVAL_SCALE_PCT")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .unwrap_or(400)
-        .clamp(100, 2000);
-    let sleep_ms = service_guard::scale_interval_for_quiescent(
-        base_sleep_ms,
-        quiescent_state,
-        quiescent_scale_pct,
-        50,
-        5_000,
-    );
+    let sleep_ms = if recent_service_latency_ms >= 1_500 || rss_ratio >= 0.90 {
+        250
+    } else if recent_service_latency_ms >= 500 || rss_ratio >= 0.80 {
+        50
+    } else {
+        0
+    };
 
     DiscoveryPolicy {
         sleep: std::time::Duration::from_millis(sleep_ms),
@@ -663,18 +674,18 @@ mod tests {
             10 * 1024 * 1024 * 1024,
             0,
         );
-        assert_eq!(policy.sleep, std::time::Duration::from_millis(50));
+        assert_eq!(policy.sleep, std::time::Duration::ZERO);
     }
 
     #[test]
-    fn test_discovery_policy_slows_when_backlog_grows() {
+    fn test_discovery_policy_keeps_push_discovery_fast_even_when_backlog_grows() {
         let policy = discovery_policy(
-            6_000,
+            20_000,
             Some(2 * 1024 * 1024 * 1024),
             10 * 1024 * 1024 * 1024,
             0,
         );
-        assert_eq!(policy.sleep, std::time::Duration::from_millis(150));
+        assert_eq!(policy.sleep, std::time::Duration::ZERO);
     }
 
     #[test]
@@ -685,20 +696,20 @@ mod tests {
             10 * 1024 * 1024 * 1024,
             700,
         );
-        assert_eq!(policy.sleep, std::time::Duration::from_millis(500));
+        assert_eq!(policy.sleep, std::time::Duration::from_millis(50));
     }
 
     #[test]
     fn test_discovery_policy_pauses_harder_when_pressure_is_critical() {
         let policy = discovery_policy(2_000, Some(95 * 1024 * 1024), 100 * 1024 * 1024, 0);
-        assert_eq!(policy.sleep, std::time::Duration::from_secs(2));
+        assert_eq!(policy.sleep, std::time::Duration::from_millis(250));
     }
 
     #[test]
-    fn test_discovery_policy_scales_up_when_runtime_is_quiescent() {
+    fn test_discovery_policy_does_not_slow_down_just_because_runtime_is_quiescent() {
         service_guard::reset_for_tests();
         let policy = discovery_policy(0, Some(2 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024, 0);
-        assert!(policy.sleep >= std::time::Duration::from_millis(200));
+        assert_eq!(policy.sleep, std::time::Duration::ZERO);
     }
 
     #[test]
@@ -947,5 +958,51 @@ mod tests {
 
         assert_eq!(registered_count, 1);
         assert_eq!(unknown_count, 0);
+    }
+
+    #[test]
+    fn test_workspace_scan_uses_deepest_registered_project_root_for_nested_projects() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let parent = root.join("parent");
+        let nested = parent.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(parent.join("outer.ex"), "defmodule Outer do\nend\n").unwrap();
+        std::fs::write(nested.join("inner.ex"), "defmodule Inner do\nend\n").unwrap();
+
+        let store = Arc::new(crate::tests::test_helpers::create_test_db().unwrap());
+        store
+            .sync_project_registry_entry(
+                "PAR",
+                Some("parent"),
+                Some(parent.to_string_lossy().as_ref()),
+            )
+            .unwrap();
+        store
+            .sync_project_registry_entry(
+                "NST",
+                Some("nested"),
+                Some(nested.to_string_lossy().as_ref()),
+            )
+            .unwrap();
+
+        let scanner = Scanner::new(root.to_string_lossy().as_ref(), "");
+        scanner.scan(store.clone());
+
+        let parent_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM File WHERE project_code = 'PAR' AND path LIKE '{}%'",
+                parent.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        let nested_count = store
+            .query_count(&format!(
+                "SELECT count(*) FROM File WHERE project_code = 'NST' AND path LIKE '{}%'",
+                nested.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        assert_eq!(parent_count, 1);
+        assert_eq!(nested_count, 1);
     }
 }

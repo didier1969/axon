@@ -171,6 +171,22 @@ pub fn resolve_canonical_project_identity(project_code: &str) -> Result<Canonica
     ))
 }
 
+pub fn resolve_discovered_project_identity_for_path(
+    path: &Path,
+) -> Result<CanonicalProjectIdentity> {
+    let candidate = canonicalize_lossy(path);
+    discover_project_identities()
+        .into_iter()
+        .filter(|identity| candidate.starts_with(&identity.project_path))
+        .max_by_key(|identity| identity.project_path.as_os_str().len())
+        .ok_or_else(|| {
+            anyhow!(
+                "Aucun projet canonique local découvert pour le chemin `{}`",
+                candidate.display()
+            )
+        })
+}
+
 pub fn is_valid_project_code(value: &str) -> bool {
     value.len() == 3 && value.chars().all(|ch| ch.is_ascii_alphanumeric())
 }
@@ -248,6 +264,22 @@ pub fn resolve_registered_project_identity(
         })
 }
 
+pub fn resolve_project_identity(
+    graph: &crate::graph::GraphStore,
+    project_code: &str,
+) -> Result<CanonicalProjectIdentity> {
+    let requested = project_code.trim().to_ascii_uppercase();
+    if !is_valid_project_code(&requested) {
+        return Err(anyhow!(
+            "Code projet canonique invalide `{}`: exactement 3 caractères alphanumériques attendus",
+            project_code.trim()
+        ));
+    }
+
+    resolve_canonical_project_identity(&requested)
+        .or_else(|_| resolve_registered_project_identity(graph, &requested))
+}
+
 pub fn resolve_registered_project_identity_for_path(
     graph: &crate::graph::GraphStore,
     path: &Path,
@@ -265,11 +297,21 @@ pub fn resolve_registered_project_identity_for_path(
         })
 }
 
+pub fn resolve_project_identity_for_path(
+    graph: &crate::graph::GraphStore,
+    path: &Path,
+) -> Result<CanonicalProjectIdentity> {
+    resolve_discovered_project_identity_for_path(path)
+        .or_else(|_| resolve_registered_project_identity_for_path(graph, path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         is_valid_project_code, resolve_canonical_project_identity,
-        resolve_registered_project_identity, resolve_registered_project_identity_for_path,
+        resolve_discovered_project_identity_for_path, resolve_project_identity,
+        resolve_project_identity_for_path, resolve_registered_project_identity,
+        resolve_registered_project_identity_for_path,
     };
     use std::path::Path;
 
@@ -288,6 +330,33 @@ mod tests {
         assert_eq!(identity.code, "AXO");
         assert_eq!(identity.name.as_deref(), Some("axon"));
         assert!(identity.meta_path.ends_with(".axon/meta.json"));
+    }
+
+    #[test]
+    fn discovered_project_identity_can_resolve_current_repo_path() {
+        let identity = resolve_discovered_project_identity_for_path(Path::new(
+            "/home/dstadel/projects/axon/src/axon-core/src/main_background.rs",
+        ))
+        .unwrap();
+        assert_eq!(identity.code, "AXO");
+        assert_eq!(identity.name.as_deref(), Some("axon"));
+    }
+
+    #[test]
+    fn local_first_resolution_prefers_meta_for_code_and_path() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+
+        let by_code = resolve_project_identity(&store, "AXO").unwrap();
+        assert_eq!(by_code.code, "AXO");
+        assert_eq!(by_code.name.as_deref(), Some("axon"));
+
+        let by_path = resolve_project_identity_for_path(
+            &store,
+            Path::new("/home/dstadel/projects/axon/src/axon-core/src/main_background.rs"),
+        )
+        .unwrap();
+        assert_eq!(by_path.code, "AXO");
+        assert_eq!(by_path.name.as_deref(), Some("axon"));
     }
 
     #[test]

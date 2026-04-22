@@ -169,14 +169,54 @@ defmodule Axon.Watcher.CockpitLive do
               <h3>File lifecycle</h3>
             </div>
             <div class="hero-grid">
-              <.metric_card label="Known Files" value={@workspace["known"]} tone={:neutral} hint="All files currently known to the canonical file table." />
-              <.metric_card label="Terminal Files" value={@workspace["completed"]} tone={:ok} hint="Terminal lifecycle states: indexed, indexed degraded, skipped, deleted, and oversized." />
-              <.metric_card label="Indexing" value={@workspace["indexing"]} tone={:info} hint="Files currently claimed and actively processing." />
-              <.metric_card label="Pending" value={@workspace["pending"]} tone={:warn} hint="Files waiting to enter the fast lane." />
-              <.metric_card label="Indexed Degraded" value={@workspace["indexed_degraded"]} tone={:warn} hint="Structure-only success. Graph truth exists, but semantic materialization may be partial." />
-              <.metric_card label="Oversized" value={@workspace["oversized"]} tone={:danger} hint="Terminal refusal for the current budget envelope. A later scan or budget change can reopen it." />
-              <.metric_card label="Skipped" value={@workspace["skipped"]} tone={:neutral} hint="Files intentionally skipped by parser/runtime policy." />
-              <.metric_card label="Deleted" value={@workspace["deleted"]} tone={:neutral} hint="Files removed from source and tombstoned in the canonical table." />
+              <.metric_card
+                label="Known Files"
+                value={@workspace["known"]}
+                tone={:neutral}
+                hint="All files currently known to the canonical file table."
+              />
+              <.metric_card
+                label="Terminal Files"
+                value={@workspace["completed"]}
+                tone={:ok}
+                hint="Terminal lifecycle states: indexed, indexed degraded, skipped, deleted, and oversized."
+              />
+              <.metric_card
+                label="Indexing"
+                value={@workspace["indexing"]}
+                tone={:info}
+                hint="Files currently claimed and actively processing."
+              />
+              <.metric_card
+                label="Pending"
+                value={@workspace["pending"]}
+                tone={:warn}
+                hint="Files waiting to enter the fast lane."
+              />
+              <.metric_card
+                label="Indexed Degraded"
+                value={@workspace["indexed_degraded"]}
+                tone={:warn}
+                hint="Structure-only success. Graph truth exists, but semantic materialization may be partial."
+              />
+              <.metric_card
+                label="Oversized"
+                value={@workspace["oversized"]}
+                tone={:danger}
+                hint="Terminal refusal for the current budget envelope. A later scan or budget change can reopen it."
+              />
+              <.metric_card
+                label="Skipped"
+                value={@workspace["skipped"]}
+                tone={:neutral}
+                hint="Files intentionally skipped by parser/runtime policy."
+              />
+              <.metric_card
+                label="Deleted"
+                value={@workspace["deleted"]}
+                tone={:neutral}
+                hint="Files removed from source and tombstoned in the canonical table."
+              />
             </div>
           </section>
 
@@ -192,8 +232,18 @@ defmodule Axon.Watcher.CockpitLive do
                 tone={:ok}
                 hint="Files whose AST-derived structural graph is available and queryable."
               />
-              <.metric_card label="Nodes" value={@workspace["nodes_count"]} tone={:neutral} hint="Structural node count from Symbol." />
-              <.metric_card label="Links" value={@workspace["links_count"]} tone={:neutral} hint="Structural edge count from CALLS, CONTAINS, IMPACTS, and SUBSTANTIATES." />
+              <.metric_card
+                label="Nodes"
+                value={@workspace["nodes_count"]}
+                tone={:neutral}
+                hint="Structural node count from Symbol."
+              />
+              <.metric_card
+                label="Links"
+                value={@workspace["links_count"]}
+                tone={:neutral}
+                hint="Structural edge count from CALLS, CONTAINS, IMPACTS, and SUBSTANTIATES."
+              />
             </div>
           </section>
 
@@ -350,7 +400,7 @@ defmodule Axon.Watcher.CockpitLive do
                 label="Graph Projection In-Flight"
                 value={Integer.to_string(@runtime.graph_projection_queue_inflight)}
               />
-            <.signal_stat
+              <.signal_stat
                 label="Graph Projection Pending"
                 value={Integer.to_string(@runtime.graph_projection_queue_depth)}
               />
@@ -374,7 +424,12 @@ defmodule Axon.Watcher.CockpitLive do
               <.signal_stat label="Bridge" value={bridge_status_label(@runtime.bridge_status)} />
               <.signal_stat
                 label="SQL Snapshot"
-                value={sql_status_label(@runtime.sql_snapshot_status, @runtime.sql_snapshot_last_duration_ms)}
+                value={
+                  sql_status_label(
+                    @runtime.sql_snapshot_status,
+                    @runtime.sql_snapshot_last_duration_ms
+                  )
+                }
               />
               <.signal_stat
                 label="Budget Reserved"
@@ -528,7 +583,17 @@ defmodule Axon.Watcher.CockpitLive do
             phx-update="stream"
             class="stack-list"
           >
-            <div :for={{dom_id, project} <- @streams.projects} id={dom_id} class={["project-card", if(expanded_project?(@expanded_projects, project.project_code), do: "open", else: "closed")]}>
+            <div
+              :for={{dom_id, project} <- @streams.projects}
+              id={dom_id}
+              class={[
+                "project-card",
+                if(expanded_project?(@expanded_projects, project.project_code),
+                  do: "open",
+                  else: "closed"
+                )
+              ]}
+            >
               <div class="project-head">
                 <div>
                   <p class="stack-title">{project.display_name}</p>
@@ -538,8 +603,15 @@ defmodule Axon.Watcher.CockpitLive do
                   <span class={["readiness-pill", readiness_class(project.readiness)]}>
                     {project.progress}%
                   </span>
-                  <button type="button" class="project-toggle" phx-click="toggle_project" phx-value-project_code={project.project_code}>
-                    {if expanded_project?(@expanded_projects, project.project_code), do: "Hide", else: "Details"}
+                  <button
+                    type="button"
+                    class="project-toggle"
+                    phx-click="toggle_project"
+                    phx-value-project_code={project.project_code}
+                  >
+                    {if expanded_project?(@expanded_projects, project.project_code),
+                      do: "Hide",
+                      else: "Details"}
                   </button>
                 </div>
               </div>
@@ -555,7 +627,10 @@ defmodule Axon.Watcher.CockpitLive do
                 />
               </div>
 
-              <div :if={expanded_project?(@expanded_projects, project.project_code)} class="project-grid expanded">
+              <div
+                :if={expanded_project?(@expanded_projects, project.project_code)}
+                class="project-grid expanded"
+              >
                 <.signal_stat label="Degraded" value={Integer.to_string(project.degraded)} />
                 <.signal_stat label="Oversized" value={Integer.to_string(project.oversized)} />
                 <.signal_stat label="Skipped" value={Integer.to_string(project.skipped)} />
@@ -643,7 +718,9 @@ defmodule Axon.Watcher.CockpitLive do
     <article class={["metric-card", tone_class(@tone)]}>
       <p class="metric-label">
         {@label}
-        <span :if={is_binary(@hint) and String.trim(@hint) != ""} class="metric-hint" title={@hint}>i</span>
+        <span :if={is_binary(@hint) and String.trim(@hint) != ""} class="metric-hint" title={@hint}>
+          i
+        </span>
       </p>
       <p class="metric-value">{@value}</p>
     </article>
@@ -687,7 +764,7 @@ defmodule Axon.Watcher.CockpitLive do
           style={"height: #{spark_height(sample, @max_sample)}%"}
         />
       </div>
-      <p class="latency-error" :if={Map.has_key?(@summary, :error_rate)}>
+      <p :if={Map.has_key?(@summary, :error_rate)} class="latency-error">
         error rate {Float.round((@summary[:error_rate] || 0.0) * 100, 2)}%
       </p>
     </div>
@@ -696,17 +773,17 @@ defmodule Axon.Watcher.CockpitLive do
 
   defp assign_snapshot(socket, snapshot) do
     socket
-      |> assign(
-        sql_source: snapshot.sql_source,
-        workspace: snapshot.workspace,
-        runtime: snapshot.runtime,
-        readiness: snapshot.readiness,
-        recent_files: snapshot.recent_files,
-        projects: snapshot.projects,
-        reasons: snapshot.reasons,
-        project_count: length(snapshot.projects),
-        reason_count: length(snapshot.reasons)
-      )
+    |> assign(
+      sql_source: snapshot.sql_source,
+      workspace: snapshot.workspace,
+      runtime: snapshot.runtime,
+      readiness: snapshot.readiness,
+      recent_files: snapshot.recent_files,
+      projects: snapshot.projects,
+      reasons: snapshot.reasons,
+      project_count: length(snapshot.projects),
+      reason_count: length(snapshot.reasons)
+    )
     |> stream(:projects, snapshot.projects, reset: true)
     |> stream(:reasons, snapshot.reasons, reset: true)
   end
@@ -762,7 +839,8 @@ defmodule Axon.Watcher.CockpitLive do
   end
 
   defp preserve_workspace(%{workspace: workspace} = snapshot, previous_workspace) do
-    if zero_workspace?(workspace) and not zero_workspace?(previous_workspace) do
+    if preserve_previous_snapshot?(snapshot) and zero_workspace?(workspace) and
+         not zero_workspace?(previous_workspace) do
       %{snapshot | workspace: previous_workspace}
     else
       snapshot
@@ -771,17 +849,31 @@ defmodule Axon.Watcher.CockpitLive do
 
   defp preserve_projects(%{projects: []} = snapshot, previous_count, previous_projects)
        when previous_count > 0 do
-    %{snapshot | projects: previous_projects}
+    if preserve_previous_snapshot?(snapshot) do
+      %{snapshot | projects: previous_projects}
+    else
+      snapshot
+    end
   end
 
   defp preserve_projects(snapshot, _previous_count, _previous_projects), do: snapshot
 
   defp preserve_reasons(%{reasons: []} = snapshot, previous_count, previous_reasons)
        when previous_count > 0 do
-    %{snapshot | reasons: previous_reasons}
+    if preserve_previous_snapshot?(snapshot) do
+      %{snapshot | reasons: previous_reasons}
+    else
+      snapshot
+    end
   end
 
   defp preserve_reasons(snapshot, _previous_count, _previous_reasons), do: snapshot
+
+  defp preserve_previous_snapshot?(%{runtime: runtime}) when is_map(runtime) do
+    Map.get(runtime, :sql_snapshot_status, :unknown) != :ok
+  end
+
+  defp preserve_previous_snapshot?(_snapshot), do: true
 
   defp zero_workspace?(workspace) when is_map(workspace) do
     Enum.all?(
@@ -909,10 +1001,8 @@ defmodule Axon.Watcher.CockpitLive do
       exhaustion_ratio: Map.get(stats, :exhaustion_ratio, 0.0) || 0.0,
       reserved_task_count: Map.get(stats, :reserved_task_count, 0) || 0,
       anonymous_trace_reserved_tasks: Map.get(stats, :anonymous_trace_reserved_tasks, 0) || 0,
-      anonymous_trace_admissions_total:
-        Map.get(stats, :anonymous_trace_admissions_total, 0) || 0,
-      reservation_release_misses_total:
-        Map.get(stats, :reservation_release_misses_total, 0) || 0,
+      anonymous_trace_admissions_total: Map.get(stats, :anonymous_trace_admissions_total, 0) || 0,
+      reservation_release_misses_total: Map.get(stats, :reservation_release_misses_total, 0) || 0,
       queue_depth: Map.get(stats, :queue_depth, 0) || 0,
       claim_mode: Map.get(stats, :claim_mode, "unknown") || "unknown",
       service_pressure: Map.get(stats, :service_pressure, "healthy") || "healthy",
@@ -932,23 +1022,17 @@ defmodule Axon.Watcher.CockpitLive do
       db_total_bytes: Map.get(stats, :db_total_bytes, 0) || 0,
       duckdb_memory_bytes: Map.get(stats, :duckdb_memory_bytes, 0) || 0,
       duckdb_temporary_bytes: Map.get(stats, :duckdb_temporary_bytes, 0) || 0,
-      graph_projection_queue_queued:
-        Map.get(stats, :graph_projection_queue_queued, 0) || 0,
-      graph_projection_queue_inflight:
-        Map.get(stats, :graph_projection_queue_inflight, 0) || 0,
-      graph_projection_queue_depth:
-        Map.get(stats, :graph_projection_queue_depth, 0) || 0,
-      file_vectorization_queue_queued:
-        Map.get(stats, :file_vectorization_queue_queued, 0) || 0,
+      graph_projection_queue_queued: Map.get(stats, :graph_projection_queue_queued, 0) || 0,
+      graph_projection_queue_inflight: Map.get(stats, :graph_projection_queue_inflight, 0) || 0,
+      graph_projection_queue_depth: Map.get(stats, :graph_projection_queue_depth, 0) || 0,
+      file_vectorization_queue_queued: Map.get(stats, :file_vectorization_queue_queued, 0) || 0,
       file_vectorization_queue_inflight:
         Map.get(stats, :file_vectorization_queue_inflight, 0) || 0,
-      file_vectorization_queue_depth:
-        Map.get(stats, :file_vectorization_queue_depth, 0) || 0,
+      file_vectorization_queue_depth: Map.get(stats, :file_vectorization_queue_depth, 0) || 0,
       ingress_enabled: Map.get(stats, :ingress_enabled, false) || false,
       ingress_buffered_entries: Map.get(stats, :ingress_buffered_entries, 0) || 0,
       ingress_subtree_hints: Map.get(stats, :ingress_subtree_hints, 0) || 0,
-      ingress_subtree_hint_in_flight:
-        Map.get(stats, :ingress_subtree_hint_in_flight, 0) || 0,
+      ingress_subtree_hint_in_flight: Map.get(stats, :ingress_subtree_hint_in_flight, 0) || 0,
       ingress_subtree_hint_accepted_total:
         Map.get(stats, :ingress_subtree_hint_accepted_total, 0) || 0,
       ingress_subtree_hint_blocked_total:
@@ -1030,6 +1114,7 @@ defmodule Axon.Watcher.CockpitLive do
   defp sql_status_label(:ok, duration_ms), do: "OK (#{duration_ms} ms)"
   defp sql_status_label(:error, duration_ms), do: "ERROR (#{duration_ms} ms)"
   defp sql_status_label(:unknown, duration_ms), do: "UNKNOWN (#{duration_ms} ms)"
+
   defp sql_status_label(other, duration_ms),
     do: "#{other |> to_string() |> String.upcase()} (#{duration_ms} ms)"
 
@@ -1120,7 +1205,8 @@ defmodule Axon.Watcher.CockpitLive do
     MapSet.member?(expanded_projects, project_code)
   end
 
-  defp spark_height(value, max_value) when is_integer(value) and is_integer(max_value) and max_value > 0 do
+  defp spark_height(value, max_value)
+       when is_integer(value) and is_integer(max_value) and max_value > 0 do
     value
     |> Kernel.*(100)
     |> Kernel./(max_value)
@@ -1171,12 +1257,16 @@ defmodule Axon.Watcher.CockpitLive do
       "pending" => Map.get(workspace, "pending", 0) || 0,
       "indexed_graph_ready" => Map.get(workspace, "indexed_graph_ready", 0) || 0,
       "indexed_graph_missing" => Map.get(workspace, "indexed_graph_missing", 0) || 0,
-      "indexed_degraded_graph_ready" => Map.get(workspace, "indexed_degraded_graph_ready", 0) || 0,
-      "indexed_degraded_graph_missing" => Map.get(workspace, "indexed_degraded_graph_missing", 0) || 0,
+      "indexed_degraded_graph_ready" =>
+        Map.get(workspace, "indexed_degraded_graph_ready", 0) || 0,
+      "indexed_degraded_graph_missing" =>
+        Map.get(workspace, "indexed_degraded_graph_missing", 0) || 0,
       "indexed_vector_ready" => Map.get(workspace, "indexed_vector_ready", 0) || 0,
       "indexed_vector_missing" => Map.get(workspace, "indexed_vector_missing", 0) || 0,
-      "indexed_degraded_vector_ready" => Map.get(workspace, "indexed_degraded_vector_ready", 0) || 0,
-      "indexed_degraded_vector_missing" => Map.get(workspace, "indexed_degraded_vector_missing", 0) || 0
+      "indexed_degraded_vector_ready" =>
+        Map.get(workspace, "indexed_degraded_vector_ready", 0) || 0,
+      "indexed_degraded_vector_missing" =>
+        Map.get(workspace, "indexed_degraded_vector_missing", 0) || 0
     }
   end
 

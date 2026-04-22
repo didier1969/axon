@@ -32,6 +32,19 @@ axon_workspace_release_bin() {
     printf '%s\n' "$cargo_target_root/release/axon-core"
 }
 
+axon_workspace_release_bin_for() {
+    local project_root="${1:?project root required}"
+    local bin_name="${2:?bin name required}"
+    local cargo_target_root="${CARGO_TARGET_DIR:-$project_root/.axon/cargo-target}"
+    printf '%s\n' "$cargo_target_root/release/$bin_name"
+}
+
+axon_build_info_path_for() {
+    local project_root="${1:?project root required}"
+    local bin_name="${2:?bin name required}"
+    printf '%s\n' "$project_root/bin/$bin_name.build-info"
+}
+
 axon_file_sha256() {
     local path="${1:?path required}"
     sha256sum "$path" | awk '{print $1}'

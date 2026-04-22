@@ -11,13 +11,15 @@ use axon_core::embedder::{
     apply_runtime_embedding_lane_adjustment, current_embedding_provider_diagnostics,
     current_gpu_memory_snapshot, current_gpu_utilization_snapshot, embedding_lane_config_from_env,
 };
-use axon_core::file_ingress_guard::{guard_metrics_snapshot, SharedFileIngressGuard};
+use axon_core::file_ingress_guard::{
+    guard_metrics_snapshot, FileIngressRow, SharedFileIngressGuard,
+};
 use axon_core::fs_watcher::{self, HOT_PRIORITY};
 use axon_core::graph::GraphStore;
 use axon_core::graph::PendingFile;
 use axon_core::ingress_buffer::{
     record_ingress_flush, wait_for_ingress_activity_or_timeout, IngressMetricsSnapshot,
-    SharedIngressBuffer,
+    IngressSubtreeHint, SharedIngressBuffer,
 };
 use axon_core::optimizer::{
     build_admissible_action_profiles, collect_host_snapshot, collect_operator_policy_snapshot,
@@ -27,6 +29,9 @@ use axon_core::optimizer::{
 use axon_core::queue::{ProcessingMode, QueueStore};
 use axon_core::runtime_observability::{
     duckdb_memory_snapshot, duckdb_storage_snapshot, process_memory_snapshot,
+};
+use axon_core::runtime_profile::{
+    current_admission_controller_state, recommend_admission_controller_profile, RuntimeProfile,
 };
 use axon_core::scanner::Scanner;
 use axon_core::service_guard;
@@ -103,10 +108,12 @@ const AUTONOMOUS_INGESTOR_IDLE_WAIT_MS: u64 = 2_000;
 const INGRESS_PROMOTER_POLL_INTERVAL_MS: u64 = 50;
 const INGRESS_PROMOTER_IDLE_WAIT_MS: u64 = 2_000;
 const INGRESS_HOT_FLUSH_WINDOW_MS: u64 = 100;
-const INGRESS_BULK_FLUSH_WINDOW_MS: u64 = 400;
+const INGRESS_BULK_FLUSH_WINDOW_MS: u64 = 75;
 const INGRESS_HINT_FLUSH_WINDOW_MS: u64 = 150;
-const INGRESS_MAX_BATCH_SIZE: usize = 512;
-const INGRESS_FORCE_BATCH_SIZE: usize = 1_024;
+const INGRESS_MAX_BATCH_SIZE: usize = 2_048;
+const INGRESS_FORCE_BATCH_SIZE: usize = 4_096;
+const INGRESS_HOT_PRIORITY_BATCH_CAP: usize = 256;
+const INGRESS_MIXED_BULK_BATCH_SIZE: usize = 1_024;
 const MEMORY_RECLAIMER_POLL_INTERVAL_SECS: u64 = 15;
 const QUIESCENT_INTERVAL_SCALE_PCT_DEFAULT: usize = 400;
 
@@ -117,6 +124,23 @@ static MEMORY_TRIM_SUCCESSES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static LAST_REPORTED_CLAIM_MODE: AtomicU8 = AtomicU8::new(CLAIM_MODE_SENTINEL);
 static HOST_PRESSURE_SAMPLER: LazyLock<Mutex<HostPressureSampler>> =
     LazyLock::new(|| Mutex::new(HostPressureSampler::default()));
+
+#[derive(Debug, Clone, Copy)]
+struct AdmissionControllerDecision {
+    target_band: usize,
+    reorder_point: usize,
+    max_wip: usize,
+    hold_window_ms: u64,
+    forced_bulk_fill_threshold: usize,
+    blocking_authority: &'static str,
+    bulk_fill_preferred: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct IngressFlushOutcome {
+    admitted_count: usize,
+    subtree_discovered_count: usize,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeTelemetrySnapshot {
@@ -148,6 +172,8 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub guard_hydration_duration_ms: u64,
     pub ingress_enabled: bool,
     pub ingress_buffered_entries: usize,
+    pub ingress_hot_entries: usize,
+    pub ingress_scan_entries: usize,
     pub ingress_subtree_hints: usize,
     pub ingress_subtree_hint_in_flight: usize,
     pub ingress_subtree_hint_accepted_total: u64,
@@ -182,6 +208,10 @@ pub(crate) struct RuntimeTelemetrySnapshot {
     pub file_vectorization_queue_queued: usize,
     pub file_vectorization_queue_inflight: usize,
     pub file_vectorization_queue_depth: usize,
+    pub runtime_truth_last_heartbeat_at_ms: u64,
+    pub runtime_truth_last_good_payload_at_ms: u64,
+    pub runtime_truth_stale_after_ms: u64,
+    pub runtime_truth_degraded_reason: Option<String>,
     pub orphan_vectorization_files: usize,
     pub stale_vector_inflight_files: usize,
     pub oldest_graph_pending_age_ms: u64,
@@ -549,6 +579,12 @@ pub(crate) fn spawn_runtime_trace_logger(
                     "semantic_underfeed": telemetry.semantic_underfeed,
                     "semantic_ready_reserve_target": telemetry.semantic_ready_reserve_target,
                     "utility_first_scheduler_hold_window_ms": telemetry.utility_first_scheduler_hold_window_ms,
+                    "runtime_truth_feed": {
+                        "last_heartbeat_at_ms": telemetry.runtime_truth_last_heartbeat_at_ms,
+                        "last_good_payload_at_ms": telemetry.runtime_truth_last_good_payload_at_ms,
+                        "stale_after_ms": telemetry.runtime_truth_stale_after_ms,
+                        "degraded_reason": telemetry.runtime_truth_degraded_reason,
+                    },
                 },
                 "signals": {
                     "cpu_usage_ratio": signals.cpu_usage_ratio,
@@ -1370,11 +1406,17 @@ pub(crate) fn runtime_telemetry_snapshot(
         .unwrap_or((0, 0));
     let graph_projection_queue_depth =
         graph_projection_queue_queued + graph_projection_queue_inflight;
+    let persisted_file_pending_depth = store.count_persisted_file_pending().unwrap_or(0);
     let (file_vectorization_queue_queued, file_vectorization_queue_inflight) = store
         .fetch_file_vectorization_queue_counts()
         .unwrap_or((0, 0));
     let file_vectorization_queue_depth =
         file_vectorization_queue_queued + file_vectorization_queue_inflight;
+    let runtime_truth_feed = service_guard::current_runtime_truth_feed();
+    service_guard::record_graph_vector_priority_context(
+        persisted_file_pending_depth,
+        file_vectorization_queue_depth,
+    );
     let now_ms = chrono::Utc::now().timestamp_millis();
     let stale_threshold_ms = std::env::var("AXON_VECTOR_LEASE_STALE_MS")
         .ok()
@@ -1387,7 +1429,7 @@ pub(crate) fn runtime_telemetry_snapshot(
     let oldest_graph_pending_age_ms = store.oldest_graph_pending_age_ms(now_ms).unwrap_or(0);
     let oldest_semantic_pending_age_ms = store.oldest_semantic_pending_age_ms(now_ms).unwrap_or(0);
     let utility_scheduler = current_utility_first_scheduler_diagnostics(
-        graph_projection_queue_depth,
+        persisted_file_pending_depth,
         file_vectorization_queue_depth,
         service_pressure,
     );
@@ -1427,6 +1469,8 @@ pub(crate) fn runtime_telemetry_snapshot(
         guard_hydration_duration_ms: guard_metrics.hydration_duration_ms,
         ingress_enabled: ingress_metrics.enabled,
         ingress_buffered_entries: ingress_metrics.buffered_entries,
+        ingress_hot_entries: ingress_metrics.hot_entries,
+        ingress_scan_entries: ingress_metrics.scan_entries,
         ingress_subtree_hints: ingress_metrics.subtree_hints,
         ingress_subtree_hint_in_flight: ingress_metrics.subtree_hint_in_flight,
         ingress_subtree_hint_accepted_total: ingress_metrics.subtree_hint_accepted_total,
@@ -1462,6 +1506,12 @@ pub(crate) fn runtime_telemetry_snapshot(
         file_vectorization_queue_queued,
         file_vectorization_queue_inflight,
         file_vectorization_queue_depth,
+        runtime_truth_last_heartbeat_at_ms: runtime_truth_feed.last_heartbeat_at_ms.unwrap_or(0),
+        runtime_truth_last_good_payload_at_ms: runtime_truth_feed
+            .last_good_payload_at_ms
+            .unwrap_or(0),
+        runtime_truth_stale_after_ms: runtime_truth_feed.stale_after_ms,
+        runtime_truth_degraded_reason: runtime_truth_feed.degraded_reason,
         orphan_vectorization_files,
         stale_vector_inflight_files,
         oldest_graph_pending_age_ms,
@@ -1518,9 +1568,89 @@ fn ingress_promoter_sleep_ms(metrics: &IngressMetricsSnapshot, elapsed: Duration
         return base_poll_ms;
     }
 
-    target_window_ms
-        .saturating_sub(elapsed_ms)
-        .clamp(base_poll_ms, target_window_ms)
+    let remaining = target_window_ms.saturating_sub(elapsed_ms);
+    let floor = base_poll_ms.min(target_window_ms);
+    let ceiling = base_poll_ms.max(target_window_ms);
+    remaining.clamp(floor, ceiling)
+}
+
+fn ingress_promoter_backoff_ms(
+    metrics: &IngressMetricsSnapshot,
+    elapsed: Duration,
+    zero_admission_streak: u32,
+) -> u64 {
+    let base = ingress_promoter_sleep_ms(metrics, elapsed);
+    if metrics.hot_entries > 0
+        || metrics.scan_entries >= INGRESS_HOT_PRIORITY_BATCH_CAP
+        || metrics.buffered_entries >= INGRESS_MAX_BATCH_SIZE
+        || zero_admission_streak == 0
+    {
+        return base;
+    }
+    let scaled = base.saturating_mul(1u64 << zero_admission_streak.min(3));
+    let ceiling = ingress_promoter_idle_wait_ms().max(base);
+    scaled.clamp(base, ceiling)
+}
+
+fn admission_controller_decision(
+    metrics: &IngressMetricsSnapshot,
+    persisted_file_pending_current: usize,
+    graph_wip_current: usize,
+) -> AdmissionControllerDecision {
+    let runtime_profile = RuntimeProfile::detect();
+    let profile = recommend_admission_controller_profile(&runtime_profile);
+    let state = current_admission_controller_state(
+        profile,
+        metrics.buffered_entries,
+        metrics.hot_entries,
+        metrics.scan_entries,
+        persisted_file_pending_current,
+        graph_wip_current,
+        false,
+        matches!(service_guard::current_pressure(), ServicePressure::Critical),
+    );
+
+    AdmissionControllerDecision {
+        target_band: state.profile.target_band,
+        reorder_point: state.profile.reorder_point,
+        max_wip: state.profile.max_wip,
+        hold_window_ms: state.profile.hold_window_ms,
+        forced_bulk_fill_threshold: state.profile.forced_bulk_fill_threshold,
+        blocking_authority: state.blocking_authority,
+        bulk_fill_preferred: state.bulk_fill_preferred,
+    }
+}
+
+fn ingress_flush_batch_size(
+    metrics: &IngressMetricsSnapshot,
+    persisted_file_pending_current: usize,
+    graph_wip_current: usize,
+) -> usize {
+    let controller =
+        admission_controller_decision(metrics, persisted_file_pending_current, graph_wip_current);
+    if controller.bulk_fill_preferred {
+        return INGRESS_FORCE_BATCH_SIZE;
+    }
+
+    if controller.blocking_authority != "none" {
+        return INGRESS_HOT_PRIORITY_BATCH_CAP.min(INGRESS_MAX_BATCH_SIZE);
+    }
+
+    if metrics.hot_entries == 0 {
+        return INGRESS_MAX_BATCH_SIZE;
+    }
+
+    if metrics.scan_entries >= INGRESS_MAX_BATCH_SIZE
+        || metrics.buffered_entries >= INGRESS_FORCE_BATCH_SIZE
+    {
+        return INGRESS_MAX_BATCH_SIZE;
+    }
+
+    if metrics.scan_entries >= INGRESS_HOT_PRIORITY_BATCH_CAP {
+        return INGRESS_MIXED_BULK_BATCH_SIZE.min(INGRESS_MAX_BATCH_SIZE);
+    }
+
+    INGRESS_HOT_PRIORITY_BATCH_CAP.min(INGRESS_MAX_BATCH_SIZE)
 }
 
 fn flush_ingress_buffer_once(
@@ -1528,44 +1658,93 @@ fn flush_ingress_buffer_once(
     projects_root: &str,
     file_ingress_guard: &SharedFileIngressGuard,
     ingress_buffer: &SharedIngressBuffer,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<IngressFlushOutcome> {
     let metrics = ingress_buffer
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .metrics_snapshot();
     if !metrics.enabled || (metrics.buffered_entries == 0 && metrics.subtree_hints == 0) {
-        return Ok(0);
+        return Ok(IngressFlushOutcome::default());
     }
 
-    let batch_size = if metrics.hot_entries > 0 {
-        INGRESS_MAX_BATCH_SIZE.min(256)
-    } else {
-        INGRESS_MAX_BATCH_SIZE
-    };
+    let persisted_file_pending_current = store.count_persisted_file_pending()?;
+    let graph_wip_current = store.count_graph_wip_files()?;
+    let controller =
+        admission_controller_decision(&metrics, persisted_file_pending_current, graph_wip_current);
+    let batch_size =
+        ingress_flush_batch_size(&metrics, persisted_file_pending_current, graph_wip_current);
     let batch = ingress_buffer
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .drain_batch(batch_size);
     if batch.files.is_empty() && batch.tombstones.is_empty() && batch.subtree_hints.is_empty() {
-        return Ok(0);
+        return Ok(IngressFlushOutcome::default());
     }
 
     let started_at = Instant::now();
+    let batch_paths = batch
+        .files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let pending_before_for_batch = if batch_paths.is_empty() {
+        0
+    } else {
+        count_pending_graph_eligible_rows(&store.fetch_file_ingress_rows(&batch_paths)?)
+    };
     let promoted = store.promote_ingress_batch(&batch)?;
 
+    let mut durably_persisted_count = 0usize;
+    let mut persisted_but_excluded_count = 0usize;
     if !batch.files.is_empty() {
-        let paths = batch
-            .files
-            .iter()
-            .map(|file| file.path.clone())
-            .collect::<Vec<_>>();
-        if let Ok(rows) = store.fetch_file_ingress_rows(&paths) {
+        if let Ok(rows) = store.fetch_file_ingress_rows(&batch_paths) {
+            durably_persisted_count = rows.len();
+            let pending_after_for_batch = count_pending_graph_eligible_rows(&rows);
+            persisted_but_excluded_count = rows
+                .iter()
+                .filter(|row| !row.is_pending_graph_eligible())
+                .count();
+            let admitted_delta = pending_after_for_batch.saturating_sub(pending_before_for_batch);
             let mut locked = file_ingress_guard
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
             for row in rows {
                 locked.record_committed_row(row);
             }
+            let elapsed_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            record_ingress_flush(
+                elapsed_ms,
+                admitted_delta,
+                durably_persisted_count,
+                persisted_but_excluded_count,
+            );
+            watcher_probe::record(
+                "ingress.promoted",
+                None,
+                format!(
+                    "files={} tombstones={} subtree_hints={} subtree_discovered={} admitted_delta={} durably_persisted={} excluded_from_pending={} duration_ms={} admission_blocking_authority={} target_band={} reorder_point={} max_wip={} hold_window_ms={} forced_bulk_fill_threshold={} bulk_fill_preferred={}",
+                    promoted.promoted_files,
+                    promoted.promoted_tombstones,
+                    batch.subtree_hints.len(),
+                    0,
+                    admitted_delta,
+                    durably_persisted_count,
+                    persisted_but_excluded_count,
+                    elapsed_ms,
+                    controller.blocking_authority,
+                    controller.target_band,
+                    controller.reorder_point,
+                    controller.max_wip,
+                    controller.hold_window_ms,
+                    controller.forced_bulk_fill_threshold,
+                    controller.bulk_fill_preferred
+                ),
+            );
+
+            return Ok(IngressFlushOutcome {
+                admitted_count: admitted_delta,
+                subtree_discovered_count: 0,
+            });
         }
     }
 
@@ -1579,37 +1758,91 @@ fn flush_ingress_buffer_once(
     }
 
     if !batch.subtree_hints.is_empty() {
-        let scanner = Scanner::new(projects_root, "");
-        for hint in &batch.subtree_hints {
+        spawn_subtree_hint_scans(
+            projects_root.to_string(),
+            store.clone(),
+            file_ingress_guard.clone(),
+            ingress_buffer.clone(),
+            batch.subtree_hints.clone(),
+        );
+    }
+
+    let elapsed_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    record_ingress_flush(
+        elapsed_ms,
+        0,
+        durably_persisted_count,
+        persisted_but_excluded_count,
+    );
+    watcher_probe::record(
+        "ingress.promoted",
+        None,
+        format!(
+            "files={} tombstones={} subtree_hints={} subtree_discovered={} admitted_delta={} durably_persisted={} excluded_from_pending={} duration_ms={} admission_blocking_authority={} target_band={} reorder_point={} max_wip={} hold_window_ms={} forced_bulk_fill_threshold={} bulk_fill_preferred={}",
+            promoted.promoted_files,
+            promoted.promoted_tombstones,
+            batch.subtree_hints.len(),
+            0,
+            0,
+            durably_persisted_count,
+            persisted_but_excluded_count,
+            elapsed_ms,
+            controller.blocking_authority,
+            controller.target_band,
+            controller.reorder_point,
+            controller.max_wip,
+            controller.hold_window_ms,
+            controller.forced_bulk_fill_threshold,
+            controller.bulk_fill_preferred
+        ),
+    );
+
+    Ok(IngressFlushOutcome {
+        admitted_count: 0,
+        subtree_discovered_count: 0,
+    })
+}
+
+fn count_pending_graph_eligible_rows(rows: &[FileIngressRow]) -> usize {
+    rows.iter()
+        .filter(|row| row.is_pending_graph_eligible())
+        .count()
+}
+
+fn spawn_subtree_hint_scans(
+    projects_root: String,
+    store: Arc<GraphStore>,
+    file_ingress_guard: SharedFileIngressGuard,
+    ingress_buffer: SharedIngressBuffer,
+    subtree_hints: Vec<IngressSubtreeHint>,
+) {
+    for hint in subtree_hints {
+        let projects_root = projects_root.clone();
+        let store = store.clone();
+        let file_ingress_guard = file_ingress_guard.clone();
+        let ingress_buffer = ingress_buffer.clone();
+        std::thread::spawn(move || {
+            let scanner = Scanner::new(&projects_root, "");
             let promoted_hint_files = scanner.scan_subtree_with_guard_and_ingress(
-                store.clone(),
+                store,
                 Path::new(&hint.path),
-                Some(file_ingress_guard),
-                Some(ingress_buffer),
+                Some(&file_ingress_guard),
+                Some(&ingress_buffer),
             );
             ingress_buffer
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .complete_subtree_hint_with_stats(&hint.path, promoted_hint_files);
-        }
+            watcher_probe::record(
+                "ingress.subtree_hint_completed",
+                None,
+                format!(
+                    "path={} discovered_files={}",
+                    hint.path, promoted_hint_files
+                ),
+            );
+        });
     }
-
-    let promoted_count = promoted.promoted_files + promoted.promoted_tombstones;
-    let elapsed_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    record_ingress_flush(elapsed_ms, promoted_count);
-    watcher_probe::record(
-        "ingress.promoted",
-        None,
-        format!(
-            "files={} tombstones={} subtree_hints={} duration_ms={}",
-            promoted.promoted_files,
-            promoted.promoted_tombstones,
-            batch.subtree_hints.len(),
-            elapsed_ms
-        ),
-    );
-
-    Ok(promoted_count + batch.subtree_hints.len())
 }
 
 fn sample_host_pressure() -> HostPressureSnapshot {
@@ -1922,21 +2155,33 @@ pub(crate) fn spawn_initial_scan(
     ingress_buffer: SharedIngressBuffer,
 ) {
     std::thread::spawn(move || {
-        info!(
-            "🚀 Auto-Ignition: Beginning initial workspace mapping for {}...",
-            project_root
-        );
-        let scanner = axon_core::scanner::Scanner::new(&project_root, &project_code);
-        scanner.scan_with_guard_and_ingress(
+        run_initial_scan(
             store,
-            Some(&file_ingress_guard),
-            Some(&ingress_buffer),
-        );
-        info!(
-            "✅ Auto-Ignition: Initial mapping sequence complete for {}.",
-            project_root
+            project_root,
+            project_code,
+            file_ingress_guard,
+            ingress_buffer,
         );
     });
+}
+
+fn run_initial_scan(
+    store: Arc<GraphStore>,
+    project_root: String,
+    project_code: String,
+    file_ingress_guard: SharedFileIngressGuard,
+    ingress_buffer: SharedIngressBuffer,
+) {
+    info!(
+        "🚀 Auto-Ignition: Beginning initial workspace mapping for {}...",
+        project_root
+    );
+    let scanner = axon_core::scanner::Scanner::new(&project_root, &project_code);
+    scanner.scan_with_guard_and_ingress(store, Some(&file_ingress_guard), Some(&ingress_buffer));
+    info!(
+        "✅ Auto-Ignition: Initial mapping sequence complete for {}.",
+        project_root
+    );
 }
 
 pub(crate) fn spawn_hot_delta_watcher(
@@ -2115,6 +2360,7 @@ pub(crate) fn spawn_ingress_promoter(
 ) {
     std::thread::spawn(move || {
         let mut last_flush = Instant::now();
+        let mut zero_admission_streak = 0u32;
 
         loop {
             let metrics = ingress_buffer
@@ -2124,7 +2370,11 @@ pub(crate) fn spawn_ingress_promoter(
 
             if !metrics.enabled {
                 let signaled = wait_for_ingress_activity_or_timeout(Duration::from_millis(
-                    ingress_promoter_sleep_ms(&metrics, last_flush.elapsed()),
+                    ingress_promoter_backoff_ms(
+                        &metrics,
+                        last_flush.elapsed(),
+                        zero_admission_streak,
+                    ),
                 ));
                 if signaled {
                     service_guard::record_background_runtime_wakeup(
@@ -2138,7 +2388,11 @@ pub(crate) fn spawn_ingress_promoter(
 
             if !should_flush_ingress_buffer(&metrics, last_flush.elapsed()) {
                 let signaled = wait_for_ingress_activity_or_timeout(Duration::from_millis(
-                    ingress_promoter_sleep_ms(&metrics, last_flush.elapsed()),
+                    ingress_promoter_backoff_ms(
+                        &metrics,
+                        last_flush.elapsed(),
+                        zero_admission_streak,
+                    ),
                 ));
                 if signaled {
                     service_guard::record_background_runtime_wakeup(
@@ -2162,12 +2416,18 @@ pub(crate) fn spawn_ingress_promoter(
                 &file_ingress_guard,
                 &ingress_buffer,
             ) {
-                Ok(promoted) if promoted > 0 => {
+                Ok(outcome) if outcome.admitted_count > 0 => {
+                    zero_admission_streak = 0;
                     last_flush = Instant::now();
                 }
-                Ok(_) => {
+                Ok(_outcome) => {
+                    zero_admission_streak = zero_admission_streak.saturating_add(1);
                     let signaled = wait_for_ingress_activity_or_timeout(Duration::from_millis(
-                        ingress_promoter_sleep_ms(&metrics, last_flush.elapsed()),
+                        ingress_promoter_backoff_ms(
+                            &metrics,
+                            last_flush.elapsed(),
+                            zero_admission_streak,
+                        ),
                     ));
                     if signaled {
                         service_guard::record_background_runtime_wakeup(
@@ -2178,6 +2438,7 @@ pub(crate) fn spawn_ingress_promoter(
                     }
                 }
                 Err(err) => {
+                    zero_admission_streak = zero_admission_streak.saturating_add(1);
                     warn!("Ingress promoter flush failed: {}", err);
                     std::thread::sleep(Duration::from_millis(INGRESS_BULK_FLUSH_WINDOW_MS));
                 }
@@ -2745,6 +3006,25 @@ fn bootstrap_salvage_paths(paths: &[PathBuf], active_project_root: Option<&Path>
         .collect()
 }
 
+fn federation_orchestration_candidates_from_identities(
+    identities: Vec<axon_core::project_meta::CanonicalProjectIdentity>,
+) -> Vec<(String, String)> {
+    let mut projects: Vec<(String, String)> = identities
+        .into_iter()
+        .filter(|identity| identity.code != "PRO")
+        .filter_map(|identity| {
+            let project_path = identity.project_path.to_string_lossy().trim().to_string();
+            if project_path.is_empty() {
+                None
+            } else {
+                Some((identity.code, project_path))
+            }
+        })
+        .collect();
+    projects.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    projects
+}
+
 pub(crate) fn spawn_federation_orchestrator(
     store: Arc<GraphStore>,
     file_ingress_guard: SharedFileIngressGuard,
@@ -2757,7 +3037,7 @@ pub(crate) fn spawn_federation_orchestrator(
     std::thread::spawn(move || {
         let mut known_projects = std::collections::HashSet::new();
         let mut stable_sweeps_without_new_projects: u32 = 0;
-        info!("Fédération : Démarrage de l'orchestrateur de projets SOLL.");
+        info!("Fédération : Démarrage de l'orchestrateur de projets locaux.");
         loop {
             let base_interval_ms = if stable_sweeps_without_new_projects >= 8 {
                 30_000
@@ -2771,57 +3051,74 @@ pub(crate) fn spawn_federation_orchestrator(
                 1_000,
                 60_000,
             )));
-            if let Ok(json_str) = store.query_json("SELECT project_code, project_path FROM soll.ProjectCodeRegistry WHERE project_code NOT IN ('PRO')") {
-                if let Ok(rows) = serde_json::from_str::<Vec<Vec<String>>>(&json_str) {
-                    let mut newly_discovered = Vec::new();
-                    for row in rows {
-                        if row.len() == 2 {
-                            let project_code = &row[0];
-                            let path = &row[1];
-                            if !path.is_empty() && !known_projects.contains(project_code) {
-                                known_projects.insert(project_code.clone());
-                                newly_discovered.push((project_code.clone(), path.clone()));
-                            }
-                        }
-                    }
-
-                    if newly_discovered.is_empty() {
-                        stable_sweeps_without_new_projects =
-                            stable_sweeps_without_new_projects.saturating_add(1);
-                        continue;
-                    }
-
-                    stable_sweeps_without_new_projects = 0;
-                    service_guard::record_background_runtime_wakeup(
-                        service_guard::BackgroundWakeDetail::FederationOrchestrator,
-                        0,
-                        0,
-                    );
-                    info!(
-                        "Fédération : {} nouveau(x) projet(s) détecté(s) et orchestré(s).",
-                        newly_discovered.len()
-                    );
-                    for (project_code, path) in newly_discovered {
-                        info!(
-                            "Fédération : Nouveau projet détecté et orchestré: {} ({})",
-                            project_code, path
-                        );
-                        spawn_hot_delta_watcher(
-                            store.clone(),
-                            path.clone(),
-                            project_code.clone(),
-                            file_ingress_guard.clone(),
-                            ingress_buffer.clone(),
-                        );
-                        spawn_initial_scan(
-                            store.clone(),
-                            path.clone(),
-                            project_code.clone(),
-                            file_ingress_guard.clone(),
-                            ingress_buffer.clone(),
-                        );
-                    }
+            let local_projects = federation_orchestration_candidates_from_identities(
+                axon_core::project_meta::discover_project_identities(),
+            );
+            let mut newly_discovered = Vec::new();
+            for (project_code, path) in local_projects {
+                if !known_projects.contains(&project_code) {
+                    known_projects.insert(project_code.clone());
+                    newly_discovered.push((project_code, path));
                 }
+            }
+
+            if newly_discovered.is_empty() {
+                stable_sweeps_without_new_projects =
+                    stable_sweeps_without_new_projects.saturating_add(1);
+                continue;
+            }
+
+            stable_sweeps_without_new_projects = 0;
+            service_guard::record_background_runtime_wakeup(
+                service_guard::BackgroundWakeDetail::FederationOrchestrator,
+                0,
+                0,
+            );
+            info!(
+                "Fédération : {} nouveau(x) projet(s) local(aux) détecté(s) et orchestré(s).",
+                newly_discovered.len()
+            );
+            let mut scan_jobs = Vec::new();
+            for (project_code, path) in &newly_discovered {
+                info!(
+                    "Fédération : Nouveau projet local détecté et orchestré: {} ({})",
+                    project_code, path
+                );
+                let scan_store = store.clone();
+                let scan_path = path.clone();
+                let scan_project_code = project_code.clone();
+                let scan_guard = file_ingress_guard.clone();
+                let scan_ingress = ingress_buffer.clone();
+                scan_jobs.push(std::thread::spawn(move || {
+                    run_initial_scan(
+                        scan_store,
+                        scan_path,
+                        scan_project_code,
+                        scan_guard,
+                        scan_ingress,
+                    );
+                }));
+            }
+
+            for scan_job in scan_jobs {
+                if let Err(payload) = scan_job.join() {
+                    let reason = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic payload".to_string());
+                    error!("Fédération : initial scan thread panicked: {}", reason);
+                }
+            }
+
+            for (project_code, path) in newly_discovered {
+                spawn_hot_delta_watcher(
+                    store.clone(),
+                    path.clone(),
+                    project_code.clone(),
+                    file_ingress_guard.clone(),
+                    ingress_buffer.clone(),
+                );
             }
         }
     });
@@ -2830,16 +3127,22 @@ pub(crate) fn spawn_federation_orchestrator(
 #[cfg(test)]
 mod tests {
     use super::{
-        active_project_hot_targets, bootstrap_salvage_paths, claim_policy, enqueue_claimed_files,
+        active_project_hot_targets, admission_controller_decision, bootstrap_salvage_paths,
+        claim_policy, enqueue_claimed_files, federation_orchestration_candidates_from_identities,
         federation_orchestrator_enabled, flush_ingress_buffer_once, handle_watcher_events,
+        ingress_flush_batch_size, ingress_promoter_backoff_ms, ingress_promoter_sleep_ms,
         memory_limit_bytes, memory_reclaimer_enabled, memory_reclaimer_min_anon_bytes,
         optimizer_loop_interval_ms, plan_admissions, should_attempt_memory_reclaim,
         should_suppress_bootstrap_event_storm, ClaimMode, RescanGuardReset,
+        INGRESS_FORCE_BATCH_SIZE, INGRESS_HOT_PRIORITY_BATCH_CAP, INGRESS_MAX_BATCH_SIZE,
         OVERSIZED_PROBATION_DEFER_THRESHOLD,
     };
     use axon_core::file_ingress_guard::FileIngressGuard;
     use axon_core::graph::{GraphStore, PendingFile};
-    use axon_core::ingress_buffer::{IngressBuffer, IngressSource, SharedIngressBuffer};
+    use axon_core::ingress_buffer::{
+        ingress_metrics_snapshot, reset_ingress_metrics_for_tests, IngressBuffer,
+        IngressMetricsSnapshot, IngressSource, SharedIngressBuffer,
+    };
     use axon_core::queue::QueueStore;
     use axon_core::service_guard::ServicePressure;
     use axon_core::watcher_probe;
@@ -2906,6 +3209,38 @@ mod tests {
         unsafe {
             std::env::remove_var("AXON_ENABLE_FEDERATION_ORCHESTRATOR");
         }
+    }
+
+    #[test]
+    fn test_federation_orchestration_candidates_use_local_canonical_identities() {
+        let candidates = federation_orchestration_candidates_from_identities(vec![
+            axon_core::project_meta::CanonicalProjectIdentity {
+                name: Some("System".to_string()),
+                code: "PRO".to_string(),
+                project_path: std::path::PathBuf::from("/tmp/pro"),
+                meta_path: std::path::PathBuf::from("/tmp/pro/.axon/meta.json"),
+            },
+            axon_core::project_meta::CanonicalProjectIdentity {
+                name: Some("Axon".to_string()),
+                code: "AXO".to_string(),
+                project_path: std::path::PathBuf::from("/tmp/axon"),
+                meta_path: std::path::PathBuf::from("/tmp/axon/.axon/meta.json"),
+            },
+            axon_core::project_meta::CanonicalProjectIdentity {
+                name: Some("BookingSystem".to_string()),
+                code: "BKS".to_string(),
+                project_path: std::path::PathBuf::from("/tmp/booking"),
+                meta_path: std::path::PathBuf::from("/tmp/booking/.axon/meta.json"),
+            },
+        ]);
+
+        assert_eq!(
+            candidates,
+            vec![
+                ("AXO".to_string(), "/tmp/axon".to_string()),
+                ("BKS".to_string(), "/tmp/booking".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -3252,6 +3587,216 @@ mod tests {
 
         assert!(row.contains("pending"));
         assert!(row.contains("900"));
+    }
+
+    #[test]
+    fn test_flush_ingress_buffer_records_durable_but_excluded_from_pending() {
+        reset_ingress_metrics_for_tests();
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("already-indexed.rs");
+        std::fs::write(&file_path, "fn already_indexed() {}\n").unwrap();
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        let size = metadata.len() as i64;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        store
+            .execute(&format!(
+                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES ('{}', 'proj', 'indexed', 'graph_indexed', TRUE, FALSE, {}, {}, 900)",
+                file_path.to_string_lossy().replace('\'', "''"),
+                size,
+                mtime
+            ))
+            .unwrap();
+
+        let ingress_buffer = test_ingress_buffer();
+        {
+            let mut locked = ingress_buffer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            locked.record_file(axon_core::ingress_buffer::IngressFileEvent::new(
+                file_path.to_string_lossy().to_string(),
+                "proj",
+                size,
+                mtime,
+                900,
+                IngressSource::Watcher,
+                axon_core::ingress_buffer::IngressCause::Modified,
+            ));
+        }
+
+        let guard = test_file_ingress_guard();
+        flush_ingress_buffer_once(
+            store,
+            root.to_string_lossy().as_ref(),
+            &guard,
+            &ingress_buffer,
+        )
+        .unwrap();
+
+        let metrics = ingress_metrics_snapshot();
+        assert_eq!(metrics.flush_count, 1);
+        assert_eq!(metrics.last_durably_persisted_count, 1);
+        assert_eq!(metrics.last_excluded_from_pending_count, 1);
+        assert_eq!(metrics.last_promoted_count, 0);
+    }
+
+    #[test]
+    fn test_flush_ingress_buffer_does_not_count_already_pending_file_as_new_admission() {
+        reset_ingress_metrics_for_tests();
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let file_path = project.join("still-pending.rs");
+        std::fs::write(&file_path, "fn still_pending() {}\n").unwrap();
+        let metadata = std::fs::metadata(&file_path).unwrap();
+        let size = metadata.len() as i64;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let store = Arc::new(GraphStore::new(":memory:").unwrap());
+        store
+            .execute(&format!(
+                "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES ('{}', 'proj', 'pending', 'promoted', FALSE, FALSE, {}, {}, 900)",
+                file_path.to_string_lossy().replace('\'', "''"),
+                size,
+                mtime
+            ))
+            .unwrap();
+
+        let ingress_buffer = test_ingress_buffer();
+        {
+            let mut locked = ingress_buffer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            locked.record_file(axon_core::ingress_buffer::IngressFileEvent::new(
+                file_path.to_string_lossy().to_string(),
+                "proj",
+                size,
+                mtime,
+                900,
+                IngressSource::Watcher,
+                axon_core::ingress_buffer::IngressCause::Modified,
+            ));
+        }
+
+        let guard = test_file_ingress_guard();
+        flush_ingress_buffer_once(
+            store,
+            root.to_string_lossy().as_ref(),
+            &guard,
+            &ingress_buffer,
+        )
+        .unwrap();
+
+        let metrics = ingress_metrics_snapshot();
+        assert_eq!(metrics.flush_count, 1);
+        assert_eq!(metrics.last_durably_persisted_count, 1);
+        assert_eq!(metrics.last_excluded_from_pending_count, 0);
+        assert_eq!(metrics.last_promoted_count, 0);
+    }
+
+    #[test]
+    fn test_ingress_flush_batch_size_keeps_hot_priority_without_throttling_large_scan_backlog() {
+        let mut metrics = IngressMetricsSnapshot {
+            enabled: true,
+            buffered_entries: 700,
+            hot_entries: 2,
+            scan_entries: 698,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            ingress_flush_batch_size(&metrics, 32, 4),
+            INGRESS_FORCE_BATCH_SIZE
+        );
+
+        metrics.buffered_entries = 320;
+        metrics.scan_entries = 318;
+        assert_eq!(
+            ingress_flush_batch_size(&metrics, 320, 8),
+            INGRESS_FORCE_BATCH_SIZE
+        );
+
+        metrics.scan_entries = 32;
+        metrics.buffered_entries = 34;
+        assert_eq!(
+            ingress_flush_batch_size(&metrics, 320, 8),
+            INGRESS_HOT_PRIORITY_BATCH_CAP
+        );
+    }
+
+    #[test]
+    fn test_admission_controller_prefers_bulk_fill_when_pending_stock_is_below_target_band() {
+        let metrics = IngressMetricsSnapshot {
+            enabled: true,
+            buffered_entries: 900,
+            hot_entries: 4,
+            scan_entries: 896,
+            ..Default::default()
+        };
+
+        let decision = admission_controller_decision(&metrics, 24, 2);
+        assert_eq!(decision.blocking_authority, "none");
+        assert!(decision.bulk_fill_preferred);
+        assert_eq!(
+            ingress_flush_batch_size(&metrics, 24, 2),
+            INGRESS_FORCE_BATCH_SIZE
+        );
+    }
+
+    #[test]
+    fn test_ingress_promoter_backoff_only_scales_when_no_hot_entries_and_no_admission_progress() {
+        let cold_metrics = IngressMetricsSnapshot {
+            enabled: true,
+            buffered_entries: 12,
+            hot_entries: 0,
+            scan_entries: 12,
+            ..Default::default()
+        };
+        let hot_metrics = IngressMetricsSnapshot {
+            enabled: true,
+            buffered_entries: 12,
+            hot_entries: 2,
+            scan_entries: 10,
+            ..Default::default()
+        };
+
+        let base = ingress_promoter_sleep_ms(&cold_metrics, Duration::from_millis(0));
+        assert_eq!(
+            ingress_promoter_backoff_ms(&cold_metrics, Duration::from_millis(0), 0),
+            base
+        );
+        assert!(ingress_promoter_backoff_ms(&cold_metrics, Duration::from_millis(0), 2) > base);
+        assert_eq!(
+            ingress_promoter_backoff_ms(&hot_metrics, Duration::from_millis(0), 3),
+            ingress_promoter_sleep_ms(&hot_metrics, Duration::from_millis(0))
+        );
+
+        let scan_backlog_metrics = IngressMetricsSnapshot {
+            enabled: true,
+            buffered_entries: INGRESS_MAX_BATCH_SIZE,
+            hot_entries: 0,
+            scan_entries: INGRESS_HOT_PRIORITY_BATCH_CAP,
+            ..Default::default()
+        };
+        assert_eq!(
+            ingress_promoter_backoff_ms(&scan_backlog_metrics, Duration::from_millis(0), 3),
+            ingress_promoter_sleep_ms(&scan_backlog_metrics, Duration::from_millis(0))
+        );
     }
 
     #[test]

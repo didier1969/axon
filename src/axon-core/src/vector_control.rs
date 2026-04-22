@@ -978,10 +978,10 @@ pub fn current_utility_first_scheduler_diagnostics(
     let desired_state =
         if interactive_active || matches!(service_pressure, ServicePressure::Critical) {
             UtilityFirstSchedulerState::RecoveryOverride
-        } else if semantic_underfeed && !persist_congested {
-            UtilityFirstSchedulerState::SemanticRefillProtection
         } else if graph_queue_depth > 0 {
             UtilityFirstSchedulerState::GraphPriority
+        } else if semantic_underfeed && !persist_congested {
+            UtilityFirstSchedulerState::SemanticRefillProtection
         } else {
             UtilityFirstSchedulerState::BalancedDrain
         };
@@ -989,12 +989,12 @@ pub fn current_utility_first_scheduler_diagnostics(
         "interactive_priority"
     } else if matches!(service_pressure, ServicePressure::Critical) {
         "service_pressure_critical"
+    } else if graph_queue_depth > 0 {
+        "graph_backlog_present"
     } else if semantic_underfeed && !persist_congested {
         "semantic_underfed"
     } else if persist_congested {
         "persist_congested"
-    } else if graph_queue_depth > 0 {
-        "graph_backlog_present"
     } else {
         "steady_balanced"
     };
@@ -1005,12 +1005,7 @@ pub fn current_utility_first_scheduler_diagnostics(
     let hold_active = guard.entered_at_ms > 0
         && now_ms.saturating_sub(guard.entered_at_ms) < UTILITY_FIRST_SCHEDULER_HOLD_WINDOW_MS;
     if desired_state != guard.state
-        && (!hold_active
-            || matches!(
-                desired_state,
-                UtilityFirstSchedulerState::RecoveryOverride
-                    | UtilityFirstSchedulerState::SemanticRefillProtection
-            ))
+        && (!hold_active || matches!(desired_state, UtilityFirstSchedulerState::RecoveryOverride))
     {
         guard.state = desired_state;
         guard.entered_at_ms = now_ms;

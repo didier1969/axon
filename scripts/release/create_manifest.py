@@ -53,11 +53,39 @@ def load_build_info(path: pathlib.Path) -> dict[str, str]:
     return data
 
 
+def topology_primary_artifact(
+    repo: pathlib.Path, topology: str, artifact_arg: str | None, build_info_arg: str | None
+) -> tuple[str, pathlib.Path, pathlib.Path]:
+    if topology == "split":
+        artifact = pathlib.Path(artifact_arg).resolve() if artifact_arg else (repo / "bin" / "axon-brain")
+        build_info = (
+            pathlib.Path(build_info_arg).resolve()
+            if build_info_arg
+            else (repo / "bin" / "axon-brain.build-info")
+        )
+        return "axon-brain", artifact, build_info
+
+    artifact = pathlib.Path(artifact_arg).resolve() if artifact_arg else (repo / "bin" / "axon-core")
+    build_info = (
+        pathlib.Path(build_info_arg).resolve()
+        if build_info_arg
+        else (repo / "bin" / "axon-core.build-info")
+    )
+    return "axon-core", artifact, build_info
+
+
+def topology_artifact_names(topology: str) -> tuple[str, ...]:
+    if topology == "split":
+        return ("axon-brain", "axon-indexer")
+    return ("axon-core",)
+
+
 def main() -> int:
     repo = pathlib.Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description="Create a canonical Axon release manifest.")
-    parser.add_argument("--artifact", default=str(repo / "bin" / "axon-core"))
-    parser.add_argument("--build-info", default=str(repo / "bin" / "axon-core.build-info"))
+    parser.add_argument("--artifact")
+    parser.add_argument("--build-info")
+    parser.add_argument("--topology", choices=["monolith", "split"], default="monolith")
     parser.add_argument("--state", choices=["pushed", "qualified"], default="qualified")
     parser.add_argument("--release-version")
     parser.add_argument("--install-generation")
@@ -65,24 +93,18 @@ def main() -> int:
     parser.add_argument("--output")
     args = parser.parse_args()
 
-    artifact = pathlib.Path(args.artifact).resolve()
+    primary_bin_name, artifact, build_info_path = topology_primary_artifact(
+        repo, args.topology, args.artifact, args.build_info
+    )
     if not artifact.exists():
         print(f"Artifact not found: {artifact}", file=sys.stderr)
         return 2
 
-    build_info_path = pathlib.Path(args.build_info).resolve()
     preflight = repo / "scripts" / "release" / "preflight.sh"
-    subprocess.run(
-        [
-            "bash",
-            str(preflight),
-            "--artifact",
-            str(artifact),
-            "--build-info",
-            str(build_info_path),
-        ],
-        check=True,
-    )
+    preflight_cmd = ["bash", str(preflight), "--topology", args.topology]
+    if args.topology != "split":
+        preflight_cmd.extend(["--artifact", str(artifact), "--build-info", str(build_info_path)])
+    subprocess.run(preflight_cmd, check=True)
     build_info = load_build_info(build_info_path)
 
     package_version = build_info.get("AXON_PACKAGE_VERSION") or default_package_version(repo)
@@ -101,8 +123,8 @@ def main() -> int:
 
     artifact_sha = sha256_file(artifact)
     artifacts_root = repo / ".axon" / "releases" / "artifacts" / artifact_sha[:16]
-    archived_artifact = artifacts_root / "axon-core"
-    archived_build_info = artifacts_root / "axon-core.build-info"
+    archived_artifact = artifacts_root / primary_bin_name
+    archived_build_info = artifacts_root / f"{primary_bin_name}.build-info"
     artifacts_root.mkdir(parents=True, exist_ok=True)
     if not archived_artifact.exists():
         shutil.copy2(artifact, archived_artifact)
@@ -129,6 +151,7 @@ def main() -> int:
         "schema_version": 1,
         "created_at": created_at,
         "state": args.state,
+        "topology": args.topology,
         "source": {
             "repo_root": str(repo),
             "git_commit": git_commit or None,
@@ -143,19 +166,43 @@ def main() -> int:
             "install_generation": install_generation,
         },
         "artifact": {
+            "name": primary_bin_name,
             "path": str(archived_artifact),
             "sha256": artifact_sha,
             "size_bytes": archived_artifact.stat().st_size,
             "build_info_path": str(archived_build_info) if archived_build_info.exists() else None,
             "build_info_sha256": sha256_file(archived_build_info) if archived_build_info.exists() else None,
         },
+        "artifacts": {},
         "qualification": {
             "evidence": evidence,
         },
     }
 
-    slug = build_id.replace("/", "_").replace(" ", "_")
-    default_output = repo / ".axon" / "releases" / "candidates" / f"{release_version}-{slug}.json"
+    for bin_name in topology_artifact_names(args.topology):
+        bin_path = repo / "bin" / bin_name
+        build_info = repo / "bin" / f"{bin_name}.build-info"
+        if not bin_path.exists():
+            continue
+        bin_sha = sha256_file(bin_path)
+        bin_root = repo / ".axon" / "releases" / "artifacts" / bin_sha[:16]
+        archived_bin = bin_root / bin_name
+        archived_bin_build_info = bin_root / f"{bin_name}.build-info"
+        bin_root.mkdir(parents=True, exist_ok=True)
+        if not archived_bin.exists():
+            shutil.copy2(bin_path, archived_bin)
+        if build_info.exists() and not archived_bin_build_info.exists():
+            shutil.copy2(build_info, archived_bin_build_info)
+        manifest["artifacts"][bin_name] = {
+            "path": str(archived_bin),
+            "sha256": bin_sha,
+            "size_bytes": archived_bin.stat().st_size,
+            "build_info_path": str(archived_bin_build_info) if archived_bin_build_info.exists() else None,
+            "build_info_sha256": sha256_file(archived_bin_build_info) if archived_bin_build_info.exists() else None,
+        }
+
+    build_tag = build_id.replace("/", "_").replace(" ", "_")
+    default_output = repo / ".axon" / "releases" / "candidates" / f"{release_version}-{build_tag}.json"
     output = pathlib.Path(args.output).resolve() if args.output else default_output
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

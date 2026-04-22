@@ -9,10 +9,22 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_SLUG="${AXON_REPO_SLUG:-$(basename "$PROJECT_ROOT")}"
 # shellcheck source=scripts/lib/axon-instance.sh
 source "$PROJECT_ROOT/scripts/lib/axon-instance.sh"
+# shellcheck source=scripts/lib/axon-role-layout.sh
+source "$PROJECT_ROOT/scripts/lib/axon-role-layout.sh"
 axon_load_worktree_env "$PROJECT_ROOT"
 axon_resolve_instance "$PROJECT_ROOT" "$REPO_SLUG"
+axon_apply_runtime_role_layout "$PROJECT_ROOT" "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-legacy_monolith}}"
+if [[ -f "$AXON_RUNTIME_STATE_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$AXON_RUNTIME_STATE_FILE"
+fi
 
 AXON_TCP_PORTS=("$PHX_PORT" "$HYDRA_TCP_PORT" "$HYDRA_HTTP_PORT" "$HYDRA_ODATA_PORT" "$HYDRA_HTTP2_PORT" "$HYDRA_MCP_PORT")
+case "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-}}" in
+    indexer|indexer_shadow)
+        AXON_TCP_PORTS=()
+        ;;
+esac
 
 HARD_MODE=0
 VERIFY_ONLY=0
@@ -59,6 +71,21 @@ EOF
     shift
 done
 
+selected_writer_guards() {
+    case "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-legacy_monolith}}" in
+        brain|brain_shadow)
+            printf 'SOLL %s\n' "$AXON_DB_ROOT/.axon-soll.writer.lock"
+            ;;
+        indexer|indexer_shadow)
+            printf 'IST %s\n' "$AXON_DB_ROOT/.axon-ist.writer.lock"
+            ;;
+        *)
+            printf 'SOLL %s\n' "$AXON_DB_ROOT/.axon-soll.writer.lock"
+            printf 'IST %s\n' "$AXON_DB_ROOT/.axon-ist.writer.lock"
+            ;;
+    esac
+}
+
 pid_exists() {
     local pid="$1"
     [ -e "/proc/$pid" ]
@@ -91,6 +118,8 @@ collect_listener_pids() {
     local port
     local port_pids
 
+    [[ "${#AXON_TCP_PORTS[@]}" -gt 0 ]] || return 0
+
     for port in "${AXON_TCP_PORTS[@]}"; do
         port_pids="$(ss -ltnp 2>/dev/null | awk -v p="$port" '
             $1 == "LISTEN" {
@@ -111,6 +140,7 @@ $port_pids"
 }
 
 primary_listener_pid() {
+    [[ "${#AXON_TCP_PORTS[@]}" -gt 0 ]] || return 0
     ss -ltnp 2>/dev/null | awk -v p="$HYDRA_HTTP_PORT" '
         $1 == "LISTEN" {
             split($4, addr_parts, ":")
@@ -129,10 +159,23 @@ pid_matches_instance() {
     local pid="$1"
     local cmdline=""
     local listener_pid=""
+    local runtime_binary_name="axon-core"
 
     [[ -n "$pid" && -e "/proc/$pid" ]] || return 1
     cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-    [[ "$cmdline" == *"axon-core"* ]] || return 1
+    case "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-}}" in
+        brain|brain_shadow)
+            runtime_binary_name="axon-brain"
+            ;;
+        indexer|indexer_shadow)
+            runtime_binary_name="axon-indexer"
+            ;;
+    esac
+    [[ "$cmdline" == *"$runtime_binary_name"* || "$cmdline" == *"axon-core"* ]] || return 1
+
+    if [[ "$runtime_binary_name" == "axon-indexer" ]]; then
+        return 0
+    fi
 
     listener_pid="$(primary_listener_pid)"
     [[ -n "$listener_pid" && "$listener_pid" == "$pid" ]]
@@ -160,9 +203,28 @@ collect_process_pids() {
 
 is_axon_process_cmd() {
     local cmd="$1"
+    local runtime_binary_name="axon-core"
+    case "${AXON_RUNTIME_SHADOW_ROLE:-${AXON_RUNTIME_BOOT_ROLE:-}}" in
+        brain|brain_shadow)
+            runtime_binary_name="axon-brain"
+            ;;
+        indexer|indexer_shadow)
+            runtime_binary_name="axon-indexer"
+            ;;
+    esac
+
+    # Ignore the tmux/devenv launcher shell that merely waits on the real
+    # runtime child. It can survive briefly around shutdown and should not be
+    # treated as the runtime process itself during stop verification.
+    if [[ "$cmd" == *"bash -lc "* && "$cmd" == *'wait $core_pid'* ]]; then
+        return 1
+    fi
     
     # We must ONLY kill instance-qualified auxiliary processes. The shared
-    # axon-core binary path is not sufficient to identify live vs dev.
+    # runtime binary path is not sufficient to identify live vs dev.
+    if [[ "$cmd" == *"$runtime_binary_name"* && "$cmd" == *"$PROJECT_ROOT"* ]]; then
+        return 0
+    fi
     if [[ "$cmd" == *"$PROJECT_ROOT"* ]]; then
         [[ "$cmd" == *"_build/esbuild"* ]] && return 0
         [[ "$cmd" == *"_build/tailwind"* ]] && return 0
@@ -247,6 +309,61 @@ kill_by_devenv() {
     fi
 }
 
+verify_writer_guard_release() {
+    local label="$1"
+    local lock_path="$2"
+    local strict_missing="${3:-0}"
+    local owner_pid=""
+    local guard_fd=""
+
+    if [[ ! -f "$lock_path" ]]; then
+        if [[ "$strict_missing" == "1" ]]; then
+            echo "❌ $label writer guard lockfile missing; release cannot be verified ($lock_path)"
+            return 1
+        fi
+        echo "⚠️ $label writer guard lockfile missing after shutdown ($lock_path)"
+        return 0
+    fi
+
+    if ! command -v flock >/dev/null 2>&1; then
+        if [[ "$strict_missing" == "1" ]]; then
+            echo "❌ flock unavailable; cannot strictly verify $label writer guard release ($lock_path)"
+            return 1
+        fi
+        echo "⚠️ flock not available; cannot verify $label writer guard release ($lock_path)"
+        return 0
+    fi
+
+    owner_pid="$(sed -n 's/^owner=.*;pid=\([0-9]\+\)$/\1/p' "$lock_path" 2>/dev/null | head -n1 || true)"
+    for _ in {1..20}; do
+        exec {guard_fd}<>"$lock_path"
+        if flock -n "$guard_fd"; then
+            echo "✅ $label writer guard released ($lock_path)"
+            flock -u "$guard_fd" || true
+            exec {guard_fd}>&-
+            return 0
+        fi
+        exec {guard_fd}>&-
+        sleep 0.10
+    done
+
+    if [[ -n "$owner_pid" ]] && ! pid_exists "$owner_pid"; then
+        exec {guard_fd}<>"$lock_path"
+        if flock -n "$guard_fd"; then
+            echo "✅ $label writer guard released after stale owner cleanup ($lock_path)"
+            flock -u "$guard_fd" || true
+            exec {guard_fd}>&-
+            return 0
+        fi
+        exec {guard_fd}>&-
+        echo "⚠️ $label writer guard lockfile is stale; recorded owner pid=$owner_pid is no longer alive ($lock_path)"
+        return 0
+    fi
+
+    echo "❌ $label writer guard still held after shutdown ($lock_path)"
+    return 1
+}
+
 kill_hard_patterns() {
     local raw
     local pids
@@ -295,6 +412,14 @@ verify_only_exit_if_needed() {
     done
 
     if [ -z "$process_pids" ] && [ -z "$listener_pids" ]; then
+        local guard_failed=0
+        while read -r guard_label guard_path; do
+            [[ -n "${guard_label:-}" ]] || continue
+            verify_writer_guard_release "$guard_label" "$guard_path" 1 || guard_failed=1
+        done < <(selected_writer_guards)
+        if [ "$guard_failed" -eq 1 ]; then
+            return 1
+        fi
         echo "✅ Stop verification OK: no visible Axon processes/listeners."
         return 0
     fi
@@ -316,6 +441,10 @@ verify_only_exit_if_needed() {
 }
 
 echo "🛑 Stopping Axon v2 Architecture (Chirurgical Mode)..."
+echo "Shutdown order: RPC -> TMUX -> tracked processes -> listener cleanup -> writer-guard verification"
+if [[ "${AXON_SPLIT_SHADOW_ONLY:-0}" == "1" ]]; then
+    echo "Split rollback note: stop must fully release SOLL/IST writer ownership before monolith reactivation."
+fi
 
 # 1. Axon process signatures for checks and teardown.
 PATTERNS=(
@@ -381,14 +510,25 @@ if [ -n "$PORT_PIDS" ]; then
     fi
 fi
 
-# 4. Clean up sockets, ports and locks (final safety net)
-echo "Cleaning up sockets, ports and locks..."
+# 4. Clean up sockets and ports. Writer guard lockfiles are intentionally left
+# on disk; the kernel lock is released with process exit and the file content is
+# useful for operator diagnostics on the next startup.
+echo "Cleaning up sockets and ports..."
 for port in "${AXON_TCP_PORTS[@]}"; do
     fuser -k "${port}/tcp" 2>/dev/null || true &
 done
 wait || true
 rm -f "$AXON_MCP_SOCK" "$AXON_TELEMETRY_SOCK" "$AXON_PID_FILE" "$AXON_RUNTIME_STATE_FILE" /tmp/axon-v2.sock
-rm -f "$AXON_DB_ROOT/"*.lock
+
+WRITER_GUARD_RELEASE_FAILED=0
+STRICT_GUARD_RELEASE=0
+if [[ "${AXON_SPLIT_SHADOW_ONLY:-0}" == "1" ]]; then
+    STRICT_GUARD_RELEASE=1
+fi
+while read -r guard_label guard_path; do
+    [[ -n "${guard_label:-}" ]] || continue
+    verify_writer_guard_release "$guard_label" "$guard_path" "$STRICT_GUARD_RELEASE" || WRITER_GUARD_RELEASE_FAILED=1
+done < <(selected_writer_guards)
 
 if [[ "${AXON_DROP_WAL_ON_STOP:-0}" == "1" ]]; then
     echo "⚠️ AXON_DROP_WAL_ON_STOP=1 set: deleting DuckDB WAL files during stop."
@@ -418,7 +558,7 @@ if [ -n "$AFTER_PATTERN_PIDS" ] || [ -n "$AFTER_PORT_PIDS" ]; then
     if [ -n "$AFTER_STALE" ]; then
         echo "⚠️ Some listener PIDs are stale/non-visible from this execution context: $AFTER_STALE"
         echo "   This usually means the listener process runs in another PID namespace/runner."
-        echo "   Run from host context: pkill -f 'axon-core|$ELIXIR_NODE_NAME|bin/axon-core|_build/esbuild|_build/tailwind'"
+        echo "   Run from host context: pkill -f 'axon-core|axon-brain|axon-indexer|$ELIXIR_NODE_NAME|bin/axon-core|_build/esbuild|_build/tailwind'"
         echo "   or run: devenv processes down"
     fi
 fi
@@ -450,6 +590,11 @@ fi
 if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     echo "⚠️ TMUX session '$TMUX_SESSION' still present after cleanup."
     echo "   If this is stale, please run: tmux kill-session -t $TMUX_SESSION"
+    exit 1
+fi
+
+if [[ "$WRITER_GUARD_RELEASE_FAILED" -ne 0 ]]; then
+    echo "⚠️ Writer guards still held after stop; rollback/reactivation is blocked until the runtime exits cleanly."
     exit 1
 fi
 

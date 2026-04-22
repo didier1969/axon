@@ -6,14 +6,25 @@ use crate::embedder::embedding_lane_config_from_env;
 use crate::embedding_contract::{
     CHUNK_MODEL_ID, DIMENSION, MAX_LENGTH, MODEL_NAME, NATIVE_DIMENSION,
 };
-use crate::graph::GraphStore;
+use crate::graph::{ExecFunc, GraphStore, InitDbFunc};
+use crate::ingress_buffer::{
+    record_ingress_flush, reset_ingress_metrics_for_tests, IngressBuffer, IngressCause,
+    IngressFileEvent, IngressSource,
+};
 use crate::parser;
 use crate::queue::ProcessingMode;
+use crate::runtime_boot::RuntimeBootProfile;
 use crate::service_guard::{self, ServiceKind};
-use crate::vector_control::reset_vector_batch_controller_for_tests;
-use std::path::Path;
+use crate::vector_control::{
+    current_utility_first_scheduler_diagnostics, reset_utility_first_scheduler_for_tests,
+    reset_vector_batch_controller_for_tests,
+};
+use libloading::Symbol as LibSymbol;
+use std::ffi::CString;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -21,6 +32,24 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[test]
+fn split_boot_roles_enable_only_owned_services() {
+    let brain = RuntimeBootProfile::brain_shadow();
+    assert!(brain.start_mcp_http);
+    assert!(!brain.start_ingestion_workers);
+    assert!(!brain.promotable);
+
+    let indexer = RuntimeBootProfile::indexer_shadow();
+    assert!(!indexer.start_mcp_http);
+    assert!(indexer.start_ingestion_workers);
+    assert!(!indexer.promotable);
+
+    let monolith = RuntimeBootProfile::monolith();
+    assert!(monolith.start_mcp_http);
+    assert!(monolith.start_ingestion_workers);
+    assert!(monolith.promotable);
 }
 
 struct RuntimeEnvGuard {
@@ -74,6 +103,59 @@ fn create_test_server() -> McpServer {
         GraphStore::new(":memory:").unwrap_or_else(|_| GraphStore::new("/tmp/test_db").unwrap()),
     );
     McpServer::new(store)
+}
+
+fn create_test_server_with_distinct_reader(db_root: &Path) -> McpServer {
+    let store = Arc::new(GraphStore::new(db_root.to_str().unwrap()).unwrap());
+    let server = McpServer::new(store);
+    attach_distinct_reader_snapshot(&server.graph_store);
+    server
+}
+
+fn attach_distinct_reader_snapshot(store: &GraphStore) {
+    let db_path = store
+        .db_path
+        .as_ref()
+        .expect("disk-backed test store required for distinct reader");
+    let reader_c_path = CString::new(db_path.to_string_lossy().to_string()).unwrap();
+    let soll_path = {
+        let mut path = PathBuf::from(db_path);
+        path.set_file_name("soll.db");
+        path
+    };
+    let attach_q = format!(
+        "INSTALL json; LOAD json; SET checkpoint_threshold = '1GB'; ATTACH '{}' AS soll;",
+        soll_path.to_string_lossy().replace("'", "''")
+    );
+
+    unsafe {
+        let init_fn: LibSymbol<InitDbFunc> = store.pool.lib.get(b"duckdb_init_db\0").unwrap();
+        let exec_fn: LibSymbol<ExecFunc> = store.pool.lib.get(b"duckdb_execute\0").unwrap();
+        let reader_ptr = init_fn(reader_c_path.as_ptr(), true);
+        assert!(
+            !reader_ptr.is_null(),
+            "failed to initialize distinct reader"
+        );
+        assert!(exec_fn(
+            reader_ptr,
+            CString::new(attach_q).unwrap().as_ptr()
+        ));
+
+        let mut reader_guard = store
+            .pool
+            .reader_ctx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *reader_guard = reader_ptr;
+    }
+    store.refresh_reader_snapshot().unwrap();
+}
+
+fn now_ms_for_tests() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn wait_for_job_status(server: &McpServer, job_id: &str) -> Value {
@@ -379,7 +461,8 @@ fn guidance_shadow_is_additive_and_preserves_existing_payload() {
 
 #[test]
 fn query_guidance_facts_capture_exact_symbol_miss_with_suggestion() {
-    let server = create_test_server();
+    let tempdir = tempdir().unwrap();
+    let server = create_test_server_with_distinct_reader(tempdir.path());
     let candidates = GuidanceCandidates {
         symbols: vec!["Axon.Scanner.scan".to_string()],
         project_codes: vec!["AXO".to_string()],
@@ -855,7 +938,7 @@ fn test_mcp_tools_list() {
     assert!(!tool_names.contains(&"bidi_trace"));
     assert!(!tool_names.contains(&"api_break_check"));
     assert!(!tool_names.contains(&"simulate_mutation"));
-    assert!(tool_names.contains(&"resume_vectorization"));
+    assert!(!tool_names.contains(&"resume_vectorization"));
 }
 
 #[test]
@@ -897,6 +980,11 @@ fn test_mcp_tools_list_in_full_autonomous_exposes_core_and_hides_relegated_tools
     assert!(tool_names.contains(&"architectural_drift"));
     assert!(tool_names.contains(&"infer_soll_mutation"));
     assert!(tool_names.contains(&"entrench_nuance"));
+    assert!(!tool_names.contains(&"truth_check"));
+    assert!(!tool_names.contains(&"resume_vectorization"));
+    assert!(!tool_names.contains(&"debug"));
+    assert!(!tool_names.contains(&"cypher"));
+    assert!(!tool_names.contains(&"diagnose_indexing"));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -946,6 +1034,9 @@ fn test_mcp_tools_list_include_internal_exposes_expert_tools_in_full_autonomous(
     assert!(tool_names.contains(&"api_break_check"));
     assert!(tool_names.contains(&"simulate_mutation"));
     assert!(tool_names.contains(&"resume_vectorization"));
+    assert!(tool_names.contains(&"debug"));
+    assert!(tool_names.contains(&"cypher"));
+    assert!(tool_names.contains(&"schema_overview"));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -1198,6 +1289,15 @@ fn test_resume_vectorization_returns_job_when_mutation_jobs_are_enabled() {
     let result = response.result.unwrap();
     let data = result.get("data").expect("job response must carry data");
     assert_async_job_contract(data, "job_status");
+    assert!(data.get("request").is_none());
+    assert!(data.get("ownership").is_none());
+    assert!(data.get("timeout").is_none());
+    assert!(data.get("retry_policy").is_none());
+    assert!(data.get("runtime_command_proxy").is_none());
+    assert!(data["result_contract"].get("request_field").is_none());
+    assert!(data["result_contract"].get("ownership_field").is_none());
+    assert!(data["result_contract"].get("timeout_field").is_none());
+    assert!(data["result_contract"].get("retry_policy_field").is_none());
 
     let job_id = data
         .get("job_id")
@@ -1221,10 +1321,494 @@ fn test_resume_vectorization_returns_job_when_mutation_jobs_are_enabled() {
         final_status["data"]["result"]["data"]["queued_files"].as_u64(),
         Some(1)
     );
+    assert!(final_status["data"].get("request").is_none());
+    assert!(final_status["data"].get("ownership").is_none());
+    assert!(final_status["data"].get("timeout").is_none());
+    assert!(final_status["data"].get("retry_policy").is_none());
+    assert!(final_status["data"].get("runtime_command_proxy").is_none());
 
     unsafe {
         std::env::remove_var("AXON_MCP_MUTATION_JOBS");
     }
+}
+
+#[test]
+fn test_runtime_command_proxy_accepts_resume_vectorization_with_explicit_ownership() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+        std::env::set_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED", "true");
+        std::env::set_var("AXON_RUNTIME_COMMAND_PROXY_TIMEOUT_MS", "250");
+    }
+    let now_ms = now_ms_for_tests();
+    service_guard::set_runtime_truth_feed_for_tests(Some(now_ms), Some(now_ms), 5_000, None);
+    let server = create_test_server();
+    let path = "/tmp/runtime_command_proxy_success.rs".to_string();
+    server
+        .graph_store
+        .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
+        .unwrap();
+
+    let extraction = parser::ExtractionResult {
+        project_code: Some("PRJ".to_string()),
+        symbols: vec![parser::Symbol {
+            name: "runtime_command_proxy_success".to_string(),
+            kind: "func".to_string(),
+            start_line: 1,
+            end_line: 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: std::collections::HashMap::new(),
+            embedding: None,
+        }],
+        relations: vec![],
+    };
+
+    server
+        .graph_store
+        .insert_file_data_batch_with_vectorization_policy(
+            &[crate::worker::DbWriteTask::FileExtraction {
+                reservation_id: "runtime-command-proxy-success".to_string(),
+                path: path.clone(),
+                content: Some("fn runtime_command_proxy_success() {}".to_string()),
+                extraction,
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }],
+            false,
+        )
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "resume_vectorization",
+                "arguments": {}
+            })),
+            id: Some(json!(5006)),
+        })
+        .unwrap();
+
+    let result = response.result.unwrap();
+    let data = result.get("data").expect("proxy response must carry data");
+    assert_eq!(data["accepted"].as_bool(), Some(true));
+    assert_eq!(
+        data["result_contract"]["request_field"].as_str(),
+        Some("request")
+    );
+    assert_eq!(
+        data["result_contract"]["ownership_field"].as_str(),
+        Some("ownership")
+    );
+    assert_eq!(
+        data["result_contract"]["timeout_field"].as_str(),
+        Some("timeout")
+    );
+    assert_eq!(
+        data["result_contract"]["retry_policy_field"].as_str(),
+        Some("retry_policy")
+    );
+    assert_eq!(data["ownership"]["proxy_role"].as_str(), Some("brain"));
+    assert_eq!(
+        data["ownership"]["execution_role"].as_str(),
+        Some("indexer")
+    );
+    assert_eq!(
+        data["ownership"]["mutation_owner"].as_str(),
+        Some("indexer")
+    );
+    assert_eq!(
+        data["request"]["tool_name"].as_str(),
+        Some("resume_vectorization")
+    );
+    assert!(data["request"]["idempotency_key"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert_eq!(
+        data["timeout"]["timeout_kind"].as_str(),
+        Some("simulated_test_only")
+    );
+    assert_eq!(data["timeout"]["retryable"].as_bool(), Some(true));
+    assert_eq!(data["timeout"]["timeout_ms"].as_i64(), Some(250));
+    assert_eq!(
+        data["runtime_command_proxy"]["mode"].as_str(),
+        Some("simulated_local_proxy")
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+        std::env::remove_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED");
+        std::env::remove_var("AXON_RUNTIME_COMMAND_PROXY_TIMEOUT_MS");
+    }
+}
+
+#[test]
+fn test_runtime_command_proxy_times_out_resume_vectorization_when_dispatch_exceeds_budget() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+        std::env::set_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED", "true");
+        std::env::set_var("AXON_RUNTIME_COMMAND_PROXY_TIMEOUT_MS", "5");
+        std::env::set_var("AXON_RUNTIME_COMMAND_PROXY_TEST_LATENCY_MS", "50");
+    }
+    let now_ms = now_ms_for_tests();
+    service_guard::set_runtime_truth_feed_for_tests(Some(now_ms), Some(now_ms), 5_000, None);
+    let server = create_test_server();
+    let path = "/tmp/runtime_command_proxy_timeout.rs".to_string();
+    server
+        .graph_store
+        .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
+        .unwrap();
+
+    let extraction = parser::ExtractionResult {
+        project_code: Some("PRJ".to_string()),
+        symbols: vec![parser::Symbol {
+            name: "runtime_command_proxy_timeout".to_string(),
+            kind: "func".to_string(),
+            start_line: 1,
+            end_line: 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: std::collections::HashMap::new(),
+            embedding: None,
+        }],
+        relations: vec![],
+    };
+
+    server
+        .graph_store
+        .insert_file_data_batch_with_vectorization_policy(
+            &[crate::worker::DbWriteTask::FileExtraction {
+                reservation_id: "runtime-command-proxy-timeout".to_string(),
+                path: path.clone(),
+                content: Some("fn runtime_command_proxy_timeout() {}".to_string()),
+                extraction,
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }],
+            false,
+        )
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "resume_vectorization",
+                "arguments": {}
+            })),
+            id: Some(json!(5007)),
+        })
+        .unwrap();
+
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    assert_eq!(result["data"]["outcome"].as_str(), Some("timeout"));
+    assert_eq!(
+        result["data"]["timeout"]["timeout_kind"].as_str(),
+        Some("simulated_test_only")
+    );
+    assert_eq!(result["data"]["timeout"]["timeout_ms"].as_i64(), Some(5));
+    assert_eq!(
+        result["data"]["ownership"]["execution_role"].as_str(),
+        Some("indexer")
+    );
+    assert!(result["content"][0]["text"]
+        .as_str()
+        .is_some_and(|value| value.contains("timeout")));
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+        std::env::remove_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED");
+        std::env::remove_var("AXON_RUNTIME_COMMAND_PROXY_TIMEOUT_MS");
+        std::env::remove_var("AXON_RUNTIME_COMMAND_PROXY_TEST_LATENCY_MS");
+    }
+}
+
+#[test]
+fn test_runtime_command_proxy_refuses_resume_vectorization_when_indexer_feed_is_stale() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+        std::env::set_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED", "true");
+    }
+    service_guard::set_runtime_truth_feed_for_tests(
+        Some(1_000),
+        Some(900),
+        50,
+        Some("indexer_feed_heartbeat_stale"),
+    );
+    let server = create_test_server();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "resume_vectorization",
+                "arguments": {}
+            })),
+            id: Some(json!(5008)),
+        })
+        .unwrap();
+
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    assert_eq!(
+        result["data"]["refusal"]["code"].as_str(),
+        Some("indexer_unavailable")
+    );
+    assert_eq!(
+        result["data"]["refusal"]["reason"].as_str(),
+        Some("indexer_feed_stale")
+    );
+    assert_eq!(result["data"]["refusal"]["stale"].as_bool(), Some(true));
+    assert_eq!(
+        result["data"]["refusal"]["degraded_reason"].as_str(),
+        Some("indexer_feed_heartbeat_stale")
+    );
+    assert_eq!(
+        result["data"]["ownership"]["proxy_role"].as_str(),
+        Some("brain")
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+        std::env::remove_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED");
+    }
+    let now_ms = now_ms_for_tests();
+    service_guard::set_runtime_truth_feed_for_tests(Some(now_ms), Some(now_ms), 5_000, None);
+}
+
+#[test]
+fn test_runtime_command_proxy_refuses_resume_vectorization_when_indexer_feed_is_degraded() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+        std::env::set_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED", "true");
+    }
+    let now_ms = now_ms_for_tests();
+    service_guard::set_runtime_truth_feed_for_tests(
+        Some(now_ms),
+        Some(now_ms),
+        5_000,
+        Some("indexer_feed_partial_runtime_truth"),
+    );
+    let server = create_test_server();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "resume_vectorization",
+                "arguments": {}
+            })),
+            id: Some(json!(5008)),
+        })
+        .unwrap();
+
+    let result = response.result.unwrap();
+    assert_eq!(result["isError"].as_bool(), Some(true));
+    assert_eq!(
+        result["data"]["refusal"]["code"].as_str(),
+        Some("indexer_unavailable")
+    );
+    assert_eq!(
+        result["data"]["refusal"]["reason"].as_str(),
+        Some("indexer_feed_degraded")
+    );
+    assert_eq!(result["data"]["refusal"]["stale"].as_bool(), Some(false));
+    assert_eq!(
+        result["data"]["refusal"]["degraded_reason"].as_str(),
+        Some("indexer_feed_partial_runtime_truth")
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+        std::env::remove_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED");
+    }
+    let now_ms = now_ms_for_tests();
+    service_guard::set_runtime_truth_feed_for_tests(Some(now_ms), Some(now_ms), 5_000, None);
+}
+
+#[test]
+fn test_runtime_command_proxy_job_status_exposes_owned_result_and_error_shape() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+        std::env::set_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED", "true");
+    }
+    let now_ms = now_ms_for_tests();
+    service_guard::set_runtime_truth_feed_for_tests(Some(now_ms), Some(now_ms), 5_000, None);
+    let server = create_test_server();
+    let path = "/tmp/runtime_command_proxy_job_shape.rs".to_string();
+    server
+        .graph_store
+        .bulk_insert_files(&[(path.clone(), "PRJ".to_string(), 128, 1)])
+        .unwrap();
+
+    let extraction = parser::ExtractionResult {
+        project_code: Some("PRJ".to_string()),
+        symbols: vec![parser::Symbol {
+            name: "runtime_command_proxy_job_shape".to_string(),
+            kind: "func".to_string(),
+            start_line: 1,
+            end_line: 1,
+            docstring: None,
+            is_entry_point: false,
+            is_public: true,
+            tested: false,
+            is_nif: false,
+            is_unsafe: false,
+            properties: std::collections::HashMap::new(),
+            embedding: None,
+        }],
+        relations: vec![],
+    };
+
+    server
+        .graph_store
+        .insert_file_data_batch_with_vectorization_policy(
+            &[crate::worker::DbWriteTask::FileExtraction {
+                reservation_id: "runtime-command-proxy-job-shape".to_string(),
+                path: path.clone(),
+                content: Some("fn runtime_command_proxy_job_shape() {}".to_string()),
+                extraction,
+                processing_mode: ProcessingMode::Full,
+                trace_id: "trace".to_string(),
+                observed_cost_bytes: 0,
+                t0: 0,
+                t1: 0,
+                t2: 0,
+                t3: 0,
+            }],
+            false,
+        )
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "resume_vectorization",
+                "arguments": {}
+            })),
+            id: Some(json!(5009)),
+        })
+        .unwrap();
+
+    let result = response.result.unwrap();
+    let data = result.get("data").expect("proxy response must carry data");
+    assert_async_job_contract(data, "job_status");
+    assert_eq!(
+        data["result_contract"]["request_field"].as_str(),
+        Some("request")
+    );
+    assert_eq!(data["ownership"]["proxy_role"].as_str(), Some("brain"));
+    assert_eq!(
+        data["ownership"]["execution_role"].as_str(),
+        Some("indexer")
+    );
+    assert!(data["ownership"]["idempotency_key"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+
+    let job_id = data
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .expect("job_id");
+    let final_status = wait_for_job_status(&server, job_id);
+    assert_eq!(final_status["data"]["state"].as_str(), Some("completed"));
+    assert_eq!(
+        final_status["data"]["ownership"]["proxy_role"].as_str(),
+        Some("brain")
+    );
+    assert_eq!(
+        final_status["data"]["ownership"]["execution_role"].as_str(),
+        Some("indexer")
+    );
+    assert_eq!(
+        final_status["data"]["request"]["runtime_command_proxy"]["mode"].as_str(),
+        Some("simulated_local_proxy")
+    );
+    assert_eq!(
+        final_status["data"]["request"]["runtime_command_proxy"]["timeout_kind"].as_str(),
+        Some("simulated_test_only")
+    );
+    assert!(final_status["data"]["result"].is_object());
+    assert_eq!(final_status["data"]["error_text"].as_str(), Some(""));
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+        std::env::remove_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED");
+    }
+}
+
+#[test]
+fn test_runtime_command_proxy_worker_panic_marks_failed_terminal() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_MCP_MUTATION_JOBS", "true");
+        std::env::set_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED", "true");
+        std::env::set_var("AXON_RUNTIME_COMMAND_PROXY_TEST_PANIC", "1");
+    }
+    let now_ms = now_ms_for_tests();
+    service_guard::set_runtime_truth_feed_for_tests(Some(now_ms), Some(now_ms), 5_000, None);
+    let server = create_test_server();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "resume_vectorization",
+                "arguments": {}
+            })),
+            id: Some(json!(5010)),
+        })
+        .unwrap();
+
+    let job_id = response.result.unwrap()["data"]["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let final_status = wait_for_job_status(&server, &job_id);
+    assert_eq!(final_status["data"]["state"].as_str(), Some("failed"));
+    assert_eq!(final_status["data"]["status"].as_str(), Some("failed"));
+    assert!(final_status["data"]["error_text"]
+        .as_str()
+        .is_some_and(|text| text.contains("panic")));
+
+    unsafe {
+        std::env::remove_var("AXON_MCP_MUTATION_JOBS");
+        std::env::remove_var("AXON_RUNTIME_COMMAND_PROXY_ENABLED");
+        std::env::remove_var("AXON_RUNTIME_COMMAND_PROXY_TEST_PANIC");
+    }
+    let now_ms = now_ms_for_tests();
+    service_guard::set_runtime_truth_feed_for_tests(Some(now_ms), Some(now_ms), 5_000, None);
 }
 
 #[test]
@@ -1655,11 +2239,19 @@ fn test_pre_flight_check_alias_uses_dry_run_commit_work() {
 #[test]
 fn test_status_reports_public_surface_and_runtime_truth() {
     let _guard = env_lock();
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
     unsafe {
         std::env::set_var("AXON_RUNTIME_MODE", "full");
         std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_status_reports_public_surface_and_runtime_truth",
+        );
     }
-    let server = create_test_server();
+    service_guard::record_runtime_truth_bridge_dispatch(None);
+    let tempdir = tempdir().unwrap();
+    let server = create_test_server_with_distinct_reader(tempdir.path());
     let response = server
         .handle_request(JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1688,15 +2280,15 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     assert!(public_tool_names.contains(&"why"));
     assert!(public_tool_names.contains(&"path"));
     assert!(public_tool_names.contains(&"anomalies"));
-    assert!(public_tool_names.contains(&"refine_lattice"));
-    assert!(public_tool_names.contains(&"cypher"));
-    assert!(public_tool_names.contains(&"debug"));
-    assert!(public_tool_names.contains(&"schema_overview"));
-    assert!(public_tool_names.contains(&"list_labels_tables"));
-    assert!(public_tool_names.contains(&"query_examples"));
     assert!(public_tool_names.contains(&"batch"));
     assert!(public_tool_names.contains(&"job_status"));
-    assert!(public_tool_names.contains(&"resume_vectorization"));
+    assert!(!public_tool_names.contains(&"resume_vectorization"));
+    assert!(!public_tool_names.contains(&"refine_lattice"));
+    assert!(!public_tool_names.contains(&"cypher"));
+    assert!(!public_tool_names.contains(&"debug"));
+    assert!(!public_tool_names.contains(&"schema_overview"));
+    assert!(!public_tool_names.contains(&"list_labels_tables"));
+    assert!(!public_tool_names.contains(&"query_examples"));
     assert!(!public_tool_names.contains(&"health"));
     assert!(!public_tool_names.contains(&"audit"));
     assert!(!public_tool_names.contains(&"truth_check"));
@@ -1712,6 +2304,48 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         .get("truth_status")
         .and_then(|value| value.as_str())
         .is_some());
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["topology"].as_str(),
+        Some("legacy_monolith_compatibility")
+    );
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["process_role"].as_str(),
+        Some("legacy_monolith")
+    );
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["system_converged"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["compatibility_shim"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["public_mcp_authority"].as_str(),
+        Some("legacy_monolith")
+    );
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["soll_writer_authority"].as_str(),
+        Some("legacy_monolith")
+    );
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["ist_writer_authority"].as_str(),
+        Some("legacy_monolith")
+    );
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["indexer_feed"]["state"].as_str(),
+        Some("fresh")
+    );
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["indexer_feed"]["last_good_payload_at_ms"]
+            .as_u64()
+            .is_some(),
+        true
+    );
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["ist_snapshot"]["state"].as_str(),
+        Some("fresh")
+    );
     assert!(data["availability"]["degraded_notes"].as_array().is_some());
     assert_eq!(
         data["async_contract"]["canonical_follow_up_tool"].as_str(),
@@ -1734,7 +2368,7 @@ fn test_status_reports_public_surface_and_runtime_truth() {
         .collect::<Vec<_>>();
     assert!(allowlisted_tools.contains(&"restore_soll"));
     assert!(allowlisted_tools.contains(&"soll_apply_plan"));
-    assert!(allowlisted_tools.contains(&"resume_vectorization"));
+    assert!(!allowlisted_tools.contains(&"resume_vectorization"));
     let monitored_sync_tools = data["async_policy"]["monitored_sync_mutation_tools"]
         .as_array()
         .unwrap()
@@ -1933,6 +2567,15 @@ fn test_status_reports_public_surface_and_runtime_truth() {
             .is_some()
     );
     assert!(
+        data["runtime_authority"]["limiting_factors"]["signals"]["graph_backlog_depth"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(data["runtime_authority"]["limiting_factors"]["signals"]
+        ["graph_projection_queue_depth"]
+        .as_u64()
+        .is_some());
+    assert!(
         data["runtime_authority"]["limiting_factors"]["thresholds"]["max_vram_used_mb"]
             .as_u64()
             .is_some()
@@ -1953,6 +2596,16 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     assert_eq!(
         data["runtime_authority"]["quiescent_state"]["wake_observability_state"].as_str(),
         Some("partial")
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["graph_backlog_depth"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        data["runtime_authority"]["quiescent_state"]["graph_projection_queue_depth"]
+            .as_u64()
+            .is_some()
     );
     assert!(
         data["runtime_authority"]["quiescent_state"]["diagnosis"]["operator_focus"]
@@ -2140,8 +2793,1249 @@ fn test_status_reports_public_surface_and_runtime_truth() {
     );
 
     unsafe {
-        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::set_var("AXON_RUNTIME_MODE", "mcp_only");
     }
+    service_guard::set_runtime_truth_feed_for_tests(
+        Some(1_000),
+        Some(900),
+        50,
+        Some("indexer_feed_heartbeat_stale"),
+    );
+    let degraded = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2203)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let degraded_data = degraded.get("data").unwrap();
+    assert_eq!(
+        degraded_data["runtime_authority"]["runtime_topology"]["indexer_feed"]["stale"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        degraded_data["runtime_authority"]["runtime_topology"]["system_converged"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(degraded_data["truth_status"].as_str(), Some("degraded"));
+    assert!(degraded_data["availability"]["degraded_notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str() == Some("runtime_topology_not_converged")));
+
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+    }
+    let now_ms = now_ms_for_tests();
+    service_guard::set_runtime_truth_feed_for_tests(
+        Some(now_ms),
+        Some(now_ms.saturating_sub(100)),
+        60_000,
+        Some("indexer_feed_partial_runtime_truth"),
+    );
+    let degraded_but_fresh = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2204)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+    let degraded_but_fresh_data = degraded_but_fresh.get("data").unwrap();
+    assert_eq!(
+        degraded_but_fresh_data["runtime_authority"]["runtime_topology"]["indexer_feed"]["state"]
+            .as_str(),
+        Some("degraded")
+    );
+    assert_eq!(
+        degraded_but_fresh_data["runtime_authority"]["runtime_topology"]["indexer_feed"]["stale"]
+            .as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        degraded_but_fresh_data["runtime_authority"]["runtime_topology"]["system_converged"]
+            .as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        degraded_but_fresh_data["truth_status"].as_str(),
+        Some("degraded")
+    );
+    assert!(degraded_but_fresh_data["availability"]["degraded_notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str() == Some("indexer_feed_partial_runtime_truth")));
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_RUNTIME_IDENTITY");
+    }
+}
+
+#[test]
+fn test_initialize_reports_brain_server_identity_when_split_shadow_role_is_brain() {
+    let _guard = env_lock();
+    service_guard::reset_for_tests();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_SHADOW_ROLE", "brain");
+        std::env::set_var("AXON_SPLIT_SHADOW_ONLY", "1");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_initialize_reports_brain_server_identity_when_split_shadow_role_is_brain",
+        );
+    }
+
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "initialize".to_string(),
+            params: Some(json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "codex-test", "version": "0.0.0" }
+            })),
+            id: Some(json!(2201)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(response["protocolVersion"].as_str(), Some("2025-11-25"));
+    assert_eq!(response["serverInfo"]["name"].as_str(), Some("axon-brain"));
+    assert_eq!(response["serverInfo"]["version"].as_str(), Some("2.2.0"));
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_SHADOW_ROLE");
+        std::env::remove_var("AXON_SPLIT_SHADOW_ONLY");
+        std::env::remove_var("AXON_RUNTIME_IDENTITY");
+    }
+}
+
+#[test]
+fn test_status_reports_split_brain_and_indexer_authorities() {
+    let _guard = env_lock();
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    let tempdir = tempdir().unwrap();
+    let server = create_test_server_with_distinct_reader(tempdir.path());
+
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "mcp_only");
+        std::env::set_var("AXON_RUNTIME_SHADOW_ROLE", "brain");
+        std::env::set_var("AXON_SPLIT_SHADOW_ONLY", "1");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_status_reports_split_brain_and_indexer_authorities_brain",
+        );
+    }
+    service_guard::record_runtime_truth_bridge_dispatch(None);
+
+    let brain_response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2207)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let brain_topology = &brain_response["data"]["runtime_authority"]["runtime_topology"];
+    assert_eq!(
+        brain_topology["topology"].as_str(),
+        Some("brain_indexer_split")
+    );
+    assert_eq!(brain_topology["process_role"].as_str(), Some("brain"));
+    assert_eq!(
+        brain_topology["public_mcp_authority"].as_str(),
+        Some("brain")
+    );
+    assert_eq!(
+        brain_topology["soll_writer_authority"].as_str(),
+        Some("brain")
+    );
+    assert_eq!(
+        brain_topology["ist_writer_authority"].as_str(),
+        Some("indexer")
+    );
+    assert_eq!(brain_topology["brain_ready"].as_bool(), Some(true));
+    assert_eq!(brain_topology["indexer_ready"].as_bool(), Some(false));
+    assert_eq!(brain_topology["system_converged"].as_bool(), Some(false));
+    assert_eq!(
+        brain_response["data"]["truth_status"].as_str(),
+        Some("degraded")
+    );
+
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var("AXON_RUNTIME_SHADOW_ROLE", "indexer");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_status_reports_split_brain_and_indexer_authorities_indexer",
+        );
+    }
+    service_guard::record_runtime_truth_bridge_dispatch(None);
+
+    let indexer_response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2208)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let indexer_topology = &indexer_response["data"]["runtime_authority"]["runtime_topology"];
+    assert_eq!(
+        indexer_topology["topology"].as_str(),
+        Some("brain_indexer_split")
+    );
+    assert_eq!(indexer_topology["process_role"].as_str(), Some("indexer"));
+    assert_eq!(
+        indexer_topology["public_mcp_authority"].as_str(),
+        Some("brain")
+    );
+    assert_eq!(
+        indexer_topology["soll_writer_authority"].as_str(),
+        Some("brain")
+    );
+    assert_eq!(
+        indexer_topology["ist_writer_authority"].as_str(),
+        Some("indexer")
+    );
+    assert_eq!(indexer_topology["brain_ready"].as_bool(), Some(false));
+    assert_eq!(indexer_topology["indexer_ready"].as_bool(), Some(true));
+    assert_eq!(indexer_topology["system_converged"].as_bool(), Some(false));
+    assert_eq!(
+        indexer_response["data"]["truth_status"].as_str(),
+        Some("degraded")
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_RUNTIME_SHADOW_ROLE");
+        std::env::remove_var("AXON_SPLIT_SHADOW_ONLY");
+        std::env::remove_var("AXON_RUNTIME_IDENTITY");
+    }
+}
+
+#[test]
+fn test_status_brain_split_exposes_indexer_runtime_telemetry_from_heartbeat() {
+    let _guard = env_lock();
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    let tempdir = tempdir().unwrap();
+    let server = create_test_server_with_distinct_reader(tempdir.path());
+    let run_root = tempdir.path().join(".axon-dev").join("run-indexer");
+    std::fs::create_dir_all(&run_root).unwrap();
+    let heartbeat_path = run_root.join("runtime-heartbeat.json");
+    std::fs::write(
+        &heartbeat_path,
+        serde_json::to_vec_pretty(&json!({
+            "runtime_mode": "full",
+            "release_version": "0.7.0",
+            "build_id": "v0.7.0-test",
+            "install_generation": "workspace",
+            "last_heartbeat_at_ms": 1234,
+            "last_good_payload_at_ms": 1234,
+            "stale_after_ms": 5000,
+            "stale": false,
+            "degraded_reason": null,
+            "runtime_truth_feed": {
+                "stale": false,
+                "observed_age_ms": 0,
+                "stale_after_ms": 5000,
+                "last_heartbeat_at_ms": 1234,
+                "last_good_payload_at_ms": 1234,
+                "degraded_reason": null
+            },
+            "runtime_telemetry": {
+                "ingress_enabled": true,
+                "ingress_buffered_entries": 144,
+                "ingress_hot_entries": 12,
+                "ingress_scan_entries": 132,
+                "ingress_subtree_hints": 3,
+                "ingress_subtree_hint_in_flight": 1,
+                "ingress_subtree_hint_accepted_total": 9,
+                "ingress_subtree_hint_blocked_total": 2,
+                "ingress_subtree_hint_suppressed_total": 4,
+                "ingress_flush_count": 7,
+                "ingress_last_flush_duration_ms": 18,
+                "ingress_last_promoted_count": 96,
+                "graph_projection_queue": {
+                    "queued": 55,
+                    "inflight": 8,
+                    "total": 63
+                },
+                "file_vectorization_queue": {
+                    "queued": 4,
+                    "inflight": 2,
+                    "total": 6
+                },
+                "claim_mode": "fast",
+                "service_pressure": "healthy",
+                "utility_first_scheduler_state": "semantic_refill_protection",
+                "utility_first_scheduler_reason": "semantic_underfed",
+                "semantic_underfeed": true
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    unsafe {
+        std::env::set_var("AXON_PROJECT_ROOT", tempdir.path());
+        std::env::set_var("AXON_INSTANCE_KIND", "dev");
+        std::env::set_var("AXON_RUNTIME_MODE", "mcp_only");
+        std::env::set_var("AXON_RUNTIME_SHADOW_ROLE", "brain");
+        std::env::set_var("AXON_SPLIT_SHADOW_ONLY", "0");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_status_brain_split_exposes_indexer_runtime_telemetry_from_heartbeat",
+        );
+    }
+    service_guard::record_runtime_truth_bridge_dispatch(None);
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2210)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let indexer_runtime =
+        &response["data"]["runtime_authority"]["runtime_topology"]["indexer_runtime"];
+    assert_eq!(indexer_runtime["available"].as_bool(), Some(true));
+    assert_eq!(
+        indexer_runtime["telemetry_source"].as_str(),
+        Some("runtime_heartbeat")
+    );
+    assert_eq!(
+        indexer_runtime["telemetry"]["ingress_buffered_entries"].as_u64(),
+        Some(144)
+    );
+    assert_eq!(
+        indexer_runtime["telemetry"]["ingress_scan_entries"].as_u64(),
+        Some(132)
+    );
+    assert_eq!(
+        indexer_runtime["telemetry"]["ingress_hot_entries"].as_u64(),
+        Some(12)
+    );
+    assert_eq!(
+        indexer_runtime["telemetry"]["ingress_last_promoted_count"].as_u64(),
+        Some(96)
+    );
+    assert_eq!(
+        indexer_runtime["telemetry"]["graph_projection_queue"]["total"].as_u64(),
+        Some(63)
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_PROJECT_ROOT");
+        std::env::remove_var("AXON_INSTANCE_KIND");
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_RUNTIME_SHADOW_ROLE");
+        std::env::remove_var("AXON_SPLIT_SHADOW_ONLY");
+        std::env::remove_var("AXON_RUNTIME_IDENTITY");
+    }
+}
+
+#[test]
+fn test_status_indexer_split_omits_soll_mcp_job_counts() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var("AXON_RUNTIME_SHADOW_ROLE", "indexer");
+        std::env::set_var("AXON_SPLIT_SHADOW_ONLY", "0");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_status_indexer_split_omits_soll_mcp_job_counts",
+        );
+    }
+
+    let server = create_test_server();
+    let response = server.axon_status(&json!({ "mode": "json" })).unwrap();
+    let data = response.get("data").unwrap();
+
+    assert_eq!(
+        data["runtime_authority"]["runtime_topology"]["process_role"].as_str(),
+        Some("indexer")
+    );
+    assert_eq!(data["job_counts"].as_array().map(Vec::len), Some(0));
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_RUNTIME_SHADOW_ROLE");
+        std::env::remove_var("AXON_SPLIT_SHADOW_ONLY");
+        std::env::remove_var("AXON_RUNTIME_IDENTITY");
+    }
+}
+
+#[test]
+fn test_status_reports_ist_alias_writer_path_is_explicitly_degraded() {
+    let _guard = env_lock();
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_status_reports_ist_alias_writer_path_is_explicitly_degraded",
+        );
+    }
+    service_guard::record_runtime_truth_bridge_dispatch(None);
+
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2206)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").unwrap();
+    let runtime_topology = &data["runtime_authority"]["runtime_topology"];
+    assert_eq!(
+        runtime_topology["ist_snapshot"]["state"].as_str(),
+        Some("degraded")
+    );
+    assert_eq!(
+        runtime_topology["ist_snapshot"]["trust_boundary"].as_str(),
+        Some("graph_store.writer_alias_direct_read")
+    );
+    assert_eq!(
+        runtime_topology["ist_snapshot"]["read_path"].as_str(),
+        Some("writer_alias_direct")
+    );
+    assert_eq!(
+        runtime_topology["ist_snapshot"]["unsafe_read"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(runtime_topology["system_converged"].as_bool(), Some(false));
+    assert_eq!(
+        runtime_topology["ist_snapshot"]["degraded_reason"].as_str(),
+        Some("ist_reader_aliases_writer_direct_path")
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_RUNTIME_IDENTITY");
+    }
+}
+
+#[test]
+fn test_status_reports_ist_snapshot_degraded_when_reader_state_is_unstable() {
+    let _guard = env_lock();
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+        std::env::set_var(
+            "AXON_RUNTIME_IDENTITY",
+            "test_status_reports_ist_snapshot_degraded_when_reader_state_is_unstable",
+        );
+    }
+    service_guard::record_runtime_truth_bridge_dispatch(None);
+
+    let server = create_test_server();
+    let now_ms = now_ms_for_tests();
+    {
+        let mut reader_guard = server
+            .graph_store
+            .pool
+            .reader_ctx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *reader_guard = std::ptr::null_mut();
+    }
+    server
+        .graph_store
+        .reader_state
+        .commit_epoch
+        .store(14, std::sync::atomic::Ordering::Relaxed);
+    server
+        .graph_store
+        .reader_state
+        .reader_epoch
+        .store(5, std::sync::atomic::Ordering::Relaxed);
+    server
+        .graph_store
+        .reader_state
+        .refresh_requested_epoch
+        .store(14, std::sync::atomic::Ordering::Relaxed);
+    server
+        .graph_store
+        .reader_state
+        .refresh_inflight
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    server
+        .graph_store
+        .reader_state
+        .last_refresh_started_ms
+        .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+    server
+        .graph_store
+        .reader_state
+        .last_refresh_completed_ms
+        .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "brief" }
+            })),
+            id: Some(json!(2205)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let data = response.get("data").unwrap();
+    let runtime_topology = &data["runtime_authority"]["runtime_topology"];
+    assert_eq!(
+        runtime_topology["ist_snapshot"]["state"].as_str(),
+        Some("degraded")
+    );
+    assert_eq!(
+        runtime_topology["ist_snapshot"]["trust_boundary"].as_str(),
+        Some("graph_store.reader_snapshot_diagnostics")
+    );
+    assert_eq!(
+        runtime_topology["ist_snapshot"]["unsafe_read"].as_bool(),
+        Some(true)
+    );
+    assert!(runtime_topology["ist_snapshot"]["degraded_reason"]
+        .as_str()
+        .is_some());
+    assert_eq!(runtime_topology["system_converged"].as_bool(), Some(false));
+    assert_eq!(data["truth_status"].as_str(), Some("degraded"));
+    assert!(data["availability"]["degraded_notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str() == Some("runtime_topology_not_converged")));
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_RUNTIME_IDENTITY");
+    }
+}
+
+#[test]
+fn test_status_reports_canonical_ingestion_stage_model() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
+    service_guard::reset_for_tests();
+    reset_ingress_metrics_for_tests();
+
+    let mut ingress = IngressBuffer::default();
+    ingress.record_file(IngressFileEvent::new(
+        "/tmp/watcher-buffered.rs",
+        "AXO",
+        11,
+        111,
+        50,
+        IngressSource::Watcher,
+        IngressCause::Modified,
+    ));
+    ingress.record_file(IngressFileEvent::new(
+        "/tmp/scan-buffered.rs",
+        "AXO",
+        12,
+        112,
+        25,
+        IngressSource::Scan,
+        IngressCause::Discovered,
+    ));
+
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES \
+             ('/tmp/persisted-only.rs', 'AXO', 'pending', 'promoted', FALSE, FALSE, 10, 10, 10), \
+             ('/tmp/graph-actionable.rs', 'AXO', 'pending', 'promoted', FALSE, FALSE, 20, 20, 20), \
+             ('/tmp/graph-ready-owned.rs', 'AXO', 'indexed', 'graph_indexed', TRUE, FALSE, 30, 30, 30), \
+             ('/tmp/vector-ready.rs', 'AXO', 'indexed', 'graph_indexed', TRUE, TRUE, 40, 40, 40)",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO GraphProjectionQueue (anchor_type, anchor_id, radius, status, attempts, queued_at) VALUES \
+             ('file', '/tmp/graph-actionable.rs', 2, 'queued', 0, 1), \
+             ('file', '/tmp/graph-ready-owned.rs', 2, 'inflight', 1, 2)",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO FileVectorizationQueue (file_path, status, queued_at, claim_token, claimed_at_ms, lease_heartbeat_at_ms, lease_owner, lease_epoch) VALUES \
+             ('/tmp/graph-ready-owned.rs', 'queued', 1, NULL, NULL, NULL, 'vector-lane', 0)",
+        )
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "full" }
+            })),
+            id: Some(json!(2203)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let model = &response["data"]["runtime_authority"]["canonical_ingestion_stage_model"];
+    assert_eq!(model["authority_state"].as_str(), Some("canonical"));
+    assert_eq!(
+        model["freshness"]["recommended_mode_for_current_counts"].as_str(),
+        Some("full")
+    );
+    assert_eq!(model["ingress_buffered"]["current_count"].as_u64(), Some(2));
+    assert_eq!(
+        model["watcher_buffered"]["ownership_surface"].as_str(),
+        Some("ingress_buffer")
+    );
+    assert!(
+        model["watcher_buffered"]["current_count"].as_u64() == Some(1),
+        "watcher buffered entries should be reflected exactly"
+    );
+    assert_eq!(model["scan_buffered"]["current_count"].as_u64(), Some(1));
+    assert_eq!(
+        model["ingress_promotion"]["ownership_surface"].as_str(),
+        Some("ingress_buffer")
+    );
+    assert!(model["ingress_promotion"]["flush_count"].as_u64().is_some());
+    assert!(model["ingress_promotion"]["last_flush_duration_ms"]
+        .as_u64()
+        .is_some());
+    assert!(model["ingress_promotion"]["last_promoted_count"]
+        .as_u64()
+        .is_some());
+    assert!(model["ingress_promotion"]["promoted_total"]
+        .as_u64()
+        .is_some());
+    assert!(model["ingress_promotion"]["last_durably_persisted_count"]
+        .as_u64()
+        .is_some());
+    assert!(model["ingress_promotion"]["durably_persisted_total"]
+        .as_u64()
+        .is_some());
+    assert!(
+        model["ingress_promotion"]["last_excluded_from_pending_count"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(model["ingress_promotion"]["excluded_from_pending_total"]
+        .as_u64()
+        .is_some());
+    assert_eq!(
+        model["persisted_file"]["ownership_surface"].as_str(),
+        Some("File")
+    );
+    assert_eq!(model["persisted_file"]["current_count"].as_u64(), Some(4));
+    assert_eq!(
+        model["persisted_file_pending"]["ownership_surface"].as_str(),
+        Some("File")
+    );
+    assert_eq!(
+        model["persisted_file_pending"]["current_count"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(model["graph_wip"]["current_count"].as_u64(), Some(0));
+    assert_eq!(
+        model["structural_graph_backlog"]["ownership_surface"].as_str(),
+        Some("File")
+    );
+    assert_eq!(
+        model["structural_graph_backlog"]["current_count"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        model["structural_graph_backlog"]["queue_breakdown"]["queued"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        model["structural_graph_backlog"]["queue_breakdown"]["inflight"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        model["graph_projection_queue_owned"]["ownership_surface"].as_str(),
+        Some("GraphProjectionQueue")
+    );
+    assert_eq!(
+        model["graph_projection_queue_owned"]["current_count"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        model["graph_projection_queue_owned"]["queue_breakdown"]["queued"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        model["graph_projection_queue_owned"]["queue_breakdown"]["inflight"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(model["graph_ready"]["current_count"].as_u64(), Some(2));
+    assert_eq!(
+        model["file_vectorization_queue_owned"]["ownership_surface"].as_str(),
+        Some("FileVectorizationQueue")
+    );
+    assert_eq!(
+        model["file_vectorization_queue_owned"]["current_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(model["vector_ready"]["status"].as_str(), Some("tracked"));
+    assert_eq!(model["vector_ready"]["current_count"].as_u64(), Some(1));
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
+}
+
+#[test]
+fn test_status_reports_priority_contract_for_watcher_first_pipeline() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("AXON_RUNTIME_MODE", "full");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
+    service_guard::reset_for_tests();
+    reset_ingress_metrics_for_tests();
+
+    let mut ingress = IngressBuffer::default();
+    ingress.record_file(IngressFileEvent::new(
+        "/tmp/watcher-hot.rs",
+        "AXO",
+        9,
+        99,
+        100,
+        IngressSource::Watcher,
+        IngressCause::Modified,
+    ));
+
+    let server = create_test_server();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO GraphProjectionQueue (anchor_type, anchor_id, radius, status, attempts, queued_at) VALUES \
+             ('file', '/tmp/graph-priority.rs', 2, 'queued', 0, 1)",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_code, status, file_stage, graph_ready, vector_ready, size, mtime, priority) VALUES \
+             ('/tmp/graph-priority.rs', 'AXO', 'pending', 'promoted', FALSE, FALSE, 10, 10, 10), \
+             ('/tmp/vector-backlog.rs', 'AXO', 'indexed', 'graph_indexed', TRUE, FALSE, 30, 30, 30)",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES \
+             ('/tmp/vector-backlog.rs', 'queued', 1)",
+        )
+        .unwrap();
+
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "full" }
+            })),
+            id: Some(json!(2204)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    assert_eq!(
+        response["data"]["runtime_authority"]["proposed_control_model"].as_str(),
+        Some("admission_first_stock_control")
+    );
+    let loop_semantics = &response["data"]["runtime_authority"]["loop_semantics"];
+    assert_eq!(
+        loop_semantics["upstream_push_loop"]["mode"].as_str(),
+        Some("push")
+    );
+    assert_eq!(
+        loop_semantics["upstream_push_loop"]["summary_scope"].as_str(),
+        Some("high_level_loop_summary")
+    );
+    assert_eq!(
+        loop_semantics["upstream_push_loop"]["boundary"].as_str(),
+        Some("buffered_discovery_to_graph_ready")
+    );
+    assert_eq!(
+        loop_semantics["upstream_push_loop"]["critical_throughput_stock"].as_str(),
+        Some("persisted_file_pending")
+    );
+    assert_eq!(
+        loop_semantics["gpu_paced_downstream_loop"]["mode"].as_str(),
+        Some("pull")
+    );
+    assert_eq!(
+        loop_semantics["gpu_paced_downstream_loop"]["boundary"].as_str(),
+        Some("graph_ready_to_vector_ready")
+    );
+    assert_eq!(
+        loop_semantics["gpu_paced_downstream_loop"]["idle_when_source_stock_empty"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(loop_semantics["finalize"]["mode"].as_str(), Some("async"));
+    assert_eq!(
+        loop_semantics["finalize"]["hot_path"].as_bool(),
+        Some(false)
+    );
+    let admission = &response["data"]["runtime_authority"]["admission_controller"];
+    let edges = &response["data"]["runtime_authority"]["canonical_edges"];
+    assert_eq!(admission["owner"].as_str(), Some("admission_controller"));
+    assert_eq!(admission["control_model_state"].as_str(), Some("proposed"));
+    assert_eq!(
+        admission["admission_completion_surface"].as_str(),
+        Some("File(status='pending', graph_ready=FALSE, eligible_for_graph=TRUE)")
+    );
+    assert_eq!(admission["buffered_discovery_current"].as_u64(), Some(1));
+    assert_eq!(
+        admission["persisted_file_pending_current"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(admission["graph_wip_current"].as_u64(), Some(0));
+    assert_eq!(admission["admission_wip_current"].as_u64(), Some(0));
+    assert_eq!(admission["blocking_authority"].as_str(), Some("none"));
+    assert_eq!(admission["allowed_by_contract"].as_bool(), Some(true));
+    assert_eq!(
+        admission["allowed_under_current_runtime"].as_bool(),
+        Some(true)
+    );
+    assert!(admission["target_band"].as_u64().is_some());
+    assert!(admission["reorder_point"].as_u64().is_some());
+    assert!(admission["max_wip"].as_u64().is_some());
+    assert!(admission["hold_window_ms"].as_u64().is_some());
+    assert!(admission["forced_bulk_fill_threshold"].as_u64().is_some());
+    assert!(admission["admission_flush_count"].as_u64().is_some());
+    assert!(admission["admission_last_flush_duration_ms"]
+        .as_u64()
+        .is_some());
+    assert!(admission["admission_last_promoted_count"]
+        .as_u64()
+        .is_some());
+    assert!(admission["admission_promoted_total"].as_u64().is_some());
+    assert!(admission["admission_last_durably_persisted_count"]
+        .as_u64()
+        .is_some());
+    assert!(admission["admission_durably_persisted_total"]
+        .as_u64()
+        .is_some());
+    assert!(admission["admission_last_excluded_from_pending_count"]
+        .as_u64()
+        .is_some());
+    assert!(admission["admission_excluded_from_pending_total"]
+        .as_u64()
+        .is_some());
+    assert!(
+        admission["admission_completion_diagnostics"]["flush_happened"]
+            .as_bool()
+            .is_some()
+    );
+    assert!(
+        admission["admission_completion_diagnostics"]["durable_file_persistence_completed"]
+            .as_bool()
+            .is_some()
+    );
+    assert!(
+        admission["admission_completion_diagnostics"]["persisted_but_excluded_from_pending"]
+            .as_bool()
+            .is_some()
+    );
+    assert_eq!(
+        edges["admission_edge"]["owner"].as_str(),
+        Some("admission_controller")
+    );
+    assert_eq!(
+        edges["admission_edge"]["blocking_authority"].as_str(),
+        Some("none")
+    );
+    assert_eq!(
+        edges["admission_edge"]["allowed_by_contract"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        edges["admission_edge"]["allowed_under_current_runtime"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        edges["graph_production_edge"]["owner"].as_str(),
+        Some("graph_production_controller")
+    );
+    assert_eq!(
+        edges["graph_production_edge"]["blocking_authority"].as_str(),
+        Some("none")
+    );
+    assert_eq!(
+        edges["graph_production_edge"]["allowed_under_current_runtime"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        edges["vector_downstream_edge"]["owner"].as_str(),
+        Some("vector_downstream_controller")
+    );
+    assert_eq!(
+        edges["vector_downstream_edge"]["blocking_authority"].as_str(),
+        Some("vector_floor_reserved")
+    );
+    assert_eq!(
+        edges["vector_downstream_edge"]["allowed_by_contract"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        edges["vector_downstream_edge"]["allowed_under_current_runtime"].as_bool(),
+        Some(true)
+    );
+
+    let contract = &response["data"]["runtime_authority"]["priority_contract"];
+    let ingestion = &response["data"]["runtime_authority"]["canonical_ingestion_stage_model"];
+    assert_eq!(
+        contract["contract_version"].as_str(),
+        Some("watcher_graph_vector_v1")
+    );
+    assert_eq!(
+        contract["authority_state"].as_str(),
+        Some("declared_runtime_truth")
+    );
+    assert_eq!(
+        ingestion["ingress_buffered"]["current_count"].as_u64(),
+        Some(1)
+    );
+
+    let ordered = contract["pipeline_order"].as_array().unwrap();
+    assert_eq!(ordered[0]["lane"].as_str(), Some("watcher_identification"));
+    assert_eq!(ordered[0]["priority"].as_str(), Some("highest"));
+    assert_eq!(
+        ordered[0]["admission_requires"].as_array().unwrap().len(),
+        0
+    );
+    assert_eq!(ordered[1]["lane"].as_str(), Some("graphing_after_enqueue"));
+    assert_eq!(ordered[1]["priority"].as_str(), Some("second"));
+    assert_eq!(
+        ordered[1]["admission_requires"][0].as_str(),
+        Some("persisted_file")
+    );
+    assert_eq!(
+        ordered[2]["lane"].as_str(),
+        Some("vectorization_after_graph_ready")
+    );
+    assert_eq!(ordered[2]["priority"].as_str(), Some("third"));
+    assert_eq!(
+        ordered[2]["admission_requires"][0].as_str(),
+        Some("graph_ready")
+    );
+
+    assert_eq!(
+        contract["backlog_scope"]["structural_graph_backlog_depth"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        contract["backlog_scope"]["graph_projection_queue_depth"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        contract["lane_gates"]["watcher_identification"]["backlog_gated"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        contract["lane_gates"]["graphing_after_enqueue"]["backlog_gated"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        contract["lane_gates"]["graphing_after_enqueue"]["gate_kind"].as_str(),
+        Some("upstream_ingress_priority")
+    );
+    assert_eq!(
+        contract["lane_gates"]["vectorization_after_graph_ready"]["backlog_gated"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        contract["lane_gates"]["vectorization_after_graph_ready"]["gate_kind"].as_str(),
+        Some("soft_priority_gate")
+    );
+    assert_eq!(
+        contract["vectorization_can_advance_ahead_of_graph_backlog"]["allowed_by_contract"]
+            .as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        contract["vectorization_can_advance_ahead_of_graph_backlog"]
+            ["allowed_under_current_runtime"]
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        contract["vectorization_can_advance_ahead_of_graph_backlog"]["enforcement_state"].as_str(),
+        Some("deprioritized_not_hard_blocked")
+    );
+
+    unsafe {
+        std::env::remove_var("AXON_RUNTIME_MODE");
+        std::env::remove_var("AXON_ENABLE_AUTONOMOUS_INGESTOR");
+    }
+}
+
+#[test]
+fn test_status_reports_admission_exclusion_diagnostics() {
+    reset_ingress_metrics_for_tests();
+    record_ingress_flush(12, 0, 1, 1);
+
+    let server = create_test_server();
+    let response = server
+        .handle_request(JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "status",
+                "arguments": { "mode": "full" }
+            })),
+            id: Some(json!(2205)),
+        })
+        .unwrap()
+        .result
+        .unwrap();
+
+    let admission = &response["data"]["runtime_authority"]["admission_controller"];
+    assert_eq!(
+        admission["admission_last_durably_persisted_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        admission["admission_last_excluded_from_pending_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        admission["admission_completion_diagnostics"]["durable_file_persistence_completed"]
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        admission["admission_completion_diagnostics"]["persisted_but_excluded_from_pending"]
+            .as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_newly_identified_file_is_enqueued_immediately_for_graph_pipeline() {
+    let server = create_test_server();
+    let mut ingress = IngressBuffer::default();
+    ingress.record_file(IngressFileEvent::new(
+        "/tmp/new-graph-hot-path.rs",
+        "AXO",
+        128,
+        42,
+        900,
+        IngressSource::Watcher,
+        IngressCause::Discovered,
+    ));
+
+    let batch = ingress.drain_batch(100);
+    let promoted = server.graph_store.promote_ingress_batch(&batch).unwrap();
+
+    assert_eq!(promoted.promoted_files, 1);
+    assert_eq!(promoted.promoted_tombstones, 0);
+
+    let file_row = server
+        .graph_store
+        .query_json(
+            "SELECT status, status_reason, file_stage, graph_ready FROM File WHERE path = '/tmp/new-graph-hot-path.rs'",
+        )
+        .unwrap();
+    assert!(file_row.contains("pending"), "{file_row}");
+    assert!(file_row.contains("watcher_hot_identified"), "{file_row}");
+    assert!(file_row.contains("promoted"), "{file_row}");
+
+    let queue_row = server
+        .graph_store
+        .query_json(
+            "SELECT anchor_type, anchor_id, status FROM GraphProjectionQueue WHERE anchor_type = 'file' AND anchor_id = '/tmp/new-graph-hot-path.rs'",
+        )
+        .unwrap();
+    assert!(queue_row.contains("queued"), "{queue_row}");
+    assert!(
+        queue_row.contains("/tmp/new-graph-hot-path.rs"),
+        "{queue_row}"
+    );
+}
+
+#[test]
+fn test_graph_backlog_blocks_vector_priority_until_graph_ready_advances() {
+    let _guard = env_lock();
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+
+    service_guard::record_vector_ready_queue_depth(0);
+    service_guard::record_vector_prepare_inflight_depth(0);
+    service_guard::record_vector_persist_queue_depth(0);
+    service_guard::record_graph_vector_priority_context(1, 16);
+
+    let first =
+        current_utility_first_scheduler_diagnostics(1, 16, service_guard::ServicePressure::Healthy);
+    assert_eq!(first.state.as_str(), "graph_priority");
+    assert_eq!(first.reason, "graph_backlog_present");
+    assert!(!first.semantic_underfeed, "{first:?}");
+    assert!(
+        service_guard::vector_runtime_metrics().ready_queue_depth_current >= 2,
+        "graph dominance should preserve a minimum semantic reserve floor"
+    );
+
+    service_guard::record_graph_vector_priority_context(0, 16);
+    let held =
+        current_utility_first_scheduler_diagnostics(0, 16, service_guard::ServicePressure::Healthy);
+    assert_eq!(held.state.as_str(), "graph_priority");
+
+    std::thread::sleep(Duration::from_millis(2_100));
+
+    service_guard::record_graph_vector_priority_context(0, 16);
+    let released =
+        current_utility_first_scheduler_diagnostics(0, 16, service_guard::ServicePressure::Healthy);
+    assert_eq!(released.state.as_str(), "semantic_refill_protection");
+    assert!(released.semantic_underfeed, "{released:?}");
+
+    service_guard::reset_for_tests();
+    reset_utility_first_scheduler_for_tests();
+}
+
+#[test]
+fn test_vectorization_admits_only_graph_ready_files() {
+    let server = create_test_server();
+
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) VALUES \
+             ('/tmp/not-graph-ready.rs', 'PRJ', 'pending', 1, 1, 100, 'promoted', FALSE, FALSE), \
+             ('/tmp/oversized.rs', 'PRJ', 'oversized_for_current_budget', 1, 1, 100, 'oversized', TRUE, FALSE), \
+             ('/tmp/graph-ready-orphan.rs', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) VALUES \
+             ('chunk-graph-ready-orphan', 'symbol', 'sym-graph-ready-orphan', 'PRJ', '/tmp/graph-ready-orphan.rs', 'function', 'body', 'hash-graph-ready-orphan', 1, 1)",
+        )
+        .unwrap();
+    server
+        .graph_store
+        .execute(
+            "INSERT INTO CONTAINS (source_id, target_id, project_code) VALUES \
+             ('/tmp/graph-ready-orphan.rs', 'sym-graph-ready-orphan', 'PRJ')",
+        )
+        .unwrap();
+
+    server
+        .graph_store
+        .enqueue_file_vectorization_refresh("/tmp/not-graph-ready.rs")
+        .unwrap();
+    server
+        .graph_store
+        .enqueue_file_vectorization_refresh("/tmp/oversized.rs")
+        .unwrap();
+
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(
+                "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/not-graph-ready.rs'"
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(
+                "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/oversized.rs'"
+            )
+            .unwrap(),
+        0
+    );
+
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "resume_vectorization",
+            "arguments": {}
+        })),
+        id: Some(json!(2205)),
+    };
+
+    let response = server.handle_request(req).unwrap().result.unwrap();
+    assert_eq!(
+        response["data"]["queued_files"].as_u64(),
+        Some(1),
+        "{response:?}"
+    );
+    assert_eq!(
+        server
+            .graph_store
+            .query_count(
+                "SELECT count(*) FROM FileVectorizationQueue WHERE file_path = '/tmp/graph-ready-orphan.rs'"
+            )
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -2173,25 +4067,25 @@ fn test_status_reports_retrieve_context_in_public_surface_when_full_autonomous()
         .filter_map(|value| value.as_str())
         .collect::<Vec<_>>();
     assert!(public_tool_names.contains(&"retrieve_context"));
-    assert!(public_tool_names.contains(&"refine_lattice"));
-    assert!(public_tool_names.contains(&"cypher"));
-    assert!(public_tool_names.contains(&"debug"));
-    assert!(public_tool_names.contains(&"schema_overview"));
-    assert!(public_tool_names.contains(&"list_labels_tables"));
-    assert!(public_tool_names.contains(&"query_examples"));
     assert!(public_tool_names.contains(&"health"));
     assert!(public_tool_names.contains(&"audit"));
     assert!(public_tool_names.contains(&"batch"));
     assert!(public_tool_names.contains(&"job_status"));
-    assert!(public_tool_names.contains(&"truth_check"));
-    assert!(public_tool_names.contains(&"diagnose_indexing"));
-    assert!(public_tool_names.contains(&"diff"));
-    assert!(public_tool_names.contains(&"semantic_clones"));
+    assert!(!public_tool_names.contains(&"truth_check"));
+    assert!(!public_tool_names.contains(&"diagnose_indexing"));
+    assert!(!public_tool_names.contains(&"diff"));
+    assert!(!public_tool_names.contains(&"semantic_clones"));
     assert!(public_tool_names.contains(&"architectural_drift"));
-    assert!(public_tool_names.contains(&"bidi_trace"));
-    assert!(public_tool_names.contains(&"api_break_check"));
-    assert!(public_tool_names.contains(&"simulate_mutation"));
-    assert!(public_tool_names.contains(&"resume_vectorization"));
+    assert!(!public_tool_names.contains(&"bidi_trace"));
+    assert!(!public_tool_names.contains(&"api_break_check"));
+    assert!(!public_tool_names.contains(&"simulate_mutation"));
+    assert!(!public_tool_names.contains(&"resume_vectorization"));
+    assert!(!public_tool_names.contains(&"refine_lattice"));
+    assert!(!public_tool_names.contains(&"cypher"));
+    assert!(!public_tool_names.contains(&"debug"));
+    assert!(!public_tool_names.contains(&"schema_overview"));
+    assert!(!public_tool_names.contains(&"list_labels_tables"));
+    assert!(!public_tool_names.contains(&"query_examples"));
 
     unsafe {
         std::env::remove_var("AXON_RUNTIME_MODE");
@@ -2240,7 +4134,7 @@ fn test_mcp_surface_diagnostics_exposes_server_truth_and_binding_caveat() {
         .collect::<Vec<_>>();
     assert!(allowlisted_tools.contains(&"restore_soll"));
     assert!(allowlisted_tools.contains(&"soll_apply_plan"));
-    assert!(allowlisted_tools.contains(&"resume_vectorization"));
+    assert!(!allowlisted_tools.contains(&"resume_vectorization"));
     assert_eq!(
         data["client_binding_notes"]["stale_client_binding_possible"].as_bool(),
         Some(true)

@@ -52,6 +52,7 @@ def main() -> int:
         "install_generation": args.install_generation
         or require_str(runtime_version, "install_generation"),
     }
+    topology = manifest.get("topology", "monolith")
 
     initialize_session(args.url, args.timeout, "release-runtime-check")
     _, response = call_tool(args.url, args.timeout, "status", {"mode": "brief"})
@@ -78,11 +79,36 @@ def main() -> int:
     if mismatches:
         raise SystemExit("runtime_version mismatch: " + "; ".join(mismatches))
 
+    if topology == "split":
+        runtime_authority = data.get("runtime_authority")
+        if not isinstance(runtime_authority, dict):
+            raise SystemExit("status missing data.runtime_authority")
+        topology_data = runtime_authority.get("runtime_topology")
+        if not isinstance(topology_data, dict):
+            raise SystemExit("status missing data.runtime_authority.runtime_topology")
+        split_expectations = {
+            "public_mcp_authority": "brain",
+            "soll_writer_authority": "brain",
+            "ist_writer_authority": "indexer",
+        }
+        split_mismatches: list[str] = []
+        for key, expected_value in split_expectations.items():
+            actual_value = topology_data.get(key)
+            if actual_value != expected_value:
+                split_mismatches.append(f"{key}: expected {expected_value}, got {actual_value}")
+        if topology_data.get("system_converged") is not True:
+            split_mismatches.append(
+                f"system_converged: expected true, got {topology_data.get('system_converged')}"
+            )
+        if split_mismatches:
+            raise SystemExit("split topology mismatch: " + "; ".join(split_mismatches))
+
     print(
         json.dumps(
             {
                 "status": "ok",
                 "instance_kind": actual_instance,
+                "topology": topology,
                 "runtime_version": {
                     key: live_runtime.get(key) for key in expected.keys()
                 },

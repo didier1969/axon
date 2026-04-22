@@ -8,6 +8,7 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     if pid = Process.whereis(AxonDashboard.BridgeClient) do
       :sys.get_state(pid)
     end
+
     Axon.Watcher.Telemetry.reset!()
     :ok
   end
@@ -209,5 +210,199 @@ defmodule AxonDashboardWeb.StatusLiveTest do
     assert html =~ "0.0%"
     assert html =~ "Host State"
     assert html =~ "HEALTHY"
+  end
+
+  test "reconcile accepts a real zero snapshot after IST reset instead of preserving stale counts",
+       %{conn: conn} do
+    initial_routes = snapshot_routes(3, 1)
+    zero_routes = snapshot_routes(0, 0)
+
+    with_dynamic_sql_gateway(initial_routes, fn update_routes ->
+      {:ok, view, html} = live(conn, "/")
+      assert html =~ ~s(data-known="3")
+
+      update_routes.(zero_routes)
+      send(view.pid, :reconcile_tick)
+
+      assert eventually(fn -> render(view) =~ ~s(data-known="0") end)
+      refute render(view) =~ ~s(data-known="3")
+    end)
+  end
+
+  defp snapshot_routes(known, vectorized) do
+    completed = known
+
+    flow_rows =
+      if known == 0 do
+        [[0, 0, 0, 0, 0, 0, 0, 0]]
+      else
+        [[completed, 0, 0, 0, vectorized, max(completed - vectorized, 0), 0, 0]]
+      end
+
+    default_rows =
+      if known == 0 do
+        []
+      else
+        [
+          ["workspace_status", nil, "indexed", completed, nil],
+          ["workspace_stage", nil, "graph_indexed", completed, nil],
+          ["workspace_ready", nil, "ready", completed, vectorized],
+          ["project_status", "alpha", "indexed", completed, nil],
+          ["project_ready", "alpha", "ready", completed, vectorized]
+        ]
+      end
+
+    [
+      {:default, default_rows},
+      {"FROM soll.ProjectCodeRegistry", if(known == 0, do: [], else: [["alpha", "Alpha"]])},
+      {"AS indexed_graph_ready", flow_rows},
+      {"SELECT COUNT(*) FROM File WHERE vector_ready = TRUE", [[vectorized]]},
+      {"SELECT COUNT(*) FROM ChunkEmbedding", [[vectorized * 2]]},
+      {"COUNT(DISTINCT anchor_type || ':' || anchor_id) FROM GraphEmbedding", [[vectorized]]},
+      {"SELECT COUNT(*) FROM Symbol", [[known * 3]]},
+      {"links_count", [[known * 4]]}
+    ]
+  end
+
+  defp with_dynamic_sql_gateway(initial_routes, fun) do
+    :inets.start()
+    :ssl.start()
+    port = random_port()
+    {:ok, routes_ref} = Agent.start_link(fn -> initial_routes end)
+
+    {:ok, listener} =
+      :gen_tcp.listen(port, [:binary, packet: :raw, active: false, reuseaddr: true])
+
+    previous = Application.get_env(:axon_dashboard, Axon.Watcher.SqlGateway, [])
+
+    Application.put_env(
+      :axon_dashboard,
+      Axon.Watcher.SqlGateway,
+      Keyword.put(previous, :url, "http://127.0.0.1:#{port}/sql")
+    )
+
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        dynamic_accept_loop(listener, routes_ref, parent)
+      end)
+
+    update_routes = fn routes -> Agent.update(routes_ref, fn _ -> routes end) end
+
+    try do
+      fun.(update_routes)
+    after
+      Application.put_env(:axon_dashboard, Axon.Watcher.SqlGateway, previous)
+      send(task.pid, :stop)
+      Task.await(task, 5_000)
+      Agent.stop(routes_ref)
+    end
+  end
+
+  defp dynamic_accept_loop(listener, routes_ref, parent) do
+    receive do
+      :stop ->
+        :gen_tcp.close(listener)
+        :ok
+    after
+      50 ->
+        case :gen_tcp.accept(listener, 200) do
+          {:ok, socket} ->
+            {:ok, request} = :gen_tcp.recv(socket, 0, 5_000)
+            routes = Agent.get(routes_ref, & &1)
+            body = response_body_for_request(request, routes)
+
+            response = [
+              "HTTP/1.1 200 OK\r\n",
+              "content-type: application/json\r\n",
+              "content-length: #{byte_size(body)}\r\n",
+              "connection: close\r\n\r\n",
+              body
+            ]
+
+            :ok = :gen_tcp.send(socket, response)
+            :gen_tcp.close(socket)
+            dynamic_accept_loop(listener, routes_ref, parent)
+
+          {:error, :timeout} ->
+            if Process.alive?(parent) do
+              dynamic_accept_loop(listener, routes_ref, parent)
+            else
+              :gen_tcp.close(listener)
+              :ok
+            end
+        end
+    end
+  end
+
+  defp response_body_for_request(request, routes) do
+    request = IO.iodata_to_binary(request)
+
+    query =
+      case Regex.run(~r/\r\n\r\n(?<body>\{.*\})/s, request, capture: :all_names) do
+        [body] ->
+          case Jason.decode(body) do
+            {:ok, %{"query" => query}} -> query
+            _ -> ""
+          end
+
+        _ ->
+          ""
+      end
+
+    normalized_query = normalize_sql(query)
+
+    if String.contains?(normalized_query, "indexed_graph_ready") and
+         String.contains?(normalized_query, "indexed_degraded_vector_missing") do
+      routes
+      |> Enum.find_value("[]", fn
+        {"AS indexed_graph_ready", rows} -> Jason.encode!(rows)
+        _ -> nil
+      end)
+    else
+      routes
+      |> Enum.reject(fn {needle, _rows} -> needle == :default end)
+      |> Enum.find_value(fn
+        {needle, rows} when is_binary(needle) ->
+          if String.contains?(normalized_query, normalize_sql(needle)),
+            do: Jason.encode!(rows),
+            else: nil
+      end)
+      |> Kernel.||(default_route_body(routes))
+    end
+  end
+
+  defp default_route_body(routes) do
+    Enum.find_value(routes, "[]", fn
+      {:default, rows} -> Jason.encode!(rows)
+      _route -> nil
+    end)
+    |> Kernel.||("[]")
+  end
+
+  defp eventually(fun, attempts \\ 40)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      true
+    else
+      Process.sleep(25)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(_fun, 0), do: false
+
+  defp random_port do
+    45_000 + rem(:erlang.unique_integer([:positive]), 10_000)
+  end
+
+  defp normalize_sql(value) do
+    value
+    |> to_string()
+    |> String.downcase()
+    |> String.replace(~r/\s+/u, " ")
+    |> String.trim()
   end
 end

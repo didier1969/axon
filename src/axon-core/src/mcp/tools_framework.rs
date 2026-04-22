@@ -1,11 +1,21 @@
+use crate::bridge::RuntimeTruthFeed;
 use crate::embedder::{
     bootstrap_runtime_tuning_state, current_embedding_provider_diagnostics,
     current_runtime_tuning_state, embedding_lane_config_from_env,
 };
+use crate::ingress_buffer::ingress_metrics_snapshot;
 use crate::optimizer;
+use crate::runtime_command_proxy::RuntimeCommandProxy;
 use crate::runtime_mode::AxonRuntimeMode;
 use crate::runtime_operational_profile::AxonRuntimeOperationalProfile;
-use crate::runtime_profile::{recommend_embedding_lane_sizing, RuntimeProfile};
+use crate::runtime_profile::{
+    canonical_watcher_first_priority_lanes, current_admission_controller_state,
+    current_graph_production_state, current_runtime_priority_contract_state,
+    current_vector_downstream_state, recommend_admission_controller_profile,
+    recommend_embedding_lane_sizing, RuntimeProfile,
+};
+use crate::runtime_topology::{AxonProcessRole, RuntimeTopologyKind, RuntimeTopologyStatus};
+use crate::runtime_truth_contract::RuntimeFreshnessState;
 use crate::service_guard;
 use crate::vector_control::{
     apply_semantic_policy_runtime_tuning, baseline_semantic_policy,
@@ -18,6 +28,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::catalog::tools_catalog;
 use super::format::{evidence_by_mode, format_standard_contract};
@@ -38,7 +49,809 @@ const STATUS_FULL_CACHE_TTL_MS: i64 = 1_000;
 const WHY_CACHE_TTL_MS: i64 = 180_000;
 const ANOMALIES_CACHE_TTL_MS: i64 = 180_000;
 
+#[derive(Debug, Clone)]
+struct SplitPeerRuntimeInfo {
+    runtime_truth_feed: RuntimeTruthFeed,
+    release_version: Option<String>,
+    build_id: Option<String>,
+    install_generation: Option<String>,
+    runtime_mode: Option<String>,
+    runtime_telemetry: Option<Value>,
+    runtime_state_present: bool,
+}
+
 impl McpServer {
+    fn split_now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    fn split_run_root(project_root: &str, instance_kind: &str, role_slug: &str) -> PathBuf {
+        let mut path = PathBuf::from(project_root);
+        if instance_kind == "dev" {
+            path.push(".axon-dev");
+        } else {
+            path.push(".axon");
+        }
+        path.push(format!("run-{role_slug}"));
+        path
+    }
+
+    fn split_runtime_state_from_file(path: &PathBuf) -> Option<HashMap<String, String>> {
+        let file = OpenOptions::new().read(true).open(path).ok()?;
+        let reader = BufReader::new(file);
+        let mut values = HashMap::new();
+        for line in reader.lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            values.insert(
+                key.trim().to_string(),
+                value.trim().trim_matches('"').to_string(),
+            );
+        }
+        Some(values)
+    }
+
+    fn split_runtime_heartbeat_path(
+        project_root: &str,
+        instance_kind: &str,
+        role_slug: &str,
+    ) -> PathBuf {
+        Self::split_run_root(project_root, instance_kind, role_slug).join("runtime-heartbeat.json")
+    }
+
+    fn split_runtime_truth_feed_from_heartbeat(
+        path: &PathBuf,
+    ) -> Option<(RuntimeTruthFeed, Value)> {
+        let payload = fs::read_to_string(path).ok()?;
+        let payload: Value = serde_json::from_str(&payload).ok()?;
+        let runtime_truth_feed = payload
+            .get("runtime_truth_feed")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .or_else(|| {
+                let now_ms = Self::split_now_ms();
+                Some(RuntimeTruthFeed::from_observed_times(
+                    now_ms,
+                    payload.get("last_heartbeat_at_ms").and_then(Value::as_u64),
+                    payload
+                        .get("last_good_payload_at_ms")
+                        .and_then(Value::as_u64),
+                    payload
+                        .get("stale_after_ms")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(RuntimeTruthFeed::DEFAULT_STALE_AFTER_MS),
+                    payload
+                        .get("degraded_reason")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .as_deref(),
+                ))
+            })?;
+        Some((runtime_truth_feed, payload))
+    }
+
+    fn split_pid_file_path(project_root: &str, instance_kind: &str, role_slug: &str) -> PathBuf {
+        Self::split_run_root(project_root, instance_kind, role_slug)
+            .join(format!("axon-{role_slug}.pid"))
+    }
+
+    fn pid_is_live(pid: u32) -> bool {
+        PathBuf::from(format!("/proc/{pid}")).exists()
+    }
+
+    fn file_mtime_ms(path: &PathBuf) -> Option<u64> {
+        let modified = fs::metadata(path).ok()?.modified().ok()?;
+        let elapsed = modified.duration_since(UNIX_EPOCH).ok()?;
+        Some(elapsed.as_millis() as u64)
+    }
+
+    fn split_runtime_truth_feed_from_runtime_state(
+        runtime_state_path: &PathBuf,
+        pid_path: &PathBuf,
+    ) -> Option<RuntimeTruthFeed> {
+        let runtime_state = Self::split_runtime_state_from_file(runtime_state_path)?;
+        let pid = fs::read_to_string(pid_path)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok());
+        let now_ms = Self::split_now_ms();
+        let last_heartbeat_at_ms = Self::file_mtime_ms(runtime_state_path)
+            .or_else(|| Self::file_mtime_ms(pid_path))
+            .or(Some(now_ms));
+        let degraded_reason = match pid {
+            Some(pid) if Self::pid_is_live(pid) => None,
+            Some(_) => Some("indexer_process_not_live"),
+            None => Some("indexer_pid_missing"),
+        };
+        let stale_after_ms = RuntimeTruthFeed::DEFAULT_STALE_AFTER_MS;
+        let mut feed = RuntimeTruthFeed::from_observed_times(
+            now_ms,
+            last_heartbeat_at_ms,
+            last_heartbeat_at_ms,
+            stale_after_ms,
+            degraded_reason,
+        );
+        if degraded_reason.is_none() {
+            feed.stale = false;
+            feed.degraded_reason = None;
+        }
+        let _ = runtime_state;
+        Some(feed)
+    }
+
+    fn split_peer_runtime_info(
+        project_root: &str,
+        instance_kind: &str,
+        role_slug: &str,
+    ) -> Option<SplitPeerRuntimeInfo> {
+        let run_root = Self::split_run_root(project_root, instance_kind, role_slug);
+        let runtime_state_path = run_root.join("runtime.env");
+        let runtime_state = Self::split_runtime_state_from_file(&runtime_state_path);
+        let pid_path = Self::split_pid_file_path(project_root, instance_kind, role_slug);
+        let runtime_heartbeat_path =
+            Self::split_runtime_heartbeat_path(project_root, instance_kind, role_slug);
+        let (runtime_truth_feed, payload) = if let Some((feed, payload)) =
+            Self::split_runtime_truth_feed_from_heartbeat(&runtime_heartbeat_path)
+        {
+            (feed, payload)
+        } else {
+            let feed =
+                Self::split_runtime_truth_feed_from_runtime_state(&runtime_state_path, &pid_path)?;
+            (feed, json!({}))
+        };
+        let release_version = payload
+            .get("release_version")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| runtime_state.as_ref()?.get("AXON_RELEASE_VERSION").cloned());
+        let build_id = payload
+            .get("build_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| runtime_state.as_ref()?.get("AXON_BUILD_ID").cloned());
+        let install_generation = payload
+            .get("install_generation")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                runtime_state
+                    .as_ref()?
+                    .get("AXON_INSTALL_GENERATION")
+                    .cloned()
+            });
+        let runtime_mode = payload
+            .get("runtime_mode")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| runtime_state.as_ref()?.get("AXON_RUNTIME_MODE").cloned());
+        let runtime_telemetry = payload.get("runtime_telemetry").cloned();
+
+        Some(SplitPeerRuntimeInfo {
+            runtime_truth_feed,
+            release_version,
+            build_id,
+            install_generation,
+            runtime_mode,
+            runtime_telemetry,
+            runtime_state_present: runtime_state.is_some(),
+        })
+    }
+
+    fn runtime_truth_feed_snapshot(feed: &RuntimeTruthFeed) -> Value {
+        let state = if feed.stale {
+            "stale"
+        } else if feed.degraded_reason.is_some() {
+            "degraded"
+        } else {
+            "fresh"
+        };
+
+        json!({
+            "state": state,
+            "stale": feed.stale,
+            "observed_age_ms": feed.observed_age_ms,
+            "stale_after_ms": feed.stale_after_ms,
+            "last_heartbeat_at_ms": feed.last_heartbeat_at_ms,
+            "last_good_payload_at_ms": feed.last_good_payload_at_ms,
+            "degraded_reason": feed.degraded_reason
+        })
+    }
+
+    fn runtime_topology_snapshot(&self, runtime_mode: AxonRuntimeMode) -> Value {
+        let mut status = RuntimeTopologyStatus::legacy_compatibility_shim(runtime_mode);
+        let instance_kind =
+            std::env::var("AXON_INSTANCE_KIND").unwrap_or_else(|_| "dev".to_string());
+        let project_root = std::env::var("AXON_PROJECT_ROOT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| ".".to_string())
+            });
+        let local_feed = service_guard::current_runtime_truth_feed();
+        let mut indexer_feed = local_feed.clone();
+        let ist_snapshot = self.graph_store.reader_snapshot_freshness_contract();
+        let reader_snapshot_diagnostics = self.graph_store.reader_snapshot_diagnostics();
+        let reader_alias_direct = self.graph_store.reader_snapshot_is_writer_alias();
+        let shadow_role = std::env::var("AXON_RUNTIME_SHADOW_ROLE").ok();
+        let split_shadow_only = std::env::var("AXON_SPLIT_SHADOW_ONLY")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        let mut peer_runtime_version = json!({
+            "available": false,
+            "release_version": Value::Null,
+            "build_id": Value::Null,
+            "install_generation": Value::Null,
+            "runtime_mode": Value::Null
+        });
+        let mut peer_runtime_telemetry = Value::Null;
+        let mut brain_ready = runtime_mode.control_plane_enabled();
+        let mut indexer_ready = runtime_mode.ingestion_enabled();
+
+        if let Some(role) = shadow_role.as_deref().map(str::trim) {
+            match role {
+                "brain" | "brain_shadow" => {
+                    if let Some(peer) =
+                        Self::split_peer_runtime_info(&project_root, &instance_kind, "indexer")
+                    {
+                        indexer_feed = peer.runtime_truth_feed.clone();
+                        indexer_ready = peer.runtime_state_present;
+                        peer_runtime_version = json!({
+                            "available": true,
+                            "release_version": peer.release_version,
+                            "build_id": peer.build_id,
+                            "install_generation": peer.install_generation,
+                            "runtime_mode": peer.runtime_mode
+                        });
+                        peer_runtime_telemetry = peer.runtime_telemetry.unwrap_or(Value::Null);
+                    } else {
+                        indexer_feed = RuntimeTruthFeed::from_observed_times(
+                            0,
+                            None,
+                            None,
+                            RuntimeTruthFeed::DEFAULT_STALE_AFTER_MS,
+                            Some("indexer_feed_unavailable"),
+                        );
+                        indexer_ready = false;
+                    }
+                }
+                "indexer" | "indexer_shadow" => {
+                    brain_ready = Self::split_runtime_state_from_file(
+                        &Self::split_run_root(&project_root, &instance_kind, "brain")
+                            .join("runtime.env"),
+                    )
+                    .is_some();
+                    indexer_ready = true;
+                }
+                _ => {}
+            }
+        }
+
+        let indexer_feed_healthy = !indexer_feed.stale && indexer_feed.degraded_reason.is_none();
+        let ist_snapshot_healthy = matches!(ist_snapshot.state, RuntimeFreshnessState::Fresh);
+        let split_ready =
+            brain_ready && indexer_ready && indexer_feed_healthy && ist_snapshot_healthy;
+        status.brain_ready = brain_ready;
+        status.indexer_ready = indexer_ready;
+        status.ist_snapshot = ist_snapshot.clone();
+        status.system_converged = match shadow_role.as_deref().map(str::trim) {
+            Some("brain") | Some("brain_shadow") | Some("indexer") | Some("indexer_shadow") => {
+                !split_shadow_only && split_ready
+            }
+            _ => matches!(runtime_mode, AxonRuntimeMode::Full) && split_ready,
+        };
+
+        if let Some(role) = shadow_role.as_deref().map(str::trim) {
+            match role {
+                "brain" | "brain_shadow" => {
+                    status.topology = RuntimeTopologyKind::BrainIndexerSplit;
+                    status.process_role = AxonProcessRole::Brain;
+                    status.public_mcp_authority = AxonProcessRole::Brain;
+                    status.soll_writer_authority = AxonProcessRole::Brain;
+                    status.ist_writer_authority = AxonProcessRole::Indexer;
+                    status.brain_ready = true;
+                    status.compatibility_shim = false;
+                    status.compatibility_reason = split_shadow_only.then(|| {
+                        format!("split brain shadow role active (shadow_only={split_shadow_only})")
+                    });
+                }
+                "indexer" | "indexer_shadow" => {
+                    status.topology = RuntimeTopologyKind::BrainIndexerSplit;
+                    status.process_role = AxonProcessRole::Indexer;
+                    status.public_mcp_authority = AxonProcessRole::Brain;
+                    status.soll_writer_authority = AxonProcessRole::Brain;
+                    status.ist_writer_authority = AxonProcessRole::Indexer;
+                    status.indexer_ready = true;
+                    status.compatibility_shim = false;
+                    status.compatibility_reason = split_shadow_only.then(|| {
+                        format!(
+                            "split indexer shadow role active (shadow_only={split_shadow_only})"
+                        )
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        json!({
+            "topology": status.topology,
+            "process_role": status.process_role,
+            "public_mcp_authority": status.public_mcp_authority,
+            "soll_writer_authority": status.soll_writer_authority,
+            "ist_writer_authority": status.ist_writer_authority,
+            "brain_ready": status.brain_ready,
+            "indexer_ready": status.indexer_ready,
+            "system_converged": status.system_converged,
+            "indexer_feed": Self::runtime_truth_feed_snapshot(&indexer_feed),
+            "indexer_runtime": {
+                "available": !peer_runtime_telemetry.is_null(),
+                "telemetry_source": if peer_runtime_telemetry.is_null() {
+                    Value::Null
+                } else {
+                    Value::String("runtime_heartbeat".to_string())
+                },
+                "telemetry": peer_runtime_telemetry,
+            },
+            "peer_runtime_version": peer_runtime_version,
+            "ist_snapshot": json!({
+                "state": ist_snapshot.state,
+                "stale": ist_snapshot.stale,
+                "observed_age_ms": ist_snapshot.observed_age_ms,
+                "stale_after_ms": ist_snapshot.stale_after_ms,
+                "degraded_reason": ist_snapshot.degraded_reason,
+                "unsafe_read": !matches!(ist_snapshot.state, RuntimeFreshnessState::Fresh),
+                "computed_by": "GraphStore::reader_snapshot_freshness_contract",
+                "trust_boundary": if reader_alias_direct {
+                    "graph_store.writer_alias_direct_read"
+                } else {
+                    "graph_store.reader_snapshot_diagnostics"
+                },
+                "read_path": if reader_alias_direct {
+                    "writer_alias_direct"
+                } else {
+                    "reader_snapshot"
+                },
+                "diagnostics": {
+                    "commit_epoch": reader_snapshot_diagnostics.commit_epoch,
+                    "reader_epoch": reader_snapshot_diagnostics.reader_epoch,
+                    "reader_epoch_lag": reader_snapshot_diagnostics.reader_epoch_lag,
+                    "refresh_inflight": reader_snapshot_diagnostics.refresh_inflight,
+                    "refresh_requested_epoch": reader_snapshot_diagnostics.refresh_requested_epoch,
+                    "last_refresh_started_ms": reader_snapshot_diagnostics.last_refresh_started_ms,
+                    "last_refresh_completed_ms": reader_snapshot_diagnostics.last_refresh_completed_ms,
+                    "reader_refresh_failures_total": reader_snapshot_diagnostics.reader_refresh_failures_total,
+                }
+            }),
+            "compatibility_shim": status.compatibility_shim,
+            "compatibility_reason": status.compatibility_reason,
+        })
+    }
+
+    fn priority_contract_snapshot(
+        runtime_mode: &str,
+        semantic_backlog_responsible: bool,
+        ingress_buffered_entries: usize,
+        structural_graph_backlog_depth: usize,
+        graph_projection_queue_depth: usize,
+        file_backlog_depth: usize,
+        utility_scheduler: crate::vector_control::UtilityFirstSchedulerDiagnostics,
+        semantic_profile: &'static str,
+    ) -> Value {
+        let lanes = canonical_watcher_first_priority_lanes();
+        let priority_state = current_runtime_priority_contract_state(
+            runtime_mode,
+            ingress_buffered_entries,
+            structural_graph_backlog_depth,
+        );
+        let semantic_runtime_enabled =
+            !matches!(runtime_mode, "graph_only" | "read_only" | "mcp_only")
+                && semantic_backlog_responsible;
+        let vector_gate_active = semantic_runtime_enabled && priority_state.graph_backlog_present;
+
+        json!({
+            "contract_version": "watcher_graph_vector_v1",
+            "authority_state": "declared_runtime_truth",
+            "scheduler_enforcement_state": priority_state.enforcement_state,
+            "pipeline_order": lanes.iter().map(|lane| {
+                json!({
+                    "lane": lane.lane,
+                    "priority": lane.priority,
+                    "admission_requires": lane.admission_requires
+                })
+            }).collect::<Vec<_>>(),
+            "lane_gates": {
+                "watcher_identification": {
+                    "backlog_gated": priority_state.watcher_identification_backlog_gated,
+                    "gate_kind": "none",
+                    "current_gate_reason": "watcher_and_scan_admission_do_not_wait_for_graph_or_vector_backlog"
+                },
+                "graphing_after_enqueue": {
+                    "backlog_gated": priority_state.graphing_after_enqueue_backlog_gated,
+                    "gate_kind": if priority_state.graphing_after_enqueue_backlog_gated {
+                        "upstream_ingress_priority"
+                    } else {
+                        "none"
+                    },
+                    "current_gate_reason": if priority_state.graphing_after_enqueue_backlog_gated {
+                        "higher_priority_ingress_is_still_buffered_before_graph_ownership"
+                    } else {
+                        "graph_backlog_itself_is_the_actionable_lane"
+                    }
+                },
+                "vectorization_after_graph_ready": {
+                    "backlog_gated": priority_state.vectorization_after_graph_ready_backlog_gated,
+                    "gate_kind": if vector_gate_active { "soft_priority_gate" } else { "none" },
+                    "current_gate_reason": if vector_gate_active {
+                        "graph_backlog_present_so_vectorization_is_contractually_deprioritized_after_graph_work"
+                    } else if !semantic_runtime_enabled {
+                        "semantic_runtime_not_owned_by_current_mode_or_instance"
+                    } else {
+                        "no_active_graph_priority_gate"
+                    },
+                    "semantic_policy_profile": semantic_profile,
+                    "scheduler_state": utility_scheduler.state.as_str(),
+                    "scheduler_reason": utility_scheduler.reason
+                }
+            },
+            "backlog_scope": {
+                "structural_graph_backlog_depth": structural_graph_backlog_depth,
+                "graph_projection_queue_depth": graph_projection_queue_depth,
+                "vector_queue_depth": file_backlog_depth
+            },
+            "vectorization_can_advance_ahead_of_graph_backlog": {
+                "allowed_by_contract": priority_state.vectorization_allowed_ahead_of_graph_backlog,
+                "allowed_under_current_runtime": semantic_runtime_enabled,
+                "enforcement_state": if vector_gate_active {
+                    "deprioritized_not_hard_blocked"
+                } else if !semantic_runtime_enabled {
+                    "not_owned_by_current_runtime"
+                } else {
+                    "allowed_without_active_graph_priority_gate"
+                },
+                "reason": if vector_gate_active {
+                    "current_runtime_slows_semantic_work_when_graph_backlog_is_present_but_does_not_hard_block_it"
+                } else if !semantic_runtime_enabled {
+                    "current_runtime_or_instance_is_not_responsible_for_semantic_drain"
+                } else {
+                    "no_graph_priority_gate_is_active_now"
+                }
+            }
+        })
+    }
+
+    fn admission_controller_snapshot(
+        runtime_mode: &str,
+        ingress: crate::ingress_buffer::IngressMetricsSnapshot,
+        persisted_file_pending_current: usize,
+        graph_wip_current: usize,
+    ) -> Value {
+        let profile = RuntimeProfile::detect();
+        let controller_profile = recommend_admission_controller_profile(&profile);
+        let pressure = service_guard::current_pressure();
+        let controller_state = current_admission_controller_state(
+            controller_profile,
+            ingress.buffered_entries,
+            ingress.hot_entries,
+            ingress.scan_entries,
+            persisted_file_pending_current,
+            graph_wip_current,
+            matches!(runtime_mode, "read_only" | "mcp_only"),
+            matches!(pressure, service_guard::ServicePressure::Critical),
+        );
+
+        json!({
+            "owner": "admission_controller",
+            "control_model_state": "proposed",
+            "buffered_discovery_current": ingress.buffered_entries,
+            "watcher_buffered_current": ingress.hot_entries,
+            "scan_buffered_current": ingress.scan_entries,
+            "persisted_file_pending_current": persisted_file_pending_current,
+            "admission_flush_count": ingress.flush_count,
+            "admission_last_flush_duration_ms": ingress.last_flush_duration_ms,
+            "admission_last_promoted_count": ingress.last_promoted_count,
+            "admission_promoted_total": ingress.promoted_total,
+            "admission_last_durably_persisted_count": ingress.last_durably_persisted_count,
+            "admission_durably_persisted_total": ingress.durably_persisted_total,
+            "admission_last_excluded_from_pending_count": ingress.last_excluded_from_pending_count,
+            "admission_excluded_from_pending_total": ingress.excluded_from_pending_total,
+            "graph_wip_current": graph_wip_current,
+            "admission_wip_current": graph_wip_current,
+            "target_band": controller_state.profile.target_band,
+            "reorder_point": controller_state.profile.reorder_point,
+            "max_wip": controller_state.profile.max_wip,
+            "hold_window_ms": controller_state.profile.hold_window_ms,
+            "forced_bulk_fill_threshold": controller_state.profile.forced_bulk_fill_threshold,
+            "admission_completion_surface": "File(status='pending', graph_ready=FALSE, eligible_for_graph=TRUE)",
+            "admission_completion_diagnostics": {
+                "flush_happened": ingress.flush_count > 0,
+                "durable_file_persistence_completed": ingress.last_durably_persisted_count > 0,
+                "persisted_but_excluded_from_pending": ingress.last_excluded_from_pending_count > 0,
+            },
+            "diagnostic_notes": {
+                "durably_persisted_count_semantics": "Counts promoted paths that are durably visible in File after the flush wave, not only newly inserted rows."
+            },
+            "blocking_authority": controller_state.blocking_authority,
+            "allowed_by_contract": !matches!(runtime_mode, "read_only" | "mcp_only"),
+            "allowed_under_current_runtime": controller_state.admission_open,
+            "bulk_fill_preferred": controller_state.bulk_fill_preferred,
+            "watcher_hot_priority": ingress.hot_entries > 0,
+            "notes": "Controls the canonical buffered_discovery -> persisted_file_pending handoff."
+        })
+    }
+
+    fn canonical_edge_control_snapshot(
+        runtime_mode: &str,
+        ingress: crate::ingress_buffer::IngressMetricsSnapshot,
+        persisted_file_pending_current: usize,
+        graph_wip_current: usize,
+        graph_ready_current: usize,
+        structural_graph_backlog_depth: usize,
+    ) -> Value {
+        let profile = RuntimeProfile::detect();
+        let controller_profile = recommend_admission_controller_profile(&profile);
+        let pressure = service_guard::current_pressure();
+        let runtime_processing_disabled = matches!(runtime_mode, "read_only" | "mcp_only");
+        let critical_pressure = matches!(pressure, service_guard::ServicePressure::Critical);
+        let semantic_runtime_enabled =
+            !matches!(runtime_mode, "graph_only" | "read_only" | "mcp_only");
+
+        let admission = current_admission_controller_state(
+            controller_profile,
+            ingress.buffered_entries,
+            ingress.hot_entries,
+            ingress.scan_entries,
+            persisted_file_pending_current,
+            graph_wip_current,
+            runtime_processing_disabled,
+            critical_pressure,
+        );
+        let graph = current_graph_production_state(
+            persisted_file_pending_current,
+            graph_wip_current,
+            (controller_profile.max_wip / 2).max(1),
+            runtime_processing_disabled,
+            critical_pressure,
+        );
+        let vector = current_vector_downstream_state(
+            graph_ready_current,
+            structural_graph_backlog_depth,
+            semantic_runtime_enabled,
+            critical_pressure,
+        );
+
+        json!({
+            "admission_edge": {
+                "owner": "admission_controller",
+                "boundary": "buffered_discovery_to_persisted_file_pending",
+                "blocking_authority": admission.blocking_authority,
+                "allowed_by_contract": !runtime_processing_disabled,
+                "allowed_under_current_runtime": admission.admission_open,
+                "source_stock_current": ingress.buffered_entries,
+                "target_stock_current": persisted_file_pending_current,
+                "wip_current": graph_wip_current,
+            },
+            "graph_production_edge": {
+                "owner": "graph_production_controller",
+                "boundary": "persisted_file_pending_to_graph_ready",
+                "blocking_authority": graph.blocking_authority,
+                "allowed_by_contract": !runtime_processing_disabled,
+                "allowed_under_current_runtime": graph.graph_open,
+                "source_stock_current": persisted_file_pending_current,
+                "target_stock_current": graph_ready_current,
+                "wip_current": graph_wip_current,
+            },
+            "vector_downstream_edge": {
+                "owner": "vector_downstream_controller",
+                "boundary": "graph_ready_to_vector_ready",
+                "blocking_authority": vector.blocking_authority,
+                "allowed_by_contract": semantic_runtime_enabled,
+                "allowed_under_current_runtime": vector.vector_open,
+                "source_stock_current": graph_ready_current,
+                "target_stock_current": 0,
+                "wip_current": structural_graph_backlog_depth,
+            }
+        })
+    }
+
+    fn loop_semantics_snapshot() -> Value {
+        json!({
+            "upstream_push_loop": {
+                "mode": "push",
+                "boundary": "buffered_discovery_to_graph_ready",
+                "summary_scope": "high_level_loop_summary",
+                "control_layers": [
+                    "supply_discovery",
+                    "admission_production"
+                ],
+                "stages": [
+                    "buffered_discovery",
+                    "persisted_file_pending",
+                    "graph_ready"
+                ],
+                "critical_throughput_stock": "persisted_file_pending",
+                "notes": "Watcher and scan should create and replenish canonical work without waiting for GPU cadence. This high-level push loop aggregates supply/discovery and admission/production; persisted_file_pending remains the primary global throughput stock unless runtime evidence disproves it."
+            },
+            "gpu_paced_downstream_loop": {
+                "mode": "pull",
+                "boundary": "graph_ready_to_vector_ready",
+                "paced_by": "gpu_capacity_and_vram",
+                "stages": [
+                    "graph_ready",
+                    "prepare",
+                    "ready_batches",
+                    "gpu",
+                    "vector_ready"
+                ],
+                "idle_when_source_stock_empty": true,
+                "notes": "The downstream lane should wake and drain according to real GPU demand and may idle cleanly when graph_ready is empty."
+            },
+            "finalize": {
+                "mode": "async",
+                "hot_path": false,
+                "notes": "Finalize is downstream of GPU execution and must not sit on the hot feed path unless a hard safety invariant requires it."
+            }
+        })
+    }
+
+    fn canonical_ingestion_stage_model_snapshot(&self) -> Value {
+        let ingress = ingress_metrics_snapshot();
+        let persisted_file_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File")
+            .unwrap_or(0);
+        let structural_graph_queued_count =
+            self.graph_store.count_persisted_file_pending().unwrap_or(0);
+        let structural_graph_inflight_count = self.graph_store.count_graph_wip_files().unwrap_or(0);
+        let structural_graph_backlog_count =
+            structural_graph_queued_count.saturating_add(structural_graph_inflight_count);
+        let (graph_queue_queued_count, graph_queue_inflight_count) = self
+            .graph_store
+            .fetch_graph_projection_queue_counts()
+            .unwrap_or((0usize, 0usize));
+        let graph_queue_owned_count =
+            u64::try_from(graph_queue_queued_count.saturating_add(graph_queue_inflight_count))
+                .unwrap_or(0);
+        let graph_ready_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File WHERE COALESCE(graph_ready, FALSE) = TRUE")
+            .unwrap_or(0);
+        let vector_queue_owned_count = self
+            .graph_store
+            .query_count(
+                "SELECT count(*) FROM FileVectorizationQueue WHERE status IN ('queued', 'paused_for_interactive_priority', 'inflight')",
+            )
+            .unwrap_or(0);
+        let vector_ready_count = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File WHERE COALESCE(vector_ready, FALSE) = TRUE")
+            .unwrap_or(0);
+        let explicitly_excluded_count = self
+            .graph_store
+            .query_count(
+                "SELECT count(*) FROM File \
+                 WHERE status IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+                    OR COALESCE(file_stage, '') IN ('deleted', 'skipped', 'oversized')",
+            )
+            .unwrap_or(0);
+
+        json!({
+            "authority_state": "canonical",
+            "model_version": "watcher_file_graph_vector_v1",
+            "freshness": {
+                "brief_status_cache_ttl_ms": STATUS_CACHE_TTL_MS,
+                "full_status_cache_ttl_ms": STATUS_FULL_CACHE_TTL_MS,
+                "recommended_mode_for_current_counts": "full",
+                "notes": "Brief status is cached. Use status(mode=\"full\") when exact current counts matter."
+            },
+            "ingress_buffered": {
+                "status": "tracked",
+                "ownership_surface": "ingress_buffer",
+                "current_count": ingress.buffered_entries as u64,
+                "notes": "All buffered ingress entries before canonical File persistence."
+            },
+            "watcher_buffered": {
+                "status": "tracked",
+                "stage_labels": ["buffered", "staged"],
+                "ownership_surface": "ingress_buffer",
+                "current_count": ingress.hot_entries as u64,
+                "notes": "Watcher-originated ingress still buffered before canonical File persistence."
+            },
+            "scan_buffered": {
+                "status": "tracked",
+                "stage_labels": ["buffered", "staged"],
+                "ownership_surface": "ingress_buffer",
+                "current_count": ingress.scan_entries as u64,
+                "notes": "Scan-originated ingress still buffered before canonical File persistence."
+            },
+            "ingress_promotion": {
+                "status": "tracked",
+                "ownership_surface": "ingress_buffer",
+                "flush_count": ingress.flush_count,
+                "last_flush_duration_ms": ingress.last_flush_duration_ms,
+                "last_promoted_count": ingress.last_promoted_count,
+                "promoted_total": ingress.promoted_total,
+                "last_durably_persisted_count": ingress.last_durably_persisted_count,
+                "durably_persisted_total": ingress.durably_persisted_total,
+                "last_excluded_from_pending_count": ingress.last_excluded_from_pending_count,
+                "excluded_from_pending_total": ingress.excluded_from_pending_total,
+                "notes": "Ingress promoter activity over the current runtime lifetime. Durable persistence counts mean promoted paths are durably visible in File after a flush wave, not only newly inserted rows."
+            },
+            "persisted_file": {
+                "status": "tracked",
+                "ownership_surface": "File",
+                "current_count": persisted_file_count
+            },
+            "persisted_file_pending": {
+                "status": "tracked",
+                "ownership_surface": "File",
+                "current_count": structural_graph_queued_count,
+                "notes": "Durably persisted canonical file work that is still eligible and pending graph production."
+            },
+            "graph_wip": {
+                "status": "tracked",
+                "ownership_surface": "File",
+                "current_count": structural_graph_inflight_count,
+                "notes": "Canonical file work currently owned by the graph worker pool."
+            },
+            "structural_graph_backlog": {
+                "status": "tracked",
+                "ownership_surface": "File",
+                "current_count": structural_graph_backlog_count,
+                "queue_breakdown": {
+                    "queued": structural_graph_queued_count,
+                    "inflight": structural_graph_inflight_count
+                },
+                "notes": "Canonical file graphing backlog before graph_ready. This is the primary graphing stage for watcher->graph->vector."
+            },
+            "graph_projection_queue_owned": {
+                "status": "tracked",
+                "ownership_surface": "GraphProjectionQueue",
+                "current_count": graph_queue_owned_count,
+                "queue_breakdown": {
+                    "queued": graph_queue_queued_count,
+                    "inflight": graph_queue_inflight_count
+                },
+                "notes": "Secondary graph projection or graph embedding work. Diagnostic only; not the canonical file graphing backlog."
+            },
+            "graph_ready": {
+                "status": "tracked",
+                "ownership_surface": "File",
+                "current_count": graph_ready_count
+            },
+            "file_vectorization_queue_owned": {
+                "status": "tracked",
+                "ownership_surface": "FileVectorizationQueue",
+                "current_count": vector_queue_owned_count,
+                "notes": "These files are currently owned by the vector lane for downstream work."
+            },
+            "vector_ready": {
+                "status": "tracked",
+                "ownership_surface": "File",
+                "current_count": vector_ready_count
+            },
+            "explicitly_excluded_from_vectorization": {
+                "status": "tracked",
+                "ownership_surface": "File",
+                "current_count": explicitly_excluded_count,
+                "notes": "Counted from explicit deleted/skipped/oversized file states only."
+            }
+        })
+    }
+
     fn lane_parameter_snapshot(
         seed: usize,
         target: usize,
@@ -61,7 +874,7 @@ impl McpServer {
     }
 
     fn runtime_lane_authority_snapshot(
-        graph_queue_depth: usize,
+        structural_graph_backlog_depth: usize,
         file_backlog_depth: usize,
     ) -> Value {
         let profile = RuntimeProfile::detect();
@@ -80,7 +893,7 @@ impl McpServer {
         let cadence_seed = baseline_semantic_policy(file_backlog_depth);
         let cadence_target = target_semantic_policy_with_graph(
             file_backlog_depth,
-            graph_queue_depth,
+            structural_graph_backlog_depth,
             service_guard::current_pressure(),
         );
         let cadence_effective = apply_semantic_policy_runtime_tuning(cadence_target);
@@ -250,7 +1063,8 @@ impl McpServer {
     fn quiescent_runtime_snapshot(
         runtime_mode: &str,
         semantic_backlog_responsible: bool,
-        graph_queue_depth: usize,
+        structural_graph_backlog_depth: usize,
+        graph_projection_queue_depth: usize,
         file_backlog_depth: usize,
         semantic_profile: &'static str,
         canonical_chunks_embedded_last_minute: u64,
@@ -271,11 +1085,11 @@ impl McpServer {
         let gpu_access_policy =
             std::env::var("AXON_GPU_ACCESS_POLICY").unwrap_or_else(|_| "unknown".to_string());
         let wake_summary = service_guard::runtime_wake_summary(
-            graph_queue_depth as u64,
+            structural_graph_backlog_depth as u64,
             file_backlog_depth as u64,
         );
         let utility_scheduler = current_utility_first_scheduler_diagnostics(
-            graph_queue_depth,
+            structural_graph_backlog_depth,
             file_backlog_depth,
             pressure,
         );
@@ -326,10 +1140,10 @@ impl McpServer {
 
         let (effective_graph_backlog_depth, effective_semantic_backlog_depth, backlog_scope) =
             match runtime_mode {
-                "graph_only" => (graph_queue_depth, 0_usize, "graph_only"),
+                "graph_only" => (structural_graph_backlog_depth, 0_usize, "graph_only"),
                 "read_only" | "mcp_only" => (0_usize, 0_usize, "runtime_processing_disabled"),
                 _ => (
-                    graph_queue_depth,
+                    structural_graph_backlog_depth,
                     if semantic_backlog_responsible {
                         file_backlog_depth
                     } else {
@@ -612,7 +1426,8 @@ impl McpServer {
             "service_pressure": pressure_label,
             "backlog_scope": backlog_scope,
             "semantic_backlog_responsible": semantic_backlog_responsible,
-            "graph_backlog_depth": graph_queue_depth,
+            "graph_backlog_depth": structural_graph_backlog_depth,
+            "graph_projection_queue_depth": graph_projection_queue_depth,
             "semantic_backlog_depth": file_backlog_depth,
             "effective_graph_backlog_depth": effective_graph_backlog_depth,
             "effective_semantic_backlog_depth": effective_semantic_backlog_depth,
@@ -707,7 +1522,8 @@ impl McpServer {
     fn runtime_limiting_factors_snapshot(
         runtime_mode: &str,
         semantic_backlog_responsible: bool,
-        graph_queue_depth: usize,
+        structural_graph_backlog_depth: usize,
+        graph_projection_queue_depth: usize,
         file_backlog_depth: usize,
         runtime_signals: &optimizer::RuntimeSignalsWindow,
     ) -> Value {
@@ -717,7 +1533,7 @@ impl McpServer {
         let runtime_target = current_runtime_tuning_state();
         let batch_controller = current_vector_batch_controller_diagnostics(&effective);
         let utility_scheduler = current_utility_first_scheduler_diagnostics(
-            graph_queue_depth,
+            structural_graph_backlog_depth,
             file_backlog_depth,
             service_guard::current_pressure(),
         );
@@ -827,7 +1643,7 @@ impl McpServer {
                 "GPU utilization is already high while backlog remains active",
                 false,
             )
-        } else if file_backlog_depth == 0 && graph_queue_depth == 0 {
+        } else if file_backlog_depth == 0 && structural_graph_backlog_depth == 0 {
             (
                 "not_currently_limited",
                 "no active graph or semantic backlog is currently competing for throughput",
@@ -883,7 +1699,8 @@ impl McpServer {
                 "target_files_per_cycle": batch_controller.target_files_per_cycle,
                 "ready_reserve_target": utility_scheduler.ready_reserve_target,
                 "semantic_backlog_depth": file_backlog_depth,
-                "graph_backlog_depth": graph_queue_depth
+                "graph_backlog_depth": structural_graph_backlog_depth,
+                "graph_projection_queue_depth": graph_projection_queue_depth
             },
             "thresholds": {
                 "max_cpu_ratio": policy.max_cpu_ratio,
@@ -983,6 +1800,24 @@ impl McpServer {
                 "async_contract": {
                     "canonical_follow_up_tool": "job_status",
                     "acceptance_fields": ["job_id", "known_ids", "next_action", "result_contract", "polling_guidance", "recovery_hint"],
+                    "runtime_command_proxy": {
+                        "enabled": RuntimeCommandProxy::enabled(),
+                        "mode": RuntimeCommandProxy::proxy_mode(),
+                        "timeout_ms": RuntimeCommandProxy::timeout_ms(),
+                        "timeout_kind": RuntimeCommandProxy::timeout_kind(),
+                        "ownership": {
+                            "proxy_role": "brain",
+                            "execution_role": "indexer",
+                            "mutation_owner": "indexer",
+                            "duplicate_execution_prevented": true
+                        },
+                        "retry_policy": {
+                            "retryable": true,
+                            "max_attempts": 1,
+                            "idempotent": true,
+                            "duplicate_execution_prevented": true
+                        }
+                    },
                     "preferred_identity_tools": ["project_registry_lookup", "axon_init_project"]
                 },
                 "advertised_endpoints": {
@@ -2040,6 +2875,10 @@ impl McpServer {
         let mode = args.get("mode").and_then(|value| value.as_str());
         let now_ms = Self::now_unix_ms();
         let runtime_mode = AxonRuntimeMode::from_env();
+        let runtime_shadow_role =
+            std::env::var("AXON_RUNTIME_SHADOW_ROLE").unwrap_or_else(|_| "unknown".to_string());
+        let split_runtime_is_indexer =
+            matches!(runtime_shadow_role.as_str(), "indexer" | "indexer_shadow");
         let runtime_profile = AxonRuntimeOperationalProfile::from_mode_and_strings(
             runtime_mode.as_str(),
             std::env::var("AXON_ENABLE_AUTONOMOUS_INGESTOR")
@@ -2085,7 +2924,7 @@ impl McpServer {
             .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
-        let queued_files = vector_queue_statuses
+        let debug_queued_files = vector_queue_statuses
             .iter()
             .filter_map(|row| {
                 let status = row.get("status")?.as_str()?;
@@ -2093,7 +2932,7 @@ impl McpServer {
                 (status == "queued" || status == "paused_for_interactive_priority").then_some(count)
             })
             .sum::<u64>();
-        let inflight_files = vector_queue_statuses
+        let debug_inflight_files = vector_queue_statuses
             .iter()
             .filter_map(|row| {
                 let status = row.get("status")?.as_str()?;
@@ -2101,6 +2940,12 @@ impl McpServer {
                 (status == "inflight").then_some(count)
             })
             .sum::<u64>();
+        let (db_queued_files, db_inflight_files) = self
+            .graph_store
+            .fetch_file_vectorization_queue_counts()
+            .unwrap_or((0, 0));
+        let queued_files = debug_queued_files.max(db_queued_files as u64);
+        let inflight_files = debug_inflight_files.max(db_inflight_files as u64);
         let drain_state = debug_data
             .pointer("/embedding_contract/drain_state")
             .and_then(|value| value.as_str())
@@ -2110,9 +2955,24 @@ impl McpServer {
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
             .unwrap_or(120_000);
-        let graph_queue_depth = debug_data
+        let debug_graph_queue_depth = debug_data
             .pointer("/embedding_contract/runtime_telemetry/graph_projection_queue_depth")
             .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        let (db_graph_queue_queued, db_graph_queue_inflight) = self
+            .graph_store
+            .fetch_graph_projection_queue_counts()
+            .unwrap_or((0, 0));
+        let graph_queue_depth =
+            debug_graph_queue_depth.max(db_graph_queue_queued + db_graph_queue_inflight);
+        let ingress = ingress_metrics_snapshot();
+        let persisted_file_pending_depth =
+            self.graph_store.count_persisted_file_pending().unwrap_or(0);
+        let graph_wip_depth = self.graph_store.count_graph_wip_files().unwrap_or(0);
+        let structural_graph_backlog_depth = persisted_file_pending_depth + graph_wip_depth;
+        let graph_ready_depth = self
+            .graph_store
+            .query_count("SELECT count(*) FROM File WHERE COALESCE(graph_ready, FALSE) = TRUE")
             .unwrap_or(0) as usize;
         let orphan_vectorization_files = self
             .graph_store
@@ -2131,28 +2991,33 @@ impl McpServer {
             .oldest_semantic_pending_age_ms(now_ms)
             .unwrap_or(0);
         let utility_scheduler = current_utility_first_scheduler_diagnostics(
-            graph_queue_depth,
+            structural_graph_backlog_depth,
             queued_files as usize + inflight_files as usize,
             service_guard::current_pressure(),
         );
         let runtime_signals = optimizer::collect_runtime_signals_window(&self.graph_store);
 
-        let job_counts_raw = self
-            .graph_store
-            .execute_raw_sql_gateway(
-                "SELECT status, count(*) FROM soll.McpJob GROUP BY 1 ORDER BY 2 DESC, 1 ASC",
-            )
-            .unwrap_or_else(|_| "[]".to_string());
-        let job_rows: Vec<Vec<Value>> = serde_json::from_str(&job_counts_raw).unwrap_or_default();
-        let job_counts = job_rows
-            .iter()
-            .filter_map(|row| {
-                Some(json!({
-                    "status": row.first()?.as_str()?.to_string(),
-                    "count": row.get(1).and_then(|value| value.as_u64()).unwrap_or(0)
-                }))
-            })
-            .collect::<Vec<_>>();
+        let job_counts = if split_runtime_is_indexer {
+            Vec::new()
+        } else {
+            let job_counts_raw = self
+                .graph_store
+                .execute_raw_sql_gateway(
+                    "SELECT status, count(*) FROM soll.McpJob GROUP BY 1 ORDER BY 2 DESC, 1 ASC",
+                )
+                .unwrap_or_else(|_| "[]".to_string());
+            let job_rows: Vec<Vec<Value>> =
+                serde_json::from_str(&job_counts_raw).unwrap_or_default();
+            job_rows
+                .iter()
+                .filter_map(|row| {
+                    Some(json!({
+                        "status": row.first()?.as_str()?.to_string(),
+                        "count": row.get(1).and_then(|value| value.as_u64()).unwrap_or(0)
+                    }))
+                })
+                .collect::<Vec<_>>()
+        };
 
         let evidence = format!(
             "**Runtime mode:** `{}`\n\
@@ -2280,10 +3145,45 @@ impl McpServer {
             .iter()
             .copied()
             .collect::<Vec<_>>();
+        let runtime_topology = self.runtime_topology_snapshot(runtime_mode);
+        let topology_converged = runtime_topology
+            .get("system_converged")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let indexer_feed_state = runtime_topology
+            .pointer("/indexer_feed/state")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let indexer_feed_reason = runtime_topology
+            .pointer("/indexer_feed/degraded_reason")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let indexer_feed_degraded =
+            indexer_feed_state != "fresh" || indexer_feed_reason.as_deref().is_some();
+        let process_role = runtime_topology
+            .get("process_role")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let mut degraded_notes = if public_tool_names.iter().any(|name| *name == "impact")
+            || (process_role == "brain" && runtime_mode == AxonRuntimeMode::McpOnly)
+        {
+            Vec::<String>::new()
+        } else {
+            vec!["advanced_indexed_surfaces_hidden_for_current_profile".to_string()]
+        };
+        if indexer_feed_degraded {
+            degraded_notes
+                .push(indexer_feed_reason.unwrap_or_else(|| "indexer_feed_degraded".to_string()));
+        }
+        if !topology_converged {
+            degraded_notes.push("runtime_topology_not_converged".to_string());
+        }
         let response = json!({
             "content": [{ "type": "text", "text": report }],
             "data": {
-                "truth_status": if public_tool_names.iter().any(|name| *name == "impact") {
+                "truth_status": if (public_tool_names.iter().any(|name| *name == "impact")
+                    || (process_role == "brain" && runtime_mode == AxonRuntimeMode::McpOnly))
+                    && degraded_notes.is_empty() {
                     "canonical"
                 } else {
                     "degraded"
@@ -2293,11 +3193,7 @@ impl McpServer {
                 "drain_state": drain_state,
                 "availability": {
                     "advanced_indexed_surfaces_visible": public_tool_names.iter().any(|name| *name == "impact"),
-                    "degraded_notes": if public_tool_names.iter().any(|name| *name == "impact") {
-                        Vec::<String>::new()
-                    } else {
-                        vec!["advanced_indexed_surfaces_hidden_for_current_profile".to_string()]
-                    }
+                    "degraded_notes": degraded_notes
                 },
                 "canonical_sources": Self::canonical_sources_snapshot(),
                 "instance_identity": {
@@ -2337,18 +3233,52 @@ impl McpServer {
                     "graph_workers": graph_workers
                 },
                 "runtime_authority": {
-                    "lane_parameters": Self::runtime_lane_authority_snapshot(
+                    "proposed_control_model": "admission_first_stock_control",
+                    "runtime_topology": runtime_topology,
+                    "loop_semantics": Self::loop_semantics_snapshot(),
+                    "canonical_ingestion_stage_model": self.canonical_ingestion_stage_model_snapshot(),
+                    "admission_controller": Self::admission_controller_snapshot(
+                        runtime_mode.as_str(),
+                        ingress,
+                        persisted_file_pending_depth,
+                        graph_wip_depth,
+                    ),
+                    "canonical_edges": Self::canonical_edge_control_snapshot(
+                        runtime_mode.as_str(),
+                        ingress,
+                        persisted_file_pending_depth,
+                        graph_wip_depth,
+                        graph_ready_depth,
+                        structural_graph_backlog_depth,
+                    ),
+                    "priority_contract": Self::priority_contract_snapshot(
+                        runtime_mode.as_str(),
+                        semantic_backlog_responsible,
+                        ingress.buffered_entries,
+                        structural_graph_backlog_depth,
                         graph_queue_depth,
+                        queued_files as usize + inflight_files as usize,
+                        utility_scheduler,
+                        apply_semantic_policy_runtime_tuning(target_semantic_policy_with_graph(
+                            queued_files as usize + inflight_files as usize,
+                            structural_graph_backlog_depth,
+                            service_guard::current_pressure(),
+                        ))
+                        .profile,
+                    ),
+                    "lane_parameters": Self::runtime_lane_authority_snapshot(
+                        structural_graph_backlog_depth,
                         queued_files as usize + inflight_files as usize,
                     ),
                     "quiescent_state": Self::quiescent_runtime_snapshot(
                         runtime_mode.as_str(),
                         semantic_backlog_responsible,
+                        structural_graph_backlog_depth,
                         graph_queue_depth,
                         queued_files as usize + inflight_files as usize,
                         apply_semantic_policy_runtime_tuning(target_semantic_policy_with_graph(
                             queued_files as usize + inflight_files as usize,
-                            graph_queue_depth,
+                            structural_graph_backlog_depth,
                             service_guard::current_pressure(),
                         ))
                         .profile,
@@ -2358,6 +3288,7 @@ impl McpServer {
                     "limiting_factors": Self::runtime_limiting_factors_snapshot(
                         runtime_mode.as_str(),
                         semantic_backlog_responsible,
+                        structural_graph_backlog_depth,
                         graph_queue_depth,
                         queued_files as usize + inflight_files as usize,
                         &runtime_signals,
@@ -2402,7 +3333,25 @@ impl McpServer {
                 "async_contract": {
                     "canonical_follow_up_tool": "job_status",
                     "stale_client_binding_possible": true,
-                    "preferred_identity_tools": ["project_registry_lookup", "axon_init_project"]
+                    "preferred_identity_tools": ["project_registry_lookup", "axon_init_project"],
+                    "runtime_command_proxy": {
+                        "enabled": RuntimeCommandProxy::enabled(),
+                        "mode": RuntimeCommandProxy::proxy_mode(),
+                        "timeout_ms": RuntimeCommandProxy::timeout_ms(),
+                        "timeout_kind": RuntimeCommandProxy::timeout_kind(),
+                        "ownership": {
+                            "proxy_role": "brain",
+                            "execution_role": "indexer",
+                            "mutation_owner": "indexer",
+                            "duplicate_execution_prevented": true
+                        },
+                        "retry_policy": {
+                            "retryable": true,
+                            "max_attempts": 1,
+                            "idempotent": true,
+                            "duplicate_execution_prevented": true
+                        }
+                    }
                 },
                 "job_counts": job_counts,
                 "debug_snapshot": debug_data,

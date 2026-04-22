@@ -174,7 +174,7 @@ fn parse_pending_file_row(row: Vec<serde_json::Value>) -> Option<PendingFile> {
 }
 
 fn parse_file_ingress_row(row: Vec<serde_json::Value>) -> Option<FileIngressRow> {
-    if row.len() < 4 {
+    if row.len() < 7 {
         return None;
     }
 
@@ -183,6 +183,9 @@ fn parse_file_ingress_row(row: Vec<serde_json::Value>) -> Option<FileIngressRow>
         status: row[1].as_str()?.to_string(),
         mtime: parse_i64_field(&row[2]).unwrap_or_default(),
         size: parse_i64_field(&row[3]).unwrap_or_default(),
+        file_stage: row[4].as_str().unwrap_or_default().to_string(),
+        status_reason: row[5].as_str().unwrap_or_default().to_string(),
+        graph_ready: row[6].as_bool().unwrap_or(false),
     })
 }
 
@@ -208,6 +211,27 @@ fn graph_projection_queue_upsert(
         radius,
         now_ms,
         now_ms
+    )
+}
+
+fn graph_projection_queue_upsert_if_needed_for_file(file_path: &str, now_ms: i64) -> String {
+    let safe_path = file_path.replace('\'', "''");
+    format!(
+        "INSERT INTO GraphProjectionQueue (anchor_type, anchor_id, radius, status, attempts, queued_at, last_error_reason, last_attempt_at) \
+         SELECT 'file', path, {DEFAULT_GRAPH_EMBEDDING_RADIUS}, 'queued', 0, {now_ms}, NULL, NULL \
+         FROM File \
+         WHERE path = '{safe_path}' \
+           AND status = 'pending' \
+           AND COALESCE(file_stage, 'promoted') = 'promoted' \
+           AND COALESCE(graph_ready, FALSE) = FALSE \
+           AND COALESCE(vector_ready, FALSE) = FALSE \
+           AND status NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+         ON CONFLICT(anchor_type, anchor_id, radius) DO UPDATE \
+         SET status = 'queued', \
+             attempts = 0, \
+             queued_at = {now_ms}, \
+             last_error_reason = NULL, \
+             last_attempt_at = NULL;"
     )
 }
 
@@ -1193,7 +1217,6 @@ impl GraphStore {
     }
 
     pub fn bulk_insert_files(&self, file_paths: &[(String, String, i64, i64)]) -> Result<()> {
-        let mut queries = Vec::new();
         let batch = file_paths
             .iter()
             .map(|(path, project, size, mtime)| {
@@ -1207,11 +1230,7 @@ impl GraphStore {
                 )
             })
             .collect::<Vec<_>>();
-        for (path, project, size, mtime, priority, source) in dedup_file_batch_rows(&batch) {
-            queries.extend(Self::upsert_file_queries(
-                &path, &project, size, mtime, priority, source,
-            ));
-        }
+        let queries = Self::bulk_upsert_file_queries(&batch);
         self.execute_batch(&queries)
     }
 
@@ -1247,7 +1266,6 @@ impl GraphStore {
         &self,
         batch: &IngressDrainBatch,
     ) -> Result<IngressPromotionStats> {
-        let mut queries = Vec::new();
         let file_rows = batch
             .files
             .iter()
@@ -1266,18 +1284,7 @@ impl GraphStore {
                 )
             })
             .collect::<Vec<_>>();
-
-        for (path, project_code, size, mtime, priority, source) in dedup_file_batch_rows(&file_rows)
-        {
-            queries.extend(Self::upsert_file_queries(
-                &path,
-                &project_code,
-                size,
-                mtime,
-                priority,
-                source,
-            ));
-        }
+        let queries = Self::bulk_upsert_file_queries(&file_rows);
 
         if !queries.is_empty() {
             self.execute_batch(&queries)?;
@@ -1529,7 +1536,8 @@ impl GraphStore {
     pub fn fetch_file_ingress_row(&self, path: &str) -> Result<Option<FileIngressRow>> {
         let escaped = Self::escape_sql(path);
         let raw = self.query_json(&format!(
-            "SELECT path, status, mtime, size FROM File WHERE path = '{}' LIMIT 1",
+            "SELECT path, status, mtime, size, COALESCE(file_stage, ''), COALESCE(status_reason, ''), COALESCE(graph_ready, FALSE) \
+             FROM File WHERE path = '{}' LIMIT 1",
             escaped
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
@@ -1548,7 +1556,8 @@ impl GraphStore {
             .join(", ");
 
         let raw = self.query_json(&format!(
-            "SELECT path, status, mtime, size FROM File WHERE path IN ({})",
+            "SELECT path, status, mtime, size, COALESCE(file_stage, ''), COALESCE(status_reason, ''), COALESCE(graph_ready, FALSE) \
+             FROM File WHERE path IN ({})",
             selector
         ))?;
         let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&raw).unwrap_or_default();
@@ -2298,6 +2307,24 @@ impl GraphStore {
 
     pub fn backfill_file_vectorization_queue(&self) -> Result<usize> {
         self.reconcile_orphaned_file_vectorization_state(usize::MAX)
+    }
+
+    pub fn backfill_file_vectorization_queue_with_limit(&self, limit: usize) -> Result<usize> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        self.reconcile_orphaned_file_vectorization_state(limit)
+    }
+
+    pub fn rebuild_file_vectorization_queue_with_limit(&self, limit: usize) -> Result<usize> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        self.execute(
+            "DELETE FROM FileVectorizationQueue \
+             WHERE status IN ('queued', 'paused_for_interactive_priority')",
+        )?;
+        self.reconcile_orphaned_file_vectorization_state(limit)
     }
 
     pub fn count_orphaned_file_vectorization_files(&self) -> Result<usize> {
@@ -3830,6 +3857,38 @@ mod tests {
     }
 
     #[test]
+    fn bulk_upsert_file_queries_stays_set_based_for_multiple_rows() {
+        let queries = crate::graph::GraphStore::bulk_upsert_file_queries(&[
+            (
+                "/tmp/a.rs".to_string(),
+                "PRJ".to_string(),
+                10,
+                1,
+                100,
+                FileUpsertSource::Scan,
+            ),
+            (
+                "/tmp/b.rs".to_string(),
+                "PRJ".to_string(),
+                20,
+                2,
+                200,
+                FileUpsertSource::HotDelta,
+            ),
+        ]);
+
+        assert_eq!(queries.len(), 4);
+        assert!(queries[0].starts_with("WITH src("));
+        assert!(queries[1].contains("UPDATE File"));
+        assert!(queries[1].contains("FROM src"));
+        assert!(queries[2].contains("INSERT INTO File"));
+        assert!(queries[3].contains("INSERT INTO GraphProjectionQueue"));
+        assert!(!queries
+            .iter()
+            .any(|query| query.contains("WHERE path = '/tmp/a.rs'")));
+    }
+
+    #[test]
     fn canonical_timestamp_columns_exist_on_file_and_chunk_embedding() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         let raw = store
@@ -5094,6 +5153,89 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_file_vectorization_queue_with_limit_trims_existing_queue_to_floor() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        for path in ["/tmp/floor-a.rs", "/tmp/floor-b.rs"] {
+            store
+                .execute(&format!(
+                    "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
+                     VALUES ('{}', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
+                    path
+                ))
+                .unwrap();
+            store
+                .execute(&format!(
+                    "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
+                     VALUES ('chunk-{}', 'symbol', 'sym-{}', 'PRJ', '{}', 'function', 'body', 'hash-{}', 1, 1)",
+                    path.replace('/', "_"),
+                    path.replace('/', "_"),
+                    path,
+                    path.replace('/', "_"),
+                ))
+                .unwrap();
+            store
+                .execute(&format!(
+                    "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES ('{}', 'queued', 1)",
+                    path
+                ))
+                .unwrap();
+        }
+
+        let rebuilt = store
+            .rebuild_file_vectorization_queue_with_limit(1)
+            .unwrap();
+
+        assert_eq!(rebuilt, 1);
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM FileVectorizationQueue")
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn backfill_file_vectorization_queue_with_limit_adds_missing_work_without_trimming_existing() {
+        let store = crate::tests::test_helpers::create_test_db().unwrap();
+        for path in ["/tmp/floor-a.rs", "/tmp/floor-b.rs", "/tmp/floor-c.rs"] {
+            store
+                .execute(&format!(
+                    "INSERT INTO File (path, project_code, status, size, mtime, priority, file_stage, graph_ready, vector_ready) \
+                     VALUES ('{}', 'PRJ', 'indexed', 1, 1, 100, 'graph_indexed', TRUE, FALSE)",
+                    path
+                ))
+                .unwrap();
+            store
+                .execute(&format!(
+                    "INSERT INTO Chunk (id, source_type, source_id, project_code, file_path, kind, content, content_hash, start_line, end_line) \
+                     VALUES ('chunk-{}', 'symbol', 'sym-{}', 'PRJ', '{}', 'function', 'body', 'hash-{}', 1, 1)",
+                    path.replace('/', "_"),
+                    path.replace('/', "_"),
+                    path,
+                    path.replace('/', "_"),
+                ))
+                .unwrap();
+        }
+        store
+            .execute(
+                "INSERT INTO FileVectorizationQueue (file_path, status, queued_at) VALUES ('/tmp/floor-a.rs', 'queued', 1)",
+            )
+            .unwrap();
+
+        let added = store
+            .backfill_file_vectorization_queue_with_limit(1)
+            .unwrap();
+
+        assert_eq!(added, 1);
+        assert_eq!(
+            store
+                .query_count("SELECT count(*) FROM FileVectorizationQueue")
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
     fn count_stale_inflight_file_vectorization_files_distinguishes_stale_from_fresh() {
         let store = crate::tests::test_helpers::create_test_db().unwrap();
         store.execute(
@@ -5116,6 +5258,28 @@ mod tests {
 }
 
 impl GraphStore {
+    pub fn count_persisted_file_pending(&self) -> Result<usize> {
+        Ok(usize::try_from(self.query_count(
+            "SELECT count(*) FROM File \
+             WHERE status = 'pending' \
+               AND COALESCE(graph_ready, FALSE) = FALSE \
+               AND COALESCE(file_stage, '') NOT IN ('deleted', 'skipped', 'oversized') \
+               AND status NOT IN ('deleted', 'skipped', 'oversized_for_current_budget')",
+        )?)
+        .unwrap_or(0))
+    }
+
+    pub fn count_graph_wip_files(&self) -> Result<usize> {
+        Ok(usize::try_from(self.query_count(
+            "SELECT count(*) FROM File \
+             WHERE status = 'indexing' \
+               AND COALESCE(graph_ready, FALSE) = FALSE \
+               AND COALESCE(file_stage, '') NOT IN ('deleted', 'skipped', 'oversized') \
+               AND status NOT IN ('deleted', 'skipped', 'oversized_for_current_budget')",
+        )?)
+        .unwrap_or(0))
+    }
+
     fn upsert_file_queries(
         path: &str,
         project: &str,
@@ -5124,6 +5288,10 @@ impl GraphStore {
         priority: i64,
         source: FileUpsertSource,
     ) -> Vec<String> {
+        let discovered_reason = match source {
+            FileUpsertSource::Scan => "scan_identified",
+            FileUpsertSource::HotDelta => "watcher_hot_identified",
+        };
         let metadata_changed_reason = match source {
             FileUpsertSource::Scan => "metadata_changed_scan",
             FileUpsertSource::HotDelta => "metadata_changed_hot_delta",
@@ -5131,6 +5299,7 @@ impl GraphStore {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let safe_path = Self::escape_sql(path);
         let safe_project = Self::escape_sql(project);
+        let safe_discovered_reason = Self::escape_sql(discovered_reason);
         let safe_reason = Self::escape_sql(metadata_changed_reason);
 
         vec![
@@ -5223,16 +5392,174 @@ impl GraphStore {
                  );"
             ),
             format!(
-                "INSERT INTO File (path, project_code, size, mtime, status, priority, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms, first_seen_at_ms, last_state_change_at_ms) \
-                 VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE, NULL, 'discovered_new', 0, NULL, {}, {}) \
+                "INSERT INTO File (path, project_code, size, mtime, status, priority, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms, first_seen_at_ms, last_state_change_at_ms, file_stage, graph_ready, vector_ready) \
+                 VALUES ('{}', '{}', {}, {}, 'pending', {}, FALSE, NULL, '{}', 0, NULL, {}, {}, 'promoted', FALSE, FALSE) \
                  ON CONFLICT(path) DO NOTHING;",
                 safe_path,
                 safe_project,
                 size,
                 mtime,
                 priority,
+                safe_discovered_reason,
                 now_ms,
                 now_ms
+            ),
+            graph_projection_queue_upsert_if_needed_for_file(path, now_ms),
+        ]
+    }
+
+    fn bulk_upsert_file_queries(
+        rows: &[(String, String, i64, i64, i64, FileUpsertSource)],
+    ) -> Vec<String> {
+        let deduped = dedup_file_batch_rows(rows);
+        if deduped.is_empty() {
+            return Vec::new();
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let values = deduped
+            .iter()
+            .map(|(path, project, size, mtime, priority, source)| {
+                let (discovered_reason, metadata_changed_reason) = match source {
+                    FileUpsertSource::Scan => ("scan_identified", "metadata_changed_scan"),
+                    FileUpsertSource::HotDelta => {
+                        ("watcher_hot_identified", "metadata_changed_hot_delta")
+                    }
+                };
+                format!(
+                    "('{}', '{}', {}, {}, {}, '{}', '{}')",
+                    Self::escape_sql(path),
+                    Self::escape_sql(project),
+                    size,
+                    mtime,
+                    priority,
+                    Self::escape_sql(discovered_reason),
+                    Self::escape_sql(metadata_changed_reason),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let src_cte = format!(
+            "WITH src(path, project_code, size, mtime, priority, discovered_reason, metadata_changed_reason) AS (VALUES {})",
+            values
+        );
+
+        vec![
+            format!(
+                "{src_cte} \
+                 INSERT INTO Project (name) \
+                 SELECT DISTINCT project_code FROM src \
+                 ON CONFLICT DO NOTHING;"
+            ),
+            format!(
+                "{src_cte} \
+                 UPDATE File \
+                 SET project_code = src.project_code, \
+                     size = src.size, \
+                     mtime = src.mtime, \
+                     status = CASE \
+                         WHEN File.status = 'indexing' THEN File.status \
+                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'pending' \
+                         WHEN File.mtime IS DISTINCT FROM src.mtime OR File.size IS DISTINCT FROM src.size OR File.project_code IS DISTINCT FROM src.project_code THEN 'pending' \
+                         ELSE File.status \
+                     END, \
+                     priority = src.priority, \
+                     worker_id = CASE \
+                         WHEN File.status = 'indexing' THEN File.worker_id \
+                         ELSE NULL \
+                     END, \
+                     last_error_reason = CASE \
+                         WHEN File.status = 'indexing' THEN File.last_error_reason \
+                         ELSE NULL \
+                     END, \
+                     status_reason = CASE \
+                         WHEN File.status = 'indexing' THEN File.status_reason \
+                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'manual_or_system_requeue' \
+                         WHEN File.mtime IS DISTINCT FROM src.mtime OR File.size IS DISTINCT FROM src.size THEN src.metadata_changed_reason \
+                         WHEN File.project_code IS DISTINCT FROM src.project_code THEN 'manual_or_system_requeue' \
+                         WHEN File.priority IS DISTINCT FROM src.priority THEN 'priority_adjusted_no_requeue' \
+                         ELSE COALESCE(File.status_reason, 'stable_metadata_no_requeue') \
+                     END, \
+                     file_stage = CASE \
+                         WHEN File.status = 'indexing' THEN File.file_stage \
+                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 'promoted' \
+                         WHEN File.mtime IS DISTINCT FROM src.mtime OR File.size IS DISTINCT FROM src.size OR File.project_code IS DISTINCT FROM src.project_code THEN 'promoted' \
+                         ELSE File.file_stage \
+                     END, \
+                     graph_ready = CASE \
+                         WHEN File.status = 'indexing' THEN File.graph_ready \
+                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
+                         WHEN File.mtime IS DISTINCT FROM src.mtime OR File.size IS DISTINCT FROM src.size OR File.project_code IS DISTINCT FROM src.project_code THEN FALSE \
+                         ELSE File.graph_ready \
+                     END, \
+                     vector_ready = CASE \
+                         WHEN File.status = 'indexing' THEN File.vector_ready \
+                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
+                         WHEN File.mtime IS DISTINCT FROM src.mtime OR File.size IS DISTINCT FROM src.size OR File.project_code IS DISTINCT FROM src.project_code THEN FALSE \
+                         ELSE File.vector_ready \
+                     END, \
+                     defer_count = CASE \
+                         WHEN File.status = 'indexing' THEN File.defer_count \
+                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN 0 \
+                         WHEN File.mtime IS DISTINCT FROM src.mtime OR File.size IS DISTINCT FROM src.size OR File.project_code IS DISTINCT FROM src.project_code THEN 0 \
+                         ELSE File.defer_count \
+                     END, \
+                     last_deferred_at_ms = CASE \
+                         WHEN File.status = 'indexing' THEN File.last_deferred_at_ms \
+                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN NULL \
+                         WHEN File.mtime IS DISTINCT FROM src.mtime OR File.size IS DISTINCT FROM src.size OR File.project_code IS DISTINCT FROM src.project_code THEN NULL \
+                         ELSE File.last_deferred_at_ms \
+                     END, \
+                     last_state_change_at_ms = CASE \
+                         WHEN File.project_code IS DISTINCT FROM src.project_code \
+                              OR File.mtime IS DISTINCT FROM src.mtime \
+                              OR File.size IS DISTINCT FROM src.size \
+                              OR File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+                              OR File.priority IS DISTINCT FROM src.priority \
+                         THEN {now_ms} \
+                         ELSE File.last_state_change_at_ms \
+                     END, \
+                     needs_reindex = CASE \
+                         WHEN File.status = 'indexing' \
+                              AND (File.mtime IS DISTINCT FROM src.mtime OR File.size IS DISTINCT FROM src.size) \
+                         THEN TRUE \
+                         WHEN File.status = 'indexing' THEN File.needs_reindex \
+                         WHEN File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') THEN FALSE \
+                         WHEN File.mtime IS DISTINCT FROM src.mtime OR File.size IS DISTINCT FROM src.size OR File.project_code IS DISTINCT FROM src.project_code THEN FALSE \
+                         ELSE File.needs_reindex \
+                     END \
+                 FROM src \
+                 WHERE File.path = src.path \
+                   AND (File.project_code IS DISTINCT FROM src.project_code \
+                        OR File.mtime IS DISTINCT FROM src.mtime \
+                        OR File.size IS DISTINCT FROM src.size \
+                        OR File.status IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+                        OR File.priority IS DISTINCT FROM src.priority);"
+            ),
+            format!(
+                "{src_cte} \
+                 INSERT INTO File (path, project_code, size, mtime, status, priority, needs_reindex, last_error_reason, status_reason, defer_count, last_deferred_at_ms, first_seen_at_ms, last_state_change_at_ms, file_stage, graph_ready, vector_ready) \
+                 SELECT path, project_code, size, mtime, 'pending', priority, FALSE, NULL, discovered_reason, 0, NULL, {now_ms}, {now_ms}, 'promoted', FALSE, FALSE \
+                 FROM src \
+                 ON CONFLICT(path) DO NOTHING;"
+            ),
+            format!(
+                "{src_cte} \
+                 INSERT INTO GraphProjectionQueue (anchor_type, anchor_id, radius, status, attempts, queued_at, last_error_reason, last_attempt_at) \
+                 SELECT 'file', f.path, {DEFAULT_GRAPH_EMBEDDING_RADIUS}, 'queued', 0, {now_ms}, NULL, NULL \
+                 FROM File f \
+                 JOIN src ON src.path = f.path \
+                 WHERE f.status = 'pending' \
+                   AND COALESCE(f.file_stage, 'promoted') = 'promoted' \
+                   AND COALESCE(f.graph_ready, FALSE) = FALSE \
+                   AND COALESCE(f.vector_ready, FALSE) = FALSE \
+                   AND f.status NOT IN ('deleted', 'skipped', 'oversized_for_current_budget') \
+                 ON CONFLICT(anchor_type, anchor_id, radius) DO UPDATE \
+                 SET status = 'queued', \
+                     attempts = 0, \
+                     queued_at = {now_ms}, \
+                     last_error_reason = NULL, \
+                     last_attempt_at = NULL;"
             ),
         ]
     }
