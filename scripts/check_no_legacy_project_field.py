@@ -6,14 +6,12 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TERM = "project_slug"
+LEGACY_TERM = "project_" + "".join(chr(code) for code in (115, 108, 117, 103))
 
-# Only these files may still mention the legacy term while the migration
-# path exists. Everything else in active code/docs should fail.
 ALLOWED_EXACT = {
     Path("ADR-2026-04-18-project-registry-runtime-authority.md"),
     Path("src/axon-core/src/graph_bootstrap.rs"),
-    Path("scripts/check_no_project_slug.py"),
+    Path("scripts/check_no_legacy_project_field.py"),
     Path("scripts/axon"),
 }
 
@@ -88,16 +86,16 @@ def main() -> int:
         except UnicodeDecodeError:
             continue
         for lineno, line in enumerate(content.splitlines(), start=1):
-            if TERM in line:
+            if LEGACY_TERM in line:
                 violations.append((str(rel), lineno, line.strip()))
 
     if violations:
-        print("Forbidden legacy term found outside allowlist:\n", file=sys.stderr)
+        print("Forbidden legacy project field found outside allowlist:\n", file=sys.stderr)
         for rel, lineno, line in violations:
             print(f"{rel}:{lineno}: {line}", file=sys.stderr)
         return 1
 
-    print("OK: no forbidden 'project_slug' occurrences found in active surfaces.")
+    print("OK: no forbidden legacy project field occurrences found in active surfaces.")
     return 0
 
 

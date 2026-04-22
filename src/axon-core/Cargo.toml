@@ -1,7 +1,20 @@
 [package]
 name = "axon-core"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
+autobins = false
+
+[[bin]]
+name = "axon-core"
+path = "src/main.rs"
+
+[[bin]]
+name = "axon-brain"
+path = "src/bin/axon-brain.rs"
+
+[[bin]]
+name = "axon-indexer"
+path = "src/bin/axon-indexer.rs"
 
 [dependencies]
 tokio = { version = "1.36", features = ["full", "net"] }

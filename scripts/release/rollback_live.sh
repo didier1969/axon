@@ -14,6 +14,7 @@ MANIFEST_PATH=""
 RESTART_LIVE=0
 SKIP_POSTCHECK=0
 DRY_RUN=0
+TOPOLOGY="monolith"
 
 assert_live_stopped() {
   if ! bash "$ROOT_DIR/scripts/stop.sh" --verify >/dev/null 2>&1; then
@@ -49,8 +50,6 @@ if [[ -f "$ROOT_DIR/.axon/live-release/pending.json" ]]; then
   exit 1
 fi
 
-bash "$ROOT_DIR/scripts/release/preflight.sh" --artifact "$ROOT_DIR/bin/axon-core" --build-info "$ROOT_DIR/bin/axon-core.build-info" --check-pending --skip-build-match
-
 python3 - <<'PY'
 import hashlib, json, os, pathlib
 manifest = json.loads(pathlib.Path(os.environ["RELEASE_MANIFEST"]).read_text())
@@ -65,6 +64,14 @@ if h.hexdigest() != manifest["artifact"]["sha256"]:
     raise SystemExit("Artifact checksum mismatch")
 if manifest.get("state") != "promoted":
     raise SystemExit("Rollback requires a previously promoted live manifest")
+artifacts = manifest.get("artifacts")
+if isinstance(artifacts, dict):
+    for name, entry in artifacts.items():
+        if not isinstance(entry, dict):
+            raise SystemExit(f"Invalid artifact entry for {name}")
+        candidate = pathlib.Path(entry["path"])
+        if not candidate.exists():
+            raise SystemExit(f"Artifact not found: {candidate}")
 PY
 
 read_manifest_field() {
@@ -82,7 +89,26 @@ PY
 export MANIFEST_FIELD="runtime_version.release_version"; release_version="$(read_manifest_field)"
 export MANIFEST_FIELD="runtime_version.package_version"; package_version="$(read_manifest_field)"
 export MANIFEST_FIELD="runtime_version.build_id"; build_id="$(read_manifest_field)"
+export MANIFEST_FIELD="topology"; topology_field="$(read_manifest_field 2>/dev/null || true)"
 export MANIFEST_FIELD="artifact.path"; artifact_path="$(read_manifest_field)"
+if [[ -n "$topology_field" ]]; then
+  TOPOLOGY="$topology_field"
+fi
+export ROOT_DIR RELEASE_VERSION="$release_version" PACKAGE_VERSION="$package_version" BUILD_ID="$build_id"
+
+if [[ "$TOPOLOGY" == "split" ]]; then
+  bash "$ROOT_DIR/scripts/release/preflight.sh" \
+    --topology "$TOPOLOGY" \
+    --check-pending \
+    --skip-build-match
+else
+  bash "$ROOT_DIR/scripts/release/preflight.sh" \
+    --artifact "$ROOT_DIR/bin/axon-core" \
+    --build-info "$ROOT_DIR/bin/axon-core.build-info" \
+    --topology "$TOPOLOGY" \
+    --check-pending \
+    --skip-build-match
+fi
 
 install_generation="rollback-$(date -u +%Y%m%dT%H%M%SZ)"
 release_root="$ROOT_DIR/.axon/live-release"
@@ -97,7 +123,7 @@ export PENDING_MANIFEST="$pending_manifest"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "DRY RUN: would roll back live using manifest $MANIFEST_PATH"
-  echo "DRY RUN: release_version=$release_version build_id=$build_id install_generation=$install_generation"
+  echo "DRY RUN: topology=$TOPOLOGY release_version=$release_version build_id=$build_id install_generation=$install_generation"
   exit 0
 fi
 
@@ -116,43 +142,87 @@ verified=0
 restart_failed=0
 postcheck_failed=0
 if [[ "$RESTART_LIVE" -eq 1 ]]; then
-  install -m 755 "$artifact_path" "$ROOT_DIR/bin/axon-core"
-  axon_write_export_file "$ROOT_DIR/bin/axon-core.build-info" \
-    AXON_RELEASE_VERSION "$release_version" \
-    AXON_BUILD_ID "$build_id" \
-    AXON_PACKAGE_VERSION "$package_version" \
-    AXON_INSTALL_GENERATION "$install_generation"
-  runtime_state="$ROOT_DIR/.axon/live-run/runtime.env"
-  start_args=()
-  if [[ -f "$runtime_state" ]]; then
-    # shellcheck disable=SC1090
-    source "$runtime_state"
-    case "${AXON_RUNTIME_MODE:-full}" in
-      graph_only) start_args+=(--graph-only) ;;
-      read_only) start_args+=(--read-only) ;;
-      mcp_only) start_args+=(--mcp-only) ;;
-      *) start_args+=(--full) ;;
-    esac
-    if [[ "${AXON_DASHBOARD_ENABLED:-1}" != "1" && "${AXON_RUNTIME_MODE:-}" != "mcp_only" ]]; then
-      start_args+=(--no-dashboard)
-    fi
-  else
-    start_args+=(--full)
-  fi
+  python3 - <<'PY'
+import json, os, pathlib, shutil, shlex
+root = pathlib.Path(os.environ["ROOT_DIR"])
+manifest = json.loads(pathlib.Path(os.environ["RELEASE_MANIFEST"]).read_text())
+release_version = os.environ["RELEASE_VERSION"]
+build_id = os.environ["BUILD_ID"]
+package_version = os.environ["PACKAGE_VERSION"]
+install_generation = os.environ["INSTALL_GENERATION"]
+artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+if not artifacts:
+    artifacts = {"axon-core": manifest["artifact"]}
+for name, entry in artifacts.items():
+    source = pathlib.Path(entry["path"])
+    target = root / "bin" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    build_info_target = root / "bin" / f"{name}.build-info"
+    build_info_source = entry.get("build_info_path")
+    if isinstance(build_info_source, str) and pathlib.Path(build_info_source).exists():
+        shutil.copy2(build_info_source, build_info_target)
+    else:
+        payload = {
+            "AXON_RELEASE_VERSION": release_version,
+            "AXON_BUILD_ID": build_id,
+            "AXON_PACKAGE_VERSION": package_version,
+            "AXON_INSTALL_GENERATION": install_generation,
+        }
+        with build_info_target.open("w") as handle:
+            for key, value in payload.items():
+                handle.write(f"{key}={shlex.quote(value)}\n")
+PY
   if ! "$ROOT_DIR/scripts/axon" --instance live stop; then
     restart_failed=1
   elif ! assert_live_stopped; then
     restart_failed=1
-  elif ! AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 "$ROOT_DIR/scripts/axon" --instance live start "${start_args[@]}"; then
-    restart_failed=1
-  elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
-    if python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
-      --manifest "$MANIFEST_PATH" \
-      --url "$AXON_MCP_URL" \
-      --install-generation "$install_generation"; then
-      verified=1
+  elif [[ "$TOPOLOGY" == "split" ]]; then
+    if ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/start-indexer.sh"; then
+      restart_failed=1
+    elif ! AXON_INSTANCE_KIND=live AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 bash "$ROOT_DIR/scripts/start-brain.sh"; then
+      restart_failed=1
+    elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
+      if python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
+        --manifest "$MANIFEST_PATH" \
+        --url "$AXON_MCP_URL" \
+        --install-generation "$install_generation" \
+        && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/status-indexer.sh" >/dev/null \
+        && AXON_INSTANCE_KIND=live bash "$ROOT_DIR/scripts/status-brain.sh" >/dev/null; then
+        verified=1
+      else
+        postcheck_failed=1
+      fi
+    fi
+  else
+    runtime_state="$ROOT_DIR/.axon/live-run/runtime.env"
+    start_args=()
+    if [[ -f "$runtime_state" ]]; then
+      # shellcheck disable=SC1090
+      source "$runtime_state"
+      case "${AXON_RUNTIME_MODE:-full}" in
+        graph_only) start_args+=(--graph-only) ;;
+        read_only) start_args+=(--read-only) ;;
+        mcp_only) start_args+=(--mcp-only) ;;
+        *) start_args+=(--full) ;;
+      esac
+      if [[ "${AXON_DASHBOARD_ENABLED:-1}" != "1" && "${AXON_RUNTIME_MODE:-}" != "mcp_only" ]]; then
+        start_args+=(--no-dashboard)
+      fi
     else
-      postcheck_failed=1
+      start_args+=(--full)
+    fi
+    if ! AXON_LIVE_RELEASE_MANIFEST="$pending_manifest" AXON_SKIP_BIN_SYNC=1 "$ROOT_DIR/scripts/axon" --instance live start "${start_args[@]}"; then
+      restart_failed=1
+    elif [[ "$SKIP_POSTCHECK" -ne 1 ]]; then
+      if python3 "$ROOT_DIR/scripts/release/check_live_runtime_version.py" \
+        --manifest "$MANIFEST_PATH" \
+        --url "$AXON_MCP_URL" \
+        --install-generation "$install_generation"; then
+        verified=1
+      else
+        postcheck_failed=1
+      fi
     fi
   fi
 fi

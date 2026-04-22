@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::bridge::RuntimeTruthFeed;
+
 static LAST_SQL_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_MCP_LATENCY_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_MCP_SAMPLE_AT_MS: AtomicU64 = AtomicU64::new(0);
@@ -82,6 +84,8 @@ static VECTOR_LANE_STATE_CODE: AtomicU64 = AtomicU64::new(0);
 static VECTOR_LANE_LAST_TRANSITION_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_LANE_LAST_SUCCESS_AT_MS: AtomicU64 = AtomicU64::new(0);
 static VECTOR_LANE_LAST_FAULT_AT_MS: AtomicU64 = AtomicU64::new(0);
+static GRAPH_PRIORITY_SOFT_DOMINANCE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+static GRAPH_PRIORITY_SEMANTIC_BACKLOG_DEPTH_CURRENT: AtomicU64 = AtomicU64::new(0);
 static VECTOR_STAGE_LATENCY_WINDOWS: OnceLock<Mutex<VectorStageLatencyWindows>> = OnceLock::new();
 static VECTOR_BACKLOG_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
 static RUNTIME_WORK_SIGNAL: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
@@ -107,6 +111,11 @@ static BACKGROUND_WAKE_FEDERATION_ORCHESTRATOR_TOTAL: AtomicU64 = AtomicU64::new
 static LAST_USEFUL_RESUME_AT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_USEFUL_RESUME_FOR_EXIT_AT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_OBSERVED_QUIESCENT_STATE_CODE: AtomicU64 = AtomicU64::new(0);
+static RUNTIME_TRUTH_LAST_HEARTBEAT_AT_MS: AtomicU64 = AtomicU64::new(0);
+static RUNTIME_TRUTH_LAST_GOOD_PAYLOAD_AT_MS: AtomicU64 = AtomicU64::new(0);
+static RUNTIME_TRUTH_STALE_AFTER_MS: AtomicU64 =
+    AtomicU64::new(RuntimeTruthFeed::DEFAULT_STALE_AFTER_MS);
+static RUNTIME_TRUTH_DEGRADED_REASON: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static RUNTIME_WAKE_TIMESTAMPS: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
 static QUIESCENT_RESUME_LATENCIES_MS: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
 static QUIESCENT_USEFUL_RESUME_LATENCIES_MS: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
@@ -116,6 +125,8 @@ const SERVICE_RECOVERY_WINDOW_MS: u64 = 15_000;
 #[allow(dead_code)]
 const INTERACTIVE_PRIORITY_IDLE_MS: u64 = 2_500;
 const VECTOR_STAGE_WINDOW_CAPACITY: usize = 256;
+const GRAPH_PRIORITY_SOFT_DOMINANCE_HOLD_MS: u64 = 2_000;
+const GRAPH_PRIORITY_SEMANTIC_READY_RESERVE_FLOOR: u64 = 2;
 
 #[derive(Clone, Copy)]
 pub enum ServiceKind {
@@ -1043,6 +1054,25 @@ pub fn record_vector_canonical_backlog_depth(depth: u64) {
     update_atomic_max(&VECTOR_CANONICAL_BACKLOG_DEPTH_MAX, depth);
 }
 
+pub fn record_graph_vector_priority_context(
+    graph_backlog_depth: usize,
+    semantic_backlog_depth: usize,
+) {
+    let now_ms = now_ms();
+    GRAPH_PRIORITY_SEMANTIC_BACKLOG_DEPTH_CURRENT
+        .store(semantic_backlog_depth as u64, Ordering::Relaxed);
+    if semantic_backlog_depth == 0 {
+        GRAPH_PRIORITY_SOFT_DOMINANCE_UNTIL_MS.store(0, Ordering::Relaxed);
+        return;
+    }
+    if graph_backlog_depth > 0 {
+        GRAPH_PRIORITY_SOFT_DOMINANCE_UNTIL_MS.store(
+            now_ms.saturating_add(GRAPH_PRIORITY_SOFT_DOMINANCE_HOLD_MS),
+            Ordering::Relaxed,
+        );
+    }
+}
+
 pub fn record_vector_oldest_ready_batch_age_ms(latency_ms: u64) {
     VECTOR_OLDEST_READY_BATCH_AGE_MS_CURRENT.store(latency_ms, Ordering::Relaxed);
     update_atomic_max(&VECTOR_OLDEST_READY_BATCH_AGE_MS_MAX, latency_ms);
@@ -1073,7 +1103,7 @@ pub fn vectorization_resumed_after_interactive_total() -> u64 {
 }
 
 pub fn vector_runtime_metrics() -> VectorRuntimeMetrics {
-    VectorRuntimeMetrics {
+    let mut metrics = VectorRuntimeMetrics {
         fetch_ms_total: VECTOR_FETCH_MS_TOTAL.load(Ordering::Relaxed),
         embed_ms_total: VECTOR_EMBED_MS_TOTAL.load(Ordering::Relaxed),
         db_write_ms_total: VECTOR_DB_WRITE_MS_TOTAL.load(Ordering::Relaxed),
@@ -1148,7 +1178,13 @@ pub fn vector_runtime_metrics() -> VectorRuntimeMetrics {
             .load(Ordering::Relaxed),
         vector_lane_last_success_at_ms: VECTOR_LANE_LAST_SUCCESS_AT_MS.load(Ordering::Relaxed),
         vector_lane_last_fault_at_ms: VECTOR_LANE_LAST_FAULT_AT_MS.load(Ordering::Relaxed),
+    };
+    if graph_priority_soft_dominance_active(now_ms()) {
+        metrics.ready_queue_depth_current = metrics
+            .ready_queue_depth_current
+            .max(GRAPH_PRIORITY_SEMANTIC_READY_RESERVE_FLOOR);
     }
+    metrics
 }
 
 pub fn vector_runtime_latency_summaries() -> VectorRuntimeLatencySummaries {
@@ -1243,6 +1279,8 @@ pub fn reset_for_tests() {
     VECTOR_LANE_LAST_TRANSITION_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_LANE_LAST_SUCCESS_AT_MS.store(0, Ordering::Relaxed);
     VECTOR_LANE_LAST_FAULT_AT_MS.store(0, Ordering::Relaxed);
+    GRAPH_PRIORITY_SOFT_DOMINANCE_UNTIL_MS.store(0, Ordering::Relaxed);
+    GRAPH_PRIORITY_SEMANTIC_BACKLOG_DEPTH_CURRENT.store(0, Ordering::Relaxed);
     LAST_RUNTIME_WAKEUP_AT_MS.store(0, Ordering::Relaxed);
     LAST_QUIESCENT_ENTERED_AT_MS.store(0, Ordering::Relaxed);
     LAST_QUIESCENT_EXITED_AT_MS.store(0, Ordering::Relaxed);
@@ -1257,6 +1295,12 @@ pub fn reset_for_tests() {
     LAST_USEFUL_RESUME_AT_MS.store(0, Ordering::Relaxed);
     LAST_USEFUL_RESUME_FOR_EXIT_AT_MS.store(0, Ordering::Relaxed);
     LAST_OBSERVED_QUIESCENT_STATE_CODE.store(0, Ordering::Relaxed);
+    RUNTIME_TRUTH_LAST_HEARTBEAT_AT_MS.store(0, Ordering::Relaxed);
+    RUNTIME_TRUTH_LAST_GOOD_PAYLOAD_AT_MS.store(0, Ordering::Relaxed);
+    RUNTIME_TRUTH_STALE_AFTER_MS.store(RuntimeTruthFeed::DEFAULT_STALE_AFTER_MS, Ordering::Relaxed);
+    *runtime_truth_degraded_reason_cell()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = None;
     *vector_stage_latency_windows()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = VectorStageLatencyWindows::default();
@@ -1385,6 +1429,92 @@ fn update_atomic_max(target: &AtomicU64, candidate: u64) {
     });
 }
 
+fn runtime_truth_degraded_reason_cell() -> &'static Mutex<Option<String>> {
+    RUNTIME_TRUTH_DEGRADED_REASON.get_or_init(|| Mutex::new(None))
+}
+
+fn runtime_truth_feed_at(now_ms: u64) -> RuntimeTruthFeed {
+    let stale_after_ms = RUNTIME_TRUTH_STALE_AFTER_MS.load(Ordering::Relaxed).max(1);
+    let last_heartbeat_at_ms = match RUNTIME_TRUTH_LAST_HEARTBEAT_AT_MS.load(Ordering::Relaxed) {
+        0 => None,
+        value => Some(value),
+    };
+    let last_good_payload_at_ms =
+        match RUNTIME_TRUTH_LAST_GOOD_PAYLOAD_AT_MS.load(Ordering::Relaxed) {
+            0 => None,
+            value => Some(value),
+        };
+    let degraded_reason = runtime_truth_degraded_reason_cell()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+
+    RuntimeTruthFeed::from_observed_times(
+        now_ms,
+        last_heartbeat_at_ms,
+        last_good_payload_at_ms,
+        stale_after_ms,
+        degraded_reason,
+    )
+}
+
+pub fn current_runtime_truth_feed() -> RuntimeTruthFeed {
+    runtime_truth_feed_at(now_ms())
+}
+
+pub fn current_runtime_truth_snapshot() -> RuntimeTruthFeed {
+    let stale_after_ms = RUNTIME_TRUTH_STALE_AFTER_MS.load(Ordering::Relaxed).max(1);
+    let last_good_payload_at_ms =
+        match RUNTIME_TRUTH_LAST_GOOD_PAYLOAD_AT_MS.load(Ordering::Relaxed) {
+            0 => None,
+            value => Some(value),
+        };
+    let degraded_reason = runtime_truth_degraded_reason_cell()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let degraded_reason = if last_good_payload_at_ms.is_some() {
+        degraded_reason
+    } else {
+        degraded_reason.or_else(|| Some("ist_snapshot_not_recently_refreshed".to_string()))
+    };
+
+    RuntimeTruthFeed::from_observed_times(
+        now_ms(),
+        last_good_payload_at_ms,
+        last_good_payload_at_ms,
+        stale_after_ms,
+        degraded_reason,
+    )
+}
+
+pub fn record_runtime_truth_bridge_dispatch(degraded_reason: Option<&str>) -> RuntimeTruthFeed {
+    let now = now_ms();
+    RUNTIME_TRUTH_LAST_HEARTBEAT_AT_MS.store(now, Ordering::Relaxed);
+    if degraded_reason.is_none() {
+        RUNTIME_TRUTH_LAST_GOOD_PAYLOAD_AT_MS.store(now, Ordering::Relaxed);
+    }
+    *runtime_truth_degraded_reason_cell()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = degraded_reason.map(str::to_string);
+    runtime_truth_feed_at(now)
+}
+
+pub fn set_runtime_truth_feed_for_tests(
+    last_heartbeat_at_ms: Option<u64>,
+    last_good_payload_at_ms: Option<u64>,
+    stale_after_ms: u64,
+    degraded_reason: Option<&str>,
+) {
+    RUNTIME_TRUTH_LAST_HEARTBEAT_AT_MS.store(last_heartbeat_at_ms.unwrap_or(0), Ordering::Relaxed);
+    RUNTIME_TRUTH_LAST_GOOD_PAYLOAD_AT_MS
+        .store(last_good_payload_at_ms.unwrap_or(0), Ordering::Relaxed);
+    RUNTIME_TRUTH_STALE_AFTER_MS.store(stale_after_ms.max(1), Ordering::Relaxed);
+    *runtime_truth_degraded_reason_cell()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = degraded_reason.map(str::to_string);
+}
+
 fn recent_peak_latency_ms_at(now_ms: u64) -> u64 {
     let last_seen = LAST_SAMPLE_AT_MS.load(Ordering::Relaxed);
     if last_seen == 0 || now_ms.saturating_sub(last_seen) > SERVICE_SAMPLE_TTL_MS {
@@ -1463,6 +1593,11 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn graph_priority_soft_dominance_active(now_ms: u64) -> bool {
+    GRAPH_PRIORITY_SEMANTIC_BACKLOG_DEPTH_CURRENT.load(Ordering::Relaxed) > 0
+        && GRAPH_PRIORITY_SOFT_DOMINANCE_UNTIL_MS.load(Ordering::Relaxed) > now_ms
 }
 
 #[cfg(test)]

@@ -49,7 +49,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["full", "graph_only", "read_only", "mcp_only"],
+        choices=["full", "graph_only", "read_only", "mcp_only", "brain_shadow", "indexer_shadow"],
         default="graph_only",
         help="Primary runtime mode when --compare is not used. Default: graph_only",
     )
@@ -97,6 +97,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Propagate ingestion truth drift gate when the profile includes ingestion qualification",
     )
     parser.add_argument(
+        "--reuse-runtime",
+        action="store_true",
+        help="Reuse the currently running runtime for ingestion qualification instead of stopping and restarting it.",
+    )
+    parser.add_argument(
         "--retrieval-corpus",
         default=str(PROJECT_ROOT / "scripts" / "retrieval_context_cases.json"),
         help="Deterministic retrieve_context corpus JSON path",
@@ -138,7 +143,7 @@ def normalize_modes(mode: str, compare: str) -> list[str]:
         modes = [mode]
     seen: list[str] = []
     for item in modes:
-        if item not in {"full", "graph_only", "read_only", "mcp_only"}:
+        if item not in {"full", "graph_only", "read_only", "mcp_only", "brain_shadow", "indexer_shadow"}:
             raise SystemExit(f"Unsupported mode: {item}")
         if item not in seen:
             seen.append(item)
@@ -242,6 +247,8 @@ def command_env(
     env = os.environ.copy()
     env["AXON_INSTANCE_KIND"] = instance
     env["AXON_MCP_URL"] = mcp_url
+    env["AXON_RUNTIME_SHADOW_ROLE"] = shadow_role_for_mode(mode)
+    env["AXON_SPLIT_SHADOW_ONLY"] = "1" if mode in {"brain_shadow", "indexer_shadow"} else "0"
     if mode == "full":
         env["AXON_ENABLE_AUTONOMOUS_INGESTOR"] = "true"
         env["AXON_RUNTIME_PROFILE"] = "full_autonomous"
@@ -424,6 +431,200 @@ def summarize_quiescent_status(status_data: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def summarize_runtime_truth(status_data: dict[str, Any]) -> dict[str, Any]:
+    runtime_authority = status_data.get("runtime_authority", {})
+    if not isinstance(runtime_authority, dict):
+        return {"available": False, "reason": "missing_runtime_authority"}
+    topology = runtime_authority.get("runtime_topology", {})
+    if not isinstance(topology, dict):
+        return {"available": False, "reason": "missing_runtime_topology"}
+    indexer_feed = topology.get("indexer_feed", {})
+    if not isinstance(indexer_feed, dict):
+        indexer_feed = {}
+    ist_snapshot = topology.get("ist_snapshot", {})
+    if not isinstance(ist_snapshot, dict):
+        ist_snapshot = {}
+    summary = {
+        "available": True,
+        "truth_status": status_data.get("truth_status"),
+        "runtime_release_version": status_data.get("runtime_version", {}).get("release_version")
+        if isinstance(status_data.get("runtime_version"), dict)
+        else None,
+        "runtime_build_id": status_data.get("runtime_version", {}).get("build_id")
+        if isinstance(status_data.get("runtime_version"), dict)
+        else None,
+        "runtime_install_generation": status_data.get("runtime_version", {}).get("install_generation")
+        if isinstance(status_data.get("runtime_version"), dict)
+        else None,
+        "process_role": topology.get("process_role"),
+        "public_mcp_authority": topology.get("public_mcp_authority"),
+        "soll_writer_authority": topology.get("soll_writer_authority"),
+        "ist_writer_authority": topology.get("ist_writer_authority"),
+        "brain_ready": topology.get("brain_ready"),
+        "indexer_ready": topology.get("indexer_ready"),
+        "system_converged": topology.get("system_converged"),
+        "indexer_feed_state": indexer_feed.get("state"),
+        "indexer_feed_stale": indexer_feed.get("stale"),
+        "indexer_feed_degraded_reason": indexer_feed.get("degraded_reason"),
+        "indexer_feed_last_good_payload_at_ms": indexer_feed.get("last_good_payload_at_ms"),
+        "ist_snapshot_state": ist_snapshot.get("state"),
+        "ist_snapshot_stale": ist_snapshot.get("stale"),
+        "ist_snapshot_degraded_reason": ist_snapshot.get("degraded_reason"),
+        "ist_snapshot_unsafe_read": ist_snapshot.get("unsafe_read"),
+        "ist_snapshot_trust_boundary": ist_snapshot.get("trust_boundary"),
+        "ist_snapshot_computed_by": ist_snapshot.get("computed_by"),
+        "degraded_notes": status_data.get("availability", {}).get("degraded_notes", []),
+    }
+    if all(value is None for key, value in summary.items() if key != "available"):
+        summary["available"] = False
+        summary["reason"] = "runtime_truth_surface_empty"
+    return summary
+
+
+def expected_runtime_version_for_instance(instance: str) -> dict[str, Any]:
+    if instance == "live":
+        manifest_path = PROJECT_ROOT / ".axon" / "live-release" / "current.json"
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except Exception:
+                return {"source": "live_manifest", "available": False}
+            runtime = manifest.get("runtime_version", {})
+            if isinstance(runtime, dict):
+                return {
+                    "source": "live_manifest",
+                    "available": True,
+                    "release_version": runtime.get("release_version"),
+                    "build_id": runtime.get("build_id"),
+                    "install_generation": runtime.get("install_generation"),
+                }
+        return {"source": "live_manifest", "available": False}
+
+    package_version = None
+    cargo_manifest = PROJECT_ROOT / "src" / "axon-core" / "Cargo.toml"
+    if cargo_manifest.exists():
+        for line in cargo_manifest.read_text().splitlines():
+            if line.startswith("version = "):
+                package_version = line.split('"')[1]
+                break
+    build_id = package_version or "unknown"
+    try:
+        build_id = (
+            subprocess.run(
+                ["git", "-C", str(PROJECT_ROOT), "describe", "--tags", "--always", "--dirty"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            or build_id
+        )
+    except Exception:
+        pass
+    return {
+        "source": "workspace",
+        "available": package_version is not None,
+        "release_version": package_version,
+        "build_id": build_id,
+        "install_generation": "workspace",
+    }
+
+
+def summarize_runtime_guardrails(mode: str, instance: str, runtime_truth_summary: dict[str, Any]) -> dict[str, Any]:
+    shadow_mode = mode in {"brain_shadow", "indexer_shadow"}
+    expected_runtime_version = expected_runtime_version_for_instance(instance)
+    version_identity_verified = False
+    if expected_runtime_version.get("available"):
+        version_identity_verified = (
+            runtime_truth_summary.get("runtime_release_version") == expected_runtime_version.get("release_version")
+            and runtime_truth_summary.get("runtime_build_id") == expected_runtime_version.get("build_id")
+            and runtime_truth_summary.get("runtime_install_generation")
+            == expected_runtime_version.get("install_generation")
+        )
+    available = isinstance(runtime_truth_summary, dict) and runtime_truth_summary.get("available") is not False
+    canonical_truth_restored = bool(available)
+    if canonical_truth_restored:
+        split_topology = runtime_truth_summary.get("topology") == "brain_indexer_split"
+        canonical_truth_restored = (
+            runtime_truth_summary.get("truth_status") == "canonical"
+            and runtime_truth_summary.get("brain_ready") is True
+            and runtime_truth_summary.get("indexer_ready") is True
+            and runtime_truth_summary.get("system_converged") is True
+            and runtime_truth_summary.get("indexer_feed_state") == "fresh"
+            and runtime_truth_summary.get("indexer_feed_stale") is False
+            and runtime_truth_summary.get("indexer_feed_degraded_reason") is None
+            and runtime_truth_summary.get("ist_snapshot_state") == "fresh"
+            and runtime_truth_summary.get("ist_snapshot_stale") is False
+            and runtime_truth_summary.get("ist_snapshot_unsafe_read") is False
+            and runtime_truth_summary.get("ist_snapshot_degraded_reason") is None
+            and version_identity_verified
+            and (
+                (
+                    split_topology
+                    and runtime_truth_summary.get("process_role") == "brain"
+                    and runtime_truth_summary.get("public_mcp_authority") == "brain"
+                    and runtime_truth_summary.get("soll_writer_authority") == "brain"
+                    and runtime_truth_summary.get("ist_writer_authority") == "indexer"
+                )
+                or (
+                    not split_topology
+                    and runtime_truth_summary.get("process_role") == "legacy_monolith"
+                    and runtime_truth_summary.get("public_mcp_authority") == "legacy_monolith"
+                    and runtime_truth_summary.get("soll_writer_authority") == "legacy_monolith"
+                    and runtime_truth_summary.get("ist_writer_authority") == "legacy_monolith"
+                )
+            )
+        )
+    split_topology = runtime_truth_summary.get("topology") == "brain_indexer_split"
+    if split_topology:
+        canonical_authority_restored = canonical_truth_restored and runtime_truth_summary.get(
+            "public_mcp_authority"
+        ) == "brain" and runtime_truth_summary.get("soll_writer_authority") == "brain"
+        if canonical_authority_restored:
+            canonical_authority_restored = runtime_truth_summary.get("ist_writer_authority") == "indexer"
+    else:
+        canonical_authority_restored = canonical_truth_restored and runtime_truth_summary.get(
+            "public_mcp_authority"
+        ) == "legacy_monolith" and runtime_truth_summary.get("soll_writer_authority") == "legacy_monolith"
+        if canonical_authority_restored:
+            canonical_authority_restored = runtime_truth_summary.get("ist_writer_authority") == "legacy_monolith"
+    promotion_allowed = canonical_authority_restored and not shadow_mode
+    rollback_path_state = "green" if promotion_allowed else "red"
+    return {
+        "shadow_mode": shadow_mode,
+        "expected_version_source": expected_runtime_version.get("source"),
+        "version_identity_verified": version_identity_verified,
+        "canonical_truth_restored": canonical_truth_restored,
+        "canonical_authority_restored": canonical_authority_restored,
+        "promotion_allowed": promotion_allowed,
+        "rollback_path_state": rollback_path_state,
+        "cutover_blocked": not promotion_allowed,
+    }
+
+
+def runtime_truth_requires_warn(
+    runtime_truth_summary: dict[str, Any], guardrails_summary: dict[str, Any] | None = None
+) -> bool:
+    if not isinstance(runtime_truth_summary, dict) or runtime_truth_summary.get("available") is False:
+        return True
+    if isinstance(guardrails_summary, dict) and guardrails_summary.get("promotion_allowed") is False:
+        return True
+    indexer_feed_state = runtime_truth_summary.get("indexer_feed_state")
+    if indexer_feed_state is None or indexer_feed_state != "fresh":
+        return True
+    if runtime_truth_summary.get("indexer_feed_stale") is True:
+        return True
+    if runtime_truth_summary.get("indexer_feed_degraded_reason"):
+        return True
+    ist_state = runtime_truth_summary.get("ist_snapshot_state")
+    if ist_state is None or ist_state != "fresh":
+        return True
+    if runtime_truth_summary.get("ist_snapshot_unsafe_read") is True:
+        return True
+    if runtime_truth_summary.get("ist_snapshot_degraded_reason"):
+        return True
+    return False
+
+
 def quiescent_backlog_drain(status_data: dict[str, Any]) -> dict[str, Any]:
     runtime_authority = status_data.get("runtime_authority", {})
     if not isinstance(runtime_authority, dict):
@@ -570,6 +771,28 @@ def mode_flag(mode: str) -> str:
     }[mode]
 
 
+def shadow_role_for_mode(mode: str) -> str:
+    if mode == "brain_shadow":
+        return "brain"
+    if mode == "indexer_shadow":
+        return "indexer"
+    return "legacy_monolith"
+
+
+def start_command_for_mode(mode: str) -> list[str]:
+    if mode == "brain_shadow":
+        return ["bash", "scripts/start-brain.sh"]
+    if mode == "indexer_shadow":
+        return ["bash", "scripts/start-indexer.sh"]
+    return ["bash", "scripts/start.sh", mode_flag(mode), "--skip-mcp-tests"]
+
+
+def mcp_robustness_supported_mode(mode: str) -> str | None:
+    if mode in {"full", "graph_only", "read_only", "mcp_only"}:
+        return mode
+    return None
+
+
 def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -674,6 +897,20 @@ def summarize_numeric_series(samples: list[dict[str, Any]], key: str) -> dict[st
     }
 
 
+def summarize_progression_series(samples: list[dict[str, Any]], key: str) -> dict[str, Any]:
+    values = [float(sample[key]) for sample in samples if isinstance(sample.get(key), (int, float))]
+    if not values:
+        return {}
+    return {
+        "first": values[0],
+        "last": values[-1],
+        "delta": values[-1] - values[0],
+        "min": min(values),
+        "max": max(values),
+        "samples": len(values),
+    }
+
+
 def gpu_sawtooth_summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
     values = [float(sample["gpu_util_pct"]) for sample in samples if isinstance(sample.get("gpu_util_pct"), (int, float))]
     if len(values) < 3:
@@ -708,6 +945,129 @@ def summarize_controller_modes(samples: list[dict[str, Any]]) -> dict[str, Any]:
         return {}
     dominant = max(counts.items(), key=lambda item: item[1])[0]
     return {"counts": counts, "dominant": dominant}
+
+
+def summarize_categorical_series(samples: list[dict[str, Any]], key: str) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    for sample in samples:
+        value = sample.get(key)
+        if not value:
+            continue
+        bucket = str(value)
+        counts[bucket] = counts.get(bucket, 0) + 1
+    if not counts:
+        return {}
+    dominant = max(counts.items(), key=lambda item: item[1])[0]
+    return {"counts": counts, "dominant": dominant}
+
+
+def progression_delta(summary: dict[str, Any]) -> float:
+    return float(summary.get("delta") or 0.0)
+
+
+def per_minute(delta: float, duration_ms: int) -> float:
+    if duration_ms <= 0:
+        return 0.0
+    return (delta * 60_000.0) / float(duration_ms)
+
+
+def summarize_conversion_rates(summary: dict[str, Any]) -> dict[str, Any]:
+    duration_ms = int(summary.get("duration_ms") or 0)
+    pipeline = summary.get("pipeline_buffer", {})
+    if not isinstance(pipeline, dict) or duration_ms <= 0:
+        return {}
+
+    buffered_to_persisted_delta = max(
+        progression_delta(pipeline.get("ingress_promoted_total", {})),
+        progression_delta(pipeline.get("ingress_durably_persisted_total", {})),
+        progression_delta(pipeline.get("persisted_file_current", {})),
+        progression_delta(pipeline.get("persisted_file_pending_current", {})),
+    )
+    persisted_to_graph_ready_delta = progression_delta(pipeline.get("graph_ready_current", {}))
+    graph_ready_to_vector_ready_delta = progression_delta(pipeline.get("vector_ready_current", {}))
+
+    return {
+        "buffered_to_persisted_per_min": round(per_minute(buffered_to_persisted_delta, duration_ms), 2),
+        "persisted_to_graph_ready_per_min": round(
+            per_minute(max(0.0, persisted_to_graph_ready_delta), duration_ms), 2
+        ),
+        "graph_ready_to_vector_ready_per_min": round(
+            per_minute(max(0.0, graph_ready_to_vector_ready_delta), duration_ms), 2
+        ),
+    }
+
+
+def diagnose_conversion_pipeline(summary: dict[str, Any]) -> dict[str, Any]:
+    duration_ms = int(summary.get("duration_ms") or 0)
+    pipeline = summary.get("pipeline_buffer", {})
+    if not isinstance(pipeline, dict) or duration_ms <= 0:
+        return {
+            "verdict": "insufficient_observation_window",
+            "reason": "runtime_window_too_short_for_conversion_diagnosis",
+        }
+
+    rates = summarize_conversion_rates(summary)
+    scan_delta = progression_delta(pipeline.get("scan_buffered_current", {}))
+    pending_delta = progression_delta(pipeline.get("persisted_file_pending_current", {}))
+    persisted_delta = progression_delta(pipeline.get("persisted_file_current", {}))
+    graph_ready_delta = progression_delta(pipeline.get("graph_ready_current", {}))
+    vector_ready_delta = progression_delta(pipeline.get("vector_ready_current", {}))
+    flush_delta = progression_delta(pipeline.get("ingress_flush_count", {}))
+    durable_persisted_delta = progression_delta(
+        pipeline.get("ingress_durably_persisted_total", {})
+    )
+    excluded_from_pending_delta = progression_delta(
+        pipeline.get("ingress_excluded_from_pending_total", {})
+    )
+    admission_block = pipeline.get("admission_blocking_authority", {}).get("dominant")
+    graph_block = pipeline.get("graph_blocking_authority", {}).get("dominant")
+    vector_block = pipeline.get("vector_blocking_authority", {}).get("dominant")
+
+    if (
+        rates.get("buffered_to_persisted_per_min", 0.0) <= 0.0
+        and flush_delta > 0.0
+        and scan_delta < 0.0
+        and persisted_delta <= 0.0
+        and pending_delta <= 0.0
+    ):
+        return {
+            "verdict": "persistence_limited",
+            "reason": admission_block
+            or "buffered_discovery_is_flushing_but_not_emerging_as_durable_pending_stock",
+        }
+    if durable_persisted_delta > 0.0 and pending_delta <= 0.0 and excluded_from_pending_delta > 0.0:
+        return {
+            "verdict": "persistence_limited",
+            "reason": "durable_file_persistence_completed_but_rows_were_excluded_before_persisted_file_pending",
+        }
+    if rates.get("buffered_to_persisted_per_min", 0.0) <= 0.0 and scan_delta >= 0.0:
+        return {
+            "verdict": "admission_limited",
+            "reason": admission_block or "buffered_discovery_is_not_converting_into_persisted_stock",
+        }
+    if rates.get("buffered_to_persisted_per_min", 0.0) > 0.0 and persisted_delta > 0.0 and graph_ready_delta <= 0.0:
+        return {
+            "verdict": "graph_production_limited",
+            "reason": graph_block or "persisted_stock_is_accumulating_faster_than_graph_ready_progress",
+        }
+    if rates.get("persisted_to_graph_ready_per_min", 0.0) > 0.0 and vector_ready_delta <= 0.0:
+        return {
+            "verdict": "vector_downstream_limited",
+            "reason": vector_block or "graph_ready_stock_is_advancing_but_vector_ready_is_not",
+        }
+    if (
+        rates.get("buffered_to_persisted_per_min", 0.0) <= 0.0
+        and rates.get("persisted_to_graph_ready_per_min", 0.0) <= 0.0
+        and rates.get("graph_ready_to_vector_ready_per_min", 0.0) > 0.0
+    ):
+        return {
+            "verdict": "vector_downstream_limited",
+            "reason": "downstream_vector_stock_is_draining_without_new_upstream_conversion",
+        }
+    return {
+        "verdict": "balanced_conversion",
+        "reason": "canonical_boundaries_show_measurable_progress",
+    }
 
 
 def diagnose_resource_balance(summary: dict[str, Any]) -> dict[str, Any]:
@@ -795,6 +1155,72 @@ def summarize_resource_samples(samples: list[dict[str, Any]], interval_ms: int) 
         "gpu_util_sawtooth": gpu_sawtooth_summary(gpu_samples),
         "pipeline_buffer": {
             "sample_count": len(pipeline_samples),
+            "watcher_buffered_current": summarize_progression_series(
+                pipeline_samples, "watcher_buffered_current"
+            ),
+            "scan_buffered_current": summarize_progression_series(
+                pipeline_samples, "scan_buffered_current"
+            ),
+            "persisted_file_current": summarize_progression_series(
+                pipeline_samples, "persisted_file_current"
+            ),
+            "persisted_file_pending_current": summarize_progression_series(
+                pipeline_samples, "persisted_file_pending_current"
+            ),
+            "graph_wip_current": summarize_progression_series(
+                pipeline_samples, "graph_wip_current"
+            ),
+            "ingress_flush_count": summarize_progression_series(
+                pipeline_samples, "ingress_flush_count"
+            ),
+            "ingress_last_flush_duration_ms": summarize_numeric_series(
+                pipeline_samples, "ingress_last_flush_duration_ms"
+            ),
+            "ingress_last_promoted_count": summarize_progression_series(
+                pipeline_samples, "ingress_last_promoted_count"
+            ),
+            "ingress_promoted_total": summarize_progression_series(
+                pipeline_samples, "ingress_promoted_total"
+            ),
+            "ingress_last_durably_persisted_count": summarize_progression_series(
+                pipeline_samples, "ingress_last_durably_persisted_count"
+            ),
+            "ingress_durably_persisted_total": summarize_progression_series(
+                pipeline_samples, "ingress_durably_persisted_total"
+            ),
+            "ingress_last_excluded_from_pending_count": summarize_progression_series(
+                pipeline_samples, "ingress_last_excluded_from_pending_count"
+            ),
+            "ingress_excluded_from_pending_total": summarize_progression_series(
+                pipeline_samples, "ingress_excluded_from_pending_total"
+            ),
+            "structural_graph_backlog_current": summarize_progression_series(
+                pipeline_samples, "structural_graph_backlog_current"
+            ),
+            "structural_graph_backlog_queued_current": summarize_progression_series(
+                pipeline_samples, "structural_graph_backlog_queued_current"
+            ),
+            "structural_graph_backlog_inflight_current": summarize_progression_series(
+                pipeline_samples, "structural_graph_backlog_inflight_current"
+            ),
+            "graph_projection_queue_current": summarize_progression_series(
+                pipeline_samples, "graph_projection_queue_current"
+            ),
+            "graph_projection_queue_queued_current": summarize_progression_series(
+                pipeline_samples, "graph_projection_queue_queued_current"
+            ),
+            "graph_projection_queue_inflight_current": summarize_progression_series(
+                pipeline_samples, "graph_projection_queue_inflight_current"
+            ),
+            "graph_ready_current": summarize_progression_series(
+                pipeline_samples, "graph_ready_current"
+            ),
+            "vector_queue_current": summarize_progression_series(
+                pipeline_samples, "vector_queue_current"
+            ),
+            "vector_ready_current": summarize_progression_series(
+                pipeline_samples, "vector_ready_current"
+            ),
             "ready_queue_depth_current": summarize_numeric_series(
                 pipeline_samples, "ready_queue_depth_current"
             ),
@@ -823,9 +1249,23 @@ def summarize_resource_samples(samples: list[dict[str, Any]], interval_ms: int) 
                 pipeline_samples, "avg_files_per_embed_call"
             ),
             "controller_state": summarize_controller_modes(pipeline_samples),
+            "admission_blocking_authority": summarize_categorical_series(
+                pipeline_samples, "admission_blocking_authority"
+            ),
+            "admission_wip_current": summarize_progression_series(
+                pipeline_samples, "admission_wip_current"
+            ),
+            "graph_blocking_authority": summarize_categorical_series(
+                pipeline_samples, "graph_blocking_authority"
+            ),
+            "vector_blocking_authority": summarize_categorical_series(
+                pipeline_samples, "vector_blocking_authority"
+            ),
         },
     }
     summary["diagnosis"] = diagnose_resource_balance(summary)
+    summary["conversion_rates"] = summarize_conversion_rates(summary)
+    summary["conversion_diagnosis"] = diagnose_conversion_pipeline(summary)
     return summary
 
 
@@ -859,6 +1299,16 @@ class ResourceSampler:
             if isinstance(runtime_authority, dict)
             else {}
         )
+        stage_model = (
+            runtime_authority.get("canonical_ingestion_stage_model", {})
+            if isinstance(runtime_authority, dict)
+            else {}
+        )
+        canonical_edges = (
+            runtime_authority.get("canonical_edges", {})
+            if isinstance(runtime_authority, dict)
+            else {}
+        )
         observed_residual_work = (
             quiescent_state.get("observed_residual_work", {})
             if isinstance(quiescent_state, dict)
@@ -875,6 +1325,10 @@ class ResourceSampler:
             observed_residual_work = {}
         if not isinstance(backlog_drain, dict):
             backlog_drain = {}
+        if not isinstance(stage_model, dict):
+            stage_model = {}
+        if not isinstance(canonical_edges, dict):
+            canonical_edges = {}
 
         vector_runtime = observed_residual_work
         vector_controller = {}
@@ -950,8 +1404,64 @@ class ResourceSampler:
         ready_lane = lane_parameters.get("vector_ready_queue_depth", {})
         if not isinstance(ready_lane, dict):
             ready_lane = {}
+
+        def stage_count(name: str) -> Any:
+            value = stage_model.get(name, {})
+            if isinstance(value, dict):
+                return value.get("current_count")
+            return None
+
+        structural_graph_breakdown = stage_model.get("structural_graph_backlog", {})
+        if not isinstance(structural_graph_breakdown, dict):
+            structural_graph_breakdown = {}
+        structural_graph_counts = structural_graph_breakdown.get("queue_breakdown", {})
+        if not isinstance(structural_graph_counts, dict):
+            structural_graph_counts = {}
+        graph_projection_breakdown = stage_model.get("graph_projection_queue_owned", {})
+        if not isinstance(graph_projection_breakdown, dict):
+            graph_projection_breakdown = {}
+        graph_projection_counts = graph_projection_breakdown.get("queue_breakdown", {})
+        if not isinstance(graph_projection_counts, dict):
+            graph_projection_counts = {}
+        ingress_promotion = stage_model.get("ingress_promotion", {})
+        if not isinstance(ingress_promotion, dict):
+            ingress_promotion = {}
+        admission_edge = canonical_edges.get("admission_edge", {})
+        if not isinstance(admission_edge, dict):
+            admission_edge = {}
+        admission_controller = runtime_authority.get("admission_controller", {})
+        if not isinstance(admission_controller, dict):
+            admission_controller = {}
+        graph_edge = canonical_edges.get("graph_production_edge", {})
+        if not isinstance(graph_edge, dict):
+            graph_edge = {}
+        vector_edge = canonical_edges.get("vector_downstream_edge", {})
+        if not isinstance(vector_edge, dict):
+            vector_edge = {}
         return {
-            "pipeline_available": bool(vector_runtime) or bool(vector_controller),
+            "pipeline_available": bool(vector_runtime) or bool(vector_controller) or bool(stage_model),
+            "watcher_buffered_current": stage_count("watcher_buffered"),
+            "scan_buffered_current": stage_count("scan_buffered"),
+            "persisted_file_current": stage_count("persisted_file"),
+            "persisted_file_pending_current": stage_count("persisted_file_pending"),
+            "graph_wip_current": stage_count("graph_wip"),
+            "ingress_flush_count": admission_controller.get("admission_flush_count", ingress_promotion.get("flush_count")),
+            "ingress_last_flush_duration_ms": admission_controller.get("admission_last_flush_duration_ms", ingress_promotion.get("last_flush_duration_ms")),
+            "ingress_last_promoted_count": admission_controller.get("admission_last_promoted_count", ingress_promotion.get("last_promoted_count")),
+            "ingress_promoted_total": admission_controller.get("admission_promoted_total", ingress_promotion.get("promoted_total")),
+            "ingress_last_durably_persisted_count": admission_controller.get("admission_last_durably_persisted_count"),
+            "ingress_durably_persisted_total": admission_controller.get("admission_durably_persisted_total"),
+            "ingress_last_excluded_from_pending_count": admission_controller.get("admission_last_excluded_from_pending_count"),
+            "ingress_excluded_from_pending_total": admission_controller.get("admission_excluded_from_pending_total"),
+            "structural_graph_backlog_current": stage_count("structural_graph_backlog"),
+            "structural_graph_backlog_queued_current": structural_graph_counts.get("queued"),
+            "structural_graph_backlog_inflight_current": structural_graph_counts.get("inflight"),
+            "graph_projection_queue_current": stage_count("graph_projection_queue_owned"),
+            "graph_projection_queue_queued_current": graph_projection_counts.get("queued"),
+            "graph_projection_queue_inflight_current": graph_projection_counts.get("inflight"),
+            "graph_ready_current": stage_count("graph_ready"),
+            "vector_queue_current": stage_count("file_vectorization_queue_owned"),
+            "vector_ready_current": stage_count("vector_ready"),
             "ready_queue_depth_current": vector_runtime.get("ready_queue_depth_current"),
             "prepare_inflight_current": vector_runtime.get("prepare_inflight_current"),
             "prepare_claimed_current": vector_runtime.get("prepare_claimed_current"),
@@ -967,6 +1477,10 @@ class ResourceSampler:
             "ready_queue_effective": ready_lane.get("effective"),
             "semantic_health": backlog_drain.get("semantic_health"),
             "provider_effective": backlog_drain.get("provider_effective"),
+            "admission_blocking_authority": admission_edge.get("blocking_authority"),
+            "admission_wip_current": admission_controller.get("admission_wip_current"),
+            "graph_blocking_authority": graph_edge.get("blocking_authority"),
+            "vector_blocking_authority": vector_edge.get("blocking_authority"),
         }
 
     def _capture_sample(self) -> dict[str, Any]:
@@ -1084,16 +1598,14 @@ def run_runtime_smoke(
 
         start_timed_out = False
         try:
-            start_proc = shell(
-                ["bash", "scripts/start.sh", mode_flag(mode), "--skip-mcp-tests"],
-                env=env,
-                timeout=smoke_budget_s,
-            )
+            start_proc = shell(start_command_for_mode(mode), env=env, timeout=smoke_budget_s)
             start_log = completed_output(start_proc.stdout) + completed_output(start_proc.stderr)
         except subprocess.TimeoutExpired as exc:
             start_timed_out = True
             start_log = completed_output(exc.stdout) + completed_output(exc.stderr)
-            start_log += f"\n[qualify] start.sh timeout after {exc.timeout}s; checking runtime readiness anyway\n"
+            start_log += (
+                f"\n[qualify] start timeout after {exc.timeout}s; checking runtime readiness anyway\n"
+            )
         (run_dir / "runtime-start.log").write_text(start_log, encoding="utf-8")
 
         effective_url = resolve_effective_mcp_url(start_log, url)
@@ -1108,8 +1620,9 @@ def run_runtime_smoke(
         wait_for_mcp_ready(effective_url, 120)
         note = "runtime ready"
         if start_timed_out:
-            note = f"{note}; start.sh exceeded {smoke_budget_s}s budget"
+            note = f"{note}; start wrapper exceeded {smoke_budget_s}s budget"
         status_data = fetch_status_snapshot(effective_url)
+        runtime_truth_summary = summarize_runtime_truth(status_data)
         quiescent_summary = summarize_quiescent_status(status_data)
         burn_rate_probe = None
         if should_probe_semantic_burn_rate(status_data, quiescent_summary):
@@ -1195,6 +1708,8 @@ def run_runtime_smoke(
             time.sleep(MIN_RUNTIME_OBSERVATION_SEC)
             status_data = fetch_status_snapshot(effective_url)
             quiescent_summary = summarize_quiescent_status(status_data)
+        runtime_truth_summary = summarize_runtime_truth(status_data)
+        guardrails_summary = summarize_runtime_guardrails(mode, instance, runtime_truth_summary)
         (run_dir / "runtime-status.json").write_text(
             json.dumps(status_data, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
@@ -1214,12 +1729,39 @@ def run_runtime_smoke(
             note = f"{note}; quiescent={quiescent_verdict}"
         elif quiescent_summary.get("available") is False:
             note = f"{note}; quiescent_unavailable={quiescent_summary.get('reason', 'unknown')}"
+        if runtime_truth_summary.get("available") is False:
+            note = f"{note}; runtime_truth_unavailable={runtime_truth_summary.get('reason', 'unknown')}"
+        else:
+            note = (
+                f"{note}; runtime_truth={runtime_truth_summary.get('truth_status', 'unknown')}"
+                f"; process_role={runtime_truth_summary.get('process_role', 'unknown')}"
+                f"; public_mcp_authority={runtime_truth_summary.get('public_mcp_authority', 'unknown')}"
+                f"; soll_writer_authority={runtime_truth_summary.get('soll_writer_authority', 'unknown')}"
+                f"; ist_writer_authority={runtime_truth_summary.get('ist_writer_authority', 'unknown')}"
+                f"; brain_ready={runtime_truth_summary.get('brain_ready', 'unknown')}"
+                f"; indexer_ready={runtime_truth_summary.get('indexer_ready', 'unknown')}"
+                f"; system_converged={runtime_truth_summary.get('system_converged', 'unknown')}"
+                f"; runtime_feed_state={runtime_truth_summary.get('indexer_feed_state', 'unknown')}"
+                f"; stale_runtime_feed={runtime_truth_summary.get('indexer_feed_stale', 'unknown')}"
+                f"; ist_snapshot={runtime_truth_summary.get('ist_snapshot_state', 'unknown')}"
+                f"; stale_ist_snapshot={runtime_truth_summary.get('ist_snapshot_stale', 'unknown')}"
+            )
+        note = (
+            f"{note}; canonical_truth_restored={guardrails_summary.get('canonical_truth_restored', 'unknown')}"
+            f"; canonical_authority_restored={guardrails_summary.get('canonical_authority_restored', 'unknown')}"
+            f"; rollback_path={guardrails_summary.get('rollback_path_state', 'unknown')}"
+            f"; promotion_allowed={guardrails_summary.get('promotion_allowed', 'unknown')}"
+            f"; cutover_blocked={guardrails_summary.get('cutover_blocked', 'unknown')}"
+        )
         if isinstance(quiescent_summary.get("burn_rate_probe"), dict):
             note = (
                 f"{note}; burn_rate_probe="
                 f"{quiescent_summary['burn_rate_probe'].get('state', 'unknown')}"
             )
         resource_summary = resource_sampler.stop() if resource_sampler is not None else {}
+        if runtime_truth_requires_warn(runtime_truth_summary, guardrails_summary):
+            if step_status == "pass":
+                step_status = "warn"
         return step_result(
             "runtime_smoke",
             step_status,
@@ -1228,6 +1770,8 @@ def run_runtime_smoke(
             {
                 "status": status_data,
                 "quiescent": quiescent_summary,
+                "runtime_truth": runtime_truth_summary,
+                "guardrails": guardrails_summary,
                 "resources": resource_summary,
             },
         )
@@ -1299,11 +1843,18 @@ def run_mcp_robustness(args: argparse.Namespace, mode: str, run_dir: Path, insta
     t0 = time.time()
     output_root = run_dir / "robustness"
     output_root.mkdir(parents=True, exist_ok=True)
+    supported_mode = mcp_robustness_supported_mode(mode)
+    if supported_mode is None:
+        note = (
+            "skipped: split shadow mode is not yet modeled by qualify_mcp_robustness.py; "
+            "shadow launch and runtime smoke remain covered"
+        )
+        return step_result("mcp_robustness", "warn", int((time.time() - t0) * 1000), note, {})
     cmd = [
         sys.executable,
         "scripts/qualify_mcp_robustness.py",
         "--modes",
-        mode,
+        supported_mode,
         "--duration",
         str(args.duration),
         "--warmup",
@@ -1422,6 +1973,8 @@ def run_ingestion_qualify(args: argparse.Namespace, mode: str, run_dir: Path, in
         cmd.append("--stop-after")
     if args.enforce_gate:
         cmd.append("--enforce-gate")
+    if args.reuse_runtime:
+        cmd.append("--reuse-runtime")
     proc = shell(
         cmd,
         env=command_env(

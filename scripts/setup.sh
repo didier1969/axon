@@ -57,25 +57,37 @@ CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-$PROJECT_ROOT/.axon/cargo-target}"
 mkdir -p "$BIN_DIR"
 
 echo "🔨 Building Rust core..."
-devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release"
+devenv shell -- bash -lc "cd '$RUST_CORE_DIR' && cargo build --release --bins"
 
-RUST_RELEASE_BIN="$(axon_workspace_release_bin "$PROJECT_ROOT")"
-if [[ ! -x "$RUST_RELEASE_BIN" ]]; then
-    echo "❌ Canonical release binary missing after build: $RUST_RELEASE_BIN"
-    exit 1
-fi
-install -m 755 "$RUST_RELEASE_BIN" "$TARGET_BIN"
+install_release_bin() {
+    local bin_name="$1"
+    local release_bin
+    local target_bin
+    local build_info_path
+    release_bin="$(axon_workspace_release_bin_for "$PROJECT_ROOT" "$bin_name")"
+    target_bin="$BIN_DIR/$bin_name"
+    build_info_path="$(axon_build_info_path_for "$PROJECT_ROOT" "$bin_name")"
+    if [[ ! -x "$release_bin" ]]; then
+        echo "❌ Canonical release binary missing after build: $release_bin"
+        exit 1
+    fi
+    install -m 755 "$release_bin" "$target_bin"
+    AXON_ARTIFACT_SHA256="$(axon_file_sha256 "$target_bin")"
+    axon_write_export_file "$build_info_path" \
+        AXON_RELEASE_VERSION "$AXON_PACKAGE_VERSION" \
+        AXON_BUILD_ID "$AXON_BUILD_ID" \
+        AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
+        AXON_INSTALL_GENERATION workspace \
+        AXON_ARTIFACT_SHA256 "$AXON_ARTIFACT_SHA256" \
+        AXON_ARTIFACT_SOURCE "$release_bin"
+    echo "✅ Rust binary available at bin/$bin_name"
+}
+
 AXON_BUILD_ID="$(axon_workspace_build_id "$PROJECT_ROOT")"
 AXON_PACKAGE_VERSION="$(axon_package_version "$PROJECT_ROOT")"
-AXON_ARTIFACT_SHA256="$(axon_file_sha256 "$TARGET_BIN")"
-axon_write_export_file "$BIN_DIR/axon-core.build-info" \
-    AXON_RELEASE_VERSION "$AXON_PACKAGE_VERSION" \
-    AXON_BUILD_ID "$AXON_BUILD_ID" \
-    AXON_PACKAGE_VERSION "$AXON_PACKAGE_VERSION" \
-    AXON_INSTALL_GENERATION workspace \
-    AXON_ARTIFACT_SHA256 "$AXON_ARTIFACT_SHA256" \
-    AXON_ARTIFACT_SOURCE "$RUST_RELEASE_BIN"
-echo "✅ Rust core available at bin/axon-core"
+install_release_bin "axon-core"
+install_release_bin "axon-brain"
+install_release_bin "axon-indexer"
 
 if [[ "$ARTIFACT_ONLY" -eq 1 ]]; then
     echo "🏁 Artifact-only bootstrap complete."

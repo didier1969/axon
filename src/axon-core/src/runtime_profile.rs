@@ -23,6 +23,52 @@ pub struct EmbeddingLaneSizing {
     pub graph_batch_size: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelinePriorityLane {
+    pub lane: &'static str,
+    pub priority: &'static str,
+    pub admission_requires: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimePriorityContractState {
+    pub watcher_identification_backlog_gated: bool,
+    pub graphing_after_enqueue_backlog_gated: bool,
+    pub vectorization_after_graph_ready_backlog_gated: bool,
+    pub vectorization_allowed_ahead_of_graph_backlog: bool,
+    pub graph_backlog_present: bool,
+    pub enforcement_state: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionControllerProfile {
+    pub target_band: usize,
+    pub reorder_point: usize,
+    pub max_wip: usize,
+    pub hold_window_ms: u64,
+    pub forced_bulk_fill_threshold: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionControllerState {
+    pub profile: AdmissionControllerProfile,
+    pub blocking_authority: &'static str,
+    pub admission_open: bool,
+    pub bulk_fill_preferred: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphProductionState {
+    pub blocking_authority: &'static str,
+    pub graph_open: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VectorDownstreamState {
+    pub blocking_authority: &'static str,
+    pub vector_open: bool,
+}
+
 impl RuntimeProfile {
     pub fn detect() -> Self {
         let cpu_cores = std::thread::available_parallelism()
@@ -192,12 +238,167 @@ pub fn recommend_embedding_lane_sizing(profile: &RuntimeProfile) -> EmbeddingLan
     }
 }
 
+pub fn canonical_watcher_first_priority_lanes() -> [PipelinePriorityLane; 3] {
+    [
+        PipelinePriorityLane {
+            lane: "watcher_identification",
+            priority: "highest",
+            admission_requires: &[],
+        },
+        PipelinePriorityLane {
+            lane: "graphing_after_enqueue",
+            priority: "second",
+            admission_requires: &["persisted_file"],
+        },
+        PipelinePriorityLane {
+            lane: "vectorization_after_graph_ready",
+            priority: "third",
+            admission_requires: &["graph_ready"],
+        },
+    ]
+}
+
+pub fn current_runtime_priority_contract_state(
+    runtime_mode: &str,
+    ingress_buffered_entries: usize,
+    structural_graph_backlog_depth: usize,
+) -> RuntimePriorityContractState {
+    let processing_disabled = matches!(runtime_mode, "read_only" | "mcp_only");
+    let graph_backlog_present = structural_graph_backlog_depth > 0;
+
+    RuntimePriorityContractState {
+        watcher_identification_backlog_gated: processing_disabled,
+        graphing_after_enqueue_backlog_gated: !processing_disabled && ingress_buffered_entries > 0,
+        vectorization_after_graph_ready_backlog_gated: !processing_disabled
+            && (ingress_buffered_entries > 0 || graph_backlog_present),
+        vectorization_allowed_ahead_of_graph_backlog: false,
+        graph_backlog_present,
+        enforcement_state: if processing_disabled {
+            "runtime_processing_disabled"
+        } else {
+            "declared_runtime_truth_scheduler_follow_through_pending"
+        },
+    }
+}
+
+pub fn recommend_admission_controller_profile(
+    profile: &RuntimeProfile,
+) -> AdmissionControllerProfile {
+    let target_band = profile
+        .recommended_workers
+        .saturating_mul(64)
+        .clamp(256, 2_048);
+    let reorder_point = (target_band.saturating_mul(3) / 4).clamp(192, 1_536);
+    let max_wip = target_band
+        .saturating_mul(8)
+        .clamp(target_band.saturating_add(256), 16_384);
+    let forced_bulk_fill_threshold = (reorder_point / 2).max(256);
+
+    AdmissionControllerProfile {
+        target_band,
+        reorder_point,
+        max_wip,
+        hold_window_ms: 500,
+        forced_bulk_fill_threshold,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn current_admission_controller_state(
+    profile: AdmissionControllerProfile,
+    buffered_discovery: usize,
+    _watcher_buffered: usize,
+    scan_buffered: usize,
+    persisted_file_pending: usize,
+    graph_wip: usize,
+    runtime_processing_disabled: bool,
+    critical_pressure: bool,
+) -> AdmissionControllerState {
+    let admission_stock_current = persisted_file_pending.saturating_add(graph_wip);
+    let blocking_authority = if runtime_processing_disabled {
+        "runtime_processing_disabled"
+    } else if critical_pressure {
+        "service_pressure_critical"
+    } else if buffered_discovery == 0 {
+        "no_buffered_discovery"
+    } else if persisted_file_pending >= profile.max_wip {
+        "persisted_file_pending_wip_cap_reached"
+    } else if admission_stock_current >= profile.max_wip {
+        "admission_stock_wip_cap_reached"
+    } else {
+        "none"
+    };
+    let admission_open = blocking_authority == "none";
+    let bulk_fill_preferred = admission_open
+        && scan_buffered >= profile.forced_bulk_fill_threshold
+        && admission_stock_current < profile.target_band;
+
+    AdmissionControllerState {
+        profile,
+        blocking_authority,
+        admission_open,
+        bulk_fill_preferred,
+    }
+}
+
+pub fn current_graph_production_state(
+    persisted_file_pending: usize,
+    graph_wip: usize,
+    graph_wip_cap: usize,
+    runtime_processing_disabled: bool,
+    critical_pressure: bool,
+) -> GraphProductionState {
+    let blocking_authority = if runtime_processing_disabled {
+        "runtime_processing_disabled"
+    } else if critical_pressure {
+        "service_pressure_critical"
+    } else if persisted_file_pending == 0 {
+        "no_persisted_file_pending"
+    } else if graph_wip >= graph_wip_cap.max(1) {
+        "graph_wip_cap_reached"
+    } else {
+        "none"
+    };
+
+    GraphProductionState {
+        blocking_authority,
+        graph_open: blocking_authority == "none",
+    }
+}
+
+pub fn current_vector_downstream_state(
+    graph_ready: usize,
+    structural_graph_backlog_depth: usize,
+    semantic_runtime_enabled: bool,
+    critical_pressure: bool,
+) -> VectorDownstreamState {
+    let blocking_authority = if !semantic_runtime_enabled {
+        "semantic_runtime_disabled"
+    } else if graph_ready == 0 {
+        "no_graph_ready_stock"
+    } else if critical_pressure {
+        "service_pressure_critical"
+    } else if structural_graph_backlog_depth > 0 {
+        "vector_floor_reserved"
+    } else {
+        "none"
+    };
+
+    VectorDownstreamState {
+        blocking_authority,
+        vector_open: semantic_runtime_enabled,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        configured_max_worker_cap, detect_ingestion_memory_budget_gb, detect_ram_budget_gb,
-        recommend_embedding_lane_sizing, recommend_sizing, wsl_cuda_runtime_available,
-        RuntimeProfile,
+        canonical_watcher_first_priority_lanes, configured_max_worker_cap,
+        current_admission_controller_state, current_graph_production_state,
+        current_runtime_priority_contract_state, current_vector_downstream_state,
+        detect_ingestion_memory_budget_gb, detect_ram_budget_gb,
+        recommend_admission_controller_profile, recommend_embedding_lane_sizing, recommend_sizing,
+        wsl_cuda_runtime_available, RuntimeProfile,
     };
 
     #[test]
@@ -364,5 +565,194 @@ mod tests {
         let sizing = recommend_embedding_lane_sizing(&profile);
         assert_eq!(sizing.graph_workers, 0);
         std::env::remove_var("AXON_GRAPH_EMBEDDINGS_ENABLED");
+    }
+
+    #[test]
+    fn test_canonical_watcher_first_priority_lanes_are_ordered() {
+        let lanes = canonical_watcher_first_priority_lanes();
+        assert_eq!(lanes[0].lane, "watcher_identification");
+        assert_eq!(lanes[0].priority, "highest");
+        assert!(lanes[0].admission_requires.is_empty());
+        assert_eq!(lanes[1].lane, "graphing_after_enqueue");
+        assert_eq!(lanes[1].priority, "second");
+        assert_eq!(lanes[1].admission_requires, &["persisted_file"]);
+        assert_eq!(lanes[2].lane, "vectorization_after_graph_ready");
+        assert_eq!(lanes[2].priority, "third");
+        assert_eq!(lanes[2].admission_requires, &["graph_ready"]);
+    }
+
+    #[test]
+    fn test_current_runtime_priority_contract_state_defaults_to_no_graph_overtake() {
+        let state = current_runtime_priority_contract_state("full", 0, 1);
+        assert!(!state.watcher_identification_backlog_gated);
+        assert!(!state.graphing_after_enqueue_backlog_gated);
+        assert!(state.vectorization_after_graph_ready_backlog_gated);
+        assert!(!state.vectorization_allowed_ahead_of_graph_backlog);
+        assert!(state.graph_backlog_present);
+    }
+
+    #[test]
+    fn test_admission_controller_prefers_bulk_fill_when_pending_stock_is_thin() {
+        let runtime = RuntimeProfile {
+            cpu_cores: 8,
+            ram_total_gb: 32,
+            ram_budget_gb: 24,
+            ingestion_memory_budget_gb: 8,
+            gpu_present: true,
+            recommended_workers: 6,
+            max_blocking_threads: 8,
+            queue_capacity: 50_000,
+        };
+        let profile = recommend_admission_controller_profile(&runtime);
+        let state =
+            current_admission_controller_state(profile, 1_200, 8, 1_192, 32, 4, false, false);
+        assert!(state.admission_open);
+        assert!(state.bulk_fill_preferred);
+        assert_eq!(state.blocking_authority, "none");
+    }
+
+    #[test]
+    fn test_admission_controller_reports_pending_wip_cap() {
+        let runtime = RuntimeProfile {
+            cpu_cores: 8,
+            ram_total_gb: 32,
+            ram_budget_gb: 24,
+            ingestion_memory_budget_gb: 8,
+            gpu_present: true,
+            recommended_workers: 6,
+            max_blocking_threads: 8,
+            queue_capacity: 50_000,
+        };
+        let profile = recommend_admission_controller_profile(&runtime);
+        let state = current_admission_controller_state(
+            profile,
+            300,
+            2,
+            298,
+            profile.max_wip,
+            0,
+            false,
+            false,
+        );
+        assert!(!state.admission_open);
+        assert_eq!(
+            state.blocking_authority,
+            "persisted_file_pending_wip_cap_reached"
+        );
+    }
+
+    #[test]
+    fn test_admission_controller_allows_graph_wip_to_climb_until_total_stock_cap() {
+        let runtime = RuntimeProfile {
+            cpu_cores: 8,
+            ram_total_gb: 32,
+            ram_budget_gb: 24,
+            ingestion_memory_budget_gb: 8,
+            gpu_present: true,
+            recommended_workers: 6,
+            max_blocking_threads: 8,
+            queue_capacity: 50_000,
+        };
+        let profile = recommend_admission_controller_profile(&runtime);
+        let state = current_admission_controller_state(
+            profile,
+            1_200,
+            0,
+            1_192,
+            profile.reorder_point,
+            profile.max_wip / 2,
+            false,
+            false,
+        );
+        assert!(state.admission_open);
+        assert_eq!(state.blocking_authority, "none");
+    }
+
+    #[test]
+    fn test_admission_controller_caps_total_admission_stock_at_budget() {
+        let runtime = RuntimeProfile {
+            cpu_cores: 8,
+            ram_total_gb: 32,
+            ram_budget_gb: 24,
+            ingestion_memory_budget_gb: 8,
+            gpu_present: true,
+            recommended_workers: 6,
+            max_blocking_threads: 8,
+            queue_capacity: 50_000,
+        };
+        let profile = recommend_admission_controller_profile(&runtime);
+        let state = current_admission_controller_state(
+            profile,
+            1_200,
+            0,
+            1_192,
+            profile.reorder_point,
+            profile.max_wip.saturating_sub(profile.reorder_point),
+            false,
+            false,
+        );
+        assert!(!state.admission_open);
+        assert_eq!(state.blocking_authority, "admission_stock_wip_cap_reached");
+    }
+
+    #[test]
+    fn test_admission_controller_bulk_fill_is_not_blocked_by_watcher_noise() {
+        let runtime = RuntimeProfile {
+            cpu_cores: 8,
+            ram_total_gb: 32,
+            ram_budget_gb: 24,
+            ingestion_memory_budget_gb: 8,
+            gpu_present: true,
+            recommended_workers: 6,
+            max_blocking_threads: 8,
+            queue_capacity: 50_000,
+        };
+        let profile = recommend_admission_controller_profile(&runtime);
+        let state = current_admission_controller_state(
+            profile,
+            1_200,
+            profile.reorder_point.saturating_mul(4),
+            1_192,
+            32,
+            4,
+            false,
+            false,
+        );
+        assert!(state.admission_open);
+        assert!(state.bulk_fill_preferred);
+        assert_eq!(state.blocking_authority, "none");
+    }
+
+    #[test]
+    fn test_graph_production_state_reports_pending_and_wip_cap() {
+        let pending_empty = current_graph_production_state(0, 0, 32, false, false);
+        assert_eq!(
+            pending_empty.blocking_authority,
+            "no_persisted_file_pending"
+        );
+        assert!(!pending_empty.graph_open);
+
+        let capped = current_graph_production_state(64, 32, 32, false, false);
+        assert_eq!(capped.blocking_authority, "graph_wip_cap_reached");
+        assert!(!capped.graph_open);
+
+        let open = current_graph_production_state(64, 8, 32, false, false);
+        assert_eq!(open.blocking_authority, "none");
+        assert!(open.graph_open);
+    }
+
+    #[test]
+    fn test_vector_downstream_state_reports_floor_reservation() {
+        let disabled = current_vector_downstream_state(32, 0, false, false);
+        assert_eq!(disabled.blocking_authority, "semantic_runtime_disabled");
+        assert!(!disabled.vector_open);
+
+        let reserved = current_vector_downstream_state(32, 12, true, false);
+        assert_eq!(reserved.blocking_authority, "vector_floor_reserved");
+        assert!(reserved.vector_open);
+
+        let open = current_vector_downstream_state(32, 0, true, false);
+        assert_eq!(open.blocking_authority, "none");
+        assert!(open.vector_open);
     }
 }

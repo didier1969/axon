@@ -30,6 +30,7 @@ pub(crate) use self::guidance::{
 };
 pub use self::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use self::soll::canonical_soll_site_dir;
+use crate::runtime_command_proxy::{RuntimeCommandProxy, RuntimeCommandProxyDecision};
 
 pub struct McpServer {
     graph_store: Arc<GraphStore>,
@@ -38,9 +39,20 @@ pub struct McpServer {
 const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
+fn mcp_server_identity_name() -> &'static str {
+    match std::env::var("AXON_RUNTIME_SHADOW_ROLE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("brain") | Some("brain_shadow") => "axon-brain",
+        Some("indexer") | Some("indexer_shadow") => "axon-indexer",
+        _ => "axon-core",
+    }
+}
+
 impl McpServer {
-    pub(crate) const ASYNC_JOB_TOOL_NAMES: &[&str] =
-        &["restore_soll", "soll_apply_plan", "resume_vectorization"];
+    pub(crate) const ASYNC_JOB_TOOL_NAMES: &[&str] = &["restore_soll", "soll_apply_plan"];
     pub(crate) const MONITORED_SYNC_MUTATION_TOOLS: &[&str] = &["soll_commit_revision"];
     pub(crate) const SOLL_DERIVED_DOCS_REFRESH_TOOLS: &[&str] = &[
         "restore_soll",
@@ -91,6 +103,7 @@ impl McpServer {
                 "raw_status_field": "status",
                 "terminal_states": ["completed", "failed"],
                 "result_data_fields": ["queued_files", "runtime_mode", "semantic_workers_enabled"],
+                "error_field": "error_text",
                 "notes": "Le résultat terminal expose la taille du backlog re-queue et l'état du runtime."
             }),
             "soll_apply_plan" => json!({
@@ -718,10 +731,115 @@ impl McpServer {
         let job_id = format!("JOB-{submitted_at}");
         let public_tool_name = Self::public_tool_name_for(requested_tool_name, normalized_name);
         let known_ids = self.async_known_ids_for(normalized_name, &reserved_ids);
-        let request_json = json!({
+        let mut request_json = json!({
             "tool_name": public_tool_name,
             "arguments": arguments,
         });
+        let mut proxy_response_data: Option<Value> = None;
+        let proxy_request =
+            if normalized_name == "resume_vectorization" && RuntimeCommandProxy::enabled() {
+                Some(RuntimeCommandProxy::request_for_resume_vectorization(
+                    arguments,
+                ))
+            } else {
+                None
+            };
+        let proxy_ownership = proxy_request
+            .as_ref()
+            .map(RuntimeCommandProxy::ownership_for_request);
+        let proxy_timeout = proxy_request
+            .as_ref()
+            .map(RuntimeCommandProxy::timeout_for_request);
+        let proxy_retry_policy = proxy_request
+            .as_ref()
+            .map(|request| RuntimeCommandProxy::retry_policy_for_timeout(request.timeout_ms));
+        let proxy_result_contract = proxy_request
+            .as_ref()
+            .map(|_| RuntimeCommandProxy::result_contract_for_resume_vectorization());
+        if let Some(request) = proxy_request.as_ref() {
+            let runtime_truth = crate::service_guard::current_runtime_truth_feed();
+            match RuntimeCommandProxy::decision_for_resume_vectorization(&runtime_truth, arguments)
+            {
+                RuntimeCommandProxyDecision::Refused(refusal) => {
+                    let ownership = proxy_ownership.as_ref().unwrap();
+                    return Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Runtime command proxy refused `{}` because the indexer feed is {}. Refresh runtime truth before retrying.",
+                                public_tool_name,
+                                refusal.reason
+                            )
+                        }],
+                        "isError": true,
+                        "data": {
+                            "outcome": "refused",
+                            "request": request,
+                            "ownership": ownership,
+                            "refusal": refusal,
+                            "retry_policy": {
+                                "retryable": refusal.retryable,
+                                "max_attempts": 0,
+                                "idempotent": true,
+                                "duplicate_execution_prevented": true,
+                                "recommended_delay_ms": refusal.stale_after_ms
+                            }
+                        }
+                    }));
+                }
+                RuntimeCommandProxyDecision::TimedOut(timeout) => {
+                    let ownership = proxy_ownership.as_ref().unwrap();
+                    let retry_policy = proxy_retry_policy.as_ref().unwrap();
+                    return Some(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!(
+                                "Runtime command proxy timed out after {} ms in {} mode while targeting `{}`. The timeout is simulated_test_only and does not represent a measured indexer latency.",
+                                timeout.timeout_ms,
+                                timeout.timeout_kind,
+                                public_tool_name
+                            )
+                        }],
+                        "isError": true,
+                        "data": {
+                            "outcome": "timeout",
+                            "request": request,
+                            "ownership": ownership,
+                            "timeout": timeout,
+                            "retry_policy": retry_policy,
+                            "result_contract": proxy_result_contract.as_ref().unwrap()
+                        }
+                    }));
+                }
+                RuntimeCommandProxyDecision::Accepted(accepted) => {
+                    request_json["runtime_command_proxy"] = json!({
+                        "enabled": true,
+                        "mode": accepted.proxy["mode"].clone(),
+                        "transport": accepted.proxy["transport"].clone(),
+                        "target_role": "indexer",
+                        "timeout_kind": accepted.timeout.timeout_kind.clone(),
+                        "request": accepted.request.clone(),
+                        "ownership": accepted.ownership.clone(),
+                        "timeout": accepted.timeout.clone(),
+                        "retry_policy": accepted.retry_policy.clone(),
+                        "result_contract": accepted.result_contract.clone()
+                    });
+                    proxy_response_data = Some(json!({
+                        "request": request,
+                        "ownership": proxy_ownership.as_ref().unwrap(),
+                        "timeout": proxy_timeout.as_ref().unwrap(),
+                        "retry_policy": proxy_retry_policy.as_ref().unwrap(),
+                        "runtime_command_proxy": {
+                            "enabled": true,
+                            "mode": accepted.proxy["mode"].clone(),
+                            "transport": accepted.proxy["transport"].clone(),
+                            "target_role": "indexer",
+                            "timeout_kind": accepted.timeout.timeout_kind.clone(),
+                        }
+                    }));
+                }
+            }
+        }
 
         if let Err(error) = Self::persist_mcp_job(
             self.graph_store.as_ref(),
@@ -744,6 +862,7 @@ impl McpServer {
         let accepted_tool_name = public_tool_name.clone();
         let queued_args = self.inject_reserved_ids(&normalized_name, arguments, &reserved_ids);
         let job_id_for_thread = job_id.clone();
+        let proxy_request_for_thread = proxy_request.clone();
         thread::spawn(move || {
             let server = McpServer::new(graph_store.clone());
             let started_at = McpServer::now_unix_ms();
@@ -756,8 +875,36 @@ impl McpServer {
                 }),
             );
 
-            match server.execute_tool_direct(&normalized_name, &queued_args) {
-                Some(result) => {
+            let execution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if cfg!(test)
+                    && std::env::var("AXON_RUNTIME_COMMAND_PROXY_TEST_PANIC")
+                        .ok()
+                        .as_deref()
+                        == Some("1")
+                    && normalized_name == "resume_vectorization"
+                {
+                    panic!("runtime_command_proxy_test_panic");
+                }
+                if normalized_name == "resume_vectorization"
+                    && proxy_request_for_thread.is_some()
+                    && RuntimeCommandProxy::use_external_bridge()
+                {
+                    match RuntimeCommandProxy::dispatch_resume_vectorization(
+                        proxy_request_for_thread.as_ref().unwrap(),
+                    ) {
+                        Ok(result) => Some(result),
+                        Err(error) => Some(json!({
+                            "content": [{ "type": "text", "text": format!("Runtime command proxy bridge error: {error}") }],
+                            "isError": true
+                        })),
+                    }
+                } else {
+                    server.execute_tool_direct(&normalized_name, &queued_args)
+                }
+            }));
+
+            match execution {
+                Ok(Some(result)) => {
                     let result = server.attach_derived_docs_refresh_metadata(
                         &normalized_name,
                         &queued_args,
@@ -792,7 +939,7 @@ impl McpServer {
                         }),
                     );
                 }
-                None => {
+                Ok(None) => {
                     let finished_at = McpServer::now_unix_ms();
                     let _ = graph_store.execute_param(
                         "UPDATE soll.McpJob SET status = $status, finished_at = $finished_at, error_text = $error_text WHERE job_id = $job_id",
@@ -804,9 +951,55 @@ impl McpServer {
                         }),
                     );
                 }
+                Err(_) => {
+                    let finished_at = McpServer::now_unix_ms();
+                    let _ = graph_store.execute_param(
+                        "UPDATE soll.McpJob SET status = $status, finished_at = $finished_at, error_text = $error_text WHERE job_id = $job_id",
+                        &json!({
+                            "status": "failed",
+                            "finished_at": finished_at,
+                            "error_text": format!("Mutation worker panicked while running `{normalized_name}`"),
+                            "job_id": job_id_for_thread
+                        }),
+                    );
+                }
             }
         });
 
+        let mut data = json!({
+            "accepted": true,
+            "job_id": job_id,
+            "tool_name": accepted_tool_name,
+            "status": "queued",
+            "state": "queued",
+            "reserved_ids": reserved_ids,
+            "known_ids": known_ids,
+            "next_action": {
+                "tool": "job_status",
+                "arguments": {
+                    "job_id": job_id
+                }
+            },
+            "result_contract": proxy_result_contract
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| self.async_result_contract_for(response_contract_name.as_str())),
+            "polling_guidance": self.async_polling_guidance_for(response_contract_name.as_str()),
+            "recovery_hint": self.async_recovery_hint_for(response_contract_name.as_str())
+        });
+        if let Some(proxy_data) = proxy_response_data {
+            data["request"] = proxy_data.get("request").cloned().unwrap_or(Value::Null);
+            data["ownership"] = proxy_data.get("ownership").cloned().unwrap_or(Value::Null);
+            data["timeout"] = proxy_data.get("timeout").cloned().unwrap_or(Value::Null);
+            data["retry_policy"] = proxy_data
+                .get("retry_policy")
+                .cloned()
+                .unwrap_or(Value::Null);
+            data["runtime_command_proxy"] = proxy_data
+                .get("runtime_command_proxy")
+                .cloned()
+                .unwrap_or(Value::Null);
+        }
         Some(json!({
             "content": [{
                 "type": "text",
@@ -814,24 +1007,7 @@ impl McpServer {
                     "Mutation job accepted: {job_id} for tool `{accepted_tool_name}`. Call `job_status(job_id=\"{job_id}\")` after 2 seconds, then every 2 seconds until `state=completed` or `state=failed`."
                 )
             }],
-            "data": {
-                "accepted": true,
-                "job_id": job_id,
-                "tool_name": accepted_tool_name,
-                "status": "queued",
-                "state": "queued",
-                "reserved_ids": reserved_ids,
-                "known_ids": known_ids,
-                "next_action": {
-                    "tool": "job_status",
-                    "arguments": {
-                        "job_id": job_id
-                    }
-                },
-                "result_contract": self.async_result_contract_for(response_contract_name.as_str()),
-                "polling_guidance": self.async_polling_guidance_for(response_contract_name.as_str()),
-                "recovery_hint": self.async_recovery_hint_for(response_contract_name.as_str())
-            }
+            "data": data
         }))
     }
 
@@ -840,7 +1016,7 @@ impl McpServer {
         let rows = self
             .graph_store
             .query_json_param(
-                "SELECT job_id, tool_name, status, submitted_at, started_at, finished_at, reserved_ids_json, result_json, error_text \
+                "SELECT job_id, tool_name, status, submitted_at, started_at, finished_at, reserved_ids_json, request_json, result_json, error_text \
                  FROM soll.McpJob WHERE job_id = $job_id LIMIT 1",
                 &json!({ "job_id": job_id }),
             )
@@ -862,15 +1038,39 @@ impl McpServer {
             .and_then(|value| serde_json::from_str::<Value>(value).ok())
             .unwrap_or_else(|| json!({}));
         let known_ids = self.async_known_ids_for(tool_name, &reserved_ids);
-        let result_contract = self.async_result_contract_for(tool_name);
+        let request_json = row
+            .get(7)
+            .and_then(|value| value.as_str())
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .unwrap_or_else(|| json!({}));
+        let proxy_contract = request_json.get("runtime_command_proxy").cloned();
+        let request_value = Some(request_json.clone());
+        let ownership_value = proxy_contract
+            .as_ref()
+            .and_then(|value| value.get("ownership"))
+            .cloned();
+        let timeout_value = proxy_contract
+            .as_ref()
+            .and_then(|value| value.get("timeout"))
+            .cloned();
+        let retry_policy_value = proxy_contract
+            .as_ref()
+            .and_then(|value| value.get("retry_policy"))
+            .cloned();
+        let proxy_value = proxy_contract.clone();
+        let result_contract = proxy_contract
+            .as_ref()
+            .and_then(|value| value.get("result_contract"))
+            .cloned()
+            .unwrap_or_else(|| self.async_result_contract_for(tool_name));
         let polling_guidance = self.async_polling_guidance_for(tool_name);
         let recovery_hint = self.async_recovery_hint_for(tool_name);
         let result = row
-            .get(7)
+            .get(8)
             .and_then(|value| value.as_str())
             .and_then(|value| serde_json::from_str::<Value>(value).ok());
         let result_data = Self::terminal_result_data_alias(&result);
-        let error_text = row.get(8).and_then(|value| value.as_str()).unwrap_or("");
+        let error_text = row.get(9).and_then(|value| value.as_str()).unwrap_or("");
         let next_action = match state {
             "queued" | "running" => json!({
                 "tool": "job_status",
@@ -891,6 +1091,32 @@ impl McpServer {
             _ => Value::Null,
         };
 
+        let mut data = json!({
+            "job_id": row.first().and_then(|value| value.as_str()).unwrap_or(job_id),
+            "tool_name": tool_name,
+            "status": raw_status,
+            "state": state,
+            "submitted_at": row.get(3).cloned().unwrap_or(json!(null)),
+            "started_at": row.get(4).cloned().unwrap_or(json!(null)),
+            "finished_at": row.get(5).cloned().unwrap_or(json!(null)),
+            "reserved_ids": reserved_ids,
+            "known_ids": known_ids,
+            "next_action": next_action,
+            "result_contract": result_contract,
+            "polling_guidance": polling_guidance,
+            "recovery_hint": recovery_hint,
+            "result": result,
+            "result_data": result_data,
+            "error_text": error_text
+        });
+        if proxy_contract.is_some() {
+            data["request"] = request_value.unwrap_or(Value::Null);
+            data["ownership"] = ownership_value.unwrap_or(Value::Null);
+            data["timeout"] = timeout_value.unwrap_or(Value::Null);
+            data["retry_policy"] = retry_policy_value.unwrap_or(Value::Null);
+            data["runtime_command_proxy"] = proxy_value.unwrap_or(Value::Null);
+        }
+
         Some(json!({
             "content": [{
                 "type": "text",
@@ -901,24 +1127,7 @@ impl McpServer {
                     tool_name
                 )
             }],
-            "data": {
-                "job_id": row.first().and_then(|value| value.as_str()).unwrap_or(job_id),
-                "tool_name": tool_name,
-                "status": raw_status,
-                "state": state,
-                "submitted_at": row.get(3).cloned().unwrap_or(json!(null)),
-                "started_at": row.get(4).cloned().unwrap_or(json!(null)),
-                "finished_at": row.get(5).cloned().unwrap_or(json!(null)),
-                "reserved_ids": reserved_ids,
-                "known_ids": known_ids,
-                "next_action": next_action,
-                "result_contract": result_contract,
-                "polling_guidance": polling_guidance,
-                "recovery_hint": recovery_hint,
-                "result": result,
-                "result_data": result_data,
-                "error_text": error_text
-            }
+            "data": data
         }))
     }
 
@@ -961,7 +1170,7 @@ impl McpServer {
                 "capabilities": {
                     "tools": {}
                 },
-                "serverInfo": { "name": "axon-core", "version": "2.2.0" }
+                "serverInfo": { "name": mcp_server_identity_name(), "version": "2.2.0" }
             })),
             "tools/list" => {
                 let include_internal = request

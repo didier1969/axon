@@ -120,7 +120,7 @@ axon_resolve_public_endpoints() {
 
 axon_resolve_instance() {
     local project_root="${1:?project root required}"
-    local repo_slug="${2:-$(basename "$project_root")}"
+    local repo_name="${2:-$(basename "$project_root")}"
     local explicit_kind=""
 
     axon_load_worktree_env "$project_root"
@@ -131,7 +131,7 @@ axon_resolve_instance() {
     fi
 
     export AXON_INSTANCE_KIND="$explicit_kind"
-    export AXON_RUNTIME_IDENTITY="axon-${AXON_INSTANCE_KIND}-${repo_slug}"
+    export AXON_RUNTIME_IDENTITY="axon-${AXON_INSTANCE_KIND}-${repo_name}"
 
     if [[ "$AXON_INSTANCE_KIND" == "dev" ]]; then
         export AXON_ENV="dev"

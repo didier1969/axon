@@ -87,6 +87,9 @@ pub(crate) struct ReaderSnapshotDiagnostics {
 pub struct GraphStore {
     pub(crate) pool: Arc<LatticePool>,
     pub(crate) db_path: Option<PathBuf>,
+    pub(crate) reader_only_ist_mode: bool,
+    pub(crate) soll_attached: bool,
+    pub(crate) soll_read_only_mode: bool,
     pub(crate) recent_write_epoch_ms: AtomicU64,
     pub(crate) last_reader_refresh_epoch_ms: AtomicU64,
     pub(crate) reader_refresh_failures_total: AtomicU64,

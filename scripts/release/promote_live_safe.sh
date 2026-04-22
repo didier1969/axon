@@ -12,10 +12,11 @@ PROJECT_CODE="AXO"
 SKIP_BUILD=0
 SKIP_QUALIFY=0
 DRY_RUN=0
+TOPOLOGY="monolith"
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/release/promote_live_safe.sh [--project <code>] [--skip-build] [--skip-qualify] [--dry-run]
+Usage: bash scripts/release/promote_live_safe.sh [--project <code>] [--topology monolith|split] [--skip-build] [--skip-qualify] [--dry-run]
 
 One-shot promotion flow:
   1. Build canonical release artifact
@@ -29,6 +30,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project) PROJECT_CODE="${2:-}"; shift 2 ;;
+    --topology) TOPOLOGY="${2:-}"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-qualify) SKIP_QUALIFY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -59,7 +61,7 @@ run_step() {
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "DRY RUN: would promote current HEAD via safe one-shot flow"
-  echo "DRY RUN: project=$PROJECT_CODE head=$start_head skip_build=$SKIP_BUILD skip_qualify=$SKIP_QUALIFY"
+  echo "DRY RUN: project=$PROJECT_CODE topology=$TOPOLOGY head=$start_head skip_build=$SKIP_BUILD skip_qualify=$SKIP_QUALIFY"
   exit 0
 fi
 
@@ -68,10 +70,10 @@ if [[ "$SKIP_BUILD" -ne 1 ]]; then
 fi
 
 ensure_head_stable
-run_step "release preflight" "$ROOT_DIR/scripts/axon" release-preflight
+run_step "release preflight" "$ROOT_DIR/scripts/axon" release-preflight --topology "$TOPOLOGY"
 ensure_head_stable
 
-manifest_path="$(run_step "create qualified release manifest" "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified | tail -n 1)"
+manifest_path="$(run_step "create qualified release manifest" "$ROOT_DIR/scripts/axon" create-release-manifest --state qualified --topology "$TOPOLOGY" | tail -n 1)"
 [[ -n "$manifest_path" ]] || { echo "Failed to capture manifest path" >&2; exit 1; }
 manifest_path="$(realpath "$manifest_path")"
 

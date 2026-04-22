@@ -30,6 +30,24 @@ pub struct FileIngressRow {
     pub status: String,
     pub mtime: i64,
     pub size: i64,
+    pub file_stage: String,
+    pub status_reason: String,
+    pub graph_ready: bool,
+}
+
+impl FileIngressRow {
+    pub fn is_pending_graph_eligible(&self) -> bool {
+        self.status == "pending"
+            && !self.graph_ready
+            && !matches!(
+                self.file_stage.as_str(),
+                "deleted" | "skipped" | "oversized"
+            )
+            && !matches!(
+                self.status.as_str(),
+                "deleted" | "skipped" | "oversized_for_current_budget"
+            )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -8,12 +8,112 @@ use axon_core::bridge::BridgeEvent;
 use axon_core::graph::GraphStore;
 use axon_core::ingress_buffer::SharedIngressBuffer;
 use axon_core::queue::QueueStore;
+use axon_core::runtime_mode::AxonRuntimeMode;
 use axon_core::scanner;
+use axon_core::service_guard;
 use crossbeam_channel::Sender;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, error, info, warn};
+
+fn write_runtime_heartbeat_export(
+    runtime_mode: AxonRuntimeMode,
+    runtime_truth_feed: &axon_core::bridge::RuntimeTruthFeed,
+    runtime_snapshot: &main_background::RuntimeTelemetrySnapshot,
+) {
+    let Ok(run_root) = std::env::var("AXON_RUN_ROOT") else {
+        warn!("Runtime heartbeat export skipped because AXON_RUN_ROOT is unset.");
+        return;
+    };
+
+    let release_version = std::env::var("AXON_RELEASE_VERSION")
+        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+    let build_id =
+        std::env::var("AXON_BUILD_ID").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
+    let install_generation =
+        std::env::var("AXON_INSTALL_GENERATION").unwrap_or_else(|_| "workspace".to_string());
+    let process_role = std::env::var("AXON_RUNTIME_SHADOW_ROLE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "legacy_monolith".to_string());
+    let runtime_identity = std::env::var("AXON_RUNTIME_IDENTITY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unknown-runtime".to_string());
+    let payload = serde_json::json!({
+        "process_role": process_role,
+        "runtime_mode": runtime_mode.as_str(),
+        "runtime_identity": runtime_identity,
+        "release_version": release_version,
+        "build_id": build_id,
+        "install_generation": install_generation,
+        "last_heartbeat_at_ms": runtime_truth_feed.last_heartbeat_at_ms,
+        "last_good_payload_at_ms": runtime_truth_feed.last_good_payload_at_ms,
+        "observed_age_ms": runtime_truth_feed.observed_age_ms,
+        "stale_after_ms": runtime_truth_feed.stale_after_ms,
+        "stale": runtime_truth_feed.stale,
+        "degraded_reason": runtime_truth_feed.degraded_reason,
+        "runtime_truth_feed": runtime_truth_feed,
+        "runtime_telemetry": {
+            "ingress_enabled": runtime_snapshot.ingress_enabled,
+            "ingress_buffered_entries": runtime_snapshot.ingress_buffered_entries,
+            "ingress_hot_entries": runtime_snapshot.ingress_hot_entries,
+            "ingress_scan_entries": runtime_snapshot.ingress_scan_entries,
+            "ingress_subtree_hints": runtime_snapshot.ingress_subtree_hints,
+            "ingress_subtree_hint_in_flight": runtime_snapshot.ingress_subtree_hint_in_flight,
+            "ingress_subtree_hint_accepted_total": runtime_snapshot.ingress_subtree_hint_accepted_total,
+            "ingress_subtree_hint_blocked_total": runtime_snapshot.ingress_subtree_hint_blocked_total,
+            "ingress_subtree_hint_suppressed_total": runtime_snapshot.ingress_subtree_hint_suppressed_total,
+            "ingress_flush_count": runtime_snapshot.ingress_flush_count,
+            "ingress_last_flush_duration_ms": runtime_snapshot.ingress_last_flush_duration_ms,
+            "ingress_last_promoted_count": runtime_snapshot.ingress_last_promoted_count,
+            "graph_projection_queue": {
+                "queued": runtime_snapshot.graph_projection_queue_queued,
+                "inflight": runtime_snapshot.graph_projection_queue_inflight,
+                "total": runtime_snapshot.graph_projection_queue_depth,
+            },
+            "file_vectorization_queue": {
+                "queued": runtime_snapshot.file_vectorization_queue_queued,
+                "inflight": runtime_snapshot.file_vectorization_queue_inflight,
+                "total": runtime_snapshot.file_vectorization_queue_depth,
+            },
+            "claim_mode": runtime_snapshot.claim_mode,
+            "service_pressure": runtime_snapshot.service_pressure,
+            "utility_first_scheduler_state": runtime_snapshot.utility_first_scheduler_state,
+            "utility_first_scheduler_reason": runtime_snapshot.utility_first_scheduler_reason,
+            "semantic_underfeed": runtime_snapshot.semantic_underfeed,
+        },
+    });
+    let runtime_heartbeat_path = std::path::Path::new(&run_root).join("runtime-heartbeat.json");
+    if let Err(err) = std::fs::create_dir_all(&run_root) {
+        warn!(
+            "Runtime heartbeat export could not create run root {}: {:?}",
+            run_root, err
+        );
+        return;
+    }
+    let existed_before = runtime_heartbeat_path.exists();
+    if let Err(err) = std::fs::write(
+        &runtime_heartbeat_path,
+        serde_json::to_vec_pretty(&payload).unwrap_or_else(|_| b"{}".to_vec()),
+    ) {
+        warn!(
+            "Runtime heartbeat export write failed for {}: {:?}",
+            runtime_heartbeat_path.display(),
+            err
+        );
+        return;
+    }
+    if !existed_before {
+        info!(
+            "Runtime heartbeat export initialized at {} (mode={}, stale={}).",
+            runtime_heartbeat_path.display(),
+            runtime_mode.as_str(),
+            runtime_truth_feed.stale
+        );
+    }
+}
 
 pub(crate) fn spawn_runtime_telemetry(
     store: Arc<GraphStore>,
@@ -28,6 +128,13 @@ pub(crate) fn spawn_runtime_telemetry(
             interval.tick().await;
             let snapshot =
                 main_background::runtime_telemetry_snapshot(&store, &queue, &ingress_buffer);
+            let runtime_mode = AxonRuntimeMode::from_env();
+            let runtime_truth_feed = if runtime_mode.ingestion_enabled() {
+                service_guard::record_runtime_truth_bridge_dispatch(None)
+            } else {
+                service_guard::current_runtime_truth_feed()
+            };
+            write_runtime_heartbeat_export(runtime_mode, &runtime_truth_feed, &snapshot);
             let event = BridgeEvent::RuntimeTelemetry {
                 budget_bytes: snapshot.budget_bytes,
                 reserved_bytes: snapshot.reserved_bytes,
@@ -99,6 +206,7 @@ pub(crate) fn spawn_runtime_telemetry(
                 file_vectorization_queue_queued: snapshot.file_vectorization_queue_queued,
                 file_vectorization_queue_inflight: snapshot.file_vectorization_queue_inflight,
                 file_vectorization_queue_depth: snapshot.file_vectorization_queue_depth,
+                runtime_truth_feed: runtime_truth_feed.clone(),
             };
 
             if let Ok(message) = serde_json::to_string(&event) {

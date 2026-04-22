@@ -144,6 +144,8 @@ fn classify_mcp_request(request: &JsonRpcRequest) -> McpRequestClass {
                 });
             if tool_name.is_some_and(is_observer_tool_name) {
                 McpRequestClass::Observer
+            } else if tool_name.is_some_and(is_runtime_command_proxy_tool_name) {
+                McpRequestClass::Control
             } else {
                 McpRequestClass::Control
             }
@@ -201,6 +203,10 @@ fn is_observer_tool_name(name: &str) -> bool {
             | "health"
             | "truth_check"
     )
+}
+
+fn is_runtime_command_proxy_tool_name(name: &str) -> bool {
+    matches!(name, "resume_vectorization")
 }
 
 /// Compliant MCP SSE Endpoint
